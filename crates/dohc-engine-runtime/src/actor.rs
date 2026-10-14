@@ -448,6 +448,45 @@ impl ActorHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(listener);
     }
 
+    pub async fn replica_frontiers(
+        &self,
+        workspace: String,
+    ) -> Result<dohc_engine_storage::replica::ReplicaFrontiers, RuntimeError> {
+        self.run(move |store, _| {
+            store.read_with(|conn| {
+                Ok(dohc_engine_storage::replica::read_frontiers(
+                    conn, &workspace,
+                )?)
+            })
+        })
+        .await
+    }
+
+    pub async fn apply_replica_page(
+        &self,
+        workspace: String,
+        after: i64,
+        epoch_log_floor: i64,
+        rows: Vec<dohc_engine_collab::live_update_application::passive::ReplicaJournalRow>,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<dohc_engine_collab::live_update_application::passive::ReplicaPageResult, RuntimeError>
+    {
+        self.run(move |store, cache| {
+            let _reservation = reservation;
+            let result = dohc_engine_collab::live_update_application::passive::apply_page(
+                store,
+                &workspace,
+                after,
+                epoch_log_floor,
+                &rows,
+                &dohc_engine_storage::NoFaults,
+            );
+            cache.clear();
+            Ok(result?)
+        })
+        .await
+    }
+
     async fn run<R: Send + 'static>(
         &self,
         work: impl FnOnce(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>

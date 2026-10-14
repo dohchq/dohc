@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
+import { nextestFlaky, playwrightFlaky, readLog, vitestFailures } from "./flaky.mjs";
 import { prepare, assertPrepared, assertIndependentStagedEngine, sourceFingerprint, buildEnvironment, stagedEnginePath, hashFile, withBuildBudget } from "./build.mjs";
 import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
 import { startTiming, timed } from "./timing.mjs";
 import { testWorkspace } from "./js-tests.mjs";
-import { selectedGates } from "./selection.mjs";
+import { affectedPackages, packageReferences, readWorkspacePackages, selectedGates } from "./selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 import { acquireExclusiveSlot, acquireVerificationSlot, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { processIdentity, ticketEvidence } from "./ticket-evidence.mjs";
@@ -205,15 +206,20 @@ export async function verify(args) {
   }
   if (mode === "plan") {
     const {baseCommit, files, gates} = selection();
-    // The JavaScript gate runs every package test and repository check, then these proofs.
-    const javascript = gates.js ? {needs: ["postgres", "engine", "desktop"], proofs: ["self-host-native", "accounts", ...desktopProofTags().required]} : null;
+    // Package tests run for the affected packages only; --full and changes outside packages run every package.
+    const workspace = gates.js && !full ? readWorkspacePackages(repoRoot) : null;
+    const packages = workspace && affectedPackages(files, workspace, packageReferences(repoRoot, workspace));
+    // The JavaScript gate runs the affected packages' tests and every repository check, then these proofs.
+    const javascript = gates.js ? {needs: ["postgres", "engine", "desktop"], packages: packages ?? "all", proofs: ["self-host-native", "accounts", ...desktopProofTags().required]} : null;
     console.log(JSON.stringify({base, baseCommit, files, gates, javascript}, null, 2));
     return;
   }
   let treeState;
   const output = grant ? grantOutput : join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
-  const report = { version: 1, mode, scope: job ?? "all", full, root: repoRoot, base, ...(grant ? { grant } : {}), ...total, steps: [], timings: [], treeReadings: [], output, verdict: "RUNNING" };
+  const report = { version: 1, mode, scope: job ?? "all", full, root: repoRoot, base, ...(grant ? { grant } : {}), ...total, steps: [], timings: [], treeReadings: [], flaky: [], output, verdict: "RUNNING" };
+  // Tests that passed only on retry: { step, test }.
+  const flaky = report.flaky;
   const reportPath = join(output, "result.json");
   const save = () => writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
   const measure = (name, action) => {
@@ -312,7 +318,9 @@ export async function verify(args) {
         const outcome = await measure("queue", () => verifyThroughQueue({ root: queue, detach, checkpoint: () => cancellation.checkpoint(), submission: {
           head: report.commit, base: report.baseCommit, baseRef: base, scope: report.scope, full,
           gates, branch, checkout: repoRoot, requester: { pid: process.pid } } }));
-        report.queue = outcome; save();
+        report.queue = outcome;
+        try { flaky.push(...(JSON.parse(readLog(outcome.result ?? "") || "{}").flaky ?? [])); } catch { /* The lane receipt is the record. */ }
+        save();
         if (detach) { report.verdict = "QUEUED"; return report; }
         if (outcome.verdict !== "PASS") throw Object.assign(new Error(outcome.reason ?? `The queued run ended ${outcome.state}.`), { queued: outcome.state });
         report.verdict = "PASS";
@@ -369,11 +377,14 @@ export async function verify(args) {
           report.rustEvidence = await checkedStep({name: "rust-reuse", reused: true, report: resolve(reuseRust)},
             () => refreshRustReuse(reuseRust, {root: repoRoot, identity,
               step: (name, command, args) => step(name, command, args, buildEnvironment())}));
+          flaky.push(...nextestFlaky(readLog(report.rustEvidence.log)).map(test => ({ step: "rust", test })));
           save();
           return;
         }
-        await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime"], buildEnvironment());
-        await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
+        try {
+          await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime"], buildEnvironment());
+          await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
+        } finally { flaky.push(...nextestFlaky(readLog(join(output, "rust.log"))).map(test => ({ step: "rust", test }))); save(); }
       } catch (error) {
         report.rustError = error.message; save();
         await checkTree("rust-failure");
@@ -383,19 +394,37 @@ export async function verify(args) {
     async function javascriptJob() {
       async function integrationProofs(env, checkpoint) {
         const proofStep = (name, command, commandArgs, env) => step(name, command, commandArgs, env, checkpoint);
+        const recordPlaywrightFlaky = (name, path) => {
+          try { flaky.push(...playwrightFlaky(JSON.parse(readLog(path) || "{}").suites).map(test => ({ step: name, test }))); } catch { /* No report. */ }
+          save();
+        };
         if (mode === "pr") {
           const nativeOutput = join(output, "self-host-native");
-          mkdirSync(nativeOutput, {recursive: true});
           const nativeHash = hashFile(stagedEnginePath);
-          await proofStep("self-host-native", ...pnpm(["--filter", "@dohc/share-web", "exec", "vitest", "run", "--config", "vitest.self-host-native.config.ts",
-            "--reporter=default", "--reporter=json", `--outputFile.json=${join(nativeOutput, "vitest.json")}`]),
-            {...env, DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
+          const nativeProof = name => {
+            rmSync(nativeOutput, {recursive: true, force: true});
+            mkdirSync(nativeOutput, {recursive: true});
+            return proofStep(name, ...pnpm(["--filter", "@dohc/share-web", "exec", "vitest", "run", "--config", "vitest.self-host-native.config.ts",
+              "--reporter=default", "--reporter=json", `--outputFile.json=${join(nativeOutput, "vitest.json")}`]),
+              {...env, DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
+          };
+          try { await nativeProof("self-host-native"); }
+          catch (error) {
+            const failed = error.commandExitFailure ? vitestFailures(join(nativeOutput, "vitest.json")) : [];
+            if (!failed.length) throw error;
+            // The failed attempt's evidence stays beside the folder the proof check reads.
+            renameSync(nativeOutput, `${nativeOutput}-attempt-1`);
+            await nativeProof("self-host-native-retry");
+            flaky.push(...failed.map(test => ({ step: "self-host-native", test })));
+          }
           report.selfHostNative = readSelfHostNativeProof(nativeOutput, stagedEnginePath, nativeHash); save();
           await proofStep("browser-install", ...pnpm(["exec", "playwright", "install", "chromium"]), env);
           const accountReport = join(output, "accounts-playwright.json");
-          await proofStep("accounts", process.execPath, ["apps/desktop/scripts/run-playwright.mjs", "--config", "services/workspace-api/playwright.config.ts", "--output", join(output, "accounts"), "--reporter=list,json"], { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: accountReport });
-          report.accounts = JSON.parse(readFileSync(accountReport, "utf8")).stats;
-          if (!report.accounts?.expected || report.accounts.unexpected || report.accounts.flaky || report.accounts.skipped) throw new Error("Account browser verification did not complete without failures or skips.");
+          try { await proofStep("accounts", process.execPath, ["apps/desktop/scripts/run-playwright.mjs", "--config", "services/workspace-api/playwright.config.ts", "--output", join(output, "accounts"), "--retries=1", "--reporter=list,json"], { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: accountReport }); }
+          finally { recordPlaywrightFlaky("accounts", accountReport); }
+          const accounts = JSON.parse(readFileSync(accountReport, "utf8"));
+          report.accounts = accounts.stats;
+          if (!(report.accounts?.expected + (report.accounts?.flaky ?? 0)) || report.accounts.unexpected || report.accounts.skipped) throw new Error("Account browser verification did not complete without failures or skips.");
           if (process.platform !== "win32") {
             report.statesPage = `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`; save();
           }
@@ -403,11 +432,14 @@ export async function verify(args) {
         const tags = mode === "pr" ? desktopProofTags() : {selected: ["@verification-smoke"], required: ["@verification-smoke"]};
         const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", tags.selected.join("|")];
         const jsonReport = join(output, "playwright.json");
-        await proofStep("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { env }), { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
+        try { await proofStep("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, ...(mode === "pr" ? ["--retries=1"] : []), "--reporter=list,json"], { env }), { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" }); }
+        finally { recordPlaywrightFlaky("desktop", jsonReport); }
         const desktopReport = JSON.parse(readFileSync(jsonReport, "utf8"));
         report.desktop = desktopReport.stats;
         report.desktopProofs = passedSpecTitles(desktopReport.suites);
-        if (!report.desktop?.expected || report.desktop.unexpected || report.desktop.flaky) throw new Error("Desktop verification did not complete a passing test run.");
+        // Only the PR gate retries proofs, so only it accepts a proof that passed on retry.
+        const retried = mode === "pr" ? report.desktop?.flaky ?? 0 : 0;
+        if (!(report.desktop?.expected + retried) || report.desktop.unexpected || report.desktop.flaky > retried) throw new Error("Desktop verification did not complete a passing test run.");
         if (mode !== "e2e" && report.desktop.skipped) throw new Error("A mandatory desktop smoke test was skipped.");
         if (mode === "pr" && tags.required.some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error(`The desktop gate did not pass every required proof: ${tags.required.join(", ")}.`);
       }
@@ -419,10 +451,15 @@ export async function verify(args) {
         report.jsTests = join(output, "js-tests", "result.json");
         // Keep package groups under this owner so cancellation finishes their
         // escalation before database cleanup, without a competing parent timer.
-        await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
-          () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env,
-            beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled),
-            runProofs: checkpoint => integrationProofs(env, checkpoint) }));
+        try {
+          await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
+            () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, changed: full ? null : report.files,
+              beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled),
+              runProofs: checkpoint => integrationProofs(env, checkpoint) }));
+        } finally {
+          try { flaky.push(...(JSON.parse(readFileSync(report.jsTests, "utf8")).flaky ?? [])); } catch { /* No package report. */ }
+          save();
+        }
       } else if (mode !== "pr") {
         await integrationProofs(desktopEnvironment, () => cancellation.checkpoint());
       }
@@ -478,6 +515,7 @@ export async function verify(args) {
       // Nothing after this changes the verdict. The queue accepts only a final receipt.
       report.final = true;
       save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
+      if (flaky.length) console.log(`[verification] ${flaky.length} flaky test(s) passed only on retry. Each one is a defect to fix:\n${flaky.map(row => `  ${row.step}: ${row.test}`).join("\n")}`);
     } finally { checkoutOwner?.release(); }
   }
 }

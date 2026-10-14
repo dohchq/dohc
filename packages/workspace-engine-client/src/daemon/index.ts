@@ -6,3 +6,4 @@ export * from "./engineDaemonLifecycle";
 export * from "./engineWorkspaceSessions";
 export * from "./fileObservation";
 export * from "./fileResolution";
+export * from "./replicaJournal";

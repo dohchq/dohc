@@ -373,7 +373,7 @@ describe("About rail (right side)", () => {
       ref: { kind: "path" as const, path: "b.md", versionId: null },
       rows: [],
       visibility: "visible" as const,
-      coverage: { kind: "granted" as const, complete: true, observation: "interval" as const },
+      unknownReason: null, coverage: { kind: "granted" as const, complete: true, observation: "interval" as const },
       checkedAtMs: 1_700_000_000_000,
       freshness: "fresh" as const,
       nextCursor: null,
