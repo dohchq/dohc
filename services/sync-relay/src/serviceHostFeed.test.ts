@@ -676,6 +676,49 @@ it("reads only the current scope with the workspace's one credential as document
   expect((await f.request("GET", "log?replicationEpoch=epoch-2&streamIdentity=stream-2")).status).toBe(404);
 });
 
+it("after an epoch rotation hosts only documents enrolled again from above the floor, and serves them from there", async () => {
+  const f = await fixture();
+  expect(f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 40})).toBe("rotated");
+  const floor = Number(f.raw.prepare("SELECT epoch_log_floor FROM sync_relay_workspaces WHERE workspace_id=?").get(ws)!.epoch_log_floor);
+  expect(floor).toBeGreaterThan(0);
+  // A writer of the new epoch edits a, and creates a document with its Y.Doc base.
+  const N = blob("new document"), base = blob("new document base"), edited = blob("hosted a, edited");
+  for (const {sha256, content} of [N, base, edited]) f.storage.putBlob({workspaceId: ws, sha256, content, createdAtMs: 1});
+  const written: Array<[string, Record<string, unknown>]> = [
+    ["moment.append", write(binding.objectId, "docs/a.md", edited, {momentId: "edit-a"})],
+    ["moment.append", write("object-new", "docs/new.md", N)],
+    ["ydoc.update", {...ydoc("object-new", "docs/new.md", base), isBaseState: true, lineageClaimId: base.sha256}],
+  ];
+  f.storage.appendLogBatch({workspaceId: ws, originId: "epoch-2-device",
+    ops: written.map(([opKind, payload], originSeq) => parseLogOp({originSeq, opKind, recordedAtMs: 50, payload}))});
+  // a's enrollment belongs to the old epoch, so it can neither serve nor enroll again.
+  expect(f.storage.readServiceHostFeedScope(ws)).toBeNull();
+  expect(() => f.enroll("docs/a.md")).toThrow("obsolete");
+  // b was never enrolled, and its only head is below the floor.
+  expect(() => f.enroll("docs/b.md")).toThrow("current main document");
+
+  const enrolled = f.enroll("docs/new.md");
+  expect(enrolled).toMatchObject({objectId: "object-new", replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
+  const bearer = deriveServiceHostBearer(enrolled, {key, namespace});
+  const page = async (query: string) => {
+    const response = await f.handle(new Request(`https://relay.test/sync/${ws}/hosted/log?replicationEpoch=epoch-2&streamIdentity=stream-2${query}`,
+      {headers: {authorization: `Bearer ${bearer}`}}));
+    expect(response.status).toBe(200);
+    return await response.json() as Page;
+  };
+  const {scope: current} = await page("");
+  // a's old enrollment is still stored and enabled, but outside the scope.
+  expect(f.storage.readServiceHostEnrollment(ws, "docs/a.md")).toMatchObject({enabled: true, retired: false, replicationEpoch: "epoch"});
+  expect(current.documents).toEqual([{objectId: "object-new", path: "docs/new.md"}]);
+  // The main feed and the new document's backfill both read only above the floor.
+  for (const query of [`&scope=${current.token}`, `&scope=${current.token}&since=0&object=object-new`]) {
+    const feed = await page(query);
+    expect(feed.ops.map(op => [op.originId, op.opKind, op.payload.objectId]), query).toEqual([
+      ["epoch-2-device", "moment.append", "object-new"], ["epoch-2-device", "ydoc.update", "object-new"]]);
+    expect(feed.ops.every(op => op.relaySeq > floor), query).toBe(true);
+  }
+});
+
 it("keeps a paused or stopped document in scope until the session host releases it", async () => {
   const f = await fixture();
   f.enroll("docs/b.md");

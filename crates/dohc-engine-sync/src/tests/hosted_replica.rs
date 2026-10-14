@@ -1386,25 +1386,19 @@ fn interrupted_hosted_passes_resume_to_the_same_content_once() {
 
 /// The slice-2 re-review's reproduction: after an epoch rotation the feed
 /// reads above the old log, so it never serves `workspace.init` again. A
-/// replica created then holds `main` from its creation.
+/// replica created then holds `main` from its creation. Rotation leaves the
+/// old epoch's enrollments, so `doc-a` is out of the scope.
 #[test]
 fn a_hosted_replica_created_after_an_epoch_rotation_needs_no_workspace_init() {
     let (_scratch, _path, mut store) = hosted_store();
     let feed = hosted_feed();
+    feed.unshare("doc-a");
     feed.epoch_log_floor.store(4, Ordering::SeqCst);
     feed.create("owner-2", 0, "doc-c", "c.md", "after rotation");
     feed.share("doc-c", "c.md");
     let client = RelaySyncClient::new(feed);
     sync(&client, &mut store);
 
-    assert_eq!(
-        hold(&store, "doc-a"),
-        Some(HostedHold::ScopePathMismatch {
-            scope_path: "a.md".to_owned(),
-            head_path: None
-        }),
-        "its rows are all below the floor, so it is at no path"
-    );
     assert!(ready(&store, "doc-c"));
     let (heads, moments) = content(&store);
     assert_eq!(
@@ -1414,6 +1408,70 @@ fn a_hosted_replica_created_after_an_epoch_rotation_needs_no_workspace_init() {
     assert!(moments.values().all(|count| *count == 1));
     assert_eq!(coordinates(&store), [("owner-2".to_owned(), 0)]);
     assert_eq!(replica(&store).main_cursor, 5);
+}
+
+/// Models an inconsistent feed that no dohc engine writes: a hand-written
+/// writer rotated the epoch, then continued `doc-a`'s Y.Doc lineage above the
+/// floor with a delta and a new head. Its base is below the floor, so the feed
+/// never serves it, and `doc-a` stays held rather than becoming ready.
+#[test]
+fn a_document_whose_ydoc_base_is_below_the_floor_stays_held() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let feed = HostedFeed::new();
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.plaintext_insert(0, "hosted a");
+    let base = ydoc.encode_full_state();
+    let base_sha = dohc_engine_storage::hex_sha256(&base);
+    let update = |origin: &str, seq: i64, bytes: Vec<u8>, is_base: bool| {
+        let sha = dohc_engine_storage::hex_sha256(&bytes);
+        feed.blobs.lock().unwrap().insert(sha.clone(), bytes);
+        feed.append(envelope(
+            origin,
+            seq,
+            "ydoc.update",
+            json!({
+                "versionId": "main",
+                "objectId": "doc-a",
+                "path": "a.md",
+                "contentKind": "plaintext",
+                "updateBlobSha256": sha,
+                "lineageClaimId": base_sha,
+                "isBaseState": is_base
+            }),
+        ));
+    };
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    update("owner", 1, base, true);
+    feed.create("owner", 2, "doc-a", "a.md", "hosted a");
+    feed.epoch_log_floor.store(3, Ordering::SeqCst);
+    update("writer", 0, ydoc.plaintext_insert(8, ", edited"), false);
+    feed.create("writer", 1, "doc-a", "a.md", "hosted a, edited");
+    feed.share("doc-a", "a.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+
+    assert_eq!(hold(&store, "doc-a"), Some(HostedHold::WorkWaiting));
+    assert_eq!(
+        document(&store, "doc-a").unwrap().backfill_cursor,
+        4,
+        "its read stops at the new head, behind the delta"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE object_id='doc-a'"
+        ),
+        1,
+        "the delta waits for its base"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM ydoc_docs WHERE object_id='doc-a'"
+        ),
+        0
+    );
+    assert!(content(&store).0.is_empty(), "no file is materialized");
 }
 
 /// The feed answers a page whose scan passed only withheld rows with no ops
