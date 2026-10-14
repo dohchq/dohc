@@ -42,7 +42,7 @@ export interface ChatWritePlace {
   store: ChatWriteStore;
 }
 
-type ChatWorkspace = Pick<RegistryEntry, "remote" | "shareView" | "sharedChannels">;
+type ChatWorkspace = Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView" | "sharedChannels">;
 
 // The target and session a write was admitted under. channelWireId is
 // undefined until a joined channel makes the lookup necessary.

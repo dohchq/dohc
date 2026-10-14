@@ -736,7 +736,7 @@ it("settles live edits into Markdown before stopping sync and permits local edit
     await sessions.closeWorkspace({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID });
   });
   const stop = createWorkspaceSyncStop({
-    credentials: async () => credentials, currentCredentials: () => credentials,
+    person: async () => ({ kind: "human", humanId: "local", displayName: "Sam" }), cleanupFailed: vi.fn(),
     withOwnerHostPaused: work => work(), prepare: () => capture.settleAndCloseLiveSessionsForSyncPause(), resume: async () => {},
     pauseRemote: id => registry.pauseRemote(id), closeActivity: async () => {
       await expect(capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined })).rejects.toThrow();
@@ -750,7 +750,7 @@ it("settles live edits into Markdown before stopping sync and permits local edit
     status: () => ({ state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
       historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 1 }),
   });
-  await expect(stop({ workspace: registry.find(WORKSPACE_ID)!, assertCurrent: () => {} })).resolves.toMatchObject({ reversible: true });
+  await expect(stop({ workspace: registry.find(WORKSPACE_ID)!, assertCurrent: () => {} })).resolves.toMatchObject({ workspaceSynced: false });
   expect(closeRelay).toHaveBeenCalledOnce();
   const methods = requests.map(request => request.method);
   expect(methods.indexOf(YDOC_METHOD.settle)).toBeLessThan(methods.indexOf(YDOC_METHOD.close));

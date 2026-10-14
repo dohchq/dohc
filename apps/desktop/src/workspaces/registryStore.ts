@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
+import type { WorkspaceSyncPause } from "@dohc/workspace-contracts/workspace-sync";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import { createShareRosterStore } from "./shareRosterStore";
 import type { ShareRoster } from "../automations/shareRoster";
@@ -316,6 +317,7 @@ export interface RegistryEntry extends CreatedWorkspace {
   remote?: RemoteIdentity;
   // This device stopped sync; retain the original owner for resumption.
   pausedRemote?: RemoteIdentity;
+  syncPause?: WorkspaceSyncPause;
   // Durable join gate: true from registration until the first pull has
   // materialized and committed. Boot-time local writers must skip the entry.
   joinBootstrapPending?: true;
@@ -525,14 +527,15 @@ export function createRegistryStore(registryFile: string) {
       const previous = entry.remote ?? entry.pausedRemote;
       const next = { ...entry, remote };
       delete next.pausedRemote;
+      delete next.syncPause;
       updateWorkspaceEntry(workspaceId, () => next);
       if (previous?.serverUrl !== remote.serverUrl || previous?.ownerUserId !== remote.ownerUserId) rosters.remove(entry);
     },
 
-    pauseRemote(workspaceId: string): void {
+    pauseRemote(workspaceId: string, syncPause?: WorkspaceSyncPause): void {
       updateWorkspaceEntry(workspaceId, entry => {
         if (!entry.remote) return undefined;
-        const next = { ...entry, pausedRemote: entry.remote };
+        const next = { ...entry, pausedRemote: entry.remote, ...(syncPause ? { syncPause } : {}) };
         delete next.remote;
         return next;
       });

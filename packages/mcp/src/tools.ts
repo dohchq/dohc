@@ -866,6 +866,8 @@ interface RegistryWorkspace {
   kind: string;
   mode?: string;
   remote?: RemoteIdentity;
+  pausedRemote?: RemoteIdentity;
+  syncPause?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause;
   confirmedRemovedShares?: Array<{ shareId: string; removedAtMs: number }>;
 }
 
@@ -1029,9 +1031,9 @@ function removedShareStatus(workspace: RegistryWorkspace | null) {
   return removedShares.length ? {removedShares} : {};
 }
 
-export async function stopWorkspaceSync(ctx: ToolContext) {
+export async function stopWorkspaceSync(ctx: ToolContext, agent?: string) {
   if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to stop its sync." };
-  return requestCli(ctx, "stopSync", {});
+  return requestCli(ctx, "stopSync", { ...(agent ? { agent } : {}) });
 }
 
 export async function workspaceStatus(ctx: ToolContext) {
@@ -1042,7 +1044,7 @@ export async function workspaceStatus(ctx: ToolContext) {
     findWorkspaceEntry(ctx),
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
-  const synced = remote !== null || nonEmptyString(manifest?.serverUrl);
+  const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
   const credential = credentialStatusFor(remote, credentials);
   return {
     ...(entry?.shareView ? {receivedShare: {
@@ -1051,6 +1053,7 @@ export async function workspaceStatus(ctx: ToolContext) {
       access: ctx.shareAccess ?? null,
     }} : {}),
     synced,
+    ...(entry?.syncPause ? { syncPause: entry.syncPause } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,

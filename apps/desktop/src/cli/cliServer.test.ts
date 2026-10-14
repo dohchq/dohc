@@ -910,6 +910,21 @@ describe("CLI socket server", () => {
     expect(describedEndpoint).not.toBe(join(stateDir, CLI_SOCKET_FILE));
   });
 
+  it("derives stop provenance for people, named agents, and agent runs", async () => {
+    const stop = vi.fn<NonNullable<CliWorkspaceContext["stopSync"]>>(async author => ({ ok: true, workspaceId: WORKSPACE_ID, workspaceSynced: false, syncPause: { atMs: 42, author } }));
+    context.stopSync = stop;
+    await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
+    expect(stop).toHaveBeenLastCalledWith({ kind: "human", humanId: "person-local", displayName: "Sam" });
+    await invoke("stopSync", { cwd: workspaceRoot, actor: "agent", agent: "Claude" });
+    expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "Claude", onBehalfOf: "person-local", depth: 0 });
+    agentRunDepth = 2;
+    await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
+    expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 2 });
+    context.readOnly = true;
+    await expect(invoke("stopSync", { cwd: workspaceRoot, actor: "agent" })).rejects.toThrow("owning workspace");
+    expect(stop).toHaveBeenCalledTimes(3);
+  });
+
   it("rejects older and newer CLIs before opening a workspace", async () => {
     for (const protocolVersion of [
       CLI_PROTOCOL_VERSION - 1,

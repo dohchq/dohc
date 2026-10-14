@@ -18,7 +18,7 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
-  | { verb: "stopSync" }
+  | { verb: "stopSync"; agent?: string }
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead"; path: string }
@@ -949,11 +949,18 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
   sync: {
     summary: "Stop syncing this workspace on this computer.",
     notes: ["Local files, documents, records, and history stay here. Shares and protected-file keys are retained.",
+      "Groups you joined and received-share mounts keep syncing.",
       "Turn sync on in Settings to resume the same workspace."],
     verbs: {
       stop: {
         capabilityId: "workspace.sync.stop", summary: "Stop this computer's sync after saving live document edits.", operands: "",
-        parse: ({ operands }) => { noExtraArgs(operands, "sync stop"); return { verb: "stopSync" }; },
+        flags: [{ name: "--agent", value: "name", text: "Record this agent name when --as-agent is set." }],
+        parse: (input) => {
+          noExtraArgs(input.operands, "sync stop");
+          const agent = lastValue(input, "--agent");
+          if (agent !== undefined && !documentAgentNameSchema.safeParse(agent).success) fail("invalid --agent name");
+          return { verb: "stopSync", ...(agent === undefined ? {} : { agent }) };
+        },
       },
     },
   },

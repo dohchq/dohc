@@ -1,8 +1,7 @@
 import { runInKeyedLane } from "../keyedLane";
 import type { CloudStopSyncResult, SyncStatusResult } from "../ipc/bridgeContract";
 import type { RegistryEntry } from "./registryStore";
-import type { CloudCredentials } from "./cloudCredentialStore";
-import { workspaceRemoteMatchesCredentials, assertSyncEnrollmentCredentials } from "./chatRelayIdentity";
+import type { WorkspaceSyncPause, WorkspaceSyncPauseAuthor } from "@dohc/workspace-contracts/workspace-sync";
 
 const syncTransitions = new Map<string, Promise<void>>();
 export function withWorkspaceSyncTransition<Result>(workspaceId: string, work: () => Promise<Result>): Promise<Result> {
@@ -15,75 +14,87 @@ export interface SyncStopOperation {
 }
 
 export function createWorkspaceSyncStop(dependencies: {
-  credentials(): Promise<CloudCredentials | null>;
-  currentCredentials(): CloudCredentials | null;
+  person(): Promise<WorkspaceSyncPauseAuthor>;
   withOwnerHostPaused<Result>(work: () => Promise<Result>): Promise<Result>;
   prepare(workspace: RegistryEntry): Promise<() => void>;
   resume(workspace: RegistryEntry): Promise<unknown>;
-  pauseRemote(workspaceId: string): void;
+  pauseRemote(workspaceId: string, pause: WorkspaceSyncPause): void;
   closeActivity(workspaceId: string): Promise<unknown>;
   closeRelay(workspace: RegistryEntry): Promise<void>;
   openActivity(workspace: RegistryEntry): Promise<unknown>;
   status(workspaceId: string): SyncStatusResult;
   notify(workspaceId: string): void;
+  cleanupFailed(workspaceId: string, error: unknown): void;
+  nowMs?: () => number;
 }) {
-  return async (operation: SyncStopOperation): Promise<CloudStopSyncResult> => {
-    const workspace = operation.workspace;
-    const result = (): CloudStopSyncResult => ({
-      workspaceId: workspace.workspaceId,
-      workspaceSynced: false,
-      reversible: true,
-      irreversibleEffects: [],
-      status: dependencies.status(workspace.workspaceId),
-    });
-    operation.assertCurrent();
-    if (workspace.shareView) {
-      throw new Error("This workspace syncs through a received share. Open the owner's workspace to stop its sync.");
-    }
-    if (!workspace.remote && !workspace.pausedRemote) return result();
-    const credentials = await dependencies.credentials();
-    operation.assertCurrent();
-    if (workspace.remote || workspace.pausedRemote) {
-      if (!credentials) throw new Error("Sign in to the account that synced this workspace.");
-      assertSyncEnrollmentCredentials(workspace, credentials);
-    }
-    await dependencies.withOwnerHostPaused(async () => {
+  return async (operation: SyncStopOperation, actor?: WorkspaceSyncPauseAuthor): Promise<CloudStopSyncResult> => {
+    const workspaceId = operation.workspace.workspaceId;
+    const author = actor === undefined ? dependencies.person() : Promise.resolve(actor);
+    return withWorkspaceSyncTransition(workspaceId, async () => {
+      const pausedBy = await author;
       operation.assertCurrent();
-      // Keep capture and file observation alive if settlement refuses.
-      let resumeAdmission: (() => void) | undefined;
-      try {
-        resumeAdmission = await dependencies.prepare(workspace);
-        operation.assertCurrent();
-        const remote = workspace.remote ?? workspace.pausedRemote;
-        if (remote && !workspaceRemoteMatchesCredentials(remote, dependencies.currentCredentials())) {
-          throw new Error("Your server session changed. Sign in to the account that synced this workspace.");
-        }
-        dependencies.pauseRemote(workspace.workspaceId);
-      } catch (error) {
-        // A refused pause keeps the original sync setting and failure.
-        resumeAdmission?.();
-        await dependencies.resume(workspace).catch(() => undefined);
-        throw error;
+      const workspace = operation.workspace;
+      let syncPause = workspace.syncPause;
+      let status = dependencies.status(workspaceId);
+      const result = (): CloudStopSyncResult => ({
+        workspaceId: workspace.workspaceId,
+        workspaceSynced: false,
+        ...(syncPause ? { syncPause } : {}),
+        status: syncPause ? { ...status, syncPause } : status,
+      });
+      operation.assertCurrent();
+      if (workspace.shareView) {
+        throw new Error("This workspace syncs through a received share. Open the owner's workspace to stop its sync.");
       }
-      // Once paused, finish resource cleanup even if the window changes workspaces.
-      // Reopening removes the daemon's relay configuration without touching data.
-      let failure: { error: unknown } | undefined;
+      if (!workspace.remote) return result();
+      let saved = false;
       try {
-        await dependencies.closeActivity(workspace.workspaceId);
-        await dependencies.closeRelay(workspace);
+        await dependencies.withOwnerHostPaused(async () => {
+          operation.assertCurrent();
+          // Keep capture and file observation alive if settlement refuses.
+          let resumeAdmission: (() => void) | undefined;
+          try {
+            resumeAdmission = await dependencies.prepare(workspace);
+            operation.assertCurrent();
+            syncPause = { atMs: (dependencies.nowMs ?? Date.now)(), author: pausedBy };
+            dependencies.pauseRemote(workspace.workspaceId, syncPause);
+            saved = true;
+            status = { ...status, syncPause };
+          } catch (error) {
+            // A refused pause keeps the original sync setting and failure.
+            resumeAdmission?.();
+            await dependencies.resume(workspace).catch(() => undefined);
+            throw error;
+          }
+          // Once paused, finish resource cleanup even if the window changes workspaces.
+          // Reopening removes the daemon's relay configuration without touching data.
+          let failure: { error: unknown } | undefined;
+          try {
+            await dependencies.closeActivity(workspace.workspaceId);
+          } catch (error) {
+            failure = { error };
+          }
+          try {
+            await dependencies.closeRelay(workspace);
+          } catch (error) {
+            failure ??= { error };
+          }
+          try {
+            await dependencies.openActivity(workspace);
+          } catch (error) {
+            failure ??= { error };
+          } finally {
+            try { dependencies.notify(workspace.workspaceId); } catch (error) { failure ??= { error }; }
+          }
+          if (failure) throw failure.error;
+        });
       } catch (error) {
-        failure = { error };
+        if (!saved) throw error;
+        dependencies.cleanupFailed(workspaceId, error);
       }
-      try {
-        await dependencies.openActivity(workspace);
-      } catch (error) {
-        failure ??= { error };
-      } finally {
-        dependencies.notify(workspace.workspaceId);
-      }
-      if (failure) throw failure.error;
+      // The saved pause is the outcome, even if its attachment retired during cleanup.
+      try { operation.assertCurrent(); status = dependencies.status(workspaceId); } catch { /* Keep the saved outcome. */ }
+      return result();
     });
-    operation.assertCurrent();
-    return result();
   };
 }

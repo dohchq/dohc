@@ -78,7 +78,7 @@ import { workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
 import { registerShareProposalsIpcHandlers } from "./ipc/shareProposalsIpc";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
-import { createWorkspaceSyncStop, withWorkspaceSyncTransition, type SyncStopOperation } from "./workspaces/stopWorkspaceSync";
+import { createWorkspaceSyncStop } from "./workspaces/stopWorkspaceSync";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
 import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
 import { registerShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
@@ -2511,6 +2511,7 @@ const activity = {
   getStatus: (workspaceId: string) =>
     withWorkspaceActivityState(workspaceId, (lease, workspace) => ({
       ...workspaceActivity.getStatus(workspace, lease.state.activity),
+      ...(workspace.syncPause ? { syncPause: workspace.syncPause } : {}),
       ownerLiveDelivery: desktopEngine.ownerLiveDeliveryStatus(workspaceId),
       ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
@@ -4634,10 +4635,10 @@ const { startDesktopCliServer } = createDesktopCliServer({
   findWorkspace,
   listWorkspaces,
   openWorkspaceActivity,
-  stopWorkspaceSync: operation => withWorkspaceSyncTransition(operation.workspace.workspaceId, async () => {
-    const { status: _status, ...result } = await stopWorkspaceSync(operation);
+  stopWorkspaceSync: async (operation, author) => {
+    const { status: _status, ...result } = await stopWorkspaceSync(operation, author);
     return { ok: true as const, ...result };
-  }),
+  },
   activity,
   linkedChatStoreFor,
   currentDaemon: () => desktopEngine.daemon,
@@ -5760,21 +5761,19 @@ async function currentDiagnostics(): Promise<string> {
   });
 }
 
-function stopWorkspaceSync(operation: SyncStopOperation) {
-  return createWorkspaceSyncStop({
-    credentials: loadAndCacheCurrentCredentials,
-    currentCredentials: () => cachedCredentials,
-    withOwnerHostPaused: work => desktopEngine.withOwnerHostPaused(work),
-    prepare: workspace => activity.prepareSyncPause(workspace),
-    resume: workspace => activity.enableCloud(workspace),
-    pauseRemote: pauseWorkspaceRemote,
-    closeActivity: workspaceId => activity.close(workspaceId, { notify: false }),
-    closeRelay: workspace => closeRelayTransportWorkspace(workspace),
-    openActivity: workspace => activity.open(workspace),
-    status: workspaceId => activity.getStatus(workspaceId),
-    notify: workspaceId => notifyRenderer({ workspaceId }),
-  })(operation);
-}
+const stopWorkspaceSync = createWorkspaceSyncStop({
+  person: async () => ({ ...await localPerson(), displayName: localUserDisplayName() }),
+  withOwnerHostPaused: work => desktopEngine.withOwnerHostPaused(work),
+  prepare: workspace => activity.prepareSyncPause(workspace),
+  resume: workspace => activity.enableCloud(workspace),
+  pauseRemote: pauseWorkspaceRemote,
+  closeActivity: workspaceId => activity.close(workspaceId, { notify: false }),
+  closeRelay: workspace => closeRelayTransportWorkspace(workspace),
+  openActivity: workspace => activity.open(workspace),
+  status: workspaceId => activity.getStatus(workspaceId),
+  notify: workspaceId => notifyRenderer({ workspaceId }),
+  cleanupFailed: (workspaceId, error) => console.error("[desktop] sync pause cleanup:", workspaceId, error),
+});
 
 function registerIpcHandlers(): void {
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());

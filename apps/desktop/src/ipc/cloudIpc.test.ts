@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import { RelayUnauthorizedError, RelayWorkspaceUnavailableError, RelayClaimRefusedError } from "@dohc/workspace-contracts/relay";
+import { RelayUnauthorizedError, RelayWorkspaceUnavailableError, RelayClaimRefusedError, RelayKeyEnvelopeMissingError } from "@dohc/workspace-contracts/relay";
 import { CHANNELS } from "./channels";
+import { createWorkspaceSyncStop } from "../workspaces/stopWorkspaceSync";
+import { enrollWorkspaceKeyEnvelope } from "../workspaces/workspaceKeyEnvelopeEnrollment";
 import { registerCloudIpcHandlers } from "./cloudIpc";
 import { workspaceSyncOperations, type SyncStatusResult } from "./bridgeContract";
 import { createWorkspaceRootApproval } from "./workspaceRegistryIpc";
@@ -66,7 +68,9 @@ async function harness() {
   const claim = vi.fn(async () => { steps.push("claim"); });
   // These opaque collaborators are used only by the injected I/O functions below.
   const sessions = {} as EngineWorkspaceSessions;
-  const relay = { claim } as unknown as EngineRelayWorkspaceClient;
+  const downloadKeyEnvelope = vi.fn(async () => ({ envelopeJson: "existing-envelope", etag: "a".repeat(64) }));
+  const uploadKeyEnvelope = vi.fn(async () => ({ etag: "b".repeat(64) }));
+  const relay = { claim, downloadKeyEnvelope, uploadKeyEnvelope } as unknown as EngineRelayWorkspaceClient;
   const daemonStartup = vi.fn<() => Promise<void>>(async () => undefined);
   const readSecrets = vi.fn<Dependencies["readWorkspaceSecretState"]>(async () => "none");
   const readDataKey = vi.fn<Dependencies["readWorkspaceDataKeyForEnrollment"]>(async () => null);
@@ -82,6 +86,8 @@ async function harness() {
   const setRemote = vi.fn<Dependencies["setWorkspaceRemote"]>(async (id, remote) => {
     steps.push("remote");
     registry.get(id)!.remote = remote;
+    delete registry.get(id)!.pausedRemote;
+    delete registry.get(id)!.syncPause;
   });
   const enable = vi.fn<Dependencies["activity"]["enableCloud"]>(async () => { steps.push("enable"); });
   const notify = vi.fn(() => { steps.push("notify"); });
@@ -105,9 +111,19 @@ async function harness() {
     closeRelay: cleanup, rollbackComplete: notify, logError: vi.fn(),
   });
   const stopWorkspaceSync = vi.fn<Dependencies["stopWorkspaceSync"]>(async operation => ({
-    workspaceId: operation.workspace.workspaceId, workspaceSynced: false, reversible: true,
-    irreversibleEffects: [], status,
+    workspaceId: operation.workspace.workspaceId, workspaceSynced: false,
+    status,
   }));
+  const preparePause = vi.fn(async () => () => {});
+  const stopOperation = createWorkspaceSyncStop({
+    person: async () => ({ kind: "human", humanId: "local", displayName: "Sam" }),
+    withOwnerHostPaused: work => work(), prepare: preparePause, resume: enable,
+    pauseRemote: (id, syncPause) => { const entry = registry.get(id)!; entry.pausedRemote = entry.remote; delete entry.remote; entry.syncPause = syncPause; },
+    closeActivity: async () => {}, closeRelay: async () => {}, openActivity: async () => {},
+    status: () => status, notify: () => {}, cleanupFailed: vi.fn(),
+  });
+  stopWorkspaceSync.mockImplementation(stopOperation);
+  const openActivity = vi.fn<Dependencies["openWorkspaceActivity"]>(async (_entry, options) => { steps.push("open"); await options.afterActivityOpen(); });
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   registerCloudIpcHandlers<string, Event, Operation>({
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
@@ -141,14 +157,14 @@ async function harness() {
     usableRoot: roots.usableRoot, readdir, mkdir, probeRelayWorkspace: probe,
     createJoinedWorkspace, bootstrapJoinedWorkspace: bootstrap,
     refreshNativeWorkspaceSurfaces: () => { steps.push("surfaces"); },
-    openWorkspaceActivity: async (_entry, options) => { steps.push("open"); await options.afterActivityOpen(); },
+    openWorkspaceActivity: openActivity,
     completeWorkspaceJoinBootstrap: (id) => { steps.push("complete"); delete registry.get(id)!.joinBootstrapPending; },
     desktopMarks: { mark: () => { steps.push("mark"); }, measureSince: () => { steps.push("measure"); } },
   });
   const invoke = async (channel: string, payload?: unknown, trusted = true) => handlers.get(channel)!({ sender: "window", trusted }, payload);
   const joinPayload = { rootPath, syncCode: buildSyncCode({ workspaceId: "joined", relayUrl: credentials.relayUrl! }) };
   return {
-    handlers, invoke, stopWorkspaceSync, joinPayload, roots, workspace, registry, authorities, cache, login,
+    handlers, invoke, stopWorkspaceSync, preparePause, openActivity, downloadKeyEnvelope, uploadKeyEnvelope, joinPayload, roots, workspace, registry, authorities, cache, login,
     stop, closeRelay, claim, readSecrets, readDataKey, enroll, bootstrap, probe, readdir, mkdir,
     bindRelay, setRemote, enable, notify, changing, ready, createFolder, cleanup, steps, daemonStartup,
     retireRenderer: () => { rendererCurrent = false; },
@@ -177,10 +193,10 @@ describe("registered cloud handlers", () => {
     expect(h.stopWorkspaceSync).not.toHaveBeenCalled();
     h.stopWorkspaceSync.mockImplementationOnce(async operation => {
       expect(operation.workspace).toMatchObject({ workspaceId: "existing", attachmentId: expect.any(Symbol) });
-      return { workspaceId: operation.workspace.workspaceId, workspaceSynced: false, reversible: true, irreversibleEffects: [], status };
+      return { workspaceId: operation.workspace.workspaceId, workspaceSynced: false, status };
     });
     await expect(h.invoke(workspaceSyncOperations.cloudStopSync.channel)).resolves.toMatchObject({
-      workspaceId: "existing", workspaceSynced: false, reversible: true, irreversibleEffects: [],
+      workspaceId: "existing", workspaceSynced: false,
     });
     expect(h.stopWorkspaceSync).toHaveBeenCalledOnce();
   });
@@ -190,7 +206,7 @@ describe("registered cloud handlers", () => {
     const entered = deferred(), held = deferred();
     h.stopWorkspaceSync.mockImplementationOnce(async operation => {
       entered.resolve(); await held.promise;
-      return { workspaceId: operation.workspace.workspaceId, workspaceSynced: false, reversible: true, irreversibleEffects: [], status };
+      return { workspaceId: operation.workspace.workspaceId, workspaceSynced: false, status };
     });
     const pending = h.invoke(workspaceSyncOperations.cloudStopSync.channel);
     await entered.promise;
@@ -205,10 +221,11 @@ describe("registered cloud handlers", () => {
     const enabling = h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" });
     await entered.promise;
     const stopping = h.invoke(workspaceSyncOperations.cloudStopSync.channel);
-    expect(h.stopWorkspaceSync).not.toHaveBeenCalled();
+    expect(h.preparePause).not.toHaveBeenCalled();
     held.resolve(); await enabling; await stopping;
     expect(h.enable).toHaveBeenCalledOnce();
-    expect(h.stopWorkspaceSync).toHaveBeenCalledOnce();
+    expect(h.preparePause).toHaveBeenCalledOnce();
+    expect(h.workspace.remote).toBeUndefined();
   });
 
   it("refuses a queued stop from an earlier visit to the same workspace", async () => {
@@ -221,7 +238,7 @@ describe("registered cloud handlers", () => {
     h.reopenRenderer();
     const refused = Promise.all([expect(enabling).rejects.toThrow(), expect(stopping).rejects.toThrow()]);
     held.resolve(); await refused;
-    expect(h.stopWorkspaceSync).not.toHaveBeenCalled();
+    expect(h.preparePause).not.toHaveBeenCalled();
     await expect(h.invoke(workspaceSyncOperations.cloudStopSync.channel)).resolves.toMatchObject({ workspaceId: "existing" });
   });
 
@@ -490,4 +507,64 @@ describe("registered cloud handlers", () => {
     expect(h.registry.has("joined")).toBe(false);
     expect(h.enable).not.toHaveBeenCalled();
   });
+});
+
+it("resumes through cloudEnableSync without replacing an intact protected-file envelope", async () => {
+  const h = await harness();
+  h.workspace.remote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
+  await h.invoke(workspaceSyncOperations.cloudStopSync.channel);
+  const pause = h.workspace.syncPause!;
+  expect(await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).toMatchObject({ workspaceSynced: false, syncPause: pause });
+  const key = Buffer.alloc(32, 42);
+  h.readDataKey.mockResolvedValueOnce(key);
+  h.enroll.mockImplementation(enrollWorkspaceKeyEnvelope);
+  await h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" });
+  expect(h.downloadKeyEnvelope).toHaveBeenCalledOnce();
+  expect(h.uploadKeyEnvelope).not.toHaveBeenCalled();
+  expect(h.setRemote).toHaveBeenCalledWith("existing", { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId });
+  expect(h.enable).toHaveBeenCalledOnce();
+  expect(h.workspace.pausedRemote).toBeUndefined();
+  expect(h.workspace.syncPause).toBeUndefined();
+  expect(key.equals(Buffer.alloc(32))).toBe(true);
+});
+
+it("requires enrollment when protected files were added while paused and no envelope exists", async () => {
+  const h = await harness();
+  h.workspace.pausedRemote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
+  h.downloadKeyEnvelope.mockRejectedValue(new RelayKeyEnvelopeMissingError());
+  h.enroll.mockImplementation(enrollWorkspaceKeyEnvelope);
+  h.readDataKey.mockResolvedValue(Buffer.alloc(32, 7));
+  await expect(h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" })).rejects.toThrow("Passphrase required");
+  expect(h.enable).not.toHaveBeenCalled();
+  expect(h.workspace.pausedRemote).toBeDefined();
+  h.readDataKey.mockResolvedValue(Buffer.alloc(32, 7));
+  await h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing", passphrase: "original new passphrase" });
+  expect(h.uploadKeyEnvelope).toHaveBeenCalledOnce();
+});
+
+it("keeps resume pinned to the original paused owner", async () => {
+  const h = await harness();
+  h.workspace.pausedRemote = { serverUrl: credentials.serverUrl, ownerUserId: "someone-else" };
+  await expect(h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" })).rejects.toThrow("account that synced");
+  expect(h.claim).not.toHaveBeenCalled();
+});
+
+it("queues a stop during join until the joined workspace is enabled", async () => {
+  const h = await harness();
+  const entered = deferred(), held = deferred();
+  h.openActivity.mockImplementationOnce(async (_entry, options) => { entered.resolve(); await held.promise; await options.afterActivityOpen(); });
+  const joining = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
+  await entered.promise;
+  const stopping = h.authorities.withOperation("joined", operation => createWorkspaceSyncStop({
+    person: async () => ({ kind: "human", humanId: "local", displayName: "Sam" }),
+    withOwnerHostPaused: work => work(), prepare: h.preparePause, resume: h.enable,
+    pauseRemote: id => { const entry = h.registry.get(id)!; entry.pausedRemote = entry.remote; delete entry.remote; },
+    closeActivity: async () => {}, closeRelay: async () => {}, openActivity: async () => {},
+    status: () => status, notify: () => {}, cleanupFailed: vi.fn(),
+  })(operation));
+  expect(h.preparePause).not.toHaveBeenCalled();
+  held.resolve(); await joining;
+  await expect(stopping).resolves.toMatchObject({ workspaceSynced: false });
+  expect(h.registry.get("joined")?.remote).toBeUndefined();
+  expect(h.registry.get("joined")?.pausedRemote).toBeDefined();
 });

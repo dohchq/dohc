@@ -12,6 +12,8 @@ import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 
+import { WorkspaceSyncPause } from "@dohc/workspace-contracts/workspace-sync";
+
 export const CLI_PROTOCOL_VERSION = 4;
 export const CLI_JSON_SCHEMA_VERSION = 2;
 
@@ -381,7 +383,7 @@ const automationPressArgsSchema = z
   .strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
-  z.object({ ...requestBase, verb: z.literal("stopSync"), args: z.object(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("stopSync"), args: z.object({ ...argsBase, agent: documentAgentNameSchema.optional() }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessObject"), args: ObjectAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessSharing"), args: SharingAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationButtons"), args: z.object({ ...argsBase, collectionPath: collectionPathArg, table: z.string().min(1).max(256).optional() }).strict() }).strict(),
@@ -1351,7 +1353,7 @@ const automationPressResultSchema = z.union([
 export const cliResultSchemas = {
   stopSync: z.union([
     z.object({ ok: z.literal(true), workspaceId: z.string().min(1), workspaceSynced: z.literal(false),
-      reversible: z.literal(true), irreversibleEffects: z.array(z.string()).length(0) }).strict(),
+      syncPause: WorkspaceSyncPause.optional() }).strict(),
     rawFailureSchema,
   ]),
   accessObject: AccessAnswer,

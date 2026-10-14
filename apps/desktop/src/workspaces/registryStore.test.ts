@@ -121,15 +121,18 @@ describe("share roster", () => {
     const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
     store.register({ ...personal, remote });
     store.setShareRoster("ws-1", { grants: [grant("g-1")], links: [], formerGrants: [], endedGrants: [] }, true);
-    store.pauseRemote("ws-1");
+    const syncPause = { atMs: 42, author: { kind: "agent" as const, agentId: "Claude", onBehalfOf: "person-local", depth: 0 } };
+    store.pauseRemote("ws-1", syncPause);
     const paused = createRegistryStore(registryPath).find("ws-1")!;
     expect(paused.remote).toBeUndefined();
     expect(paused.pausedRemote).toEqual(remote);
+    expect(paused.syncPause).toEqual(syncPause);
     expect(paused.shareRoster?.grants).toEqual([grant("g-1")]);
     store.setRemote("ws-1", remote);
     const resumed = createRegistryStore(registryPath).find("ws-1")!;
     expect(resumed.remote).toEqual(remote);
     expect(resumed.pausedRemote).toBeUndefined();
+    expect(resumed.syncPause).toBeUndefined();
     expect(resumed.shareRoster?.grants).toEqual([grant("g-1")]);
   });
 

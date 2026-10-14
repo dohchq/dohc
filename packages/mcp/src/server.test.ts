@@ -82,15 +82,15 @@ async function connectedToolNames(
 describe("share-level tool profiles", () => {
   const base: ToolContext = { root: "/tmp/shared-view", home: "/tmp/home" };
 
-  it("stops the owner's workspace through the desktop with no caller identity", async () => {
+  it("stops the owner's workspace with the handshake name as provenance", async () => {
     const requests: unknown[] = [];
     const { client } = await connectedToolNames({ ...base, request: async request => {
       requests.push(request);
-      return { ok: true, workspaceId: "workspace", workspaceSynced: false, reversible: true, irreversibleEffects: [] };
+      return { ok: true, workspaceId: "workspace", workspaceSynced: false };
     } });
     const result = await client.callTool({ name: "dohc_stop_workspace_sync", arguments: {} });
     expect(result.isError).not.toBe(true);
-    expect(requests).toMatchObject([{ verb: "stopSync", door: "mcp", args: { cwd: base.root, actor: "agent" } }]);
+    expect(requests).toMatchObject([{ verb: "stopSync", door: "mcp", args: { cwd: base.root, actor: "agent", agent: "test" } }]);
   });
 
   it("parses the --share-access flag", () => {

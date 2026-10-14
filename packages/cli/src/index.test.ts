@@ -18,14 +18,13 @@ const PROJECT = resolve("/workspace/project");
 
 const TOKEN = "a".repeat(64);
 it("stops sync through main without a caller-supplied workspace or identity", async () => {
-  const request = vi.fn(async () => ({ ok: true, workspaceId: "workspace", workspaceSynced: false,
-    reversible: true, irreversibleEffects: [] }));
-  const result = await executeCli({ argv: ["sync", "stop", "--json", "--as-agent"], cwd: "/workspace", env: {}, request });
+  const request = vi.fn(async () => ({ ok: true, workspaceId: "workspace", workspaceSynced: false }));
+  const result = await executeCli({ argv: ["sync", "stop", "--json", "--as-agent", "--agent", "Claude"], cwd: "/workspace", env: {}, request });
   expect(result.exitCode).toBe(0);
   expect(request).toHaveBeenCalledWith(expect.objectContaining({
-    verb: "stopSync", args: { cwd: resolve("/workspace"), actor: "agent" },
+    verb: "stopSync", args: { cwd: resolve("/workspace"), actor: "agent", agent: "Claude" },
   }));
-  expect(JSON.parse(result.stdout)).toMatchObject({ workspaceSynced: false, reversible: true });
+  expect(JSON.parse(result.stdout)).toMatchObject({ workspaceSynced: false });
   expect((await executeCli({ argv: ["sync", "stop", "other-workspace"], env: {}, request })).exitCode).toBe(1);
 });
 

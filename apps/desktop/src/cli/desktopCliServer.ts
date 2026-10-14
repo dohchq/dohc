@@ -60,7 +60,7 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
-  stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
+  stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
@@ -215,11 +215,19 @@ export function createDesktopCliServer<State>(
     };
     return {
       workspaceId: workspace.workspaceId,
-      ...(dependencies.stopWorkspaceSync ? { stopSync: () =>
-        withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
-          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace was closed. Open it again.");
-          return dependencies.stopWorkspaceSync!(operation);
-        }) } : {}),
+      ...(dependencies.stopWorkspaceSync ? { stopSync: async author => {
+        let saved: import("@dohc/cli/protocol").CliResultByVerb["stopSync"] | undefined;
+        try {
+          return await withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
+            if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace was closed. Open it again.");
+            saved = await dependencies.stopWorkspaceSync!(operation, author);
+            return saved;
+          });
+        } catch (error) {
+          if (saved?.ok) return saved;
+          throw error;
+        }
+      } } : {}),
       ...(dependencies.access ? { access: dependencies.access(workspace.workspaceId) } : {}),
       ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {

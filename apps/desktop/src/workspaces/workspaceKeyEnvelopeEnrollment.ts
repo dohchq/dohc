@@ -55,14 +55,27 @@ export async function enrollWorkspaceKeyEnvelope(input: {
   workspaceId: string;
   dataKey: Buffer | null;
   passphrase?: string;
+  resume?: boolean;
   transport: EngineRelayWorkspaceClient;
   installDataKey: (dataKey: Buffer) => Promise<void>;
 }): Promise<void> {
-  if (input.dataKey) {
-    const passphrase = input.passphrase ?? "";
-    const passphraseError = validateSecretPassphrase(passphrase);
-    if (passphraseError) throw new Error(passphraseError);
+  if (input.dataKey && input.resume) {
     try {
+      await input.transport.downloadKeyEnvelope();
+      input.dataKey.fill(0);
+      return;
+    } catch (error) {
+      if (!(error instanceof RelayKeyEnvelopeMissingError)) {
+        input.dataKey.fill(0);
+        throw error;
+      }
+    }
+  }
+  if (input.dataKey) {
+    try {
+      const passphrase = input.passphrase ?? "";
+      const passphraseError = validateSecretPassphrase(passphrase);
+      if (passphraseError) throw new Error(passphraseError);
       const { envelopeJson } = await wrapWorkspaceDataKey({
         dataKey: input.dataKey,
         passphrase,

@@ -451,6 +451,16 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("workspace_status shows who paused without treating the retained binding as active sync", async () => {
+    await withWorkspace(async ctx => {
+      const syncPause = { atMs: 42, author: { kind: "agent", agentId: "Claude", onBehalfOf: "person-local", depth: 0 } };
+      await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({ version: 1, workspaces: [{
+        workspaceId: "ws-1", rootPath: ctx.root, kind: "personal", pausedRemote: { serverUrl: "https://server.test", ownerUserId: "owner" }, syncPause,
+      }] }));
+      expect(await workspaceStatus(ctx)).toMatchObject({ synced: false, scope: "local", syncPause });
+    });
+  });
+
   it("workspace_status reports a matching cloud credential as connected", async () => {
     await withWorkspace(async (ctx) => {
       await bindCloudWorkspace(ctx);
