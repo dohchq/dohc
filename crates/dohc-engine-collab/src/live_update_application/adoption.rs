@@ -532,6 +532,93 @@ mod tests {
         );
     }
     #[test]
+    fn native_outbox_headers_keep_only_recorded_human_edits() {
+        use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+        for kind in [
+            Some(ChangeActorKind::Human),
+            Some(ChangeActorKind::Automation),
+            None,
+        ] {
+            let mut f = Fixture::new();
+            f.adopt().unwrap();
+            let bytes = f.doc.richdoc_append_paragraph("native edit");
+            let attribution = kind.map(|actor_kind| ChangeAttribution {
+                actor_kind,
+                on_behalf_of: None,
+                depth: 0,
+                run: None,
+            });
+            crate::record_local_update(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                &f.key,
+                &bytes,
+                crate::LocalAppend {
+                    actor_origin_id: Some("writer"),
+                    attribution: attribution.as_ref(),
+                    ..Default::default()
+                },
+                &NoFaults,
+                11,
+                |tx, outcome, _| {
+                    owner_outbox::append_adopted_local_update_in_tx(
+                        tx,
+                        &f.key,
+                        "owner.md",
+                        outcome.seq,
+                        &bytes,
+                        11,
+                    )
+                },
+            )
+            .unwrap();
+            let outbox_id: String = f
+                .store
+                .read_with(|conn| {
+                    conn.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |row| {
+                        row.get(0)
+                    })
+                })
+                .unwrap();
+            let pending = owner_outbox::read_pending(&f.store, "workspace", &outbox_id).unwrap();
+            let entry = pending.entries.last().unwrap();
+            let header = match owner_outbox::read_pending_page(
+                &f.store,
+                "workspace",
+                &outbox_id,
+                None,
+                1 << 20,
+            )
+            .unwrap()
+            {
+                owner_outbox::OwnerOutboxPageResult::Page(page) => page,
+                _ => panic!("unchanged outbox"),
+            };
+            let page = owner_outbox::read_pending_page(
+                &f.store,
+                "workspace",
+                &outbox_id,
+                Some(owner_outbox::OwnerOutboxReadCursor {
+                    snapshot: header.cursor.snapshot,
+                    part: owner_outbox::OwnerOutboxReadPart::EntryHeader,
+                    sequence: entry.sequence,
+                    offset: 0,
+                }),
+                1 << 20,
+            )
+            .unwrap();
+            let owner_outbox::OwnerOutboxPageResult::Page(page) = page else {
+                panic!("unchanged entry")
+            };
+            let json: serde_json::Value = serde_json::from_slice(&page.bytes).unwrap();
+            assert_eq!(
+                json.get("personEdit"),
+                (kind == Some(ChangeActorKind::Human)).then_some(&serde_json::Value::Bool(true))
+            );
+        }
+    }
+
+    #[test]
     fn first_adoption_seeds_only_pending_local_state_and_preserves_history() {
         let mut f = Fixture::new();
         f.local_edit_before_adoption();
@@ -544,6 +631,17 @@ mod tests {
         let (bytes, pending, created, coverage): (Vec<u8>, i64, i64, i64) = f.store.read_with(|tx| tx.query_row(
             "SELECT b.bytes,e.pending,e.created_at_ms,a.covered_outbox_sequence FROM owner_ydoc_outbox_entries e JOIN binary_blobs b ON b.sha256=e.update_blob_digest CROSS JOIN live_owner_adoptions a", [], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))).unwrap();
         assert_eq!((pending, created, coverage), (1, 10, 0));
+        let credited: Option<bool> = f
+            .store
+            .read_with(|tx| {
+                tx.query_row(
+                    "SELECT person_edit FROM owner_ydoc_outbox_entries",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(credited, None);
         let seeded = Ydoc::wire();
         seeded.apply(&bytes).unwrap();
         assert!(crate::replay_parity::structurally_equal_v2(&f.doc, &seeded).unwrap());
