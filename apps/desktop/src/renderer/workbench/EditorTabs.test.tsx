@@ -323,6 +323,84 @@ describe("EditorTabs strip scrolling", () => {
       expect(scrollTo).toHaveBeenCalledTimes(2);
       expect(scrollTo).toHaveBeenLastCalledWith({ left: 173, behavior: "auto" });
     });
+
+    // Places the tabs a test names at [left, width] over `content` px of tabs
+    // and trailing hairline, and answers where a tab sits in the view.
+    function layOut(content: number, boxes: Record<string, [number, number]>) {
+      const box = (el: HTMLElement) => boxes[el.dataset.testid?.slice(4) ?? ""] ?? [0, 0];
+      vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) {
+        return box(this)[0];
+      });
+      vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+        return box(this)[1];
+      });
+      vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockReturnValue(content);
+      return (path: string) => {
+        const [left, size] = boxes[path] ?? [0, 0];
+        const scrolled = screen.getByRole("tablist").scrollLeft;
+        return { start: left - scrolled, end: left + size - scrolled };
+      };
+    }
+
+    // The strip's end does not fade, so a last tab needs no margin there; the
+    // 33px margin at its start does not fit beside a 224px tab in 250px.
+    it("reveals a last tab with no room for its margin whole, at the strip's end", () => {
+      const span = layOut(640, { "a.md": [0, 100], "e.md": [400, 224] });
+      const { rerender } = render(renderStrip("a.md"));
+      const strip = screen.getByRole("tablist");
+      rerender(renderStrip("e.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 390, behavior: "smooth" });
+      expect(span("e.md")).toEqual({ start: 10, end: 234 });
+
+      // Already shown there, it does not move.
+      rerender(renderStrip("a.md"));
+      strip.scrollLeft = 390;
+      scrollTo.mockClear();
+      rerender(renderStrip("e.md"));
+      expect(scrollTo).not.toHaveBeenCalled();
+    });
+
+    it("reveals a first tab with no room for its margin whole, at the strip's start", () => {
+      const span = layOut(640, { "a.md": [0, 224], "e.md": [400, 100] });
+      const { rerender } = render(renderStrip("e.md"));
+      rerender(renderStrip("a.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, behavior: "smooth" });
+      expect(span("a.md")).toEqual({ start: 0, end: 224 });
+    });
+
+    it("reveals a middle tab with room for both margins clear of both fades, and leaves it where it is clear", () => {
+      const span = layOut(640, { "a.md": [0, 100], "c.md": [300, 150] });
+      const { rerender } = render(renderStrip("a.md"));
+      const strip = screen.getByRole("tablist");
+      rerender(renderStrip("c.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 233, behavior: "smooth" });
+      expect(span("c.md")).toEqual({ start: 67, end: 217 });
+
+      strip.scrollLeft = 250;
+      scrollTo.mockClear();
+      resize(251);
+      expect(scrollTo).not.toHaveBeenCalled();
+    });
+
+    it("reveals a middle tab with no room for both margins whole, as clear of both fades as the room allows", () => {
+      const span = layOut(640, { "a.md": [0, 100], "c.md": [300, 220], "d.md": [300, 190] });
+      const { rerender } = render(renderStrip("a.md"));
+      const strip = screen.getByRole("tablist");
+      // 30px of room: 15px on each side.
+      rerender(renderStrip("c.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 285, behavior: "smooth" });
+      expect(span("c.md")).toEqual({ start: 15, end: 235 });
+
+      // 60px of room clears both 24px fades, if not the joins beside them:
+      // the nearest such scroll, and none while the tab is already clear.
+      rerender(renderStrip("d.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 276, behavior: "smooth" });
+      expect(span("d.md")).toEqual({ start: 24, end: 214 });
+      strip.scrollLeft = 270;
+      scrollTo.mockClear();
+      resize(251);
+      expect(scrollTo).not.toHaveBeenCalled();
+    });
   });
 
   // The mask in styles.css reads these: it fades an edge the strip can still

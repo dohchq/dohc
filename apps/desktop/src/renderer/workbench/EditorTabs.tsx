@@ -87,23 +87,44 @@ const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-activ
 
 // An edge the strip can still scroll past fades over this width (the mask on
 // `.dohc-tab-strip` in styles.css). A revealed tab stops clear of the fade,
-// its joins included.
+// its joins included, where the strip has room for both.
 const EDGE_FADE = 24;
 const REVEAL_MARGIN = EDGE_FADE + CORNER_RADIUS + 1;
 
-// Scrolls only the strip, and only when the tab is not already clear of its
-// edges: scrollIntoView would also scroll every scrolling ancestor, the
+// Scrolls only the strip, and only when the tab is not already clear of the
+// fades: scrollIntoView would also scroll every scrolling ancestor, the
 // window included. A tab's offsetLeft is its position in the strip's
-// content, because the strip starts at its frame's left edge. A tab too wide
-// for the strip shows its start.
+// content, because the strip starts at its frame's left edge. An edge the
+// strip reaches does not fade, so the tab needs no margin there.
 function revealTab(strip: HTMLElement, tab: HTMLElement, behavior: ScrollBehavior) {
-  const first = Math.max(0, tab.offsetLeft - REVEAL_MARGIN);
-  const last = Math.min(
-    strip.scrollWidth - strip.clientWidth,
-    tab.offsetLeft + tab.offsetWidth + REVEAL_MARGIN - strip.clientWidth,
-  );
-  const target = Math.min(first, Math.max(last, strip.scrollLeft));
-  if (Math.abs(target - strip.scrollLeft) >= 1) strip.scrollTo({ left: target, behavior });
+  const view = strip.clientWidth;
+  const max = strip.scrollWidth - view;
+  const start = tab.offsetLeft;
+  const end = start + tab.offsetWidth;
+  const now = strip.scrollLeft;
+  const nearest = (low: number, high: number) => Math.min(high, Math.max(low, now));
+  // The latest scroll that keeps the tab's start clear, and the earliest
+  // that keeps its end clear.
+  const latest = Math.max(0, start - REVEAL_MARGIN);
+  const earliest = Math.min(max, end + REVEAL_MARGIN - view);
+  let target: number;
+  if (earliest <= latest) {
+    target = nearest(earliest, latest);
+  } else if (end - start > view) {
+    // A tab wider than the strip shows its start.
+    target = latest;
+  } else {
+    // The tab and its margins do not fit, so the whole tab shows: at an edge
+    // the strip reaches, where it shows there, or else as clear of both
+    // fades as the room allows.
+    const edges = [0, max].filter((edge) => edge >= end - view && edge <= start);
+    const inset = Math.min(EDGE_FADE, (view - end + start) / 2);
+    target =
+      edges.length > 0
+        ? edges.reduce((best, edge) => (Math.abs(edge - now) < Math.abs(best - now) ? edge : best))
+        : nearest(end + inset - view, start - inset);
+  }
+  if (Math.abs(target - now) >= 1) strip.scrollTo({ left: target, behavior });
 }
 
 // Memoized so the dirty flips while typing (saveState ticks every autosave)
