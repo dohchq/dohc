@@ -1421,7 +1421,7 @@ describe("settings entry points", () => {
     await user.keyboard("{Control>},{/Control}");
     await screen.findByTestId("settings-dialog");
     await user.click(screen.getByRole("button", { name: "Agents" }));
-    expect(screen.getByText("This workspace did not open.")).toBeTruthy();
+    expect(screen.getByText("Couldn’t open this workspace. Close Settings to try again.")).toBeTruthy();
     expect(screen.queryByText("Loading settings...")).toBeNull();
     expect(bridge.getMcpConfig).not.toHaveBeenCalled();
     expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();

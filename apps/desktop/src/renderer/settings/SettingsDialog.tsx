@@ -572,7 +572,7 @@ export function SettingsDialog(props: {
 
     if (!props.workspaceIsReady && activeMeta.scope !== "User") {
       if (props.workspaceOpenFailed) {
-        return <p className="text-sm text-muted">This workspace did not open.</p>;
+        return <p className="text-sm text-muted">Couldn’t open this workspace. Close Settings to try again.</p>;
       }
       return <SkeletonRows layout="panel" label="Loading settings..." />;
     }
