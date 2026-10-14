@@ -69,6 +69,7 @@ fn draft_proof(
 
 #[derive(Clone)]
 pub struct OwnerDraftAppendInput {
+    pub person_edit: bool,
     pub binding: LiveObjectBinding,
     pub expected_revision: i64,
     pub append_key: String,
@@ -343,6 +344,7 @@ pub fn append_draft_cached(
             workspace_id,
             &draft,
             PreparedDraftAppend {
+                person_edit: input.person_edit,
                 append_key: input.append_key,
                 update: input.update,
                 now_ms: input.now_ms,
@@ -735,6 +737,7 @@ pub fn append_draft_in_tx(
         workspace_id,
         &draft,
         PreparedDraftAppend {
+            person_edit: false,
             append_key,
             update,
             now_ms,
@@ -746,6 +749,7 @@ pub fn append_draft_in_tx(
 }
 
 struct PreparedDraftAppend<'a> {
+    person_edit: bool,
     append_key: String,
     update: Vec<u8>,
     now_ms: i64,
@@ -760,6 +764,7 @@ fn append_prepared_draft_in_tx(
     input: PreparedDraftAppend<'_>,
 ) -> Result<(OwnerOutboxAppendResult, usize), OwnerOutboxError> {
     let PreparedDraftAppend {
+        person_edit,
         append_key,
         update,
         now_ms,
@@ -796,6 +801,7 @@ fn append_prepared_draft_in_tx(
         Some(draft.observed.revision),
         agent_declaration,
         automation_declaration,
+        person_edit,
     )?;
     let attribution = automation_declaration
         .map(|declaration| declaration.attribution.clone())
@@ -992,6 +998,7 @@ mod tests {
                 &mut cache,
                 "workspace",
                 OwnerDraftAppendInput {
+                    person_edit: false,
                     binding: observed.binding.clone(),
                     expected_revision: 1,
                     append_key: "owner-edit".into(),
@@ -1314,6 +1321,7 @@ mod tests {
             owner.apply(&checkpoint).unwrap();
             let first = owner.richdoc_append_paragraph("first retained");
             let input = |append_key: &str, update: Vec<u8>| OwnerDraftAppendInput {
+                person_edit: false,
                 binding: observed.binding.clone(),
                 expected_revision: 1,
                 append_key: append_key.into(),
@@ -1397,6 +1405,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             let input = OwnerDraftAppendInput {
+                person_edit: false,
                 binding: self.binding.clone(),
                 expected_revision: observed.revision,
                 append_key: append_key.into(),
@@ -1471,6 +1480,110 @@ mod tests {
     }
 
     #[test]
+    fn person_edits_bind_append_keys_and_survive_reopen() {
+        let (dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let mut cache = crate::WriterDocCache::default();
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let input = OwnerDraftAppendInput {
+            person_edit: true,
+            binding: observed.binding.clone(),
+            expected_revision: 1,
+            append_key: "person".into(),
+            update: owner.richdoc_append_paragraph("Person typing"),
+            now_ms: 3,
+            agent_declaration: None,
+            automation_declaration: None,
+        };
+        let appended = append_draft_cached(
+            &mut store,
+            &mut cache,
+            "workspace",
+            input.clone(),
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(
+            entry_header(&store, &appended.outbox_id, appended.sequence)["personEdit"],
+            true
+        );
+        assert_eq!(
+            append_draft_cached(
+                &mut store,
+                &mut cache,
+                "workspace",
+                input.clone(),
+                &NoFaults
+            )
+            .unwrap(),
+            appended
+        );
+        let mut changed = input;
+        changed.person_edit = false;
+        assert!(matches!(
+            append_draft_cached(&mut store, &mut cache, "workspace", changed, &NoFaults),
+            Err(OwnerOutboxError::AppendKeyMismatch)
+        ));
+        drop(store);
+        let reopened = EngineStore::open(&dir.join("engine.db"), 4).unwrap();
+        assert_eq!(
+            entry_header(&reopened, &appended.outbox_id, appended.sequence)["personEdit"],
+            true
+        );
+        assert!(
+            super::super::read_pending(&reopened, "workspace", &appended.outbox_id)
+                .unwrap()
+                .entries[0]
+                .person_edit
+        );
+    }
+
+    #[test]
+    fn append_retry_compares_the_persisted_person_marker() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let mut cache = crate::WriterDocCache::default();
+        let owner = Ydoc::wire();
+        owner.apply(&checkpoint).unwrap();
+        let input = OwnerDraftAppendInput {
+            person_edit: false,
+            binding: observed.binding,
+            expected_revision: 1,
+            append_key: "actorless".into(),
+            update: owner.richdoc_append_paragraph("Actorless"),
+            now_ms: 3,
+            agent_declaration: None,
+            automation_declaration: None,
+        };
+        let appended = append_draft_cached(
+            &mut store,
+            &mut cache,
+            "workspace",
+            input.clone(),
+            &NoFaults,
+        )
+        .unwrap();
+        assert!(entry_header(&store, &appended.outbox_id, appended.sequence)
+            .get("personEdit")
+            .is_none());
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE owner_ydoc_outbox_entries SET person_edit=1 WHERE delivery_id=?1",
+                    [&appended.delivery_id],
+                )
+                .map_err(write_sql)?;
+                Ok::<_, OwnerOutboxError>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            append_draft_cached(&mut store, &mut cache, "workspace", input, &NoFaults),
+            Err(OwnerOutboxError::AppendKeyMismatch)
+        ));
+    }
+
+    #[test]
     fn automation_drafts_retain_the_presser_and_refuse_changed_retry_provenance() {
         let (_dir, mut store, observed, checkpoint) = fixture();
         install(&mut store, &observed, &checkpoint);
@@ -1490,6 +1603,7 @@ mod tests {
             },
         };
         let input = OwnerDraftAppendInput {
+            person_edit: false,
             binding: observed.binding,
             expected_revision: 1,
             append_key: "press/Status".into(),

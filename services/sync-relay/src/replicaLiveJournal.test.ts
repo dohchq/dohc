@@ -149,7 +149,8 @@ it("reads the committed owner update while applyThrough is pending", async () =>
     let requestId = 0;
     const drain = drainOwnerOutbox({storage: f.storage, client: client as never, workspace: "handle", host: input.host,
       registrationId: 1, binding, adoption: {adoptionId: "adoption", sequence: 1, applied() {}},
-      admission: {shares: new Map([["workspace", "share"]]), maxEntriesPerDrain: 1, maxBytesPerDrain: 10_000,
+      admission: {trustedAccount: accountId => ({accountId, name: "Owner name"}),
+        shares: new Map([["workspace", "share"]]), maxEntriesPerDrain: 1, maxBytesPerDrain: 10_000,
         validate: () => input.validation}, nextRequestId: () => ++requestId, deadlineMs: 30_000, assertCurrent() {},
       applyThrough: async value => {receipt = value; entered(); return pending;}});
     await Promise.race([applying, drain.then(() => {throw new Error("Drain returned before host application");})]);

@@ -46,7 +46,7 @@ async function fixture() {
   let closed = false;
   const closeStorage = () => { if (!closed) { deployment.storage.close(); closed = true; } };
   cleanup.push(async () => { closeStorage(); await rm(root, { recursive: true, force: true }); });
-  return { ...deployment, root, config, configPath, save, closeStorage };
+  return { trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), ...deployment, root, config, configPath, save, closeStorage };
 }
 function clientFrom(options: { env: Record<string, string> }) {
   const nativePath = options.env.DOHC_ENGINE_LIVE_HOST_CONFIG!;
