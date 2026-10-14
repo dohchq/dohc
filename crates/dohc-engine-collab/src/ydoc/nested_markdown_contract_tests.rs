@@ -331,6 +331,10 @@ fn fix1_projected_item_prose_is_accepted_unchanged() {
 fn projected_raw_html_keeps_line_start_entities() {
     for (open, close) in [
         ("<foo>", "</foo>"),
+        ("<foo_bar>", "</foo_bar>"),
+        ("<foo>", "</foo-x>"),
+        ("<foo>", "</foo:x>"),
+        ("<foo>", "<foo-x>c</foo-x>"),
         ("<span class=\"n\">", "</span>"),
         ("<b>", "</b>"),
         ("<details>", "</details>"),
@@ -351,5 +355,21 @@ fn projected_raw_html_keeps_line_start_entities() {
                 "{source}"
             );
         }
+    }
+}
+
+#[test]
+fn nested_contract_empty_ordered_ends_before_root_list() {
+    for (source, canonical) in [
+        ("1.\n\n- b\n  - c", "1. \n\n- b\n  - c"),
+        ("1. \n\n- b\n  - c", "1. \n\n- b\n  - c"),
+        ("10.\n\n1. b\n   - c", "10. \n\n1. b\n   - c"),
+    ] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+            .unwrap();
+        assert_eq!(doc.project_richdoc().unwrap(), canonical);
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, canonical)
+            .unwrap();
     }
 }

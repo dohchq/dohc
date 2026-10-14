@@ -88,10 +88,10 @@ it.each(['source', 'projection'] as const)('admits an empty child after a same-l
   expect(serializeRichdocBody(parseRichdocMarkdown('- > - \n\n  >    x', reading))).toBe('- \n  > \\- \n\n  >    x')
 })
 
-it.each(['-   a\n      ' + '- '.repeat(5000) + 'x', '1.   a\n       ' + '- '.repeat(5000) + 'x', '-   a\n      - 1. \n\n          x'])('refuses child nesting at the padded marker content column', source => {
+it.each(['-\n     ' + '- '.repeat(5000) + 'x', '1.\n      ' + '- '.repeat(5000) + 'x', '-   a\n      ' + '- '.repeat(5000) + 'x', '1.   a\n       ' + '- '.repeat(5000) + 'x', '-   a\n      - 1. \n\n          x'])('refuses child nesting at the padded marker content column', source => {
   expect(() => markdownToYDoc(source)).toThrow(/not representable/)
 })
 
-it.each(['a\n  &#32;x', 'a\n  &#9;x', '- a\n  b &#32;c'])('keeps a whitespace entity outside an item line start: %s', source => {
+it.each(['- a\n     &#32;b', '- a\n &#32;b', 'a\n  &#32;x', 'a\n  &#9;x', '- a\n  b &#32;c'])('keeps a whitespace entity outside an item line start: %s', source => {
   expect(JSON.stringify(parseRichdocMarkdown(source))).toContain(source.match(/&#(?:9|32);/u)![0])
 })

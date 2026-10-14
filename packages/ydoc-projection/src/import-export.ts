@@ -549,8 +549,8 @@ function assertSupportedListMarkdown(markdown: string): string {
       const itemFence = /^(?:`{3,}|~{3,})/u.exec(body)?.[0] ?? ''
       if (itemFence) { fence = itemFence; fenceInList = true }
       if (parents.length && indent < parents.at(-1)!.column) refuse()
-      parents.push({ indent, column: indent + marker[0].trimEnd().length + 1,
-        content: indent + marker[0].length + (/^ {0,3}[^ ]/u.test(itemBody) ? /^ */u.exec(itemBody)![0].length : 0) })
+      const column = indent + marker[0].trimEnd().length + 1
+      parents.push({ indent, column, content: column + (/^ {0,3}[^ ]/u.test(itemBody) ? /^ */u.exec(itemBody)![0].length : 0) })
       if (itemBody.trim() === '') open = parents.at(-1)
       if (emptyChild) { parents.push(emptyChild); open = emptyChild }
       if (itemBody === '') { lines[at] = lines[at].trimEnd(); changed = true }
@@ -726,7 +726,7 @@ function restoreBlockEntityParseSentinels(
           const inTag = span !== undefined
             && span.from + at >= span.start
             && span.from + at < span.end
-          return (inTag || (insideItem && itemWhitespaceEntities.has(sentinel)) ? tagEntities : decodedEntities).get(sentinel) ?? sentinel
+          return (inTag || (insideItem && itemWhitespaceEntities.has(sentinel) && (at === 0 || node.text![at - 1] === '\n')) ? tagEntities : decodedEntities).get(sentinel) ?? sentinel
         })
   }
   if (node.attrs) {

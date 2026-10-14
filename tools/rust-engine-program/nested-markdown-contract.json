@@ -790,6 +790,13 @@
       "foldRefuse": true,
       "note": "CommonMark 0.31.2: <ul>\n<li>\n<pre><code>a\n\n- b\n</code></pre>\n</li>\n</ul>\n",
       "rustBase64": "AQebrPjVi8eLCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCbrPjVi8eLCQEDCGxpc3RJdGVtBwCbrPjVi8eLCQIDCXBhcmFncmFwaIebrPjVi8eLCQMDCWNvZGVCbG9jawcAm6z41YvHiwkEBgQAm6z41YvHiwkFBmEKCi0gYgA="
+    },
+    { "name": "round13-empty-ordered-before-bullet-child", "source": "1.\n\n- b\n  - c",
+      "canonical": "1. \n\n- b\n  - c",
+      "projected": true,
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: empty ordered list, then a bullet list with a child.",
+      "rustBase64": "AQ/s5qX5iMzcAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA7Oal+YjM3AIBBXN0YXJ0AX0BBwDs5qX5iMzcAgEDCGxpc3RJdGVtBwDs5qX5iMzcAgMDCXBhcmFncmFwaIfs5qX5iMzcAgEDCmJ1bGxldExpc3QHAOzmpfmIzNwCBQMIbGlzdEl0ZW0HAOzmpfmIzNwCBgMJcGFyYWdyYXBoBwDs5qX5iMzcAgcGBADs5qX5iMzcAggBYofs5qX5iMzcAgcDCmJ1bGxldExpc3QHAOzmpfmIzNwCCgMIbGlzdEl0ZW0HAOzmpfmIzNwCCwMJcGFyYWdyYXBoBwDs5qX5iMzcAgwGBADs5qX5iMzcAg0BYwA="
     }
   ],
   "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."

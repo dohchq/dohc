@@ -295,7 +295,11 @@ pub fn fresh_successor_base(
         doc.fold_scene()
             .portable_json_with_asset_bytes(&asset_bytes)?
     } else {
-        doc.rewrite_content_to_markdown(identity.content_kind, artifact)?;
+        doc.rewrite_content_to_markdown_as(
+            identity.content_kind,
+            artifact,
+            MarkdownReading::Successor,
+        )?;
         let projection = doc.project(identity.content_kind)?.content;
         if identity.content_kind == ContentKind::Richdoc && projection != artifact {
             // Write with the deterministic client, not a staged edit's random
@@ -649,6 +653,7 @@ impl Ydoc {
     ) -> bool {
         [MarkdownReading::Source, MarkdownReading::Projection]
             .into_iter()
+            .chain((!reads_alike).then_some(MarkdownReading::Successor))
             .any(|reading| {
                 let staged = Ydoc::wire();
                 staged
@@ -1957,6 +1962,8 @@ impl<'src> MdListItem<'src> {
 /// have written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MarkdownReading {
+    /// Rebuild an explicitly chosen conflict artifact; strict witnesses still use file readings.
+    Successor,
     /// Rebuild what the projector wrote, so the result projects the same
     /// bytes back. A table without a row-height annotation stays paragraph
     /// text, which the projector reproduces verbatim, and a blank line ends a
@@ -2283,7 +2290,7 @@ fn inline_syntax(text: &str) -> Option<String> {
             .chars()
             .next()
             .is_none_or(|next| next.is_whitespace() || next == '>' || next == '/');
-    if element || html_tag_end(text, true).is_some() {
+    if element || html_tag_end(text, true, false).is_some() {
         return Some(format!("element {name}"));
     }
     let close = text[1..].find(|c: char| c == '>' || c == '<' || c.is_whitespace())? + 1;
@@ -2309,6 +2316,7 @@ fn inline_syntax(text: &str) -> Option<String> {
 
 fn raw_html_spans(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut spans = Vec::new();
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
     let mut opened: Vec<(usize, &str)> = Vec::new();
     let mut until = 0;
     for (at, _) in text.match_indices('<') {
@@ -2333,25 +2341,30 @@ fn raw_html_spans(text: &str) -> Vec<std::ops::Range<usize>> {
             }
         } else if let Some(close) = rest.strip_prefix("</") {
             let name = close
-                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-')))
                 .next()
                 .unwrap();
             let suffix = close[name.len()..].trim_start();
             if suffix.starts_with('>') {
-                if let Some(index) = opened
-                    .iter()
-                    .position(|(_, open)| open.eq_ignore_ascii_case(name))
-                {
+                if let Some(index) = opened.iter().position(|(_, open)| {
+                    name.get(..open.len())
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(open))
+                        && word(*open.as_bytes().last().unwrap())
+                            != name
+                                .as_bytes()
+                                .get(open.len())
+                                .is_some_and(|byte| word(*byte))
+                }) {
                     spans.push(opened[index].0..at + rest.len() - suffix.len() + 1);
                     opened.truncate(index);
                 }
             }
-        } else if let Some(end) = html_tag_end(rest, false) {
+        } else if let Some(end) = html_tag_end(rest, false, true) {
             until = at + end;
             spans.push(at..at + end);
             if !rest[..end].ends_with("/>") {
                 let name = rest[1..]
-                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-')))
                     .next()
                     .unwrap();
                 opened.push((at, name));
@@ -2361,7 +2374,7 @@ fn raw_html_spans(text: &str) -> Vec<std::ops::Range<usize>> {
     spans
 }
 
-fn html_tag_end(text: &str, require_attributes: bool) -> Option<usize> {
+fn html_tag_end(text: &str, require_attributes: bool, raw_names: bool) -> Option<usize> {
     let bytes = text.as_bytes();
     let space = |at: usize| matches!(bytes.get(at), Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'));
     let skip_space = |mut at: usize| {
@@ -2374,10 +2387,9 @@ fn html_tag_end(text: &str, require_attributes: bool) -> Option<usize> {
         return None;
     }
     let mut at = 1;
-    while bytes
-        .get(at)
-        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
-    {
+    while bytes.get(at).is_some_and(|byte| {
+        byte.is_ascii_alphanumeric() || *byte == b'-' || (raw_names && *byte == b'_')
+    }) {
         at += 1;
     }
     let mut attributes = false;
@@ -2711,7 +2723,11 @@ fn parse_markdown_blocks_at<'src>(
     in_list: bool,
     refused: &mut bool,
 ) -> Vec<MdBlock<'src>> {
-    let tables = in_list || reading != MarkdownReading::Projection;
+    let tables = in_list
+        || !matches!(
+            reading,
+            MarkdownReading::Projection | MarkdownReading::Successor
+        );
     let source_fences = reading == MarkdownReading::Source && !in_list;
     let mut blocks = Vec::new();
     let mut index = 0usize;
@@ -2849,8 +2865,10 @@ fn parse_markdown_blocks_at<'src>(
             index += consumed;
             continue;
         }
-        *refused |= reading != MarkdownReading::ProjectedSource
-            && indented_code_leading_entity(line).is_some();
+        *refused |= matches!(
+            reading,
+            MarkdownReading::Source | MarkdownReading::Projection
+        ) && indented_code_leading_entity(line).is_some();
         let paragraph_reading = if in_list {
             reading
         } else {
@@ -3488,15 +3506,17 @@ fn parse_list<'src>(
                         .is_some_and(|line| {
                             let indent = line.bytes().take_while(|byte| *byte == b' ').count();
                             (indent > marker.indent && indent < content_indent)
-                                || (reading == MarkdownReading::Projection
-                                    && lines[at..]
-                                        .iter()
-                                        .skip_while(|line| blank_line(line))
-                                        .map_while(|line| list_marker(line, reading))
-                                        .any(|next| {
-                                            next.indent > marker.indent
-                                                && next.indent < content_indent
-                                        }))
+                                || (matches!(
+                                    reading,
+                                    MarkdownReading::Projection | MarkdownReading::Successor
+                                ) && lines[at..]
+                                    .iter()
+                                    .skip_while(|line| blank_line(line))
+                                    .map_while(|line| list_marker(line, reading))
+                                    .take_while(|next| next.indent > marker.indent)
+                                    .any(|next| {
+                                        next.indent > marker.indent && next.indent < content_indent
+                                    }))
                         })
                 } else {
                     line.trim_start_matches(' ').starts_with('\t')

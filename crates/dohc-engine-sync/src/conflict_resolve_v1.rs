@@ -3825,7 +3825,9 @@ fn map_local_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
             limit_bytes: max,
             observed_bytes: actual,
         },
-        CollabError::SuccessorProjectionMismatch { .. }
+        CollabError::MarkdownNotRepresentable
+        | CollabError::MarkdownQuoteDepthExceeded
+        | CollabError::SuccessorProjectionMismatch { .. }
         | CollabError::SuccessorResultMismatch { .. }
         | CollabError::InvalidSuccessorBase { .. }
         | CollabError::ProjectionTooComplex { .. } => SyncError::InvalidInput {
@@ -7621,5 +7623,39 @@ mod tests {
             local_replicated_moment_origin("ydoc").expect("ydoc origin"),
             "local-file"
         );
+    }
+
+    #[test]
+    fn indented_code_conflicts_build_successors_without_strict_witnesses() {
+        for error in [
+            dohc_engine_collab::CollabError::MarkdownNotRepresentable,
+            dohc_engine_collab::CollabError::MarkdownQuoteDepthExceeded,
+        ] {
+            assert!(matches!(
+                map_local_collab_error(error),
+                SyncError::InvalidInput {
+                    reason: "ydoc-resolution-not-representable"
+                }
+            ));
+        }
+        for source in ["- Run:\n\n      npm i foo", "Install:\n\n    npm i foo"] {
+            let (_scratch, mut store, key) =
+                content_conflict_store("Other settled body", source, None, ContentKind::Richdoc);
+            resolve_content_conflict(&mut store, "document-conflict", "document-object", 21);
+            let loaded = dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap();
+            let canonical = loaded.doc.project(ContentKind::Richdoc).unwrap().content;
+            assert!(canonical.contains("npm i foo"));
+            assert!(loaded.doc.preserved_markdown_source(&canonical).is_none());
+            assert_eq!(
+                VersionedTextStore::new(&mut store)
+                    .read_text("ws", "main", "doc.md")
+                    .unwrap()
+                    .unwrap()
+                    .text,
+                source
+            );
+        }
     }
 }
