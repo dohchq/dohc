@@ -1,3 +1,4 @@
+import type { TimelineReads } from "../workspaces/historyTimeline";
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -195,7 +196,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const recordHistoryPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
   const prepareRecordHistoryPeople = vi.fn<(_workspaceId: string, userIds: readonly string[], _sender: Sender) => void>();
   const prepareNamed = vi.fn<NonNullable<EngineMomentAuthorNames["prepare"]>>();
-  const historyCollections = vi.fn(async () => ({ scope: "test", local: () => ({ pages: [], transferred: [] }), remote: async () => { throw new Error("unexpected remote history"); } }));
+  const historyCollections = vi.fn<() => Promise<Pick<TimelineReads, "scope" | "local" | "remote">>>(async () => ({ scope: "test", local: () => ({ pages: [], transferred: [] }), remote: async () => { throw new Error("unexpected remote history"); } }));
   const registrations = createWorkspaceEngineIpc({
     historyCollections,
     readWorkspaceEnginePolicy: readPolicy,
@@ -1325,4 +1326,24 @@ it("does not start the Collection host for main per-file History", async () => {
   const h = await harness();
   await h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", object: { kind: "file", objectId: "object" } });
   expect(h.historyCollections).not.toHaveBeenCalled();
+});
+
+it("keys timeline prefetches by the lazily resolved workspace attachment scope", async () => {
+  const h = await harness(), datasetId = "00000000-0000-4000-8000-000000000008";
+  let scope = "attachment-one", calls = 0;
+  const remote = vi.fn(async () => {
+    calls++;
+    return { datasetId, name: "Collection", lineage: "a".repeat(64), headRevision: 2,
+      entries: [{ revision: 2, recordedAtMs: 2000 }, { revision: 1, recordedAtMs: 1000 }].map(row => ({
+        ...row, operation: "Add record", callerReference: null, approvedRevisionHash: "b".repeat(64), changesetBytes: 0, attachmentCount: 0
+      })), nextBeforeRevision: null };
+  });
+  h.historyCollections.mockImplementation(async () => ({ scope, local: () => ({ pages: [], transferred: [datasetId] }), remote }));
+  const input = { workspaceId: "workspace", object: { kind: "dataset", datasetId }, limit: 1 };
+  await h.invoke(historyOperations.listHistory.channel, input);
+  await vi.waitFor(() => expect(calls).toBe(2));
+  scope = "attachment-two";
+  // Refresh and consume the same revision. The old attachment's cache must not match.
+  await h.invoke(historyOperations.listHistory.channel, input);
+  await vi.waitFor(() => expect(calls).toBe(4));
 });

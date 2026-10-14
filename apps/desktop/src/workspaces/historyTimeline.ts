@@ -1,3 +1,4 @@
+import { RELAY_FETCH_TIMEOUT_MS } from "./sharedChannels";
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 import type { DatasetHistoryPage } from "@dohc/cli/dataset";
 import { HISTORY_MAX_SOURCES, HISTORY_CURSOR_BYTES, TimelineCursor as CursorSchema, type TimelineCursor, type TimelineEntry, type ListHistoryPayload, type ListHistoryResult } from "../ipc/bridgeContract";
@@ -30,12 +31,12 @@ class Deadline extends Error {}
 class LineageChanged extends Error {
   constructor() { super("History lineage changed. Refresh History."); }
 }
-async function bounded<T>(signal: AbortSignal, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+async function bounded<T>(signal: AbortSignal, work: (signal: AbortSignal) => Promise<T>, timeoutMs = HISTORY_REMOTE_DEADLINE_MS): Promise<T> {
   signal.throwIfAborted();
   const controller = new AbortController();
   const abort = () => controller.abort(signal.reason);
   signal.addEventListener("abort", abort, { once: true });
-  const timer = setTimeout(() => controller.abort(new Deadline()), HISTORY_REMOTE_DEADLINE_MS);
+  const timer = setTimeout(() => controller.abort(new Deadline()), timeoutMs);
   let onAbort: () => void = () => {};
   const stopped = new Promise<never>((_, reject) => {
     onAbort = () => reject(controller.signal.reason);
@@ -77,39 +78,79 @@ function checkLineage(source: Source, page: CollectionPage) {
 
 /** Cursor positions are canonical. Bounded caches only accelerate the same read. */
 export function createHistoryTimeline() {
-  const prefetch = new Map<string, { promise: Promise<CollectionPage>; controller: AbortController }>();
-  const waiting: Array<() => void> = [];
-  let active = 0;
-  async function remoteRead(reads: TimelineReads, datasetId: string, before: number | undefined, signal: AbortSignal) {
+  type Prefetch = { promise: Promise<CollectionPage>; controller: AbortController; started: boolean };
+  const prefetch = new Map<string, Prefetch>();
+  type Waiter = { background: boolean; grant(): void };
+  const queues = new Map<string, { active: number; background: number; waiting: Waiter[] }>();
+  async function slot(scope: string, signal: AbortSignal, background: boolean) {
     signal.throwIfAborted();
+    let queue = queues.get(scope);
+    if (!queue) { queue = { active: 0, background: 0, waiting: [] }; queues.set(scope, queue); }
+    const state = queue;
+    const drain = () => {
+      while (state.active < HISTORY_REMOTE_CONCURRENCY) {
+        const foreground = state.waiting.findIndex(w => !w.background);
+        const index = foreground >= 0 ? foreground : state.background < 1 ? 0 : -1;
+        if (index < 0 || !state.waiting.length) break;
+        state.waiting.splice(index, 1)[0]!.grant();
+      }
+      if (!state.active && !state.waiting.length) queues.delete(scope);
+    };
     await new Promise<void>((resolve, reject) => {
-      const grant = () => { signal.removeEventListener("abort", abort); active++; resolve(); };
-      const abort = () => { const index = waiting.indexOf(grant); if (index >= 0) waiting.splice(index, 1); reject(signal.reason); };
-      if (active < HISTORY_REMOTE_CONCURRENCY) grant();
-      else { waiting.push(grant); signal.addEventListener("abort", abort, { once: true }); }
+      const waiter: Waiter = { background, grant() {
+        signal.removeEventListener("abort", abort);
+        state.active++; if (background) state.background++;
+        resolve();
+      } };
+      const abort = () => {
+        const index = state.waiting.indexOf(waiter);
+        if (index >= 0) state.waiting.splice(index, 1);
+        reject(signal.reason); drain();
+      };
+      state.waiting.push(waiter); signal.addEventListener("abort", abort, { once: true }); drain();
     });
-    try { signal.throwIfAborted(); return await reads.remote(datasetId, before, signal); }
-    finally { active--; waiting.shift()?.(); }
+    return () => { state.active--; if (background) state.background--; drain(); };
+  }
+  async function remoteRead(reads: TimelineReads, datasetId: string, before: number | undefined, signal: AbortSignal, background?: Prefetch) {
+    const release = await slot(reads.scope, signal, !!background);
+    try {
+      signal.throwIfAborted();
+      if (background) background.started = true;
+      // A source gets its full deadline only after it can send its request.
+      return await bounded(signal, signal => reads.remote(datasetId, before, signal), background ? RELAY_FETCH_TIMEOUT_MS : HISTORY_REMOTE_DEADLINE_MS);
+    } finally { release(); }
   }
   const key = (reads: TimelineReads, id: string, before: number | undefined) => JSON.stringify([reads.scope, id, before]);
-  function remotePage(reads: TimelineReads, id: string, before: number | undefined) {
+  async function remotePage(reads: TimelineReads, id: string, before: number | undefined) {
     const cacheKey = key(reads, id, before), saved = prefetch.get(cacheKey);
     prefetch.delete(cacheKey);
+    if (!saved) return remoteRead(reads, id, before, reads.signal);
+    if (!saved.started) {
+      // Promote queued work instead of waiting behind background reads.
+      saved.controller.abort();
+      return remoteRead(reads, id, before, reads.signal);
+    }
     return bounded(reads.signal, async signal => {
-      if (!saved) return remoteRead(reads, id, before, signal);
       const abort = () => saved.controller.abort(signal.reason);
       signal.addEventListener("abort", abort, { once: true });
-      try { return await saved.promise; }
-      finally { signal.removeEventListener("abort", abort); }
+      try {
+        try { return await saved.promise; }
+        catch {
+          signal.throwIfAborted();
+          // Idle transport failures are retried once while this page waits.
+          return await remoteRead(reads, id, before, signal);
+        }
+      } finally { signal.removeEventListener("abort", abort); }
     });
   }
   function ahead(reads: TimelineReads, source: Source, page: CollectionPage, consumed: boolean) {
     const cacheKey = key(reads, source.datasetId, source.beforeRevision);
     if (prefetch.has(cacheKey)) return;
     const controller = new AbortController();
-    const promise = consumed ? remoteRead(reads, source.datasetId, source.beforeRevision, controller.signal) : Promise.resolve(page);
-    void promise.catch(() => {});
-    prefetch.set(cacheKey, { promise, controller });
+    const saved: Prefetch = { controller, started: !consumed, promise: Promise.resolve(page) };
+    if (consumed) saved.promise = remoteRead(reads, source.datasetId, source.beforeRevision, controller.signal, saved);
+    void saved.promise.catch(() => {});
+    prefetch.set(cacheKey, saved);
     if (prefetch.size > HISTORY_MAX_SOURCES) {
       const oldest = prefetch.keys().next().value!;
       prefetch.get(oldest)!.controller.abort(); prefetch.delete(oldest);
@@ -195,6 +236,13 @@ export function createHistoryTimeline() {
       const expanded = await reads.local(needed.map(source => ({ datasetId: source.datasetId, beforeRevision: source.beforeRevision })), PAGE_LIMIT + 1, state.collections.map(source => source.datasetId));
       current(); acceptLocal(needed, expanded);
     }
+    const refill = async (source: Source) => {
+      if (source.remote) await fetchRemote(source, source.beforeRevision);
+      else {
+        const result = await reads.local([{ datasetId: source.datasetId, beforeRevision: source.beforeRevision }], PAGE_LIMIT + 1, state.collections.map(s => s.datasetId));
+        current(); acceptLocal([source], result);
+      }
+    };
     const consumed = new Set<string>();
     const entries: TimelineEntry[] = [];
     const cursorBytes = Math.min(HISTORY_CURSOR_BYTES, Buffer.byteLength(JSON.stringify(state)) + state.collections.length * 128);
@@ -215,11 +263,8 @@ export function createHistoryTimeline() {
           await readEngine(); continue;
         }
       }
-      for (const source of live().filter(source => !source.head)) {
-        if (source.remote) await fetchRemote(source, source.beforeRevision);
-        else { const refill = await reads.local([{ datasetId: source.datasetId, beforeRevision: source.beforeRevision }], PAGE_LIMIT + 1, state.collections.map(s => s.datasetId)); current(); acceptLocal([source], refill); }
-      }
-      const heads = live().map(source => ({ source, order: sourceOrder(source)! })).filter(h => h.order);
+      for (const source of live().filter(source => !source.head)) await refill(source);
+      const heads = live().flatMap(source => { const order = sourceOrder(source); return order ? [{ source, order }] : []; });
       heads.sort((a, b) => compare(a.order, b.order));
       const winner = heads[0];
       let row = engineRows[0];
@@ -227,8 +272,7 @@ export function createHistoryTimeline() {
         const source = winner.source;
         let p = pages.get(source.datasetId);
         if (!p?.entries.length) {
-          if (source.remote) await fetchRemote(source, source.beforeRevision);
-          else { const refill = await reads.local([{ datasetId: source.datasetId, beforeRevision: source.beforeRevision }], PAGE_LIMIT + 1, state.collections.map(s => s.datasetId)); current(); acceptLocal([source], refill); }
+          await refill(source);
           continue;
         }
         row = collectionEntry(source, p)!;

@@ -335,7 +335,7 @@ export function createWorkspaceEngineIpc<
           : { get scope() { return resolved?.scope ?? operation.scope ?? workspace.workspaceId; },
             local: async (positions, limit, sourceIds) => (await getCollections()).local(positions, limit, sourceIds),
             remote: async (datasetId, beforeRevision, signal) => (await getCollections()).remote(datasetId, beforeRevision, signal) };
-        return timeline(input, { ...collections, engine, signal: operation.signal, assertCurrent: () => operation.assertCurrent(),
+        return timeline(input, { ...collections, get scope() { return collections.scope; }, engine, signal: operation.signal, assertCurrent: () => operation.assertCurrent(),
           names: authorNames(workspace.workspaceId, event.sender), ...(policy ? { admitted: historyPathAdmission(policy) } : {}) });
       },
     });

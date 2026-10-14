@@ -14,6 +14,7 @@ import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { createTestScratch } from "./testTemp";
 import { deferred } from "../testing/deferred";
 import { HISTORY_MAX_SOURCES, HISTORY_CURSOR_BYTES, TimelineCursor, ListHistoryResult, type ListHistoryPayload, type TimelineEntry } from "../ipc/bridgeContract";
+import { RELAY_FETCH_TIMEOUT_MS } from "./sharedChannels";
 import { createHistoryTimeline, HISTORY_REMOTE_DEADLINE_MS, type TimelineReads } from "./historyTimeline";
 
 const uuid = (n: number) => "00000000-0000-4000-8000-" + String(n).padStart(12, "0");
@@ -418,4 +419,100 @@ it("excludes a later prefetched source only after a page has waited 750 ms", asy
   await vi.advanceTimersByTimeAsync(HISTORY_REMOTE_DEADLINE_MS);
   expect(await waiting).toMatchObject({ entries: [], nextCursor: null, completeness: "partial", unavailableSources: [{ datasetId: remote, reason: "deadline" }] });
   expect(backgroundSignal.aborted).toBe(true);
+});
+
+const remoteReply = (datasetId: string, revisions = [2, 1]) => ({
+  datasetId, name: "Current name", lineage: sha(datasetId), headRevision: 2,
+  entries: revisions.map(revision => ({ revision, recordedAtMs: revision === 2 ? 1000 : 1,
+    operation: "Add record", callerReference: null, approvedRevisionHash: sha("approved"), changesetBytes: 0, attachmentCount: 0 })),
+  nextBeforeRevision: null,
+});
+
+it("starts each foreground deadline after its slot, including later page-one sources", async () => {
+  const f = await fixture(), ids = Array.from({ length: 12 }, (_, n) => uuid(n + 8)), entered = deferred<void>();
+  f.reads.local = () => ({ pages: [], transferred: ids });
+  let started = 0;
+  f.reads.remote = async id => {
+    if (++started === 4) entered.resolve();
+    await new Promise(resolve => setTimeout(resolve, 400));
+    return remoteReply(id, [1]);
+  };
+  vi.useFakeTimers();
+  const waiting = f.page(); await entered.promise;
+  await vi.advanceTimersByTimeAsync(1200);
+  const page = await waiting;
+  expect(started).toBe(12); expect(page.unavailableSources).toEqual([]);
+  expect(page.entries.filter(row => row.kind === "collection")).toHaveLength(12);
+});
+
+it("promotes queued prefetches ahead of background work without excluding foreground sources", async () => {
+  const f = await fixture(), ids = Array.from({ length: 8 }, (_, n) => uuid(n + 8)), entered = deferred<void>();
+  f.reads.local = () => ({ pages: [], transferred: ids });
+  let background = true;
+  const starts: string[] = [];
+  f.reads.remote = async (id, before) => {
+    if (before === undefined) return remoteReply(id);
+    starts.push(background ? "background" : "foreground");
+    if (background) entered.resolve();
+    await new Promise(resolve => setTimeout(resolve, background ? 500 : 400));
+    return remoteReply(id, [1]);
+  };
+  vi.useFakeTimers();
+  const first = await f.page({ limit: 8 }); await entered.promise;
+  expect(starts).toEqual(["background"]);
+  background = false;
+  const waiting = f.page({ cursor: first.nextCursor! });
+  await vi.advanceTimersByTimeAsync(1200);
+  const page = await waiting;
+  expect(starts).toEqual(["background", ...Array(7).fill("foreground")]);
+  expect(page.unavailableSources).toEqual([]);
+  expect(page.entries.filter(row => row.kind === "collection")).toHaveLength(8);
+});
+
+it("aborts a hung background read after the relay timeout and frees its slot", async () => {
+  const f = await fixture(), ids = [uuid(8), uuid(9)], entered = deferred<AbortSignal>(), second = vi.fn();
+  f.reads.local = () => ({ pages: [], transferred: ids });
+  f.reads.remote = async (id, before, signal) => {
+    if (before === undefined) return remoteReply(id);
+    if (id === ids[0]) {
+      entered.resolve(signal);
+      return new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    }
+    second(); return remoteReply(id, [1]);
+  };
+  vi.useFakeTimers();
+  await f.page({ limit: 2 }); const signal = await entered.promise;
+  await vi.advanceTimersByTimeAsync(RELAY_FETCH_TIMEOUT_MS - 1);
+  expect(signal.aborted).toBe(false); expect(second).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(signal.aborted).toBe(true); expect(second).toHaveBeenCalledOnce();
+});
+
+it("gives another workspace its own slots while four foreground reads wait", async () => {
+  const f = await fixture(), ids = Array.from({ length: 4 }, (_, n) => uuid(n + 8)), entered = deferred<void>(), release = deferred<void>();
+  const list = createHistoryTimeline();
+  f.reads.local = () => ({ pages: [], transferred: ids });
+  let started = 0;
+  f.reads.remote = async id => { if (++started === 4) entered.resolve(); await release.promise; return remoteReply(id, [1]); };
+  const waiting = list({ workspaceId: "workspace" }, f.reads); await entered.promise;
+  const remote = vi.fn(async id => remoteReply(id, [1]));
+  const other = await list({ workspaceId: "second-workspace", object: { kind: "dataset", datasetId: ids[0]! } },
+    { ...f.reads, scope: "other-workspace-attachment", remote });
+  expect(other).toMatchObject({ status: "ready", completeness: "complete" });
+  expect(remote).toHaveBeenCalledOnce(); release.resolve(); await waiting;
+});
+
+it("retries a rejected idle prefetch once in the foreground and uses its current name", async () => {
+  const f = await fixture(), remote = uuid(8), failed = deferred<void>();
+  f.reads.local = () => ({ pages: [], transferred: [remote] });
+  let attempts = 0;
+  f.reads.remote = vi.fn(async id => {
+    if (++attempts === 1) return remoteReply(id);
+    if (attempts === 2) { failed.resolve(); throw Error("temporary 503"); }
+    return { ...remoteReply(id, [1]), name: "Renamed by owner" };
+  });
+  const first = await f.page({ object: { kind: "dataset", datasetId: remote }, limit: 1 }); await failed.promise;
+  const next = await f.page({ object: { kind: "dataset", datasetId: remote }, cursor: first.nextCursor! });
+  expect(next).toMatchObject({ completeness: "complete", unavailableSources: [], entries: [{ name: "Renamed by owner" }] });
+  expect(attempts).toBe(3);
 });
