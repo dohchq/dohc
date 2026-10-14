@@ -1,8 +1,9 @@
 import type { SqliteDb } from "./types";
 
 export interface RelayContinuity {
-  /** Persist the expected relay marker before its transaction can commit. */
+  /** Persist a pending stamp before its transaction can commit. */
   reserve(previous: number): number;
+  confirm(stamp: number, previous: number): void;
   cancel(stamp: number, previous: number): void;
   close(): void;
 }
@@ -65,6 +66,7 @@ export class RelayWriteOwner {
       committing = true;
       this.db.exec("COMMIT");
       began = false;
+      if (reserved) this.continuity!.confirm(stamp, previous);
       this.#stamp = stamp;
       return result;
     } catch (error) {

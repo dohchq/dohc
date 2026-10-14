@@ -16,16 +16,18 @@ Use the same environment file and Compose overrides as your running deployment.
 
 The relay keeps an independent continuity record outside its database volume.
 Every accepted mutation advances that record, including permission changes and schema migrations.
-A database with an older stamp cannot start against the current record.
+A database older than the confirmed continuity stamp cannot start.
 This prevents a restored backup from resurrecting revoked access.
 
 Never replace current continuity with an older archived copy.
 An archive does not prove that its server accepted no later work.
 Losing the original continuity prevents supported deployment restoration.
 You can still salvage available file contents from a completed relay snapshot.
-An interrupted write can reserve a continuity stamp before the relay transaction commits.
-That state also refuses startup and cannot be repaired from an older snapshot.
-Preserve its volumes.
+After an interrupted write, start the relay normally.
+Startup keeps the committed database state and settles its pending continuity stamp.
+The relay confirms continuity before returning a write or serving its result.
+An older database still refuses startup, including a backup from before the last accepted write.
+If startup still refuses, preserve its volumes.
 Offline salvage requires an earlier completed relay snapshot; it cannot read the failed deployment or its archive directly.
 
 Automation copies live in `dohc_self_host_host_data`, alongside their engine databases and run history.
@@ -80,7 +82,8 @@ node scripts/self-host/recovery.mjs check-backup /srv/dohc-backups/relay-before-
 node scripts/self-host/recovery.mjs restore /srv/dohc-backups/relay-before-upgrade
 ```
 
-The check requires the snapshot stamp to equal the current continuity stamp.
+If continuity has a pending write, start the relay normally before running backup, check-backup or restore.
+The check requires the snapshot stamp to equal the current confirmed continuity stamp.
 Newer accepted work makes that snapshot unsuitable for repair.
 The restore command checks the copied candidate before replacing any existing relay files.
 It preserves replaced database and SQLite side files under `/data/recovery-<id>`.

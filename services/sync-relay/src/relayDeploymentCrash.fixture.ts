@@ -14,6 +14,8 @@ if (boundary === "contender") {
 const { storage } = openRelayDeployment(configPath!);
 const exec = DatabaseSync.prototype.exec;
 DatabaseSync.prototype.exec = function(sql: string) {
+  const side = this.prepare("SELECT 1 FROM sqlite_schema WHERE name='continuity'").get();
+  if (side && sql === "BEGIN IMMEDIATE" && boundary === "before-reservation") process.exit(80);
   const relay = sql === "COMMIT" && this.prepare("SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get();
   if (relay && boundary === "before-commit") process.exit(81);
   const result = exec.call(this, sql);
