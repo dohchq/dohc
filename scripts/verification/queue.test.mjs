@@ -245,6 +245,13 @@ test("two lanes run two requests at once, each in its own checkout, and the next
   await cancel(root, first.id);
   assert.equal((await settled(first.id)).status.state, "cancelled");
   assert.equal(state(second.id), "running", "a stop reaches only its own run");
+  // Each attempt records the load it verified under, in its status and in the history.
+  const load = listRequests(root).find(candidate => candidate.id === first.id).status.attempts[0].load;
+  assert.equal(load.lanes, 2);
+  assert.equal(load.peakRuns, 2);
+  assert.ok(load.minFreeMemGb > 0 && load.cpuBusyPercent >= 0 && load.cpuBusyPercent <= 100, JSON.stringify(load));
+  const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.event === "finished" && event.id === first.id);
+  assert.deepEqual(finished.load, load);
   assert.equal((await settled(third.id)).status.verdict, "PASS");
   assert.equal(calls.find(call => call.id === third.id).lane, one.lane, "the next run takes the freed checkout");
   await cancel(root, second.id);

@@ -341,6 +341,7 @@ function printStatus(root) {
   console.log(`service: ${alive ? `running ${record.commit?.slice(0, 12) ?? ""} (pid ${record.pid})` : record ? `not responding since ${record.heartbeatAt}` : "never started"}`);
   if (record?.health?.reason) console.log(`health: ${record.health.reason}`);
   if (record?.health?.diskFreeGb != null) console.log(`free disk: ${record.health.diskFreeGb.toFixed(1)} GB`);
+  if (record?.health?.freeMemGb != null) console.log(`host: ${record.health.cpuBusyPercent}% CPU, ${record.health.freeMemGb} GB free memory, ${lanes} lane(s)`);
   const live = requests.filter(entry => !terminalStates.has(entry.status.state));
   for (const entry of live.sort((a, b) => position(requests, a.id) - position(requests, b.id))) {
     const place = position(requests, entry.id);
