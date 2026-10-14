@@ -7,7 +7,7 @@ import {
 } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import { Plus, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
 import { AutomationFieldMark } from "./collections/collectionFieldMarks";
 import {
@@ -17,9 +17,17 @@ import {
   frontmatterEntriesFromPairs,
   type FrontmatterEntry,
 } from "./markdown/frontmatter";
+import { PROPERTIES_LINE, PROPERTIES_PANEL, TOPMATTER_FLAG } from "./pageTopmatter";
 
 const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
 const FRONTMATTER_FIELD = "frontmatter";
+
+// Each property is one pill: its name, then its value. The inputs size to
+// their text, so a pill is as wide as what it says.
+const PILL =
+  "group/pill relative inline-flex h-6 max-w-full min-w-0 items-center gap-1.5 rounded-full border border-line px-[9px] text-[12px] transition-colors duration-100 hover:bg-hover focus-within:border-muted";
+const PILL_FIELD =
+  "h-5 min-w-[2ch] max-w-64 text-ellipsis border-0 bg-transparent p-0 leading-5 field-sizing-content placeholder:text-subtle";
 
 export type PropertiesPanelProps = (
   | {
@@ -271,65 +279,69 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     commit(entries.map((entry, i) => (i === index ? { ...entry, value } : entry)));
   }
 
+  // Where focus goes once the pills render: a pill's name, or the +.
+  const line = useRef<HTMLDivElement | null>(null);
+  const focusNext = useRef<number | "add" | null>(null);
+  useLayoutEffect(() => {
+    const target = focusNext.current;
+    if (target === null) return;
+    focusNext.current = null;
+    const element = target === "add"
+      ? line.current?.querySelector<HTMLElement>('[data-testid="property-add"]')
+      : line.current?.querySelectorAll<HTMLElement>('[data-testid="property-key"]')[target];
+    element?.focus();
+  });
+
+  function add() {
+    focusNext.current = entries.length;
+    setEntries((current) => [...current, { key: "", value: "" }]);
+  }
+
+  // Focus moves to the next pill, else the one before, else the +.
   function remove(index: number) {
+    focusNext.current = index < entries.length - 1 ? index : index > 0 ? index - 1 : "add";
     commit(entries.filter((_, i) => i !== index));
   }
 
   const isEmpty = entries.length === 0;
+  const duplicates = duplicateKeySet(entries);
 
   return (
-    <section
-      data-testid="properties-panel"
-      className="dohc-page-properties"
-      aria-label="Properties"
-    >
-      <div className="dohc-page-properties__inner">
+    <section data-testid="properties-panel" className={PROPERTIES_PANEL} aria-label="Properties">
+      <div ref={line} className={PROPERTIES_LINE}>
         {locked || editRefused ? (
-          <span
-            data-testid="properties-locked"
-            className="dohc-page-properties__flag"
-            title={FRONTMATTER_EDIT_REFUSED_MESSAGE}
-          >
-            Edit in text
+          <span data-testid="properties-locked" className={TOPMATTER_FLAG} title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>
+            Edit in Source
           </span>
         ) : null}
         {entries.map((entry, index) => {
           const reserved = isReserved(entry.key);
-          const duplicate = duplicateKeySet(entries).has(entry.key.trim().toLowerCase());
+          const duplicate = duplicates.has(entry.key.trim().toLowerCase());
           const automations = props.fieldMarks?.get(entry.key.trim());
           return (
-            <div key={index} data-testid="property-row" className="dohc-page-properties__row">
-              {/* The name and its ⚡ share the first column. */}
-              <span className="flex min-w-0 items-center gap-1">
-                <input
-                  data-testid="property-key"
-                  aria-label={`Property ${index + 1} name`}
-                  value={entry.key}
-                  placeholder="Property"
-                  spellCheck={false}
-                  readOnly={locked}
-                  onChange={(event) => setKey(index, event.target.value)}
-                  onBlur={() => commit(entries)}
-                  className={`dohc-page-properties__key min-w-0 flex-1${
-                    reserved || duplicate ? " is-invalid" : ""
-                  }`}
-                />
-                {automations ? <AutomationFieldMark automations={automations} /> : null}
-              </span>
+            <div key={index} data-testid="property-row" className={PILL}>
+              <input
+                data-testid="property-key"
+                aria-label={`Property ${index + 1} name`}
+                value={entry.key}
+                placeholder="Property"
+                spellCheck={false}
+                readOnly={locked}
+                onChange={(event) => setKey(index, event.target.value)}
+                onBlur={() => commit(entries)}
+                className={`${PILL_FIELD} ${reserved || duplicate ? "text-danger" : "text-subtle"}`}
+              />
+              {automations ? <AutomationFieldMark automations={automations} /> : null}
               {reserved ? (
                 <span
                   data-testid="property-reserved"
-                  className="dohc-page-properties__flag"
-                  title="Reserved names are managed by the document system."
+                  className={TOPMATTER_FLAG}
+                  title="dohc uses this name for the page's title, icon or ID. Choose another name."
                 >
                   reserved name
                 </span>
               ) : duplicate ? (
-                <span
-                  data-testid="property-duplicate"
-                  className="dohc-page-properties__flag"
-                  title="Use a unique property name."
-                >
+                <span data-testid="property-duplicate" className={TOPMATTER_FLAG} title="Use a unique property name.">
                   duplicate name
                 </span>
               ) : (
@@ -337,37 +349,50 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   data-testid="property-value"
                   aria-label={`Property ${entry.key || index + 1} value`}
                   value={entry.value}
+                  // A value longer than the pill ends in an ellipsis; its
+                  // tooltip holds all of it.
+                  title={entry.value || undefined}
                   placeholder="Empty"
                   spellCheck={false}
                   readOnly={locked}
                   onChange={(event) => setValue(index, event.target.value)}
-                  className="dohc-page-properties__value"
+                  className={`${PILL_FIELD} text-ink`}
                 />
               )}
-              <button
-                type="button"
-                data-testid="property-remove"
-                aria-label={`Remove property ${entry.key || index + 1}`}
-                title="Remove property"
-                onClick={() => remove(index)}
-                className="dohc-page-properties__remove"
-              >
-                <X size={13} aria-hidden />
-              </button>
+              {/* On the pill's corner, so showing it moves nothing. A locked
+                  block cannot lose one property, so it offers no ×. */}
+              {locked ? null : (
+                <button
+                  type="button"
+                  data-testid="property-remove"
+                  aria-label={`Remove property ${entry.key || index + 1}`}
+                  title="Remove property"
+                  onClick={() => remove(index)}
+                  className="absolute -top-2 -right-2 grid size-[18px] place-items-center rounded-full border border-line bg-bg text-subtle opacity-0 transition duration-100 group-hover/pill:opacity-100 group-focus-within/pill:opacity-100 hover:text-danger"
+                >
+                  <X size={12} aria-hidden />
+                </button>
+              )}
             </div>
           );
         })}
-        <button
-          type="button"
-          data-testid="property-add"
-          onClick={() => setEntries((current) => [...current, { key: "", value: "" }])}
-          className={`dohc-page-properties__add${
-            isEmpty ? " dohc-page-properties__add--empty" : ""
-          }`}
-        >
-          <Plus size={13} aria-hidden />
-          Add a property
-        </button>
+        {/* Alone on a page with no properties, it shows while the pointer is
+            over the title and properties, like "Add icon". A locked block
+            cannot gain a property, so it offers no +. */}
+        {locked ? null : (
+          <button
+            type="button"
+            data-testid="property-add"
+            aria-label="Add a property"
+            title="Add a property"
+            onClick={add}
+            className={`grid size-6 shrink-0 place-items-center rounded-full border border-dashed border-line text-subtle transition duration-100 hover:bg-hover hover:text-muted${
+              isEmpty ? " opacity-0 group-hover/topmatter:opacity-100 focus-visible:opacity-100" : ""
+            }`}
+          >
+            <Plus size={12} aria-hidden />
+          </button>
+        )}
       </div>
     </section>
   );

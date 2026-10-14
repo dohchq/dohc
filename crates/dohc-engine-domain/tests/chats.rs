@@ -3928,3 +3928,76 @@ fn stored_slug_is_a_lookup_identity_not_a_new_filename() {
         )
         .unwrap();
 }
+
+#[test]
+fn local_actor_key_commits_with_the_message_and_replays_its_original_admission() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let key = r#"{"kind":"installation","installationId":"device"}"#;
+    let later_key = r#"{"kind":"account","issuer":"https://accounts.test","userId":"alice"}"#;
+    {
+        let mut store = open(&db, 1);
+        LinkedChatStore::new(&mut store)
+            .ensure_general_channel(WS, "gen", 10, &NO_FAULTS)
+            .expect("channel");
+    }
+    for point in [
+        FaultPoint::StorageBeforePersist,
+        FaultPoint::StorageAfterCommitBeforeAck,
+    ] {
+        let mut input = start_thread(
+            "gen",
+            "key-thread",
+            "key-opening",
+            "Hello",
+            ChatActorKind::Human,
+            20,
+        );
+        input.author_user_id = None;
+        input.request_id = Some("key-start".to_owned());
+        {
+            let mut store = open(&db, 2);
+            let faults = ScriptedFaults::crash_at(point);
+            let result = LinkedChatStore::new(&mut store).start_admitted_channel_thread(
+                &input,
+                Some(key),
+                faults.as_ref(),
+            );
+            assert!(result.is_err());
+            assert!(faults.fired());
+        }
+        let mut store = open(&db, 3);
+        let saved: Vec<Option<String>> = store
+            .read_with(|conn| {
+                let mut query = conn.prepare("SELECT author_actor_key FROM chat_messages")?;
+                query.query_map([], |row| row.get(0))?.collect()
+            })
+            .expect("saved keys");
+        if point == FaultPoint::StorageBeforePersist {
+            assert!(saved.is_empty());
+            continue;
+        }
+        assert_eq!(saved, vec![Some(key.to_owned())]);
+        let (_, replay) = LinkedChatStore::new(&mut store)
+            .start_admitted_channel_thread(&input, Some(later_key), &NO_FAULTS)
+            .expect("replay");
+        assert_eq!(replay.author_actor_key.as_deref(), Some(key));
+    }
+    let mut reply = send_msg("key-thread", "key-reply", None, "Reply", 25);
+    reply.request_id = Some("key-send".to_owned());
+    {
+        let mut store = open(&db, 4);
+        let faults = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+        assert!(
+            LinkedChatStore::new(&mut store)
+                .send_admitted_message(&reply, Some(later_key), faults.as_ref())
+                .is_err()
+        );
+        assert!(faults.fired());
+    }
+    let mut store = open(&db, 5);
+    let replay = LinkedChatStore::new(&mut store)
+        .send_admitted_message(&reply, Some(key), &NO_FAULTS)
+        .expect("reply replay");
+    assert_eq!(replay.author_actor_key.as_deref(), Some(later_key));
+}

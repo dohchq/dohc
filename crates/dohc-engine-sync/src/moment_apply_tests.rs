@@ -4739,6 +4739,72 @@ fn moment_append_head_fast_forward_write_delete_and_rename_updates_alias_snapsho
 }
 
 #[test]
+fn fix1_remote_delete_releases_capture_hold() {
+    let (_scratch, mut store) = test_store();
+    seed_text_moment(
+        &mut store,
+        "object-delete",
+        "delete.md",
+        "before",
+        "local-head",
+        None,
+        true,
+    );
+    let outside = format!("{} too deep\n", "> ".repeat(121));
+    store.write_with(&NoFaults, |tx| tx.execute(
+        "INSERT INTO capture_file_holds VALUES ('ws','main','object-delete','delete.md',?1,?2,'ydoc-resolution-not-representable',3,1,0)",
+        params![text_sha(&outside), outside.len() as i64]).map_err(dohc_engine_storage::StorageError::persist_public)).unwrap();
+    let delete = envelope(
+        "delete-peer",
+        0,
+        "ws",
+        present_text_payload(
+            "remote-delete",
+            "object-delete",
+            "delete",
+            "delete.md",
+            "delete.md",
+            "before",
+            "local-head",
+            "before",
+        ),
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &delete, &NoFaults).unwrap(),
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    );
+    assert!(
+        store
+            .read_with(|conn| dohc_engine_storage::capture_file_holds::hold_in(
+                conn,
+                "ws",
+                "delete.md"
+            ))
+            .unwrap()
+            .is_none()
+    );
+    let result = VersionedTextStore::new(&mut store)
+        .capture_ingest(
+            &dohc_engine_domain::CaptureIngest {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                path: "delete.md".into(),
+                text: "New outside file.\n".into(),
+                metadata_origin: "capture".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4_000,
+                request_id: None,
+                claim_foreign_head: false,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    assert_eq!(result.snapshot.text, "New outside file.\n");
+}
+
+#[test]
 fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrite() {
     for (operation, after_path, after_text) in [
         ("write", "head.md", "changed"),

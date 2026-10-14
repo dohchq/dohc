@@ -89,6 +89,7 @@ impl ActorHandle {
                             let result = dohc_engine_collab::owner_outbox::draft::append_draft_cached(
                                 store, cache, &key.workspace_id,
                                 dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                                    person_edit: false,
                                     binding: draft.descriptor.binding,
                                     expected_revision: draft.descriptor.revision,
                                     append_key: format!("collection-adoption:{}:{}", candidate.record_id, hex_sha256(&update)),
@@ -1935,6 +1936,9 @@ fn reconcile_collections_on_store(
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
+        if store.placement_is_held(workspace_id, &candidate.file_path)? {
+            continue;
+        }
         match adopt_collection_record_on_store(
             store,
             doc_cache,
@@ -2004,6 +2008,9 @@ fn reconcile_collections_on_store(
             return Err(RuntimeError::Cancelled);
         }
         if pending_seed_objects.contains(&candidate.source_object_id) {
+            continue;
+        }
+        if store.placement_is_held(workspace_id, &candidate.source_file_path)? {
             continue;
         }
         match cleanup_collection_relation_on_store(

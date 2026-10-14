@@ -1,5 +1,6 @@
 import {workspaceIsDeleted} from "./storage/accountDeletion";
 import {parseServiceActivationConfig,parseServiceActivationTarget,ServiceActivationDriver,type ServiceActivationConfig,type ServiceActivationTarget} from "./serviceActivationDriver";
+import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal.js";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
 import {parseNativeLiveSyncConfig} from "./liveSyncConfig.js";
@@ -144,6 +145,7 @@ const held = new WeakSet<SyncRelayStorage>();
 
 /** Owns one configured service incarnation and its durable delivery consumers. */
 export async function startServiceLiveHost(options: {
+  trustedAccount: OwnerOutboxAdmission["trustedAccount"];
   configPath: string;
   storage: SyncRelayStorage;
   history: LiveJournalHistoryAuthority;
@@ -533,7 +535,7 @@ export async function startServiceLiveHost(options: {
       return retiring;
     }));
     if(config.activation){
-      activation=new ServiceActivationDriver({storage,history,client,host:coordinate,workspaces:attachments,config:config.activation,
+      activation=new ServiceActivationDriver({trustedAccount:options.trustedAccount,storage,history,client,host:coordinate,workspaces:attachments,config:config.activation,
         adoption:config.adoption!,restore,nextRequestId,deadlineMs:config.client.requestDeadlineMs,assertCurrent:checkPreparing,
         registered(){registered=true;},runDocument:(document,signal,operation)=>runDocument(document,signal,operation)});
       registerRetained();

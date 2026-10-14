@@ -9,6 +9,7 @@ use dohc_engine_files::{
     BatchIngestResult, CaptureError, CaptureOp, CaptureSink, IngestOutcome, IngestReason,
     MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES,
 };
+use dohc_engine_runtime::actor::CapturePlacementPath;
 use dohc_engine_runtime::search::{
     FilesPolicyRule, SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy,
 };
@@ -300,6 +301,7 @@ pub struct StoreCaptureSink {
     /// Automation claims this run's captures and reconciliations inserted.
     /// The driver announces them after the run.
     automation_claims: std::cell::RefCell<Vec<AutomationClaim>>,
+    pending_placement_paths: std::cell::RefCell<Vec<CapturePlacementPath>>,
     /// Lazily loaded-or-created on the first secret capture (TS parity:
     /// `loadSecretDataKey` create branch) so workspaces without secrets never
     /// mint a key file.
@@ -399,6 +401,7 @@ impl StoreCaptureSink {
             files_policy,
             policy_held: std::cell::Cell::new(false),
             automation_claims: std::cell::RefCell::new(Vec::new()),
+            pending_placement_paths: std::cell::RefCell::new(Vec::new()),
             secret_key: None,
             self_writes,
             provenance,
@@ -483,6 +486,11 @@ impl StoreCaptureSink {
     /// Whether any op this run was held on an unavailable policy.
     pub fn policy_held(&self) -> bool {
         self.policy_held.get()
+    }
+
+    /// Take paths whose committed observations need a placement drain.
+    pub(crate) fn take_pending_placement_paths(&self) -> Vec<CapturePlacementPath> {
+        self.pending_placement_paths.take()
     }
 
     /// Take the automation claims this run inserted so far.
@@ -607,6 +615,14 @@ impl StoreCaptureSink {
             Arc::new(NoFaults),
         ) {
             Ok(result) => {
+                if result.pending_placement {
+                    self.pending_placement_paths
+                        .borrow_mut()
+                        .push(CapturePlacementPath {
+                            path: path.to_owned(),
+                            released_hold: result.released_capture_hold,
+                        });
+                }
                 self.automation_claims
                     .borrow_mut()
                     .extend(result.automation_claims);
@@ -622,10 +638,20 @@ impl StoreCaptureSink {
             // The head belongs to another writer (RPC/replication): capture
             // does not own it, so it stops tracking the path rather than
             // overwriting content that may have no disk counterpart.
+            Err(RuntimeError::CaptureNotOwnedAfterHold { path }) => {
+                self.pending_placement_paths
+                    .borrow_mut()
+                    .push(CapturePlacementPath {
+                        path,
+                        released_hold: true,
+                    });
+                Ok(DomainIngest::ForeignHead)
+            }
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                 Ok(DomainIngest::ForeignHead)
             }
             Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
+            Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
             Err(_) => Err(INGEST_FAILED),
         }
     }
@@ -653,17 +679,37 @@ impl StoreCaptureSink {
             self.leases.clone(),
             Arc::new(NoFaults),
         ) {
-            Ok(_) => Ok(DomainIngest::Persisted),
+            Ok(result) => {
+                if result.pending_placement {
+                    self.pending_placement_paths
+                        .borrow_mut()
+                        .push(CapturePlacementPath {
+                            path: path.to_owned(),
+                            released_hold: result.released_capture_hold,
+                        });
+                }
+                Ok(DomainIngest::Persisted)
+            }
             // Same settled-refusal rule as text: the store's admission gate is
             // stricter than the scan floor, and a refused name can never
             // succeed on retry.
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                 Ok(DomainIngest::NameRefused)
             }
+            Err(RuntimeError::CaptureNotOwnedAfterHold { path }) => {
+                self.pending_placement_paths
+                    .borrow_mut()
+                    .push(CapturePlacementPath {
+                        path,
+                        released_hold: true,
+                    });
+                Ok(DomainIngest::ForeignHead)
+            }
             Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                 Ok(DomainIngest::ForeignHead)
             }
             Err(error) if held_as_new_file(&error) => Ok(DomainIngest::HeldAsNewFile),
+            Err(RuntimeError::CaptureFileHeld { .. }) => Ok(DomainIngest::Held),
             Err(_) => Err(BINARY_INGEST_FAILED),
         }
     }
@@ -871,7 +917,17 @@ impl StoreCaptureSink {
             Arc::new(NoFaults),
             root_guard,
         ) {
-            Ok(_) => Ok(()),
+            Ok(result) => {
+                if result.pending_placement {
+                    self.pending_placement_paths
+                        .borrow_mut()
+                        .push(CapturePlacementPath {
+                            path: path.to_owned(),
+                            released_hold: result.released_capture_hold,
+                        });
+                }
+                Ok(())
+            }
             // A name the store refuses to address can never hold a head;
             // there is nothing to retire.
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
@@ -891,6 +947,7 @@ enum DomainIngest {
     /// A live session holds a file the store has no head for. See
     /// [`held_new_file_outcome`] for when that defers.
     HeldAsNewFile,
+    Held,
 }
 
 /// A live session holds a file the store has no head for yet. Capture defers
@@ -1163,9 +1220,26 @@ impl StoreCaptureSink {
                 for (result, (size, sha256)) in results.into_iter().zip(identities) {
                     outcomes.push(match result {
                         Ok(result) => {
+                            if result.pending_placement {
+                                self.pending_placement_paths.borrow_mut().push(
+                                    CapturePlacementPath {
+                                        path: result.snapshot.path.clone(),
+                                        released_hold: result.released_capture_hold,
+                                    },
+                                );
+                            }
                             self.automation_claims
                                 .borrow_mut()
                                 .extend(result.automation_claims);
+                            Ok(IngestOutcome::Captured { size, sha256 })
+                        }
+                        Err(RuntimeError::CaptureNotOwnedAfterHold { path }) => {
+                            self.pending_placement_paths
+                                .borrow_mut()
+                                .push(CapturePlacementPath {
+                                    path,
+                                    released_hold: true,
+                                });
                             Ok(IngestOutcome::Captured { size, sha256 })
                         }
                         Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
@@ -1175,6 +1249,9 @@ impl StoreCaptureSink {
                             Ok(IngestOutcome::NotOwned)
                         }
                         Err(error) if held_as_new_file(&error) => held_new_file_outcome(size),
+                        Err(RuntimeError::CaptureFileHeld { .. }) => {
+                            Ok(IngestOutcome::Held { size, sha256 })
+                        }
                         Err(_) => Err(INGEST_FAILED),
                     });
                 }
@@ -1355,6 +1432,10 @@ impl CaptureSink for StoreCaptureSink {
                     // next genuine edit arrives as `Changed` and is captured.
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
+                    DomainIngest::Held => {
+                        self.self_writes.clear_path(&self.workspace_id, path);
+                        Ok(IngestOutcome::Held { size, sha256 })
+                    }
                 }
             }
             CurrentContent::Absent => {
@@ -1420,6 +1501,7 @@ impl CaptureSink for StoreCaptureSink {
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::HeldAsNewFile => held_new_file_outcome(size),
+                    DomainIngest::Held => Ok(IngestOutcome::Held { size, sha256 }),
                 }
             }
         }

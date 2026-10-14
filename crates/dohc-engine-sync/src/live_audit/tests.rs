@@ -717,7 +717,15 @@ fn deferred_settlement_export(retain_capture: bool) {
             .collect::<Vec<_>>()
     };
     assert!(paired(&f.store).is_empty());
-    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, &crate::NoLiveLeases, 301).unwrap();
+    enrollment::prepare_exports(
+        &mut f.store,
+        "ws",
+        &NoFaults,
+        &crate::NoLiveLeases,
+        301,
+        &mut false,
+    )
+    .unwrap();
     let published = paired(&f.store);
     if retain_capture {
         assert_eq!(published.len(), 2);
@@ -746,7 +754,15 @@ fn deferred_settlement_export(retain_capture: bool) {
             journal_live_settlement_in_tx(tx, "ws", &id, 302)
         })
         .unwrap();
-    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, &crate::NoLiveLeases, 303).unwrap();
+    enrollment::prepare_exports(
+        &mut f.store,
+        "ws",
+        &NoFaults,
+        &crate::NoLiveLeases,
+        303,
+        &mut false,
+    )
+    .unwrap();
     assert_eq!(paired(&f.store), published);
 }
 
@@ -945,7 +961,8 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
             "ws",
             fault.as_ref(),
             &crate::NoLiveLeases,
-            201
+            201,
+            &mut false
         ),
         Err(SyncError::FaultCrash)
     ));
@@ -957,7 +974,8 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
             "ws",
             fault.as_ref(),
             &crate::NoLiveLeases,
-            202
+            202,
+            &mut false
         ),
         Err(SyncError::FaultCrash)
     ));
@@ -970,7 +988,15 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
         1,
         "new writes defer behind unfinished history"
     );
-    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, &crate::NoLiveLeases, 204).unwrap();
+    enrollment::prepare_exports(
+        &mut f.store,
+        "ws",
+        &NoFaults,
+        &crate::NoLiveLeases,
+        204,
+        &mut false,
+    )
+    .unwrap();
     assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
     assert_eq!(count(&f.store, "live_audit_event_publications"), 3);
     assert_eq!(count(&f.store, "replication_pending_conflict_bundles"), 0);
@@ -991,7 +1017,15 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
         successor.origin_seq > audit.last().unwrap().origin_seq,
         "retained predecessor history precedes successor bundle"
     );
-    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, &crate::NoLiveLeases, 205).unwrap();
+    enrollment::prepare_exports(
+        &mut f.store,
+        "ws",
+        &NoFaults,
+        &crate::NoLiveLeases,
+        205,
+        &mut false,
+    )
+    .unwrap();
     assert_eq!(operations(&f.store), ops);
     accept_enrollment_event(&mut f, 4);
     assert_eq!(
@@ -1077,7 +1111,15 @@ fn retained_base_export_preserves_a_different_current_marker() {
         Ok::<_,SyncError>(())
     }).unwrap();
     contact(&mut f.store);
-    enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, &crate::NoLiveLeases, 201).unwrap();
+    enrollment::prepare_exports(
+        &mut f.store,
+        "ws",
+        &NoFaults,
+        &crate::NoLiveLeases,
+        201,
+        &mut false,
+    )
+    .unwrap();
     assert_eq!(count(&f.store, "live_audit_base_publications"), 1);
     let key = DocKey::new("ws", "main", "object").unwrap();
     let marker = f

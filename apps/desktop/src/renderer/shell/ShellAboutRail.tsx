@@ -7,7 +7,7 @@ import type {
 import { ErrorBoundary } from "../ErrorBoundary";
 import { AboutRail } from "../workbench/AboutRail";
 import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
-import { parseChatTabPath, setAboutWidth, type WorkbenchState } from "../workbench/workbenchState";
+import { parseTab, setAboutWidth, type WorkbenchState } from "../workbench/workbenchState";
 import { useAboutConversation } from "../workbench/aboutConversation";
 import { chatsOffCopy } from "./capabilityOffCopy";
 
@@ -91,9 +91,9 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   // and the file panel reads it once.
   const showsSearchHit = searchChatTarget !== null && searchChatTarget.tab === focusedTabPath;
   const pendingHit = showsSearchHit && !searchChatTarget.read ? searchChatTarget : null;
-  const chatTab = parseChatTabPath(focusedTabPath);
+  const tab = parseTab(focusedTabPath);
   const conversationTab = !shareView && !showsSearchHit &&
-    (chatTab?.kind === "channel" || chatTab?.kind === "dm");
+    tab?.kind === "chat" && (tab.target.kind === "channel" || tab.target.kind === "dm");
   // Null for a tab that is not a conversation's.
   const published = useAboutConversation(workspaceId, conversationTab ? focusedTabPath : null);
   const conversation = conversationTab ? published : null;

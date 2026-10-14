@@ -76,6 +76,11 @@ _Avoid_: workflow, zap
 A step in an automation that uses one person's own reach, such as waking that person's agent. Only that person can change it.
 _Avoid_: private step, owner step
 
+### References
+
+**WorkspaceRef**:
+A source workspace id and native object identity with display labels. Labels do not affect equality. A reference grants no authority.
+
 ### Chat
 
 **ActorKey**:

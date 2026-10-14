@@ -1,10 +1,14 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
-import { Plus, Table, Trash2 } from "lucide-react";
-import { EmptyState, SecondaryButton } from "./ui/controls";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { Code, Database, LoaderCircle, Plus, Table, Trash2 } from "lucide-react";
+import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import type { ImportToDatabaseResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import type { ReportButtonError } from "./collections/useAutomationButtons";
+import { ViewActions } from "./fileInspectorUi";
 import { extensionOf } from "./path";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
+import { SegmentedControl, type SegmentedOption } from "./ui/SegmentedControl";
 import { StateMark } from "./ui/StateMark";
 import {
   useAutosavedTextDraft,
@@ -23,18 +27,193 @@ function deriveImportTarget(sourcePath: string): { dbPath: string; tableName: st
 
 import { MAX_CSV_PREVIEW_ROWS, detectCsvBound, type CsvBoundOffer } from "./offers/csvBound";
 
+// Imports running now, by workspace and file, so a header click and a stored
+// Try again never import one file twice at once, and every view of the file
+// shows the import until it ends.
+const runningImports = new Map<string, Promise<ImportToDatabaseResult>>();
+const importListeners = new Set<() => void>();
+const importKey = (workspaceId: string, path: string) => `${workspaceId}\u0000${path}`;
+const subscribeImports = (listener: () => void) => {
+  importListeners.add(listener);
+  return () => {
+    importListeners.delete(listener);
+  };
+};
+
+function useImportRunning(workspaceId: string, path: string): boolean {
+  const key = importKey(workspaceId, path);
+  return useSyncExternalStore(subscribeImports, () => runningImports.has(key));
+}
+
+const notifyImports = () => {
+  for (const listener of importListeners) listener();
+};
+
+// Imports a CSV into a SQLite file beside it. While an import of the same
+// file runs, a header click starts nothing and answers null, and a retry
+// (`join`) waits for that import and answers with its result.
+function importCsv(workspaceId: string, path: string, join = false): Promise<ImportToDatabaseResult | null> {
+  const key = importKey(workspaceId, path);
+  const running = runningImports.get(key);
+  if (running) return join ? running : Promise.resolve(null);
+  const { dbPath, tableName } = deriveImportTarget(path);
+  // Started on the next tick, so the import is listed before it can end.
+  const started = Promise.resolve()
+    .then(() =>
+      bridge().importToDatabase({
+        workspaceId,
+        sourceRelativePath: path,
+        databaseRelativePath: dbPath,
+        tableName,
+      }),
+    )
+    .finally(() => {
+      runningImports.delete(key);
+      notifyImports();
+    });
+  runningImports.set(key, started);
+  notifyImports();
+  return started;
+}
+
+// What failed, naming the database the import makes; the error's words say
+// why and what to do next (ipc/errorWords.ts).
+const importFailed = (path: string) =>
+  `dohc could not import this file to ${deriveImportTarget(path).dbPath}.`;
+
+// Try again on a failed import's Notices row. The person asked for it, so it
+// answers through the shell's own hooks whether or not the CSV is still open:
+// success opens the database, and a failure files a new row. An import of the
+// file already running answers it. The shell remounts for each workspace
+// (DesktopRoot), so its hooks never reach another.
+function retryImport(
+  workspaceId: string,
+  path: string,
+  onOpenPath: ((path: string) => void) | undefined,
+  onError: ReportButtonError | undefined,
+): () => void {
+  const run = async () => {
+    try {
+      const result = await importCsv(workspaceId, path, true);
+      if (result) onOpenPath?.(result.path);
+    } catch (cause) {
+      onError?.(importFailed(path), cause, () => void run());
+    }
+  };
+  return () => void run();
+}
+
+export type CsvMode = "table" | "raw";
+
+const CSV_MODES: ReadonlyArray<SegmentedOption<CsvMode>> = [
+  { value: "table", label: "Table", icon: Table },
+  { value: "raw", label: "Raw", icon: Code },
+];
+
+// A CSV's controls, right of Share: Table or Raw, and Import to SQLite where
+// the view can open the database it makes. A CSV still opening, or one that
+// could not be read, draws them disabled in the same places. A running import
+// keeps its button, and the focus on it, marks it busy, and says so.
+export function CsvControls(props: {
+  mode: CsvMode;
+  onModeChange?: (mode: CsvMode) => void;
+  importable: boolean;
+  importing?: boolean;
+  onImport?: () => void;
+  disabled?: boolean;
+  importDisabled?: boolean;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-1">
+      <SegmentedControl
+        testId="csv-raw-toggle"
+        label="Show as"
+        value={props.mode}
+        options={CSV_MODES}
+        onChange={props.onModeChange ?? noop}
+        disabled={props.disabled}
+      />
+      {props.importable ? (
+        <IconButton
+          data-testid="csv-import-sqlite"
+          aria-label="Import to SQLite"
+          aria-busy={props.importing || undefined}
+          title="Import to SQLite"
+          disabled={props.disabled || props.importDisabled}
+          onClick={props.onImport}
+        >
+          {props.importing ? (
+            <LoaderCircle data-testid="csv-import-sqlite-pending" size={14} aria-hidden className="motion-safe:animate-spin" />
+          ) : (
+            <Database size={14} aria-hidden />
+          )}
+        </IconButton>
+      ) : null}
+      {/* As the chat composer says a slow send: the button keeps its name,
+          and a polite status says the import started. */}
+      {props.importable ? (
+        <span role="status" aria-live="polite" className="sr-only">
+          {props.importing ? "Importing to SQLite…" : ""}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+const noop = () => undefined;
+
+// A CSV's actions in its tab row: the save state, Share, then its controls.
+export function CsvViewActions(props: {
+  onShare?: () => void;
+  saveState: SaveState;
+  truncated?: boolean;
+  readOnly?: boolean;
+  mode: CsvMode;
+  onModeChange: (mode: CsvMode) => void;
+  importing?: boolean;
+  onImport?: () => void;
+}) {
+  const locked = Boolean(props.truncated || props.readOnly);
+  return (
+    <ViewActions
+      onShare={props.onShare}
+      status={
+        <StateMark
+          testId="csv-save-state"
+          truncate
+          quietWhenCalm
+          state={props.saveState}
+          shown={props.readOnly ? "read-only" : props.truncated ? "too-large" : props.saveState}
+        />
+      }
+      actions={
+        <CsvControls
+          mode={props.mode}
+          onModeChange={props.onModeChange}
+          importable={props.onImport !== undefined}
+          importing={props.importing}
+          onImport={props.onImport}
+          importDisabled={locked}
+        />
+      }
+    />
+  );
+}
+
 const CsvTableHeader = memo(function CsvTableHeader({
   header,
   columnCount,
   truncated,
   onUpdateCell,
   onDeleteColumn,
+  onAddColumn,
 }: {
   header: string[];
   columnCount: number;
   truncated?: boolean;
   onUpdateCell: (rowIndex: number, cellIndex: number, value: string) => void;
   onDeleteColumn: (cellIndex: number) => void;
+  onAddColumn: () => void;
 }) {
   return (
     <thead>
@@ -73,6 +252,19 @@ const CsvTableHeader = memo(function CsvTableHeader({
             </div>
           </th>
         ))}
+        {!truncated ? (
+          <th className="w-8 border-l border-line bg-panel p-0">
+            <IconButton
+              data-testid="csv-add-column"
+              aria-label="Add column"
+              title="Add column"
+              onClick={onAddColumn}
+              className="mx-auto"
+            >
+              <Plus size={12} aria-hidden />
+            </IconButton>
+          </th>
+        ) : null}
       </tr>
     </thead>
   );
@@ -128,9 +320,32 @@ const CsvTableRow = memo(function CsvTableRow({
           />
         </td>
       ))}
+      {/* Under Add column, so the row's hairline runs to the table's edge. */}
+      {!truncated ? <td aria-hidden className="border-t border-line" /> : null}
     </tr>
   );
 });
+
+// The table's quiet last row: Add row in the gutter, under the row numbers.
+function CsvAddRow(props: { columnCount: number; onAddRow: () => void }) {
+  return (
+    <tr>
+      <td className="border-t border-line px-1 py-1 text-center">
+        <button
+          type="button"
+          data-testid="csv-add-row"
+          aria-label="Add row"
+          title="Add row"
+          onClick={props.onAddRow}
+          className="grid size-5 place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink"
+        >
+          <Plus size={12} aria-hidden />
+        </button>
+      </td>
+      <td colSpan={props.columnCount + 1} className="border-t border-line" />
+    </tr>
+  );
+}
 
 export function CsvView({
   body,
@@ -152,6 +367,8 @@ export function CsvView({
   localBuffer,
   onCsvBoundOffer,
   csvSource,
+  onShare,
+  onError,
 }: {
   reopenKey?: number;
   switchReadPending: boolean;
@@ -175,11 +392,22 @@ export function CsvView({
   localBuffer: SharedLocalDocument;
   onCsvBoundOffer?: (offer: CsvBoundOffer | null) => void;
   csvSource?: "workspace-file" | "received-share" | "dataset";
+  onShare?: () => void;
+  // The shell's error hook: a failed import is a toast and a Notices row.
+  onError?: ReportButtonError;
 }) {
   const locked = Boolean(truncated || readOnly);
   const [raw, setRaw] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [importError, setImportError] = useState<string | null>(null);
+  const importing = useImportRunning(workspaceId, path);
+  // The file the view shows, or null once it closes, so a late import answer
+  // never opens or reports into a workspace or file the view has left.
+  const target = useRef<{ workspaceId: string; path: string } | null>(null);
+  useEffect(() => {
+    target.current = { workspaceId, path };
+    return () => {
+      target.current = null;
+    };
+  }, [workspaceId, path]);
   const draft = useAutosavedTextDraft({
     body,
     contentHash,
@@ -358,8 +586,9 @@ export function CsvView({
     setRows(next);
   }, [setRows]);
 
-  const toggleRaw = useCallback(() => {
-    if (!raw) {
+  const chooseMode = useCallback((mode: CsvMode) => {
+    if (mode === (raw ? "raw" : "table")) return;
+    if (mode === "raw") {
       setRaw(true);
       return;
     }
@@ -372,84 +601,29 @@ export function CsvView({
   }, [delimiter, raw]);
 
   async function importToSqlite() {
-    if (importing || locked) return;
-    setImporting(true);
-    setImportError(null);
+    if (locked) return;
+    const current = () =>
+      target.current?.workspaceId === workspaceId && target.current.path === path;
     try {
-      const { dbPath, tableName } = deriveImportTarget(path);
-      const result = await bridge().importToDatabase({
-        workspaceId,
-        sourceRelativePath: path,
-        databaseRelativePath: dbPath,
-        tableName,
-      });
-      onOpenPath?.(result.path);
+      const result = await importCsv(workspaceId, path);
+      if (result && current()) onOpenPath?.(result.path);
     } catch (cause) {
-      // Most common: the target database already exists (import never
-      // overwrites a canonical file). Tell the user instead of failing mute.
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setImportError(/already exists/i.test(message) ? "Database already exists" : "Import failed");
-    } finally {
-      setImporting(false);
+      if (current()) onError?.(importFailed(path), cause, retryImport(workspaceId, path, onOpenPath, onError));
     }
   }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="view-csv">
-      <div className="flex items-center justify-end gap-1 border-b border-line px-3 py-1">
-        <StateMark
-          testId="csv-save-state"
-          state={draft.saveState}
-          shown={readOnly ? "read-only" : truncated ? "too-large" : draft.saveState}
-          className="mr-auto"
-        />
-        {importError ? (
-          <span data-testid="csv-import-error" className="px-1 text-[11px] text-danger">
-            {importError}
-          </span>
-        ) : null}
-        {!raw && !locked ? (
-          <>
-            <button
-              type="button"
-              onClick={addRow}
-              className="inline-flex h-7 items-center gap-1 rounded px-2 text-[11px] text-subtle hover:bg-hover hover:text-ink"
-              data-testid="csv-add-row"
-            >
-              <Plus size={12} aria-hidden />
-              Row
-            </button>
-            <button
-              type="button"
-              onClick={addColumn}
-              className="inline-flex h-7 items-center gap-1 rounded px-2 text-[11px] text-subtle hover:bg-hover hover:text-ink"
-              data-testid="csv-add-column"
-            >
-              <Plus size={12} aria-hidden />
-              Column
-            </button>
-          </>
-        ) : null}
-        {onOpenPath ? (
-          <button
-            type="button"
-            onClick={() => void importToSqlite()}
-            disabled={importing || locked}
-            className="rounded px-2 py-0.5 text-[11px] text-subtle hover:text-ink disabled:opacity-50"
-            data-testid="csv-import-sqlite"
-          >
-            {importing ? "Importing…" : "Import to SQLite"}
-          </button>
-        ) : null}
-        <button
-          type="button"
-          onClick={toggleRaw}
-          className="rounded px-2 py-0.5 text-[11px] text-subtle hover:text-ink"
-          data-testid="csv-raw-toggle"
-        >
-          {raw ? "Table" : "Raw"}
-        </button>
-      </div>
+      <CsvViewActions
+        onShare={onShare}
+        saveState={draft.saveState}
+        truncated={truncated}
+        readOnly={readOnly}
+        mode={raw ? "raw" : "table"}
+        onModeChange={chooseMode}
+        importing={importing}
+        onImport={onOpenPath ? () => void importToSqlite() : undefined}
+      />
       {raw ? (
         <textarea
           data-testid="csv-raw-editor"
@@ -503,6 +677,7 @@ export function CsvView({
               truncated={locked}
               onUpdateCell={updateCell}
               onDeleteColumn={deleteColumn}
+              onAddColumn={addColumn}
             />
             <tbody>
               {previewRows.map((row, r) => (
@@ -516,6 +691,7 @@ export function CsvView({
                   onDeleteRow={deleteRow}
                 />
               ))}
+              {!locked ? <CsvAddRow columnCount={columnCount} onAddRow={addRow} /> : null}
             </tbody>
           </table>
           {dataRowCount > previewRows.length ? (

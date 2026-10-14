@@ -261,6 +261,9 @@ export interface ShareViewIdentity {
 // read-write) pushed back through the member append route. `ended` marks a
 // revoked grant: the locally replayed copy stays readable but stops syncing.
 export interface JoinedSharedChannel {
+  // Authenticated account server captured at join. A relay endpoint is not an issuer.
+  // Older rows without this evidence keep unknown attribution.
+  serverUrl?: string;
   shareId: string;
   channelWireId: string;
   access: "read-write" | "read-only";

@@ -370,6 +370,7 @@ type MaterializeOutcome =
   | "skipped"
   | "conflict"
   | "superseded"
+  | "parked"
   | "error";
 
 type VersionedTextRenameResult = typeof TextRenameResultSchema.Type;
@@ -586,6 +587,7 @@ const MaterializeOutcomeSchema = Schema.Literals([
   "skipped",
   "conflict",
   "superseded",
+  "parked",
   "error",
 ]);
 const EmptyObjectSchema = Schema.Record(Schema.String, Schema.Never);

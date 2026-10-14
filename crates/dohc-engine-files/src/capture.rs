@@ -59,6 +59,16 @@ pub enum IngestOutcome {
     /// The capture driver asks for that scan once a session releases its
     /// lease.
     Deferred,
+    /// The bytes were durably observed but could not be recorded. A separate
+    /// hold protects them; acknowledging this identity must not claim capture.
+    Held { size: u64, sha256: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldObservation {
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
 }
 
 /// The actual content identity an applied ingest persisted.
@@ -125,6 +135,7 @@ pub struct CaptureApplyResult {
     /// Ingests the sink deferred to a live document session, in plan order.
     /// Their manifest entries are dropped, and they do not degrade the run.
     pub deferred_paths: Vec<String>,
+    pub held_observations: Vec<HeldObservation>,
     /// The last path in the durable unit committed immediately before the
     /// injected crash. The whole plan remains unacknowledged, so a restarted
     /// controller safely retries that unit and any earlier committed units.
@@ -248,6 +259,7 @@ enum Applied {
     Retired,
     NotOwned,
     Deferred,
+    Held { size: u64, sha256: String },
 }
 
 impl From<IngestOutcome> for Applied {
@@ -256,6 +268,7 @@ impl From<IngestOutcome> for Applied {
             IngestOutcome::Captured { size, sha256 } => Self::Ingested { size, sha256 },
             IngestOutcome::NotOwned => Self::NotOwned,
             IngestOutcome::Deferred => Self::Deferred,
+            IngestOutcome::Held { size, sha256 } => Self::Held { size, sha256 },
         }
     }
 }
@@ -266,6 +279,7 @@ struct Receipt {
     not_owned_paths: Vec<String>,
     failed_applies: Vec<String>,
     deferred_paths: Vec<String>,
+    held_observations: Vec<HeldObservation>,
 }
 
 impl Receipt {
@@ -276,6 +290,7 @@ impl Receipt {
             not_owned_paths: Vec::new(),
             failed_applies: Vec::new(),
             deferred_paths: Vec::new(),
+            held_observations: Vec::new(),
         }
     }
 
@@ -292,6 +307,11 @@ impl Receipt {
             Ok(Applied::Retired) => self.applied_paths.push(op.path().to_owned()),
             Ok(Applied::NotOwned) => self.not_owned_paths.push(op.path().to_owned()),
             Ok(Applied::Deferred) => self.deferred_paths.push(op.path().to_owned()),
+            Ok(Applied::Held { size, sha256 }) => self.held_observations.push(HeldObservation {
+                path: op.path().to_owned(),
+                size,
+                sha256,
+            }),
             Err(_) => self.failed_applies.push(op.path().to_owned()),
         }
     }
@@ -308,6 +328,7 @@ impl Receipt {
             not_owned_paths: self.not_owned_paths,
             failed_applies: self.failed_applies,
             deferred_paths: self.deferred_paths,
+            held_observations: self.held_observations,
             crashed_after_durable_boundary: Some(boundary_path.to_owned()),
             degraded: true,
         }
@@ -321,6 +342,7 @@ impl Receipt {
             not_owned_paths: self.not_owned_paths,
             failed_applies: self.failed_applies,
             deferred_paths: self.deferred_paths,
+            held_observations: self.held_observations,
             crashed_after_durable_boundary: None,
             degraded,
         }

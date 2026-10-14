@@ -1,10 +1,11 @@
-import { parseDatasetPath } from "@dohc/security-contract/dataset";
 // Pure workbench model: activity-bar view, side-panel visibility
 // and width, open editor tabs, and the right-hand About rail. Pure like
 // window/windowState.ts so every transition and the persistence round-trip
 // are unit-tested without Electron. `dirty` is runtime-only (derived from the
 // editor's save state) and never lives here or on disk.
 
+import { basenameOf } from "../path";
+import { parseDatasetPath } from "@dohc/security-contract/dataset";
 import type { WorkspaceUiState } from "../../ipc/bridgeContract";
 import type { SidebarSettings } from "../../settings/userSettings";
 
@@ -142,63 +143,17 @@ const DATA_COLLECTION_TAB_PREFIX = "tab://data-collection/";
 export function transactionalCollectionTabPath(datasetPath: string, tableId: string): string {
   return `${DATA_COLLECTION_TAB_PREFIX}${encodeURIComponent(datasetPath)}/${encodeURIComponent(tableId)}`;
 }
-export function parseTransactionalCollectionTabPath(path: string | null): { datasetPath: string; tableId: string } | null {
-  if (!path?.startsWith(DATA_COLLECTION_TAB_PREFIX)) return null;
-  const parts = path.slice(DATA_COLLECTION_TAB_PREFIX.length).split("/");
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-  if (parts.length !== 2 || !uuid.test(parts[1]!)) return null;
-  try { return { datasetPath: parseDatasetPath(decodeURIComponent(parts[0]!)), tableId: parts[1]! }; }
-  catch { return null; }
-}
 
 export function collectionTabPath(collectionPath: string): string {
   return `${COLLECTION_TAB_PREFIX}${encodeURIComponent(collectionPath)}`;
-}
-
-export function isCollectionTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(COLLECTION_TAB_PREFIX);
-}
-
-export function parseCollectionTabPath(path: string | null): string | null {
-  if (typeof path !== "string" || !isCollectionTabPath(path)) return null;
-  try {
-    const collectionPath = decodeURIComponent(
-      path.slice(COLLECTION_TAB_PREFIX.length),
-    );
-    return collectionPath.length > 0 ? collectionPath : null;
-  } catch {
-    return null;
-  }
 }
 
 export function momentDiffTabPath(momentId: string): string {
   return `${MOMENT_DIFF_TAB_PREFIX}${encodeURIComponent(momentId)}`;
 }
 
-export function isMomentDiffTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(MOMENT_DIFF_TAB_PREFIX);
-}
-
-export function parseMomentDiffTabPath(path: string | null): string | null {
-  if (typeof path !== "string" || !isMomentDiffTabPath(path)) return null;
-  try {
-    const momentId = decodeURIComponent(path.slice(MOMENT_DIFF_TAB_PREFIX.length));
-    return momentId.length > 0 ? momentId : null;
-  } catch {
-    return null;
-  }
-}
-
 export function siteTabPath(siteRoot: string): string {
   return `${APP_TAB_PREFIX}${encodeURIComponent(siteRoot)}`;
-}
-
-export function isGraphTabPath(path: string | null): boolean {
-  return path === GRAPH_TAB_PATH;
-}
-
-export function isHistoryTabPath(path: string | null): boolean {
-  return path === HISTORY_TAB_PATH;
 }
 
 export type ChatTabTarget =
@@ -212,104 +167,164 @@ export function chatTabPath(target: ChatTabTarget): string {
   return `${CHATS_TAB_PATH}/${target.kind}/${encodeURIComponent(target.id)}`;
 }
 
-export function parseChatTabPath(path: string | null): ChatTabTarget | null {
-  if (path === CHATS_TAB_PATH) return { kind: "home" };
-  if (path === `${CHATS_TAB_PATH}/new`) return { kind: "new" };
-  if (!path?.startsWith(`${CHATS_TAB_PATH}/`)) return null;
-  const parts = path.slice(CHATS_TAB_PATH.length + 1).split("/");
-  if (parts.length !== 2 || (parts[0] !== "channel" && parts[0] !== "dm")) return null;
-  try {
-    const id = decodeURIComponent(parts[1]!);
-    return id ? { kind: parts[0], id } : null;
-  } catch {
-    return null;
-  }
-}
-
-export function chatTabDefaultTitle(path: string): string {
-  const target = parseChatTabPath(path);
-  return target?.kind === "home" ? "Home" : target?.kind === "new" ? "New message" : "Chat";
-}
-
-export function isChatsTabPath(path: string | null): path is string {
-  return parseChatTabPath(path) !== null;
-}
-
-export function isSiteTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(APP_TAB_PREFIX);
-}
-
-export function isSingletonEditorTabPath(path: string | null): boolean {
-  return (
-    isChatsTabPath(path) ||
-    isSiteTabPath(path)
-  );
-}
-
-export function canonicalSingletonEditorTabPath(path: string | null): string | null {
-  const chat = parseChatTabPath(path);
-  if (chat) return chatTabPath(chat);
-  const siteRoot = parseSiteTabPath(path);
-  return siteRoot === null ? null : siteTabPath(siteRoot);
-}
-
-export function parseSiteTabPath(path: string | null): string | null {
-  if (typeof path !== "string" || !isSiteTabPath(path)) return null;
-  try {
-    const siteRoot = decodeURIComponent(path.slice(APP_TAB_PREFIX.length));
-    return siteRoot.length > 0 ? siteRoot : null;
-  } catch {
-    return null;
-  }
-}
-
 // Versions compare page (PR 0M-4): one tab per compared version, keyed by
 // the version id so re-comparing re-activates instead of duplicating.
 export function versionCompareTabPath(versionId: string): string {
   return `${VERSION_COMPARE_TAB_PREFIX}${encodeURIComponent(versionId)}`;
 }
 
-export function isVersionCompareTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(VERSION_COMPARE_TAB_PREFIX);
-}
-
-export function parseVersionCompareTabPath(path: string | null): string | null {
-  if (typeof path !== "string" || !isVersionCompareTabPath(path)) return null;
+// A navigation address carries no authority. Malformed recognized ids retain
+// their kind so the existing closeable fallback can render; unknown schemes drop.
+export type ParsedTab = { path: string } & (
+  | { kind: "file" }
+  | { kind: "removed" }
+  | { kind: "graph" }
+  | { kind: "history" }
+  | { kind: "chat"; target: ChatTabTarget }
+  | { kind: "site"; siteRoot: string | null }
+  | { kind: "momentDiff"; momentId: string | null }
+  | { kind: "versionCompare"; versionId: string | null }
+  | { kind: "collection"; collectionPath: string | null }
+  | { kind: "transactionalCollection"; datasetPath: string; tableId: string }
+);
+const TABLE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+function decodedTabField(value: string): string | null {
   try {
-    const versionId = decodeURIComponent(path.slice(VERSION_COMPARE_TAB_PREFIX.length));
-    return versionId.length > 0 ? versionId : null;
+    return decodeURIComponent(value) || null;
   } catch {
     return null;
   }
 }
-
-/**
- * `tab://` is reserved for tabs dohc renders itself. A persisted tab on that
- * scheme that no kind above recognizes is a tab from a removed surface.
- * It is not a workspace file and must never be restored as one. For example,
- * `tab://retired-dashboard/report` would otherwise open as a plain path and
- * show an editor for a file that does not exist. Restore drops it instead.
- * Unmigrated v2 IDs are also dropped; only the v2 reader converts them.
- */
-export function isRemovedVirtualTabPath(path: string | null): boolean {
-  return (
-    typeof path === "string" &&
-    (path.startsWith(V2_TAB_SCHEME) ||
-      (path.startsWith(INTERNAL_TAB_SCHEME) && !isVirtualTabPath(path)))
-  );
+export function parseTab(path: string): ParsedTab;
+export function parseTab(path: string | null): ParsedTab | null;
+export function parseTab(path: string | null): ParsedTab | null {
+  if (path === null) return null;
+  if (!path.startsWith(INTERNAL_TAB_SCHEME)) {
+    return { kind: path.startsWith(V2_TAB_SCHEME) ? "removed" : "file", path };
+  }
+  if (path === GRAPH_TAB_PATH) return { kind: "graph", path };
+  if (path === HISTORY_TAB_PATH) return { kind: "history", path };
+  if (path === CHATS_TAB_PATH) return { kind: "chat", path, target: { kind: "home" } };
+  if (path === CHATS_TAB_PATH + "/new") return { kind: "chat", path, target: { kind: "new" } };
+  if (path.startsWith(CHATS_TAB_PATH + "/")) {
+    const parts = path.slice(CHATS_TAB_PATH.length + 1).split("/");
+    const id = parts.length === 2 ? decodedTabField(parts[1]!) : null;
+    if (id && (parts[0] === "channel" || parts[0] === "dm")) {
+      return { kind: "chat", path, target: { kind: parts[0], id } };
+    }
+  }
+  if (path.startsWith(APP_TAB_PREFIX)) return { kind: "site", path, siteRoot: decodedTabField(path.slice(APP_TAB_PREFIX.length)) };
+  if (path.startsWith(MOMENT_DIFF_TAB_PREFIX)) return { kind: "momentDiff", path, momentId: decodedTabField(path.slice(MOMENT_DIFF_TAB_PREFIX.length)) };
+  if (path.startsWith(VERSION_COMPARE_TAB_PREFIX)) return { kind: "versionCompare", path, versionId: decodedTabField(path.slice(VERSION_COMPARE_TAB_PREFIX.length)) };
+  if (path.startsWith(COLLECTION_TAB_PREFIX)) return { kind: "collection", path, collectionPath: decodedTabField(path.slice(COLLECTION_TAB_PREFIX.length)) };
+  if (path.startsWith(DATA_COLLECTION_TAB_PREFIX)) {
+    const parts = path.slice(DATA_COLLECTION_TAB_PREFIX.length).split("/");
+    if (parts.length === 2 && TABLE_ID.test(parts[1]!)) {
+      try { return { kind: "transactionalCollection", path, datasetPath: parseDatasetPath(decodeURIComponent(parts[0]!)), tableId: parts[1]! }; } catch { /* Removed below. */ }
+    }
+  }
+  return { kind: "removed", path };
 }
-
-export function isVirtualTabPath(path: string | null): boolean {
-  return (
-    parseTransactionalCollectionTabPath(path) !== null ||
-    isGraphTabPath(path) ||
-    isHistoryTabPath(path) ||
-    isChatsTabPath(path) ||
-    isMomentDiffTabPath(path) ||
-    isCollectionTabPath(path) ||
-    isVersionCompareTabPath(path) ||
-    isSiteTabPath(path)
-  );
+export function tabPath(tab: ParsedTab): string {
+  switch (tab.kind) {
+    case "chat": return chatTabPath(tab.target);
+    case "site": return tab.siteRoot === null ? tab.path : siteTabPath(tab.siteRoot);
+    case "momentDiff": return tab.momentId === null ? tab.path : momentDiffTabPath(tab.momentId);
+    case "versionCompare": return tab.versionId === null ? tab.path : versionCompareTabPath(tab.versionId);
+    case "collection": return tab.collectionPath === null ? tab.path : collectionTabPath(tab.collectionPath);
+    case "transactionalCollection": return transactionalCollectionTabPath(tab.datasetPath, tab.tableId);
+    case "graph": return GRAPH_TAB_PATH;
+    case "history": return HISTORY_TAB_PATH;
+    case "file": case "removed": return tab.path;
+  }
+}
+type TabTitle = (tab: ParsedTab, label?: string) => string;
+type TabRules = { virtual: boolean; singleton: boolean; title: TabTitle; tooltip: TabTitle; explorerTitle: TabTitle };
+const fileTitles = {
+  title: (tab: ParsedTab) => basenameOf(tab.path),
+  tooltip: (tab: ParsedTab) => tab.path,
+  explorerTitle: (tab: ParsedTab) => basenameOf(tab.path),
+};
+const chatTitle: TabTitle = (tab, label) => {
+  if (label !== undefined) return label;
+  if (tab.kind !== "chat") return "Chat";
+  return tab.target.kind === "home" ? "Home" : tab.target.kind === "new" ? "New message" : "Chat";
+};
+const diffTitle: TabTitle = (_tab, label) => {
+  const name = label === undefined ? undefined : basenameOf(label);
+  return name ? `Diff: ${name}` : "History change";
+};
+const collectionTitle: TabTitle = (_tab, label) => label ?? "Collection";
+export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
+  file: {
+    virtual: false,
+    singleton: false,
+    ...fileTitles,
+  },
+  removed: {
+    virtual: false,
+    singleton: false,
+    ...fileTitles,
+  },
+  graph: {
+    virtual: true,
+    singleton: false,
+    title: () => "Graph",
+    tooltip: () => "Workspace graph",
+    explorerTitle: () => "Graph",
+  },
+  history: {
+    virtual: true,
+    singleton: false,
+    title: () => "History",
+    tooltip: () => "Workspace history",
+    explorerTitle: () => "History",
+  },
+  chat: {
+    virtual: true,
+    singleton: true,
+    title: chatTitle,
+    tooltip: chatTitle,
+    explorerTitle: chatTitle,
+  },
+  site: {
+    virtual: true,
+    singleton: true,
+    ...fileTitles,
+    explorerTitle: tab => `App: ${tab.kind === "site" ? tab.siteRoot ?? "preview" : "preview"}`,
+  },
+  momentDiff: {
+    virtual: true,
+    singleton: false,
+    title: diffTitle,
+    tooltip: (_tab, label) => label ? `History diff: ${label}` : "History change",
+    explorerTitle: diffTitle,
+  },
+  versionCompare: {
+    virtual: true,
+    singleton: false,
+    title: () => "Compare with Main",
+    tooltip: () => "Compare this Version with Main",
+    explorerTitle: () => "Compare with Main",
+  },
+  collection: {
+    virtual: true,
+    singleton: false,
+    ...fileTitles,
+    explorerTitle: tab => basenameOf(tab.kind === "collection" ? tab.collectionPath ?? "Collection" : "Collection"),
+  },
+  transactionalCollection: {
+    virtual: true,
+    singleton: false,
+    title: collectionTitle,
+    tooltip: (_tab, label) => label ? `Collection: ${label}` : "Collection",
+    explorerTitle: collectionTitle,
+  },
+};
+export function singletonTabIdentity(tab: ParsedTab | null): string | null {
+  if (tab === null || !TAB_KINDS[tab.kind].singleton) return null;
+  if (tab.kind === "site" && tab.siteRoot === null) return null;
+  return tabPath(tab);
 }
 
 export interface WorkbenchTab {
@@ -522,17 +537,18 @@ export function openTab(
   path: string,
   targetGroupId: string = state.activeEditorGroup,
 ): WorkbenchState {
-  const singletonPath = canonicalSingletonEditorTabPath(path);
-  if (isSingletonEditorTabPath(path) && singletonPath === null) return state;
+  const parsed = parseTab(path);
+  const singletonPath = singletonTabIdentity(parsed);
+  if (TAB_KINDS[parsed.kind].singleton && singletonPath === null) return state;
   const openedPath = singletonPath ?? path;
   if (singletonPath !== null) {
     const existingGroup = state.editorGroups.find((group) =>
       group.tabs.some(
-        (tab) => canonicalSingletonEditorTabPath(tab.path) === singletonPath,
+        (tab) => singletonTabIdentity(parseTab(tab.path)) === singletonPath,
       ),
     );
     const existingTab = existingGroup?.tabs.find(
-      (tab) => canonicalSingletonEditorTabPath(tab.path) === singletonPath,
+      (tab) => singletonTabIdentity(parseTab(tab.path)) === singletonPath,
     );
     if (existingGroup && existingTab) {
       return activateTab(state, existingGroup.id, existingTab.path);
@@ -753,7 +769,7 @@ export function createEditorGroupRight(
   const requestedSource = state.editorGroups.find(
     (group) => group.id === sourceGroupId,
   );
-  if (isSingletonEditorTabPath(requestedSource?.activeTab ?? null)) return state;
+  if (TAB_KINDS[parseTab(requestedSource?.activeTab ?? null)?.kind ?? "removed"].singleton) return state;
   let base: WorkbenchState = {
     ...state,
     editorGroups: normalizeEditorGroupSizes(
@@ -986,7 +1002,8 @@ export function remapWorkbenchPaths(
   project: (path: string) => string | null,
 ): WorkbenchState {
   const projectTab = (path: string): string | null => {
-    const collectionPath = parseCollectionTabPath(path);
+    const tab = parseTab(path);
+    const collectionPath = tab.kind === "collection" ? tab.collectionPath : null;
     if (collectionPath === null) return project(path);
     const next = project(collectionPath);
     if (next === null) return null;
@@ -1061,7 +1078,7 @@ export function pruneMissingRestoredTabs(
     const tabs = group.tabs.filter(
       (tab) =>
         !restoredPaths.has(tab.path) ||
-        isVirtualTabPath(tab.path) ||
+        TAB_KINDS[parseTab(tab.path).kind].virtual ||
         fileExists(tab.path),
     );
     if (tabs.length === group.tabs.length) return group;
@@ -1168,11 +1185,11 @@ export function parseUiState(raw: unknown): WorkbenchState {
       const tabPaths = new Set<string>();
       const rawTabs = groupOwn("tabs");
       const rawActiveTab = migrateTabPath(groupOwn("activeTab"));
-      const normalizedActiveTab =
-        typeof rawActiveTab === "string"
-          ? (canonicalSingletonEditorTabPath(rawActiveTab) ??
-            (isSingletonEditorTabPath(rawActiveTab) ? null : rawActiveTab))
-          : null;
+      const parsedActiveTab = typeof rawActiveTab === "string" ? parseTab(rawActiveTab) : null;
+      const normalizedActiveTab = parsedActiveTab
+        ? (singletonTabIdentity(parsedActiveTab) ??
+          (TAB_KINDS[parsedActiveTab.kind].singleton ? null : parsedActiveTab.path))
+        : null;
       if (Array.isArray(rawTabs)) {
         for (const rawTab of rawTabs) {
           if (tabCount >= MAX_OPEN_TABS) break;
@@ -1180,15 +1197,15 @@ export function parseUiState(raw: unknown): WorkbenchState {
           if (
             typeof tab !== "string" ||
             tab.length === 0 ||
-            tab.length > 4096 ||
-            // A tab from a surface dohc no longer has. Dropped here, so it
-            // cannot survive as a workspace file path that does not exist.
-            isRemovedVirtualTabPath(tab)
+            tab.length > 4096
           ) {
             continue;
           }
-          const canonicalSingleton = canonicalSingletonEditorTabPath(tab);
-          if (isSingletonEditorTabPath(tab) && canonicalSingleton === null) {
+          const parsedTab = parseTab(tab);
+          // Removed surfaces never restore as workspace file paths.
+          if (parsedTab.kind === "removed") continue;
+          const canonicalSingleton = singletonTabIdentity(parsedTab);
+          if (TAB_KINDS[parsedTab.kind].singleton && canonicalSingleton === null) {
             continue;
           }
           const tabPath = canonicalSingleton ?? tab;

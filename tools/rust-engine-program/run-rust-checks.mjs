@@ -55,6 +55,7 @@ import {
   readTreeState,
 } from "./tree-provenance.mjs";
 import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
+import { clippy, fmtCheck, nextest } from "./gate-commands.mjs";
 import { readGit } from "./git-read.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -169,20 +170,17 @@ const required = [
     skipCode: 2,
     skipReason: "yjs/tsx unavailable; fixture drift not checked",
   },
-  { name: "fmt --check", cmd: "cargo fmt --all --check" },
+  { name: "fmt --check", cmd: `cargo ${fmtCheck.join(" ")}` },
   // `--locked` on every step that resolves dependencies: a CI substitute must
   // not rewrite Cargo.lock mid-run. Without it, `cargo build` over a stale
   // lock rewrites the file and the tree-provenance row fails — correctly, but
   // the reader gets a provenance refusal where a lockfile error was the fact.
-  {
-    name: "clippy -D warnings",
-    cmd: "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
-  },
+  { name: "clippy -D warnings", cmd: `cargo ${clippy.join(" ")}` },
   // nextest schedules the workspace's ~73 test binaries in parallel where
   // `cargo test` runs them one at a time — measured, that was ~90% of the
   // gate's wall clock. It runs no doctests by design; the `doctests` row
   // below keeps them.
-  { name: "test --workspace", cmd: "cargo nextest run --locked --workspace --no-fail-fast" },
+  { name: "test --workspace", cmd: `cargo ${nextest.join(" ")} --no-fail-fast` },
   { name: "doctests", cmd: "cargo test --locked --workspace --doc" },
   // Test builds enable fault hooks through testkit. Finish with the shipping
   // daemon so desktop preparation sees the default production features.
