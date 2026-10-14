@@ -2,7 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { accountsDatabaseError, composeConfig, dataDiskVolumeErrors, readSettings, relayDeploymentError } from "../../tools/self-host/config.mjs";
+import { accountsDatabaseError, composeConfig, dataDiskVolumeErrors, readValidSettings, relayDeploymentError } from "../../tools/self-host/config.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const usage = `node scripts/self-host/move.mjs [--env-file PATH]
@@ -29,7 +29,7 @@ export function parseMoveArguments(args) {
 }
 
 export function runMove(options, run = spawn, log = console.log) {
-  const settings = readSettings(options.envFile);
+  const settings = readValidSettings(options.envFile);
   if (!settings.DOHC_DATA_DIRECTORY) throw new Error("Set DOHC_DATA_DIRECTORY to the deployment folder on the attached disk.");
   const docker = args => run("docker", args);
   const config = composeConfig(options.envFile, settings, docker);

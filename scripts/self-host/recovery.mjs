@@ -48,8 +48,8 @@ export function parseRecoveryArguments(args) {
 }
 
 export async function recoveryComposeArgs(options) {
-  const { composeArgs, readSettings } = await import("../../tools/self-host/config.mjs");
-  return composeArgs(options.envFile, readSettings(options.envFile),
+  const { composeArgs, readValidSettings } = await import("../../tools/self-host/config.mjs");
+  return composeArgs(options.envFile, readValidSettings(options.envFile),
     ...options.composeFiles.flatMap(path => ["-f", path]), ...(options.project ? ["--project-name", options.project] : []));
 }
 

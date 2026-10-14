@@ -215,6 +215,7 @@ Each copy would accept different work under the same deployment identity.
 
 If the old host starts again without the disk, its relay cannot start because its data folder is missing.
 With an external database, its sign-in service can still start and use that database. Keep the old host off.
+Also remove the old host's address from your provider's allowlist, or change the database password and set the new one as `POSTGRES_PASSWORD` on the new host.
 
 ### Start the deployment on the new host
 

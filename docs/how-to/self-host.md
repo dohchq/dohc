@@ -233,6 +233,7 @@ The setup has no option to turn this check off.
    ```
 
    Use the host name that the provider's certificate names.
+   `POSTGRES_DB` and `POSTGRES_USER` can contain only letters, digits, underscores, hyphens and dots.
    `POSTGRES_PASSWORD` replaces the password that `init` generated.
 
 With `DOHC_POSTGRES_HOST` set, the setup and recovery commands add the external-database Compose overlay.
@@ -257,7 +258,10 @@ After that, every start and upgrade refuses to run in these cases:
 - With `DOHC_POSTGRES_HOST` set, the external database is unreachable or holds no dohc accounts.
 - With only `DOHC_DATA_DIRECTORY` set, the accounts volume on the host holds no accounts database.
 
+The accounts check accepts any database that holds dohc accounts, including another deployment's, so check that `POSTGRES_DB` names this deployment's database.
+
 A first start refuses unless the disk folders are empty.
+With `DOHC_POSTGRES_HOST` set and no data disk, a first start refuses if the relay's Docker volumes already hold relay data.
 A start also refuses when Docker cannot complete these checks.
 
 The deployment initializes fresh storage, applies authentication migrations, and starts the services.

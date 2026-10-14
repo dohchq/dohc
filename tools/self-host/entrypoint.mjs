@@ -1,6 +1,8 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 export function relayInitializationRequired(config, dataDirectory, continuityDirectory) {
   if (existsSync(config)) return false;
@@ -10,12 +12,24 @@ export function relayInitializationRequired(config, dataDirectory, continuityDir
   return true;
 }
 
+// Every service's pg reads its connection URL with this parser, at the version the lockfile pins.
+const parseConnection = url => createRequire(createRequire(new URL('../../services/workspace-api/package.json', import.meta.url))
+  .resolve('pg'))('pg-connection-string')(url);
+
 /** The bundled database stays inside the Compose network. An external one must present a certificate signed by the provider's CA. */
 export function postgresUrl(env) {
-  const credentials = `${encodeURIComponent(env.POSTGRES_USER ?? 'dohc')}:${encodeURIComponent(env.POSTGRES_PASSWORD)}`;
-  const database = encodeURIComponent(env.POSTGRES_DB ?? 'dohc');
-  if (!env.DOHC_POSTGRES_HOST) return `postgres://${credentials}@postgres:5432/${database}`;
-  return `postgres://${credentials}@${env.DOHC_POSTGRES_HOST}:${env.DOHC_POSTGRES_PORT}/${database}?sslmode=verify-full&sslrootcert=/etc/dohc/postgres-ca.pem`;
+  const user = env.POSTGRES_USER ?? 'dohc', password = env.POSTGRES_PASSWORD, database = env.POSTGRES_DB ?? 'dohc';
+  const external = Boolean(env.DOHC_POSTGRES_HOST), ca = '/etc/dohc/postgres-ca.pem';
+  const [host, port] = external ? [env.DOHC_POSTGRES_HOST, env.DOHC_POSTGRES_PORT] : ['postgres', '5432'];
+  const url = `postgres://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(database)}` +
+    (external ? `?sslmode=verify-full&sslrootcert=${ca}` : '');
+  // A value the parser reads back differently, such as the database "..", would connect elsewhere or without TLS.
+  const { ssl, ...parsed } = parseConnection(url);
+  if (!isDeepStrictEqual(parsed, { user, password, host, port, database, ...(external ? { sslmode: 'verify-full', sslrootcert: ca } : {}) }) ||
+    !isDeepStrictEqual(Object.keys(ssl ?? {}), external ? ['ca'] : [])) {
+    throw new Error('The database settings do not survive the connection URL unchanged. Check POSTGRES_DB, POSTGRES_USER, DOHC_POSTGRES_HOST and DOHC_POSTGRES_PORT.');
+  }
+  return url;
 }
 
 /** Migrations record every applied id, so a database without one has never held dohc's accounts. */

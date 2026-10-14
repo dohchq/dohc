@@ -36,7 +36,8 @@ test("a killed deployment's data disk starts in a fresh Compose project and refu
     const env = join(scratch, `${suffix}.env`);
     await writeFile(env, Object.entries({ ...secrets, DOHC_DEPLOYMENT_NAME: name, DOHC_IMAGE: image,
       DOHC_PUBLIC_ORIGIN: "https://drill.dohc.invalid", DOHC_PUBLIC_HOST: "drill.dohc.invalid", DOHC_SERVER_NETWORK_ACCESS: "public",
-      DOHC_SMTP_HOST: "smtp.dohc.invalid", DOHC_SMTP_FROM: "drill@dohc.invalid", DOHC_RELAY_AUTOMATIONS: "0", DOHC_DATA_DIRECTORY: dataDirectory,
+      DOHC_SMTP_HOST: "smtp.dohc.invalid", DOHC_SMTP_PORT: "587", DOHC_SMTP_SECURE: "false", DOHC_SMTP_FROM: "drill@dohc.invalid",
+      DOHC_RELAY_AUTOMATIONS: "0", DOHC_DATA_DIRECTORY: dataDirectory,
       DOHC_NETWORK_SUBNET: `${subnet}.0/24`, DOHC_NETWORK_IP_RANGE: `${subnet}.128/25`,
       DOHC_GATEWAY_ADDRESS: `${subnet}.2`, DOHC_SHARE_WEB_ADDRESS: `${subnet}.3`,
     }).map(([key, value]) => `${key}=${value}\n`).join(""), { mode: 0o600 });

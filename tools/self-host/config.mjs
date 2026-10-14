@@ -38,12 +38,18 @@ export function validateSettings(settings) {
     if (!/^\d+$/.test(settings.DOHC_POSTGRES_PORT ?? '') || Number(settings.DOHC_POSTGRES_PORT) < 1 || Number(settings.DOHC_POSTGRES_PORT) > 65535) {
       errors.push('Set DOHC_POSTGRES_PORT to your database port.');
     }
-    for (const name of ['POSTGRES_DB', 'POSTGRES_USER']) if (!settings[name]) errors.push(`Set ${name} for the external database.`);
     if (!/^(\/(?!\.\.?(\/|$))[a-zA-Z0-9._-]+)+$/.test(settings.DOHC_POSTGRES_CA_FILE ?? '')) {
       errors.push("Set DOHC_POSTGRES_CA_FILE to the absolute path of your database provider's CA certificate.");
     }
   } else if (settings.DOHC_POSTGRES_PORT || settings.DOHC_POSTGRES_CA_FILE) {
     errors.push('Set DOHC_POSTGRES_HOST to use an external database, or leave DOHC_POSTGRES_PORT and DOHC_POSTGRES_CA_FILE empty.');
+  }
+  // Services connect through a URL. A dot segment or reserved character would come back as another database name.
+  for (const name of ['POSTGRES_DB', 'POSTGRES_USER']) {
+    if (!settings[name]) { if (settings.DOHC_POSTGRES_HOST) errors.push(`Set ${name} for the external database.`); }
+    else if (!/^(?=.*[^.])[a-zA-Z0-9_.-]+$/.test(settings[name])) {
+      errors.push(`Use only letters, digits, underscores, hyphens and dots in ${name}, with at least one character that is not a dot.`);
+    }
   }
   try {
     const origin = new URL(settings.DOHC_PUBLIC_ORIGIN);
@@ -62,6 +68,13 @@ export function validateSettings(settings) {
     errors.push('Set DOHC_DATA_DIRECTORY to an absolute folder on the data disk, or leave it empty.');
   }
   return errors;
+}
+
+/** Refuses invalid settings, so a command stops before any Docker or database operation uses them. */
+export function readValidSettings(path) {
+  const settings = readSettings(path), errors = validateSettings(settings);
+  if (errors.length) throw new Error(errors.join('\n'));
+  return settings;
 }
 
 export function composeArgs(envFile, settings, ...args) {
@@ -104,15 +117,19 @@ export function dataDiskVolumeErrors(config, docker) {
   });
 }
 
-/** A first start needs empty disk folders. Every later start needs the deployment on them. */
+/** A first start needs empty relay storage. Every later start needs the deployment on the data disk. */
 export function relayDeploymentError(envFile, settings, docker, firstStart) {
   const { status } = docker(composeArgs(envFile, settings, 'run', '--rm', '--no-deps', '-T',
     '--entrypoint', 'node', 'relay-initialize', '-e', relayDeploymentCheck));
   const directory = settings.DOHC_DATA_DIRECTORY;
   if (![relayDeployment.found, relayDeployment.missingFile, relayDeployment.empty].includes(status)) {
-    return `Could not check the data disk in ${directory}. Check that the disk is mounted there and Docker is running, then try again.`;
+    return directory ? `Could not check the data disk in ${directory}. Check that the disk is mounted there and Docker is running, then try again.`
+      : "Could not check the relay's Docker volumes. Check that Docker is running, then try again.";
   }
-  if (firstStart) return status === relayDeployment.empty ? '' : `${directory} already holds relay data. Start without --first-start.`;
+  if (firstStart) {
+    if (status === relayDeployment.empty) return '';
+    return `${directory ? `${directory} already holds` : "The relay's Docker volumes already hold"} relay data. Start without --first-start.`;
+  }
   if (status === relayDeployment.empty) {
     return `No relay deployment found in ${directory}. Mount the data disk there and try again. ` +
       'Never recreate its folders: setup would create a new deployment.';
@@ -157,9 +174,12 @@ export function deploymentChecks(envFile, settings, docker, { start, firstStart 
       problems = dataDiskVolumeErrors(config, docker);
     } catch (error) { problems = [error.message]; }
     checks.push(['data disk volumes', problems.join(' ')]);
-    if (problems.length || !start) return checks;
+    if (problems.length) return checks;
+  }
+  // A first start with an external database creates its accounts, which would not own an existing relay deployment's workspaces.
+  if (start && (settings.DOHC_DATA_DIRECTORY || firstStart && settings.DOHC_POSTGRES_HOST)) {
     const problem = relayDeploymentError(envFile, settings, docker, firstStart);
-    checks.push(['relay deployment on the data disk', problem]);
+    checks.push([settings.DOHC_DATA_DIRECTORY ? 'relay deployment on the data disk' : 'relay deployment', problem]);
     if (problem) return checks;
   }
   // Every start after the first needs the accounts that own the deployment's workspaces.

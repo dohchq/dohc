@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -85,6 +85,13 @@ test("restore and failed maintenance remain stopped", async t => {
     if (failMaintenance) await assert.rejects(run, /refused/); else await run;
     assert.equal(mock.calls.some(args => args.includes("start")), false);
   }
+});
+test("invalid settings are refused before Docker runs", async t => {
+  const root = await fixture(t), mock = runner(), envFile = join(root, "deployment.env");
+  await writeFile(envFile, "DOHC_POSTGRES_HOST=db.provider.invalid:5432/dohc?sslmode=disable&unused=\n");
+  await assert.rejects(runRecovery(parseRecoveryArguments(["backup", join(root, "snapshot"), "--env-file", envFile]), mock.run, () => {}),
+    /Set DOHC_POSTGRES_HOST to your database host name/);
+  assert.deepEqual(mock.calls, []);
 });
 test("a foreign volume writer is refused before stop and named with its mount", async t => {
   const root = await fixture(t), mock = runner({ foreign: true });

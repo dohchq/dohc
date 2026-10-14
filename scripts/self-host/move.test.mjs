@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { initialSettings } from "../../tools/self-host/bootstrap.mjs";
 import { parseMoveArguments, runMove } from "./move.mjs";
 
+// Valid settings for a public deployment. Each test's `contents` add to them or replace them.
+const valid = readFileSync(new URL("../../.env.self-host.example", import.meta.url), "utf8") +
+  Object.entries({ ...initialSettings({ origin: "https://dohc.team.invalid", image: "dohc-self-host:v1" }),
+    DOHC_SMTP_HOST: "mail.team.invalid", DOHC_SMTP_FROM: "dohc@team.invalid" }).map(([key, value]) => `${key}=${value}\n`).join("");
 async function envFile(t, contents) {
   const root = await mkdtemp(join(tmpdir(), "dohc-move-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const path = join(root, "deployment.env");
-  await writeFile(path, contents);
+  await writeFile(path, valid + contents);
   return path;
 }
 const folders = { dohc_self_host_sync_relay: "sync-relay", dohc_self_host_relay_continuity: "continuity", dohc_self_host_host_data: "host-data" };
@@ -20,7 +26,8 @@ const config = { name: "dohc-self-host", services: { postgres: { image: "postgre
 } };
 // The external-database overlay leaves out the bundled database and its volume.
 const externalConfig = { ...config, services: {}, volumes: Object.fromEntries(Object.entries(config.volumes).filter(([key]) => key !== "dohc_self_host_postgres")) };
-const externalSettings = "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\nDOHC_POSTGRES_HOST=db.provider.invalid\nDOHC_POSTGRES_PORT=25060\nPOSTGRES_DB=dohc\n";
+const externalSettings = "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\nDOHC_POSTGRES_HOST=db.provider.invalid\nDOHC_POSTGRES_PORT=25060\n" +
+  "DOHC_POSTGRES_CA_FILE=/etc/dohc/postgres-ca.pem\nPOSTGRES_DB=dohc\n";
 const deployment = ["/pg/PG_VERSION", "/continuity/deployment.json", "/data/sync-relay.sqlite"];
 const accounts = { "dohc-self-host_dohc_self_host_postgres": { Driver: "local", Options: null } };
 
@@ -143,6 +150,17 @@ test("move refuses a deployment that keeps relay data in host volumes before Doc
   const path = await envFile(t, "DOHC_DATA_DIRECTORY=\n"), mock = host();
   assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), /Set DOHC_DATA_DIRECTORY/);
   assert.deepEqual(mock.calls, []);
+});
+
+test("move refuses invalid settings before Docker or the database sees them", async t => {
+  // The host would turn TLS off in the connection URL. The database name would fall back to another database.
+  const refusals = [["DOHC_POSTGRES_HOST=db.provider.invalid:5432/dohc?sslmode=disable&unused=\n", /Set DOHC_POSTGRES_HOST to your database host name/],
+    ["POSTGRES_DB=..\n", /Use only letters, digits, underscores, hyphens and dots in POSTGRES_DB/]];
+  for (const [setting, refusal] of refusals) {
+    const path = await envFile(t, externalSettings + setting), mock = host({ external: "present" });
+    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal);
+    assert.deepEqual(mock.calls, [], setting);
+  }
 });
 
 test("move accepts only an env file option", () => {
