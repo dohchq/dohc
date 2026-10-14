@@ -5369,7 +5369,7 @@ mod tests {
             INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state) \
             VALUES ('outbox',1,'append','delivery','base','base',1,1,1,1,1,'active');").unwrap();
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let retained: (String, Option<bool>) = conn
