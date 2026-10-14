@@ -7,6 +7,22 @@ const CHECKED_DELETE_DISCARD_SQL: &str =
     "DELETE FROM moments WHERE workspace_id=?1 AND moment_id=?2";
 const PROJECTION: &str = "dohc-engine-domain/src/collections/projection.rs";
 const HOSTED_RETIREMENT: &str = "dohc-engine-sync/src/hosted/retirement.rs";
+/// The first statement of the retirement transaction, before any write.
+const HOSTED_RETIREMENT_GUARD: &str =
+    "if !retirable(tx, workspace_id, object_id)? { return Ok(false); }";
+/// The one document, out of the scope, with every row its host wrote for it
+/// pushed and no export pending.
+const HOSTED_RETIRABLE_SQL: &str = "SELECT EXISTS(SELECT 1 FROM hosted_documents d \
+       JOIN hosted_replicas h ON h.workspace_id=d.workspace_id \
+       WHERE d.workspace_id=?1 AND d.object_id=?2 \
+         AND d.scope_generation<>h.scope_generation) \
+     AND NOT EXISTS(SELECT 1 FROM replication_log \
+       JOIN sync_identity USING (workspace_id,origin_id) \
+       WHERE workspace_id=?1 AND {DOCUMENT_NAMED_SQL}=?2 \
+         AND origin_seq>COALESCE((SELECT p.pushed_seq FROM sync_relay_push_state p \
+           WHERE p.workspace_id=?1 AND p.origin_id=sync_identity.origin_id),-1)) \
+     AND NOT EXISTS(SELECT 1 FROM live_audit_pending_exports \
+       WHERE workspace_id=?1 AND object_id=?2)";
 const RETAINED_TABLES: [&str; 4] = [
     "moments",
     "versions",
@@ -182,34 +198,76 @@ fn assert_checked_delete_discard_site(source: &str) {
     );
 }
 
-/// The body of `name`, a function in `source`, as tokens.
-fn function_body(source: &str, name: &str) -> String {
+/// `name`, a function in `source`.
+fn function(source: &str, name: &str) -> syn::ItemFn {
     syn::parse_file(source)
         .unwrap()
         .items
         .into_iter()
         .find_map(|item| match item {
-            syn::Item::Fn(function) if function.sig.ident == name => {
-                Some(function.block.into_token_stream().to_string())
-            }
+            syn::Item::Fn(function) if function.sig.ident == name => Some(function),
             _ => None,
         })
         .unwrap_or_else(|| panic!("hosted retirement must keep `{name}`"))
 }
 
+/// The body of `name`, a function in `source`, as tokens.
+fn function_body(source: &str, name: &str) -> String {
+    function(source, name).block.into_token_stream().to_string()
+}
+
+/// The value of every string literal under `cursor`, in order.
+fn string_literals(mut cursor: syn::buffer::Cursor, found: &mut Vec<String>) {
+    while !cursor.eof() {
+        if let Some((literal, next)) = cursor.literal() {
+            if let Ok(literal) = syn::parse_str::<syn::LitStr>(&literal.to_string()) {
+                found.push(literal.value());
+            }
+            cursor = next;
+        } else if let Some((inside, _, _, next)) = cursor.any_group() {
+            string_literals(inside, found);
+            cursor = next;
+        } else {
+            cursor = cursor.token_tree().unwrap().1;
+        }
+    }
+}
+
 fn assert_hosted_retirement_site(source: &str) {
-    let retire = function_body(source, "retire_hosted_document");
-    assert_eq!(destructive_statements(&retire), ["dynamic deletion"]);
-    let guard = retire
-        .find("retirable (tx , workspace_id , object_id)")
-        .expect("retirement must be guarded by `retirable`");
-    assert!(
-        retire.find("execute").is_some_and(|first| guard < first),
+    let retire = function(source, "retire_hosted_document");
+    let body = retire.block.to_token_stream().to_string();
+    assert_eq!(destructive_statements(&body), ["dynamic deletion"]);
+    let [syn::Stmt::Expr(syn::Expr::MethodCall(transaction), None)] = retire.block.stmts.as_slice()
+    else {
+        panic!("retirement must be one transaction");
+    };
+    let Some(syn::Expr::Closure(writes)) = transaction.args.last() else {
+        panic!("retirement must write in its transaction's closure");
+    };
+    let syn::Expr::Block(writes) = &*writes.body else {
+        panic!("retirement must write in a block");
+    };
+    let guard = syn::parse_str::<syn::Stmt>(HOSTED_RETIREMENT_GUARD).unwrap();
+    assert_eq!(transaction.method, "write_with");
+    assert_eq!(
+        writes
+            .block
+            .stmts
+            .first()
+            .map(|first| first.to_token_stream().to_string()),
+        Some(guard.to_token_stream().to_string()),
         "retirement must check `retirable` before it writes"
     );
-    assert!(
-        function_body(source, "retirable").contains("d.scope_generation<>h.scope_generation"),
-        "only a document that left a hosted replica's scope retires"
+    let retirable = function(source, "retirable").block.into_token_stream();
+    let mut literals = Vec::new();
+    string_literals(
+        syn::buffer::TokenBuffer::new2(retirable).begin(),
+        &mut literals,
+    );
+    assert_eq!(
+        literals,
+        [HOSTED_RETIRABLE_SQL],
+        "only the one document, out of the scope, pushed and with no export pending, retires"
     );
     assert!(
         source.contains(r#"const OBJECT: &str = "workspace_id=?1 AND object_id=?2";"#),
@@ -219,7 +277,11 @@ fn assert_hosted_retirement_site(source: &str) {
     for table in RETAINED_TABLES {
         let named = format!("\"{table}\"");
         let deleted = matches!(table, "moments" | "file_objects");
-        assert_eq!(rows.matches(&named).count(), usize::from(deleted), "{table}");
+        assert_eq!(
+            rows.matches(&named).count(),
+            usize::from(deleted),
+            "{table}"
+        );
         assert!(
             !deleted || rows.contains(&format!("object ({named})")),
             "retirement must delete only the document's own {table}"
@@ -241,8 +303,19 @@ fn hosted_retirement_entry_rejects_an_unguarded_or_wider_deletion() {
             })
         }
         fn retirable() {
-            query("SELECT EXISTS(SELECT 1 FROM hosted_documents d JOIN hosted_replicas h \
-                WHERE d.scope_generation<>h.scope_generation)")
+            let quiet: bool = conn.query_row(&format!(
+                "SELECT EXISTS(SELECT 1 FROM hosted_documents d \
+                   JOIN hosted_replicas h ON h.workspace_id=d.workspace_id \
+                   WHERE d.workspace_id=?1 AND d.object_id=?2 \
+                     AND d.scope_generation<>h.scope_generation) \
+                 AND NOT EXISTS(SELECT 1 FROM replication_log \
+                   JOIN sync_identity USING (workspace_id,origin_id) \
+                   WHERE workspace_id=?1 AND {DOCUMENT_NAMED_SQL}=?2 \
+                     AND origin_seq>COALESCE((SELECT p.pushed_seq FROM sync_relay_push_state p \
+                       WHERE p.workspace_id=?1 AND p.origin_id=sync_identity.origin_id),-1)) \
+                 AND NOT EXISTS(SELECT 1 FROM live_audit_pending_exports \
+                   WHERE workspace_id=?1 AND object_id=?2)"
+            ), params![workspace_id, object_id], |row| row.get(0))?;
         }
         fn retired_rows() {
             let object = |table| (table, OBJECT.to_owned());
@@ -251,12 +324,39 @@ fn hosted_retirement_entry_rejects_an_unguarded_or_wider_deletion() {
     "#;
     assert_hosted_retirement_site(guarded);
     for (from, to) in [
-        ("if !retirable(tx, workspace_id, object_id)? { return Ok(false); }", ""),
+        (
+            "if !retirable(tx, workspace_id, object_id)? { return Ok(false); }",
+            "",
+        ),
+        ("if !retirable(", "if retirable("),
         ("d.scope_generation<>h.scope_generation", "1"),
-        ("workspace_id=?1 AND object_id=?2", "workspace_id=?1"),
-        (r#"object("moments")"#, r#"("moments", "workspace_id=?1".to_owned())"#),
-        (r#"object("file_objects")"#, r#"object("file_objects"), object("versions")"#),
-        ("Ok(true)", r#"execute(tx, "DELETE FROM moments", &[])?; Ok(true)"#),
+        (" AND d.object_id=?2", ""),
+        (
+            "AND origin_seq>COALESCE((SELECT p.pushed_seq FROM sync_relay_push_state p \\\n                       \
+             WHERE p.workspace_id=?1 AND p.origin_id=sync_identity.origin_id),-1)",
+            "",
+        ),
+        (
+            "AND NOT EXISTS(SELECT 1 FROM live_audit_pending_exports \\\n                   \
+             WHERE workspace_id=?1 AND object_id=?2)",
+            "",
+        ),
+        (
+            r#""workspace_id=?1 AND object_id=?2";"#,
+            r#""workspace_id=?1";"#,
+        ),
+        (
+            r#"object("moments")"#,
+            r#"("moments", "workspace_id=?1".to_owned())"#,
+        ),
+        (
+            r#"object("file_objects")"#,
+            r#"object("file_objects"), object("versions")"#,
+        ),
+        (
+            "Ok(true)",
+            r#"execute(tx, "DELETE FROM moments", &[])?; Ok(true)"#,
+        ),
     ] {
         let source = guarded.replace(from, to);
         assert_ne!(source, guarded, "{from}");

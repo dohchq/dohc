@@ -1801,7 +1801,13 @@ fn a_ready_document_holds_at_a_withheld_conflict_parent_and_retains_nothing() {
     let (_parent, child, _) = withheld_conflict(&mut store);
     let feed = HostedFeed::new();
     feed.append(envelope("owner", 2, "workspace.init", json!({})));
-    feed.create("peer", 0, "hosted-object", "hosted.md", "before the conflict");
+    feed.create(
+        "peer",
+        0,
+        "hosted-object",
+        "hosted.md",
+        "before the conflict",
+    );
     feed.share("hosted-object", "hosted.md");
     feed.share("other-object", "other.md");
     let client = RelaySyncClient::new(feed);
@@ -1843,9 +1849,167 @@ fn a_ready_document_holds_at_a_withheld_conflict_parent_and_retains_nothing() {
             .pull_requests()
             .iter()
             .rev()
-            .any(|request| request.object_id.as_deref() == Some("hosted-object")
-                && request.cursor == child_seq - 1)
+            .any(
+                |request| request.object_id.as_deref() == Some("hosted-object")
+                    && request.cursor == child_seq - 1
+            )
     );
+}
+
+/// Sol's review of the hold above: a ready document's moment waited behind a
+/// live editor, retaining the conflict child and the rows behind it. Once
+/// the editor closed, replay applied the moment and held the document at the
+/// child, but its retained rows stayed, counting against the workspace's cap
+/// though they could never apply. The hold releases them, and its own read
+/// starts before the child.
+#[test]
+fn a_held_document_releases_the_work_it_retained_while_ready() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let (_parent, child, _) = withheld_conflict(&mut store);
+    let feed = HostedFeed::new();
+    feed.append(envelope("owner", 2, "workspace.init", json!({})));
+    feed.create(
+        "peer",
+        0,
+        "hosted-object",
+        "hosted.md",
+        "before the conflict",
+    );
+    feed.share("hosted-object", "hosted.md");
+    feed.share("other-object", "other.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+    assert!(ready(&store, "hosted-object"));
+
+    let feed = client.transport();
+    feed.replace(
+        "peer",
+        1,
+        "hosted-object",
+        "hosted.md",
+        "edited live",
+        ("hosted-object", "before the conflict", "moment-peer-0"),
+    );
+    let moment = feed.log.lock().unwrap().len();
+    feed.append(child);
+    let child_seq = moment as i64 + 1;
+    for seq in 0..3 {
+        feed.append(envelope(
+            "live",
+            seq,
+            "live.audit.application",
+            json!({"objectId": "hosted-object"}),
+        ));
+    }
+    hydrated(&mut store, &["edited live".to_owned()]);
+    retain_behind_closed_editor(&client, &mut store, moment);
+    // Later retained rows of the document, past the replay page, fill the
+    // workspace's cap.
+    let identity = read_sync_identity(&store, "ws").unwrap().unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            for seq in 0..9_995 {
+                let mut op = document_op(seq, child_seq + 4 + seq, "hosted-object");
+                op.origin_id = "filler".to_owned();
+                let json = serde_json::to_string(&op).unwrap();
+                tx.execute(
+                    "INSERT INTO relay_deferred_ops (workspace_id,origin_id,origin_seq, \
+                     replication_epoch,stream_identity,envelope_json,retained_bytes) \
+                     VALUES ('ws','filler',?1,?2,?3,?4,?5)",
+                    params![
+                        seq,
+                        identity.replication_epoch,
+                        identity.stream_identity,
+                        json,
+                        json.len() as i64
+                    ],
+                )
+                .map_err(SyncError::persist)?;
+                tx.execute(
+                    "INSERT INTO hosted_deferred_ops (workspace_id,origin_id,origin_seq,object_id,relay_seq) \
+                     VALUES ('ws','filler',?1,'hosted-object',?2)",
+                    params![seq, child_seq + 4 + seq],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    assert_eq!(retained(&store), 10_000);
+
+    sync(&client, &mut store);
+    assert_eq!(
+        content(&store).0.get("hosted-object").map(String::as_str),
+        Some("edited live"),
+        "the moment the editor held applied"
+    );
+    assert_eq!(hold(&store, "hosted-object"), Some(parent_withheld()));
+    assert_eq!(retained(&store), 0, "the held document retains nothing");
+    assert_eq!(
+        document(&store, "hosted-object").unwrap().backfill_cursor,
+        child_seq - 1,
+        "its own read starts at the child"
+    );
+    let again = pass(&client, &mut store, &NoFaults).unwrap();
+    assert_eq!(again.held.get("hosted-object"), Some(&parent_withheld()));
+    assert!(
+        client
+            .transport()
+            .pull_requests()
+            .iter()
+            .rev()
+            .any(
+                |request| request.object_id.as_deref() == Some("hosted-object")
+                    && request.cursor == child_seq - 1
+            )
+    );
+
+    let other = [
+        document_op(0, child_seq + 10_000, "other-object"),
+        document_op(1, child_seq + 10_001, "other-object"),
+    ];
+    crate::deferred::retain(&mut store, &identity, &[&other[0], &other[1]], &NoFaults)
+        .expect("another document retains work under the freed cap");
+}
+
+/// Opus's review: a read that stops below its document's read position, with
+/// no released work to explain it, would skip the row it stopped at. Commit
+/// refuses it and changes nothing.
+#[test]
+fn a_read_stopping_before_its_document_position_is_refused() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let feed = HostedFeed::new();
+    feed.append(envelope("owner", 2, "workspace.init", json!({})));
+    feed.create(
+        "peer",
+        0,
+        "hosted-object",
+        "hosted.md",
+        "before the conflict",
+    );
+    feed.share("hosted-object", "hosted.md");
+    let client = RelaySyncClient::new(feed);
+    sync(&client, &mut store);
+    let before = document(&store, "hosted-object").unwrap();
+    assert!(before.backfill_cursor > 0);
+
+    let mut outcome = pass(&client, &mut store, &NoFaults).unwrap();
+    let pending = outcome.pending_cursor.as_mut().unwrap();
+    pending.reads.insert(
+        "hosted-object".to_owned(),
+        crate::HostedRead {
+            cursor: before.backfill_cursor - 1,
+            stopped: Some(parent_withheld()),
+            complete: false,
+        },
+    );
+    assert!(matches!(
+        crate::commit_hosted_cursor(&mut store, "ws", pending, &NoFaults),
+        Err(SyncError::InvalidInput {
+            reason: crate::hosted::STOPPED_BEFORE_READ
+        })
+    ));
+    assert_eq!(document(&store, "hosted-object"), Some(before));
 }
 
 #[test]
@@ -1892,13 +2056,26 @@ fn live_writes_journal_and_push_under_the_service_host_origin() {
     );
 
     let client = RelaySyncClient::new(HostedFeed::new());
+    let mut progress = PushWorkspaceProgress::default();
     let outcome = client
-        .push_workspace(&mut store, "ws", &NoFaults, &NoLiveLeases, 3_000, 1_000_000)
+        .resume_push_workspace(
+            &mut store,
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3_000,
+            1_000_000,
+            &mut progress,
+        )
         .unwrap();
     assert!(matches!(
         outcome,
         SyncPassOutcome::Complete { pushed: 2, .. }
     ));
+    assert!(
+        !progress.writer_cache_reset_required(),
+        "a hosted push claims no local bases, so live sessions keep their documents"
+    );
     let pushes = client.transport().pushes.lock().unwrap().clone();
     assert_eq!(pushes.len(), 1, "one batch to the hosted log, and no probe");
     assert_eq!(pushes[0].origin_id, HOST);

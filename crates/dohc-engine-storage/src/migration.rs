@@ -4005,7 +4005,7 @@ mod tests {
     }
 
     #[test]
-    fn hosted_replica_applies_fresh_and_upgrades_a_store_at_the_store_role() {
+    fn hosted_replica_applies_fresh_and_upgrades_a_store_at_its_predecessor() {
         let hosted = |conn: &Connection| {
             conn.execute_batch(
                 "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
@@ -4085,7 +4085,6 @@ mod tests {
         let mut upgraded = open_bare(&dir.join("upgraded.db"));
         upgraded.pragma_update(None, "foreign_keys", true).unwrap();
         let before = migration_index("v2-hosted-replica");
-        assert_eq!(BASELINE_MIGRATIONS[before - 1].id, "v2-engine-store-role");
         run_migrations(
             &mut upgraded,
             &BASELINE_MIGRATIONS[..before],
@@ -4099,9 +4098,10 @@ mod tests {
                  VALUES ('ordinary','origin:a','epoch','stream',1);",
             )
             .unwrap();
+        let after = (BASELINE_MIGRATIONS.len() - before) as u32;
         assert!(matches!(
             run_migrations(&mut upgraded, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
-            MigrationOutcome::Applied { newly_applied: 1 }
+            MigrationOutcome::Applied { newly_applied } if newly_applied == after
         ));
         let replicas: i64 = upgraded
             .query_row("SELECT COUNT(*) FROM hosted_replicas", [], |row| row.get(0))

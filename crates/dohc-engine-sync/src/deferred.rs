@@ -167,6 +167,39 @@ pub(crate) fn first_unapplied_hosted(
         .transpose()
 }
 
+/// Release `object_id`'s retained work still to apply, answering the relay
+/// position of the first released op. A held document retains nothing: its
+/// own read fetches the work again from before that position.
+pub(crate) fn release_hosted_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace: &str,
+    object_id: &str,
+) -> Result<Option<i64>, SyncError> {
+    let retained = format!(
+        "FROM relay_deferred_ops d JOIN hosted_deferred_ops h
+         ON h.workspace_id=d.workspace_id AND h.origin_id=d.origin_id AND h.origin_seq=d.origin_seq
+         WHERE d.workspace_id=?1 AND h.object_id=?2 AND {UNAPPLIED}"
+    );
+    let first: Option<i64> = tx
+        .query_row(
+            &format!("SELECT MIN(h.relay_seq) {retained}"),
+            params![workspace, object_id],
+            |r| r.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if first.is_some() {
+        tx.execute(
+            &format!(
+                "DELETE FROM relay_deferred_ops WHERE workspace_id=?1 AND (origin_id,origin_seq) IN
+                 (SELECT d.origin_id,d.origin_seq {retained})"
+            ),
+            params![workspace, object_id],
+        )
+        .map_err(SyncError::persist)?;
+    }
+    Ok(first)
+}
+
 pub(crate) fn has_unapplied(store: &EngineStore, workspace: &str) -> Result<bool, RelayError> {
     store
         .read_with(|conn| {

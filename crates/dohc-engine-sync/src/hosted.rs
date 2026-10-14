@@ -36,6 +36,10 @@ pub const SERVICE_HOST_ORIGIN_PREFIX: &str = "service-host:";
 
 pub(crate) const NOT_A_HOSTED_REPLICA: &str = "workspace is not a hosted replica";
 
+/// A pass's read of a document that would restart past the row it stopped at.
+pub(crate) const STOPPED_BEFORE_READ: &str =
+    "a hosted read stopped before its document's read position";
+
 /// Why a passive store refuses every hosted operation.
 pub const PASSIVE_STORE_CANNOT_HOST: &str = "a passive store cannot host documents";
 
@@ -475,30 +479,32 @@ fn decode_status(
     held_by: Option<String>,
     held_conflict_id: Option<String>,
 ) -> Result<HostedDocumentStatus, SyncError> {
-    Ok(match (state, reason, held_path, held_by, held_conflict_id) {
-        ("backfilling", None, None, None, None) => HostedDocumentStatus::Backfilling,
-        ("ready", None, None, None, None) => HostedDocumentStatus::Ready,
-        ("held", Some("hosted-backfill-path-held"), Some(path), Some(held_by), None) => {
-            HostedDocumentStatus::Held(HostedHold::PathHeld { path, held_by })
-        }
-        ("held", Some("hosted-conflict-parent-withheld"), None, None, Some(conflict_id)) => {
-            HostedDocumentStatus::Held(HostedHold::ConflictParentWithheld { conflict_id })
-        }
-        ("held", Some("hosted-backfill-work-waiting"), None, None, None) => {
-            HostedDocumentStatus::Held(HostedHold::WorkWaiting)
-        }
-        ("held", Some("hosted-scope-path-mismatch"), head_path, None, None) => {
-            HostedDocumentStatus::Held(HostedHold::ScopePathMismatch {
-                scope_path: scope_path.to_owned(),
-                head_path,
-            })
-        }
-        _ => {
-            return Err(crate::error::local_corruption(
-                "a hosted document's state is malformed",
-            ));
-        }
-    })
+    Ok(
+        match (state, reason, held_path, held_by, held_conflict_id) {
+            ("backfilling", None, None, None, None) => HostedDocumentStatus::Backfilling,
+            ("ready", None, None, None, None) => HostedDocumentStatus::Ready,
+            ("held", Some("hosted-backfill-path-held"), Some(path), Some(held_by), None) => {
+                HostedDocumentStatus::Held(HostedHold::PathHeld { path, held_by })
+            }
+            ("held", Some("hosted-conflict-parent-withheld"), None, None, Some(conflict_id)) => {
+                HostedDocumentStatus::Held(HostedHold::ConflictParentWithheld { conflict_id })
+            }
+            ("held", Some("hosted-backfill-work-waiting"), None, None, None) => {
+                HostedDocumentStatus::Held(HostedHold::WorkWaiting)
+            }
+            ("held", Some("hosted-scope-path-mismatch"), head_path, None, None) => {
+                HostedDocumentStatus::Held(HostedHold::ScopePathMismatch {
+                    scope_path: scope_path.to_owned(),
+                    head_path,
+                })
+            }
+            _ => {
+                return Err(crate::error::local_corruption(
+                    "a hosted document's state is malformed",
+                ));
+            }
+        },
+    )
 }
 
 /// The replica's state, or `None` for a workspace that is not hosted.
@@ -701,7 +707,9 @@ impl HostedRead {
 /// caller pulls again. Each document read is settled in the same transaction:
 /// held where its read stopped, ready once its read completes with nothing of
 /// it waiting in deferred work and its head at its scope's path, and still
-/// backfilling otherwise. So readiness never precedes its content.
+/// backfilling otherwise. So readiness never precedes its content. A held
+/// document releases the deferred work it still has to apply, and its read
+/// restarts before it.
 pub fn commit_hosted_cursor(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -753,14 +761,38 @@ pub fn commit_hosted_cursor(
                 None if read.complete => "ready",
                 None => "backfilling",
             };
+            // A held document retains nothing, so its own read starts before
+            // the work it retained while ready.
+            let released = if hold.is_some() {
+                crate::deferred::release_hosted_in_tx(tx, workspace_id, object_id)?
+            } else {
+                None
+            };
+            let from: i64 = tx
+                .query_row(
+                    "SELECT backfill_cursor FROM hosted_documents \
+                     WHERE workspace_id=?1 AND object_id=?2",
+                    params![workspace_id, object_id],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            // A read that stops below where its document's read already is,
+            // and not at work this commit releases, would skip the row it
+            // stopped at.
+            if read.cursor < from && released.is_none_or(|first| read.cursor < first - 1) {
+                return Err(SyncError::InvalidInput {
+                    reason: STOPPED_BEFORE_READ,
+                });
+            }
+            let position = released.map_or(read.cursor, |first| read.cursor.min(first - 1));
             tx.execute(
-                "UPDATE hosted_documents SET backfill_cursor=MAX(backfill_cursor,?3),state=?4, \
+                "UPDATE hosted_documents SET backfill_cursor=?3,state=?4, \
                  held_reason=?5,held_path=?6,held_by=?7,held_conflict_id=?8 \
                  WHERE workspace_id=?1 AND object_id=?2",
                 params![
                     workspace_id,
                     object_id,
-                    read.cursor,
+                    position,
                     state,
                     hold.as_ref().map(HostedHold::reason),
                     hold.as_ref().and_then(HostedHold::held_path),

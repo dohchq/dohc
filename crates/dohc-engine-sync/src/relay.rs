@@ -1425,8 +1425,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let has_position = store
             .read_with(|conn| has_relay_position(conn, workspace_id))
             .map_err(local)?;
-        // The first pushed cursor can backfill and claim local bases.
-        progress.writer_cache_reset_required |= !has_position;
+        // The first pushed cursor can backfill and claim local bases. A hosted
+        // replica already replicates, so its pushes never backfill.
+        progress.writer_cache_reset_required |= !has_position && !hosted;
         let mut enrollment_prepared = has_position || hosted;
         if origins.is_empty() && !enrollment_prepared {
             let response = self.transport.push(push_probe_request(
@@ -2105,7 +2106,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 for (object_id, (cursor, more)) in reads {
                     let read = match pass.stopped.get(&object_id) {
                         Some(op) => crate::HostedRead {
-                            // Commit never moves a cursor back.
+                            // Commit refuses one below its document's read
+                            // that is not explained by work it releases.
                             cursor: op
                                 .relay_seq
                                 .map_or(0, |seq| cursor.min(seq.saturating_sub(1))),

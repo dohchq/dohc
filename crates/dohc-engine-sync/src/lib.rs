@@ -66,10 +66,9 @@ pub use enrolment::{originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_
 use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
 pub use hosted::{
-    DepartedDocument, DepartedHead, HOSTED_REPLICA_NOT_PRISTINE, HostedCursor,
-    HostedDocumentState, HostedDocumentStatus, HostedHold, HostedRead, HostedReplicaState,
-    PASSIVE_STORE_CANNOT_HOST, RetiredFile,
-    SERVICE_HOST_ORIGIN_PREFIX, commit_hosted_cursor, departed_hosted_documents,
+    DepartedDocument, DepartedHead, HOSTED_REPLICA_NOT_PRISTINE, HostedCursor, HostedDocumentState,
+    HostedDocumentStatus, HostedHold, HostedRead, HostedReplicaState, PASSIVE_STORE_CANNOT_HOST,
+    RetiredFile, SERVICE_HOST_ORIGIN_PREFIX, commit_hosted_cursor, departed_hosted_documents,
     forget_retired_hosted_file, hosted_document_retirable, is_hosted_replica, read_hosted_replica,
     retire_hosted_document, retired_hosted_files,
 };
