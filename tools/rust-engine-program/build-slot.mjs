@@ -616,7 +616,37 @@ function reclaimStaleTickets({ root, kind, owns = () => true }) {
   }
 }
 
-function createTicket(root, kind, heartbeatMs, metadata) {
+/** The slot count a waiting ticket's code uses. Tickets from older code record none. */
+function ticketSlots(root, kind, name, legacySlots) {
+  try {
+    return JSON.parse(readFileSync(join(root, `${kind}-queue`, name), "utf8")).slots ?? legacySlots;
+  } catch (error) {
+    // Admitted or reclaimed since the listing.
+    if (error.code === "ENOENT") return 0;
+    if (error instanceof SyntaxError) return legacySlots;
+    throw error;
+  }
+}
+
+/**
+ * The free slot the ticket at `position` may claim, or undefined. Older tickets
+ * claim first, each the lowest free slot its code can use. While some waiting
+ * code uses fewer slots, tickets that can use more take the slots it cannot,
+ * so an older verifier waiting for slot 1 never idles slot 2.
+ */
+export function admissionSlot(free, counts, position) {
+  const floor = Math.min(...counts.filter(count => count > 0));
+  const left = [...free];
+  for (let k = 0; k <= position; k += 1) {
+    const usable = left.filter(i => i <= counts[k]);
+    const slot = (counts[k] > floor ? usable.find(i => i > floor) : undefined) ?? usable[0];
+    if (k === position) return slot;
+    if (slot !== undefined) left.splice(left.indexOf(slot), 1);
+  }
+  return undefined;
+}
+
+function createTicket(root, kind, heartbeatMs, metadata, slots) {
   const queueDir = join(root, `${kind}-queue`);
   mkdirSync(queueDir, { recursive: true });
   // hrtime uses the host's monotonic clock, shared across its processes.
@@ -625,7 +655,7 @@ function createTicket(root, kind, heartbeatMs, metadata) {
   const path = join(queueDir, name);
   const temporary = `${path}.tmp`;
   try {
-    writeFileSync(temporary, JSON.stringify({ pid: process.pid, start: new Date().toISOString(), heartbeatMs, ...metadataFields(metadata) }), { flag: "wx" });
+    writeFileSync(temporary, JSON.stringify({ pid: process.pid, start: new Date().toISOString(), heartbeatMs, slots, ...metadataFields(metadata) }), { flag: "wx" });
     renameSync(temporary, path);
   } finally {
     try {
@@ -795,35 +825,43 @@ const canonical = path => {
 const verifierEntry = fileURLToPath(new URL("../../scripts/verification/verify.mjs", import.meta.url));
 
 /**
- * Hold the host's single verification lane for a whole PR gate, so two gates
- * never compete for the same cores and disk. Null on a single-tenant host.
- * A gate can wait behind several others, so this waits up to six hours.
- * Only this checkout's PR verifier may hold it; `entry` is the caller's script.
+ * The host's verification lane count. It is 1 unless `verification-lanes` in
+ * the verification slot root contains 2, so every verifier on the host agrees.
  */
 export function verificationLanes(env = process.env) {
-  const requested = env.DOHC_VERIFICATION_LANES ?? "1";
-  if (!["1", "2"].includes(requested)) throw new Error("DOHC_VERIFICATION_LANES must be 1 or 2.");
   const trialRoot = env.DOHC_VERIFICATION_SLOT_ROOT;
   const cargoRoot = resolveBuildBudget(env)?.root;
   if (trialRoot && (env.DOHC_VERIFICATION_TRIAL !== "1" || cargoRoot && canonical(trialRoot) === canonical(cargoRoot))) {
     throw new Error("A verification trial requires DOHC_VERIFICATION_TRIAL=1 and an isolated DOHC_VERIFICATION_SLOT_ROOT; keep Cargo on its shared root.");
   }
-  if (requested === "2" && !trialRoot) {
-    throw new Error("Two verification lanes require DOHC_VERIFICATION_TRIAL=1 and an isolated DOHC_VERIFICATION_SLOT_ROOT.");
-  }
-  return Number(requested);
+  const root = trialRoot ?? cargoRoot;
+  if (!root) return 1;
+  const path = join(root, "verification-lanes");
+  let setting;
+  try { setting = readFileSync(path, "utf8").trim(); }
+  catch (error) { if (error.code === "ENOENT") return 1; throw error; }
+  if (!["1", "2"].includes(setting)) throw new Error(`${path} must contain 1 or 2.`);
+  return Number(setting);
 }
 
-export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1] } = {}) {
+/**
+ * Hold one of the host's verification lanes for a whole PR gate, so gates
+ * never exceed the host's lane count. Null on a single-tenant host.
+ * A gate can wait behind several others, so this waits up to six hours.
+ * Only this checkout's PR verifier may hold it; `entry` is the caller's script.
+ * `lanes` replaces the host setting for a caller that has already read it, such as the queue service.
+ */
+export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1], signal, lanes } = {}) {
   if (!entry || canonical(entry) !== canonical(verifierEntry)) {
     throw new Error(`Only the PR verifier (${verifierEntry}) may hold a verification lane. Run pnpm verify:pr, or take a build slot for other Cargo work.`);
   }
-  const slots = verificationLanes(env);
+  const slots = lanes ?? verificationLanes(env);
   const budget = resolveBuildBudget(env);
   if (!budget) return null;
-  return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots,
+  // Verifiers older than the lane setting used one slot and record no count.
+  return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots, legacySlots: 1,
     kind: "verification-slot", lanes: "verification runs", metadata,
-    waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket });
+    waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket, signal });
 }
 
 /** A ticket observer failed, so acquisition stopped before admission instead of retrying. */
@@ -845,6 +883,7 @@ export class TicketEvidenceError extends Error {}
 async function acquireSlot({
   root,
   slots,
+  legacySlots = slots,
   kind,
   lanes,
   waitMs = 90 * 60_000,
@@ -856,6 +895,7 @@ async function acquireSlot({
   observeTicket,
   identityDelayMs,
   goneMs,
+  signal,
 }) {
   mkdirSync(root, { recursive: true });
   const label = kind.replace("-", " ");
@@ -874,6 +914,10 @@ async function acquireSlot({
   };
   const onSigint = () => cancel("SIGINT", 130);
   const onSigterm = () => cancel("SIGTERM", 143);
+  // A caller's signal stops the wait without touching the process's exit code.
+  const onAbort = () => { cancellation.abort(signal.reason ?? new Error(`${label} acquisition stopped.`)); removeTicket(); };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
   const observe = ({ name, path }) => {
     // Inspecting a returned thenable runs observer code too, so its failures must not reach the transient retry.
     try {
@@ -890,12 +934,17 @@ async function acquireSlot({
     cancellation.signal.throwIfAborted();
     let ahead = -1;
     let free = [];
+    let slot;
     const refreshQueue = () => {
-      ahead = queueTickets(root, kind).indexOf(ticket.name);
+      const tickets = queueTickets(root, kind);
+      ahead = tickets.indexOf(ticket.name);
       free = [];
       for (let i = 1; i <= slots; i += 1) {
         if (!existsSync(slotDir(root, i, kind))) free.push(i);
       }
+      // Waiting code can use fewer slots than this one only when older code may be waiting too.
+      const counts = slots === legacySlots ? tickets.map(() => slots) : tickets.map(name => name === ticket.name ? slots : ticketSlots(root, kind, name, legacySlots));
+      slot = ahead < 0 ? undefined : admissionSlot(free, counts, ahead);
     };
     try {
       if (ticket && !existsSync(ticket.path)) {
@@ -903,11 +952,11 @@ async function acquireSlot({
         ticket = undefined;
       }
       if (!ticket) {
-        ticket = createTicket(root, kind, heartbeatMs, metadata);
+        ticket = createTicket(root, kind, heartbeatMs, metadata, slots);
         if (observeTicket) observe(ticket);
       }
       refreshQueue();
-      const reserved = ahead > 0 && free.length > 0 && ahead >= free.length;
+      const reserved = ahead > 0 && free.length > 0 && slot === undefined;
       const sweepMs = reserved ? Math.min(pollMs, 1000) : pollMs;
       if (Date.now() - lastSweepAt >= sweepMs) {
         lastSweepAt = Date.now();
@@ -918,10 +967,10 @@ async function acquireSlot({
         ticket.remove();
         ticket = undefined;
       }
-      if (ahead >= 0 && ahead < free.length) {
-        // Reserve one free slot for each ticket ahead. Atomic mkdir arbitrates
+      if (slot !== undefined) {
+        // Tickets ahead keep the free slots they can claim. Atomic mkdir arbitrates
         // changing snapshots and old-code holders without blocking on a sweep.
-        const i = free[ahead];
+        const i = slot;
         const dir = slotDir(root, i, kind);
         let created = false;
         try {
@@ -935,6 +984,7 @@ async function acquireSlot({
     } catch (error) {
       if (error instanceof TicketEvidenceError || !transientFilesystemError(error, root, kind)) throw error;
       ahead = -1; // This snapshot cannot grant admission; retry after the sleep.
+      slot = undefined;
     }
     if (!denied) {
       // A waiter has time to learn its identity before it claims.
@@ -969,6 +1019,7 @@ async function acquireSlot({
     await sleep(Math.min(pollMs, 1000, Math.max(1, deadline - Date.now())), undefined, { signal: cancellation.signal });
   } } finally {
     removeTicket();
+    signal?.removeEventListener("abort", onAbort);
     process.off("exit", removeTicket);
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
