@@ -18,8 +18,8 @@ import { createRecoveryInstaller, type RecoveryInstallOptions } from "./recovery
 import { equalRecoveryCursor } from "./recovery-record.js";
 import type { CheckpointStageAllocation } from "./checkpoint-storage.js";
 import { createDatasetReplicaHost } from "./replica-host.js";
-import { historyStatement, readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
-export { historyStatement } from "./dataset-history.js";
+import { historyActivitySql, historyStatement, readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
+export { historyActivitySql, historyStatement } from "./dataset-history.js";
 import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled } from "./dataset-attempts.js";
 import { createDatasetAutomationClaims, DATASET_AUTOMATION_CHAIN_DEPTH, type DatasetActor, type DatasetPressed, type DatasetPressInput } from "./dataset-automation-claims.js";
 
@@ -784,7 +784,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
         const select = "SELECT c.dataset_id,json_extract(c.revision_json,'$.definition.name') AS name,j.revision FROM dohc_dataset_catalog c JOIN dohc_dataset_journals j ON j.workspace_id=c.workspace_id AND j.dataset_id=c.dataset_id LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND COALESCE(l.archived,0)=0";
         const rows = positions
           ? [...positions.keys()].flatMap(datasetId => { const row = historyStatement(db, select + " AND c.dataset_id=?").get(workspaceId, datasetId); return row ? [row] : []; })
-          : historyStatement(db, select + " ORDER BY c.dataset_id LIMIT ?").all(workspaceId, raw.maxSources ?? 129);
+          : historyStatement(db, select + ` ORDER BY ${historyActivitySql} DESC,c.dataset_id LIMIT ?`).all(workspaceId, raw.maxSources ?? 129);
         const pages = rows.filter(row => !skip.has(String(row.dataset_id)) && (!positions || positions.has(String(row.dataset_id)))).map(row => {
           const datasetId = String(row.dataset_id), key = { workspaceId, datasetId }, before = positions?.get(datasetId) ?? Number.MAX_SAFE_INTEGER;
           if (!Number.isSafeInteger(before) || before < 1) throw new DatasetHostError("invalid", "Invalid Collection history position.");

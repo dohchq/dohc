@@ -516,3 +516,12 @@ it("retries a rejected idle prefetch once in the foreground and uses its current
   expect(next).toMatchObject({ completeness: "complete", unavailableSources: [], entries: [{ name: "Renamed by owner" }] });
   expect(attempts).toBe(3);
 });
+
+it("keeps the most recently active Collections when the source count exceeds the cap", async () => {
+  const f = await fixture(), ids = Array.from({ length: HISTORY_MAX_SOURCES + 5 }, (_, n) => f.initialize(n + 1));
+  for (const [n, id] of ids.entries()) f.event(id, n + 1);
+  const page = await f.page({ limit: 1 });
+  expect(page.entries[0]).toMatchObject({ datasetId: ids.at(-1), sortAtMs: ids.length });
+  expect(page.nextCursor!.collections.map(s => s.datasetId)).not.toContain(ids[0]);
+  expect(page).toMatchObject({ completeness: "partial", omittedSources: 5 });
+});

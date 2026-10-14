@@ -13,6 +13,7 @@ type CollectionPage = DatasetHistoryPage & { name?: string; deleted?: boolean };
 type Source = TimelineCursor["collections"][number];
 export interface HistoryHeads {
   transferred: string[];
+  sourceIds?: string[];
   sourceCount?: number;
   pages: Array<CollectionPage & { name: string; lineage: string }>;
 }
@@ -194,7 +195,7 @@ export function createHistoryTimeline() {
     current();
     const pages = new Map<string, CollectionPage>(local.pages.map(p => [p.datasetId, { ...p, entries: [...p.entries] }]));
     if (!input.cursor && includeCollections) {
-      const ids = [...new Set([...local.pages.map(p => p.datasetId), ...local.transferred])].sort().filter(id => requestedObject?.kind !== "dataset" || requestedObject.datasetId === id);
+      const ids = [...new Set(local.sourceIds ?? [...local.pages.map(p => p.datasetId), ...local.transferred])].filter(id => requestedObject?.kind !== "dataset" || requestedObject.datasetId === id);
       state.omittedSources = requestedObject?.kind === "dataset" ? 0 : Math.max(0, (local.sourceCount ?? ids.length) - HISTORY_MAX_SOURCES);
       for (const datasetId of ids.slice(0, HISTORY_MAX_SOURCES)) {
         const p = pages.get(datasetId);

@@ -13,6 +13,12 @@ export function historyStatement(db: JournalDb, sql: string) {
   return statement;
 }
 
+/** Latest dated journal revision, using each table's workspace/dataset/revision index. */
+export const historyActivitySql = `(SELECT recorded_at_ms FROM (
+  SELECT * FROM (SELECT revision,recorded_at_ms FROM dohc_dataset_events WHERE workspace_id=j.workspace_id AND dataset_id=j.dataset_id ORDER BY revision DESC LIMIT 1)
+  UNION ALL SELECT * FROM (SELECT revision,recorded_at_ms FROM dohc_dataset_checkpoint_times WHERE workspace_id=j.workspace_id AND dataset_id=j.dataset_id ORDER BY revision DESC LIMIT 1)
+) ORDER BY revision DESC LIMIT 1)`;
+
 /** Called inside an owner-authorized transaction. No input payloads or grants leave this boundary. */
 export function readDatasetHistory(db: JournalDb, scope: DatasetScope, approved: DatasetRevision | undefined, before: number, limit: number, metadataOnly = false) {
   const receipt = metadataOnly ? "NULL" : "CASE WHEN length(CAST(e.result_json AS BLOB)) <= 16384 THEN e.result_json END";
