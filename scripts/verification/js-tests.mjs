@@ -1,9 +1,10 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { cancellationScope } from "./cancellation.mjs";
 import { pnpm, repoRoot, run } from "./process.mjs";
 import { startTiming, timed } from "./timing.mjs";
+import { flakyReporter, nodeTestFailures, readFlakyLog } from "./flaky.mjs";
 
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 const longestFirst = ["@dohc/ydoc-projection", "@dohc/desktop", "@dohc/sync-relay", "@dohc/app-backend-runtime"];
@@ -16,7 +17,8 @@ export function testPlan(packages) {
       : name === "@dohc/desktop" ? Math.min(4, Math.max(2, Math.floor(availableParallelism() / 4))) : 4;
     const vitest = /^vitest run(?: |$)/u.test(manifest.scripts[script]);
     return { name, script, resource: databasePackages.has(name) ? "postgres" : null,
-      args: ["--filter", name, "run", script, ...(vitest ? [`--maxWorkers=${workers}`] : [])] };
+      // A failing test runs once more; the reporter records each one that passed only on retry.
+      args: ["--filter", name, "run", script, ...(vitest ? [`--maxWorkers=${workers}`, "--retry=1", "--reporter=default", `--reporter=${flakyReporter}`] : [])] };
   }).sort((a, b) => {
     const priority = name => longestFirst.includes(name) ? longestFirst.indexOf(name) : longestFirst.length;
     return priority(a.name) - priority(b.name) || a.name.localeCompare(b.name);
@@ -66,12 +68,30 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     await cancellation.checkpoint();
     if (failure) throw failure;
   }
-  async function command(name, args) {
+  // `rerun` marks a node:test step: one that failed only in its tests runs once more.
+  async function command(name, args, { rerun = false } = {}) {
     await checkpoint();
-    const row = { name, args, log: join(output, name.replaceAll(/[^\w.-]/gu, "_") + ".log") };
+    const file = join(output, name.replaceAll(/[^\w.-]/gu, "_"));
+    const row = { name, args, log: `${file}.log` };
     report.steps.push(row);
-    return timed(row, () => run(...pnpm(args), { env, log: row.log }), save)
-      .catch(fail);
+    const flakyLog = `${file}.flaky.jsonl`;
+    const execute = log => run(...pnpm(args), { env: { ...env, DOHC_FLAKY_LOG: flakyLog }, log });
+    return timed(row, async () => {
+      try { return await execute(row.log); }
+      catch (error) {
+        // A failed build or check is not retried, and neither is a step whose report names no failed test.
+        const failed = rerun && error.commandExitFailure && existsSync(row.log) ? nodeTestFailures(readFileSync(row.log, "utf8")) : [];
+        if (!failed.length) throw error;
+        await checkpoint();
+        row.retryLog = `${file}.retry.log`;
+        const result = await execute(row.retryLog);
+        row.flaky = failed;
+        return result;
+      }
+    }, save).finally(() => {
+      const flaky = [...(row.flaky ?? []), ...readFlakyLog(flakyLog)];
+      if (flaky.length) { row.flaky = flaky; save(); }
+    }).catch(fail);
   }
   async function planPackages() {
     const inventory = await command("inventory", ["-r", "list", "--depth", "-1", "--json"]);
@@ -87,7 +107,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     if (!prepared) {
       await command("runtime-build", ["--filter", "@dohc/app-backend-runtime", "build"]);
     }
-    const repositoryChecks = command("repository", ["run", "test:repo"]);
+    const repositoryChecks = command("repository", ["run", "test:repo"], { rerun: true });
     const plan = planPackages().catch(fail);
     const databasePending = new Set();
     const packages = plan.then(async tasks => {
@@ -112,7 +132,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       await repositoryChecks;
       const tasks = await plan;
       if (tasks.some(task => task.name === "@dohc/desktop")) {
-        await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts:isolated"]);
+        await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts:isolated"], { rerun: true });
       }
       if (runProofs) {
         await databaseFinished.promise;
@@ -131,7 +151,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     // recovery fixture read. Package tests and proofs must also finish first.
     if (tasks.some(task => task.name === "@dohc/desktop")) {
       await beforeDesktopScripts?.();
-      await command("desktop-runtime-packaging", ["--filter", "@dohc/desktop", "run", "test:scripts:runtime"]);
+      await command("desktop-runtime-packaging", ["--filter", "@dohc/desktop", "run", "test:scripts:runtime"], { rerun: true });
     }
     await cancellation.checkpoint();
     report.verdict = "PASS";
@@ -142,6 +162,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
   } finally {
     const interrupted = await cancellation.dispose();
     if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
+    report.flaky = report.steps.flatMap(step => (step.flaky ?? []).map(test => ({ step: step.name, test })));
     finish(); save();
   }
 }
