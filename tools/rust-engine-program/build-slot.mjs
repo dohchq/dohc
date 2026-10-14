@@ -795,25 +795,31 @@ const canonical = path => {
 const verifierEntry = fileURLToPath(new URL("../../scripts/verification/verify.mjs", import.meta.url));
 
 /**
- * Hold the host's single verification lane for a whole PR gate, so two gates
- * never compete for the same cores and disk. Null on a single-tenant host.
- * A gate can wait behind several others, so this waits up to six hours.
- * Only this checkout's PR verifier may hold it; `entry` is the caller's script.
+ * The host's verification lane count. It is 1 unless `verification-lanes` in
+ * the verification slot root contains 2, so every verifier on the host agrees.
  */
 export function verificationLanes(env = process.env) {
-  const requested = env.DOHC_VERIFICATION_LANES ?? "1";
-  if (!["1", "2"].includes(requested)) throw new Error("DOHC_VERIFICATION_LANES must be 1 or 2.");
   const trialRoot = env.DOHC_VERIFICATION_SLOT_ROOT;
   const cargoRoot = resolveBuildBudget(env)?.root;
   if (trialRoot && (env.DOHC_VERIFICATION_TRIAL !== "1" || cargoRoot && canonical(trialRoot) === canonical(cargoRoot))) {
     throw new Error("A verification trial requires DOHC_VERIFICATION_TRIAL=1 and an isolated DOHC_VERIFICATION_SLOT_ROOT; keep Cargo on its shared root.");
   }
-  if (requested === "2" && !trialRoot) {
-    throw new Error("Two verification lanes require DOHC_VERIFICATION_TRIAL=1 and an isolated DOHC_VERIFICATION_SLOT_ROOT.");
-  }
-  return Number(requested);
+  const root = trialRoot ?? cargoRoot;
+  if (!root) return 1;
+  const path = join(root, "verification-lanes");
+  let setting;
+  try { setting = readFileSync(path, "utf8").trim(); }
+  catch (error) { if (error.code === "ENOENT") return 1; throw error; }
+  if (!["1", "2"].includes(setting)) throw new Error(`${path} must contain 1 or 2.`);
+  return Number(setting);
 }
 
+/**
+ * Hold one of the host's verification lanes for a whole PR gate, so gates
+ * never exceed the host's lane count. Null on a single-tenant host.
+ * A gate can wait behind several others, so this waits up to six hours.
+ * Only this checkout's PR verifier may hold it; `entry` is the caller's script.
+ */
 export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1], signal } = {}) {
   if (!entry || canonical(entry) !== canonical(verifierEntry)) {
     throw new Error(`Only the PR verifier (${verifierEntry}) may hold a verification lane. Run pnpm verify:pr, or take a build slot for other Cargo work.`);

@@ -503,24 +503,32 @@ test("inherited compiler and test settings cannot exceed a lane's budget", () =>
   assert.throws(() => capBuildParallelism({}, 0), /positive integer/);
 });
 
-test("full capacity stays one unless an isolated two-lane trial is explicit", async t => {
+test("the lane count is one unless the slot root's setting says two", async t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
-  assert.equal(verificationLanes({}), 1);
-  for (const env of [{DOHC_VERIFICATION_LANES: "0"}, {DOHC_VERIFICATION_LANES: "3"},
-    {DOHC_VERIFICATION_LANES: "2"}, {DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: "1", DOHC_BUILD_SLOT_ROOT: root, DOHC_VERIFICATION_SLOT_ROOT: root}]) {
-    assert.throws(() => verificationLanes(env), /must be 1 or 2|isolated/);
+  const env = {DOHC_BUILD_SLOT_ROOT: root};
+  assert.equal(verificationLanes(env), 1);
+  for (const setting of ["0", "3", "two"]) {
+    writeFileSync(join(root, "verification-lanes"), setting);
+    assert.throws(() => verificationLanes(env), /must contain 1 or 2/);
   }
-  const trial = join(root, "trial");
-  const env = {DOHC_BUILD_SLOT_ROOT: root, DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: "1"};
-  assert.equal(resolveBuildBudget(env).root, root);
+  assert.throws(() => verificationLanes({...env, DOHC_VERIFICATION_SLOT_ROOT: root, DOHC_VERIFICATION_TRIAL: "1"}), /isolated/);
+  writeFileSync(join(root, "verification-lanes"), "2\n");
+  assert.equal(verificationLanes(env), 2);
   const first = await verifierLane(env);
   const second = await verifierLane(env);
   try {
     assert.notEqual(first.name, second.name);
-    assert.equal(first.dir, join(trial, first.name));
+    assert.equal(first.dir, join(root, first.name));
     await assert.rejects(verifierLane(env, {waitMs: 0}), /all 2 slots are held/);
   } finally { first.release(); second.release(); }
+  // An isolated trial root has its own setting.
+  const trial = join(root, "trial");
+  mkdirSync(trial);
+  const trialEnv = {...env, DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_TRIAL: "1"};
+  assert.equal(verificationLanes(trialEnv), 1);
+  const lease = await verifierLane(trialEnv);
+  try { assert.equal(lease.dir, join(trial, lease.name)); } finally { lease.release(); }
 });
 
 test("queue status retains claim identity and estimates only from completed lane history", async t => {
@@ -569,7 +577,7 @@ test("status CLI reports invalid configuration and preserves an existing second 
   writeFileSync(join(second, "owner.json"), owner);
   const result = spawnSync(process.execPath, [new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).pathname.replace(/^\/(\w:)/u, "$1"), "--status"],
     {encoding: "utf8", timeout: 5000, env: {...process.env, DOHC_BUILD_SLOT_ROOT: root,
-      DOHC_VERIFICATION_SLOT_ROOT: root, DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: ""}});
+      DOHC_VERIFICATION_SLOT_ROOT: root, DOHC_VERIFICATION_TRIAL: ""}});
   assert.equal(result.status, 0, result.stderr);
   const status = JSON.parse(result.stdout);
   assert.equal(status.verificationSlots, null);
@@ -584,15 +592,17 @@ test("status CLI reports configured empty trial capacity without acquiring a lan
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
   const trial = join(root, "trial");
+  mkdirSync(trial);
+  writeFileSync(join(trial, "verification-lanes"), "2");
   const result = spawnSync(process.execPath, [new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).pathname.replace(/^\/(\w:)/u, "$1"), "--status"],
     {encoding: "utf8", timeout: 5000, env: {...process.env, DOHC_BUILD_SLOT_ROOT: root,
-      DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: "1"}});
+      DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_TRIAL: "1"}});
   assert.equal(result.status, 0, result.stderr);
   const status = JSON.parse(result.stdout);
   assert.equal(status.verificationSlots, 2);
   assert.equal(status.verificationConfigurationError, null);
   assert.equal(status.lanes.find(lane => lane.kind === "verification-slot").slots, 2);
-  assert.equal(existsSync(trial), false);
+  assert.deepEqual(readdirSync(trial), ["verification-lanes"]);
 });
 
 test("a verification ticket observer reads the published ticket before any lane exists", async () => {
