@@ -37,6 +37,7 @@ export function createWorkspaceReplicationRoutes(
   nowMs: () => number,
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
   lookupUserDisplayName?: LogAuthorNameLookup,
+  onLogRead?: (request: Request, workspaceId: string, rows: readonly SyncRelayLogRow[]) => void,
 ) {
   async function respondToWorkspaceRegistration(
     request: Request,
@@ -189,7 +190,7 @@ export function createWorkspaceReplicationRoutes(
         sinceRelaySeq: since,
         limit,
       });
-      return jsonResponse({
+      const response = jsonResponse({
         ok: true,
         ops: page.rows.map(servedLogOp),
         // A hidden epoch floor is a read filter, not a served log row. An
@@ -199,6 +200,8 @@ export function createWorkspaceReplicationRoutes(
         nextCursor: page.rows.length === 0 ? requestedSince : page.nextCursor,
         hasMore: page.hasMore,
       });
+      onLogRead?.(request, route.workspaceId, page.rows);
+      return response;
     }
 
     if (route.route === "log-coordinate" && request.method === "GET") {
@@ -214,7 +217,9 @@ export function createWorkspaceReplicationRoutes(
         originId: route.originId,
         originSeq: route.originSeq,
       });
-      return jsonResponse(logCoordinateAnswer(row, epochLogFloor));
+      const response = jsonResponse(logCoordinateAnswer(row, epochLogFloor));
+      if (row) onLogRead?.(request, route.workspaceId, [row]);
+      return response;
     }
 
     throw relayError("method_not_allowed");

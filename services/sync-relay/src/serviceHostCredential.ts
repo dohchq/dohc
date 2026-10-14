@@ -1,12 +1,16 @@
 import {createHmac, timingSafeEqual} from "node:crypto";
 import type {SyncRelayStorage} from "./storage";
-import type {ServiceHostEnrollment} from "./storage/serviceHostEnrollment";
+import type {ServiceHostWorkspace} from "./storage/serviceHostEnrollment";
 
 export interface ServiceHostCredentialKey {key: Uint8Array; namespace: string}
-export function deriveServiceHostBearer(enrollment: ServiceHostEnrollment, config: ServiceHostCredentialKey): string {
+/**
+ * The credential the service host replicates a workspace with. It belongs to
+ * the workspace, so documents can join and leave without replacing it.
+ */
+export function deriveServiceHostBearer(workspace: ServiceHostWorkspace, config: ServiceHostCredentialKey): string {
   if (config.key.byteLength < 32 || !config.namespace) throw new Error("Service host credential key is unavailable.");
-  const input = JSON.stringify(["dohc-service-replication-v1", config.namespace, enrollment.workspaceId, enrollment.objectId,
-    enrollment.ownerUserId, enrollment.replicationEpoch, enrollment.streamIdentity, enrollment.credentialNonce]);
+  const input = JSON.stringify(["dohc-service-replication-v2", config.namespace, workspace.workspaceId,
+    workspace.ownerUserId, workspace.replicationEpoch, workspace.streamIdentity]);
   return `dohc-service-v1.${createHmac("sha256", config.key).update(input).digest("base64url")}`;
 }
 
@@ -29,15 +33,17 @@ export function serviceHostFeedRoute(input: {workspaceId: string; method: string
   return parts[3] === "hosted" && serviceHostReplicationRoute({...input, pathname: [...parts.slice(0, 3), ...parts.slice(4)].join("/")});
 }
 
-/** A service token grants replication only, never account or share administration. */
+/**
+ * A service token grants replication and the scoped feed only, never account
+ * or share administration, and only while an enabled enrollment matches the
+ * workspace's current owner and identity.
+ */
 export function authorizeServiceHostReplication(storage: SyncRelayStorage, input: ServiceHostCredentialKey & {
   workspaceId: string; bearer: string; method: string; pathname: string;
 }): string | null {
   if (!/^dohc-service-v1\.[A-Za-z0-9_-]{43}$/.test(input.bearer) || !(serviceHostReplicationRoute(input) || serviceHostFeedRoute(input))) return null;
-  const supplied = Buffer.from(input.bearer);
-  for (const enrollment of storage.listCurrentServiceHostEnrollments(input.workspaceId)) {
-    const expected = Buffer.from(deriveServiceHostBearer(enrollment, input));
-    if (supplied.length === expected.length && timingSafeEqual(supplied, expected)) return enrollment.ownerUserId;
-  }
-  return null;
+  const workspace = storage.currentServiceHostWorkspace(input.workspaceId);
+  if (!workspace) return null;
+  const supplied = Buffer.from(input.bearer), expected = Buffer.from(deriveServiceHostBearer(workspace, input));
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected) ? workspace.ownerUserId : null;
 }

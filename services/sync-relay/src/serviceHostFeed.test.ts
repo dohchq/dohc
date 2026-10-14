@@ -3,6 +3,7 @@ import {sha256Hex} from "@dohc/workspace-core/hash";
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostFeedRoute} from "./serviceHostCredential";
 import {createServiceHostReplication} from "./serviceHostReplication";
+import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 import {hostedRowDecision, hostedWriteAllowed} from "./serviceHostFeed";
 import {parseLogOp, SERVICE_HOST_ORIGIN_PREFIX} from "./relayLogInputs";
 import {referencedBlobShas} from "./storage/blobReferences";
@@ -213,7 +214,8 @@ it("refuses writes outside the hosted documents and lets accepted edits settle a
   expect(await f.blobStatus(update.sha256)).toBe(200);
   // Still enrolled: work the relay accepted before revocation can settle.
   expect((await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", update)]], 1)).status).toBe(200);
-  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, nowMs: 30, guard() {}});
+  // Once the session host releases it, the uncovered document retires and the credential ends.
+  expect(f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: binding.objectId, nowMs: 30})).toMatchObject({enabled: false, retired: true});
   expect((await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", update)]], 2)).status).toBe(404);
 });
 
@@ -383,13 +385,18 @@ it("drops upload proof when the workspace stops being hosted", async () => {
   const {uploads} = f;
   const setEnabled = (path: string, enabled: boolean) =>
     f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, nowMs: 30, guard() {}});
+  const release = (objectId: string) => f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId, nowMs: 31});
   const kept = blob("kept upload");
   await f.upload(kept);
   f.enroll("docs/b.md");
   // Another document is still hosted.
   setEnabled("docs/b.md", false);
+  release("object-b");
   expect(uploads()).toBe(1);
+  // A Pause waits for the session host to release the document.
   setEnabled("docs/a.md", false);
+  expect(uploads()).toBe(1);
+  release(binding.objectId);
   expect(uploads()).toBe(0);
   setEnabled("docs/a.md", true);
   const edit = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", kept)] satisfies [string, Record<string, unknown>];
@@ -399,6 +406,78 @@ it("drops upload proof when the workspace stops being hosted", async () => {
   // A new workspace identity leaves every enrollment behind.
   expect(f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 40})).toBe("rotated");
   expect(uploads()).toBe(0);
+});
+
+it("reads only the current scope with the workspace's one credential as documents join and leave", async () => {
+  const f = await fixture();
+  // Every enrollment derives the same workspace credential.
+  expect(deriveServiceHostBearer(f.enroll("docs/b.md"), {key, namespace})).toBe(f.bearer);
+  expect(f.objects(await f.read())).toEqual(["workspace", binding.objectId, "object-b"]);
+  // A released Pause keeps the enrollment row, but not its scope.
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/b.md", ownerUserId: "owner-1", enabled: false, nowMs: 30, guard() {}});
+  expect(f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: "object-b", nowMs: 31})).toMatchObject({enabled: false, retired: false});
+  const left = await f.read();
+  expect(left.scope.documents).toEqual([{objectId: binding.objectId, path: "docs/a.md"}]);
+  expect(f.objects(left)).toEqual(["workspace", binding.objectId]);
+  expect(await f.blobStatus(B.sha256)).toBe(404);
+  expect((await f.request("GET", `log?${identity}&scope=${left.scope.token}&since=0&object=object-b`)).status).toBe(400);
+  expect((await f.push([["moment.append", write("object-b", "docs/b.md", B)]])).status).toBe(403);
+  // Ordinary replication stays open to the same credential until the session host switches over.
+  expect((await f.handle(new Request(`https://relay.test/sync/${ws}/log?${identity}`, {headers: {authorization: `Bearer ${f.bearer}`}}))).status).toBe(200);
+  // A new workspace identity leaves the enrollments, and so the credential, behind.
+  f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 40});
+  expect((await f.request("GET", "log?replicationEpoch=epoch-2&streamIdentity=stream-2")).status).toBe(404);
+});
+
+it("keeps a paused or stopped document in scope until the session host releases it", async () => {
+  const f = await fixture();
+  f.enroll("docs/b.md");
+  const set = (path: string, enabled: boolean, retire = false) =>
+    f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, retire, nowMs: 30, guard() {}});
+  const release = (objectId: string) => f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId, nowMs: 31});
+  const documents = async () => (await f.read()).scope.documents.map(row => row.objectId);
+  // A pending Pause or Stop keeps the binding, and so the scope, while unsettled work settles.
+  set("docs/a.md", false);
+  set("docs/b.md", false, true);
+  expect(await documents()).toEqual([binding.objectId, "object-b"]);
+  expect((await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]])).status).toBe(200);
+  // Resuming before the release cancels the Pause.
+  set("docs/a.md", true);
+  expect(release(binding.objectId)).toBeNull();
+  expect(release("object-b")).toMatchObject({enabled: false, retired: true});
+  expect(await documents()).toEqual([binding.objectId]);
+  expect(await f.blobStatus(B.sha256)).toBe(404);
+  // Revocation cuts reads at once; writes stay open until the release retires the document.
+  f.setGrant(scope.shareId, "status='revoked',revoked_at_ms=40");
+  expect(await documents()).toEqual([]);
+  expect([...f.storage.readServiceHostFeedScope(ws)!.hosted.keys()]).toEqual([binding.objectId]);
+  expect(release(binding.objectId)).toMatchObject({enabled: false, retired: true});
+  expect(f.storage.readServiceHostFeedScope(ws)).toBeNull();
+  expect((await f.request("GET", `log?${identity}`)).status).toBe(404);
+});
+
+it("keeps the read replica's routes and guards apart from the session host's", async () => {
+  const f = await fixture();
+  const principal = createReplicaReadPrincipal(f.storage);
+  const get = (handle: (request: Request) => Promise<Response>, bearer: string, suffix: string) =>
+    handle(new Request(`https://relay.test/sync/${ws}/${suffix}`, {headers: {authorization: `Bearer ${bearer}`}}));
+  const first = principal.issue(ws, "first");
+  expect((await get(principal.handle, first.bearer, `log?${identity}`)).status).toBe(200);
+  expect((await get(principal.handle, first.bearer, "live-journal")).status).toBe(200);
+  // Neither credential reaches the other's routes.
+  expect((await get(principal.handle, first.bearer, `hosted/log?${identity}`)).status).toBe(404);
+  expect((await get(f.handle, first.bearer, `hosted/log?${identity}`)).status).toBe(404);
+  expect((await get(f.handle, f.bearer, "live-journal")).status).toBe(404);
+  expect((await get(principal.handle, f.bearer, `log?${identity}`)).status).toBe(404);
+  // Ending either principal leaves the other reading.
+  principal.revoke(first);
+  expect((await get(principal.handle, first.bearer, "live-journal")).status).toBe(404);
+  expect((await get(f.handle, f.bearer, `hosted/log?${identity}`)).status).toBe(200);
+  const second = principal.issue(ws, "second");
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, nowMs: 30, guard() {}});
+  f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: binding.objectId, nowMs: 31});
+  expect((await get(f.handle, f.bearer, `hosted/log?${identity}`)).status).toBe(404);
+  expect((await get(principal.handle, second.bearer, "live-journal")).status).toBe(200);
 });
 
 it("admits the engine's own settlement batch for its hosted document, both ways", () => {

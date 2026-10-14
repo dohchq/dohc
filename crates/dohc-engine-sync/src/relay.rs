@@ -684,6 +684,14 @@ pub struct PushWorkspaceProgress {
     page: Option<PreparedPushPage>,
     batch_size: usize,
     file_versions_selected: bool,
+    writer_cache_reset_required: bool,
+}
+
+impl PushWorkspaceProgress {
+    /// Sticky across I/O continuations, including failed enrollment work.
+    pub fn writer_cache_reset_required(&self) -> bool {
+        self.writer_cache_reset_required
+    }
 }
 
 impl Default for PushWorkspaceProgress {
@@ -694,6 +702,7 @@ impl Default for PushWorkspaceProgress {
             page: None,
             batch_size: crate::MAX_PUSH_OPS_PER_BATCH,
             file_versions_selected: false,
+            writer_cache_reset_required: false,
         }
     }
 }
@@ -818,6 +827,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         page: &[ReplicationEnvelope],
     ) -> Result<(), RelayError> {
+        let passive = store.is_passive();
         let local_pushed_seq =
             read_pushed_seq(store, workspace_id, &identity.origin_id).map_err(local)?;
         let rows = store
@@ -966,7 +976,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }) || deferred.iter().any(|(origin_id, origin_seq, ..)| {
             origin_id == &identity.origin_id && *origin_seq > local_pushed_seq
         });
-        let relay_origin_max = if needs_confirmation {
+        let relay_origin_max = if needs_confirmation && !passive {
             // Empty pushes ignore the cursor; keep the request stable across deferred-I/O replay.
             let probe = self.transport.push(push_probe_request(
                 workspace_id,
@@ -1052,7 +1062,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .into_iter()
                 .filter(|(origin, seq)| {
                     !(page_coordinates.contains_key(&(origin.as_str(), *seq))
-                        || origin == &identity.origin_id && *seq > own_relay_bound)
+                        || !passive && origin == &identity.origin_id && *seq > own_relay_bound)
                 })
                 .map(|(origin_id, origin_seq)| LogCoordinateRequest {
                     workspace_id: workspace_id.to_owned(),
@@ -1076,7 +1086,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let lookup = |origin_id: &str, origin_seq: i64| {
                 if let Some(op) = page_coordinates.get(&(origin_id, origin_seq)) {
                     Ok(LogCoordinateResponse::Present((*op).clone()))
-                } else if origin_id == identity.origin_id && origin_seq > own_relay_bound {
+                } else if !passive
+                    && origin_id == identity.origin_id
+                    && origin_seq > own_relay_bound
+                {
                     Ok(LogCoordinateResponse::Absent)
                 } else {
                     responses
@@ -1105,7 +1118,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     LogCoordinateResponse::Absent
                         if repair.origin_id == identity.origin_id
-                            && local_pushed_seq < repair.origin_seq =>
+                            && local_pushed_seq < repair.origin_seq
+                            && !passive =>
                     {
                         None
                     }
@@ -1144,7 +1158,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     LogCoordinateResponse::Absent
                         if repair.origin_id == identity.origin_id
-                            && local_pushed_seq < repair.origin_seq =>
+                            && local_pushed_seq < repair.origin_seq
+                            && !passive =>
                     {
                         (None, true)
                     }
@@ -1271,6 +1286,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         max_read_bytes: usize,
         progress: &mut PushWorkspaceProgress,
     ) -> Result<SyncPassOutcome, RelayError> {
+        if store.is_passive() {
+            return Err(local(SyncError::InvalidInput {
+                reason: "passive store cannot write to the relay",
+            }));
+        }
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::IdentityRequired)?;
@@ -1300,6 +1320,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             faults,
             leases,
             now_ms,
+            &mut progress.writer_cache_reset_required,
         )
         .map_err(local)?;
         select_file_versions(
@@ -1317,6 +1338,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let has_position = store
             .read_with(|conn| has_relay_position(conn, workspace_id))
             .map_err(local)?;
+        // The first pushed cursor can backfill and claim local bases.
+        progress.writer_cache_reset_required |= !has_position;
         let mut enrollment_prepared = has_position;
         if origins.is_empty() && !has_position {
             let response = self.transport.push(push_probe_request(
@@ -1352,6 +1375,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     faults,
                     leases,
                     now_ms,
+                    &mut progress.writer_cache_reset_required,
                 )
                 .map_err(local)?,
             );
@@ -1529,6 +1553,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                                 faults,
                                 leases,
                                 now_ms,
+                                &mut progress.writer_cache_reset_required,
                             )
                             .map_err(local)?,
                         );
@@ -1968,6 +1993,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         account_id: Option<&str>,
         faults: &dyn FaultInjector,
     ) -> Result<ClaimResponse, RelayError> {
+        if store.is_passive() {
+            return Err(local(SyncError::InvalidInput {
+                reason: "passive store cannot write to the relay",
+            }));
+        }
         validate_identity_request(
             &req.workspace_id,
             &req.replication_epoch,
@@ -2427,6 +2457,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         channel_wire_id: &str,
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
+        if store.is_passive() {
+            return Err(local(SyncError::InvalidInput {
+                reason: "passive store cannot write to the relay",
+            }));
+        }
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::InvalidResponse)?;
@@ -2566,6 +2601,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         max_read_bytes: usize,
     ) -> Result<ShareProposalSubmitOutcome, RelayError> {
+        if store.is_passive() {
+            return Err(local(SyncError::InvalidInput {
+                reason: "passive store cannot write to the relay",
+            }));
+        }
         // The PINNED level is read here rather than trusted from the relay's
         // own refusal. A recipient offers nothing it was not granted, so a
         // View or Comment share never contacts the relay at all.

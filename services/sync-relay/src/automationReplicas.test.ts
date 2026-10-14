@@ -116,8 +116,7 @@ describe("the automation replica's credential", () => {
     expect(authorize({ bearer: deriveAutomationReplicaBearer(row, { key: new Uint8Array(32).fill(8), namespace }) })).toBeNull();
     expect(authorize({ bearer: deriveAutomationReplicaBearer({ ...row, incarnation: 2 }, { key, namespace }) })).toBeNull();
     // A service host credential for the same values never verifies here.
-    const service = deriveServiceHostBearer({ ...row, objectId: "o", path: "p", shareId: "s", enabled: true, retired: false,
-      createdAtMs: 0, updatedAtMs: 0, accountedBytes: 0 } as Parameters<typeof deriveServiceHostBearer>[0], { key, namespace });
+    const service = deriveServiceHostBearer(row, { key, namespace });
     expect(authorize({ bearer: service })).toBeNull();
 
     const handler = createServiceHostReplication({ storage, prefix: "dohc-automation-v1.",

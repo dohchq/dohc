@@ -1,8 +1,11 @@
+import type { LucideIcon } from "lucide-react";
 import { useRef, type KeyboardEvent } from "react";
 
 export type SegmentedOption<T extends string> = {
   value: T;
   label: string;
+  // Drawn in place of the label, which stays the option's name and tooltip.
+  icon?: LucideIcon;
   disabled?: boolean;
 };
 
@@ -82,28 +85,39 @@ export function SegmentedControl<T extends string>(props: {
   options: ReadonlyArray<SegmentedOption<T>>;
   onChange: (value: T) => void;
   disabled?: boolean;
+  testId?: string;
 }) {
   const group = useRadioGroup(props);
   return (
     <div
       role="radiogroup"
       aria-label={props.label}
+      data-testid={props.testId}
       onKeyDown={group.onKeyDown}
       className="flex rounded-lg border border-line bg-panel-2 p-0.5"
     >
-      {props.options.map((option, index) => (
-        <button
-          key={option.value}
-          {...group.radio(index)}
-          className={`flex-1 rounded-md px-2.5 py-1 text-xs transition-colors disabled:opacity-50 ${
-            props.value === option.value
-              ? "bg-bg text-ink shadow-sm"
-              : "text-muted enabled:hover:text-ink"
-          }`}
-        >
-          {option.label}
-        </button>
-      ))}
+      {props.options.map((option, index) => {
+        const Icon = option.icon;
+        return (
+          <button
+            key={option.value}
+            {...group.radio(index)}
+            aria-label={Icon ? option.label : undefined}
+            title={Icon ? option.label : undefined}
+            // An icon segment is a 24px square, the smallest target WCAG 2.5.8
+            // allows when targets touch.
+            className={`rounded-md transition-colors disabled:opacity-50 ${
+              Icon ? "grid size-6 place-items-center" : "flex-1 px-2.5 py-1 text-xs"
+            } ${
+              props.value === option.value
+                ? "bg-bg text-ink shadow-sm"
+                : "text-muted enabled:hover:text-ink"
+            }`}
+          >
+            {Icon ? <Icon size={13} aria-hidden /> : option.label}
+          </button>
+        );
+      })}
     </div>
   );
 }

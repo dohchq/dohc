@@ -17,7 +17,7 @@ import {
   type UnifiedDiffLine,
 } from "./unifiedDiff";
 import { EngineMomentSource, engineMomentSummary } from "./EngineHistory";
-import { parseMomentDiffTabPath } from "./workbenchState";
+import { parseTab } from "./workbenchState";
 import { hasBlockingModal } from "../modalFocus";
 import { SkeletonRows } from "../ui/SkeletonRows";
 
@@ -113,7 +113,10 @@ export function EngineMomentDiffPage({
   restoreRequested: boolean;
   onRestoreRequestTaken: () => void;
 }) {
-  const momentId = useMemo(() => parseMomentDiffTabPath(tabPath), [tabPath]);
+  const momentId = useMemo(() => {
+    const tab = parseTab(tabPath);
+    return tab.kind === "momentDiff" ? tab.momentId : null;
+  }, [tabPath]);
   const [state, setState] = useState<
     | { status: "loading" }
     | { status: "ready"; moment: EngineMomentDetailRecord | null; credit: MomentCredit }

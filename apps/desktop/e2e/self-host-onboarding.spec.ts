@@ -48,19 +48,21 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     await writeWorkspaceFiles(first, [{ path: "welcome.md", contents: "# Self-hosted workspace\n\nCreated before connecting.\n" }]);
     left = await launchDesktopApp({ workspace: first });
     const workspace = await openWorkspaceFromFirstRun(left.page, first);
-    // Sync and sharing lives in Settings; the connect form is inside it.
+    // Sync and sharing lives in Settings. Signed out, it opens the connect
+    // flow; once signed in, the flow hands back to the page and its switch.
     await left.page.getByTestId(activityPin("settings")).click();
     await left.page.getByTestId(settingsNavPin("cloud")).click();
-    await left.page.getByRole("button", { name: "Open sync and sharing" }).click();
+    await left.page.getByTestId("settings-cloud-connect").click();
     await expect(left.page.getByTestId("cloud-sync-panel")).toBeVisible();
     ownerBrowser = await browser.newContext();
     const ownerPage = await ownerBrowser.newPage();
     const approval = await openDesktopApproval(left, ownerPage, stack.account.origin);
     await createVerifiedAccount(ownerPage, stack.account, account, approval);
     await approveDesktop(ownerPage, account);
-    await expect(left.page.getByTestId("cloud-connected-email")).toHaveText(account.email);
-    await left.page.getByTestId("cloud-enable-sync").click();
-    await expect(left.page.getByTestId("cloud-workspace-synced")).toBeVisible();
+    await expect(left.page.getByTestId("settings-row-account")).toContainText(account.email);
+    const syncSwitch = left.page.getByRole("switch", { name: "Sync this workspace" });
+    await syncSwitch.click();
+    await expect(syncSwitch).toHaveAttribute("aria-checked", "true");
     await expect(left.page.getByTestId("cloud-sync-code")).toBeVisible();
     await left.page.getByTestId("cloud-copy-sync-code").click();
     await expect.poll(() => left!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(await left.page.getByTestId("cloud-sync-code").textContent());

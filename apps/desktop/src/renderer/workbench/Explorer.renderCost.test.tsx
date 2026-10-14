@@ -6,7 +6,7 @@ import { EditorTabs } from "./EditorTabs";
 import { Explorer, type ExplorerProps } from "./Explorer";
 import { buildTree } from "./path-tree";
 import { basenameOf } from "../path";
-import { isSingletonEditorTabPath } from "./workbenchState";
+import { parseTab } from "./workbenchState";
 import { useWorkspaceListing } from "../shell/useWorkspaceListing";
 import { indexFileListing } from "./file-listing-index";
 import type { DohcDesktopBridge } from "../../ipc/bridgeContract";
@@ -163,9 +163,10 @@ describe("Explorer render cost", () => {
       );
     }
     render(<Host />);
-    expect(vi.mocked(isSingletonEditorTabPath)).toHaveBeenCalledTimes(1);
+    const calls = vi.mocked(parseTab).mock.calls.length;
+    expect(calls).toBeGreaterThan(0);
     fireEvent.click(screen.getByTestId("bump"));
-    expect(vi.mocked(isSingletonEditorTabPath)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(parseTab)).toHaveBeenCalledTimes(calls);
   });
 
   // Selection state lives in the Explorer, so a click re-renders the tree —

@@ -1,5 +1,6 @@
 import {prepareHostedSettlements} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
-import {appendValidatedLiveJournal} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
+import {appendValidatedLiveJournal, readReplicaLiveJournal, decodeJournalRow} from "../../../services/sync-relay/src/storage/liveUpdateJournal.js";
+import {verifyRestoreCheckpoint} from "../../../services/sync-relay/src/storage/liveRestoreCheckpoint.js";
 import {stableJsonStringify} from "../../../services/sync-relay/src/canonicalJson.js";
 import {initialAcceptedHistoryDigest} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
 import {createLiveMarkdownRegistrationValidator} from "./liveDocumentValidation.js";
@@ -964,10 +965,31 @@ it("rolls back owner ACK reservation and quota changes when its progress UPDATE 
 });
 
 type AcceptedNative = {bytes: Uint8Array; source: Omit<ReturnType<typeof pendingSource>, "acceptedReceipt"> & {acceptedReceipt: ReturnType<ReturnType<typeof fixture>["add"]>}};
+// Seed completed prefix delivery without one durable commit per author.
+// Keep the band's final admission and application acknowledgement on the real path.
+function seedOwnerApplicationPrefix(f: ReturnType<typeof fixture>, terminal: ReturnType<ReturnType<typeof fixture>["add"]>, count: number) {
+  const where = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?";
+  const params = [f.document.workspaceId, f.document.mainVersionId, f.document.objectId, f.document.lineageClaimId, f.coordinate.hostId];
+  const owner = f.context.db.prepare(`SELECT * FROM sync_relay_live_delivery_owners WHERE relay_database_namespace=? AND ${where}`).get("restore-test", ...params)!;
+  const tip = JSON.stringify(terminal), sequence = 9, applicationSequence = count === 1 ? 9 : 2;
+  const charge = Buffer.byteLength(JSON.stringify(["restore-test", ...params, owner.origin_json, tip, terminal.journalCursor, sequence, applicationSequence]));
+  const reserved = f.context.db.prepare(`SELECT COUNT(*) AS count, SUM(reserved_bytes + accounted_bytes) AS bytes
+    FROM sync_relay_live_delivery_reservations WHERE ${where} AND journal_cursor>0 AND journal_cursor<=?`).get(...params, terminal.journalCursor)!;
+  expect(reserved.count).toBe(count);
+  const refund = Number(reserved.bytes) + Number(owner.accounted_bytes) - charge;
+  expect(f.context.db.prepare(`UPDATE sync_relay_live_delivery_owners
+    SET tip_receipt_json=?,tip_cursor=?,tip_sequence=?,tip_application_sequence=?,accounted_bytes=? WHERE relay_database_namespace=? AND ${where}`)
+    .run(tip, terminal.journalCursor, sequence, applicationSequence, charge, "restore-test", ...params).changes).toBe(1);
+  expect(f.context.db.prepare(`DELETE FROM sync_relay_live_delivery_reservations WHERE ${where} AND journal_cursor>0 AND journal_cursor<=?`)
+    .run(...params, terminal.journalCursor).changes).toBe(count);
+  expect(f.context.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?")
+    .run(refund, f.document.workspaceId, refund).changes).toBe(1);
+}
 function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device", events: boolean | "native" | number = false, selectedPoint = false) {
   const f = fixture(kind, mode);
   if (kind === "owner") f.adopt();
   let acceptedNative: AcceptedNative | undefined;
+  let seededPredecessor: ReturnType<typeof f.add> | null = null;
   const receipts: ReturnType<typeof f.add>[] = [];
   if (typeof events === "number") {
     const head = new Y.Doc();
@@ -989,7 +1011,13 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
           checkpointBytes: null, checkpointDigest: null, priorMetadata});
         priorMetadata = row.metadata;
         receipts.push(row.metadata.accepted.receipt);
-      }});
+      }
+        if (kind === "owner" && !selectedPoint && receipts.length) {
+          seededPredecessor = receipts.at(-1)!;
+          seedOwnerApplicationPrefix(f, seededPredecessor, receipts.length);
+          receipts.length = 0;
+        }
+      });
       {
         const index = events - 1;
         head.clientID = index + 1;
@@ -1034,7 +1062,7 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
     f.store.acknowledgeStopRestoreBootstrap(capture, bootstrapAck(next.baseline));
   }
   for (const [index, receipt] of receipts.entries()) {
-    f.store.acknowledgeStopRestoreApplication(capture, receipts[index - 1] ?? null, applicationAck(receipt, index === 0 ? 9 : 2));
+    f.store.acknowledgeStopRestoreApplication(capture, receipts[index - 1] ?? seededPredecessor, applicationAck(receipt, index === 0 && !seededPredecessor ? 9 : 2));
   }
   f.store.completeStopRestoreCut(capture);
   const operation = f.store.pendingStopRestoreFence(f.lookup).operation;
@@ -1365,6 +1393,30 @@ for (const saved of [false,true]) {
     }finally{f.close();}
   });
 }
+
+it("serves the exact retained restore admission and checkpoint before native application", async () => {
+  const f = contentProposalFixture("owner", "device", true);
+  try {
+    const proposed = f.store.recordStopRestoreProposal(f.input, f.encoded, policy, 200);
+    const lifecycle = f.store.admitStopRestoreProposal(f.input, proposed.proposalDigest, policy, 201);
+    expect(lifecycle.application).toBeNull();
+    const raw = f.raw.prepare("SELECT * FROM sync_relay_live_update_journal ORDER BY journal_cursor DESC LIMIT 1").get()!;
+    const decoded = decodeJournalRow(f.context.db, raw);
+    const proof = verifyRestoreCheckpoint(f.context.db, decoded);
+    const cursor = decoded.admitted.metadata.accepted.receipt.journalCursor;
+    const reading = readReplicaLiveJournal(f.context, {workspaceId: "workspace", after: cursor - 1, limit: 1});
+    // The page owns its proof even if retained evidence changes after the transaction closes.
+    f.context.tx(() => f.context.db.exec("UPDATE sync_relay_live_restore_lifecycles SET admission_json='{}'"));
+    const page = await reading;
+    expect(page).toEqual({rows: [{admitted: {metadata: decoded.admitted.metadata, updateBytes: Buffer.from(decoded.admitted.updateBytes).toString("base64")},
+      relayDatabaseNamespace: decoded.history.namespace, evidenceDigest: decoded.history.evidenceDigest, journalCursor: cursor,
+      restore: {operationId: decoded.restoreOperationId, checkpoint: {digest: decoded.checkpoint!.digest, bytes: Buffer.from(decoded.checkpoint!.bytes).toString("base64")}, proof},
+      authority: {lineageClaimId: f.document.lineageClaimId, baselineSequence: 1, restoreFenceGeneration: 2}}], nextCursor: cursor, hasMore: false});
+    const encoded = JSON.stringify(page);
+    for (const secret of ["hostCoordinate", "instanceId", "connectionId", "bearer", "cookie"]) expect(encoded).not.toContain(secret);
+    await expect(readReplicaLiveJournal(f.context, {workspaceId: "workspace", after: cursor - 1, limit: 1})).rejects.toThrow();
+  } finally {f.close();}
+});
 
 it.each([["bootstrap","service"],["bootstrap","device"],["owner","device"]] as const)("admits and resumes one durable restore replacement for %s on %s",(kind,mode)=>{
   const f=contentProposalFixture(kind,mode,kind==="owner");

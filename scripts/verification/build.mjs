@@ -44,7 +44,7 @@ const inputPaths = {
 };
 const environmentInputs = {
   engine: /^(CARGO_(BUILD_|PROFILE_|TARGET_|INCREMENTAL$|ENCODED_RUSTFLAGS$)|RUST(?:FLAGS|UP_TOOLCHAIN|C|C_WRAPPER|C_WORKSPACE_WRAPPER|DOC|DOCFLAGS)$|(?:CC|CXX|AR|CFLAGS|CXXFLAGS)(?:_|$))/,
-  desktop: /^(VITE_|NODE_ENV$|NODE_OPTIONS$|ESBUILD_BINARY_PATH$|DOHC_(?:POSTHOG_KEY|POSTHOG_HOST|SENTRY_DSN|SENTRY_DIST)$)/,
+  desktop: /^(VITE_|NODE_ENV$|NODE_OPTIONS$|ESBUILD_BINARY_PATH$|DOHC_(?:POSTHOG_KEY|POSTHOG_HOST|DESKTOP_DIST)$)/,
 };
 
 export function hashFile(path) {
@@ -95,7 +95,7 @@ export function sourceFingerprint(kind, root = repoRoot, selectedPaths, contents
     if (executable) { hash.update(name + "\0" + executable + "\0"); hash.update(readFileSync(executable)); }
   }
   if (kind === "engine") {
-    hash.update(execFileSync("rustc", ["-vV"], { cwd: root, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
+    hash.update(execFileSync("rustc", ["-vV"], { cwd: root, windowsHide: true, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
     // Cargo discovers configuration from its working directory through the filesystem root.
     for (let directory = resolve(root); dirname(directory) !== directory;) {
       directory = dirname(directory);
@@ -240,11 +240,13 @@ export function directoryFingerprint(path) {
 }
 
 // The Windows x64 probe owner and relay run on the compiler's pinned Node, so both trees are desktop artifacts.
+// Linux x64 stages only the Collection compiler's esbuild binary.
 export function artifactFingerprint(kind, root = repoRoot, platform = process.platform, arch = process.arch) {
   if (kind === "engine") return hashFile(enginePath);
   return createHash("sha256").update(JSON.stringify([
     "apps/desktop/dist", "apps/desktop/resources/cli-bin", "apps/desktop/resources/app-backend-runtime", "services/share-web/viewer/dist",
-    ...(platform === "win32" && arch === "x64" ? ["apps/desktop/resources/app-compiler", "apps/desktop/resources/agent-probe"] : []),
+    ...(arch === "x64" && ["win32", "linux"].includes(platform) ? ["apps/desktop/resources/app-compiler"] : []),
+    ...(platform === "win32" && arch === "x64" ? ["apps/desktop/resources/agent-probe"] : []),
   ].map((path) => [path, directoryFingerprint(join(root, path))]))).digest("hex");
 }
 

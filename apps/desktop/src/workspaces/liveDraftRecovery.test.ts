@@ -80,6 +80,8 @@ it.each(["half-written temp", "invalid path", "non-string update", "untracked pa
   const draft = {path: "a.txt", objectId: "object", contentKind: "plaintext" as const, text: "seen", update};
   await preserveLiveDraft(directory, "workspace", draft);
   await preserveLiveDraft(directory, "workspace", {...draft, text: "survivor"});
+  const throughMs = 1000;
+  for (const name of await readdir(directory)) await utimes(join(directory, name), new Date(0), new Date(0));
   const bad = join(directory, `${"0".repeat(64)}.${kind === "half-written temp" ? "tmp" : "json"}`);
   await writeFile(bad, kind === "half-written temp" ? '{"workspaceId":"workspace","path":"a.txt",' : JSON.stringify({
     workspaceId: "workspace", objectId: "object", path: kind === "invalid path" ? 7 : kind === "untracked path" ? ".env" : "a.txt",
@@ -88,10 +90,10 @@ it.each(["half-written temp", "invalid path", "non-string update", "untracked pa
   const records = await listLiveDraftRecovery(directory, "workspace");
   expect(records.map(record => record.text).sort()).toEqual(["seen", "survivor"]);
   const seen = records.find(record => record.text === "seen")!;
-  const after = await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now(), "a.txt", seen.recordId);
+  const after = await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), throughMs, "a.txt", seen.recordId);
   expect(after.map(record => record.text)).toEqual(["survivor"]);
   expect(await hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).toBe(true);
-  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), Date.now(), "a.txt", after[0]!.recordId);
+  await removeLiveDraftCopies(directory, "workspace", "object", snapshotSha(update), throughMs, "a.txt", after[0]!.recordId);
   expect(await hasRetainedLiveDraft(directory, "workspace", "a.txt", "object")).toBe(false);
   expect(await readdir(directory)).toEqual([bad.slice(directory.length + 1)]);
 });

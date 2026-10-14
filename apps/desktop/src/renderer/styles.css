@@ -160,9 +160,18 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  ::before,
-  ::after {
+  :where(:root:not([data-system-reduced-motion='false'])) {
+    &, &::before, &::after, *, ::before, ::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+}
+
+:where(:root[data-system-reduced-motion='true']) {
+  &, &::before, &::after, *, ::before, ::after {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
@@ -259,10 +268,15 @@ table {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :where(.dohc-menu-in) {
+  :where(:root:not([data-system-reduced-motion='false']) .dohc-menu-in) {
     animation-name: dohc-menu-fade !important;
     animation-duration: 60ms !important;
   }
+}
+
+:where(:root[data-system-reduced-motion='true'] .dohc-menu-in) {
+  animation-name: dohc-menu-fade !important;
+  animation-duration: 60ms !important;
 }
 
 /* Faint paper grid for brand moments (first-run) — texture, not decoration. */
@@ -2306,8 +2320,8 @@ body {
 
 /* ===========================================================================
  * Page identity — Notion-style title + emoji icon above the document body.
- * A serif page title on warm paper, an emoji icon that reveals a quiet "Add
- * icon" affordance on hover, and a small self-contained picker. This is a
+ * An emoji icon that reveals a quiet "Add icon" affordance on hover, and a
+ * small self-contained picker; the title is drawn in PageIdentity. This is a
  * sibling of the ProseMirror surface (never part of the doc), aligned to the
  * shared editor reading measure. Colors ride the theme tokens so both light
  * and dark come for free; the dark block only deepens the picker shadow.
@@ -2322,12 +2336,6 @@ body {
 .dohc-page-identity__inner {
   max-width: 720px;
   margin: 0 auto;
-}
-
-.dohc-page-identity__icon-row {
-  position: relative;
-  min-height: 20px;
-  margin-bottom: 4px;
 }
 
 .dohc-page-identity__icon {
@@ -2345,59 +2353,6 @@ body {
 
 .dohc-page-identity__icon:hover {
   @apply bg-hover;
-}
-
-.dohc-page-identity__add-icon {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  padding: 3px 6px;
-  color: var(--dohc-subtle);
-  font-size: 12.5px;
-  cursor: pointer;
-  opacity: 0;
-  transition:
-    opacity 100ms ease-out,
-    color 100ms ease-out;
-}
-
-.dohc-page-identity:hover .dohc-page-identity__add-icon,
-.dohc-page-identity__add-icon:focus-visible {
-  opacity: 1;
-}
-
-.dohc-page-identity__add-icon:hover {
-  color: var(--dohc-muted);
-}
-
-.dohc-page-identity__title {
-  display: block;
-  width: 100%;
-  field-sizing: content;
-  resize: none;
-  overflow: hidden;
-  border: 0;
-  background: transparent;
-  padding: 0;
-  color: var(--dohc-ink);
-  font-family: var(--font-serif);
-  font-size: 2em;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  line-height: 1.2;
-  outline: none;
-}
-
-.dohc-page-identity__title::placeholder {
-  color: var(--dohc-subtle);
-  font-weight: 600;
-}
-
-.dohc-page-identity__title:read-only {
-  cursor: default;
 }
 
 .dohc-page-identity__picker {
@@ -2480,151 +2435,6 @@ body {
 
 [data-theme='dark'] .dohc-page-identity__picker {
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
-}
-
-/* ===========================================================================
- * Inline document properties — Notion-style rows in the document flow, sitting
- * directly under the title (below PageIdentity, above the body) and aligned to
- * the same reading measure. Quiet by design: a small mono key on the left, the
- * value on the right, borderless inputs that read as text until hovered/focused,
- * and a whisper "Add a property" affordance. No box, no divider — the brand
- * prefers whitespace over chrome. Both data modes (local body frontmatter and
- * the engine Y.Map) render through this exact surface.
- * ========================================================================= */
-.dohc-page-properties {
-  box-sizing: border-box;
-  width: 100%;
-  padding: 8px 56px 0;
-  background: var(--dohc-bg);
-}
-
-.dohc-page-properties__inner {
-  max-width: 720px;
-  margin: 0 auto;
-}
-
-.dohc-page-properties__row {
-  display: grid;
-  grid-template-columns: minmax(88px, 168px) minmax(0, 1fr) 22px;
-  align-items: center;
-  gap: 6px;
-  min-height: 28px;
-  border-radius: 6px;
-}
-
-.dohc-page-properties__key,
-.dohc-page-properties__value {
-  min-width: 0;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  padding: 3px 6px;
-  outline: none;
-  transition:
-    background-color 100ms ease-out,
-    box-shadow 100ms ease-out;
-}
-
-.dohc-page-properties__key {
-  color: var(--dohc-muted);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-}
-
-.dohc-page-properties__value {
-  color: var(--dohc-ink);
-  font-size: 13px;
-}
-
-.dohc-page-properties__key::placeholder,
-.dohc-page-properties__value::placeholder {
-  color: var(--dohc-subtle);
-}
-
-.dohc-page-properties__key.is-invalid {
-  color: var(--dohc-danger);
-}
-
-.dohc-page-properties__key:hover,
-.dohc-page-properties__value:hover {
-  @apply bg-hover;
-}
-
-.dohc-page-properties__key:focus,
-.dohc-page-properties__value:focus {
-  background: var(--dohc-panel-2);
-  box-shadow: inset 0 0 0 1px var(--dohc-line);
-}
-
-/* Reserved/duplicate-name notice sits where the value would — same column,
- * quiet danger text, never an input the user can commit a bad value into. */
-.dohc-page-properties__flag {
-  overflow: hidden;
-  padding: 0 6px;
-  color: var(--dohc-danger);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-}
-
-.dohc-page-properties__remove {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--dohc-subtle);
-  cursor: pointer;
-  opacity: 0;
-  transition:
-    opacity 100ms ease-out,
-    color 100ms ease-out,
-    background-color 100ms ease-out;
-}
-
-.dohc-page-properties__row:hover .dohc-page-properties__remove,
-.dohc-page-properties__remove:focus-visible {
-  opacity: 1;
-}
-
-.dohc-page-properties__remove:hover {
-  @apply bg-hover;
-  color: var(--dohc-danger);
-}
-
-.dohc-page-properties__add {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 2px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  padding: 4px 6px;
-  color: var(--dohc-subtle);
-  font-size: 12px;
-  cursor: pointer;
-  transition:
-    color 100ms ease-out,
-    opacity 100ms ease-out;
-}
-
-.dohc-page-properties__add:hover {
-  color: var(--dohc-muted);
-}
-
-/* Empty document: the add row is the ONLY thing here, so keep it a whisper —
- * revealed when the pointer is over the top-matter zone, like the "Add icon"
- * affordance — instead of stamping chrome on every property-less page. */
-.dohc-page-properties__add--empty {
-  opacity: 0;
-}
-
-.dohc-page-topmatter:hover .dohc-page-properties__add--empty,
-.dohc-page-properties__add--empty:focus-visible {
-  opacity: 1;
 }
 
 /* ===================================================================== *

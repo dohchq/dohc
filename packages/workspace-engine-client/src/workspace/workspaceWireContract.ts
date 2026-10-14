@@ -90,6 +90,7 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
       })
     | null;
   captureMode?: "none";
+  storeMode?: "passive";
   recoverRunningDispatches?: boolean;
 };
 export type CaptureRecoveryImportParams = WorkspaceJsonObject & {
@@ -1029,7 +1030,21 @@ const GranularChatMessageSearchResponseSchema = mutableStruct({
   saturated: Schema.Boolean,
 });
 
+const CaptureFileHoldSchema = mutableStruct({
+  workspaceId: Schema.NonEmptyString,
+  sourceVersionId: Schema.NonEmptyString,
+  objectId: Schema.NonEmptyString,
+  path: Schema.NonEmptyString,
+  observedSha256: Schema.NonEmptyString,
+  observedSize: Schema.Int,
+  reason: Schema.Literal("ydoc-resolution-not-representable"),
+  observedAtMs: Schema.Int,
+  attemptCount: Schema.Int,
+  retryRequested: Schema.Boolean,
+});
+
 const CaptureFlushResultSchema = mutableStruct({
+  heldFiles: Schema.mutable(Schema.Array(CaptureFileHoldSchema)),
   settled: Schema.Boolean,
   running: Schema.Boolean,
   degraded: Schema.Boolean,
@@ -1261,6 +1276,7 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]:
     GranularChatMessageSearchResponseSchema,
   [WORKSPACE_METHOD.watcherStatus]: mutableStruct({
+    heldFiles: Schema.mutable(Schema.Array(CaptureFileHoldSchema)),
     running: Schema.Boolean,
     degraded: Schema.Boolean,
     terminal: Schema.Boolean,

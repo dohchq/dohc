@@ -19,6 +19,7 @@ use dohc_engine_protocol::{
     },
     wire::WorkspaceHandle,
 };
+use dohc_engine_runtime::WorkspaceSupervisor;
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
@@ -1251,6 +1252,21 @@ async fn assert_open_document_artifact_recovery_inner(
         "crash" => {
             drop(a_transport);
             drop(a_service);
+            // Engine drop closes its store actor on a teardown thread. The
+            // replacement open waits out a closing actor but would attach to a
+            // registered one, so wait until the registry no longer holds it.
+            let db = engine_db_path(&a_scratch).unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while WorkspaceSupervisor::global()
+                    .generation_of(&db)
+                    .unwrap()
+                    .is_some()
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("dropped engine must release its store actor");
             a_service = Arc::new(EngineService::new());
             a_transport = InProcessTransport::new(Arc::clone(&a_service));
             a = open_uncaptured_workspace(&a_transport, &a_scratch, &relay, workspace).await;

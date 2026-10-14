@@ -31,6 +31,8 @@
   "desktop:read-usage-record": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:clear-usage-record": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:set-usage-record-enabled": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:start-usage-record": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:restore-usage-record": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:register-chat-dispatch-notices": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:dismiss-chat-dispatch-notice": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:read-schedule-host": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "main.scheduleHostState" } },
@@ -53,5 +55,6 @@
   "desktop:engine-ydoc-retry-save": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "engineYDocSessionIpc.retrySave" } },
   "desktop:update-share-direct-write-delivery": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "shareDirectWriteDelivery.sessionWorkspaceAndDocumentMatch" } },
   "desktop:typing-recovery": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:get-folder-app": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:get-folder-app": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:get-system-reduced-motion": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null }
 }

@@ -3,6 +3,7 @@ import {accountDisplayName} from "./discussionRoutes";
 import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
+import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -16,6 +17,7 @@ import {
 import { Pool } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
+import { createSignUpInviteRoute } from "./signUpInviteRoute";
 import { errorBody, errorResponse, notFound } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
@@ -33,6 +35,8 @@ import {readOwnerAdmissionConfig,startOwnerAdmission} from "./ownerAdmissionConf
 import {liveValidation} from "./liveValidation.js";
 import {readRelayDeviceDeliveryConfig} from "./deviceLiveHostConfig";
 import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
+import { startPublicationOperator } from "./appPublicationOperator";
+import { operatorSocketPath } from "./appPublicationOperatorProtocol";
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
@@ -410,7 +414,9 @@ const relayHandler = guardRelayResponses(storage, request => {
   if (isLinkLivePath(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   return relayApplication(request);
 });
+const signUpInvites = secret.length >= 32 ? createSignUpInviteRoute({storage, key: signUpInviteKey(secret)}) : undefined;
 const fetchHandler = async (request: Request): Promise<Response> => {
+  if (signUpInvites && new URL(request.url).pathname === SIGN_UP_INVITE_PATH) return signUpInvites(request);
   if (new URL(request.url).pathname === "/ready") {
     const ready = !storage.unavailable.aborted && (!selfHostedLive || (!!selfHost && !selfHost.unavailable));
     return Response.json({ok: ready, service: "sync-relay", selfHostedLive: selfHostedLive && ready, apiVersions: RELAY_API_VERSIONS,
@@ -531,6 +537,7 @@ const server = serveFetchHandler({
 const host = testAuthSeam ? "127.0.0.1" : (process.env.SYNC_RELAY_BIND ?? "0.0.0.0");
 let deviceControl: ReturnType<typeof createDeviceControl> | undefined;
 const deviceDeliveryConfig = process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG;
+const trustedOwnerAccount = async (accountId: string) => ({accountId, name: await accountDisplayName(lookupUserDisplayName, accountId) ?? "Unnamed"});
 const ownerAdmissionPath = process.env.DOHC_RELAY_OWNER_ADMISSION_CONFIG;
 if (ownerAdmissionPath && !deviceDeliveryConfig) fatal("FATAL: Private owner admission requires configured device delivery.");
 let ownerAdmission: ReturnType<typeof readOwnerAdmissionConfig> | undefined;
@@ -540,8 +547,7 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
     const limits = parseDeviceControlLimits(JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS));
     const delivery = deviceDeliveryConfig ? readRelayDeviceDeliveryConfig(deviceDeliveryConfig,limits) : undefined;
     if (ownerAdmissionPath && delivery) {
-      ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,delivery.workspaceIds);
-      ownerAdmission.admission.trustedAccount = async accountId => ({accountId, name: await accountDisplayName(lookupUserDisplayName, accountId) ?? "Unnamed"});
+      ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,delivery.workspaceIds,trustedOwnerAccount);
     }
     deviceControl = createDeviceControl({
       storage, relayExchangeKey: relayExchangeKey ?? "",
@@ -571,12 +577,12 @@ process.once("SIGTERM",stopOwnerAdmission);
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
 if (serviceHostConfig && !deployment) fatal("FATAL: A service host requires an initialized relay deployment.");
 const configuredServiceHost = serviceHostConfig && deployment
-  ? await startServiceLiveHost({ configPath: serviceHostConfig, storage, history: deployment.history, frameChanges })
+  ? await startServiceLiveHost({ trustedAccount: trustedOwnerAccount, configPath: serviceHostConfig, storage, history: deployment.history, frameChanges })
   : undefined;
 if (selfHostedLive && (!deployment || !frameChanges || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST_ROOT || !process.env.DOHC_RELAY_ENGINE_EXECUTABLE || !process.env.DOHC_RELAY_PUBLIC_ORIGIN)) {
   fatal("FATAL: Self-host live editing requires a deployment, a persistent host root, the native engine executable, and the public HTTPS relay origin.");
 }
-const selfHost = selfHostedLive ? await startSelfHostedLiveHost({storage, history: deployment!.history, frameChanges: frameChanges!,
+const selfHost = selfHostedLive ? await startSelfHostedLiveHost({trustedAccount: trustedOwnerAccount,storage, history: deployment!.history, frameChanges: frameChanges!,
   root: process.env.DOHC_RELAY_SERVICE_HOST_ROOT!, engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
   relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, key: Buffer.from(linkKey!),
   onError: error => console.error("[sync-relay] self-host live service:", error)}) : undefined;
@@ -642,6 +648,7 @@ if (namedLiveConfig) {
   server.once("close", namedLive.close);
   process.once("SIGINT", namedLive.close); process.once("SIGTERM", namedLive.close);
 }
+const publicationOperator = await startPublicationOperator(storage, operatorSocketPath());
 server.listen(requestedPort, host, () => {
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;
@@ -672,6 +679,7 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    await publicationOperator.close();
     await documentProjection?.close();
     await ownerAdmissionRun?.close();
     await automations?.close();

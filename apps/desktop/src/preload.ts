@@ -20,6 +20,7 @@ import type {
   WorkspaceActivityEvent,
 } from "./ipc/bridgeContract";
 import {
+  systemMotionOperations,
   SitePreviewReplacedEvent,
   ListOwnerLiveDocumentsPayload,
   ListOwnerLiveRefusalsPayload,
@@ -55,6 +56,7 @@ import {
   fileObservationOperations,
   reportingOperations,
   usageRecordOperations,
+  UsageRecordStoppedEvent,
   noticeOperations,
   liveDraftRecoveryOperations,
   stopAndRestoreRecoveryOperations,
@@ -112,6 +114,7 @@ async function invokeParsed<Schema extends z.ZodType>(
 const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
+  ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
   ...operationBridge(shareCopyOperations, invoke),
   ...operationBridge(accessOperations, invoke),
@@ -418,6 +421,8 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(crashReportOperations, invoke),
   ...operationBridge(reportingOperations, invoke),
   ...operationBridge(usageRecordOperations, invoke),
+  onUsageRecordStopped: (listener) =>
+    onEvent(CHANNELS.usageRecordStopped, UsageRecordStoppedEvent, () => listener()),
   onCrashReportChanged: (listener) =>
     onEvent(CHANNELS.crashReportChanged, CrashReportChangedEvent, () => listener()),
   onAutomationHoldsChanged: (

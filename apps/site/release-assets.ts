@@ -3,7 +3,7 @@ interface Release { draft: boolean; prerelease: boolean; assets: ReleaseAsset[] 
 
 export async function releaseAssets(fetchRelease: typeof fetch = fetch): Promise<ReleaseAsset[]> {
   try {
-    const response = await fetchRelease('https://api.github.com/repos/dohc-ai/dohc/releases?per_page=10', {
+    const response = await fetchRelease('https://api.github.com/repos/dohchq/dohc/releases?per_page=10', {
       headers: { Accept: 'application/vnd.github+json' },
       signal: AbortSignal.timeout(3000),
     });

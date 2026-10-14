@@ -153,7 +153,7 @@ async function harness() {
     requireEngineCapture: async () => ({ workspace, capture }), linkedChatStoreFor,
     openWorkspaceActivity: async () => undefined,
     receivedShareEngine: { workspaceFor: input => ({ workspaceId: input.engineWorkspaceId, rootPath: input.rootPath, attachmentId: input.attachmentId }) },
-    activeEngineFileIndex: async () => ({ objectIdByPath: new Map() }),
+    resolveEngineFiles: async (_workspace, targets) => targets.map(() => ({ status: "absent" })),
     readOwnedWorkspaceText: async () => ({ text: "# Current heading\n" }),
   });
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
@@ -165,7 +165,7 @@ async function harness() {
     relayShareJsonWithCredentials: async <Result>(auth: CloudCredentials, path: string, init?: RequestInit) => await relayJson(auth, path, init) as Result,
     normalizeServerUrl: url => url, listWorkspaces: () => [...entries.values()], stateDir: () => stateDirectory,
     peekedReceivedGrantKinds: kinds, syncRendererSharedChannelsForChatTarget: sync,
-    ...sharedCommands, chatScope, localUserDisplayName: () => "Sam", activity, chatDispatchService: dispatch,
+    ...sharedCommands, chatScope, localUserDisplayName: () => "Sam", localInstallationId: () => "device", activity, chatDispatchService: dispatch,
   });
   const invoke = async (channel: string, payload: unknown, trusted = true, sender = "window") => {
     const handler = handlers.get(channel);
@@ -184,6 +184,16 @@ async function harness() {
 }
 
 describe("registered direct message boundaries", () => {
+  it.each(["new", "existing"])("stores the admitted account key on the opening %s DM message", async (conversation) => {
+    const h = await harness();
+    if (conversation === "existing") h.seedConversation();
+    await h.invoke(CHANNELS.startDm, startPayload);
+    const writes = conversation === "new" ? h.storeMethods.startChannelThread : h.storeMethods.sendMessage;
+    expect(writes).toHaveBeenCalledWith(expect.objectContaining({
+      authorActorKey: '{"kind":"account","issuer":"https://account.test","userId":"owner"}',
+    }));
+  });
+
   it("registers the six commands and rejects untrusted callers before work", async () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([CHANNELS.syncDms, CHANNELS.acceptDm, CHANNELS.declineDm, CHANNELS.requestDmAgain, CHANNELS.leaveDm, CHANNELS.startDm]);
@@ -496,7 +506,7 @@ describe("registered direct message boundaries", () => {
   it("grants before writing, ignores renderer identity, then queues sync and dispatch", async () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.startDm, { ...startPayload, authorUserId: "forged", author: { kind: "agent" } })).resolves.toMatchObject({ dm: { role: "owner" }, message: { authorKind: "human", authorDisplayName: "Sam" } });
-    expect(h.storeMethods.startChannelThread).toHaveBeenCalledWith({ workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, authorUserId: "owner", body: "Hello" });
+    expect(h.storeMethods.startChannelThread).toHaveBeenCalledWith({ workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, authorUserId: "owner", authorActorKey: '{"kind":"account","issuer":"https://account.test","userId":"owner"}', body: "Hello" });
     expect(h.events).toEqual(["list-grants", "create", "grant", "start-thread", "cloud", "dispatch"]);
   });
 
@@ -513,7 +523,7 @@ describe("registered direct message boundaries", () => {
     expect(h.storeMethods.startChannelThread).not.toHaveBeenCalled();
     expect(h.storeMethods.sendMessage).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", author: { kind: "human", displayName: "Sam" },
-      authorUserId: "owner", body: "Hello",
+      authorUserId: "owner", authorActorKey: '{"kind":"account","issuer":"https://account.test","userId":"owner"}', body: "Hello",
     });
   });
 

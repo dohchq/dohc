@@ -159,7 +159,7 @@ export function RecordButton(props: {
         <span data-label={props.field} className="grid min-w-0 grid-cols-1 before:invisible before:col-start-1 before:row-start-1 before:min-w-0 before:truncate before:pl-4 before:content-[attr(data-label)]">
           <span className="col-start-1 row-start-1 flex min-w-0 items-center justify-center gap-1">
             {/* Turns only where motion is allowed; with reduced motion it stays as a still mark beside the words. */}
-            {running || state?.kind === "checking" ? <LoaderCircle aria-hidden size={12} strokeWidth={1.9} className="shrink-0 motion-safe:animate-spin" /> : null}
+            {running || state?.kind === "checking" ? <LoaderCircle aria-hidden size={12} strokeWidth={1.9} className="shrink-0 animate-spin" /> : null}
             <span className="truncate">{props.field}</span>
           </span>
         </span>

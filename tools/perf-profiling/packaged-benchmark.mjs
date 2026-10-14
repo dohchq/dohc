@@ -14,7 +14,7 @@ import { mkdir, writeFile, readFile, stat, readdir } from 'node:fs/promises';
 import { join, resolve, dirname, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -34,7 +34,7 @@ const settings = { runCount, idleSeconds, keystrokes, switches, scenario, profil
 const receipt = { label, binary, packageCommit: options.packageCommit, engineCommit: options.engineCommit,
   startedAt: new Date().toISOString(), platform: process.platform, node: process.version, settings, runs: [], status: 'setup' };
 const feedRequests = [];
-let feed, active, windowController, helperStartup, workload;
+let feed, active, windowController, helperStartup, workload, goToFixture;
 const automationFailures = [];
 const cancellation = benchmarkCancellation();
 try {
@@ -81,8 +81,11 @@ Object.assign(receipt, {
   surfacesSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-surfaces.mjs')),
   closeImplementationSha256: await sha256(fileURLToPath(new URL('../../scripts/verification/close-electron.mjs', import.meta.url))),
   summarizerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'summarize-packaged-benchmark.mjs')),
-  ...(scenario === 'chat-history' || scenario === 'collection' ? { cli, cliHashedPaths, cliSha256: await sha256Tree(cli, cliHashedPaths),
+  ...(['chat-history', 'collection', 'go-to-mixed'].includes(scenario) ? { cli, cliHashedPaths, cliSha256: await sha256Tree(cli, cliHashedPaths),
     processRunner, processRunnerPaths, processRunnerSha256: await sha256Tree(processRunner, processRunnerPaths) } : {}),
+  ...(scenario === 'go-to-mixed' ? { goToFixtureSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'go-to-packaged-fixture.mts')),
+    goToFixtureGeneratorsSha256: await sha256Tree(root, ['packages/mcp/src/tools.ts', 'apps/desktop/src/renderer/collections/schemaAuthoring.ts',
+      'apps/desktop/e2e/helpers/syncRelay.ts', 'apps/desktop/src/testing/relayFilePeer.ts']) } : {}),
   ...(scenario === 'chat-history' ? { cliLauncher, seedScript, seedScriptSha256: await sha256(seedScript) } : {}),
   ...(scenario === 'collection' ? { automationsModule, automationsModuleSha256: await sha256(automationsModule), datasetCliScript, datasetCliSha256: await sha256(datasetCliScript) } : {}),
   harnessCheckout: root, harnessCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
@@ -168,7 +171,7 @@ async function fixture(runDir) {
       await writeFile(join(workspace.rootPath, `${name}.md`), content);
       workspaceHash.update(`${name}.md\0${content}\0`);
     }
-    for (let begin = 2; begin < fixtureFiles; begin += 32) {
+    for (let begin = 2; begin < (scenario === 'go-to-mixed' ? 2 : fixtureFiles); begin += 32) {
       cancellation.signal.throwIfAborted();
       const batch = [];
       for (let n = begin; n < Math.min(fixtureFiles, begin + 32); n++) {
@@ -188,7 +191,7 @@ async function fixture(runDir) {
         return writeFile(join(workspace.rootPath, file.path), file.content);
       }));
     }
-    fixtureHashes.push({ workspaceId: workspace.workspaceId, files: fixtureFiles, collectionFiles: collection.length, digest: workspaceHash.digest('hex'), algorithm: 'SHA256 of name,NUL,UTF8-content,NUL in generation order; workspace metadata excluded' });
+    fixtureHashes.push({ workspaceId: workspace.workspaceId, files: scenario === 'go-to-mixed' ? 2 : fixtureFiles, collectionFiles: collection.length, digest: workspaceHash.digest('hex'), algorithm: 'SHA256 of name,NUL,UTF8-content,NUL in generation order; workspace metadata excluded' });
     workspaces.push(workspace);
   }
   await json(join(profile, 'dohc-workspaces.json'), { version: 1, workspaces });
@@ -795,7 +798,7 @@ async function soak(instance, data, runDir) {
     receipt.runs.push(data);
     await mkdir(runDir, { recursive: true });
     const f = await fixture(runDir);
-    const fresh = await launch(runDir, f, 'fresh');
+    let fresh = await launch(runDir, f, 'fresh');
     data.freshStartup = fresh.startup;
     await json(join(output, 'result.json'), receipt);
     console.log(JSON.stringify({ label, run: index + 1, phase: 'fresh-ready', ms: fresh.startup.editablePaintObservedMs }));
@@ -836,9 +839,61 @@ async function soak(instance, data, runDir) {
       await json(join(output, 'result.json'), receipt);
       continue;
     }
-    if (['go-to', 'command-palette', 'search', 'collection'].includes(scenario)) {
+    if (scenario === 'go-to-mixed') {
+      const relayRequire = createRequire(join(root, 'services/sync-relay/package.json'));
+      const { tsImport } = relayRequire('tsx/esm/api');
+      const { provisionGoToFixture } = await tsImport('./go-to-packaged-fixture.mts', import.meta.url);
+      const { createApp } = await tsImport('../../packages/mcp/src/tools.ts', import.meta.url);
+      const bridgeCall = () => (method, payload) => fresh.page.evaluate(async ({ method, payload }) => {
+        const api = window.dohcDesktop;
+        if (typeof api?.[method] !== 'function') throw Error('Missing fixture operation ' + method);
+        return api[method](payload);
+      }, { method, payload });
+      goToFixture = await provisionGoToFixture({ workspace: f.workspaces[0], profile: f.profile, runDir,
+        files: fixtureFiles, signal: cancellation.signal, call: bridgeCall(),
+        createApp: (appRoot, title, agent) => createApp({ root: f.workspaces[0].rootPath, home: f.profile }, { appRoot, title }, agent),
+        cli: async args => (await runOwnedCommand(process.execPath, [cliLauncher, ...args], {
+          cwd: f.workspaces[0].rootPath, env: { ...env, DOHC_STATE_DIR: f.profile, NODE_NO_WARNINGS: '1' },
+          timeoutMs: 120000, signal: cancellation.signal, log: join(runDir, 'go-to-cli-' + randomUUID() + '.log'),
+        })).stdout,
+        signIn: async (baseUrl, userId) => {
+          await shutdown(runDir, fresh);
+          const registryPath = join(f.profile, 'dohc-workspaces.json');
+          const registry = JSON.parse(await readFile(registryPath, 'utf8'));
+          registry.workspaces.find(row => row.workspaceId === f.workspaces[0].workspaceId).remote = { serverUrl: baseUrl, ownerUserId: userId };
+          await json(registryPath, registry);
+          await json(join(f.profile, 'dohc-cloud.json'), { version: 1, serverUrl: baseUrl, relayUrl: baseUrl,
+            userId, email: userId + '@dohc.test', token: 'plain:test:' + userId });
+          fresh = await launch(runDir, f, 'go-to-admitted');
+          data.admittedStartup = fresh.startup;
+          return bridgeCall();
+        },
+        waitForListing: async (files, folders) => {
+          await fresh.page.waitForFunction(async ({ workspaceId, files, folders }) => {
+            const result = await window.dohcDesktop.listWorkspaceFiles({ workspaceId });
+            return result.files.length === files && result.folders?.length === folders;
+          }, { workspaceId: f.workspaces[0].workspaceId, files, folders }, { timeout: 120000 });
+          await painted(fresh.page);
+        },
+        commandCount: async () => {
+          await fresh.page.keyboard.press('Control+Shift+P');
+          const palette = fresh.page.getByTestId('command-palette');
+          await palette.waitFor({ state: 'visible', timeout: 120000 });
+          const count = await palette.getByRole('option').count();
+          await fresh.page.keyboard.press('Escape');
+          await palette.waitFor({ state: 'detached', timeout: 120000 });
+          return count;
+        },
+      });
+      data.goToFixture = goToFixture.receipt;
+      Object.assign(f.fixtureHashes[0], { files: fixtureFiles, folders: 50, digest: goToFixture.receipt.contentSha256,
+        algorithm: 'SHA256 of sorted canonical path,NUL,UTF8-content,NUL after normal admission; metadata excluded' });
+      await json(join(runDir, 'fixture.json'), f.fixtureHashes);
+      await json(join(output, 'result.json'), receipt);
+    }
+    if (['go-to', 'go-to-mixed', 'command-palette', 'search', 'collection'].includes(scenario)) {
       data.listing = await filesListed(fresh.page, fixtureFiles + (scenario === 'collection' ? 1 : 0));
-      if (scenario === 'go-to') data.goTo = await goTo(fresh.page);
+      if (scenario === 'go-to' || scenario === 'go-to-mixed') data.goTo = await goTo(fresh.page);
       if (scenario === 'command-palette') data.commandPalette = await commandPalette(fresh.page);
       if (scenario === 'search') data.search = await search(fresh.page);
       if (scenario === 'collection') {
@@ -850,6 +905,7 @@ async function soak(instance, data, runDir) {
       }
       await fresh.page.screenshot({ path: join(runDir, 'completed.png') });
       await shutdown(runDir, fresh);
+      if (goToFixture) { await goToFixture.stop(); goToFixture = null; }
       await json(join(output, 'result.json'), receipt);
       continue;
     }
@@ -932,6 +988,10 @@ async function soak(instance, data, runDir) {
   }
   if (!cancellation.signal.aborted) process.exitCode = 1;
 } finally {
+  if (goToFixture) {
+    try { await goToFixture.stop(); }
+    catch (cleanupError) { receipt.fixtureCleanupError = cleanupError.stack; receipt.status = 'failed'; process.exitCode = 1; }
+  }
   if (active) {
     try { await closeOwnedPackage(active); }
     catch (cleanupError) { receipt.shutdownError = cleanupError.stack; receipt.status = 'failed'; if (!cancellation.signal.aborted) process.exitCode = 1; }

@@ -13,8 +13,8 @@ use dohc_engine_sync::{
     ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareCursor, ShareLogPushRequest,
     ShareProposalSubmitOutcome, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
     ShareViewPullOutcome, ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome,
-    SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
-    adopt_join_identity, create_claim_identity, read_sync_identity,
+    SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse, SyncError,
+    SyncPassOutcome, adopt_join_identity, create_claim_identity, read_sync_identity,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use std::sync::{Arc, Mutex};
@@ -1775,6 +1775,7 @@ impl ActorHandle {
             let outcome = self
                 .run(move |store, cache| {
                     let _reservation = queued_reservation;
+                    let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
                     let outcome = if queued_token.is_cancelled() {
                         Err(RuntimeError::Cancelled)
                     } else {
@@ -1787,9 +1788,11 @@ impl ActorHandle {
                             &queued_claims,
                         )
                     };
-                    // A pull can claim, replace, or advance lineages behind the
-                    // local path (probe-covered; reset hooks stay unconditional).
-                    cache.clear();
+                    // Push handles enrollment resets below. Every other
+                    // operation clears by default.
+                    if !is_push {
+                        cache.clear();
+                    }
                     outcome
                 })
                 .await;
@@ -2137,27 +2140,46 @@ fn run_relay_operation(
     operation: RelayOperation,
     leases: &LeaseRegistry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
+    if store.is_passive()
+        && !matches!(
+            &operation,
+            RelayOperation::Pull { .. }
+                | RelayOperation::CommitCursor { .. }
+                | RelayOperation::AdoptJoinIdentity { .. }
+        )
+    {
+        return Err(RuntimeError::Sync(SyncError::InvalidInput {
+            reason: "passive store cannot execute this relay operation",
+        }));
+    }
     match operation {
         RelayOperation::Push {
             workspace_id,
             now_ms,
             max_read_bytes,
-        } => client
-            .resume_push_workspace(
+        } => {
+            let mut progress = client
+                .transport()
+                .push_progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let outcome = client.resume_push_workspace(
                 store,
                 &workspace_id,
                 &NoFaults,
                 leases,
                 now_ms,
                 max_read_bytes,
-                &mut client
-                    .transport()
-                    .push_progress
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            )
-            .map(RelayOperationOutcome::Sync)
-            .map_err(RuntimeError::from),
+                &mut progress,
+            );
+            // Enrollment can claim bases before I/O yields or an error.
+            if progress.writer_cache_reset_required() {
+                doc_cache.clear();
+            }
+            outcome
+                .map(RelayOperationOutcome::Sync)
+                .map_err(RuntimeError::from)
+        }
         RelayOperation::Pull {
             workspace_id,
             now_ms,

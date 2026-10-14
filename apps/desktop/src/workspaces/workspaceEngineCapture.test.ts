@@ -215,7 +215,7 @@ describe("probeEngineStoreRefusal", () => {
     const sessions = mockLiveSessions(
       new VersionedLoopbackEngine(),
       undefined,
-      () => ({ settled: true, running: true, degraded: false }),
+      () => ({ settled: true, running: true, degraded: false, heldFiles: [] }),
       async () => {
         throw probeError;
       },
@@ -432,16 +432,22 @@ describe("workspaceEngineCapture batch capture", () => {
       rustEngineSessions: mockLiveSessions(loopback, requests),
     });
 
-    const objectId = await engine.fileObjectIdForPath("just-saved.md");
+    const resolve = engine.resolveFileForPath;
+    const file = await resolve("just-saved.md");
+    const objectId = file?.objectId;
+    expect(file?.path).toBe("just-saved.md");
     const relevant = requests
       .map((request) => request.method)
       .filter(
         (method) =>
-          method === "capture.flush" || method === VERSIONED_METHOD.textRead,
+          method === "capture.flush" || method === "files.resolve",
       );
 
     expect(objectId).toBeTruthy();
-    expect(relevant, "remove fileObjectIdForPath's flushCapture call. The read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", VERSIONED_METHOD.textRead]);
+    expect(await engine.filePathForObjectId(objectId!)).toBe("just-saved.md");
+    expect(requests.filter(request => request.method === VERSIONED_METHOD.textList)).toHaveLength(0);
+    expect(requests.filter(request => request.method === VERSIONED_METHOD.textRead || request.method === VERSIONED_METHOD.textReadBlob)).toHaveLength(0);
+    expect(relevant, "remove resolveFileForPath's flushCapture call. The read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", "files.resolve"]);
     await engine.stop();
   });
 
@@ -1291,7 +1297,9 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root,"responses/moved.md","response");
     const engine=capture(root,{store,rustEngineSessions:sessions});
     const selection={acceptanceId:"accepted-a",objectId:created.object.id,momentId:created.moment.id,path:created.snapshot.path,collectionPath:"responses",versionId:"main",publicPrincipalId:"public-a",grantId:"grant",requestId:"undo-a"};
+    requests.length = 0;
     const result=await engine.undoAcceptedAppResponse(selection);
+    expect(requests.filter(request => request.method === VERSIONED_METHOD.textList)).toHaveLength(0);
     expect(result.status).toBe("deleted");expect(result.momentId).toBeTruthy();
     expect(existsSync(join(root,"responses/moved.md"))).toBe(false);
     const deletion=requests.findLast(request=>request.method==="versionedText.delete");
@@ -1615,7 +1623,7 @@ describe("workspaceEngineCapture batch capture", () => {
     let settled = true;
     const sessions = mockLiveSessions(loopback, requests, () => {
       if (!settled) polling.resolve();
-      return { settled, running: true, degraded: !settled };
+      return { settled, running: true, heldFiles: [], degraded: !settled };
     });
     const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
     const engine = capture(root, { rustEngineSessions: sessions });
@@ -1643,7 +1651,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const sessions = mockLiveSessions(loopback, undefined, () => ({
       settled,
       running: true,
-      degraded: !settled,
+      heldFiles: [], degraded: !settled,
     }));
     const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
     const engine = capture(root, {
@@ -2616,7 +2624,7 @@ describe("workspaceEngineCapture relay sync materialization", () => {
         rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
           settled,
           running: true,
-          degraded: !settled,
+          heldFiles: [], degraded: !settled,
         })),
       });
       loopback.seedTextFile({
@@ -3481,7 +3489,7 @@ describe("workspaceEngineCapture agent attribution", () => {
         rustEngineSessions: mockLiveSessions(loopback, requests, () => ({
           settled,
           running: true,
-          degraded: !settled,
+          heldFiles: [], degraded: !settled,
         })),
       });
 

@@ -1238,7 +1238,7 @@ List an app's shared publications.
 - `appRoot`: `string`. Required.
 - `cursor`: `SHA-256 hex`
 
-Returns `{ kind: "listed", publications: ({ approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }`.
+Returns `{ kind: "listed", publications: ({ operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { operatorTakedown?, approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }`.
 
 #### `dohc app prepare`
 

@@ -89,6 +89,7 @@ impl ActorHandle {
                             let result = dohc_engine_collab::owner_outbox::draft::append_draft_cached(
                                 store, cache, &key.workspace_id,
                                 dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                                    person_edit: false,
                                     binding: draft.descriptor.binding,
                                     expected_revision: draft.descriptor.revision,
                                     append_key: format!("collection-adoption:{}:{}", candidate.record_id, hex_sha256(&update)),
@@ -1935,6 +1936,9 @@ fn reconcile_collections_on_store(
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
+        if store.placement_is_held(workspace_id, &candidate.file_path)? {
+            continue;
+        }
         match adopt_collection_record_on_store(
             store,
             doc_cache,
@@ -2004,6 +2008,9 @@ fn reconcile_collections_on_store(
             return Err(RuntimeError::Cancelled);
         }
         if pending_seed_objects.contains(&candidate.source_object_id) {
+            continue;
+        }
+        if store.placement_is_held(workspace_id, &candidate.source_file_path)? {
             continue;
         }
         match cleanup_collection_relation_on_store(
@@ -2228,5 +2235,208 @@ mod collection_relation_cleanup_tests {
             .expect("state after cleanup");
         assert_eq!((after.0, after.1), (before.0, before.1));
         assert_eq!((after.2, after.3), (0, 0));
+    }
+
+    #[test]
+    fn engine_seeded_relation_cleanup_survives_restart() {
+        use dohc_engine_domain::DeleteTextFile;
+        use yrs::{Any, Doc, Map, Transact, Update, updates::decoder::Decode};
+
+        let scratch = ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        ensure_mutation_version_on_store(&mut store, WORKSPACE_ID, VERSION_ID, 1, &NoFaults)
+            .unwrap();
+        let markdown = format!("---\nid: {SOURCE_ID}\nrelated: {TARGET_ID}\n---\n\nSource");
+        write_text(
+            &mut store,
+            "schema",
+            "tasks/collection.yaml",
+            "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+            "schema-moment",
+            2,
+        );
+        write_text(
+            &mut store,
+            SOURCE_OBJECT_ID,
+            SOURCE_PATH,
+            &markdown,
+            "source-moment",
+            3,
+        );
+        write_text(
+            &mut store,
+            "target-object",
+            "tasks/target.md",
+            &format!("---\nid: {TARGET_ID}\n---\n\nTarget\n"),
+            "target-moment",
+            4,
+        );
+        store
+            .write_with(&NoFaults, |tx| {
+                reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)?;
+                for (path, id) in [(SOURCE_PATH, SOURCE_ID), ("tasks/target.md", TARGET_ID)] {
+                    set_collection_adoption_state_in_tx(
+                        tx,
+                        WORKSPACE_ID,
+                        VERSION_ID,
+                        path,
+                        id,
+                        "adopted",
+                    )?;
+                }
+                Ok::<_, DomainError>(())
+            })
+            .unwrap();
+        let key = DocKey::new(WORKSPACE_ID, VERSION_ID, SOURCE_OBJECT_ID).unwrap();
+        assert!(
+            dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .is_none(),
+            "never opened"
+        );
+        std::fs::create_dir_all(scratch.path().join("tasks")).unwrap();
+        std::fs::write(scratch.path().join(SOURCE_PATH), &markdown).unwrap();
+        VersionedTextStore::new(&mut store)
+            .delete_text_file(
+                &DeleteTextFile {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: "tasks/target.md".to_owned(),
+                    moment_id: "target-delete".to_owned(),
+                    request_id: None,
+                    metadata_origin: "test".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 5,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        let mut cache = WriterDocCache::new();
+        let outcome = reconcile_collections_on_store(
+            &mut store,
+            &mut cache,
+            WORKSPACE_ID,
+            VERSION_ID,
+            scratch.path(),
+            None,
+            &LeaseRegistry::default(),
+            &(),
+            6,
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(outcome.changed_paths, [SOURCE_PATH]);
+        let persisted = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted.doc.frontmatter_json(),
+            serde_json::json!({"id": SOURCE_ID})
+        );
+        let checkpoint = persisted.doc.encode_full_state();
+        let updates: Vec<Vec<u8>> = store
+            .read_with(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT b.bytes FROM ydoc_updates u JOIN binary_blobs b \
+                ON b.sha256=u.update_blob_sha256 WHERE u.workspace_id=?1 AND u.version_id=?2 \
+                AND u.object_id=?3 ORDER BY u.seq",
+                )?;
+                stmt.query_map([WORKSPACE_ID, VERSION_ID, SOURCE_OBJECT_ID], |row| {
+                    row.get(0)
+                })?
+                .collect::<Result<_, rusqlite::Error>>()
+            })
+            .unwrap();
+        assert_eq!(updates.len(), 2, "one seed and one relation cleanup delta");
+        drop(persisted);
+        drop(cache);
+        drop(store);
+        let store = EngineStore::open(&db, 7).unwrap();
+        let reopened = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let after_restart = reopened.doc.encode_full_state();
+        let fixture = serde_json::json!({
+            "sourceId": SOURCE_ID, "targetId": TARGET_ID, "seed": updates[0],
+            "cleanup": updates[1], "checkpoint": checkpoint, "afterRestart": after_restart,
+        });
+        if let Ok(path) = std::env::var("DOHC_SEEDED_CLEANUP_FIXTURE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+        }
+        let committed: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../dohc-engine-collab/tests/seeded-doc-fixtures/cleanup.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            fixture.as_object().unwrap().keys().collect::<Vec<_>>(),
+            committed.as_object().unwrap().keys().collect::<Vec<_>>(),
+            "cleanup fixture keys drift"
+        );
+        for field in ["sourceId", "targetId"] {
+            assert_eq!(
+                fixture[field], committed[field],
+                "cleanup input drift: {field}"
+            );
+        }
+        for field in ["seed", "cleanup", "checkpoint", "afterRestart"] {
+            let documents = [&fixture, &committed].map(|input| {
+                let doc = Ydoc::wire();
+                if field == "cleanup" {
+                    let seed: Vec<u8> = serde_json::from_value(input["seed"].clone()).unwrap();
+                    doc.apply(&seed).unwrap();
+                }
+                let bytes: Vec<u8> = serde_json::from_value(input[field].clone()).unwrap();
+                doc.apply(&bytes).unwrap();
+                doc
+            });
+            // Compare semantic roots, metadata, and projection, not random client bytes.
+            assert_eq!(
+                documents[0].canonical_content(),
+                documents[1].canonical_content(),
+                "cleanup shape drift: {field}"
+            );
+            assert_eq!(
+                documents[0].project(ContentKind::Richdoc).unwrap().content,
+                documents[1].project(ContentKind::Richdoc).unwrap().content,
+                "cleanup projection drift: {field}"
+            );
+        }
+        assert_eq!(
+            after_restart, checkpoint,
+            "restart replays the same client and clocks"
+        );
+        let receiver = Doc::new();
+        receiver.get_or_insert_xml_fragment("body");
+        let meta = receiver.get_or_insert_map("meta");
+        receiver
+            .transact_mut()
+            .apply_update(Update::decode_v1(&after_restart).unwrap())
+            .unwrap();
+        assert_eq!(
+            meta.get(&receiver.transact(), "schemaVersion"),
+            Some(yrs::Out::Any(Any::Number(1.0)))
+        );
+        assert_eq!(
+            reopened.doc.frontmatter_json(),
+            serde_json::json!({"id": SOURCE_ID})
+        );
+        let relation_edges: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM collection_relation_edges WHERE source_record_id=?1",
+                    [SOURCE_ID],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(relation_edges, 0);
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join(SOURCE_PATH)).unwrap(),
+            markdown.replace(&format!("related: {TARGET_ID}\n"), "")
+        );
     }
 }

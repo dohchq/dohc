@@ -1,3 +1,4 @@
+import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
 import { actOnTypingCopy, type TypingCopyResult } from "./workspaces/typingRecoveryActions";
@@ -24,6 +25,7 @@ import {readOwnerRestoreResponse} from "./ipc/readOwnerRestoreResponse";
 import { readDatasetResponse } from "./ipc/readDatasetResponse";
 import { ipcWireError } from "./ipc/errorWords";
 import { createUpdateInstall, registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
+import { registerSystemMotionIpc } from "./ipc/systemMotionIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import {
   devToolsEnabled,
@@ -58,6 +60,7 @@ import { createDatasetHandler } from "./ipc/datasetIpc";
 import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
 import { createDatasetSources, type SourceCreationProgress } from "./workspaces/datasetSourceCreation";
+import { flushDatasetSourceCapture } from "./workspaces/datasetSourceCapture";
 import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./workspaces/localAppLaunch";
 import { createDesktopAppRuntimeLauncher } from "./workspaces/localAppBackendRuntime";
 import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc/ownerAppResponsesIpc";
@@ -94,7 +97,7 @@ import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster } from "./access/accessOwner";
-import { hasAccessChat, locateAccessVersionPath, resolveAccessObject } from "./access/accessObjectResolution";
+import { hasAccessChat, locateAccessVersionPath, resolveAccessFileObject, resolveAccessObject } from "./access/accessObjectResolution";
 import { createShareCopyHandler } from "./ipc/shareCopyHandler";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
@@ -116,6 +119,7 @@ import {
   powerMonitor,
   protocol,
   safeStorage,
+  systemPreferences,
   session,
   shell,
   Tray,
@@ -127,7 +131,7 @@ import {
   type WebContents,
 } from "electron";
 import { watch, existsSync, realpathSync, statSync } from "node:fs";
-import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { hostname, release as osRelease, type as osType } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -520,6 +524,12 @@ makeProcessDiagnosticsNonFatal();
 
 let usageStore: ReturnType<typeof createUsageStore> | undefined;
 let usageLoad: ReturnType<typeof setImmediate> | undefined;
+// Each window reports it to Notices, with Try again to read the file again.
+function usageRecordStopped(): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send(CHANNELS.usageRecordStopped);
+  }
+}
 const rendererUsage = createRendererUsage<IpcMainInvokeEvent>(invocation => usageStore?.recordSuccess(invocation));
 
 const crashFacts = () => ({
@@ -554,16 +564,14 @@ const crashReportPreview = createCrashReportPreview({
   openPath: (path) => shell.openPath(path),
 });
 void crashReportPreview.remove();
-// Usage and short error reports. Only a packaged build that names a report
-// service sends them, and only as the switches in Privacy allow.
+// Usage and short error reports. Only a packaged build that names a PostHog
+// project sends them, and only as the switches in Privacy allow.
 const telemetry = createTelemetry({
   reporting: resolveReporting({
     build: REPORTING_BUILD,
     packaged: app.isPackaged,
     env: process.env,
     argv: process.argv,
-    version: app.getVersion(),
-    channel: resolveUpdateChannel(app.getVersion()),
   }),
   statePath: join(stateDir(), "reporting.json"),
   facts: () => ({
@@ -576,6 +584,7 @@ const telemetry = createTelemetry({
     electron: process.versions.electron ?? "unknown",
   }),
   locate: createCodeLocations(codeRoots, process.platform),
+  readCode: (path) => readFile(join(codeRoots[0]!, path), "utf8"),
 });
 // The report switches as the settings file sets them. A file main cannot
 // read turns both off.
@@ -1578,12 +1587,8 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
   resolve: async (operation, ref) => {
     const workspace = operation.workspace;
     return resolveAccessObject(workspace, ref, {
-      filePathForObjectId: async objectId => {
-        const index = await engineSearchIndexFor(receivedShareEngine.workspaceForRegistered(workspace));
-        if (!index) throw new Error("File aliases are unavailable.");
-        const file = index.files.find(row => row.objectId === objectId);
-        return file ? { path: file.path, versionId: index.versionId } : null;
-      },
+      filePathForObjectId: objectId => resolveAccessFileObject(workspace, objectId,
+        work => withEngineAdapter(receivedShareEngine.workspaceForRegistered(workspace), work), operation.signal),
       locatePath: async (path, versionId) => {
         if (versionId !== null && versionId !== "main") {
           return withEngineAdapter(receivedShareEngine.workspaceForRegistered(workspace), adapter =>
@@ -2865,38 +2870,6 @@ function agentDispatchStoreHandleFor(workspace: {
   }
 }
 
-// The object-id <-> path index the search surfaces need, read through the
-// DAEMON rather than a second sqlite connection.
-//
-// This used to call the legacy TypeScript store factory, which opened another
-// node:sqlite connection to the engine.db the daemon owns -- exactly the second
-// writable connection workspaceEngineCapture.ts warns can deadlock. It also
-// hydrated every file's content via a full-text listing just to read two string
-// fields off each row.
-//
-// listTextFileMetadata is the right call: it pages (limit 500 + afterPath) so
-// a workspace past one page is no longer silently truncated, and it never
-// hydrates file bodies.
-async function engineSearchIndexFor(
-  workspace: EngineWorkspace,
-): Promise<{ versionId: string; files: { objectId: string; path: string }[];
-} | null> {
-  return await withEngineAdapter(workspace, async (adapter) => {
-    const active = await adapter.getActiveVersion({
-      workspaceId: workspace.workspaceId,
-    });
-    if (!active) return null;
-    const files = await adapter.listTextFileMetadata({
-      workspaceId: workspace.workspaceId,
-      versionId: active.id,
-    });
-    return {
-      versionId: active.id,
-      files: files.map((file) => ({ objectId: file.objectId, path: file.path })),
-    };
-  });
-}
-
 // One daemon round-trip per read, through the workspace-attachment authority
 // sandwich. Returns null when the daemon has no workspace sessions (engine
 // unavailable), so callers can answer with an empty result — collections.list
@@ -2904,7 +2877,7 @@ async function engineSearchIndexFor(
 // error.
 async function withEngineAdapter<T>(
   workspace: EngineWorkspace,
-  work: (adapter: VersionedLiveAdapter) => Promise<T>,
+  work: (adapter: VersionedLiveAdapter, assertCurrent?: () => void) => Promise<T>,
 ): Promise<T | null> {
   const sessions = desktopEngine.sessions;
   if (!sessions) return null;
@@ -2914,6 +2887,7 @@ async function withEngineAdapter<T>(
         new VersionedLiveAdapter(binding.client, binding.workspace, {
           workspaceId: workspace.workspaceId,
         }),
+        () => sessions.assertCurrentBinding(engineWorkspace, binding),
       ),
     );
   const registered = findWorkspace(workspace.workspaceId);
@@ -2931,19 +2905,7 @@ async function withEngineAdapter<T>(
   );
 }
 
-async function activeEngineFileIndex(workspace: EngineWorkspace): Promise<{
-  pathByObjectId: Map<string, string>;
-  objectIdByPath: Map<string, string>;
-}> {
-  const index = await engineSearchIndexFor(workspace);
-  if (!index) {
-    return { pathByObjectId: new Map(), objectIdByPath: new Map() };
-  }
-  return {
-    pathByObjectId: new Map(index.files.map((file) => [file.objectId, file.path])),
-    objectIdByPath: new Map(index.files.map((file) => [file.path, file.objectId])),
-  };
-}
+const resolveEngineFiles = createEngineFileResolver(withEngineAdapter);
 
 // The human author every renderer-sent chat message is attributed to. Main
 // derives it — the renderer never supplies identity. At alpha the desktop's
@@ -5410,7 +5372,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       usageLoad = setImmediate(() => {
         usageLoad = undefined;
         try {
-          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: DESKTOP_USAGE_COVERAGE });
+          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: DESKTOP_USAGE_COVERAGE,
+            onStop: usageRecordStopped });
         } catch {
           usageStore = undefined;
           return;
@@ -5788,6 +5751,7 @@ async function currentDiagnostics(): Promise<string> {
 }
 
 function registerIpcHandlers(): void {
+  registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
   shareDirectWriteDelivery.register(operationBoundary);
   const shareCopyHandler = createShareCopyHandler<WebContents, RegistryEntry, DesktopRendererWorkspaceOperation>({
     currentSession: sender => rendererWorkspaceSessions.current(sender) ?? null,
@@ -5960,7 +5924,7 @@ function registerIpcHandlers(): void {
     requireEngineCapture,
     syncWorkspaceSharedChannels,
     linkedChatStoreFor,
-    activeEngineFileIndex,
+    resolveEngineFiles,
   });
 
   windowIpc.registerExternalUrl();
@@ -6098,14 +6062,7 @@ function registerIpcHandlers(): void {
     flushSourceCapture: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
       await openWorkspaceActivity(workspace);
       const captured = await withEngineAdapter(workspace, async adapter => {
-        signal.throwIfAborted();
-        let capture = await adapter.reconcileCapture();
-        for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
-          signal.throwIfAborted();
-          capture = await adapter.flushCapture();
-        }
-        signal.throwIfAborted();
-        if (!capture.settled || !capture.running || capture.degraded) throw new Error("dohc could not capture these Collection files. Reopen the workspace and try again.");
+        await flushDatasetSourceCapture(adapter, signal);
         return true;
       });
       if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
@@ -6121,12 +6078,7 @@ function registerIpcHandlers(): void {
         register: () => openWorkspaceActivity(workspace),
         capture: async () => {
           const captured = await withEngineAdapter(workspace, async adapter => {
-            let capture = await adapter.reconcileCapture();
-            for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
-              signal.throwIfAborted();
-              capture = await adapter.flushCapture();
-            }
-            if (!capture.settled || !capture.running || capture.degraded) throw new Error("dohc could not capture the saved files.");
+            await flushDatasetSourceCapture(adapter, signal, Object.keys(files));
             return true;
           });
           if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
@@ -6668,7 +6620,7 @@ function registerIpcHandlers(): void {
 
   const chatScope = createChatScopeCapability({
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineCapture, linkedChatStoreFor,
-    openWorkspaceActivity, receivedShareEngine, activeEngineFileIndex, readOwnedWorkspaceText,
+    openWorkspaceActivity, receivedShareEngine, resolveEngineFiles, readOwnedWorkspaceText,
   });
 
   registerOperations(operationBoundary, folderAppOfferOperations, {
@@ -6688,7 +6640,7 @@ function registerIpcHandlers(): void {
     assertWritableWorkspace, warmCredentialCache, localUserId,
     localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
-    syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
+    syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, resolveEngineFiles,
     activity, desktopChatBookmarks, notifyRenderer,
     automationCollectionOf: (workspaceId) => {
       const executor = collectionAutomationsOf(workspaceId);
@@ -6710,7 +6662,7 @@ function registerIpcHandlers(): void {
     remoteForWorkspace, relayShareJsonWithCredentials, normalizeServerUrl, listWorkspaces,
     stateDir, peekedReceivedGrantKinds, syncRendererSharedChannelsForChatTarget,
     assertShareNotHeldElsewhere, reserveAndPullSharedChannelForWorkspace,
-    endWorkspaceJoinedChannel, chatScope, localUserDisplayName, activity, chatDispatchService,
+    endWorkspaceJoinedChannel, chatScope, localUserDisplayName, localInstallationId, activity, chatDispatchService,
   });
 
   registerPresenceIpcHandlers<IpcMainInvokeEvent>({

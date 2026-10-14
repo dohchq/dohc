@@ -18,6 +18,14 @@ _Avoid_: self-hosted Drive
 A device's authenticated connection to a dohc server. Workspace permissions determine which work the connection can access.
 _Avoid_: Drive connection (for a self-hosted server)
 
+**Server account**:
+A person's identity on one dohc server. A dohc Drive account is a server account on Drive and carries no authority on any other server.
+_Avoid_: dohc account, global account
+
+**Cell**:
+One deployment of the dohc release behind dohc Drive, holding a set of workspaces. Each workspace lives on exactly one cell. People never see cells; to them Drive is one server.
+_Avoid_: shard, node, tenant
+
 ### Privacy
 
 **Usage record**:
@@ -68,6 +76,11 @@ _Avoid_: workflow, zap
 A step in an automation that uses one person's own reach, such as waking that person's agent. Only that person can change it.
 _Avoid_: private step, owner step
 
+### References
+
+**WorkspaceRef**:
+A source workspace id and native object identity with display labels. Labels do not affect equality. A reference grants no authority.
+
 ### Chat
 
 **ActorKey**:
@@ -107,7 +120,7 @@ A URL carrying the credential that authenticates a link grant: anyone holding it
 _Avoid_: public link, web share, share URL
 
 **Link holder**:
-A person using a share link without a dohc identity. Known by a link principal and an optional self-claimed, unverified name.
+A person using a share link without a server account. Known by a link principal and an optional self-claimed, unverified name.
 _Avoid_: guest (means sandboxed code in the app runtime), anonymous user, visitor
 
 **Link principal**:
@@ -115,11 +128,11 @@ The server-minted identity for one browser holding one share link. It carries pr
 _Avoid_: anonymous id, device id
 
 **Received share**:
-The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access.
+The recipient-side materialization of a share: either its own workspace or a mount inside a host workspace under `shared-with-me/`, constrained by the grant's access. A mount syncs only with the share's server.
 _Avoid_: shared folder, remote workspace
 
 **Pending invite**:
-A share grant addressed to an email with no dohc account yet, claimed on the recipient's first relay contact.
+A share grant addressed to an email with no server account on the share's server yet, claimed on the recipient's first relay contact.
 _Avoid_: unclaimed share
 
 **Session host**:
@@ -133,6 +146,10 @@ _Avoid_: site, dashboard, artifact
 **Publication**:
 An immutable, owner-approved bundle of one app revision. Authority comes from the publication, never from the app's source or manifest alone.
 _Avoid_: deploy, build (for the approved object)
+
+**App domain**:
+The domain that serves app launches, on a different registrable domain from the server's share pages. Each launch gets a random subdomain. With the domain on the Public Suffix List, browsers treat every subdomain as its own site and refuse cookies set for the shared parent, so one app cannot set cookies another app reads.
+_Avoid_: publish domain, user content domain
 
 **Dataset**:
 A workspace-owned transactional data domain with its schema, operations, records, and file associations. Apps receive permission to use approved operations; they do not own a separate backend.

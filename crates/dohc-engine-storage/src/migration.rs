@@ -2846,6 +2846,15 @@ CREATE TABLE live_settlement_attribution_unavailable (
 ) STRICT;
 ";
 
+// A fence row also holds its restore proof, which can be tens of MiB, and SQLite
+// reaches a later column of a row only by walking the overflow pages of every
+// column before it. Each edit and live application on a restored document
+// reads its resumed fence, so answer those reads from this index instead.
+const V2_LIVE_RESTORE_RESUMED_LOOKUP_DDL: &str = "
+DROP INDEX live_restore_document_generation;
+CREATE INDEX live_restore_resumed ON live_restore_fences(workspace_id,main_version_id,object_id,new_generation,relay_database_namespace,resume_receipt_json);
+";
+
 const V2_FIELD_HISTORY_LINK_AUTHOR_DDL: &str = "
 ALTER TABLE collection_field_history ADD COLUMN link_author_json TEXT;
 ";
@@ -3188,6 +3197,36 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 46,
         id: "v2-moments-history-time",
         sql: "CREATE INDEX idx_moments_history_time ON moments(workspace_id, version_id, recorded_at_ms, moment_order); CREATE INDEX idx_moments_object_history_time ON moments(workspace_id, version_id, object_id, recorded_at_ms, moment_order);",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 47,
+        id: "v2-engine-store-role",
+        sql: "ALTER TABLE engine_ownership ADD COLUMN store_role TEXT NOT NULL DEFAULT 'owner' CHECK (store_role IN ('owner','passive'));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 48,
+        id: "v2-capture-file-holds",
+        sql: "CREATE TABLE capture_file_holds (workspace_id TEXT NOT NULL, source_version_id TEXT NOT NULL, object_id TEXT NOT NULL, path TEXT NOT NULL, observed_sha256 TEXT NOT NULL CHECK(length(observed_sha256)=64 AND observed_sha256 NOT GLOB '*[^0-9a-f]*'), observed_size INTEGER NOT NULL CHECK(observed_size>=0), reason TEXT NOT NULL CHECK(reason='ydoc-resolution-not-representable'), observed_at_ms INTEGER NOT NULL, attempt_count INTEGER NOT NULL CHECK(attempt_count>0), retry_requested INTEGER NOT NULL CHECK(retry_requested IN (0,1)), PRIMARY KEY(workspace_id,path), FOREIGN KEY(workspace_id,source_version_id) REFERENCES versions(workspace_id,version_id), FOREIGN KEY(workspace_id,object_id) REFERENCES file_objects(workspace_id,object_id)) STRICT;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 49,
+        id: "v2-local-chat-actor-key",
+        sql: "ALTER TABLE chat_messages ADD COLUMN author_actor_key TEXT CHECK (author_actor_key IS NULL OR json_valid(author_actor_key));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 50,
+        id: "v2-live-restore-resumed-lookup",
+        sql: V2_LIVE_RESTORE_RESUMED_LOOKUP_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 51,
+        id: "v2-owner-outbox-person-edit",
+        sql: "ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN person_edit INTEGER CHECK (person_edit IS NULL OR person_edit=1);",
         sets_user_version: None,
     },
 ];
@@ -3853,6 +3892,26 @@ mod tests {
                 "v2-moments-history-time",
                 "5aa8707d5659bbfb8e3e0076c812d1d723a011e6cfb32fefe490f8b1066b2c39",
             ),
+            (
+                "v2-engine-store-role",
+                "8d75962511b05d48c91ea5c041ed69c8ab6b181212aee4c0cad4c7e16f61a54b",
+            ),
+            (
+                "v2-capture-file-holds",
+                "e5326f922618067ec6dec0bed092a8ea98c929a101f5166e448f935cd8ac9dfc",
+            ),
+            (
+                "v2-local-chat-actor-key",
+                "f84d0497555ff288db36304ed0c4b41b7f61d1d7f10396b9fd08a61da0fc7219",
+            ),
+            (
+                "v2-live-restore-resumed-lookup",
+                "ccc7e17969beb6ae6259e9ce174863fa91d15c2bdad66c3f8232e8b236ff8b8c",
+            ),
+            (
+                "v2-owner-outbox-person-edit",
+                "55940512b28bebcdda24b3c86763c66e29416eed55f157b8c06edf9f5b5622df",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -3879,6 +3938,39 @@ mod tests {
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
         assert_eq!(state, (1, 0, 100));
+    }
+
+    #[test]
+    fn restore_resumed_lookup_upgrade_indexes_existing_fences() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-live-restore-resumed-lookup");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','doc','relay','restore','{\"newFence\":1}','{}');").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let indexes: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_index_list('live_restore_fences')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(indexes.iter().any(|name| name == "live_restore_resumed"));
+        assert!(
+            !indexes
+                .iter()
+                .any(|name| name == "live_restore_document_generation")
+        );
+        let found: (i64, String) = conn
+            .query_row(
+                "SELECT new_generation,relay_database_namespace FROM live_restore_fences INDEXED BY live_restore_resumed WHERE workspace_id='ws' AND main_version_id='main' AND object_id='doc'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(found, (1, "relay".to_owned()));
     }
 
     #[test]
@@ -3971,6 +4063,75 @@ mod tests {
             .iter()
             .position(|migration| migration.id == id)
             .expect("a shipped migration")
+    }
+
+    #[test]
+    fn capture_file_hold_migration_upgrades_a_populated_store() {
+        let scratch = tempdir();
+        let mut conn = open_bare(&scratch.join("holds.db"));
+        let ctx = MigrationContext::current(10);
+        let before = migration_index("v2-capture-file-holds");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("INSERT INTO versioned_workspaces VALUES ('ws','main')", [])
+            .unwrap();
+        conn.execute("INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','Main',1)", []).unwrap();
+        conn.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100) INSERT INTO file_objects SELECT 'ws','object-'||x,1 FROM n", []).unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let objects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM file_objects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(objects, 100);
+        let holds: i64 = conn
+            .query_row("SELECT COUNT(*) FROM capture_file_holds", [], |r| r.get(0))
+            .expect("the upgrade creates the hold ledger");
+        assert_eq!(holds, 0);
+        conn.execute("INSERT INTO capture_file_holds(workspace_id,source_version_id,object_id,path,observed_sha256,observed_size,reason,observed_at_ms,attempt_count,retry_requested) VALUES ('ws','main','object-1','held.md',?1,1,'ydoc-resolution-not-representable',10,1,0)", ["a".repeat(64)]).unwrap();
+        assert_eq!(
+            conn.query_row("PRAGMA foreign_key_check", [], |_| Ok(()))
+                .optional()
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    #[ignore = "manual migration cost measurement"]
+    fn capture_file_hold_migration_cost_100000_objects() {
+        let scratch = tempdir();
+        let source = scratch.join("source.db");
+        let mut conn = open_bare(&source);
+        let ctx = MigrationContext::current(10);
+        let before = migration_index("v2-capture-file-holds");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("INSERT INTO versioned_workspaces VALUES ('ws','main')", [])
+            .unwrap();
+        conn.execute("INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','Main',1)", []).unwrap();
+        conn.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) INSERT INTO file_objects SELECT 'ws','object-'||x,1 FROM n", []).unwrap();
+        drop(conn);
+        let mut samples = Vec::new();
+        for sample in 0..33 {
+            let copy = scratch.join(format!("copy-{sample}.db"));
+            std::fs::copy(&source, &copy).unwrap();
+            let mut conn = open_bare(&copy);
+            let start = std::time::Instant::now();
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+            let objects: i64 = conn
+                .query_row("SELECT COUNT(*) FROM file_objects", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(objects, 100000);
+            drop(conn);
+            std::fs::remove_file(copy).unwrap();
+            if sample >= 3 {
+                samples.push(elapsed);
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        println!(
+            "migration_100000_objects warmups=3 samples=30 median_ms={:.6} p95_ms={:.6}",
+            (samples[14] + samples[15]) / 2.0,
+            samples[28]
+        );
     }
 
     fn migration_29_history_fixture(conn: &Connection) -> (String, String) {
@@ -5182,6 +5343,37 @@ mod tests {
         assert_eq!(flag(&conn), 3);
         assert!(
             conn.execute("UPDATE ydoc_docs SET file_export_lane=4", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn owner_person_marker_migration_upgrades_a_populated_store_without_crediting_old_work() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1_000);
+        let before = migration_index("v2-owner-outbox-person-edit");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO binary_blobs VALUES ('base',1,X'58'); \
+            INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,created_at_ms) \
+            VALUES ('outbox','ws','main','doc','base','doc.md','[\"doc.md\"]',0,'base','base',1,'active',1,1,2,1); \
+            INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state) \
+            VALUES ('outbox',1,'append','delivery','base','base',1,1,1,1,1,'active');").unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let retained: (String, Option<bool>) = conn
+            .query_row(
+                "SELECT delivery_id,person_edit FROM owner_ydoc_outbox_entries",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(retained, ("delivery".into(), None));
+        conn.execute("UPDATE owner_ydoc_outbox_entries SET person_edit=1", [])
+            .unwrap();
+        assert!(
+            conn.execute("UPDATE owner_ydoc_outbox_entries SET person_edit=0", [])
                 .is_err()
         );
     }

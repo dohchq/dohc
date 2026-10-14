@@ -4,7 +4,7 @@ import type {SqliteDb, SyncRelayLogRow} from "./types";
 import {rowToLogRow} from "./rows";
 import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, pathVisibleThroughShare} from "../shareFilter";
 import {canonicalLiveSelector} from "./liveDocumentAuthority";
-import {listCurrentServiceHostEnrollments} from "./serviceHostEnrollment";
+import {currentServiceHostEnrollments} from "./serviceHostEnrollment";
 
 /** The op kinds that name one live document, and so may belong to a hosted one. */
 export const HOSTED_DOCUMENT_OP_KINDS = ["moment.append", "ydoc.update", "live.audit.application", "live.audit.settlement", "live.audit.base"] as const;
@@ -32,7 +32,7 @@ export interface ServiceHostFeedScope {
 
 /** Statement-level snapshots; safe both on the request path and inside a write guard. */
 export function readServiceHostFeedScope(storage: StorageContext, workspaceId: string): ServiceHostFeedScope | null {
-  const enrollments = listCurrentServiceHostEnrollments(storage, workspaceId);
+  const enrollments = currentServiceHostEnrollments(storage, workspaceId);
   if (!enrollments.length) return null;
   // Current enrollments share the workspace's owner and identity.
   const {ownerUserId, replicationEpoch, streamIdentity} = enrollments[0]!;

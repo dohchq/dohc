@@ -10,6 +10,7 @@ use crate::rpc::chats::encode_chat_cursor;
 use crate::rpc::chats::threads::ChatLocalAttachmentParams;
 use crate::rpc::chats::threads::ChatThreadPageParams;
 use crate::rpc::chats::threads::ThreadB2Wire;
+use crate::rpc::request::MAX_METADATA_FIELD_BYTES;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
@@ -47,6 +48,7 @@ struct ChatMessageSendParams {
     author_display_name: String,
     author_owner_display_name: Option<String>,
     author_user_id: Option<String>,
+    author_actor_key: Option<String>,
     parent_message_id: Option<String>,
     origin: Option<String>,
     body: String,
@@ -168,6 +170,16 @@ pub(super) fn parse_actor_kind(raw: &str) -> Result<ChatActorKind, WireError> {
     }
 }
 
+pub(super) fn validate_actor_key(key: Option<&str>) -> Result<(), WireError> {
+    if key.is_some_and(|key| key.len() > MAX_METADATA_FIELD_BYTES) {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            format!("chat actor key exceeds {MAX_METADATA_FIELD_BYTES} bytes"),
+        ));
+    }
+    Ok(())
+}
+
 /// A reaction author. Automations do not react.
 fn parse_reactor_kind(raw: &str) -> Result<ChatActorKind, WireError> {
     match parse_actor_kind(raw)? {
@@ -225,6 +237,8 @@ pub(super) struct MessageWire<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     author_user_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    author_actor_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     parent_message_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     origin: Option<&'a str>,
@@ -248,6 +262,7 @@ impl<'a> From<&'a ChatMessage> for MessageWire<'a> {
                 .collect(),
             author_owner_display_name: message.author_owner_display_name.as_deref(),
             author_user_id: message.author_user_id.as_deref(),
+            author_actor_key: message.author_actor_key.as_deref(),
             parent_message_id: message.parent_message_id.as_deref(),
             origin: message.origin.as_deref(),
             automation: message.automation.as_ref().map(AutomationWire::from),
@@ -606,6 +621,7 @@ impl EngineService {
         request_id: Option<String>,
     ) -> Result<Value, WireError> {
         let params: ChatMessageSendParams = parse(params)?;
+        validate_actor_key(params.author_actor_key.as_deref())?;
         reject_capture_origin(params.origin.as_deref())?;
         let author_kind = parse_actor_kind(&params.author_kind)?;
         let open = self.open(handle.as_ref())?;
@@ -637,6 +653,7 @@ impl EngineService {
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
+                params.author_actor_key,
                 cancellation.token(),
             ),
         )
@@ -899,6 +916,7 @@ mod tests {
             author_display_name: "Stamp".to_owned(),
             author_owner_display_name: None,
             author_user_id: None,
+            author_actor_key: None,
             parent_message_id: None,
             origin: None,
             body: "hello".to_owned(),
@@ -939,6 +957,7 @@ mod tests {
         let full = ChatMessage {
             author_owner_display_name: Some("Ada".to_owned()),
             author_user_id: Some("user".to_owned()),
+            author_actor_key: Some(r#"{"kind":"unknown"}"#.to_owned()),
             parent_message_id: Some("parent".to_owned()),
             origin: Some("desktop".to_owned()),
             automation: Some(ChatMessageAutomation {
@@ -966,6 +985,7 @@ mod tests {
                 }],
                 "authorOwnerDisplayName": "Ada",
                 "authorUserId": "user",
+                "authorActorKey": r#"{"kind":"unknown"}"#,
                 "parentMessageId": "parent",
                 "origin": "desktop",
                 "automation": { "automationId": "collection:tasks#stamp" },

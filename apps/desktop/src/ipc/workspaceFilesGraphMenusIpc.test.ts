@@ -1,3 +1,4 @@
+import { workspaceFileRef } from "../workspaces/resolveEngineFiles";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -116,13 +117,13 @@ async function harness() {
     listThreads: vi.fn(async () => []), listChannels: vi.fn(async () => []),
     getChannelWireId: vi.fn(async () => null), listThreadAttachments: vi.fn(async () => []),
   };
-  const index = vi.fn(async () => ({ pathByObjectId: new Map<string, string>(), objectIdByPath: new Map<string, string>() }));
+  const resolveFiles = vi.fn<GraphDependencies["resolveEngineFiles"]>(async (_workspace, targets) => targets.map(() => ({ status: "absent" })));
   registerWorkspaceGraphIpcHandlers<Sender, Event, Workspace, Operation>({
     registerHandler, assertTrustedSender: trusted, withRendererWorkspaceOperation: withOperation,
     workspaceFileListings: listings, listOwnedWorkspaceFilesFor: listing,
     readOwnedWorkspaceTextFor: readText, requireEngineCapture: capture,
     syncWorkspaceSharedChannels: syncChannels, linkedChatStoreFor: () => store,
-    activeEngineFileIndex: index,
+    resolveEngineFiles: resolveFiles,
   });
 
   type MenuDependencies = Parameters<typeof registerNativeMenusIpcHandlers<Sender, Event, Workspace, Operation>>[0];
@@ -143,7 +144,7 @@ async function harness() {
   };
   return {
     workspace, handlers, invoke, change, openDialog, saveDialog, listing, readText, repair,
-    openPath, reveal, renderPdf, notify, capture, syncChannels, store, index, buildMenu,
+    openPath, reveal, renderPdf, notify, capture, syncChannels, store, resolveFiles, buildMenu,
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
     reenterWorkspace: () => { generation += 1; },
@@ -393,10 +394,13 @@ describe("registered graph and heading handlers", () => {
     vi.mocked(h.store.listThreadAttachments).mockResolvedValue([
       { messageId: "message", objectId: "present", pathHint: "old.md" } as Attachment,
       { messageId: "removed-message", objectId: "removed", pathHint: "current.md" } as Attachment,
+      { messageId: "invalid-hint", pathHint: "../outside.md" } as Attachment,
+      { messageId: "mounted-legacy-hint", pathHint: "shared-with-me/Shared/a.md" } as Attachment,
+      { messageId: "duplicate", objectId: "present", pathHint: "another-old-hint.md" } as Attachment,
     ]);
-    h.index.mockResolvedValue({
-      pathByObjectId: new Map([["present", "current.md"]]), objectIdByPath: new Map([["current.md", "present"]]),
-    });
+    h.resolveFiles.mockResolvedValue([
+      { status: "found", objectId: "present", path: "current.md" }, { status: "absent" }, { status: "invalid" }, { status: "absent" },
+    ]);
     h.syncChannels.mockResolvedValue(2);
     const graph = await h.invoke(CHANNELS.readWorkspaceGraph, { workspaceId: "workspace", includeChatMentions: true }) as {
       nodes: { path: string }[]; edges: { target: string }[]; sharedChannelRowsUncovered: number;
@@ -406,6 +410,7 @@ describe("registered graph and heading handlers", () => {
     expect(graph.nodes.some((node) => node.path === "old.md")).toBe(false);
     expect(graph.edges).toHaveLength(1);
     expect(h.capture).toHaveBeenCalledWith("workspace", "Chat mentions");
+    expect(h.resolveFiles).toHaveBeenCalledWith(h.workspace, [workspaceFileRef("workspace", "present"), workspaceFileRef("workspace", "removed"), { path: "../outside.md" }, { path: "shared-with-me/Shared/a.md" }]);
   });
 
   it("rejects a heading response after renderer retirement", async () => {

@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn replicated_empty_record_refusal_is_a_failed_ingest_in_both_capture_routes() {
+fn excessive_quote_depth_is_held_in_both_collection_capture_routes() {
     for batched in [false, true] {
         let scratch = ScratchDir::new().unwrap();
         let supervisor = WorkspaceSupervisor::new();
@@ -18,16 +18,11 @@ fn replicated_empty_record_refusal_is_a_failed_ingest_in_both_capture_routes() {
         sink.reconcile_collections().unwrap();
         seed_captured_richdoc_lineage(&sink, path);
         let conn = Connection::open(&db).unwrap();
-        conn.execute(
-            "INSERT INTO replication_log \
-             (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
-             SELECT workspace_id,'seed-origin',0,'ydoc.update', \
-               json_object('versionId',version_id,'objectId',object_id),4,0 \
-             FROM ydoc_docs WHERE path=?1",
-            [path],
-        )
-        .unwrap();
-        let completed = b"---\nTitle: Completed\n---\n- parent\n  - child\n";
+        let completed = format!(
+            "---\nTitle: Completed\n---\n{} too deep\n",
+            "> ".repeat(121)
+        );
+        let completed = completed.as_bytes();
         write_file(scratch.path(), path, completed);
         if batched {
             write_file(scratch.path(), "tasks/sibling.md", b"Sibling\n");
@@ -42,11 +37,22 @@ fn replicated_empty_record_refusal_is_a_failed_ingest_in_both_capture_routes() {
             let BatchIngestResult::Committed(results) = sink.ingest_batch(&ops).unwrap() else {
                 panic!("batch must return per-file outcomes");
             };
-            assert_eq!(results[0], Err(INGEST_FAILED));
+            assert!(matches!(results[0], Ok(IngestOutcome::Held { .. })));
             assert!(matches!(results[1], Ok(IngestOutcome::Captured { .. })));
         } else {
-            assert_eq!(ingest(&mut sink, path), Err(INGEST_FAILED));
+            assert!(matches!(
+                ingest(&mut sink, path),
+                Ok(IngestOutcome::Held { .. })
+            ));
         }
+        let hold: (String, String) = conn
+            .query_row(
+                "SELECT path, observed_sha256 FROM capture_file_holds WHERE workspace_id=?1",
+                [WORKSPACE_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(hold, (path.to_owned(), hex_sha256(completed)));
         assert_eq!(snapshot(&db, path).unwrap().text, "");
         assert_eq!(std::fs::read(scratch.path().join(path)).unwrap(), completed);
         drop(conn);

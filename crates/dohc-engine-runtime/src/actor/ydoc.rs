@@ -721,6 +721,8 @@ impl ActorHandle {
                             workspace_id: &workspace_id,
                             self_writes: Some(self_writes.as_ref()),
                             progress: None,
+                            file_outcomes_settled: false,
+                            released_hold_paths: None,
                         },
                         now_ms,
                         &NoFaults,
@@ -1565,6 +1567,11 @@ pub(super) fn ydoc_open_state_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let canonical_path = validate_addressable_plaintext_path(path)?;
+    if store.placement_is_held(workspace_id, &canonical_path)? {
+        return Err(RuntimeError::CaptureFileHeld {
+            path: canonical_path,
+        });
+    }
     // Bootstrap: the first live doc in an empty workspace must be creatable —
     // without this, read_text errors VersionNotFound before the absent-path
     // flow can run (capture normally creates main, but nothing has captured).
@@ -2660,6 +2667,12 @@ pub(super) fn ydoc_settle_on_store(
                 }
             };
             match replay_outcome {
+                JobOutcome::Parked => {
+                    self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
+                    return Err(RuntimeError::CaptureFileHeld {
+                        path: current.path.clone(),
+                    });
+                }
                 JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
                     reconcile_author_coverage(store, key, now_ms, faults)?;
                 }
@@ -3048,6 +3061,16 @@ pub(super) fn ydoc_settle_on_store(
     };
     let mut materialized = true;
     match job_outcome {
+        JobOutcome::Parked => {
+            self_writes.retract(
+                &key.workspace_id,
+                &write.snapshot.path,
+                &write.snapshot.blob_sha256,
+            );
+            return Err(RuntimeError::CaptureFileHeld {
+                path: write.snapshot.path.clone(),
+            });
+        }
         JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
             reconcile_author_coverage(store, key, now_ms, faults)?;
         }
@@ -3194,6 +3217,79 @@ fn ydoc_resync_on_store(
     })
 }
 
+/// The head's projection digest that a close compares with the artifact, or
+/// none for a lineage without edits.
+fn close_projection(
+    store: &EngineStore,
+    key: &DocKey,
+    marker: &dohc_engine_collab::Marker,
+    root_dir: Option<&std::path::Path>,
+) -> Result<Option<dohc_engine_collab::CloseProjection>, RuntimeError> {
+    if marker.head_update_seq == 0 {
+        return Ok(None);
+    }
+    let persisted = dohc_engine_collab::load_persisted(store, key)?
+        .ok_or(dohc_engine_collab::CollabError::NoMarker)?;
+    let projection = project_ydoc_on_store(store, key, &persisted.doc, marker.content_kind)?;
+    // A reopened seed can import an engine-written head whose earlier
+    // close cleared last_settled_sha. Prove these source bytes still
+    // belong to this object and are on disk before allowing its prune.
+    let materialized_seed_source_sha256 = if let Some(root_dir) = root_dir
+        && let Some(path) = marker.path.as_deref()
+        && let Some(seed_source) = dohc_engine_collab::read_seed_only_lineage_source(store, key)?
+        && store.read_with(|conn| -> Result<bool, StorageError> {
+            conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM snapshots \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+                       AND path = ?4 AND blob_sha256 = ?5 AND binary_sha256 IS NULL \
+                       AND metadata_origin <> ?6)",
+                params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    path,
+                    seed_source,
+                    dohc_engine_domain::store::CAPTURE_ORIGIN
+                ],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::persist_public)
+        })?
+        && matches!(
+            probe_projection_target(root_dir, path, ProjectionTargetKind::Plaintext),
+            ProjectionTargetState::Text { sha256 } if sha256 == seed_source
+        ) {
+        Some(seed_source)
+    } else {
+        None
+    };
+    Ok(Some(dohc_engine_collab::CloseProjection {
+        sha256: hex_sha256(projection.content.as_bytes()),
+        materialized_seed_source_sha256,
+    }))
+}
+
+/// Name the settlement work an unload must wait for: the condition a
+/// local-only close enforces before it prunes, applied in every regime.
+pub(super) fn ydoc_unload_pending(
+    store: &mut EngineStore,
+    key: &DocKey,
+    root_dir: &std::path::Path,
+    now_ms: i64,
+) -> Result<Option<dohc_engine_collab::live_update_application::UnloadPending>, RuntimeError> {
+    use dohc_engine_collab::live_update_application::UnloadPending;
+    if !reconcile_author_coverage(store, key, now_ms, &NoFaults)? {
+        return Ok(Some(UnloadPending::Materialization));
+    }
+    let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
+        return Ok(None);
+    };
+    let projection = close_projection(store, key, &marker, Some(root_dir))?;
+    let covered =
+        dohc_engine_collab::local_close_is_covered(store, key, &marker, projection.as_ref())?;
+    Ok((!covered).then_some(UnloadPending::Settlement))
+}
+
 fn ydoc_close_session_on_store(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
@@ -3237,49 +3333,13 @@ fn ydoc_close_session_on_store(
     // Keeping the closed CRDT authoritative here would shadow external file
     // edits on reopen: existing lineage, no seedContent, stale document.
     let persist_closed_state = false;
-    let authoritative_projection = if marker.regime == Regime::LocalOnly
-        && marker.head_update_seq > 0
-    {
-        let persisted = dohc_engine_collab::load_persisted(store, key)?
-            .ok_or(dohc_engine_collab::CollabError::NoMarker)?;
-        let projection = project_ydoc_on_store(store, key, &persisted.doc, marker.content_kind)?;
-        // A reopened seed can import an engine-written head whose earlier
-        // close cleared last_settled_sha. Prove these source bytes still
-        // belong to this object and are on disk before allowing its prune.
-        let materialized_seed_source_sha256 = if let Some(materialization) = materialization
-            && let Some(path) = marker.path.as_deref()
-            && let Some(seed_source) =
-                dohc_engine_collab::read_seed_only_lineage_source(store, key)?
-            && store.read_with(|conn| -> Result<bool, StorageError> {
-                conn.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM snapshots \
-                         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
-                           AND path = ?4 AND blob_sha256 = ?5 AND binary_sha256 IS NULL \
-                           AND metadata_origin <> ?6)",
-                    params![
-                        key.workspace_id,
-                        key.version_id,
-                        key.object_id,
-                        path,
-                        seed_source,
-                        dohc_engine_domain::store::CAPTURE_ORIGIN
-                    ],
-                    |row| row.get(0),
-                )
-                .map_err(StorageError::persist_public)
-            })?
-            && matches!(
-                probe_projection_target(&materialization.root_dir, path, ProjectionTargetKind::Plaintext),
-                ProjectionTargetState::Text { sha256 } if sha256 == seed_source
-            ) {
-            Some(seed_source)
-        } else {
-            None
-        };
-        Some(dohc_engine_collab::CloseProjection {
-            sha256: hex_sha256(projection.content.as_bytes()),
-            materialized_seed_source_sha256,
-        })
+    let authoritative_projection = if marker.regime == Regime::LocalOnly {
+        close_projection(
+            store,
+            key,
+            &marker,
+            materialization.map(|materialization| materialization.root_dir.as_path()),
+        )?
     } else {
         None
     };
@@ -3413,6 +3473,8 @@ fn materialize_ydoc_drain(
             workspace_id: &key.workspace_id,
             self_writes: Some(materialization.self_writes.as_ref()),
             progress: None,
+            file_outcomes_settled: false,
+            released_hold_paths: None,
         },
         now_ms,
         faults,
@@ -3987,6 +4049,8 @@ mod scene_seed_transaction_tests {
                 workspace_id: "workspace",
                 self_writes: None,
                 progress: None,
+                file_outcomes_settled: false,
+                released_hold_paths: None,
             },
             3,
             &NoFaults,
@@ -4029,6 +4093,8 @@ mod scene_seed_transaction_tests {
                 workspace_id: "workspace",
                 self_writes: None,
                 progress: Some(&jobs_taken),
+                file_outcomes_settled: false,
+                released_hold_paths: None,
             },
             7,
             &NoFaults,
