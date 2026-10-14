@@ -32,12 +32,13 @@ export function createReplicaReadPrincipal(storage: SyncRelayStorage) {
     const state = authorizedLease(input);
     if (!state) return null;
     const parts = input.pathname.split("/");
-    const allowed = parts.length === 4 && ["bootstrap", "log"].includes(parts[3]!) ||
+    const allowed = parts.length === 4 && ["bootstrap", "log", "live-journal"].includes(parts[3]!) ||
       parts.length === 6 && parts[3] === "log" && /^\d+$/.test(parts[5]!);
     const blob = parts.length === 5 && parts[3] === "blobs" && /^[a-f0-9]{64}$/.test(parts[4]!) &&
       state.blobs.has(parts[4]!);
     return allowed || blob ? state.lease.ownerUserId : null;
   },
+  replicaLiveJournal: true,
   // The guard rechecks standing. Immutable served references need only one membership check.
   revalidate: input => authorizedLease(input)?.lease.ownerUserId ?? null,
   onLogRead(input, rows) {

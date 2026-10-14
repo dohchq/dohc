@@ -67,7 +67,7 @@ it("replays a real journal admission and retains the owner entry until native ap
     };
     const consumer = new OwnerCommittedDelivery(f.storage,history,{client: client as unknown as EngineClient,
       workspace: "handle",host,deadlineMs: 1_000,nextRequestId: () => ++requestId,bounds,
-      ownerAdmission: {shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 100_000,validate}});
+      ownerAdmission: {trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 100_000,validate}});
     client.sendLiveApplication.mockResolvedValueOnce({id: 1,result: {status: "pending",reason: "native busy"}});
     expect(await consumer.drain(document)).toMatchObject({kind: "pending",continueDrain: false});
     expect(pending).toBe(true); expect(removed).toEqual([]); expect(nativeAck).toBeNull();

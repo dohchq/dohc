@@ -39,19 +39,19 @@ function credentialFile(): string {
 
 describe("cloud credential store", () => {
   it("keeps server display metadata across restart without exposing the token", async () => {
-    const saved = { ...credentials, serverName: "Research server", networkAccess: "private" as const };
+    const saved = { ...credentials, networkAccess: "private" as const };
     await createCloudCredentialStore({ dir, cipher: fakeCipher }).save(saved);
     expect(await createCloudCredentialStore({ dir, cipher: fakeCipher }).load()).toEqual(saved);
     expect(await readFile(credentialFile(), "utf8")).not.toContain(credentials.token);
   });
 
-  it("does not render invalid server metadata from disk", async () => {
+  // A file an earlier build saved can still carry the server's name.
+  it("does not render invalid or retired server metadata from disk", async () => {
     const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
     await store.save(credentials);
     const data = JSON.parse(await readFile(credentialFile(), "utf8"));
-    await writeFile(credentialFile(), JSON.stringify({ ...data, serverName: "Bad\nname", networkAccess: "unknown" }));
+    await writeFile(credentialFile(), JSON.stringify({ ...data, serverName: "Research server", networkAccess: "unknown" }));
     expect(await store.load()).toEqual(credentials);
-    await expect(store.save({ ...credentials, serverName: "Bad\nname" })).rejects.toThrow();
   });
 
   it("round-trips credentials through the injected cipher", async () => {

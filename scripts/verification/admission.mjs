@@ -4,14 +4,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 
-// These suites use ordinary Vitest workers, without native or service setup.
-// Unknown suites retain the full lane. Keep this list with their resource inputs.
-const lightPackages = new Set(["@dohc/site", "@dohc/collection-views", "@dohc/live-session-contract", "@dohc/security-contract", "@dohc/workspace-contracts"]);
-const desktopFiles = new Set(["src/renderer/tokens.test.ts", "src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx"]);
-const typecheck = /^tsc --noEmit(?: -p [\w./-]+)?(?: && tsc --noEmit(?: -p [\w./-]+)?)*$/u;
-const exactlyFalse = (object, keys) => object && Object.keys(object).length === keys.length && keys.every(key => object[key] === false);
-
-/** Cold or unverifiable dependencies remain under the full build budget. */
+/** The typecheck can run before queueing only on the lockfile's installed dependencies. */
 export function installedDependenciesMatch(root) {
   try {
     const installed = readFileSync(join(root, "node_modules/.pnpm/lock.yaml"));
@@ -21,33 +14,9 @@ export function installedDependenciesMatch(root) {
     if (require("pnpm").version !== manifest.engines?.pnpm) return false;
     const modules = readFileSync(join(root, "node_modules/.modules.yaml"), "utf8");
     if (!modules.includes(`pnpm@${manifest.engines.pnpm}`)) return false;
-    for (const name of ["typescript", "vitest", "js-yaml"]) require.resolve(`${name}/package.json`);
+    require.resolve("typescript/package.json");
     return true;
   } catch { return false; }
-}
-
-/** Eligibility describes resources, never which verification coverage to omit. */
-export function verificationAdmission({ gates, javascript }, packages, dependenciesReady) {
-  const full = reason => ({ lightweight: false, reason });
-  if (!gates?.js || gates.rust || !javascript || javascript.full !== false) return full("Full or native verification.");
-  if (!dependenciesReady) return full("Dependencies need installation or cannot be verified.");
-  if (javascript.repository !== "source" || javascript.desktopScripts !== false ||
-      !exactlyFalse(javascript.needs, ["engine", "desktop", "postgres"]) ||
-      !exactlyFalse(javascript.proofs, ["accounts", "selfHostNative", "desktop", "statesPage"])) return full("Build, service, browser, or repository contracts selected.");
-  if (!Array.isArray(javascript.packages) || javascript.packages.length < 1 || javascript.packages.length > 2 ||
-      new Set(javascript.packages).size !== javascript.packages.length) return full("Package count is outside the light budget.");
-  if (packages.some(pkg => pkg.manifest.scripts?.typecheck && (!typecheck.test(pkg.manifest.scripts.typecheck) || pkg.manifest.scripts.pretypecheck || pkg.manifest.scripts.posttypecheck))) return full("A workspace typecheck has an unbounded custom command.");
-  for (const name of javascript.packages) {
-    const pkg = packages.find(pkg => pkg.name === name);
-    const script = pkg?.manifest.scripts?.[name === "@dohc/desktop" ? "test:unit" : "test"];
-    if (script !== "vitest run") return full(`Unbounded or unknown test command: ${name}.`);
-    if (name === "@dohc/desktop") {
-      const files = javascript.testFiles?.[name];
-      if (!Array.isArray(files) || !files.length || files.some(file => !desktopFiles.has(file))) return full("Desktop suite requires the full lane.");
-    } else if (!lightPackages.has(name)) return full(`No audited light resource contract: ${name}.`);
-    if (Object.keys(pkg.manifest.scripts).some(key => /^(?:pre|post)(?:test(?::unit)?|typecheck)$/u.test(key))) return full(`Custom test or typecheck hook: ${name}.`);
-  }
-  return { lightweight: true, reason: "Warm dependencies, audited suites, sequential commands, one test worker." };
 }
 
 /** Host/tool failures can be rejected before waiting; installations stay after admission. */

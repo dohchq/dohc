@@ -7,19 +7,120 @@ import {
 import { patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter-map";
 import { modalFocusableElements, switchModalRegion, trapModalTabKey } from "./modalFocus";
 import { Smile } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type * as Y from "yjs";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import * as Y from "yjs";
+import type { Lexer } from "marked";
 import {
   applyFrontmatter,
   displayFrontmatterValue,
+  markdownEditorBody,
   orderFrontmatter,
   parseFrontmatter,
 } from "./markdown/frontmatter";
+import { lexesAsH1, opensWithH1 } from "./markdown/firstBlock";
+import { TOPMATTER_FLAG } from "./pageTopmatter";
 
 // The frontmatter Y.Map field name shared with PropertiesPanel. Title + icon
 // are reserved keys the document system owns — this
 // surface edits them directly instead of exposing them as user properties.
 const FRONTMATTER_FIELD = "frontmatter";
+// The body editor's fragment in a live document.
+const BODY_FIELD = "body";
+
+// One title: a page with no `title` whose body opens with an H1 shows that
+// H1 as its title, and the title field folds into the row beside the icon.
+// Both answers read the first block alone, never the rest of the document.
+
+// The editor's own Markdown lexer, for a paragraph with an underline (see
+// markdown/firstBlock.ts). It loads with the editor's chunk, not at launch;
+// until it arrives, such a page shows its title open.
+let lexer: typeof Lexer | null = null;
+let lexerLoad: Promise<typeof Lexer> | null = null;
+function loadLexer(): Promise<typeof Lexer> {
+  lexerLoad ??= import("marked").then(
+    (module) => (lexer = module.Lexer),
+    (error: unknown) => {
+      lexerLoad = null;
+      throw error;
+    },
+  );
+  return lexerLoad;
+}
+
+// A local page's body is the Markdown after its frontmatter. The lines to lex
+// are a string, so an edit that leaves them unchanged lexes nothing.
+function useLocalOpensWithH1(markdown: string | null): boolean {
+  const decided = useMemo(() => (markdown === null ? false : opensWithH1(markdownEditorBody(markdown))), [markdown]);
+  const block = typeof decided === "string" ? decided : null;
+  const [loaded, setLoaded] = useState(() => lexer);
+  useEffect(() => {
+    if (block === null || loaded) return;
+    let current = true;
+    loadLexer().then(
+      (next) => {
+        if (current) setLoaded(() => next);
+      },
+      // Without the lexer the title stays open, as it is on a page with no H1.
+      () => undefined,
+    );
+    return () => {
+      current = false;
+    };
+  }, [block, loaded]);
+  const lexed = useMemo(() => block !== null && loaded !== null && lexesAsH1(loaded, block), [block, loaded]);
+  return typeof decided === "boolean" ? decided : lexed;
+}
+
+function isH1(node: unknown): boolean {
+  return node instanceof Y.XmlElement && node.nodeName === "heading" && Number(node.getAttribute("level")) === 1;
+}
+
+// In a live document, the body fragment's first child. The fragment reports
+// blocks added or removed, and the first block reports its own attributes;
+// typing inside a block reports to neither. The snapshot is a boolean, so a
+// report that leaves the answer unchanged renders nothing.
+function useLiveOpensWithH1(ydoc: Y.Doc | null): boolean {
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      if (!ydoc) return () => undefined;
+      const body = ydoc.getXmlFragment(BODY_FIELD);
+      let first: Y.XmlElement | null = null;
+      const watchFirst = () => {
+        const next = body.get(0);
+        const element = next instanceof Y.XmlElement ? next : null;
+        if (element === first) return;
+        first?.unobserve(onChange);
+        first = element;
+        first?.observe(onChange);
+      };
+      const onBody = () => {
+        watchFirst();
+        onChange();
+      };
+      watchFirst();
+      body.observe(onBody);
+      return () => {
+        body.unobserve(onBody);
+        first?.unobserve(onChange);
+      };
+    },
+    [ydoc],
+  );
+  return useSyncExternalStore(subscribe, () => (ydoc ? isH1(ydoc.getXmlFragment(BODY_FIELD).get(0)) : false));
+}
+
+const TITLE_FIELD = "block resize-none overflow-hidden border-0 bg-transparent field-sizing-content read-only:cursor-default";
+// Its own line under the icon, as large as the drawing's title.
+const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-bold leading-[1.15] tracking-[-0.02em] text-ink placeholder:text-subtle`;
+// Folded beside "Add icon", and shown with it while the pointer is over the
+// page's identity or the field has focus. A read-only page has nothing to
+// add, so it stays hidden. Square corners keep its focus underline straight,
+// like the pills' fields.
+const TITLE_FOLDED = `${TITLE_FIELD} px-1.5 py-[3px] text-[12.5px] leading-normal text-subtle placeholder:text-subtle hover:placeholder:text-muted focus:placeholder:text-muted`;
+// "Add icon" shows while the pointer is over the page's identity or focus is
+// anywhere in it, so a focused "Add title" never sits beside an empty gap.
+const ADD_ICON =
+  "inline-flex cursor-pointer items-center gap-1.5 rounded-md border-0 bg-transparent px-1.5 py-[3px] text-[12.5px] text-subtle opacity-0 transition-[opacity,color] duration-100 ease-out hover:text-muted focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100";
 
 // A small curated palette — enough for the common cases (docs, projects,
 // status, life) without shipping a multi-thousand-emoji database. Anything
@@ -35,7 +136,7 @@ const EMOJI_CHOICES = [
   "🐛", "🎓", "👤", "👥", "💬", "📣", "🔔", "❓", "❗", "⏰",
 ] as const;
 
-// Page identity above the document body: a large serif title and an emoji
+// Page identity above the document body: a large title and an emoji
 // icon, both stored as reserved `title` / `icon` frontmatter keys. This is a
 // sibling React surface — not part of the ProseMirror doc — so it never
 // touches the editor schema. It reuses the same read/write plumbing as
@@ -128,6 +229,8 @@ export function PageIdentity(props: PageIdentityProps) {
   }, [body, ydoc, ydocRevision]);
 
   const title = displayFrontmatterValue(meta.title);
+  const liveOpensWithH1 = useLiveOpensWithH1(ydoc);
+  const localOpensWithH1 = useLocalOpensWithH1(ydoc ? null : body);
   const [editRefused, setEditRefused] = useState(false);
   useEffect(() => setEditRefused(false), [ydoc, body]);
   const icon =
@@ -160,9 +263,48 @@ export function PageIdentity(props: PageIdentityProps) {
   // frontmatter whenever an external change lands and the field isn't focused
   // (mirrors how PropertiesPanel avoids a dirty-loop with the editor).
   const [titleDraft, setTitleDraft] = useState(title);
-  const titleFocused = useRef(false);
+  const [titleFocused, setTitleFocused] = useState(false);
   const titleRef = useRef<HTMLTextAreaElement | null>(null);
   const titleCaret = useRef<number | null>(null);
+  // A blur while an input method composes can come before the composed text
+  // reaches onChange. The field keeps its text until the composition ends.
+  const titleComposing = useRef(false);
+  const [blurHeld, setBlurHeld] = useState(false);
+  // An open title stays open until its composition ends, so interim text
+  // that empties the field does not fold it mid-composition.
+  const [openWhileComposing, setOpenWhileComposing] = useState(false);
+  // Ends a composition, and the blur it held back if the field has lost
+  // focus. The draft re-syncs from the title once the composed text, if any,
+  // has been written.
+  function endComposition() {
+    titleComposing.current = false;
+    setBlurHeld(false);
+    setOpenWhileComposing(false);
+    if (document.activeElement !== titleRef.current) setTitleFocused(false);
+  }
+  // Some input methods never send compositionend after a blur. The person's
+  // next click or key elsewhere, or the window's next focus, ends the
+  // composition instead, so the field cannot ignore later blurs, or outside
+  // changes to the title, for good. Not focusin: the focus move that held the blur can still
+  // be arriving at its new element.
+  useEffect(() => {
+    if (!blurHeld) return;
+    const elsewhere = (event: Event) => {
+      if (event.target === titleRef.current) return;
+      // A key the input method still owns is part of the composition.
+      if (event instanceof KeyboardEvent && (event.isComposing || event.keyCode === 229)) return;
+      endComposition();
+    };
+    const events = ["pointerdown", "keydown"] as const;
+    for (const name of events) document.addEventListener(name, elsewhere, true);
+    window.addEventListener("focus", elsewhere);
+    return () => {
+      for (const name of events) document.removeEventListener(name, elsewhere, true);
+      window.removeEventListener("focus", elsewhere);
+    };
+    // endComposition reads only refs and state setters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blurHeld]);
   useLayoutEffect(() => {
     const caret = titleCaret.current;
     if (caret === null) return;
@@ -170,8 +312,15 @@ export function PageIdentity(props: PageIdentityProps) {
     titleRef.current?.setSelectionRange(caret, caret);
   });
   useEffect(() => {
-    if (!titleFocused.current) setTitleDraft(title);
-  }, [title]);
+    if (!titleFocused) setTitleDraft(title);
+  }, [title, titleFocused]);
+  // The same field folds and unfolds, so focus, caret and Tab order stay.
+  // It folds while it holds no text, whether or not it has focus, so focus
+  // and blur never move what is below it: the first character typed opens
+  // it, and clearing it folds it again. While it has focus, the text on
+  // screen decides, so a title written elsewhere opens it only on blur.
+  const empty = titleFocused ? titleDraft === "" : title === "";
+  const folded = (liveOpensWithH1 || localOpensWithH1) && empty && !openWhileComposing;
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [emojiInput, setEmojiInput] = useState("");
@@ -230,9 +379,11 @@ export function PageIdentity(props: PageIdentityProps) {
 
   return (
     <div className="dohc-page-identity group" data-testid="page-identity">
-      <div className="dohc-page-identity__inner">
-        {editRefused ? <span role="status" className="dohc-page-properties__flag" title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>Edit in text</span> : null}
-        <div className="dohc-page-identity__icon-row">
+      {/* The icon's line, then the title on its own line. Folded, the title
+          joins the icon's line. */}
+      <div className="dohc-page-identity__inner flex flex-wrap items-center gap-x-1 gap-y-3">
+        {editRefused ? <span role="status" className={`${TOPMATTER_FLAG} basis-full px-1.5`} title={FRONTMATTER_EDIT_REFUSED_MESSAGE}>Edit in Source</span> : null}
+        <div className="relative min-h-5">
           {icon ? (
             <button
               ref={iconTriggerRef}
@@ -253,7 +404,7 @@ export function PageIdentity(props: PageIdentityProps) {
               data-testid="page-icon-add"
               aria-label="Add icon"
               onClick={() => setPickerOpen((open) => !open)}
-              className="dohc-page-identity__add-icon"
+              className={ADD_ICON}
             >
               <Smile size={15} aria-hidden />
               Add icon
@@ -318,16 +469,29 @@ export function PageIdentity(props: PageIdentityProps) {
           aria-label="Page title"
           rows={1}
           value={titleDraft}
-          placeholder={props.filenameStem}
+          placeholder={folded ? "Add title" : props.filenameStem}
           spellCheck={false}
           readOnly={readOnly}
           onFocus={() => {
-            titleFocused.current = true;
+            // Focus back in the field ends a composition it never ended.
+            titleComposing.current = false;
+            setBlurHeld(false);
+            setOpenWhileComposing(false);
+            setTitleFocused(true);
           }}
           onBlur={() => {
-            titleFocused.current = false;
+            if (titleComposing.current) {
+              setBlurHeld(true);
+              return;
+            }
+            setTitleFocused(false);
             setTitleDraft(title);
           }}
+          onCompositionStart={() => {
+            titleComposing.current = true;
+            if (!folded) setOpenWhileComposing(true);
+          }}
+          onCompositionEnd={endComposition}
           onChange={(event) => {
             const field = event.target;
             const next = oneLine(field.value);
@@ -338,6 +502,13 @@ export function PageIdentity(props: PageIdentityProps) {
             }
             setTitleDraft(next);
             writeField("title", next.length === 0 ? undefined : next);
+            if (titleComposing.current && next !== "") setOpenWhileComposing(true);
+            // Committed text arriving after the blur is the composition's
+            // last word; interim text is not.
+            const input = event.nativeEvent;
+            const interim =
+              input instanceof InputEvent && (input.isComposing || input.inputType === "insertCompositionText");
+            if (blurHeld && !interim) endComposition();
           }}
           onKeyDown={(event) => {
             // During IME composition, Enter and ArrowDown pick a candidate.
@@ -352,7 +523,13 @@ export function PageIdentity(props: PageIdentityProps) {
               props.onEnterBody?.();
             }
           }}
-          className="dohc-page-identity__title"
+          className={
+            !folded
+              ? TITLE_OPEN
+              : readOnly
+                ? `${TITLE_FOLDED} invisible`
+                : `${TITLE_FOLDED} opacity-0 transition-opacity duration-100 ease-out group-hover:opacity-100 focus:opacity-100`
+          }
         />
       </div>
     </div>

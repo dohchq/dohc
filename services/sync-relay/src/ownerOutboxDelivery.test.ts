@@ -9,12 +9,13 @@ const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("he
 const seedKey = (adoptionId: string, sequence: number) => (updateDigest: string) =>
   `owner-adoption:${sha(Buffer.from(JSON.stringify([adoptionId, sequence, updateDigest])))}`;
 
-function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclaration?: object, firstKey?: (updateDigest: string) => string) {
+function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclaration?: object, firstKey?: (updateDigest: string) => string, personEdit = true) {
   const base = Buffer.alloc(1_048_576, 17);
   const binding = {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: sha(base),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1};
   const entries = [1,3,7].map(sequence => ({sequence,
     appendKey: sequence === 1 && firstKey ? firstKey(sha(Buffer.from([sequence]))) : `append-${sequence}`,
     deliveryId: `delivery-${sequence}`,updateDigest: sha(Buffer.from([sequence])),byteLength: 1,createdAtMs: sequence,
+    ...(personEdit ? {personEdit: true} : {}),
     ...(sequence === 1 && agentDeclaration ? {agentDeclaration} : {})}));
   const applied = vi.fn();
   const host = {hostId: "host",hostEpoch: 1,instanceId: "instance",connectionId: "connection"};
@@ -56,8 +57,8 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
     commitLiveUpdateJournal: vi.fn((input: {metadata: {deliveryId: string; updateDigest: string}}) => ({result: {kind: "accepted",receipt: {deliveryId: input.metadata.deliveryId,updateDigest: input.metadata.updateDigest,journalCursor: receipts.length + 1,acceptingHostEpoch: 1}}})),
   };
   const validate = vi.fn<OwnerOutboxAdmission["validate"]>(() => ({} as never));
-  const admission: OwnerOutboxAdmission = {shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,validate};
-  return {requests,receipts,storage,state,applyThrough,validate,applied,admission,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission,workspace: "handle",host: host as never,registrationId: 1,binding,
+  const admission: OwnerOutboxAdmission = {trustedAccount: accountId => ({accountId, name: "Owner name"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,validate};
+  return {requests,receipts,storage,state,client,applyThrough,validate,applied,admission,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission,workspace: "handle",host: host as never,registrationId: 1,binding,
     adoption: {adoptionId: "adoption",sequence: 7,applied},nextRequestId: () => ++requestId,deadlineMs: 30_000,assertCurrent() {},applyThrough})};
 }
 
@@ -113,20 +114,20 @@ it("submits the agent each entry declared and none for an entry that declared no
   const [first, second] = run.storage.commitLiveUpdateJournal.mock.calls.map(([input]) => (input as {metadata: Record<string, unknown>}).metadata);
   expect(first).toMatchObject({deliveryId: "delivery-1",authorContext: {kind: "account",accountId: "owner",agent: agentDeclaration}});
   expect(first).not.toHaveProperty("agentDeclaration");
-  expect(second).toMatchObject({deliveryId: "delivery-3"});
+  expect(second).toMatchObject({deliveryId: "delivery-3", authorContext: {kind: "account", accountId: "owner"}});
   expect(second).not.toHaveProperty("agentDeclaration");
-  expect(second).not.toHaveProperty("authorContext");
+  expect(second!.authorContext).not.toHaveProperty("agent");
   await expect(fixture(1, 10_000, {agentId: "",onBehalfOf: null,depth: 0}).run()).rejects.toThrow();
 });
 
-it("uses authenticated account names and refuses another account's metadata", async () => {
-  const f = fixture(1, 10_000, {agentId: "trip-agent", onBehalfOf: null, depth: 0});
+it.each([undefined, {agentId: "trip-agent", onBehalfOf: null, depth: 0}])("uses authenticated account names and refuses another account's metadata (%j)", async declared => {
+  const f = fixture(1, 10_000, declared);
   f.admission.trustedAccount = vi.fn(async accountId => ({accountId, name: "Owner name"}));
   await f.run();
   expect(f.admission.trustedAccount).toHaveBeenCalledWith("owner");
   expect(f.storage.commitLiveUpdateJournal.mock.calls[0]![0]).toMatchObject({trustedAccount: {accountId: "owner", name: "Owner name"},
-    metadata: {authorContext: {kind: "account", accountId: "owner", agent: {agentId: "trip-agent", depth: 0}}}});
-  const changed = fixture(1, 10_000, {agentId: "trip-agent", onBehalfOf: null, depth: 0});
+    metadata: {authorContext: {kind: "account", accountId: "owner", ...(declared ? {agent: {agentId: "trip-agent", depth: 0}} : {})}}});
+  const changed = fixture(1, 10_000, declared);
   changed.admission.trustedAccount = () => ({accountId: "another", name: "Another"});
   await expect(changed.run()).rejects.toThrow("Owner account changed.");
   expect(changed.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
@@ -143,6 +144,26 @@ it("retains configured entry and byte limits without acknowledging unread update
   await expect(bounded.run()).rejects.toThrow("byte budget exceeded");
   expect(bounded.receipts).toHaveLength(0);
   expect(bounded.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
+});
+
+it.each(["provenance-refused", "delivery-conflict"])("quarantines a terminal %s without acknowledging or retrying it", async reason => {
+  const f = fixture(1);
+  f.storage.commitLiveUpdateJournal.mockReturnValue({result: {kind: "refused", reason}} as never);
+  const original = f.client.sendRequest.getMockImplementation()!;
+  f.client.sendRequest.mockImplementation(async request => {
+    if (request.method === "liveApplication.quarantineOwnerOutbox") {
+      expect(request.params).toEqual({registrationId: 1, reason});
+      f.state.value = "quarantined";
+      return {id: request.id, result: {state: "quarantined"}} as never;
+    }
+    return original(request);
+  });
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(f.state.value).toBe("quarantined");
+  expect(f.receipts).toEqual([]);
+  f.storage.commitLiveUpdateJournal.mockClear();
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(f.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
 });
 
 it("continues a byte-limited pass only after a real admission and native outbox ACK", async () => {
@@ -163,7 +184,7 @@ it("drains a sealed queue with fresh owner standing and leaves quarantine intact
   expect(await sealed.run()).toEqual({admittedEntries: 1,hasMore: false});
   const quarantined = fixture();
   quarantined.state.value = "quarantined";
-  await expect(quarantined.run()).rejects.toThrow("explicit recovery");
+  expect(await quarantined.run()).toEqual({admittedEntries: 0, hasMore: false});
   expect(quarantined.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
   expect(quarantined.applyThrough).not.toHaveBeenCalled();
   expect(quarantined.receipts).toEqual([]);
@@ -219,4 +240,31 @@ it("waits for worker capacity without committing or acknowledging and resumes th
   release(); expect(await first).toEqual({admittedEntries: 0, hasMore: true, retryReady: true});
   expect(await f.run()).toEqual({admittedEntries: 1, hasMore: true});
   expect(f.receipts).toMatchObject([{deliveryId: "delivery-1"}]);
+});
+
+it.each(["seed", "automation", "actorless", "Collection adoption", "owner delivery"])("leaves %s entries unattributed", async () => {
+  const f = fixture(1, 10_000, undefined, undefined, false);
+  await f.run();
+  expect(f.storage.commitLiveUpdateJournal.mock.calls[0]![0].metadata).not.toHaveProperty("authorContext");
+});
+it("does not submit a credited entry during a temporary account lookup failure", async () => {
+  const f = fixture(1);
+  f.admission.trustedAccount = vi.fn().mockResolvedValueOnce(undefined).mockResolvedValue({accountId: "owner", name: "Owner name"});
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true});
+  expect(f.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
+  await f.run();
+  expect(f.storage.commitLiveUpdateJournal.mock.calls[0]![0]).toMatchObject({metadata: {authorContext: {kind: "account", accountId: "owner"}}});
+});
+
+it("keeps submitted context when an admitted head retries across a missing account lookup", async () => {
+  const f = fixture(1);
+  f.applyThrough.mockResolvedValueOnce(null);
+  f.admission.trustedAccount = vi.fn().mockResolvedValueOnce({accountId: "owner", name: "Owner name"})
+    .mockResolvedValueOnce(undefined).mockResolvedValue({accountId: "owner", name: "Owner name"});
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true});
+  const first = f.storage.commitLiveUpdateJournal.mock.calls[0]![0].metadata;
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true});
+  expect(f.storage.commitLiveUpdateJournal).toHaveBeenCalledTimes(1);
+  await f.run();
+  expect(f.storage.commitLiveUpdateJournal.mock.calls[1]![0].metadata).toEqual(first);
 });
