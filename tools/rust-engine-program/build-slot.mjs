@@ -814,7 +814,7 @@ export function verificationLanes(env = process.env) {
   return Number(requested);
 }
 
-export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1] } = {}) {
+export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1], signal } = {}) {
   if (!entry || canonical(entry) !== canonical(verifierEntry)) {
     throw new Error(`Only the PR verifier (${verifierEntry}) may hold a verification lane. Run pnpm verify:pr, or take a build slot for other Cargo work.`);
   }
@@ -823,7 +823,7 @@ export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 
   if (!budget) return null;
   return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots,
     kind: "verification-slot", lanes: "verification runs", metadata,
-    waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket });
+    waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket, signal });
 }
 
 /** A ticket observer failed, so acquisition stopped before admission instead of retrying. */
@@ -856,6 +856,7 @@ async function acquireSlot({
   observeTicket,
   identityDelayMs,
   goneMs,
+  signal,
 }) {
   mkdirSync(root, { recursive: true });
   const label = kind.replace("-", " ");
@@ -874,6 +875,10 @@ async function acquireSlot({
   };
   const onSigint = () => cancel("SIGINT", 130);
   const onSigterm = () => cancel("SIGTERM", 143);
+  // A caller's signal stops the wait without touching the process's exit code.
+  const onAbort = () => { cancellation.abort(signal.reason ?? new Error(`${label} acquisition stopped.`)); removeTicket(); };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
   const observe = ({ name, path }) => {
     // Inspecting a returned thenable runs observer code too, so its failures must not reach the transient retry.
     try {
@@ -969,6 +974,7 @@ async function acquireSlot({
     await sleep(Math.min(pollMs, 1000, Math.max(1, deadline - Date.now())), undefined, { signal: cancellation.signal });
   } } finally {
     removeTicket();
+    signal?.removeEventListener("abort", onAbort);
     process.off("exit", removeTicket);
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
