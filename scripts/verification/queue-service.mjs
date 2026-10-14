@@ -8,7 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
@@ -39,8 +39,17 @@ export async function sweepContainers({ request, command = run } = {}) {
   return ids.size;
 }
 
+/**
+ * A lane's temp folder, beside the lane under the queue root. Lanes never share one, and the queue root
+ * sits in the host's antivirus exclusion, so a scan cannot hold a test's temp file while it is deleted.
+ */
+export const laneTemp = lane => join(dirname(lane), "tmp", basename(lane));
+
 /** Put the lane at `head` with no state from earlier runs except the named caches. */
 export async function prepareLane({ lane, repo, head, signal }) {
+  // The temp folder keeps only the coming run's files.
+  await rm(laneTemp(lane), { recursive: true, force: true, maxRetries: 5 });
+  mkdirSync(laneTemp(lane), { recursive: true });
   // Git runs as a child process, never synchronously, so a slow checkout cannot stop the heartbeat of another lane's run.
   const laneGit = async (args, cwd = lane) => (await run("git", args, { cwd, signal, quietStdout: true, timeoutMs: 15 * 60_000 })).stdout.trim();
   if (!existsSync(join(lane, ".git"))) {
@@ -56,7 +65,8 @@ export async function prepareLane({ lane, repo, head, signal }) {
   if (await laneGit(["rev-parse", "HEAD"]) !== head) throw new Error(`The lane did not check out ${head}.`);
   if (await laneGit(["status", "--porcelain"]) !== "") throw new Error("The lane has changes after checkout and clean.");
   // Installed while the request waits for the lane, so the verifier's own install has nothing left to do in it.
-  await run(process.execPath, ["scripts/verification/setup.mjs"], { cwd: lane, signal, quietStdout: true, timeoutMs: 30 * 60_000 });
+  await run(process.execPath, ["scripts/verification/setup.mjs"], { cwd: lane, signal, quietStdout: true, timeoutMs: 30 * 60_000,
+    env: { ...process.env, TEMP: laneTemp(lane), TMP: laneTemp(lane) } });
 }
 
 export async function dockerResponds(command = run) {
@@ -76,7 +86,7 @@ async function defaultWorker({ lane, request, grant, output, signal }) {
   const args = ["scripts/verification/verify.mjs", "pr", "--base", request.base,
     ...(request.scope === "all" ? [] : ["--job", request.scope]), ...(request.full ? ["--full"] : [])];
   await run(process.execPath, args, { cwd: lane, signal, log: join(output, "worker.log"), quietStdout: true,
-    env: { ...process.env, DOHC_VERIFICATION_GRANT: JSON.stringify(grant), DOHC_VERIFICATION_OUTPUT: output } })
+    env: { ...process.env, TEMP: laneTemp(lane), TMP: laneTemp(lane), DOHC_VERIFICATION_GRANT: JSON.stringify(grant), DOHC_VERIFICATION_OUTPUT: output } })
     .catch(error => { if (!error.commandExitFailure) throw error; });
 }
 
@@ -272,7 +282,7 @@ export async function runService({
     }
     const busy = new Set([...running.values()].map(other => other.checkout));
     const checkout = checkouts.find(path => !busy.has(path));
-    const current = { id: entry.id, attempt: n, checkout, startedAt: new Date().toISOString(), phase: "preparing", awakeMs: 0,
+    const current = { id: entry.id, attempt: n, checkout, startedAt: new Date().toISOString(), phase: "preparing", phaseAt: Date.now(), awakeMs: 0,
       limitMs: Math.min(timeLimitMs, requestBudgetMs - used), prepareMs: 0, abort: new AbortController(), stopped: undefined };
     running.set(entry.id, current);
     let lease;
@@ -286,6 +296,7 @@ export async function runService({
       // Rust-only runs need no Docker, so a sweep failure must not stop them.
       await sweep({}).catch(error => log(`container sweep failed: ${error.message}`));
       current.phase = "verifying";
+      current.phaseAt = Date.now();
       if (!current.stopped) await worker({ lane: checkout, request: entry.request, grant, output, signal: current.abort.signal });
     } catch (error) {
       if (!current.stopped) log(`attempt ${entry.id}/${n} ended early: ${error.stack ?? error.message}`);
@@ -376,16 +387,19 @@ export async function runService({
     beating ??= beat().catch(error => log(`heartbeat failed: ${error.message}`)).finally(() => { beating = null; });
   }, 10_000);
   // Awake time has its own clock too, so slow work in the loop never shortens a run's time.
-  // Only awake time counts against a run: a gap far over one tick is sleep.
+  // Only awake time counts against a run. A gap of over a minute between ticks is the machine sleeping;
+  // a shorter one is a busy host delaying the timer, and the run was working through it.
   let last = Date.now();
   const clock = setInterval(() => {
     const now = Date.now();
-    const awake = Math.min(now - last, 3 * tickMs);
-    last = now;
+    const asleep = now - last > 60_000;
     for (const current of running.values()) {
+      // A phase that began since the last tick counts only from its start.
+      const awake = asleep ? 0 : now - Math.max(last, current.phaseAt);
       if (current.phase === "verifying") current.awakeMs += awake;
       if (current.phase === "preparing") current.prepareMs += awake;
     }
+    last = now;
   }, tickMs);
   log(`service ${commit ?? "(unversioned)"} started, pid ${process.pid}`);
   try {
