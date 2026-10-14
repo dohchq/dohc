@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { attemptOutcome, cancel, listRequests, nextRequest, placeSubmission, position, queuePaths, readJson, submit, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, cancel, listRequests, nextRequest, placeSubmission, position, queuePaths, readJson, submit, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
 import { runService } from "./queue-service.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
 import { run } from "./process.mjs";
@@ -54,6 +54,15 @@ test("only a receipt for this exact attempt counts", () => {
   assert.equal(attemptOutcome(receipt({ verdict: "PASS" }), grant, { stopped: "time limit" }).outcome, "failed");
   assert.equal(attemptOutcome(null, grant, { stopped: "cancelled" }).outcome, "cancelled");
   assert.equal(attemptOutcome(null, grant, { stopped: "time budget" }).outcome, "error", "a run cut short by the shared budget gets no verdict");
+});
+
+test("the service task restarts a dead supervisor from the session that installed it, at normal priority", () => {
+  const xml = taskDefinition("C:\\w\\_verification");
+  // A logon trigger's repetition only starts at the next logon; the time trigger repeats from the moment it is registered.
+  assert.match(xml, /<LogonTrigger><Enabled>true<\/Enabled><UserId>[^<]*<\/UserId><\/LogonTrigger>/u);
+  assert.match(xml, /<TimeTrigger>.*<Repetition><Interval>PT5M<\/Interval>/u);
+  assert.match(xml, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/u);
+  assert.match(xml, /<Priority>4<\/Priority>/u, "the default priority runs every gate below normal");
 });
 
 test("a request whose status cannot be read is skipped, never taken for a new one", () => {

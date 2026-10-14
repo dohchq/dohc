@@ -254,12 +254,13 @@ export async function verifyThroughQueue({ root, submission, detach = false, che
   }
 }
 
-function taskDefinition(root) {
+export function taskDefinition(root) {
   const xml = text => text.replace(/[&<>"]/gu, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" })[c]);
   const user = `${process.env.USERDOMAIN}\\${process.env.USERNAME}`;
   const command = `--headless pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${join(root, "supervisor.ps1")}" -Root "${root}"`;
   // Logon starts it. Every five minutes a time trigger restarts a supervisor that died; a logon trigger's own
   // repetition would only begin at the next logon, leaving the session that installed it unguarded. IgnoreNew keeps one.
+  // Priority 4 is normal: Task Scheduler's default of 7 runs every gate in the lane below normal CPU and I/O priority.
   return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
@@ -273,6 +274,7 @@ function taskDefinition(root) {
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <StartWhenAvailable>true</StartWhenAvailable>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>4</Priority>
     <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
   </Settings>
   <Actions Context="Author"><Exec><Command>conhost.exe</Command><Arguments>${xml(command)}</Arguments></Exec></Actions>
