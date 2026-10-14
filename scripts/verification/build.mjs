@@ -44,7 +44,7 @@ const inputPaths = {
 };
 const environmentInputs = {
   engine: /^(CARGO_(BUILD_|PROFILE_|TARGET_|INCREMENTAL$|ENCODED_RUSTFLAGS$)|RUST(?:FLAGS|UP_TOOLCHAIN|C|C_WRAPPER|C_WORKSPACE_WRAPPER|DOC|DOCFLAGS)$|(?:CC|CXX|AR|CFLAGS|CXXFLAGS)(?:_|$))/,
-  desktop: /^(VITE_|NODE_ENV$|NODE_OPTIONS$|ESBUILD_BINARY_PATH$|DOHC_(?:POSTHOG_KEY|POSTHOG_HOST|SENTRY_DSN|SENTRY_DIST)$)/,
+  desktop: /^(VITE_|NODE_ENV$|NODE_OPTIONS$|ESBUILD_BINARY_PATH$|DOHC_(?:POSTHOG_KEY|POSTHOG_HOST|DESKTOP_DIST)$)/,
 };
 
 export function hashFile(path) {
@@ -95,7 +95,7 @@ export function sourceFingerprint(kind, root = repoRoot, selectedPaths, contents
     if (executable) { hash.update(name + "\0" + executable + "\0"); hash.update(readFileSync(executable)); }
   }
   if (kind === "engine") {
-    hash.update(execFileSync("rustc", ["-vV"], { cwd: root, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
+    hash.update(execFileSync("rustc", ["-vV"], { cwd: root, windowsHide: true, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
     // Cargo discovers configuration from its working directory through the filesystem root.
     for (let directory = resolve(root); dirname(directory) !== directory;) {
       directory = dirname(directory);

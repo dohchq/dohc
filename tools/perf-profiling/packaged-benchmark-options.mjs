@@ -2,7 +2,7 @@ import { resolve, join, isAbsolute } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import { DEFAULT_LIMITS } from './packaged-collection-automations.mjs';
 
-export const SCENARIOS = ['full', 'startup', 'switches', 'small-switch', 'small-tab', 'go-to', 'command-palette', 'search', 'chat-history', 'collection', 'soak'];
+export const SCENARIOS = ['full', 'startup', 'switches', 'small-switch', 'small-tab', 'go-to', 'go-to-mixed', 'command-palette', 'search', 'chat-history', 'collection', 'soak'];
 export const SWITCHING_SCENARIOS = ['full', 'switches', 'small-switch', 'small-tab', 'soak'];
 export const usage = `node tools/perf-profiling/packaged-benchmark.mjs --binary <dohc.exe> --package-commit <40-digit SHA> --output <new directory> --label <baseline|candidate> [--runs <count>] [--idle-seconds 60] [--keystrokes 30] [--switches 10] [--files 2] [--scenario ${SCENARIOS.join('|')}] [--soak-minutes 10] [--heap-snapshot-minutes 10,60] [--chat-messages 200] [--records 500] [--find-cap 50] [--write-cap 200] [--profile-renderer true|false] [--profile-main true|false] [--engine-commit <40-digit SHA>]
 Runs default to 5 for collection and 3 for other scenarios.
@@ -62,6 +62,7 @@ export function parseOptions(argv) {
   }
   // go-to types fixture-004242 and search submits "fixture 4242."; both need that fixture file to exist.
   if (['go-to', 'search'].includes(options.scenario) && options.fixtureFiles < 4243) throw Error(`--scenario ${options.scenario} needs --files of at least 4243 so fixture-004242 exists`);
+  if (options.scenario === 'go-to-mixed' && options.fixtureFiles < 5000) throw Error('--scenario go-to-mixed needs --files of at least 5000 for its generated sources and fixture-004242');
   if (options.profileMain && (options.scenario !== 'startup' || /\s/.test(options.output))) throw Error('--profile-main requires --scenario startup and an output path without whitespace');
   if (options.profileRenderer && !SWITCHING_SCENARIOS.includes(options.scenario)) throw Error('--profile-renderer requires a scenario with workspace switches');
   return options;

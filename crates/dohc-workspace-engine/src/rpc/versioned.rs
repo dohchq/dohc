@@ -321,6 +321,7 @@ fn comparison_json(comparison: &dohc_engine_domain::VersionedTextComparison) -> 
 fn materialize_outcome_name(outcome: PostCommitMaterializeOutcome) -> &'static str {
     match outcome {
         PostCommitMaterializeOutcome::Applied => "applied",
+        PostCommitMaterializeOutcome::Parked => "parked",
         PostCommitMaterializeOutcome::Skipped => "skipped",
         PostCommitMaterializeOutcome::Conflict => "conflict",
         PostCommitMaterializeOutcome::Superseded => "superseded",

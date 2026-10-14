@@ -221,19 +221,19 @@ If it fails, inspect the sync-relay logs and verify disk space and the relay's p
 
 ## Connect the desktop app
 
-1. Open **Settings → Sync and sharing**.
+1. Open **Settings → Sync and sharing** and select **Connect server**.
 2. Enter the HTTPS address you configured above.
 3. Follow the browser sign-in flow.
 4. Create an account on your server and open the link in the email it sends.
 5. Approve the device after checking the displayed code.
-6. Return to dohc and select **Sync this workspace**.
+6. Return to dohc. Settings opens on **Sync and sharing**; turn on **Sync this workspace**.
 
 The server account belongs to your server.
 A dohc Drive account is not required.
 The connection applies to this dohc installation; workspace permissions still determine what it can access.
 
 On another device, connect to the same server and sign in to the same account.
-Use the workspace's sync code to join the existing workspace in a local folder.
+Copy the workspace code from **Settings → Sync and sharing**, then use it to join the existing workspace in a local folder.
 
 ## Share work
 
@@ -254,6 +254,31 @@ Restart the services and confirm that the workspace remains available.
 
 Keep a local copy of important work while testing your deployment.
 See the [browser service operations reference](../../services/share-web/README.md) for storage and permission boundaries.
+
+## Disable a published app
+
+If a published app is unsafe, run this command from the deployment bundle directory on the server:
+
+```sh
+docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T sync-relay \
+  node /app/services/sync-relay/dist/app-publication-takedown.js \
+  --publication-id PUBLICATION_ID --reason "Phishing reported and confirmed"
+```
+
+Use the publication ID from the owner's publication list or the app URL's `app` parameter.
+The command disables that one publication. The owner sees the reason and cannot reactivate that publication.
+The owner can still publish the app under a new share link or after rotating the grant.
+Watch for new publications of the same app.
+The relay records the actor as "operator", the time, and the reason durably.
+It immediately refuses serving, new launches, and writes, including requests from existing launches.
+
+The command uses a private socket inside the running relay container. Other publications, sync, and sharing keep running.
+Use Compose's `--env-file`, `-f`, or `--project-name` options when selecting a custom deployment.
+Exit codes are 0 for success, 2 for bad input, 3 for not found, and 1 for connection or operation failures.
+The client times out after 10 seconds. Retries preserve the first takedown record.
+
+Restoring a backup taken before the takedown brings that publication back.
+Run the takedown command again after restoring such a backup.
 
 ## Back up and maintain the deployment
 

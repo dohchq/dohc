@@ -1,8 +1,8 @@
 import {shareSenderLabel, shareAccessLabel} from "@dohc/security-contract/share-labels";
 import {ShareSender} from "../ShareSender";
 import { MessageReactions } from "./chatMessages";
-import { chatEditorPath } from "../shell/chatsNav";
-import { parseChatTabPath } from "./workbenchState";
+import { chatEditorPath, chatEditorTitle } from "../shell/chatsNav";
+import { parseTab } from "./workbenchState";
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { agentIsSetUp } from "../askAgent";
 import { PostFeedList } from "./PostFeedList";
@@ -108,6 +108,7 @@ import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
+import { publishAboutConversation, type AboutConversationEntry } from "./aboutConversation";
 import type {
   PresenceTransport,
 } from "../collab/presenceChannel";
@@ -2446,7 +2447,8 @@ export function ChatsView(props: {
   useEffect(() => {
     if (seededRef.current || overview.status !== "ready") return;
     let seed = props.initialNav;
-    const target = parseChatTabPath(props.editorTabPath ?? null);
+    const tab = parseTab(props.editorTabPath ?? null);
+    const target = tab?.kind === "chat" ? tab.target : null;
     if (!seed && target?.kind === "channel") {
       const channel = overview.channels.find((entry) => entry.id === target.id);
       seed = channel ? { level: "channel", channel } : { level: "channels" };
@@ -2961,6 +2963,61 @@ export function ChatsView(props: {
       presence.others.filter((peer) => (peer.state as { agent?: unknown } | null)?.agent !== true),
     [presence.others],
   );
+
+  // About for this tab: the conversation it shows, who is here, and whether
+  // it came through someone else's share. Only a tab's own page publishes.
+  const agentName = props.agentSetup?.agentName;
+  const aboutConversation = useMemo<AboutConversationEntry | null>(() => {
+    if (!props.editorTabPath) return null;
+    if (activeDm) {
+      return {
+        kind: "person",
+        name: activeDm.peerLabel,
+        channelWireId: activeDm.channelWireId,
+        received: activeDm.role === "participant",
+        present: presence.others,
+      };
+    }
+    // A channel always has a wire id here, the same one presence keys on.
+    if (!activeChannel || activeWireId === null) {
+      // The tab's conversation is gone, or Chats could not list it: About
+      // has nothing to show. Until then it is still loading.
+      const tab = parseTab(props.editorTabPath);
+      const target = tab.kind === "chat" ? tab.target : null;
+      if (overview.status === "unavailable") return "none";
+      if (overview.status !== "ready") return null;
+      if (target?.kind === "channel") {
+        return overview.channels.some((channel) => channel.id === target.id) ? null : "none";
+      }
+      if (target?.kind === "dm") {
+        return dmRestoreReady && !dms.some((dm) => dm.channelId === target.id) ? "none" : null;
+      }
+      return "none";
+    }
+    if (activeChannel.kind === "agent") {
+      return {
+        kind: "agent",
+        name: chatEditorTitle(nav, agentName),
+        channelWireId: activeWireId,
+        received: false,
+        // The agent is the conversation, so its own presence is not a face,
+        // the same as the page's header.
+        present: peoplePresence,
+      };
+    }
+    const joined = activeChannel.wireId ? joinedByWire.get(activeChannel.wireId) : null;
+    return {
+      kind: "group",
+      name: activeChannel.name,
+      channelWireId: activeWireId,
+      received: joined === undefined ? null : joined !== null,
+      present: presence.others,
+    };
+  }, [activeChannel, activeDm, activeWireId, agentName, dmRestoreReady, dms, joinedByWire, nav, overview, peoplePresence, presence.others, props.editorTabPath]);
+  useEffect(() => {
+    if (!props.editorTabPath || aboutConversation === null) return;
+    return publishAboutConversation(workspaceId, props.editorTabPath, aboutConversation);
+  }, [aboutConversation, props.editorTabPath, workspaceId]);
 
   const refreshShares = useCallback(async () => {
     // This reader has no channel list of its own, and the joined lane answers
@@ -3558,8 +3615,9 @@ export function ChatsView(props: {
     [goBack, nav.level, replyTarget, resolveTargetMessageId, variant],
   );
 
+  const editorTab = parseTab(props.editorTabPath ?? null);
   if (overview.status === "loading" || (overview.status === "ready" && variant === "page" && !props.initialNav &&
-    parseChatTabPath(props.editorTabPath ?? null)?.kind === "dm" && !dmRestoreReady)) {
+    editorTab?.kind === "chat" && editorTab.target.kind === "dm" && !dmRestoreReady)) {
     return <SkeletonRows inSlot layout="panel" label="Loading Chats..." />;
   }
 

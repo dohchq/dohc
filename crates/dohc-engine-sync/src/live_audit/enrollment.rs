@@ -49,10 +49,25 @@ pub(crate) fn prepare_exports(
     faults: &dyn FaultInjector,
     leases: &dyn crate::LeaseProbe,
     now_ms: i64,
+    writer_cache_reset_required: &mut bool,
 ) -> Result<Vec<crate::SharingDeclined>, SyncError> {
     if !store.read_with(|conn| pending_in_tx(conn, workspace))? {
         return Ok(Vec::new());
     }
+    // Finishing native history can claim bases. Mark before any write so
+    // an error after a partial export still invalidates the writer cache.
+    *writer_cache_reset_required = true;
+    prepare_pending_exports(store, workspace, faults, leases, now_ms)
+}
+
+#[cold]
+fn prepare_pending_exports(
+    store: &mut EngineStore,
+    workspace: &str,
+    faults: &dyn FaultInjector,
+    leases: &dyn crate::LeaseProbe,
+    now_ms: i64,
+) -> Result<Vec<crate::SharingDeclined>, SyncError> {
     let mut bytes = 0usize;
     let mut declined = Vec::new();
     for _ in 0..crate::MAX_PUSH_OPS_PER_BATCH {

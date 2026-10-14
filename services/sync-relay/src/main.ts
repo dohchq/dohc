@@ -35,6 +35,8 @@ import {readOwnerAdmissionConfig,startOwnerAdmission} from "./ownerAdmissionConf
 import {liveValidation} from "./liveValidation.js";
 import {readRelayDeviceDeliveryConfig} from "./deviceLiveHostConfig";
 import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
+import { startPublicationOperator } from "./appPublicationOperator";
+import { operatorSocketPath } from "./appPublicationOperatorProtocol";
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
@@ -646,6 +648,7 @@ if (namedLiveConfig) {
   server.once("close", namedLive.close);
   process.once("SIGINT", namedLive.close); process.once("SIGTERM", namedLive.close);
 }
+const publicationOperator = await startPublicationOperator(storage, operatorSocketPath());
 server.listen(requestedPort, host, () => {
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;
@@ -676,6 +679,7 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    await publicationOperator.close();
     await documentProjection?.close();
     await ownerAdmissionRun?.close();
     await automations?.close();

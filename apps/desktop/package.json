@@ -23,7 +23,7 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.trip-poll.json && tsc --noEmit -p tsconfig.fundraiser.json && tsc --noEmit -p tsconfig.stock-orders.json",
     "test:unit": "vitest run",
     "test:scripts": "pnpm run test:scripts:isolated && pnpm run test:scripts:runtime",
-    "test:scripts:isolated": "node --experimental-transform-types --test ../../examples/fundraiser/recovery.test.ts && node --test --test-concurrency=1 scripts/dev.test.mjs scripts/build-cli-bin.test.mjs scripts/validate-ui-audit.test.mjs scripts/compiler-process.test.mjs scripts/agent-probe-owner.test.mjs scripts/agent-probe-process.test.mjs scripts/stage-trip-poll.test.mjs scripts/stage-app-compiler.test.mjs scripts/appimage-apprun.test.mjs scripts/stage-agent-probe.test.mjs scripts/fuse-smoke.test.mjs",
+    "test:scripts:isolated": "node --experimental-transform-types --test ../../examples/fundraiser/recovery.test.ts && node --test --test-concurrency=1 scripts/dev.test.mjs scripts/build-cli-bin.test.mjs scripts/validate-ui-audit.test.mjs scripts/compiler-process.test.mjs scripts/agent-probe-owner.test.mjs scripts/agent-probe-process.test.mjs scripts/stage-trip-poll.test.mjs scripts/stage-app-compiler.test.mjs scripts/appimage-apprun.test.mjs scripts/stage-agent-probe.test.mjs scripts/fuse-smoke.test.mjs scripts/check-error-symbolication.test.mjs",
     "test:scripts:runtime": "node --test scripts/stage-app-backend-runtime.test.mjs"
   },
   "devDependencies": {
@@ -44,6 +44,7 @@
     "@excalidraw/excalidraw": "0.18.1",
     "@fontsource-variable/inter": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@posthog/core": "1.58.0",
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
@@ -74,6 +75,7 @@
     "playwright": "^1.62.1",
     "pngjs": "^7.0.0",
     "pnpm": "11.20.0",
+    "posthog-node": "5.55.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",

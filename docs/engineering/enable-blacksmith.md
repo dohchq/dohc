@@ -1,7 +1,7 @@
 # Enable Blacksmith CI
 
 This procedure is for the maintainer enabling paid CI at launch.
-Track the remaining public-contributor setup in [issue #1193](https://github.com/dohc-ai/dohc/issues/1193).
+Track the remaining public-contributor setup in [issue #1193](https://github.com/dohchq/dohc/issues/1193).
 
 ## Keep cloud execution off
 
@@ -12,13 +12,13 @@ Manual dispatch still uses registered self-hosted Linux x64 runners.
 Inspect the switch:
 
 ```sh
-gh variable list --repo dohc-ai/dohc
+gh variable list --repo dohchq/dohc
 ```
 
 Keep it off until launch:
 
 ```sh
-gh variable set BLACKSMITH_ENABLED --repo dohc-ai/dohc --body false
+gh variable set BLACKSMITH_ENABLED --repo dohchq/dohc --body false
 ```
 
 This switch does not install or uninstall Blacksmith's GitHub App.
@@ -27,8 +27,8 @@ Defer app installation too if Blacksmith must receive no repository activity bef
 
 ## Prepare the account at launch
 
-1. Install the Blacksmith GitHub App for `dohc-ai/dohc` only.
-2. Restrict its runner group's repository access to `dohc-ai/dohc`.
+1. Install the Blacksmith GitHub App for `dohchq/dohc` only.
+2. Restrict its runner group's repository access to `dohchq/dohc`.
 3. Set a monitored primary email under Account, then configure a $50 monthly threshold under Spending Alerts.
 4. Plan for $100 per month. Confirm any provider-enforced cutoff before enabling automatic runs.
 5. While private, keep fork PR workflows disabled in GitHub Actions settings.
@@ -47,7 +47,7 @@ The workflow switch is not a spending boundary against malicious contributors or
 Set the switch only when paid runs are authorized:
 
 ```sh
-gh variable set BLACKSMITH_ENABLED --repo dohc-ai/dohc --body true
+gh variable set BLACKSMITH_ENABLED --repo dohchq/dohc --body true
 ```
 
 New updates to ready, same-repository PRs now run on Blacksmith.
@@ -59,7 +59,7 @@ There are no automatic main-branch, nightly, Windows, macOS, or release builds i
 Run a manual benchmark from the Actions page, or use:
 
 ```sh
-gh workflow run pr-checks.yml --repo dohc-ai/dohc --ref main -f gate=all -f runner_size=4
+gh workflow run pr-checks.yml --repo dohchq/dohc --ref main -f gate=all -f runner_size=4
 ```
 
 The `gate` input accepts `all`, `js`, or `rust`.

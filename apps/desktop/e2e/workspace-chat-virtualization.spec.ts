@@ -70,10 +70,11 @@ test("chat lane keeps history, follows within 40px, and retains focused rows", a
       await chats.createChannel({ workspaceId, name: "Empty chat", type: "chat" });
       const channel = await chats.createChannel({ workspaceId, name: "Long chat", type: "chat" });
       const { thread, message } = await chats.startChannelThread({
+        authorActorKey: null,
         workspaceId, channelId: channel.id, lane: "chat", author, body: "Lane message 0",
       });
       for (let index = 1; index < messageCount; index += 1) {
-        await chats.sendMessage({ workspaceId, threadId: thread.id, author, body: `Lane message ${index}` });
+        await chats.sendMessage({ authorActorKey: null, workspaceId, threadId: thread.id, author, body: `Lane message ${index}` });
       }
       return { threadId: thread.id, firstMessageId: message.id };
     });
@@ -163,9 +164,9 @@ test("a file linked mention reveals an unmounted historical message", async () =
       await files.ensureMainVersion({ workspaceId });
       const file = await files.writeTextFile({ workspaceId, versionId: "main", path: "topic.md", text: "# Topic\n", metadata: { origin: "local-file" } });
       const thread = await chats.createThread({ workspaceId, title: "Long file conversation", linkedFile: { objectId: file.object.id, pathHint: "topic.md" } });
-      const first = await chats.sendMessage({ workspaceId, threadId: thread.id, author, body: "heliotrope historical target @[topic.md]", attachments: [{ objectId: file.object.id, pathHint: "topic.md" }] });
+      const first = await chats.sendMessage({ authorActorKey: null, workspaceId, threadId: thread.id, author, body: "heliotrope historical target @[topic.md]", attachments: [{ objectId: file.object.id, pathHint: "topic.md" }] });
       for (let index = 1; index < messageCount; index += 1) {
-        await chats.sendMessage({ workspaceId, threadId: thread.id, author, body: `File message ${index}` });
+        await chats.sendMessage({ authorActorKey: null, workspaceId, threadId: thread.id, author, body: `File message ${index}` });
       }
       return first.id;
     });
@@ -207,9 +208,9 @@ test("a file linked mention opens the exact unmounted DM message", async () => {
       await files.ensureMainVersion({ workspaceId });
       const file = await files.writeTextFile({ workspaceId, versionId: "main", path: "topic.md", text: "# Topic\n", metadata: { origin: "local-file" } });
       const channel = await chats.createChannel({ workspaceId, name: "reader@dohc.test", kind: "dm" });
-      const { thread, message } = await chats.startChannelThread({ workspaceId, channelId: channel.id, author, body: "azimuth historical target @[topic.md]", attachments: [{ objectId: file.object.id, pathHint: "topic.md" }] });
+      const { thread, message } = await chats.startChannelThread({ authorActorKey: null, workspaceId, channelId: channel.id, author, body: "azimuth historical target @[topic.md]", attachments: [{ objectId: file.object.id, pathHint: "topic.md" }] });
       for (let index = 1; index < messageCount; index += 1) {
-        await chats.sendMessage({ workspaceId, threadId: thread.id, author, body: `Direct message ${index}` });
+        await chats.sendMessage({ authorActorKey: null, workspaceId, threadId: thread.id, author, body: `Direct message ${index}` });
       }
       return message.id;
     });

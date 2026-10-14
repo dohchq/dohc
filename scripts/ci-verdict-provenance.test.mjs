@@ -402,7 +402,7 @@ function workflowExpression(expression, { github, vars = {}, inputs = {}, needs 
 
 function workflowContext({ enabled = "", event = "pull_request", draft = false, fork = false, gate = "all", size = "4" } = {}) {
   return {
-    github: {event_name: event, repository: "dohc-ai/dohc", event: {pull_request: {draft, head: {repo: {full_name: fork ? "contributor/dohc" : "dohc-ai/dohc"}}}}},
+    github: {event_name: event, repository: "dohchq/dohc", event: {pull_request: {draft, head: {repo: {full_name: fork ? "contributor/dohc" : "dohchq/dohc"}}}}},
     vars: {BLACKSMITH_ENABLED: enabled}, inputs: event === "workflow_dispatch" ? {gate, runner_size: size} : {},
   };
 }

@@ -65,3 +65,12 @@ it("refuses bearer material in publication results", () => {
   expect(OwnerAppPublicationResult.safeParse({...published,url:"https://relay.example/s/#secret"}).success).toBe(false);
   expect(OwnerAppPublicationResult.safeParse({...published,urlUnavailable:{grantId:"g"}}).success).toBe(false);
 });
+
+it("preserves the operator record in owner listings and rejects caller-selected actors", () => {
+  const operatorTakedown = {actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing"};
+  const publication = {publicationId: "a".repeat(64), authorityRevision: 2, shareId: "s", grantId: "g", active: false,
+    linkCurrent: true, manifestUnavailable: true, collectionCapability: null, datasetCapability: null, operatorTakedown};
+  const value = {kind: "listed", publications: [publication], nextCursor: null};
+  expect(OwnerAppPublicationResult.parse(value)).toEqual(value);
+  expect(OwnerAppPublicationResult.safeParse({...value, publications: [{...publication, operatorTakedown: {...operatorTakedown, actor: "owner"}}]}).success).toBe(false);
+});

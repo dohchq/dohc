@@ -19,14 +19,15 @@ export async function readFolderAppOffer(input: {
   }
 }
 
+// One subscription for every folder asked about: each one is an IPC listener.
 export function observeFolderAppOffers(input: {
-  token: OfferWorkspaceToken; currentToken(): OfferWorkspaceToken; folder: string;
+  token: OfferWorkspaceToken; currentToken(): OfferWorkspaceToken; wants(folder: string): boolean;
   subscribe(listener: (answer: FolderAppAnswer) => void): () => void;
   onChanged(answer: FolderAppAnswer): void;
 }): () => void {
   return input.subscribe(answer => {
     const current = input.currentToken();
     if (current.workspaceId === input.token.workspaceId && current.generation === input.token.generation
-      && answer.workspaceId === current.workspaceId && answer.folder === input.folder) input.onChanged(answer);
+      && answer.workspaceId === current.workspaceId && input.wants(answer.folder)) input.onChanged(answer);
   });
 }

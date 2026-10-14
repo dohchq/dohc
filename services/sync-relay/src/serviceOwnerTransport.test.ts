@@ -10,7 +10,7 @@ function fixture(){
     request.method==="liveApplication.ownerState"?{adoptionId:adopted?capture.activationId:"native-default-adoption",expectedLocalSequence:2,
       throughCursor:adopted?0:null,outboxId:adopted?"actual-outbox":null,pendingBytes:adopted?12:0,outboxState:adopted?"active":null}:{delivered:true}}));
   const sendLiveOwnerAdoption=vi.fn(async()=>{adopted=true;return {id:3,result:{status:"adopted",adoption:{}}};});
-  const transport=serviceOwnerTransport({client:{sendRequest,sendLiveOwnerAdoption} as never,workspace:"native-workspace",capture,binding,
+  const transport=serviceOwnerTransport({client:{sendRequest,sendLiveOwnerAdoption} as never,workspace:"native-workspace",capture:async()=>capture,binding,
     nextRequestId:()=>100,assertCurrent(){if(changed)throw new Error("retired");}});
   const request={id:1,workspace:"native-workspace",deadlineMs:1000};
   return {binding,capture,transport,sendRequest,sendLiveOwnerAdoption,request,retire(){changed=true;}};
