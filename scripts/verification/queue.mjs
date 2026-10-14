@@ -336,7 +336,9 @@ function printStatus(root) {
   const live = requests.filter(entry => !terminalStates.has(entry.status.state));
   for (const entry of live.sort((a, b) => position(requests, a.id) - position(requests, b.id))) {
     const place = position(requests, entry.id);
-    const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}` : `#${place}${typical ? `, starts in about ${minutes((place - 1) * typical)}` : ""}`;
+    // The service's heartbeat says what a running attempt is doing, such as waiting for the host lane.
+    const phase = record?.running?.id === entry.id && record.running.phase ? `, ${record.running.phase}` : "";
+    const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase}` : `#${place}${typical ? `, starts in about ${minutes((place - 1) * typical)}` : ""}`;
     console.log(`${entry.id}  ${where}  ${entry.request.scope}  ${entry.request.head.slice(0, 12)}  ${entry.request.branch?.replace("refs/heads/", "") ?? entry.request.checkout}${entry.status.waiting ? `  (${entry.status.waiting})` : ""}`);
   }
   if (!live.length) console.log("no requests waiting");
@@ -364,7 +366,13 @@ async function main([command, ...args]) {
     }
     spawnSync("schtasks.exe", ["/end", "/tn", taskName], { windowsHide: true });
     spawnSync("schtasks.exe", ["/run", "/tn", taskName], { windowsHide: true });
-    return console.log("restarted the verification queue service");
+    // Report a restart only once a new service is beating; otherwise the task's five-minute trigger finishes it.
+    for (let waited = 0; waited < 30_000; waited += 500) {
+      const next = serviceState(root);
+      if (next.alive && next.record.pid !== record?.pid) return console.log(`restarted the verification queue service (pid ${next.record.pid})`);
+      await sleep(500);
+    }
+    return console.log("asked Task Scheduler to restart the verification queue service; it starts within five minutes");
   }
   throw new Error("Use status, cancel <id>, install [--ref <ref>], upgrade [--ref <ref>], or restart [--now].");
 }

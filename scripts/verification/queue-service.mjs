@@ -359,7 +359,7 @@ export async function runService({
       try {
       // Count only awake verification time against a run: a gap far over one tick is sleep.
       // Preparation has its own deadline, but a git call that hangs blocks this loop, and the supervisor's
-      // heartbeat check restarts the service instead. Waiting for the host lane has the slot's own wait limit.
+      // heartbeat check restarts the service instead. Waiting for the host lane has no limit; only cancel or a stop ends it.
       const awake = Math.min(now - last, 3 * tickMs);
       if (running?.phase === "verifying") running.awakeMs += awake;
       if (running?.phase === "preparing") running.prepareMs += awake;
