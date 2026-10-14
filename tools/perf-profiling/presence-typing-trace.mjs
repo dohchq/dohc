@@ -4,6 +4,21 @@ export const TYPING_TRACE_CATEGORIES = 'input,blink.user_timing';
 export const EVENT_TIMING_TOLERANCE_MS = 5;
 export const typingTraceMark = (index, side) => `dohc-presence-key-${index}-${side}`;
 
+// Frame completion allows compositor work to advance; the completed trace still
+// decides whether the last key reached presentation.
+export async function stopTypingTraceAfterFrames(page, trace) {
+  const completed = await page.waitForFunction(() => new Promise(resolve => {
+    let frames = 0;
+    const next = () => {
+      if (++frames === 3) resolve(true);
+      else requestAnimationFrame(next);
+    };
+    requestAnimationFrame(next);
+  }), null, { timeout: 1_000 });
+  await completed.dispose();
+  return trace.stop();
+}
+
 export async function startTypingTrace(page) {
   const session = await page.context().newCDPSession(page);
   let browser;

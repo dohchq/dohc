@@ -201,6 +201,8 @@ Both arms use the same CDP trace categories, `input,blink.user_timing`, during t
 The input category enables Chromium's `EventLatency` slices. User Timing marks bound each trusted key in the trace clock.
 Each key must match one `KEY_PRESSED` slice in the owner's renderer and reach a compositor presentation.
 The slice's presentation timestamp minus its generated timestamp supplies the uncensored input-to-next-paint value in milliseconds.
+After the last key's paint wait, both rich arms wait for three more owner animation frames before stopping the trace.
+This frame wait has a one-second deadline. The completed trace must still contain the final key's presentation stage.
 The harness retains each raw trace, its categories, browser revision, per-key matches, and validation result.
 Missing, ambiguous, untrusted, or unpresented keys fail the run.
 

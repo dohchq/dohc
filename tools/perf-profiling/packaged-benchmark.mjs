@@ -1,5 +1,5 @@
 import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, validatePresenceClocks, rebasePresenceWindow } from './presence-owner.mjs';
-import { startTypingTrace, measureTypingTrace, typingTraceMark } from './presence-typing-trace.mjs';
+import { startTypingTrace, stopTypingTraceAfterFrames, measureTypingTrace, typingTraceMark } from './presence-typing-trace.mjs';
 import { acquireProfilingSlot } from './admission.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs, usage } from './packaged-benchmark-options.mjs';
@@ -372,7 +372,7 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {}, a
     const ownerPresence = rich && arm === 'solo' ? await editor.evaluate(readPresenceOwner, typingWindow) : undefined;
     let traceEvidence;
     if (trace) {
-      traceResult = await trace.stop();
+      traceResult = await stopTypingTraceAfterFrames(page, trace);
       const tracePath = join(dirname(active.logPath), `presence-${arm}-${name}.trace.json`);
       await writeFile(tracePath, traceResult.raw);
       const measured = measureTypingTrace(traceResult.events, samples, timing);

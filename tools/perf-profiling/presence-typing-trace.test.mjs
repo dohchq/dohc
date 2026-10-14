@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { measureTypingTrace, startTypingTrace, typingTraceMark, TYPING_TRACE_CATEGORIES } from './presence-typing-trace.mjs';
+import { measureTypingTrace, startTypingTrace, stopTypingTraceAfterFrames, typingTraceMark, TYPING_TRACE_CATEGORIES } from './presence-typing-trace.mjs';
 
 function fixture(durations = [7.123, 21.234]) {
   const events = [], samples = [], keys = [], reported = [];
@@ -124,4 +124,47 @@ test('a lost trace fails and detaches instead of manufacturing measurements', as
   const trace = await startTypingTrace({ context: () => ({ newCDPSession: async () => session }) });
   await assert.rejects(trace.stop(), /incomplete or lost/);
   assert.equal(closed, true); assert.equal(detached, true);
+});
+
+
+test('three more owner frames complete before trace stop; absent final presentation still refuses', async () => {
+  const frames = [], calls = [];
+  const priorRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = callback => frames.push(callback);
+  const data = fixture();
+  data.events = data.events.filter(event => !(event.name.startsWith('SubmitCompositorFrame') && event.ts > 180000));
+  try {
+    const stopping = stopTypingTraceAfterFrames({ waitForFunction: async (predicate, arg, options) => {
+      assert.equal(options.timeout, 1_000);
+      await predicate();
+      calls.push('frames-complete');
+      return { dispose: async () => calls.push('dispose') };
+    } }, { stop: async () => { calls.push('stop'); return data.events; } });
+    for (let index = 0; index < 3; index++) {
+      assert.equal(frames.length, 1);
+      assert.equal(calls.includes('stop'), false);
+      frames.shift()();
+      await Promise.resolve();
+    }
+    const events = await stopping;
+    assert.deepEqual(calls, ['frames-complete', 'dispose', 'stop']);
+    assert.equal(frames.length, 0);
+    const result = measureTypingTrace(events, data.samples, data.timing);
+    assert.equal(result.validation.pass, false);
+    assert.equal(result.samples.at(-1).inputToNextPaintMs, null);
+    assert.match(result.validation.problems.join(' '), /Key 1: EventLatency did not reach presentation/);
+  } finally {
+    if (priorRaf === undefined) delete globalThis.requestAnimationFrame;
+    else globalThis.requestAnimationFrame = priorRaf;
+  }
+});
+
+test('frame deadline refuses normal trace completion', async () => {
+  const deadline = new Error('owner frames timed out');
+  let stopped = false;
+  await assert.rejects(stopTypingTraceAfterFrames({ waitForFunction: async (_predicate, _arg, options) => {
+    assert.equal(options.timeout, 1_000);
+    throw deadline;
+  } }, { stop: async () => { stopped = true; } }), error => error === deadline);
+  assert.equal(stopped, false);
 });
