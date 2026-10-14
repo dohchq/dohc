@@ -1,3 +1,4 @@
+import { observePresenceOwner, readPresenceOwner, validatePresenceWorkload } from './presence-owner.mjs';
 import { startTypingTrace, measureTypingTrace, typingTraceMark } from './presence-typing-trace.mjs';
 import { acquireProfilingSlot } from './admission.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
@@ -91,7 +92,7 @@ Object.assign(receipt, {
   ...(scenario === 'go-to-mixed' ? { goToFixtureSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'go-to-packaged-fixture.mts')),
     goToFixtureGeneratorsSha256: await sha256Tree(root, ['packages/mcp/src/tools.ts', 'apps/desktop/src/renderer/collections/schemaAuthoring.ts',
       'apps/desktop/e2e/helpers/syncRelay.ts', 'apps/desktop/src/testing/relayFilePeer.ts']) } : {}),
-  ...(scenario === 'presence' ? { presenceFixtureSha256: await sha256(join(root, 'apps/desktop/e2e/helpers/presenceBenchmark.ts')), presenceRuleSha256: await sha256(join(root, 'tools/perf-profiling/packaged-presence.mjs')), presenceTraceSha256: await sha256(join(root, 'tools/perf-profiling/presence-typing-trace.mjs')) } : {}),
+  ...(scenario === 'presence' ? { presenceFixtureSha256: await sha256(join(root, 'apps/desktop/e2e/helpers/presenceBenchmark.ts')), presenceRuleSha256: await sha256(join(root, 'tools/perf-profiling/packaged-presence.mjs')), presenceTraceSha256: await sha256(join(root, 'tools/perf-profiling/presence-typing-trace.mjs')), presenceOwnerSha256: await sha256(join(root, 'tools/perf-profiling/presence-owner.mjs')) } : {}),
   ...(scenario === 'chat-history' ? { cliLauncher, seedScript, seedScriptSha256: await sha256(seedScript) } : {}),
   ...(scenario === 'collection' ? { automationsModule, automationsModuleSha256: await sha256(automationsModule), datasetCliScript, datasetCliSha256: await sha256(datasetCliScript) } : {}),
   harnessCheckout: root, harnessCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
@@ -100,7 +101,7 @@ Object.assign(receipt, {
     'Fresh profile/process is not cold OS filesystem cache. Restart reuses the same profile and workspace.',
     'Startup/switch/open wall times include CDP/Playwright detection and scheduling; readiness is observed DOM plus two animation frames, not an instrumented compositor presentation.',
     'Startup renderer timestamps record observer installation, the expected visible non-inert editor predicate, and a second animation-frame callback. Already-ready samples are left-censored; no earlier readiness time is inferred and no overhead is subtracted.',
-    scenario === 'presence' ? 'Presence input-to-next-paint is the uncensored KEY_PRESSED EventLatency trace slice through presentation. Every trusted key must match once. Reported keydown Event Timing is supplemental and must agree within its 4ms rounding bound.' : 'Only PerformanceEventTiming.duration is called input-to-next-paint here. Chromium quantizes durations to 8ms and does not report event entries below the requested 16ms floor. Missing samples stay missing.',
+    scenario === 'presence' ? 'Presence input-to-next-paint is the uncensored KEY_PRESSED EventLatency trace slice through presentation. Every trusted key must match once. Reported keydown Event Timing is supplemental and must agree within 5ms (4ms rounding plus 1ms).' : 'Only PerformanceEventTiming.duration is called input-to-next-paint here. Chromium quantizes durations to 8ms and does not report event entries below the requested 16ms floor. Missing samples stay missing.',
     'Keyboard uses trusted Chromium CDP input; physical keyboard/OS delivery before Chromium is not measured. EventTiming measures presentation opportunity, not photons.',
     'Idle measures a small local workspace without cloud or sync peers. Minimized is the background condition; it does not model every occlusion/power mode.',
     'Win32 IsWindowVisible/IsIconic verifies the owned app window. DOM visibility is recorded separately because CDP may keep it visible while minimized. A persistent prewarmed Win32 helper verifies the window before readiness; individual round-trip overhead remains included and separately recorded.',
@@ -305,7 +306,7 @@ async function openDoc(page, name) {
   await page.locator('[contenteditable="true"]').waitFor({ timeout: 120000 });
   return { openObservedMs, editActivationObservedMs };
 }
-async function typing(page, name, { rich = false, arm, beforeInput = () => {} } = {}) {
+async function typing(page, name, { rich = false, arm, beforeInput = () => {}, afterInput = () => {} } = {}) {
   const windowState = await setWindowState(active, 'visible');
   const { openObservedMs, editActivationObservedMs } = await openDoc(page, name);
   console.log(JSON.stringify({ label, phase: 'typing-start', name, openObservedMs, editActivationObservedMs }));
@@ -318,6 +319,7 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {} } 
   await editor.click({ position: { x: 30, y: 30 } });
   await page.keyboard.press('Control+End');
   await painted(page);
+  if (rich) await editor.evaluate(observePresenceOwner);
   const trace = rich ? await startTypingTrace(page) : null;
   let traceResult;
   try {
@@ -339,11 +341,12 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {} } 
     for (let index = 0; index < keystrokes; index++) {
       const start = await page.evaluate(mark => { if (mark) performance.mark(mark); return performance.now(); }, trace ? typingTraceMark(index, 'before') : null);
       await page.keyboard.press('x');
+      if (index === keystrokes - 1) await afterInput();
       await painted(page);
       const end = await page.evaluate(mark => { if (mark) performance.mark(mark); return performance.now(); }, trace ? typingTraceMark(index, 'after') : null);
       samples.push({ index, start, end, dispatchToTwoRafMs: end - start });
       // An intentionally paced user workload, not a sleep used as a correctness assertion.
-      await delay(80, undefined, { signal: benchmarkSignal });
+      if (!rich || index < keystrokes - 1) await delay(80, undefined, { signal: benchmarkSignal });
     }
     await page.waitForFunction(count => window.__packagedEvents.inputs.length === count, keystrokes);
     const timing = await page.evaluate(() => {
@@ -351,7 +354,7 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {} } 
       if (s.observer) s.events.push(...s.observer.takeRecords().map(e => ({ name: e.name, startTime: e.startTime, duration: e.duration, processingStart: e.processingStart, processingEnd: e.processingEnd, interactionId: e.interactionId })));
       s.longTasks.push(...s.longObserver.takeRecords().map(e => ({ startTime: e.startTime, duration: e.duration })));
       s.observer?.disconnect(); s.longObserver.disconnect(); document.removeEventListener('input', s.onInput, true); document.removeEventListener('keydown', s.onKeyDown, true);
-      return { supported: s.supported, events: s.events, inputs: s.inputs, keys: s.keys, longTasks: s.longTasks };
+      return { supported: s.supported, events: s.events, inputs: s.inputs, keys: s.keys, longTasks: s.longTasks, timeOrigin: performance.timeOrigin };
     });
     for (const sample of samples) {
       const events = timing.events.filter(e => e.startTime >= sample.start && e.startTime <= sample.end && e.interactionId > 0);
@@ -359,6 +362,9 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {} } 
       sample.events = events;
     }
     if (!timing.inputs.every(input => input.trusted)) throw Error('Untrusted input observed');
+    const typingWindow = rich ? { start: timing.timeOrigin + timing.keys[0].eventTimestamp,
+      end: timing.timeOrigin + timing.keys.at(-1).eventTimestamp } : null;
+    const ownerPresence = rich && arm === 'solo' ? await editor.evaluate(readPresenceOwner, typingWindow) : undefined;
     let traceEvidence;
     if (trace) {
       traceResult = await trace.stop();
@@ -369,7 +375,7 @@ async function typing(page, name, { rich = false, arm, beforeInput = () => {} } 
       traceEvidence = { source: 'EventLatency', categories: traceResult.categories, browser: traceResult.browser, path: tracePath, validation: measured.validation };
     }
     return { name, mode, windowState, paragraphs: name === 'small.md' ? 100 : 5000, openObservedMs, editActivationObservedMs, samples, ...timing,
-      ...(traceEvidence ? { trace: traceEvidence } : {}) };
+      ...(traceEvidence ? { trace: traceEvidence, typingWindow, ownerPresence } : {}) };
   } finally { if (trace && !traceResult) await trace.stop(); }
 }
 function parseNativeLaunchMarks(log) {
@@ -887,11 +893,13 @@ async function soak(instance, data, runDir) {
         if (!solo.trace.validation.pass) throw Error('Solo typing trace validation failed: ' + solo.trace.validation.problems.join('; '));
         const peers = await presenceFixture.peers(name, presencePeers);
         try {
-          const typed = await typing(fresh.page, name, { rich: true, arm: 'peers', beforeInput: () => peers.start() });
-          typed.workload = await peers.finish();
+          const typed = await typing(fresh.page, name, { rich: true, arm: 'peers', beforeInput: () => peers.start(), afterInput: () => peers.stop() });
+          typed.workload = await peers.finish(typed.typingWindow);
+          typed.ownerPresence = await fresh.page.locator('[contenteditable="true"].tiptap').evaluate(readPresenceOwner, typed.typingWindow);
+          typed.workload = validatePresenceWorkload(typed.workload, typed.ownerPresence);
           data.presence.peers.push(typed);
           await json(join(output, 'result.json'), receipt);
-          if (!typed.workload.pass) throw Error('Presence peers did not sustain their configured rates');
+          if (!typed.workload.pass) throw Error('Presence peer rates, schedule, or owner delivery failed');
           if (!typed.trace.validation.pass) throw Error('Peer typing trace validation failed: ' + typed.trace.validation.problems.join('; '));
         } finally { await peers.finish(); }
         await json(join(output, 'result.json'), receipt);

@@ -1,3 +1,4 @@
+import './presence-owner.test.mjs';
 import './presence-typing-trace.test.mjs';
 import './presence-packaged-fixture.test.mjs';
 import './packaged-presence.test.mjs';

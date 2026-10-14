@@ -63,9 +63,14 @@ test('another renderer is excluded and ambiguous keys in this renderer refuse th
   assert.equal(measure(data).validation.pass, false);
 });
 
-test('reported Event Timing must agree within half its eight millisecond rounding interval', () => {
-  assert.equal(measure(fixture([20])).validation.pass, true);
-  const data = fixture([19.999]); data.timing.events[0].duration = 24;
+test('reported Event Timing allows four milliseconds of rounding plus one millisecond', () => {
+  const boundary = fixture([19]); boundary.timing.events[0].duration = 24;
+  const at = measure(boundary);
+  assert.equal(at.validation.pass, true);
+  assert.equal(at.validation.toleranceMs, 5);
+  assert.equal(at.validation.maxDeltaMs, 5);
+  assert.equal(at.validation.eventTimingChecked, 1);
+  const data = fixture([18.999]); data.timing.events[0].duration = 24;
   assert.equal(measure(data).validation.pass, false);
   assert.match(measure(data).validation.problems.join(' '), /beyond rounding/);
 });

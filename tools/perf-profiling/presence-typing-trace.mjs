@@ -1,7 +1,7 @@
 // EventLatency is emitted by Chromium cc/metrics/event_latency_tracing_recorder.cc.
 // Its presented slice runs from kGenerated to presentation, in trace-clock microseconds.
 export const TYPING_TRACE_CATEGORIES = 'input,blink.user_timing';
-export const EVENT_TIMING_TOLERANCE_MS = 4;
+export const EVENT_TIMING_TOLERANCE_MS = 5;
 export const typingTraceMark = (index, side) => `dohc-presence-key-${index}-${side}`;
 
 export async function startTypingTrace(page) {

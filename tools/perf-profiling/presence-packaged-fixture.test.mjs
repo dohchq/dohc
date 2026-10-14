@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { request } from 'node:https';
 const require = createRequire(new URL('../../services/sync-relay/package.json', import.meta.url));
 const { tsImport } = require('tsx/esm/api');
-const { createPresenceFixture, readPresenceDocuments } = await tsImport('../../apps/desktop/e2e/helpers/presenceBenchmark.ts', import.meta.url);
+const { createPresenceFixture, readPresenceDocuments, summarizePeerSchedule } = await tsImport('../../apps/desktop/e2e/helpers/presenceBenchmark.ts', import.meta.url);
 
 test('dry fixture reads canonical snapshots, prepares the desktop host, serves TLS, and closes its listeners', { timeout: 180_000 }, async () => {
   const scratch = await mkdtemp(join(tmpdir(), 'dohc-presence-fixture-'));
@@ -48,4 +48,10 @@ test('dry fixture reads canonical snapshots, prepares the desktop host, serves T
     assert.ok(!isAbsolute(owned) && !owned.startsWith('..') && owned.startsWith('dohc-presence-fixture-'));
     await rm(scratch, { recursive: true, force: true });
   }
+});
+
+
+test('peer rate and gaps use only ticks between the first and last key', () => {
+  assert.deepEqual(summarizePeerSchedule([0, 99, 100, 150, 200, 201], 100, 200), { ticks: 3, maxGapMs: 50 });
+  assert.deepEqual(summarizePeerSchedule([100, 250], 100, 300), { ticks: 2, maxGapMs: 150 });
 });

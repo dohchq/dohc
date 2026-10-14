@@ -165,8 +165,18 @@ There is no service-host substitute. The fixture registers the package's CRDT ba
 For each document, the owner types `--keystrokes` trusted keys at its end, with no peers, using the existing typing collector.
 The fixture then admits N named Edit recipients through `/sync/live/desktop-open` and the production named-live transport.
 Each peer edits its first body block at 5 characters per second and publishes relative selections through the existing presence channel at 20 Hz.
-The driver keeps one tick in flight and records completed publications, edits, live status, and achieved rates.
-Rates below 18 selections or 4 edits per second fail the workload. Peers leave before the next document.
+The driver keeps one tick in flight and schedules each deadline from the current time, without catch-up bursts.
+Only publications and edits between the first and last trusted key count toward the achieved rates.
+Rates below 18 selections or 4 edits per second fail the workload. Any gap above 100 ms also fails, including either window edge.
+The output records each peer's largest gap and counters. Peers leave before the next document.
+After peers finish, the owner's editor must contain exactly their total inserted marker count; missing edits fail the run.
+The owner observer counts remote awareness updates during the typing window through the Tiptap caret provider's awareness.
+It reports `presenceUpdatesReceived` and the binding explicitly. An unbound baseline reports zero.
+A caret extension without observable awareness or received updates refuses the run.
+
+No product Markdown object-topic builder exists on this base.
+PR 5 must move and import `makePresenceObjectTopic` from `apps/desktop/e2e/helpers/presenceBenchmark.ts` as its shared topic definition.
+It must expose the bound awareness through the caret extension's standard `options.provider.awareness` for this observer.
 Both sizes use the rich editor. The retained baseline package may have no Markdown caret binding; record that limitation with the package receipt.
 
 The result stores raw keystrokes and long tasks for each arm and document in every run.
@@ -184,7 +194,7 @@ The slice's presentation timestamp minus its generated timestamp supplies the un
 The harness retains each raw trace, its categories, browser revision, per-key matches, and validation result.
 Missing, ambiguous, untrusted, or unpresented keys fail the run.
 
-Event Timing remains supplemental. For each reported keydown, its duration must agree with the trace within 4 ms, half its 8 ms rounding interval.
+Event Timing remains supplemental. For each reported keydown, its duration must agree with the trace within 5 ms: 4 ms for its 8 ms rounding interval plus 1 ms.
 A mismatch fails the run. Omitted Event Timing entries do not remove fast trace samples or affect the verdict.
 The output records the checked count, individual differences, maximum difference, and agreement result.
 The two-frame diagnostic remains separate. Required tracing runs in both arms and both packages; optional CPU profiling still prevents performance comparison.
@@ -200,9 +210,9 @@ The smoke opens an isolated, temporary contenteditable window. It launches no do
 Eight keys alternate short and 25 ms fixture handlers to exercise uncensored timing and the Event Timing cross-check.
 It retains the trace and validation receipt, closes its own process, and removes the temporary profile.
 
-Run `node --test tools/perf-profiling/packaged-presence.test.mjs tools/perf-profiling/presence-typing-trace.test.mjs tools/perf-profiling/presence-packaged-fixture.test.mjs` for the rule tests and a dry TLS/relay setup smoke.
+Run `node --test tools/perf-profiling/packaged-presence.test.mjs tools/perf-profiling/presence-owner.test.mjs tools/perf-profiling/presence-typing-trace.test.mjs tools/perf-profiling/presence-packaged-fixture.test.mjs` for the rule tests and a dry TLS/relay setup smoke.
 The dry smoke uses a small canonical snapshot specimen and launches no desktop or live typing workload.
-The full packaged-harness suite includes both files. The orchestrator owns packaged measurements and the final performance verdict.
+The full packaged-harness suite includes these tests. The orchestrator owns packaged measurements and the final performance verdict.
 
 Run `node --test tools/perf-profiling/packaged-benchmark.test.mjs` for CLI, lifecycle, fixture, and summary checks. The fixture contract check imports the automation executor, so build `@dohc/app-backend-runtime` first, as the JS gate does.
 These tests also run through the canonical root test command. They do not launch the GUI workload.

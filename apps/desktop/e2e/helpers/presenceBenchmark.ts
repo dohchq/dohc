@@ -33,10 +33,19 @@ import { createLiveValidationExecutor } from '../../../../services/sync-relay/sr
 import { PresenceHub } from '../../../../services/sync-relay/src/presence.ts';
 import { createDeviceHostCredential } from '../../../../services/sync-relay/src/deviceHostCredential.ts';
 import { parseHostEpoch } from '../../../../packages/live-session-contract/src/hostControl.ts';
-const makePresenceObjectTopic = (value: {workspaceId: string; versionId: string; objectId: string}) => 'doc:' + JSON.stringify([value.workspaceId, value.versionId, value.objectId]);
+// No product object-topic builder exists yet. PR 5 must move and import this
+// definition for its Markdown caret binding; do not introduce a second format.
+export const makePresenceObjectTopic = (value: {workspaceId: string; versionId: string; objectId: string}) => 'doc:' + JSON.stringify([value.workspaceId, value.versionId, value.objectId]);
 
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 export const RATES = { selectionHz: 20, typingHz: 5 };
+export const PEER_EDIT = '\u25c7';
+
+export function summarizePeerSchedule(times: number[], start: number, end: number) {
+  const ticks = times.filter(time => time >= start && time <= end);
+  const bounds = [start, ...ticks, end];
+  return { ticks: ticks.length, maxGapMs: Math.max(...bounds.slice(1).map((time, index) => time - bounds[index]!)) };
+}
 const owner = 'presence-owner';
 type Workspace = { workspaceId: string; rootPath: string };
 
@@ -168,7 +177,9 @@ export async function createPresenceFixture(options: { workspace: Workspace; pro
         const peers: Array<{ manager: ReturnType<typeof createNamedLiveBrowserTransport>; session: ReturnType<ReturnType<typeof createNamedLiveBrowserTransport>['select']>; awareness: Awareness; shareId: string; user: string; clientId: string; selections: number; edits: number }> = [];
         const sockets = new Set<WebSocket>();
         let running = false, failure: unknown, loop: Promise<void> | undefined, closed = false, startedAt = 0;
-        let result: Promise<{ peers: number; pass: boolean; peerCounts: Array<{ selections: number; edits: number; selectionHz: number; typingHz: number }>; elapsedMs: number; rates: typeof RATES }> | undefined;
+        const ticks: Array<{ time: number; peer: number; edited: boolean }> = [];
+        let result: Promise<{ peers: number; pass: boolean; elapsedMs: number; maxGapMs: number; rates: typeof RATES;
+          peerCounts: Array<{ selections: number; edits: number; windowEdits: number; selectionHz: number; typingHz: number; maxGapMs: number }> }> | undefined;
         const close = async () => {
           if (closed) return;
           closed = true; running = false; await loop;
@@ -204,26 +215,50 @@ export async function createPresenceFixture(options: { workspace: Workspace; pro
           await session.reconnect(); await waitForPresence(() => session.state().status, value => { if (['closed', 'disconnected', 'quarantined'].includes(value)) throw new Error('Peer failed to join: ' + value); return value === 'live'; }, signal);
         }
         const topic = encodeURIComponent(makePresenceObjectTopic({ workspaceId: workspace.workspaceId, versionId: 'main', objectId: doc.objectId }));
-        const tick = async () => {
-          for (const peer of peers) {
+        const tick = async (prime = false) => {
+          for (const [index, peer] of peers.entries()) {
+            if (!prime && !running) break;
             assert.equal(peer.session.state().status, 'live');
             const block = peer.session.doc.getXmlFragment('body').get(0) as Y.XmlElement, text = block.get(0) as Y.XmlText;
             assert.ok(text instanceof Y.XmlText, 'First paragraph text');
-            if (peer.selections % 4 === 0) { peer.session.edit(() => text.insert(text.length, 'p')); peer.edits++; }
+            const edited = !prime && peer.selections % 4 === 0;
+            if (edited) { peer.session.edit(() => text.insert(text.length, PEER_EDIT)); peer.edits++; }
             const cursor = { anchor: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(text, peer.selections % (text.length + 1))), head: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(text, peer.selections % (text.length + 1))) };
             peer.awareness.setLocalState({ cursor });
             await request(peer.user, '/sync/shares/' + peer.shareId + '/presence?topic=' + topic, { clientId: peer.clientId, state: { yc: peer.awareness.clientID, update: Buffer.from(encodeAwarenessUpdate(peer.awareness, [peer.awareness.clientID])).toString('base64') } }); peer.selections++;
+            if (!prime) ticks.push({ time: performance.timeOrigin + performance.now(), peer: index, edited });
           }
         };
-        await tick();
-        return { start() { running = true; startedAt = performance.now(); for (const peer of peers) { peer.selections = 0; peer.edits = 0; } const started = startedAt; loop = (async () => { let ticks = 0; while (running) { await tick(); ticks++; await delay(Math.max(0, started + ticks * 50 - performance.now()), undefined, { signal }); } })().catch(error => { failure = error; running = false; }); },
-          finish() {
+        await tick(true);
+        return { start() {
+          running = true; startedAt = performance.timeOrigin + performance.now();
+          for (const peer of peers) { peer.selections = 0; peer.edits = 0; }
+          loop = (async () => {
+            while (running) {
+              // Set each deadline from now. A late tick never triggers catch-up bursts.
+              const next = performance.now() + 50;
+              await tick();
+              if (running) await delay(Math.max(0, next - performance.now()), undefined, { signal });
+            }
+          })().catch(error => { failure = error; running = false; });
+        },
+          stop() { running = false; },
+          finish(window?: { start: number; end: number }) {
             result ??= (async () => {
-              const elapsedMs = performance.now() - startedAt;
+              running = false;
               await close();
               if (failure) throw failure;
-              const peerCounts = peers.map(peer => ({ selections: peer.selections, edits: peer.edits, selectionHz: peer.selections * 1000 / elapsedMs, typingHz: peer.edits * 1000 / elapsedMs }));
-              return { peers: count, pass: peerCounts.every(peer => peer.selectionHz >= 18 && peer.typingHz >= 4), peerCounts, elapsedMs, rates: RATES };
+              const start = window?.start ?? startedAt, end = window?.end ?? start;
+              const elapsedMs = end - start;
+              const peerCounts = peers.map((peer, index) => {
+                const during = ticks.filter(tick => tick.peer === index && tick.time >= start && tick.time <= end);
+                const schedule = summarizePeerSchedule(during.map(tick => tick.time), start, end);
+                return { selections: during.length, edits: peer.edits, windowEdits: during.filter(tick => tick.edited).length,
+                  selectionHz: during.length * 1000 / elapsedMs, typingHz: during.filter(tick => tick.edited).length * 1000 / elapsedMs,
+                  maxGapMs: schedule.maxGapMs };
+              });
+              return { peers: count, pass: elapsedMs > 0 && peerCounts.every(peer => peer.selectionHz >= 18 && peer.typingHz >= 4 && peer.maxGapMs <= 100),
+                peerCounts, elapsedMs, maxGapMs: Math.max(...peerCounts.map(peer => peer.maxGapMs)), rates: RATES };
             })();
             return result;
           } };
