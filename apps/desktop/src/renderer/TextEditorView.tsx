@@ -16,6 +16,8 @@ import {
 export function TextViewActions(props: {
   testId: string;
   onShare?: () => void;
+  // The app this file is the entry of: Run opens its local preview.
+  onRun?: () => void;
   saveState: SaveState;
   truncated?: boolean;
   readOnly?: boolean;
@@ -23,6 +25,7 @@ export function TextViewActions(props: {
   return (
     <ViewActions
       onShare={props.onShare}
+      onRun={props.onRun}
       status={
         <StateMark
           testId={`${props.testId}-save-state`}
@@ -59,6 +62,7 @@ export function TextEditorView({
   onPendingUndoConsumed,
   localBuffer,
   onShare,
+  onRun,
 }: {
   reopenKey?: number;
   switchReadPending: boolean;
@@ -84,6 +88,7 @@ export function TextEditorView({
   // pre so the matched line sits in the upper third.
   scrollLine?: number;
   onShare?: () => void;
+  onRun?: () => void;
 }) {
   const editor = useAutosavedTextDraft({
     body,
@@ -110,6 +115,7 @@ export function TextEditorView({
       <TextViewActions
         testId={testId}
         onShare={onShare}
+        onRun={onRun}
         saveState={editor.saveState}
         truncated={truncated}
         readOnly={readOnly}

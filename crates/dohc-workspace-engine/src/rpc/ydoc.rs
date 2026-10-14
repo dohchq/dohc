@@ -1149,6 +1149,10 @@ impl EngineService {
                 )
             })?;
             let input = dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                person_edit: params
+                    .attribution
+                    .as_ref()
+                    .is_some_and(|a| a.actor_kind == dohc_engine_domain::ChangeActorKind::Human),
                 binding: draft.binding.clone(),
                 expected_revision: draft.revision,
                 append_key,

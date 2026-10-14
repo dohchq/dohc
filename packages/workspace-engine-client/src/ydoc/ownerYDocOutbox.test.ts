@@ -330,6 +330,20 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     expect(run.requests).toHaveLength(responses.length);
   });
 
+  it("reads a recorded person's marker and leaves unmarked entries absent", async () => {
+    const result = pendingResult();
+    result.entries.push({...result.entries[0]!, sequence: 3, deliveryId: "delivery-3", appendKey: "append-3"});
+    result.pendingBytes = 6;
+    Object.assign(result.entries[0]!, {personEdit: true});
+    const pending = await read(result);
+    expect(pending.entries[0]?.personEdit).toBe(true);
+    expect(pending.entries[1]).not.toHaveProperty("personEdit");
+  });
+  it.each([false, null, "human", 1])("rejects a malformed person marker %j", async personEdit => {
+    const result = pendingResult(); Object.assign(result.entries[0]!, {personEdit});
+    await expect(read(result)).rejects.toThrow(TypeError);
+  });
+
   it("reads the agent an entry declared and adds none to an entry that declared none", async () => {
     const result = pendingResult();
     result.entries.push({ ...result.entries[0]!, sequence: 3, deliveryId: "delivery-3", appendKey: "append-3" });

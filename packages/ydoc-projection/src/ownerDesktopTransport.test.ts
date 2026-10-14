@@ -165,7 +165,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       client: {aggregateBytes: 200_000_000,maxUploads: 2,connectTimeoutMs: 30_000,requestDeadlineMs: 30_000,maxFrameBytes: 1_048_576}}));
     const frameChanges = createNamedFrameChanges(16);
     const control = createDeviceControl({storage: deployment.storage,hosts: new Set([`127.0.0.1:${relayPort}`]),relayExchangeKey: exchangeKey,limits,
-      delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,frameChanges,ownerAdmission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000_000,
+      delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,frameChanges,ownerAdmission: {trustedAccount: accountId => ({accountId, name: "Owner"}), shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000_000,
         validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input)}}});
     relay.on("upgrade",control.handleUpgrade);
     const {certificate, key} = await ensureLocalhostTls();
