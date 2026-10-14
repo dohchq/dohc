@@ -1130,10 +1130,10 @@ async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials
 function normalizeServerUrl(url: string): string {
   return url.replace(/\/+$/, "");
 }
-async function remoteForWorkspace(workspace: RegistryEntry) {
+async function remoteForWorkspace(workspace: RegistryEntry, options?: { allowPaused: boolean }) {
   await warmCredentialCache();
   const credentialGeneration = credentialCacheGeneration;
-  const remote = workspace.remote;
+  const remote = workspace.remote ?? (options?.allowPaused ? workspace.pausedRemote : undefined);
   if (!remote) throw new Error("Sync this workspace before sharing.");
   const credentials = requireCredentials(cachedCredentials);
   if (!workspaceRemoteMatchesCredentials(remote, credentials)) {

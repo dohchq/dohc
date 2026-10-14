@@ -32,7 +32,7 @@ function fixture() {
     hold.entered.resolve();
     await hold.held.promise;
   }
-  const row: Pick<RegistryEntry, "remote" | "shareView" | "sharedChannels"> = {
+  const row: Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView" | "sharedChannels"> = {
     remote: { serverUrl: "https://cloud.test", ownerUserId: "user-1" },
   };
   const reactions: ChatReaction[] = [];
@@ -677,4 +677,14 @@ describe("ActorKey local admission", () => {
     await expect(pending).rejects.toThrow("session changed");
     expectNothingWritten(test);
   });
+});
+
+it("records paused chat writes under the retained relay author", async () => {
+  const h = fixture(); h.row.pausedRemote = h.row.remote; delete h.row.remote;
+  await h.writeEach.send(); await h.writeEach.react(); await h.writeEach.decide();
+  expect(h.store.sendMessage.mock.calls[0]![0].authorUserId).toBe("user-1");
+  expect(h.store.setReaction.mock.calls[0]![0].replicationAuthorId).toBe("user-1");
+  h.setCredentials(null);
+  await expect(h.writes.sendMessage(h.place, { writer: { via: "automation", automationId: "collection:Tasks#tell", name: "Tell", depth: 1 },
+    threadId: "thread", body: "Wait", resolveAttachments: async () => [] })).rejects.toBeInstanceOf(AutomationChatSessionWait);
 });

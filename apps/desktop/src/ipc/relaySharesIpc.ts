@@ -130,7 +130,7 @@ export function registerRelaySharesIpcHandlers<
     inactiveMessage: string,
     work: (operation: Operation) => Promise<Result>,
   ): Promise<Result>;
-  remoteForWorkspace(workspace: Workspace): Promise<{
+  remoteForWorkspace(workspace: Workspace, options?: { allowPaused: boolean }): Promise<{
     credentials: CloudCredentials;
     credentialGeneration: number;
   }>;
@@ -699,6 +699,8 @@ export function registerRelaySharesIpcHandlers<
         }
         return RevokeRelayShareLinkResult.parse({ outcome: "ended", undo: ended.data.undo });
       },
+      assertOriginalWorkspace,
+      { allowPaused: true },
     );
   });
 
@@ -1091,6 +1093,7 @@ export function registerRelaySharesIpcHandlers<
         });
       },
       assertOriginalWorkspace,
+      { allowPaused: true },
     );
   });
 

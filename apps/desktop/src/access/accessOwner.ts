@@ -10,13 +10,14 @@ import type { RegistryEntry } from "../workspaces/registryStore";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
 
 export function ownerAccessRoster(
-  workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "shareView">,
+  workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "pausedRemote" | "shareView">,
   credentials: CloudCredentials | null,
   observation: (workspaceId: string) => RosterObservation,
 ): RosterObservation {
   // The server/account matcher ignores relayUrl; a missing relay must stay unknown, matching account().
-  if (workspace.shareView || !workspace.remote || !credentials?.relayUrl ||
-      !workspaceRemoteMatchesCredentials(workspace.remote, credentials)) return { listing: null, checkedAtMs: null, freshness: "unknown" };
+  const remote = workspace.remote ?? workspace.pausedRemote;
+  if (workspace.shareView || !remote || !credentials?.relayUrl ||
+      !workspaceRemoteMatchesCredentials(remote, credentials)) return { listing: null, checkedAtMs: null, freshness: "unknown" };
   return observation(workspace.workspaceId);
 }
 

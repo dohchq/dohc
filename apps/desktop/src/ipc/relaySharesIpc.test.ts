@@ -65,7 +65,7 @@ function harness() {
       });
     },
   });
-  const remote = vi.fn(async () => ({ credentials, credentialGeneration: generation }));
+  const remote = vi.fn(async (_workspace: Workspace, _options?: { allowPaused: boolean }) => ({ credentials, credentialGeneration: generation }));
   const request = vi.fn<(
     credentials: CloudCredentials, path: string, init?: RequestInit, options?: unknown,
   ) => Promise<unknown>>(async () => linkResult);
@@ -496,6 +496,26 @@ describe("registered relay share handlers", () => {
 });
 
 const undo = {undoId: "undo-1", expiresAtMs: 600_000};
+
+it.each([
+  [CHANNELS.revokeRelayShareGrant, { workspaceId, shareId: "share", grantId: "grant" },
+    { ok: true, grantId: "grant", access: "edit", generation: 2, parentGrantId: null, status: "revoked", revokedAtMs: 5, undo }],
+  [CHANNELS.revokeRelayShareLink, { workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [] },
+    { kind: "success", body: { ok: true, undo } }],
+] as const)("allows paused owner control for %s without enabling content sync", async (channel, payload, result) => {
+  const h = harness();
+  h.remote.mockImplementation(async (_workspace, options) => {
+    if (!options?.allowPaused) throw new Error("Sync this workspace before sharing.");
+    return { credentials: h.credentials, credentialGeneration: 1 };
+  });
+  h.request.mockResolvedValue(result);
+  await h.invoke(channel, payload);
+  expect(h.remote).toHaveBeenCalledWith(h.workspace, { allowPaused: true });
+  await expect(h.invoke(CHANNELS.createRelayShareLink, linkInput)).rejects.toThrow("Sync this workspace");
+  h.remote.mockRejectedValueOnce(new Error("wrong account"));
+  await expect(h.invoke(channel, payload)).rejects.toThrow("wrong account");
+  expect(h.request).toHaveBeenCalledOnce();
+});
 
 describe("share roster refresh", () => {
   const grantBody = {grantId: "grant", access: "edit", generation: 2, parentGrantId: null};

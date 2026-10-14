@@ -106,6 +106,17 @@ async function listed(shares: unknown, links: unknown[] = []): Promise<RosterLis
   return answer.listing;
 }
 
+it("keeps paused owner reach and cached recipients instead of treating it as reattached", async () => {
+  const listing = await listed({ granted: [row()] });
+  const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first",
+    pausedRemote: remote, shareRoster: { ...listing, version: 1, listedAtMs: 42 } };
+  const roster = reachRosterFor({ entry, localUserId: null, localPersonId: null, history: "synced", latest: null, next: "" });
+  expect(roster).toMatchObject({ kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster] });
+  const [reach] = checkAutomationReach(roster, { id: "local", collection: { path: "Trip", name: "Trip" }, codeFiles: [],
+    steps: [{ kind: "change-records", collection: { path: "Trip", name: "Trip" } }] });
+  expect(reach.allowed).toBe(true);
+});
+
 describe("roster from the relay's listings", () => {
   it("loads missing History names once per inventory without fetching known names or changing the roster", async () => {
     const roster = await listed({ granted: [row()] });

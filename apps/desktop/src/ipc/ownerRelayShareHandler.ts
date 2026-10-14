@@ -21,7 +21,7 @@ export function createOwnerRelayShareHandler<
     inactiveMessage: string,
     work: (operation: Operation) => Promise<Result>,
   ): Promise<Result>;
-  remoteForWorkspace(workspace: Workspace): Promise<{
+  remoteForWorkspace(workspace: Workspace, options?: { allowPaused: boolean }): Promise<{
     credentials: Credentials;
     credentialGeneration: number;
   }>;
@@ -36,6 +36,7 @@ export function createOwnerRelayShareHandler<
       session: ReturnType<typeof credentialScopedOperation>,
     ) => Promise<Result>,
     assertWorkspace?: (workspace: Workspace) => void,
+    options?: { allowPaused: boolean },
   ): Promise<Result> {
     return dependencies.withWorkspaceOperation(
       sender,
@@ -45,7 +46,7 @@ export function createOwnerRelayShareHandler<
         operation.assertCurrent();
         assertWorkspace?.(operation.workspace);
         const { credentials, credentialGeneration } =
-          await dependencies.remoteForWorkspace(operation.workspace);
+          await dependencies.remoteForWorkspace(operation.workspace, options);
         const session = credentialScopedOperation({
           assertCurrent: () => operation.assertCurrent(),
           capturedGeneration: credentialGeneration,

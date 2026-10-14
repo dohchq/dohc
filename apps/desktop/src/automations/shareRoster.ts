@@ -59,23 +59,24 @@ export function reachRosterFor(input: {
 }): ReachRoster {
   const { entry } = input;
   if (entry.shareView) return { kind: "shared-view" };
+  const remote = entry.remote ?? entry.pausedRemote;
   // A workspace that synced keeps its grants on the relay even after it is
   // forgotten and attached again, which drops its server connection from the
   // registry. With no connection dohc cannot list them, so who can edit it
   // is unknown until it syncs again. A record dohc cannot read may say it
   // synced, so it counts the same. Only a folder with no record, as one made
   // before dohc kept it, or one that says it never synced, is its owner's.
-  if (!entry.remote && (input.history === "synced" || input.history === "unknown")) {
+  if (!remote && (input.history === "synced" || input.history === "unknown")) {
     return { kind: "unknown", problem: { kind: "unchecked", next: SYNC_AGAIN } };
   }
   // Only this computer's person can edit a workspace that does not sync, even
   // with no account signed in.
-  if (!entry.remote) {
+  if (!remote) {
     const local = input.localPersonId === null ? {} : { localPersonId: input.localPersonId };
     return { kind: "owner", ownerUserId: input.localUserId, grants: [], ...local };
   }
   // The registry is a file on disk. A copy it cannot read is unchecked, not empty.
-  return ownerRoster(entry.remote.ownerUserId, input.latest ?? entry.shareRoster, input.next);
+  return ownerRoster(remote.ownerUserId, input.latest ?? entry.shareRoster, input.next);
 }
 
 interface RosterState {
