@@ -13,6 +13,7 @@ Use the same environment file and Compose overrides as your running deployment.
 | `restore` | Repairs missing or corrupt relay storage from a matching snapshot | Refuses snapshots older than accepted relay writes |
 | `archive` | All named deployment volumes, configuration, secrets and image identities | Preserves evidence; no full-deployment restore command |
 | `salvage` | Exports settled tracked file contents from an old snapshot | Creates ordinary files; does not restore a running deployment |
+| `move.mjs` | Starts the deployment on a new host from its attached data disk | Requires the data-disk layout; accounts move separately |
 
 The relay keeps an independent continuity record outside its database volume.
 Every accepted mutation advances that record, including permission changes and schema migrations.
@@ -68,7 +69,7 @@ Otherwise, preserve a private deployment archive for further recovery work.
 Use `--env-file PATH` for a different environment file.
 Use `--compose-file PATH` for each additional Compose override.
 Use `--project-name NAME` if your deployment overrides the Compose project name.
-The shared configuration reader includes the private-network overlay automatically.
+The shared configuration reader includes the private-network and data-disk overlays automatically.
 
 ## Check and repair relay storage
 
@@ -162,17 +163,85 @@ The pre-upgrade snapshot can then be used for offline salvage, but not in-place 
 If an upgrade fails, keep its volumes and diagnose or install a corrected version.
 Do not reset continuity or automatically restore an older deployment archive.
 
+## Move to a new host
+
+Use this procedure for a deployment that keeps its data on an [attached disk](self-host.md#keep-server-data-on-an-attached-disk).
+It also recovers a server that stopped working while its disk survived.
+The new host continues from the last write the relay committed to the disk. Nothing is rolled back.
+
+The disk carries the relay database, its continuity record, and the session host and automation copies.
+Bring these separately:
+
+- `.env.self-host`, unchanged. It holds the configuration and the server secrets. Keep a private copy off the server.
+- The same release bundle and image version that the old host ran.
+- The `dohc_self_host_postgres` volume, which holds accounts and sign-in sessions.
+  Copy the stopped volume to the new host before you start the deployment there.
+  If the old host is lost, restore this volume from your own backup.
+  An older copy can bring back sessions and accounts that were removed after it was taken.
+  Without this volume, the new server has no accounts, and nobody can open the workspaces on the disk as their owner.
+- Nothing for TLS. In public mode, Caddy obtains new certificates when the deployment starts on the new host.
+
+Never copy the disk to run a second server.
+Each copy would accept different work under the same deployment identity.
+
+### Stop the old server for good
+
+1. If the old host still responds, run `node tools/self-host/bootstrap.mjs stop` there.
+2. On the old host, run `docker ps` and confirm that no dohc service is running.
+3. Shut down the old host.
+4. Detach the disk from the old host.
+5. In your provider's console, confirm that the old host is off and the disk has no attachment.
+
+If the old host starts again without the disk, its relay cannot start because its data folder is missing.
+
+### Start the deployment on the new host
+
+1. Prepare the new host as described in [Set up a dohc server](self-host.md#prepare-the-host).
+2. Copy the release bundle and `.env.self-host` to the new host, then load the release image.
+3. Restore the `dohc_self_host_postgres` volume.
+4. Attach the disk and mount it so that `DOHC_DATA_DIRECTORY` names the deployment folder on it.
+   If the mount path changed, update `DOHC_DATA_DIRECTORY` in `.env.self-host`.
+5. For public access, point DNS for the server's domain to the new host.
+6. For private access, remove the old machine from the tailnet.
+   Give the new host the same Tailscale hostname, then follow `node tools/self-host/bootstrap.mjs network`.
+7. From the bundle directory, run:
+
+```sh
+node scripts/self-host/move.mjs
+```
+
+The command checks the disk through the relay's own volumes.
+If `deployment.json` or the relay database is missing, it refuses to start anything.
+Otherwise it starts the deployment and runs the same checks as `node scripts/check-self-host.mjs --running`.
+Use `--env-file PATH` for a different environment file.
+
+If the command refuses, check the disk mount and `DOHC_DATA_DIRECTORY`.
+Never start the deployment on an empty folder: setup would create a new deployment.
+If the relay refuses its continuity, keep the services stopped and preserve the disk.
+A host that stopped during a relay write can leave that state, as described above.
+
+Devices connect to the same address and the same relay deployment, so they need no changes.
+
 ## Verify the recovery tooling
 
 Run focused source checks after changing this procedure's commands:
 
 ```sh
 pnpm --filter @dohc/sync-relay exec vitest run src/relayDeployment.test.ts src/relayDeploymentRecovery.test.ts src/relayContentSalvage.test.ts
-node --test scripts/self-host/recovery.test.mjs
+node --test scripts/self-host/recovery.test.mjs scripts/self-host/move.test.mjs
 pnpm --filter @dohc/sync-relay build
 DOHC_RECOVERY_TEST_IMAGE=YOUR_DOHC_IMAGE node --test scripts/self-host/recovery.docker.test.mjs
+DOHC_RECOVERY_TEST_IMAGE=YOUR_DOHC_IMAGE node --test scripts/self-host/drill.docker.test.mjs
 ```
 
-The Docker test uses isolated volumes and removes them afterward.
-It proves cold snapshot repair after corruption, production reopen, salvage and private volume archival.
-It does not prove arbitrary old-archive restoration or recovery of a lost physical host.
+The Docker tests use isolated volumes and folders and remove them afterward.
+Build the image from the same checkout.
+The recovery test proves cold snapshot repair after corruption, production reopen, salvage and private volume archival.
+It does not prove arbitrary old-archive restoration.
+
+The drill needs a Linux Docker host.
+It hard-kills a deployment that keeps its data in a folder, then starts a fresh Compose project on that folder.
+It checks that the relay reopens the same deployment without moving continuity back.
+It checks that documents, blobs, shares and accounts survive, and that the relay refuses an older copy of its database.
+It also checks that a missing folder fails to start and that the move command refuses an empty folder.
+A killed container does not lose the host's write cache, so the drill does not prove survival of a power loss.

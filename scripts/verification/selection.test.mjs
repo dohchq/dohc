@@ -25,11 +25,11 @@ test("workspace discovery follows declared globs, exclusions, and nested package
   assert.ok(readWorkspacePackages(root).some(pkg => pkg.name === "@dohc/yrs-interop-scripts" && pkg.path === "crates/yrs-interop/scripts"));
 });
 
-test("canonical repository checks include every script contract except the Docker proof", () => {
+test("canonical repository checks include every script contract except the Docker proofs", () => {
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const listed = new Set([...manifest.scripts["test:repo"].matchAll(/[^\s]+\.test\.mjs/gu),
     ...manifest.scripts["test:repo:source"].matchAll(/[^\s]+\.test\.mjs/gu)].map(([path]) => path));
-  const optIn = new Set(["scripts/self-host/recovery.docker.test.mjs"]);
+  const optIn = new Set(["scripts/self-host/recovery.docker.test.mjs", "scripts/self-host/drill.docker.test.mjs"]);
   const tracked = execFileSync("git", ["ls-files", "-z", "--", ":(glob)scripts/**/*.test.mjs", ":(glob)tools/**/*.test.mjs"],
     { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }).split("\0").filter(Boolean);
   assert.ok(tracked.includes("scripts/build-slot.test.mjs"));

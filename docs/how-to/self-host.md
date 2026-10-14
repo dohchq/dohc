@@ -166,6 +166,34 @@ Listed addresses can still sign up.
 Outside the self-host bundle, set `WORKSPACE_API_RELAY_URL` on `workspace-api` to the relay's internal origin.
 Both services must use the same `BETTER_AUTH_SECRET`.
 
+## Keep server data on an attached disk
+
+To keep server data on an attached disk, set it up before the first start.
+You can then [move the server to a new host](self-host-recovery.md#move-to-a-new-host) by moving the disk.
+The disk holds the relay database with its files, the continuity record, and the server's session host and automation copies.
+Accounts in the `dohc_self_host_postgres` volume and Caddy's certificates stay on the host.
+
+Mount the disk on the host, for example at `/mnt/dohc-data`, and make the mount persist across restarts.
+Create a deployment folder on the mounted disk with one folder for each kind of data.
+The services run as UID 1000 and need to own these folders:
+
+```sh
+sudo install -d -m 0700 -o 1000 -g 1000 /mnt/dohc-data/dohc/sync-relay /mnt/dohc-data/dohc/continuity /mnt/dohc-data/dohc/host-data
+```
+
+Set the deployment folder in `.env.self-host`:
+
+```dotenv
+DOHC_DATA_DIRECTORY=/mnt/dohc-data/dohc
+```
+
+Name a folder on the disk, not the mount point.
+If the disk is not mounted, that folder is missing and the deployment fails to start.
+It never creates a new, empty deployment in its place.
+The setup and recovery commands add the data-disk Compose overlay when `DOHC_DATA_DIRECTORY` is set.
+Leave it empty to keep all data in Docker volumes on the host.
+Do not set or change it after the first start; this guide does not move existing volumes onto a disk.
+
 ## Start and check the server
 
 ```sh

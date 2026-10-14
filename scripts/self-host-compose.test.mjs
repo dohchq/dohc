@@ -130,6 +130,33 @@ test('private mode selects the private-only gateway overlay and the real env fil
   assert.match(readFileSync('tools/self-host/compose.private.yml', 'utf8'), /127\.0\.0\.1/);
 });
 
+test('a data directory selects the data-disk overlay for relay, continuity and host data only', () => {
+  assert.ok(!composeArgs('.env.self-host', settings(), 'up').includes('tools/self-host/compose.data-disk.yml'));
+  const args = composeArgs('.env.self-host', {...settings(), DOHC_SERVER_NETWORK_ACCESS: 'private', DOHC_DATA_DIRECTORY: '/mnt/disk/dohc'}, 'up');
+  assert.ok(args.indexOf('tools/self-host/compose.private.yml') < args.indexOf('tools/self-host/compose.data-disk.yml'));
+  assert.ok(args.indexOf('tools/self-host/compose.data-disk.yml') < args.indexOf('up'));
+  const overlay = load(readFileSync('tools/self-host/compose.data-disk.yml', 'utf8'), { schema: YAML11_SCHEMA });
+  assert.deepEqual(Object.keys(overlay), ['volumes']);
+  const folders = {dohc_self_host_sync_relay: 'sync-relay', dohc_self_host_relay_continuity: 'continuity', dohc_self_host_host_data: 'host-data'};
+  assert.deepEqual(Object.keys(overlay.volumes), Object.keys(folders));
+  for (const [name, folder] of Object.entries(folders)) {
+    assert.ok(Object.hasOwn(compose.volumes, name));
+    // A bound volume fails to mount when its folder is missing; Docker never creates it.
+    assert.deepEqual(overlay.volumes[name], {driver: 'local', driver_opts: {type: 'none', o: 'bind',
+      device: `\${DOHC_DATA_DIRECTORY:?Set DOHC_DATA_DIRECTORY}/${folder}`}});
+  }
+  assert.deepEqual(compose.services.postgres.volumes, ['dohc_self_host_postgres:/var/lib/postgresql/data']);
+});
+
+test('the data directory must be an absolute folder without parent segments', () => {
+  for (const value of [undefined, '', '/mnt/disk/dohc', '/mnt/HC_Volume_1234/dohc.data']) {
+    assert.deepEqual(validateSettings({...settings(), DOHC_DATA_DIRECTORY: value}), []);
+  }
+  for (const value of ['relative/dohc', '/', '/mnt/disk/', '/mnt/../etc', '/mnt/./disk', '/mnt/disk,dohc', '/mnt/disk dohc', 'C:/dohc']) {
+    assert.ok(validateSettings({...settings(), DOHC_DATA_DIRECTORY: value}).some(error => error.includes('DOHC_DATA_DIRECTORY')), value);
+  }
+});
+
 test('automatic initialization cannot overwrite orphaned data or continuity', () => {
   const root = mkdtempSync(join(tmpdir(), 'dohc-bootstrap-'));
   try {
