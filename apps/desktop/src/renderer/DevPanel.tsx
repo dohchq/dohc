@@ -1,3 +1,4 @@
+import { shortcutText } from "../shortcuts/shortcutRegistry";
 import { Bug, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
@@ -101,7 +102,7 @@ export function DevPanel(props: { workspaceId?: string }) {
               <Bug size={13} strokeWidth={1.9} aria-hidden className="text-subtle" />
               Dev tools
               <kbd className="rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle">
-                Ctrl Shift D
+                {shortcutText("dev-panel", window.dohcDesktop?.platform)}
               </kbd>
             </span>
             <IconButton aria-label="Close dev tools" onClick={() => setOpen(false)}>
@@ -169,7 +170,7 @@ export function DevPanel(props: { workspaceId?: string }) {
       <button
         type="button"
         aria-label="Dev tools"
-        title="Dev tools (Ctrl+Shift+D)"
+        title={"Dev tools (" + shortcutText("dev-panel", window.dohcDesktop?.platform).replaceAll(" ", "+") + ")"}
         onClick={() => setOpen((current) => !current)}
         className={`fixed bottom-9 right-3 z-50 grid size-7 place-items-center rounded-full border border-line transition-colors ${
           open ? "bg-ink text-bg" : "bg-panel text-subtle hover:text-ink"
