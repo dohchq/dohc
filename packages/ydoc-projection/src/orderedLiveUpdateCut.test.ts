@@ -1904,6 +1904,13 @@ describe('validateOrderedLiveUpdateCut', () => {
       [pairAcrossChunk, 32_771],
       [`${pairAcrossChunk}\uD800`, 32_774],
       [`\uDC00${pairAcrossChunk}`, 32_774],
+      // The longest string the loop measures, and the shortest the encoder measures.
+      ['a'.repeat(16_384), 16_384],
+      ['a'.repeat(16_385), 16_385],
+      // A lone high surrogate that ends the first chunk, a lone low one that starts the second, and two highs in a row across it.
+      ['a'.repeat(16_383) + '\uD800' + 'b'.repeat(16_384), 32_770],
+      ['a'.repeat(16_384) + '\uDC00' + 'b'.repeat(16_384), 32_771],
+      ['a'.repeat(16_383) + '\uD800\uD800' + 'b'.repeat(16_384), 32_773],
     ] as const) expect(proof(value, 14).frame?.byteLength).toBe(5 + payloadBytes)
 
     const loneKey = proof({ [`${pairAcrossChunk}\uD800`]: null }, 16)
