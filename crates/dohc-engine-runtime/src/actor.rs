@@ -999,6 +999,7 @@ mod saturation_tests {
             claims: ClaimAnnouncer::default(),
             link_metrics: metrics,
             link_drain_holds: holds,
+            current_views: Arc::default(),
         };
         prepare(&actor.handle());
         let (startup_tx, startup_rx) = std_sync_channel(1);
