@@ -81,7 +81,7 @@ test("a node:test step that failed only in its tests runs once more and records 
       if(args.includes('test:repo')&&(process.env.SCENARIO==='twice'||process.env.SCENARIO==='flaky'&&!existsSync('ran'))){writeFileSync('ran','');writeFileSync(log,'✖ failing tests:\\n\\n✖ times out under load (30231ms)\\n');throw Object.assign(Error('tests failed'),{commandExitFailure:true});}
       if(args[1]==='@dohc/tail'&&process.env.SCENARIO==='vitest'){
         appendFileSync(env.DOHC_TEST_RECORD,JSON.stringify({test:'src/a.test.ts › settles on retry',flaky:true,failed:false,seconds:0.1})+'\\n'+JSON.stringify({test:'src/a.test.ts › fails both tries',flaky:false,failed:true,seconds:0.1})+'\\n');
-        writeFileSync(log,'FAIL src/a.test.ts');throw Object.assign(Error('tests failed'),{commandExitFailure:true});
+        writeFileSync(log,'FAIL src/a.test.ts\\n✖ failing tests:\\n\\n✖ a node:test run a test printed (5ms)\\n');throw Object.assign(Error('tests failed'),{commandExitFailure:true});
       }
       writeFileSync(log,'ok');return {stdout:''};
     }
@@ -104,7 +104,7 @@ test("a node:test step that failed only in its tests runs once more and records 
   assert.deepEqual(drive("twice"), { repo: 2, flaky: [], failed: [{ step: "repository", test: "times out under load" }] }, "the retry's report names the failure, with the flaky list's name");
   assert.deepEqual(drive("check"), { repo: 1, flaky: [], failed: [] });
   assert.deepEqual(drive("vitest"), { repo: 1, flaky: [{ step: "@dohc/tail", test: "src/a.test.ts › settles on retry" }], failed: [{ step: "@dohc/tail", test: "src/a.test.ts › fails both tries" }] },
-    "a vitest test that failed both tries is failed, not flaky");
+    "a vitest test that failed both tries is failed, not flaky, and node:test output in a vitest log names nothing");
 });
 
 test("a confirmed failure stops the running steps unless the run keeps going, and a retried pass does not", t => {

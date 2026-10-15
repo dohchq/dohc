@@ -99,7 +99,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       if (flaky.length) row.flaky = flaky;
       // vitest's failed and slow tests come from its reporter; node:test's from the spec report of the attempt that ran last.
       const last = readLog(row.retryLog ?? row.log);
-      const failed = [...recorded.filter(test => test.failed).map(test => test.test), ...nodeTestFailures(last)];
+      const failed = [...recorded.filter(test => test.failed).map(test => test.test), ...(rerun ? nodeTestFailures(last) : [])];
       if (failed.length) row.failed = failed;
       const times = [...recorded.filter(test => test.seconds >= 2), ...nodeTestTimes(last).filter(test => test.seconds >= 2)];
       if (times.length) row.slowest = slowest(times);

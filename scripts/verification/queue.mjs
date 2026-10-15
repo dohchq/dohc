@@ -255,9 +255,11 @@ export function sharedFailures(root, failed, { branch, now = Date.now() } = {}) 
       if (!lines.has(id)) { const request = readJson(join(queuePaths(root).request(id), "request.json")); lines.set(id, request?.branch ?? request?.checkout ?? null); }
       return lines.get(id);
     };
-    const own = String(branch).toLowerCase();
+    // A branch is compared and shown without refs/heads/, however each request recorded it.
+    const short = line => String(line).replace(/^refs\/heads\//u, "");
+    const own = short(branch).toLowerCase();
     return [...wanted].flatMap(([name, row]) => {
-      const branches = [...new Set((attempts.get(name) ?? []).map(lineOf).filter(line => line && line.toLowerCase() !== own).map(line => line.replace(/^refs\/heads\//u, "")))].sort();
+      const branches = [...new Set((attempts.get(name) ?? []).map(lineOf).filter(Boolean).map(short).filter(line => line.toLowerCase() !== own))].sort();
       return branches.length ? [{ ...row, branches }] : [];
     });
   } catch { return []; }

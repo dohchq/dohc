@@ -154,6 +154,7 @@ test("a failed test is shared when another branch's run failed it in the last da
     { ...grid, branches: ["feat/a", "fix/b"] },
     { ...rust, branches: ["C:\\w\\ffffff", "fix/b"] },
   ], "a run older than a day, the same test in another step, this branch's runs, and a request with no record do not count; a detached run is named by its checkout");
+  assert.deepEqual(sharedFailures(root, failed, { branch: "Mine", now }), sharedFailures(root, failed, { branch: "refs/heads/mine", now }), "a branch named without refs/heads/ is still this branch");
   assert.deepEqual(sharedFailures(root, [own], { branch: "refs/heads/mine", now }), []);
   assert.deepEqual(sharedFailures(root, [], { branch: "refs/heads/mine", now }), []);
   assert.deepEqual(sharedFailures(join(root, "missing"), failed, { branch: "refs/heads/mine", now }), [], "a missing queue root gives none");
