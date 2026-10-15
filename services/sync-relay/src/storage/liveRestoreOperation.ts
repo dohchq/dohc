@@ -2,6 +2,7 @@ import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
 import {readServiceActivation} from "./serviceActivationAccess";
+import {SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -114,6 +115,11 @@ function owner(storage: StorageContext, workspaceId: string, ownerUserId: string
 function requireNoPendingActivation(storage: StorageContext, document: LiveDocumentKey): void {
   if (readServiceActivation(storage, document)?.completion_json === null) refuse();
 }
+function requireUnretiredEnrollment(storage: StorageContext, document: LiveDocumentKey): void {
+  // Enrollments are main-only and keyed by workspace/object, even after a path moves.
+  if (document.mainVersionId !== "main" || storage.db.prepare(`SELECT 1 FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=? AND retired=1`)
+    .get(document.workspaceId, document.objectId)) refuse();
+}
 function basis(storage: StorageContext, intent: StopRestoreIntent, authority: StoredLiveDocumentAuthority): StopRestoreBasis {
   const share = storage.getShare(intent.shareId), control = storage.getLiveHostControl();
   const storedSelector = share && parseStoredAnyShareSelectorJson(share.selectorJson);
@@ -224,6 +230,7 @@ export function readStopRestorePlan(storage: StorageContext, input: StopRestoreP
     const row = storage.db.prepare(`SELECT restore_fence_generation,baseline_digest,current_path FROM sync_relay_live_documents
       WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state='open'`).get(...key(document));
     if (!row) refuse();
+    requireUnretiredEnrollment(storage, document);
     requireNoPendingActivation(storage, document);
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector = storedSelector && effectiveShareSelector(storedSelector, grant.access);
@@ -266,6 +273,7 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
   return storage.tx(() => {
     owner(storage, intent.document.workspaceId, intent.ownerUserId);
     requireLiveJournalHistory(storage);
+    requireUnretiredEnrollment(storage, intent.document);
     const saved = read(storage, intent.operationId, intent.document.workspaceId);
     if (saved) { if (!isDeepStrictEqual(saved.intent, intent)) refuse(); return saved; }
     const namespace=liveJournalHistoryNamespace(storage);

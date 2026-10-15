@@ -150,6 +150,11 @@ impl<'a> Iterator for Iter<'a> {
 pub struct Ranges<'a>(&'a IdRange);
 
 impl<'a> Ranges<'a> {
+    /// Check whether every range in this view is covered by `other`.
+    pub fn subset_of(&self, other: &IdRange) -> bool {
+        self.0.subset_of(other)
+    }
+
     /// Iterate over the clock ranges.
     pub fn iter(&self) -> RangesIter<'a> {
         RangesIter(self.0.inner().iter())

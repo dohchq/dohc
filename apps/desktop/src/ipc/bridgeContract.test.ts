@@ -4537,3 +4537,9 @@ describe("exclusive app creation IPC contract", () => {
     expect(DeleteWorkspacePathPayload.safeParse({ ...path, emptyFolderOnly: "true" }).success).toBe(false);
   });
 });
+
+ it("refreshes only visibility.toml among internal metadata paths", () => {
+  expect(activityPathsAffectWorkspaceListing([".dohc/visibility.toml"], "linux")).toBe(true);
+  expect(activityPathsAffectWorkspaceListing([".DOHC/VISIBILITY.TOML"], "win32")).toBe(true);
+  expect(activityPathsAffectWorkspaceListing([".dohc/files.toml", ".dohc/ui-state.json", ".dohc/engine"], "win32")).toBe(false);
+});
