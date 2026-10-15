@@ -301,6 +301,8 @@ export function createWorkspaceEngineIpc<
         history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> & Partial<Pick<WorkspaceEngineCapture, "filePathForObjectId">>,
         rootPath: string | null,
         presentations: EngineMomentAuthorNames["presentations"],
+        // Call after each await, so nothing returns from a replaced folder, server, or shared view.
+        assertCurrent: () => void,
       ) => Promise<Result>,
     ): Promise<Result> {
       // The read stops only when its folder, server, or shared view changes. Other
@@ -327,7 +329,7 @@ export function createWorkspaceEngineIpc<
         return read(capture, entry.rootPath, createHistoryPresentationRequest({
           source: "own-store", workspaceId, assertCurrent, serverUrl: entry.remote?.serverUrl, synced,
           installationId: localInstallationId(), credentials,
-        }));
+        }), assertCurrent);
       }
       return withRendererWorkspaceOperation(event.sender, workspaceId,
         "History stopped loading because this window changed workspaces.", async (operation) => {
@@ -338,7 +340,7 @@ export function createWorkspaceEngineIpc<
             engineWorkspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: workspace.attachmentId,
           });
           return read(sharedViewHistory(store, workspace.workspaceId), null,
-            createHistoryPresentationRequest({ source: "received", workspaceId, assertCurrent }));
+            createHistoryPresentationRequest({ source: "received", workspaceId, assertCurrent }), assertCurrent);
         });
     }
 
@@ -349,8 +351,9 @@ export function createWorkspaceEngineIpc<
     registerHandler(CHANNELS.listEngineMoments, async (event, payload) => {
       assertTrustedSender(event);
       const input = ListEngineMomentsPayload.parse(payload);
-      return readHistory(event, input.workspaceId, async (history, rootPath, presentations) => {
+      return readHistory(event, input.workspaceId, async (history, rootPath, presentations, assertCurrent) => {
         const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
+        assertCurrent();
         if (policy?.errors.length) return policyUnreadable(policy);
         const admitted = policy ? historyPathAdmission(policy) : null;
         return listEngineMomentsForIpc(
@@ -366,6 +369,7 @@ export function createWorkspaceEngineIpc<
                 ...(input.limit !== undefined ? { limit: input.limit } : {}),
                 ...(cursor !== undefined ? { cursor } : {}),
               });
+              assertCurrent();
               startCursor ??= page.startCursor;
               versionMarkers.push(...page.versionMarkers);
               const moments = admitted ? page.moments.filter(moment => moment.protected || admitted(moment.path)) : page.moments;
@@ -374,6 +378,7 @@ export function createWorkspaceEngineIpc<
               }
               if (pageIndex === 0 && admitted && input.objectId !== undefined) {
                 const objectPath = await history.filePathForObjectId?.(input.objectId);
+                assertCurrent();
                 if (objectPath != null && !admitted(objectPath)) {
                   return { ...page, moments, nextCursor: null, startCursor, versionMarkers };
                 }
@@ -389,10 +394,12 @@ export function createWorkspaceEngineIpc<
     registerHandler(CHANNELS.readEngineMoment, async (event, payload) => {
       assertTrustedSender(event);
       const input = ReadEngineMomentPayload.parse(payload);
-      return readHistory(event, input.workspaceId, async (history, rootPath, presentations) => {
+      return readHistory(event, input.workspaceId, async (history, rootPath, presentations, assertCurrent) => {
         const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
+        assertCurrent();
         if (policy?.errors.length) return ReadEngineMomentResult.parse({ ...policyUnreadable(policy), moment: null });
         const moment = await history.readMoment(input.momentId);
+        assertCurrent();
         if (moment && !moment.protected && policy && !historyMomentPathsAdmitted(historyPathAdmission(policy), moment.moment)) {
           return ReadEngineMomentResult.parse({ status: "untracked", moment: null });
         }

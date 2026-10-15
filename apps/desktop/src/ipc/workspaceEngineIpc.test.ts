@@ -986,6 +986,31 @@ describe("workspace engine IPC registrations", () => {
       expect(capturing.warmCredentialCache).not.toHaveBeenCalled();
     });
 
+    // None of these reaches a token, so only the read's own checks can stop it.
+    it.each([
+      ["the policy read, before a policy error", CHANNELS.listEngineMoments, (h: Awaited<ReturnType<typeof harness>>, replace: () => void) =>
+        h.readPolicy.mockImplementation(async () => { replace(); return { filesPolicy: null, visibilityPolicy: null, errors: ["line 1"], unreadable: [".dohc/files.toml"] }; })],
+      ["a detail's policy read, before a policy error", CHANNELS.readEngineMoment, (h: Awaited<ReturnType<typeof harness>>, replace: () => void) =>
+        h.readPolicy.mockImplementation(async () => { replace(); return { filesPolicy: null, visibilityPolicy: null, errors: ["line 1"], unreadable: [".dohc/files.toml"] }; })],
+      ["an empty page", CHANNELS.listEngineMoments, (h: Awaited<ReturnType<typeof harness>>, replace: () => void) =>
+        h.capture.listMoments.mockImplementation(async () => { replace(); return page(); })],
+      ["an authorless detail", CHANNELS.readEngineMoment, (h: Awaited<ReturnType<typeof harness>>, replace: () => void) =>
+        h.capture.readMoment.mockImplementation(async () => { replace(); return historyDetail(); })],
+      ["the object's path lookup", CHANNELS.listEngineMoments, (h: Awaited<ReturnType<typeof harness>>, replace: () => void) => {
+        h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+        h.capture.listMoments.mockResolvedValue(historyPage("private/a.md"));
+        h.capture.filePathForObjectId.mockImplementation(async () => { replace(); return "private/a.md"; });
+      }],
+    ] as const)("stops a read whose folder moved during %s", async (_await, channel, arrange) => {
+      const h = await harness();
+      arrange(h, () => {
+        const moved = { ...h.workspace, rootPath: "C:/moved" };
+        h.requireWorkspace.mockImplementation(() => moved);
+      });
+      const payload = channel === CHANNELS.listEngineMoments ? { objectId: "object-1", limit: 5 } : { momentId: "moment" };
+      await expect(h.invoke(channel, { workspaceId: "workspace", ...payload })).rejects.toThrow("the workspace changed");
+    });
+
     it.each([
       ["its folder moves", { rootPath: "C:/moved" }],
       ["it becomes a shared view", { shareView: {} as NonNullable<RegistryEntry["shareView"]> }],
