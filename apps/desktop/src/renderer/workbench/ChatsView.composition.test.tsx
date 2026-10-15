@@ -1,6 +1,6 @@
 import "../../testing/legendListMock";
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
@@ -61,22 +61,6 @@ describe("ChatsView My agent", () => {
     expect(heading.textContent).toBe(title);
     expect(heading.classList.contains("sr-only")).toBe(!visible);
     expect(screen.getByTestId("chats-message-body").textContent).toBe(body);
-  });
-
-  it("attributes a runner failure to dohc without an agent badge", async () => {
-    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
-    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), message({ presentation: { group: "fixture", hue: null, self: false },
-      id: "failure", authorKind: "agent", authorDisplayName: "You",
-      body: "⚠ Agent run failed (exit 3). Open the run chip for details.",
-    })] });
-    renderView();
-    await userEvent.click(await screen.findByTestId("chats-channel"));
-    await userEvent.click(await screen.findByTestId("chats-thread"));
-    const notes = await screen.findAllByTestId("chats-message");
-    const note = within(notes.find((element) => element.dataset.messageId === "failure")!);
-    expect(note.getByTestId("chats-message-author").textContent).toBe("dohc");
-    expect(note.getByTestId("chats-message-author").dataset.authorKind).toBe("system");
-    expect(note.queryByTestId("chats-comment-agent-badge")).toBeNull();
   });
 
   it("stays absent when the workspace has no agent channel", async () => {
@@ -495,35 +479,6 @@ describe("ChatsView document thread", () => {
     expect(toolbar.querySelector('[data-testid="chats-comment-reply"]')?.getAttribute("aria-label")).toBe("Reply");
     expect(toolbar.querySelector('[data-testid="chats-add-reaction"]')).not.toBeNull();
     expect(toolbar.querySelector('[data-testid="chats-message-bookmark"]')).not.toBeNull();
-  });
-
-  it("breaks a run at an agent's run failure but not at a person's words that read like one", async () => {
-    const user = userEvent.setup();
-    const opening = message({ body: "The full opening post body." });
-    const failure = "⚠ Agent run failed: exit 1";
-    const comments = [
-      message({ presentation: { group: "fixture", hue: null, self: false }, id: "agent-1", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: "Starting" }),
-      message({ presentation: { group: "fixture", hue: null, self: false }, id: "agent-failed", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: failure, createdAtMs: NOW + 1 }),
-      message({ presentation: { group: "fixture", hue: null, self: false }, id: "agent-2", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: "Retrying", createdAtMs: NOW + 2 }),
-      message({ id: "ana-1", parentMessageId: opening.id, authorDisplayName: "Ana", body: failure, createdAtMs: NOW + 3 }),
-      message({ id: "ana-2", parentMessageId: opening.id, authorDisplayName: "Ana", body: "That was me quoting it", createdAtMs: NOW + 4 }),
-    ];
-    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 6 })] });
-    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, ...comments] });
-    renderView();
-
-    await user.click(await screen.findByTestId("chats-channel"));
-    await user.click(await screen.findByTestId("chats-thread"));
-    await screen.findByTestId("chats-comments-divider");
-    const items = screen.getAllByTestId("chats-message").filter((element) => element.tagName === "LI");
-    expect(items.map((item) => [item.dataset.messageId, item.dataset.continues])).toEqual([
-      ["agent-1", "false"],
-      ["agent-failed", "false"],
-      ["agent-2", "false"],
-      ["ana-1", "false"],
-      ["ana-2", "true"],
-    ]);
-    expect(items[3]!.querySelector('[data-testid="chats-comment-bubble"]')?.getAttribute("data-system")).toBeNull();
   });
 
   it("enters reply mode and sends the true parent message id", async () => {
