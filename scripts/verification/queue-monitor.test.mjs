@@ -7,7 +7,7 @@ import { request as httpRequest } from "node:http";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSampler, monitorState, runDetails, runLog, startMonitor, waitingIntervals } from "./queue-monitor.mjs";
+import { loadSampler, monitorState, runDetails, runLog, slotLog, startMonitor, threadDirectory, waitingIntervals } from "./queue-monitor.mjs";
 import { listRequests, queuePaths, writeJson } from "./queue.mjs";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
@@ -158,4 +158,57 @@ test("the server answers only reads, and only on this host's names and the tailn
   assert.equal((await get(port, "/api/log?id=000000003-cccccc&attempt=1&file=..%2F..%2Fstatus.json")).status, 404);
   assert.equal(JSON.parse((await get(port, "/api/log?id=000000003-cccccc&attempt=1&file=rust.log")).body).text, "rust.log\n");
   assert.equal(JSON.parse((await get(port, "/api/load?days=7")).body).samples.length, 288);
+});
+
+test("a request is named by the T3 thread whose worktree, linked pull request, or branch it uses", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "dohc-t3-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const sqlite = process.getBuiltinModule("node:sqlite");
+  const path = join(dir, "statev2.sqlite");
+  const db = new sqlite.DatabaseSync(path);
+  db.exec("create table orchestration_v2_projection_threads (thread_id text, title text, payload_json text, updated_at text, deleted_at text)");
+  const add = (id, title, payload, deleted = null) => db.prepare("insert into orchestration_v2_projection_threads values (?, ?, ?, ?, ?)").run(id, title, JSON.stringify(payload), new Date().toISOString(), deleted);
+  add("t1", "Fix the share page", { worktreePath: "C:/w/share-page", branch: "main" });
+  add("t2", "Agent review", { createdBy: "agent", pullRequests: [{ number: 7, snapshot: { headBranch: "feat/sync" } }] });
+  add("t3", "Make sync faster", { createdBy: "user", pullRequests: [{ number: 7, snapshot: { headBranch: "feat/sync" } }] });
+  add("t4", "Old thread", { branch: "feat/gone" }, new Date().toISOString());
+  add("t5", "Tidy styles", { branch: "fix/styles" });
+  db.close();
+  const threadOf = threadDirectory({ path });
+  assert.deepEqual(threadOf("anything", "c:/w/share-page"), { id: "t1", title: "Fix the share page" }, "by the thread's own worktree, whatever the case");
+  assert.deepEqual(threadOf("feat/sync", "C:/w/elsewhere"), { id: "t3", title: "Make sync faster", pr: 7 }, "by a linked pull request, preferring the thread a person started");
+  assert.deepEqual(threadOf("fix/styles", null), { id: "t5", title: "Tidy styles" });
+  assert.equal(threadOf("feat/gone", null), null, "a deleted thread names nothing");
+  assert.equal(threadDirectory({ path: join(dir, "missing.sqlite") })("feat/sync", null), null, "without T3 every lookup is null");
+});
+
+test("the lanes show the gate holding each verification slot, an agent's inline gate with its own steps and logs, and each thread's week", async t => {
+  const root = await queueRoot(t);
+  const checkout = mkdtempSync(join(tmpdir(), "dohc-inline-"));
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+  mkdirSync(join(checkout, ".git"), { recursive: true });
+  writeFileSync(join(checkout, ".git", "HEAD"), "ref: refs/heads/fix/inline-thing\n");
+  const run = join(checkout, ".agent-artifacts", "verification", "2026-10-15T11-00-00.000Z-abcdef12");
+  mkdirSync(run, { recursive: true });
+  await writeJson(join(run, "result.json"), { commit: "d".repeat(40), steps: [{ name: "rust", verdict: "RUNNING", startedAt: iso(5) }] });
+  writeFileSync(join(run, "rust.log"), "compiling\n");
+  writeFileSync(join(checkout, "secret.log"), "secret");
+  const status = { slots: 2, owners: [
+    { name: "verification-slot-1", start: iso(10), elapsedMs: 600_000, phase: "request 000000003-cccccc" },
+    { name: "verification-slot-2", start: iso(5), elapsedMs: 300_000, checkout, commit: "d".repeat(40), phase: "tests", pid: 4 }],
+    waiters: [{ position: 1, elapsedMs: 120_000, phase: "request 000000004-dddddd" }] };
+  const threadOf = branch => ({ done: { id: "t1", title: "Ship the done thing" }, "fix/inline-thing": { id: "t2", title: "Inline work" } })[branch] ?? null;
+  const state = monitorState(root, { now, threadOf, slots: () => status });
+  assert.deepEqual(state.lanes.holders.map(holder => [holder.slot, holder.kind, holder.requestId ?? holder.branch]), [[1, "queue", "000000003-cccccc"], [2, "inline", "fix/inline-thing"]]);
+  const inline = state.lanes.holders[1];
+  assert.deepEqual([inline.thread.title, inline.head, inline.steps.map(step => step.name), inline.logs.map(log => log.file)], ["Inline work", "d".repeat(12), ["rust"], ["rust.log"]]);
+  assert.deepEqual(state.lanes.waiters, [{ position: 1, waitedMs: 120_000, kind: "queue", requestId: "000000004-dddddd" }]);
+  assert.equal(state.runs.find(run => run.id === "000000002-bbbbbb").thread.title, "Ship the done thing");
+  const done = state.threads.find(item => item.title === "Ship the done thing");
+  assert.deepEqual([done.runs, done.passed, done.machine, done.waiting, done.running, done.gateMs], [2, 1, 1, 0, 0, 40 * 60_000]);
+  assert.deepEqual(state.threads.find(item => item.title === "Inline work").inline, 1);
+  assert.equal(state.threads.find(item => item.title === "again").waiting, 1, "a request without a thread is named by its branch");
+  assert.equal(slotLog(status, 2, "rust.log").text, "compiling\n");
+  for (const file of ["../../../secret.log", "result.json"]) assert.equal(slotLog(status, 2, file), null, file);
+  assert.equal(slotLog(status, 1, "rust.log"), null, "a queued request's logs are read by its id, not its slot");
 });

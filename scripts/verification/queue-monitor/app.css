@@ -153,12 +153,21 @@ main { padding: 16px 20px 40px; }
 .pos { font: 700 18px var(--display); color: var(--muted); font-variant-numeric: tabular-nums; }
 .tower-branch { font: 600 13px var(--display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tower-time { font: 600 13px var(--display); font-variant-numeric: tabular-nums; text-align: right; }
-.tower-sub { grid-column: 2 / 4; font-size: 12px; color: var(--muted); display: flex; gap: 8px; justify-content: space-between; }
+.tower-sub { grid-column: 2 / 4; font-size: 12px; color: var(--muted); display: flex; gap: 8px; justify-content: space-between; min-width: 0; }
+.tower-sub .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tower-sub span:last-child { white-space: nowrap; flex: none; }
 .tower-list li.tower-more { display: block; padding: 10px 4px 2px; font-size: 13px; color: var(--muted); }
 .tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 0 7px; border-radius: 99px; margin-left: 6px; white-space: nowrap; vertical-align: 1px; }
 .tag.retry { background: var(--machine-soft); color: var(--machine); }
 .tag.nightly { background: var(--pass-soft); color: var(--pass); }
 .tag.scope { background: var(--panel-2); color: var(--ink-2); }
+.tag.inline { background: var(--run-soft); color: var(--run); margin-left: 0; }
+.ready-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.ready-list li { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; font-size: 13px; padding: 6px 0; border-bottom: 1px solid var(--rule-2); }
+.ready-list li:last-child { border-bottom: 0; }
+.ready-list b { font: 600 14px var(--display); }
+.rate { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 2px; background: var(--rule-2); min-width: 90px; }
+.rate i { display: block; height: 100%; }
 
 /* Timeline track */
 .track { position: relative; }

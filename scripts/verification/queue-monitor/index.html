@@ -16,6 +16,7 @@
     <button role="tab" id="tab-now" data-tab="now" aria-controls="view-now">Now</button>
     <button role="tab" id="tab-queue" data-tab="queue" aria-controls="view-queue">Queue <span class="tab-count" id="queue-count"></span></button>
     <button role="tab" id="tab-history" data-tab="history" aria-controls="view-history">History</button>
+    <button role="tab" id="tab-threads" data-tab="threads" aria-controls="view-threads">Threads</button>
     <button role="tab" id="tab-tests" data-tab="tests" aria-controls="view-tests">Tests</button>
     <button role="tab" id="tab-nightly" data-tab="nightly" aria-controls="view-nightly">Nightly</button>
   </nav>
@@ -33,6 +34,7 @@
     <div class="now-grid">
       <div class="now-main">
         <div id="lanes" class="lanes"></div>
+        <div id="lanes-waiting"></div>
         <div class="panel">
           <div class="panel-head"><h2>Last 24 hours</h2><div id="legend-now" class="legend"></div></div>
           <div id="track-now" class="track"></div>
@@ -84,6 +86,13 @@
       <div class="panel-head"><h2>Runs</h2><span id="runs-summary" class="muted"></span></div>
       <div class="table-wrap"><table id="runs-table" class="table"></table></div>
       <div id="runs-more"></div>
+    </div>
+  </section>
+
+  <section id="view-threads" class="view" role="tabpanel" aria-labelledby="tab-threads" hidden>
+    <div class="panel">
+      <div class="panel-head"><h2>Threads using the queue this week</h2><span class="muted">Named by their T3 thread where one linked the branch's pull request. Select a thread to see its runs.</span></div>
+      <div class="table-wrap"><table id="threads-table" class="table"></table></div>
     </div>
   </section>
 

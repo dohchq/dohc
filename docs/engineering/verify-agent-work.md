@@ -120,7 +120,8 @@ Read the service's verdict from the request's `status.json`, or from the last li
 Run `pnpm verify:queue status` to see the service, the running requests, the line, and wait estimates.
 Run `pnpm verify:queue cancel <id>` to stop a request. A finished request keeps its verdict.
 
-The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows each lane's run with its steps and its live output, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Tests, and Nightly tabs show the whole line, every run this week, the slowest and flaky tests, and the nightly runs.
+The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows what holds each verification lane, a queued request or an agent's inline gate, with its steps and its live output, then the requests ready and waiting for a lane, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Threads, Tests, and Nightly tabs show the whole line, every run this week, each thread's runs and results, the slowest and flaky tests, and the nightly runs.
+When T3 runs on the host, the dashboard names each request by the T3 thread that linked its branch's pull request, or whose worktree or branch it uses. It reads T3's local database read-only once a minute. Without T3 it names requests by their branch.
 Select a run to see its failing step's test summary, its steps on a timeline, and any of its logs. The dashboard refreshes every few seconds and cannot change the queue. It records the host's CPU and free memory once a minute in `monitor-load.json` in the queue root.
 To open it from another device, serve it on the tailnet only:
 
