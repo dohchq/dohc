@@ -1,3 +1,4 @@
+import { parseApprovalAgent, type ApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { createHash, randomUUID } from "node:crypto";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
@@ -17,7 +18,8 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
   type Prepared = Awaited<ReturnType<typeof prepareLocalAppPublication>>;
   const pending = new Map<string, { prepared: Prepared; workspaceId: string; callerKey: string; scope: string; signal: AbortSignal; digest: string; clear(): void }>();
   const preparing = new Set<string>();
-  return async (input: OwnerAppPublicationRequest, callerKey: string, operation: Operation): Promise<OwnerAppPublicationResult | null> => {
+  return async (input: OwnerAppPublicationRequest, callerKey: string, operation: Operation, attribution?: ApprovalAgent | null): Promise<OwnerAppPublicationResult | null> => {
+    const agent = parseApprovalAgent(attribution);
     if (input.action !== "prepareLocal" && input.action !== "listLocal" && input.action !== "launchLocal" && input.action !== "approve" && input.action !== "cancel" && input.action !== "withdraw") return null;
     const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
     current();
@@ -46,7 +48,7 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
       if (input.candidateDigest !== entry.digest) throw new Error("The app candidate changed. Review it again.");
       entry.clear();
       const local = await deps.datasetForWorkspace(operation.workspace, operation.signal); current();
-      const result = await local.apps.activate(entry.prepared, operation.signal);
+      const result = await local.apps.activate(entry.prepared, operation.signal, agent);
       current();
       return OwnerAppPublicationResult.parse({ kind: "published", publicationId: result.publicationId, authorityRevision: result.authorityRevision, local: true });
     }
