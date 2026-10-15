@@ -8,12 +8,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { join, resolve } from "node:path";
+import { cpus, freemem } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
 import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
-import { attemptOutcome, listRequests, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, lastNightlyPass, listRequests, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
 const sha = /^[0-9a-f]{40}$/u;
@@ -22,6 +23,15 @@ const environmentAttempts = 5;
 // A stopped run that has not ended by then is stopped by restarting the service, whose job kills it.
 const stopGraceMs = 5 * 60_000;
 const names = path => { try { return readdirSync(path); } catch { return []; } };
+// A receipt's step times in seconds, and its ten slowest tests, for the history.
+const timesOf = receipt => ({
+  steps: Object.fromEntries((receipt?.timings ?? []).filter(row => Number.isFinite(row.seconds)).map(row => [row.name, Math.round(row.seconds)])),
+  slowest: (receipt?.slowest ?? []).slice(0, 10),
+});
+const cpuTimes = () => cpus().reduce((total, { times }) => {
+  const busy = times.user + times.nice + times.sys + times.irq;
+  return { busy: total.busy + busy, all: total.all + busy + times.idle };
+}, { busy: 0, all: 0 });
 
 /**
  * Remove one request's containers, or without a request, every verification
@@ -39,8 +49,18 @@ export async function sweepContainers({ request, command = run } = {}) {
   return ids.size;
 }
 
+/**
+ * A lane's temp folder, beside the lane under the queue root. Lanes never share one, and the queue root
+ * sits in the host's antivirus exclusion, so a scan cannot hold a test's temp file while it is deleted.
+ */
+export const laneTemp = lane => join(dirname(lane), "tmp", basename(lane));
+
 /** Put the lane at `head` with no state from earlier runs except the named caches. */
 export async function prepareLane({ lane, repo, head, signal }) {
+  // The temp folder keeps only the coming run's files.
+  // Best effort: a file still held by a stray process stays, and every run makes its own folders inside.
+  await rm(laneTemp(lane), { recursive: true, force: true, maxRetries: 5 }).catch(() => {});
+  mkdirSync(laneTemp(lane), { recursive: true });
   // Git runs as a child process, never synchronously, so a slow checkout cannot stop the heartbeat of another lane's run.
   const laneGit = async (args, cwd = lane) => (await run("git", args, { cwd, signal, quietStdout: true, timeoutMs: 15 * 60_000 })).stdout.trim();
   if (!existsSync(join(lane, ".git"))) {
@@ -56,7 +76,8 @@ export async function prepareLane({ lane, repo, head, signal }) {
   if (await laneGit(["rev-parse", "HEAD"]) !== head) throw new Error(`The lane did not check out ${head}.`);
   if (await laneGit(["status", "--porcelain"]) !== "") throw new Error("The lane has changes after checkout and clean.");
   // Installed while the request waits for the lane, so the verifier's own install has nothing left to do in it.
-  await run(process.execPath, ["scripts/verification/setup.mjs"], { cwd: lane, signal, quietStdout: true, timeoutMs: 30 * 60_000 });
+  await run(process.execPath, ["scripts/verification/setup.mjs"], { cwd: lane, signal, quietStdout: true, timeoutMs: 30 * 60_000,
+    env: { ...process.env, TEMP: laneTemp(lane), TMP: laneTemp(lane) } });
 }
 
 export async function dockerResponds(command = run) {
@@ -76,7 +97,7 @@ async function defaultWorker({ lane, request, grant, output, signal }) {
   const args = ["scripts/verification/verify.mjs", "pr", "--base", request.base,
     ...(request.scope === "all" ? [] : ["--job", request.scope]), ...(request.full ? ["--full"] : [])];
   await run(process.execPath, args, { cwd: lane, signal, log: join(output, "worker.log"), quietStdout: true,
-    env: { ...process.env, DOHC_VERIFICATION_GRANT: JSON.stringify(grant), DOHC_VERIFICATION_OUTPUT: output } })
+    env: { ...process.env, TEMP: laneTemp(lane), TMP: laneTemp(lane), DOHC_VERIFICATION_GRANT: JSON.stringify(grant), DOHC_VERIFICATION_OUTPUT: output } })
     .catch(error => { if (!error.commandExitFailure) throw error; });
 }
 
@@ -108,6 +129,8 @@ function holdInstance(root) {
 export async function runService({
   root, repo, lane = queuePaths(root).lane, commit = null,
   tickMs = 2000, timeLimitMs = 120 * 60_000, floorGb = resolveBuildBudget()?.diskFloorGb ?? 40,
+  // Another run starts only with this much free memory; a check that failed after it fell under the second floor is not trusted.
+  memoryFloorGb = 10, memoryFailGb = 3, freeMemory = () => freemem() / 1024 ** 3,
   freeDisk = () => freeDiskGb(lane) ?? freeDiskGb(root), docker = dockerResponds,
   prepare = prepareLane, sweep = sweepContainers, holdLane = holdLegacyLane,
   worker = defaultWorker, retryDelay = retryDelayMs, cleanupRetryMs = 60_000, prepareLimitMs = 45 * 60_000, stop, log = defaultLog(root),
@@ -127,6 +150,11 @@ export async function runService({
   const running = new Map();
   const checkouts = [lane, `${lane}-2`];
   let laneCount = 1;
+  // The host's CPU and free memory at the last clock tick.
+  const host = { cpuBusyPercent: null, freeMemGb: null };
+  // The load an attempt verified under: the lane count, the most runs at once, the lowest free memory, and the mean CPU use.
+  const runLoad = current => current.load.samples ? { lanes: current.load.lanes, peakRuns: current.load.peakRuns,
+    minFreeMemGb: Math.round(current.load.minFreeMemGb * 10) / 10, cpuBusyPercent: Math.round(current.load.cpuBusy / current.load.samples) } : null;
   let laneError = null;
   let fatal = null;
   let lastPrune = 0;
@@ -148,7 +176,7 @@ export async function runService({
   const beat = () => writeJson(paths.service, {
     protocol, pid: process.pid, commit, startedAt, heartbeatAt: new Date().toISOString(), lanes: laneCount,
     running: [...running.values()].map(current => ({ id: current.id, attempt: current.attempt, checkout: current.checkout, phase: current.phase, startedAt: current.startedAt, awakeMs: current.awakeMs })),
-    health: { diskFreeGb: health.diskFreeGb, diskOk: health.diskOk, dockerOk: health.dockerOk,
+    health: { diskFreeGb: health.diskFreeGb, diskOk: health.diskOk, dockerOk: health.dockerOk, cpuBusyPercent: host.cpuBusyPercent, freeMemGb: host.freeMemGb,
       pausedUntil: health.pausedUntil ? new Date(health.pausedUntil).toISOString() : null, reason: health.reason },
   });
 
@@ -159,7 +187,8 @@ export async function runService({
 
   async function finish(entry, attempt, outcome, { cleanup = false } = {}) {
     const status = readJson(statusPath(entry.id)) ?? entry.status;
-    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, ...outcome } : row);
+    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load ?? null, flaky: attempt.flaky ?? [],
+      steps: attempt.steps ?? {}, slowest: attempt.slowest ?? [], ...outcome } : row);
     // Only the JavaScript gate starts containers.
     if (cleanup && entry.request.gates?.js) status.cleanupPending = await cleanUp(entry.id);
     const failures = attempts.filter(row => row.outcome === "environment").length;
@@ -179,7 +208,8 @@ export async function runService({
         verdict: outcome.outcome === "passed" ? "PASS" : outcome.outcome === "failed" ? "FAIL" : null,
         result: attempt ? join(paths.attempt(entry.id, attempt.n), "result.json") : null, cause: outcome.cause, reason: outcome.reason ?? null });
     }
-    history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, ...outcome });
+    history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, load: attempt?.load ?? null, flaky: attempt?.flaky ?? [],
+      steps: attempt?.steps ?? {}, slowest: attempt?.slowest ?? [], ...outcome });
   }
 
   async function recover(requests) {
@@ -192,7 +222,7 @@ export async function runService({
       const last = previousRuns.find(row => row.id === entry.id && row.attempt === attempt?.n)?.awakeMs ?? 0;
       const stopped = entry.status.stopping ?? "service restart";
       // A recovery that cannot be recorded would repeat every tick; restart under the supervisor's backoff instead.
-      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
+      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last, flaky: result?.flaky ?? [], ...timesOf(result) }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
       catch (error) { fatal = error; return; }
     }
   }
@@ -272,7 +302,7 @@ export async function runService({
     }
     const busy = new Set([...running.values()].map(other => other.checkout));
     const checkout = checkouts.find(path => !busy.has(path));
-    const current = { id: entry.id, attempt: n, checkout, startedAt: new Date().toISOString(), phase: "preparing", awakeMs: 0,
+    const current = { id: entry.id, attempt: n, checkout, startedAt: new Date().toISOString(), phase: "preparing", phaseAt: Date.now(), awakeMs: 0, load: { lanes: 0, peakRuns: 0, minFreeMemGb: Infinity, cpuBusy: 0, samples: 0 },
       limitMs: Math.min(timeLimitMs, requestBudgetMs - used), prepareMs: 0, abort: new AbortController(), stopped: undefined };
     running.set(entry.id, current);
     let lease;
@@ -286,6 +316,7 @@ export async function runService({
       // Rust-only runs need no Docker, so a sweep failure must not stop them.
       await sweep({}).catch(error => log(`container sweep failed: ${error.message}`));
       current.phase = "verifying";
+      current.phaseAt = Date.now();
       if (!current.stopped) await worker({ lane: checkout, request: entry.request, grant, output, signal: current.abort.signal });
     } catch (error) {
       if (!current.stopped) log(`attempt ${entry.id}/${n} ended early: ${error.stack ?? error.message}`);
@@ -293,17 +324,19 @@ export async function runService({
       // Only verification counts against the run; its bookkeeping does not.
       current.phase = "finishing";
       lease?.release();
-      let outcome = attemptOutcome(readJson(join(output, "result.json")), grant, { stopped: current.stopped });
+      const receipt = readJson(join(output, "result.json"));
+      let outcome = attemptOutcome(receipt, grant, { stopped: current.stopped });
       if (outcome.outcome === "failed" && outcome.cause === "check") {
         // A check that failed while the host was failing proves nothing about the change.
         const free = freeDisk();
         const host = free !== null && free < Math.min(floorGb, 5) ? `free disk fell to ${free.toFixed(1)} GB`
+          : current.load.minFreeMemGb < memoryFailGb ? `free memory fell to ${current.load.minFreeMemGb.toFixed(1)} GB`
           : entry.request.gates?.js && !(await docker()) ? "Docker stopped responding" : null;
         if (host) outcome = { outcome: "environment", cause: "host", reason: `${host} during the run, so its failure is not trusted.` };
       }
       // The attempt stays owned until its outcome is on disk. If that write fails, the
       // service stops, and its replacement recovers the request from the receipt.
-      await finish({ ...entry, status: readJson(statusPath(entry.id)) ?? entry.status }, { n, awakeMs: current.awakeMs }, outcome, { cleanup: true });
+      await finish({ ...entry, status: readJson(statusPath(entry.id)) ?? entry.status }, { n, awakeMs: current.awakeMs, load: runLoad(current), flaky: receipt?.flaky ?? [], ...timesOf(receipt) }, outcome, { cleanup: true });
       running.delete(entry.id);
     }
   }
@@ -339,13 +372,16 @@ export async function runService({
     health.reason = targetRemoval ? "removing the lanes' build output to free disk"
       : !health.diskOk ? `waiting for disk: ${health.diskFreeGb.toFixed(1)} GB free, ${floorGb} GB needed`
       : health.pausedUntil > Date.now() ? `paused after ${health.environmentStreak} environment failures in a row`
-      : !health.dockerOk ? "Docker is not responding; runs with the JavaScript gate wait" : null;
+      : !health.dockerOk ? "Docker is not responding; runs with the JavaScript gate wait"
+      : running.size && freeMemory() < memoryFloorGb ? `waiting for memory: ${freeMemory().toFixed(1)} GB free, ${memoryFloorGb} GB needed to start another run` : null;
   }
 
   function prune(requests) {
     const cutoff = Date.now() - 7 * 24 * 60 * 60_000;
+    // The last nightly that passed stays, with its pinned commits, as the base of the next one.
+    const keep = lastNightlyPass(requests)?.id;
     for (const entry of requests) {
-      if (!terminalStates.has(entry.status.state) || cleanupPending.has(entry.id) || Date.parse(entry.status.updatedAt ?? 0) > cutoff) continue;
+      if (!terminalStates.has(entry.status.state) || cleanupPending.has(entry.id) || entry.id === keep || Date.parse(entry.status.updatedAt ?? 0) > cutoff) continue;
       rmSync(paths.request(entry.id), { recursive: true, force: true });
       finished.delete(entry.id);
     }
@@ -376,16 +412,33 @@ export async function runService({
     beating ??= beat().catch(error => log(`heartbeat failed: ${error.message}`)).finally(() => { beating = null; });
   }, 10_000);
   // Awake time has its own clock too, so slow work in the loop never shortens a run's time.
-  // Only awake time counts against a run: a gap far over one tick is sleep.
+  // Only awake time counts against a run. A gap of over a minute between ticks is the machine sleeping;
+  // a shorter one is a busy host delaying the timer, and the run was working through it.
+  // The same clock samples the host, so each run records the load it verified under.
   let last = Date.now();
+  let cpu = cpuTimes();
   const clock = setInterval(() => {
     const now = Date.now();
-    const awake = Math.min(now - last, 3 * tickMs);
-    last = now;
+    const asleep = now - last > 60_000;
+    const sample = cpuTimes();
+    host.cpuBusyPercent = Math.round(100 * (sample.busy - cpu.busy) / Math.max(1, sample.all - cpu.all));
+    const memoryGb = freeMemory();
+    host.freeMemGb = Math.round(memoryGb * 10) / 10;
+    cpu = sample;
     for (const current of running.values()) {
-      if (current.phase === "verifying") current.awakeMs += awake;
+      // A phase that began since the last tick counts only from its start; a clock set back counts nothing.
+      const awake = asleep ? 0 : Math.max(0, now - Math.max(last, current.phaseAt));
+      if (current.phase === "verifying") {
+        current.awakeMs += awake;
+        current.load.lanes = Math.max(current.load.lanes, laneCount);
+        current.load.peakRuns = Math.max(current.load.peakRuns, running.size);
+        current.load.minFreeMemGb = Math.min(current.load.minFreeMemGb, memoryGb);
+        current.load.cpuBusy += host.cpuBusyPercent;
+        current.load.samples += 1;
+      }
       if (current.phase === "preparing") current.prepareMs += awake;
     }
+    last = now;
   }, tickMs);
   log(`service ${commit ?? "(unversioned)"} started, pid ${process.pid}`);
   try {
@@ -444,7 +497,8 @@ export async function runService({
       // containers are not yet removed waits, because they carry its id and their removal would stop its next run.
       // A restart, even one requested during this tick, starts nothing new and waits for the runs in flight.
       const started = new Set([...running.keys(), ...cleanupPending]);
-      while (running.size < laneCount && health.pausedUntil <= now && !existsSync(restart)) {
+      // A lone run always starts; another one waits while free memory is low.
+      while (running.size < laneCount && (running.size === 0 || freeMemory() >= memoryFloorGb) && health.pausedUntil <= now && !existsSync(restart)) {
         const entry = nextRequest(requests.filter(candidate => !started.has(candidate.id)), health, now);
         if (!entry) break;
         started.add(entry.id);
