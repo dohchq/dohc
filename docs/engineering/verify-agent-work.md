@@ -77,7 +77,7 @@ Use the canonical runner below. Other agents reuse its evidence instead of recon
 Fetch the PR's target branch. Use its fetched ref as `<target-ref>` below, such as `origin/main`.
 Run `pnpm verify:plan --base <target-ref>` to see the applicable workflow gates.
 When the JavaScript gate applies, the plan also lists the services, prepared builds, and integration proofs it needs.
-The JavaScript gate always runs the complete JavaScript suite: every package's tests, `pnpm test:repo`, the desktop script tests, and every integration proof.
+The JavaScript gate always runs `pnpm test:repo` and every integration proof. It runs the tests of the [affected packages](#affected-packages), and the desktop script tests when desktop is one of them.
 Commit the changes. Run `pnpm verify:pr --base <target-ref>` against that clean commit.
 The runner rejects changes to the source or commit during verification.
 The JavaScript gate prepares the engine and desktop, typechecks the whole workspace, then runs repository checks alongside package tests.
@@ -205,7 +205,12 @@ The [`verification-triage` skill](../../.agents/skills/verification-triage/SKILL
 
 The JavaScript gate runs package tests only for the packages a change affects: the packages its files are in, and every package that depends on them.
 A package depends on another when its manifest says so, or when its files reach into the other's files by a relative path, as some tests import another package's source.
-A change to any file outside the workspace packages, such as a lockfile, a crate, or a root script, runs every package. Documentation changes run none.
+A file outside the workspace packages runs every package unless `rootInputs` in `scripts/verification/selection.mjs` declares it.
+A declared file runs the packages listed as its readers, and every package that reaches it by a relative path, with their dependents.
+For example, a crate change runs desktop and sync-relay, whose tests drive the engine the gate builds.
+The lockfile, root manifests and configuration, `scripts/verification`, and `tools/rust-engine-program` stay undeclared, so they run every package.
+Before you add a test that reads a file outside the packages by a computed path or an environment variable, add its package to that file's readers.
+Documentation changes run none.
 Repository checks and proofs always run. `pnpm verify:plan` lists the selected packages, and `result.json` records them under `packages` and `js-tests/result.json` under `skippedPackages`.
 Pass `--full` to run every package. The nightly run on main always does.
 

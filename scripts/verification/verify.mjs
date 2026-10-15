@@ -210,7 +210,7 @@ export async function verify(args) {
   }
   if (mode === "plan") {
     const {baseCommit, files, gates} = selection();
-    // Package tests run for the affected packages only; --full and changes outside packages run every package.
+    // Package tests run for the affected packages only; --full and undeclared changes outside packages run every package.
     const workspace = gates.js && !full ? readWorkspacePackages(repoRoot) : null;
     const packages = workspace && affectedPackages(files, workspace, packageReferences(repoRoot, workspace));
     // The JavaScript gate runs the affected packages' tests and every repository check, then these proofs.

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { cancellationScope } from "./cancellation.mjs";
 import { runBounded, testPlan, testWorkspace } from "./js-tests.mjs";
-import { affectedPackages, packageReferences, readWorkspacePackages } from "./selection.mjs";
+import { affectedPackages, packageReferences, readWorkspacePackages, rootInputs } from "./selection.mjs";
 
 test("a malformed proof continuation cannot silently omit proofs", async () => {
   await assert.rejects(testWorkspace({runProofs: true}), /runProofs must be a function/);
@@ -216,8 +216,12 @@ test("a change affects its own packages and every package that depends on them",
   assert.deepEqual(affectedPackages(["packages/runtime/src/a.ts"], packages), ["@dohc/desktop", "@dohc/relay", "@dohc/runtime"], "dependents, through a dev dependency too");
   assert.deepEqual(affectedPackages(["packages/runtime/tools/build.mjs"], packages), ["@dohc/runtime-tools"], "the nested package owns its files");
   assert.deepEqual(affectedPackages(["README.md", "docs/a.md"], packages), [], "documentation affects no package");
-  assert.equal(affectedPackages(["docs/reference/cli-mcp-sdk.md"], packages), null, "a generated reference that tests compare against is not documentation");
+  assert.equal(affectedPackages(["docs/reference/generated.md"], packages), null, "a generated reference that tests compare against is not documentation");
   assert.equal(affectedPackages([], packages), null, "with nothing to attribute, every package runs");
+  // A root module that relay imports without its extension counts as relay's, so relay's dependents run too.
+  assert.deepEqual(affectedPackages(["scripts/lib/fixture.mjs"], packages, [["scripts/lib/fixture", "@dohc/relay"]]), ["@dohc/desktop", "@dohc/relay"],
+    "a declared path outside the packages runs the packages that read it");
+  assert.equal(affectedPackages(["notes/plan.txt"], packages, [["notes/plan.txt", "@dohc/relay"]]), null, "a reference alone does not declare a path");
   const aliased = [...packages, pkg("@dohc/consumer", "packages/consumer", { renamed: "workspace:@dohc/site@*" })];
   assert.deepEqual(affectedPackages(["apps/site/src/index.ts"], aliased), ["@dohc/consumer", "@dohc/site"], "a workspace alias is a dependency");
   assert.deepEqual(affectedPackages(["apps/site/src/index.ts"], packages, [["@dohc/site", "@dohc/runtime"]]), ["@dohc/desktop", "@dohc/relay", "@dohc/runtime", "@dohc/site"],
@@ -232,9 +236,44 @@ test("undeclared relative imports between packages count as dependencies", t => 
   put("services/relay/src/edits.test.ts", "import { channel } from '../../../apps/desktop/src/ipc/channels';\nimport { local } from './local';\n");
   put("services/relay/dist/bundle.js", "require('../../../apps/site/index.js');\n");
   put("packages/x/src/a.ts", "const fixture = new URL(\x60../../../services/relay/src/edits.test.ts\x60, import.meta.url);\n");
+  put("packages/x/src/cases.test.ts", "read(new URL('../../../crates/engine/tests/cases/', import.meta.url));\nconst root = new URL('../../..', import.meta.url);\n");
   const packages = [{ name: "@dohc/desktop", path: "apps/desktop" }, { name: "@dohc/relay", path: "services/relay" },
     { name: "@dohc/site", path: "apps/site" }, { name: "@dohc/x", path: "packages/x" }];
-  assert.deepEqual(packageReferences(root, packages), [["@dohc/desktop", "@dohc/relay"], ["@dohc/relay", "@dohc/x"]], "build output is not read");
+  assert.deepEqual(packageReferences(root, packages), [["@dohc/desktop", "@dohc/relay"], ["@dohc/relay", "@dohc/x"], ["crates/engine/tests/cases", "@dohc/x"]],
+    "a path outside the packages is a reference, but the repository root and build output are not");
+});
+
+test("a change outside the packages runs the packages that read it", () => {
+  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const packages = readWorkspacePackages(root);
+  const references = packageReferences(root, packages);
+  const select = files => affectedPackages(files, packages, references);
+  // The engine's readers, but not the packages that depend on them.
+  assert.deepEqual(select(["crates/dohc-engine-runtime/src/actor.rs", "Cargo.lock", "vendor/yrs-0.27.3/src/id_set.rs"]), ["@dohc/desktop", "@dohc/sync-relay"]);
+  assert.ok(select(["crates/dohc-engine-files/src/pathFoldFixtures.json"]).includes("@dohc/security-contract"),
+    "a crate's fixture also runs the packages whose tests read it by relative path");
+  assert.ok(select(["scripts/lib/apply-migrations.mjs"]).includes("@dohc/workspace-postgres"));
+  assert.deepEqual(select(["docs/reference/cli-mcp-sdk.md"]), ["@dohc/mcp"]);
+  assert.deepEqual(select(["tools/self-host/Caddyfile", "docker-compose.self-host.yml", ".env.self-host.example", "tools/perf-profiling/admission.mjs",
+    "scripts/self-host-compose.test.mjs", "scripts/ipc-sites.json"]), [], "the repository checks test these, and they always run");
+  for (const outside of ["pnpm-lock.yaml", "package.json", "pnpm-workspace.yaml", "tsconfig.base.json", "scripts/verification/close-electron.mjs",
+    "tools/rust-engine-program/build-slot.mjs", "docs/reference/desktop-capabilities.md", "notes/undeclared.txt"]) {
+    assert.equal(select(["crates/dohc-engine-runtime/src/actor.rs", outside]), null, `${outside} can affect any package`);
+  }
+});
+
+test("the packages whose tests reach the staged engine are its declared readers", () => {
+  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const packages = readWorkspacePackages(root);
+  const readers = new Set();
+  // The gate hands package tests the engine only through these variables, which the shared resolver reads.
+  for (const pkg of packages) {
+    for (const file of globSync(`${pkg.path}/**/*.{ts,tsx,mts,cts,js,mjs,cjs}`, { cwd: root, exclude: name => /(^|[\\/])(node_modules|dist)$/u.test(name) })) {
+      if (/DOHC_TEST_ENGINE_BINARY|DOHC_REQUIRE_ENGINE_E2E|testing\/engineBinary/u.test(readFileSync(join(root, file), "utf8"))) readers.add(pkg.name);
+    }
+  }
+  assert.deepEqual([...readers].sort(), rootInputs.find(input => input.paths.includes("crates/**")).readers);
+  for (const { readers } of rootInputs) for (const name of readers) assert.ok(packages.some(pkg => pkg.name === name), `${name} is a workspace package`);
 });
 
 test("the real tree's undeclared test imports select their importers", () => {
@@ -244,9 +283,6 @@ test("the real tree's undeclared test imports select their importers", () => {
   // sync-relay's tests import desktop source, and ydoc-projection's tests import sync-relay's.
   assert.ok(affectedPackages(["apps/desktop/src/ipc/stopAndRestoreIpc.ts"], packages, references).includes("@dohc/sync-relay"));
   assert.ok(affectedPackages(["services/sync-relay/src/liveTickets.ts"], packages, references).includes("@dohc/ydoc-projection"));
-  for (const outside of ["pnpm-lock.yaml", "crates/engine/src/lib.rs", "scripts/verification/close-electron.mjs"]) {
-    assert.equal(affectedPackages(["apps/site/src/index.ts", outside], packages), null, `${outside} can affect any package`);
-  }
 });
 
 test("a narrowed run tests only the affected packages, and records the rest as skipped", t => {

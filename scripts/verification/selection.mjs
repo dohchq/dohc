@@ -22,25 +22,53 @@ export function readWorkspacePackages(root) {
 }
 
 /**
+ * Paths outside every package that only some package tests read, with the
+ * readers that packageReferences cannot see. Every other path outside the
+ * packages can affect any package: the lockfile, the root manifest and
+ * configuration, and the gate's own scripts in scripts/verification and
+ * tools/rust-engine-program.
+ */
+export const rootInputs = [
+  // The gate builds the engine from these and gives package tests its path as DOHC_TEST_ENGINE_BINARY.
+  // Only apps/desktop/src/testing/engineBinary.ts reads that, and only desktop's and sync-relay's tests import it.
+  { paths: ["crates/**", "vendor/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/**"], readers: ["@dohc/desktop", "@dohc/sync-relay"] },
+  // packages/mcp's reference test compares its output with this page through a computed path.
+  { paths: ["docs/reference/cli-mcp-sdk.md"], readers: ["@dohc/mcp"] },
+  // Root scripts, profiling tools, and the self-host deployment, which the repository checks test.
+  // No package test reads them except by a relative path.
+  { paths: ["scripts/*", "scripts/lib/**", "scripts/self-host/**", "scripts/capabilities/**", "tools/perf-profiling/**",
+    "tools/self-host/**", "docker-compose.self-host.yml", ".env.self-host.example", ".dockerignore"], readers: [] },
+];
+
+/**
  * The workspace packages a change can affect: the packages its files are in,
  * and every package that depends on one of them, directly or through others.
- * Null means every package, because a file outside all packages, such as a
- * lockfile, a crate, or a root script that package tests import, can affect
- * any of them, and so does an empty change. Documentation changes affect none.
- * `packages` carry a path relative to the repository root and their manifest.
- * `references` are [target, importer] package names from packageReferences: a
- * package whose files another package reaches into affects that package too.
+ * A path that rootInputs declares affects its readers there, but not their
+ * dependents, and counts as a file of each package that reaches it by a
+ * relative path. Null means every package, because any other path outside the
+ * packages can affect any of them, and so does an empty change. Documentation
+ * changes affect none. `packages` carry a path relative to the repository root
+ * and their manifest. `references` are [target, importer] pairs from
+ * packageReferences: a package whose files another package reaches into
+ * affects that package too.
  */
 export function affectedPackages(files, packages, references = []) {
   // With no changed file to attribute, as in an explicit job on an unchanged branch, every package runs.
   if (!files.length) return null;
-  const owners = new Set();
+  const names = new Set(packages.map(pkg => pkg.name));
+  const owners = new Set(), readers = new Set();
   for (const file of files) {
     // docs/reference holds generated references that package tests compare against, so it is not documentation here.
     if ((file.startsWith("docs/") || file.endsWith(".md")) && !file.startsWith("docs/reference/")) continue;
     const owner = packages.filter(pkg => file.startsWith(`${pkg.path}/`)).sort((a, b) => b.path.length - a.path.length)[0];
-    if (!owner) return null;
-    owners.add(owner.name);
+    if (owner) { owners.add(owner.name); continue; }
+    const declared = rootInputs.filter(input => input.paths.some(pattern => matchesGlob(file, pattern)));
+    if (!declared.length) return null;
+    for (const input of declared) for (const name of input.readers) readers.add(name);
+    // A package that names the file, a folder above it, or the module without its extension reads it as one of its own files.
+    for (const [target, importer] of references) {
+      if (!names.has(target) && (file === target || file.startsWith(`${target}/`) || file.startsWith(`${target}.`))) owners.add(importer);
+    }
   }
   const dependents = new Map(packages.map(pkg => [pkg.name, []]));
   for (const pkg of packages) {
@@ -55,13 +83,14 @@ export function affectedPackages(files, packages, references = []) {
   for (const [target, importer] of references) dependents.get(target)?.push(importer);
   const pending = [...owners];
   while (pending.length) for (const name of dependents.get(pending.pop())) if (!owners.has(name)) { owners.add(name); pending.push(name); }
-  return [...owners].sort();
+  return [...new Set([...owners, ...readers])].sort();
 }
 
 /**
- * Packages that reach into another package's files by relative path, which no
- * manifest declares: a test in sync-relay that imports a desktop source file, or
- * reads a fixture from another package. Returns [target, importer] name pairs.
+ * Files that packages reach by relative path, which no manifest declares: a
+ * test in sync-relay that imports a desktop source file, or reads a crate's
+ * fixture. Returns [target, importer] pairs. The target is a package name, or
+ * the path relative to `root` when it is outside every package.
  * `packages` carry paths relative to `root`; build output is not read.
  */
 export function packageReferences(root, packages) {
@@ -73,8 +102,11 @@ export function packageReferences(root, packages) {
       const path = file.replaceAll("\\", "/");
       if (owner(path)?.name !== pkg.name) continue;
       for (const match of readFileSync(join(root, path), "utf8").matchAll(/["'\x60](\.\.\/[^"'\x60\s$]*)["'\x60]/gu)) {
-        const target = owner(posix.normalize(posix.join(posix.dirname(path), match[1])));
-        if (target && target.name !== pkg.name) references.add(`${target.name}\n${pkg.name}`);
+        const reached = posix.normalize(posix.join(posix.dirname(path), match[1])).replace(/\/$/u, "");
+        // The repository root itself, or a path above it, names no file.
+        if (reached === "." || reached === ".." || reached.startsWith("../")) continue;
+        const target = owner(reached)?.name ?? reached;
+        if (target !== pkg.name) references.add(`${target}\n${pkg.name}`);
       }
     }
   }
