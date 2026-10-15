@@ -1,5 +1,6 @@
 import {accountIsFenced} from "./storage/accountDeletion";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
+import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
 import {prepareHostedSettlements} from "./storage/hostedSettlement";
 import * as shareLabelsStorage from "./storage/shareLabels";
@@ -618,6 +619,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   currentViewFilesAtFences(workspaceId: string, files: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[2], previous: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[3], omitted: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[4]) { return replicaCurrentViews.currentViewFilesAtFences(this,workspaceId,files,previous,omitted); }
   readReplicaCurrentViewText(workspaceId: string,sha: string) { return replicaCurrentViews.readReplicaCurrentViewText(this,workspaceId,sha); }
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string) { return replicaReads.readReplicaStanding(this, workspaceId, shareGrantBindings); }
+  listReplicaCurrentViewFiles(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) {
+    return replicaCurrentViewReads.listReplicaCurrentViewFiles(this, input, source);
+  }
+  readReplicaCurrentViewFile(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput & {path: string}, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) {
+    return replicaCurrentViewReads.readReplicaCurrentViewFile(this, input, source);
+  }
 
   postAutomationWake(input: noticeStorage.PostAutomationWakeInput): noticeStorage.PostedAutomationWake {
     return noticeStorage.postAutomationWake(this, input);
