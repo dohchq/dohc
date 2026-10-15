@@ -3852,7 +3852,8 @@ export function DesktopWorkspaceShell(props: {
   const commandContext = useMemo<CommandContext>(
     () => ({
       // A damaged marker's grant cannot be read, so it names no level.
-      // Stricter than the registry the Explorer menu reads while access narrows or a share needs reopening.
+      // These are the renderer's latest access facts, so until the registry the
+      // Explorer menu reads catches up, the two menus can differ either way.
       shareView: isShareView
         ? { access: shareViewDamaged ? null : shareAccess ?? null, ended: shareViewEnded }
         : null,
