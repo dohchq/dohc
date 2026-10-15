@@ -56,7 +56,7 @@ export function accountUser(value: unknown): {id: string; name: string} | null {
 }
 export function namedFiles(value: unknown, userId: string, grantId: string): NamedRecipientFiles {
   if (!record(value) || Object.keys(value).sort().join() !== "access,files,grantId,limits,shareId,sharerName,subjectName,userId,workspaceId" ||
-    value.access !== "edit" || value.userId !== userId || value.grantId !== grantId || !Array.isArray(value.files)) throw Error("Invalid selection");
+    value.access !== "edit" || value.userId !== userId || value.grantId !== grantId || value.workspaceId !== `named:${grantId}` || !Array.isArray(value.files)) throw Error("Invalid selection");
   const seen = new Set<string>();
   const files = value.files.map(file => {
     if (!record(file) || Object.keys(file).sort().join() !== "objectId,path" || typeof file.path !== "string" ||
@@ -64,6 +64,6 @@ export function namedFiles(value: unknown, userId: string, grantId: string): Nam
     const objectId = parseLiveUpdateIdentifier(file.objectId); seen.add(objectId);
     return {objectId, path: file.path};
   });
-  return {subjectName: normalizeShareLabel(value.subjectName), sharerName: normalizeShareLabel(value.sharerName, 320), access: "edit", userId, grantId, workspaceId: parseLiveUpdateIdentifier(value.workspaceId), shareId: parseLiveUpdateIdentifier(value.shareId),
+  return {subjectName: normalizeShareLabel(value.subjectName), sharerName: normalizeShareLabel(value.sharerName, 320), access: "edit", userId, grantId, workspaceId: `named:${grantId}`, shareId: parseLiveUpdateIdentifier(value.shareId),
     files, limits: parseNamedLiveBrowserLimits(value.limits)};
 }

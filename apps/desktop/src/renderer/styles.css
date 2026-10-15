@@ -42,8 +42,8 @@
   --dohc-danger: #a43e2a;
   --dohc-selection: rgba(58, 126, 233, 0.22);
 
-  /* Identity hues: one per person, chosen by a hash of who they are (see
-   * ChatAvatar). Muted so they sit on the paper; text-strength on every
+  /* Identity hues: the shared human hash excludes olive; colour choices include it.
+   * Muted so they sit on the paper; text-strength on every
    * surface and on their own 15% tint (tokens.test.ts). */
   --dohc-hue-rust: #88412c;
   --dohc-hue-amber: #705012;
@@ -152,8 +152,10 @@ body {
 }
 
 /* Text fields use their border and a thin underline, including borderless
- * editors. Unlayered so field utilities cannot hide keyboard focus. */
-:is(input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'], [type='color'], [type='button'], [type='submit'], [type='reset']), textarea, select):focus {
+ * editors. Unlayered so field utilities cannot hide keyboard focus. A data
+ * grid's cell draws the focus outline for the field inside it
+ * (ui/DataGrid.tsx), so that field takes no second mark. */
+:is(input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'], [type='color'], [type='button'], [type='submit'], [type='reset']), textarea, select):not([data-grid-cell] *):focus {
   outline: none;
   border-color: var(--dohc-muted);
   box-shadow: inset 0 -1px 0 var(--dohc-muted);
@@ -2103,7 +2105,7 @@ body {
   z-index: 20;
   padding: 1px 6px;
   border-radius: 3px 3px 3px 0;
-  color: #fff;
+  color: var(--dohc-bg);
   font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 600;

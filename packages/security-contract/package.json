@@ -16,6 +16,7 @@
     "./app-publication": "./src/appPublication.ts",
     ".": "./src/index.ts",
     "./effective-policy": "./src/effectivePolicy.ts",
+    "./visibility-policy": "./src/visibilityPolicy.ts",
     "./engine-path-floor": "./src/enginePathFloor.ts",
     "./secret-key-envelope": "./src/secretKeyEnvelope.ts",
     "./chat-wire-ids": "./src/chatWireIds.ts",

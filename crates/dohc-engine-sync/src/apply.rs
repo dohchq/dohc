@@ -255,7 +255,11 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
     envelope.validate()?;
     crate::settlement_publication::validate(envelope)?;
     let payload_json = envelope.payload_json()?;
+    let passive = store.is_passive();
     let result = store.write_with(faults, |tx| {
+        if passive && let Some(cursor) = envelope.relay_seq {
+            dohc_engine_storage::replica::advance_frontiers(tx, &envelope.workspace_id, cursor, 0)?;
+        }
         let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
         if envelope.origin_seq <= acked {
             // A redelivered coordinate at or below the ack must match the row

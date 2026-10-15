@@ -30,6 +30,7 @@ interface Entry {
   storeDir?: string;
   child?: ReplicaChild;
   frontier: number;
+  journalFrontier: number;
   dirty: boolean;
   stopping: boolean;
   run?: Promise<void>;
@@ -120,9 +121,10 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
           while (entry.dirty && !entry.stopping) {
             if (!principal.current(entry.lease)) break;
             entry.dirty = false;
-            const frontier = options.storage.readReplicaStanding(entry.lease.workspaceId)!.logSeq;
+            const standing = options.storage.readReplicaStanding(entry.lease.workspaceId)!;
             await entry.child!.pull();
-            entry.frontier = frontier;
+            entry.frontier = standing.logSeq;
+            entry.journalFrontier = standing.journalCursor;
           }
           return;
         } catch (error) {
@@ -165,7 +167,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
         if (entry.stopping) continue;
         const standing = standingCurrent(entry.lease);
         if (!standing) void retire(entry).catch(error => report(entry, error));
-        else if (standing.logSeq !== entry.frontier) {
+        else if (standing.logSeq !== entry.frontier || standing.journalCursor !== entry.journalFrontier) {
           void schedule(entry).catch(() => {});
         }
       }
@@ -184,7 +186,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
     if (!entry) {
       if (entries.size >= limits.maxRunning) throw new Error("Replica capacity reached.");
       const lease = principal.issue(workspaceId, randomUUID());
-      entry = { lease, frontier: -1, dirty: true, stopping: false };
+      entry = { lease, frontier: -1, journalFrontier: -1, dirty: true, stopping: false };
       entries.set(workspaceId, entry);
       unsubscribe ??= observeRelayWrites(options.storage, observeWrite);
     }

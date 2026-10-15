@@ -16,8 +16,6 @@ import {
   resolvePeerDisplayName,
 } from "./presenceChannel";
 
-import { presencePalette } from "./presencePalette";
-
 type AwarenessChanges = {
   added: number[];
   updated: number[];
@@ -73,7 +71,6 @@ class SnapshotAwareness extends Awareness {
 
 export interface DocPresenceUser {
   name: string;
-  color: string;
 }
 
 // Each publish carries the encoded Yjs awareness update plus the numeric Yjs
@@ -200,8 +197,6 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
           if (!embedded || embedded.some((id) => id !== state.yc)) continue;
           const user = {
             name: resolvePeerDisplayName(peer),
-            color: presencePalette(peer.paletteSlot).stroke,
-            paletteSlot: peer.paletteSlot,
             sessionToken: peer.sessionToken,
           };
           applyAwarenessUpdate(
@@ -209,13 +204,11 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
             modifyAwarenessUpdate(update, (state) => (state === null ? null : { ...state, user })),
             "presence-remote",
           );
-          // Same-clock heartbeats are ignored by Yjs, but relay presentation can still change.
+          // Same-clock heartbeats are ignored by Yjs, but disclosed names can still change.
           const remote = awareness.getStates().get(state.yc);
           if (
             remote &&
             (remote.user?.name !== user.name ||
-              remote.user?.color !== user.color ||
-              remote.user?.paletteSlot !== user.paletteSlot ||
               remote.user?.sessionToken !== user.sessionToken)
           ) {
             remote.user = user;
