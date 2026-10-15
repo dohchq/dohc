@@ -53,7 +53,10 @@ test.describe("chat list virtualization", () => {
       await page.goto(server.resolvedUrls!.local[0]);
       await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
       await page.evaluate(() => window.chatListFixture.jump("m-200"));
-      const trigger = page.locator('[data-message-id="m-200"]').getByRole("button", { name: "Add reaction" });
+      const row = page.locator('[data-message-id="m-200"]');
+      const trigger = row.getByRole("button", { name: "Add reaction" });
+      // The row's toolbar takes the pointer only while its row is hovered.
+      await row.hover();
       await trigger.click();
       const picker = page.getByTestId("fixture-chat-reaction-picker");
       await expect(picker).toBeVisible();
@@ -127,7 +130,8 @@ test.describe("chat list virtualization", () => {
       await expect(row("m-0")).toBeInViewport();
       await expect(trigger).toBeFocused();
       await page.keyboard.press("Tab");
-      await expect(row("m-201").getByRole("button", { name: "Add reaction" })).toBeFocused();
+      // The next row's toolbar starts with its quick reactions.
+      await expect(row("m-201").getByRole("button", { name: "React with 👍" })).toBeFocused();
       await page.keyboard.press("Shift+Tab");
       await expect(trigger).toBeFocused();
 
