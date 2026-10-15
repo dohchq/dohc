@@ -2774,7 +2774,9 @@ fn retire_departed_hosted(
 /// its path. One that holds anything else stays on disk with its path held,
 /// so its document stays departed; the first such path goes in `unexpected`
 /// for the pass to name. A removal that fails also keeps the path held for
-/// the next pass. Answers whether any path came free.
+/// the next pass. The folders a removed file leaves empty go too, so a file
+/// can take their name; one that cannot go stays. Answers whether any path
+/// came free.
 fn remove_retired_files(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -2786,6 +2788,16 @@ fn remove_retired_files(
         if !dohc_engine_files::remove_file_holding(root, &file.path, &file.sha256)? {
             unexpected.get_or_insert(file.path);
             continue;
+        }
+        let mut parent = file.path.as_str();
+        while let Some((folder, _)) = parent.rsplit_once('/') {
+            if !matches!(
+                dohc_engine_files::remove_empty_directory_target(root, folder),
+                Ok(true)
+            ) {
+                break;
+            }
+            parent = folder;
         }
         freed = true;
         match dohc_engine_sync::forget_retired_hosted_file(
@@ -3346,6 +3358,68 @@ mod hosted_refusal_tests {
         );
         assert!(root.path().join("a.md").exists());
         assert!(!root.path().join("z.md").exists());
+    }
+
+    /// The durability review: a retired `a.md/x/c.md` left the folder
+    /// `a.md`, which a file at `a.md` could never replace. The folders its
+    /// file leaves empty go with it, up to one that still holds something.
+    #[test]
+    fn a_retired_file_takes_the_folders_it_leaves_empty() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                     VALUES ('ws','a.md/x/c.md','doc-c',?1),('ws','d/e/f.md','doc-f',?1)",
+                    [dohc_engine_storage::hex_sha256(b"hosted")],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        std::fs::create_dir_all(root.path().join("a.md/x")).unwrap();
+        std::fs::create_dir_all(root.path().join("d/e")).unwrap();
+        std::fs::write(root.path().join("a.md/x/c.md"), "hosted").unwrap();
+        std::fs::write(root.path().join("d/e/f.md"), "hosted").unwrap();
+        std::fs::write(root.path().join("d/keep.md"), "keep").unwrap();
+
+        assert!(
+            retire_departed_hosted(
+                &mut store,
+                &mut WriterDocCache::new(),
+                &LeaseRegistry::default(),
+                "ws",
+                root.path(),
+                2_000,
+            )
+            .unwrap()
+        );
+        assert!(!root.path().join("a.md").exists());
+        assert!(!root.path().join("d/e").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("d/keep.md")).unwrap(),
+            "keep"
+        );
+        assert!(
+            dohc_engine_sync::retired_hosted_files(&store, "ws")
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 

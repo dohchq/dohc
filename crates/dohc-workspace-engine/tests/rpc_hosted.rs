@@ -912,6 +912,51 @@ async fn a_departed_document_retires_and_frees_its_file_for_its_replacement() {
     assert_eq!((objects, conflicts), (0, 0));
 }
 
+/// The durability review: `doc-b` left the scope at `a.md/x/c.md` and
+/// `doc-a` was created at `a.md`. Retirement removed the file but left the
+/// empty folder `a.md`, so every materialization of `doc-a`'s write failed
+/// and hosted pull stalled. The folders go with the file, and `doc-a` lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retired_file_leaves_no_folder_in_its_replacements_way() {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-b", "a.md/x/c.md", "hosted b");
+    relay.share("doc-b", "a.md/x/c.md");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("a.md/x/c.md")).expect("a.md/x/c.md"),
+        "hosted b"
+    );
+
+    {
+        let mut relay = relay.relay();
+        relay.unshare("doc-b");
+        relay.create("owner", 2, "doc-a", "a.md", "hosted a");
+        relay.share("doc-a", "a.md");
+    }
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b"), None);
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("a.md")).expect("a.md"),
+        "hosted a"
+    );
+    assert_eq!(host.pull().await["departed"], json!([]));
+}
+
 /// Sol's retirement review: a file that could not go after its document
 /// retired stayed forever. `a.md` is locked when `doc-b` retires, and the
 /// host restarts. `doc-b`'s file keeps `a.md` held, so `doc-a`'s write
