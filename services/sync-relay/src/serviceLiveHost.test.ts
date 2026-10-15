@@ -764,6 +764,29 @@ it("keeps a workspace attached while its last document's unload is pending and d
   expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
 });
 
+it.each(["settlement-pending", "delivery-pending"])("drops a stopped document with %s and detaches its last workspace", async reason => {
+  const o = await emptyServiceHost();
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling]});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const cut = o.f.storage.readLiveUpdateJournalCut({document: o.document});
+  const generation = o.raw.prepare("SELECT restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id='workspace' AND object_id='object' AND lineage_state='current'").get()!.restore_fence_generation as number;
+  const stopped = o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
+    enabled: false, retire: true, restoreFenceGeneration: generation, nowMs: 20, guard() {}});
+  expect(stopped).toMatchObject({enabled: false, retired: true});
+  o.unloads.push({status: "pending", reason});
+  expect(await o.host.update({workspaces: [], documents: []})).toEqual([]);
+  expect(o.host.holds(o.sibling)).toBe(false);
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  expect(o.host.automationLedger("workspace")).toBeNull();
+  expect(o.membership.at(-1)).toEqual({method: "liveApplication.detachWorkspace", workspace: "attached-handle", params: {}});
+  expect(o.f.storage.readLiveUpdateJournalCut({document: o.document})).toEqual(cut);
+  const calls = o.membership.length;
+  expect(await o.host.update({workspaces: [], documents: []})).toEqual([]);
+  expect(o.membership).toHaveLength(calls);
+  expect(o.client().close).not.toHaveBeenCalled();
+});
+
 it.each([false, true])("detaches a workspace at once when its identity changes, leaving its pending document unsettled (new documents at once: %s)", async newAtOnce => {
   const o = await emptyServiceHost();
   const siblingRoot = join(o.f.root, "workspace-2"), rotatedRoot = join(o.f.root, "workspace-rotated");

@@ -43,7 +43,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
   const frameChanges = createNamedFrameChanges(8);
   // A stand-in for the service host: it records each membership update and,
   // like the engine, keeps a document that left while its unload is pending,
-  // with its workspace attached, unless the workspace's identity changed.
+  // with its workspace attached, unless its enrollment or workspace identity is fenced.
   // Unloads finish before a refused attach fails the update.
   const pending = new Set<string>(), settled = new Set<string>(), updates: ServiceHostedSet[] = [], attachedAfter: string[][] = [];
   const refusal = new Error("Workspace attach refused.");
@@ -67,7 +67,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
       if (hold) {hold.entered.resolve(); await hold.release.promise;}
       if (failUpdate) {const failure = failUpdate; failUpdate = undefined; throw failure;}
       const retiring = held.filter(document => !desired.documents.some(row => row.objectId === document.objectId) &&
-        pending.has(document.objectId) && !fenced(document.workspaceId));
+        pending.has(document.objectId) && !fenced(document.workspaceId) && serviceHostDocumentEnabled(f.storage as StorageContext, document));
       held = [...held.filter(document => desired.documents.some(row => row.objectId === document.objectId)), ...retiring];
       if (desired.documents.some(row => row.path === refusedPath)) throw refusal;
       updates.push(desired);
@@ -253,6 +253,23 @@ it("keeps a document hosted while any Edit grant covers it and retires it once i
   expect(f.storage.listServiceHostEnrollments(scope.workspaceId).map(row => row.path)).toEqual(["notes/c.md", "notes/d.md"]);
   expect(f.starts).toHaveLength(1); expect(f.starts[0]!.close).not.toHaveBeenCalled();
   expect(f.updates.slice(1).every(update => update.documents.some(row => row.path === "notes/c.md"))).toBe(true);
+});
+
+it("drops a stopped last document whose unload is pending and settles the selection", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  f.pending.add(binding.objectId);
+  const stopped = f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration});
+  expect(stopped).toMatchObject({enabled: false, retired: true});
+  await f.waitUpdate([]);
+  expect(f.holds(binding.objectId)).toBe(false);
+  expect(f.attachedAfter.at(-1)).toEqual([]);
+  const checks = vi.spyOn(f.storage, "listServiceHostEnrollments");
+  const updateCount = f.updates.length;
+  f.host.reconcile();
+  await vi.waitFor(() => expect(checks).toHaveBeenCalled(), {timeout: 10_000});
+  expect(f.updates).toHaveLength(updateCount);
+  expect(f.pending.has(binding.objectId)).toBe(true);
+  expect(f.host.current()).toBeDefined(); expect(f.starts[0]!.close).not.toHaveBeenCalled();
 });
 
 it("retires the last document without stopping the daemon", async () => {

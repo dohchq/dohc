@@ -26,7 +26,8 @@
     "./share-selector": "./src/shareSelector.ts",
     "./share-discussion": "./src/shareDiscussion.ts",
     "./share-proposal-bound": "./src/shareProposalBound.ts",
-    "./wire-patterns": "./src/wirePatterns.ts"
+    "./wire-patterns": "./src/wirePatterns.ts",
+    "./app-collection-checks": "./src/appCollectionChecks.ts"
   },
   "scripts": {
     "test": "vitest run",
