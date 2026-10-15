@@ -220,8 +220,9 @@ test("a runner that exits silently leaves the thread alone and posts a failed-ru
     // The failure is a row in Notices. The thread keeps only what people and
     // the agent wrote, so once the notice is there it still holds one post.
     await page.getByTestId("notice-center-toggle").click();
+    // "failed", not "failed to start": the runner started, then exited silently.
     await expect(page.getByTestId("notice-center")).toContainText(
-      'Your agent\'s run in "audit the projections" failed',
+      /Your agent's run in "audit the projections" failed(?! to start)/,
     );
     await expect(page.getByTestId("chats-message")).toHaveCount(1);
   } finally {

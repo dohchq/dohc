@@ -44,18 +44,9 @@ if (mode === "silent-fail") {
   process.exit(3);
 }
 
-if (profileTool) {
-  const expected = profileTool === "claude"
-    ? ["-p", "--permission-prompts", "none", "--no-session-persistence"]
-    : ["exec", "--config", "approval_policy=never", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
-  if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expected)) {
-    console.error("Unexpected profile arguments", process.argv.slice(3));
-    process.exit(2);
-  }
-  // Do what the prompt asks, as an installed tool would: run the self-test's
-  // command, or reply in the thread. The shell resolves dohc from the
-  // runner's PATH, as installed tools must do.
-  const command = selfTestCommand ?? `dohc chat reply ${threadId} --as-agent "done: checked the exports"`;
+// Do what the prompt asks, as an installed tool would. The shell resolves dohc
+// from the runner's PATH, as installed tools must do.
+function runCommand(command) {
   if (!/^dohc chat (?:post|reply) [\w-]+ --as-agent [^\r\n]*$/u.test(command)) {
     console.error("Unexpected runner command", command);
     process.exit(2);
@@ -65,6 +56,19 @@ if (profileTool) {
   });
   child.on("error", (error) => { console.error(error); process.exit(1); });
   child.on("exit", (code) => process.exit(code ?? 1));
+}
+
+if (profileTool) {
+  const expected = profileTool === "claude"
+    ? ["-p", "--permission-prompts", "none", "--no-session-persistence"]
+    : ["exec", "--config", "approval_policy=never", "--sandbox", "workspace-write", "--skip-git-repo-check", "--ephemeral", "-"];
+  if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expected)) {
+    console.error("Unexpected profile arguments", process.argv.slice(3));
+    process.exit(2);
+  }
+  runCommand(selfTestCommand ?? `dohc chat reply ${threadId} --as-agent "done: checked the exports"`);
+} else if (selfTestCommand) {
+  runCommand(selfTestCommand);
 } else {
 
 if (mode !== "report" && mode !== "ask") {

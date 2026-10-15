@@ -61,6 +61,7 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     // No runner yet: Agents has no agent of yours and offers Add an agent,
     // which creates its channel.
     await expect(page.getByTestId("chats-add-agent-open")).toBeVisible();
+    await expect(page.getByTestId("chats-channel").filter({ hasText: "general" })).toBeVisible();
     await expect(page.getByTestId("chats-my-agent")).toHaveCount(0);
     await shoot(page, "agents-not-set-up");
 
