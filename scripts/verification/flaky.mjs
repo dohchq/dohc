@@ -1,7 +1,9 @@
-// Tests that passed only on retry, and the slowest tests. The gate retries a
-// failing test once, so a flaky test no longer fails a change it has nothing to
-// do with, and records each one here so it gets fixed instead of hidden. It also
-// records the slowest tests, so the suites' time can be kept in budget.
+// Tests that passed only on retry, tests that failed on their last try, and the
+// slowest tests. The gate retries a failing test once, so a flaky test no longer
+// fails a change it has nothing to do with, and records each one here so it gets
+// fixed instead of hidden. Failed tests use the same names, so the queue can tell
+// when other branches fail the same test. It also records the slowest tests, so
+// the suites' time can be kept in budget.
 
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -23,6 +25,17 @@ export function nextestFlaky(log) {
   return [...new Set(names)];
 }
 
+/**
+ * Tests nextest's summary lists as failed on their last try: a failure, a
+ * timeout, a crash, or a test binary that could not start. A run that printed
+ * no summary names none.
+ */
+export function nextestFailures(log) {
+  const summary = plain(log).split(/^\s*Summary \[.*$/mu).slice(1).join("\n");
+  const names = [...summary.matchAll(/^\s*(?:TRY \d+ )?(?:FAIL|TIMEOUT|ABORT|XFAIL|LEAK-FAIL|SIG\w+)\s+\[[^\]]*\]\s+(?:\([^)]*\)\s+)?(.+?)\s*$/gmu)].map(match => match[1]);
+  return [...new Set(names)];
+}
+
 /** The failed tests in a node:test spec report, or none when the run failed outside its tests. */
 export function nodeTestFailures(log) {
   const text = plain(log);
@@ -32,13 +45,16 @@ export function nodeTestFailures(log) {
   return [...new Set(names)];
 }
 
+const playwrightSpecs = (suites = [], status) => suites.flatMap(suite => [
+  ...(suite.specs ?? []).filter(spec => spec.tests?.some(test => test.status === status)).map(spec => `${spec.file} › ${spec.title}`),
+  ...playwrightSpecs(suite.suites, status),
+]);
+
 /** Tests a Playwright JSON report marks flaky. */
-export function playwrightFlaky(suites = []) {
-  return suites.flatMap(suite => [
-    ...(suite.specs ?? []).filter(spec => spec.tests?.some(test => test.status === "flaky")).map(spec => `${spec.file} › ${spec.title}`),
-    ...playwrightFlaky(suite.suites),
-  ]);
-}
+export const playwrightFlaky = suites => playwrightSpecs(suites, "flaky");
+
+/** Tests a Playwright JSON report marks unexpected: they failed on every try. An interrupted test counts as skipped. */
+export const playwrightFailures = suites => playwrightSpecs(suites, "unexpected");
 
 /** Failed tests in a vitest JSON report. */
 export function vitestFailures(path) {
@@ -48,7 +64,7 @@ export function vitestFailures(path) {
   } catch { return []; }
 }
 
-/** The tests the vitest reporter recorded in `path`: { test, flaky, seconds }. */
+/** The tests the vitest reporter recorded in `path`: { test, flaky, failed, seconds }. */
 export function readTestRecord(path) {
   return read(path).split(/\r?\n/u).filter(Boolean).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
 }

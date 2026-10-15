@@ -10,6 +10,7 @@
 //   requests/<id>/cancel         a cancellation request (client)
 //   requests/<id>/attempts/<n>/  one worker's evidence (worker)
 //   service.json                 service identity, heartbeat, and health (service)
+//   monitor-load.json            the dashboard's minute samples of host load (service)
 //   lane/                        the checkout the service verifies in
 //   service/<commit>/, current   installed service checkouts, and the active one
 
@@ -206,6 +207,8 @@ export function serviceState(root, now = Date.now()) {
 }
 
 export const taskName = "dohc-verification-queue";
+// The service serves its read-only monitor page here, on this host only.
+export const monitorPort = 4250;
 
 /** Start the installed service if its heartbeat is not current. Starting a running task does nothing. */
 export function ensureService(root, { start = () => spawnSync("schtasks.exe", ["/run", "/tn", taskName], { windowsHide: true, encoding: "utf8" }) } = {}) {
@@ -229,6 +232,40 @@ export function typicalRunMs(root) {
       .slice(-20).sort((a, b) => a - b);
     return runs.length ? runs[Math.floor(runs.length / 2)] : null;
   } catch { return null; }
+}
+
+/**
+ * The failed tests, from a list of { step, test }, that another branch's attempt
+ * also failed in the last day: [{ step, test, branches }]. `branch` names this
+ * run's line as a request does, by its branch ref or else its checkout; attempts
+ * on that line do not count. A missing or unreadable queue gives none.
+ */
+export function sharedFailures(root, failed, { branch, now = Date.now() } = {}) {
+  try {
+    const key = row => `${row.step}\n${row.test}`;
+    const wanted = new Map(failed.map(row => [key(row), row]));
+    const attempts = new Map();
+    const history = wanted.size ? readFileSync(queuePaths(root).history, "utf8").trim().split("\n").reverse() : [];
+    // The history is in time order, newest last, so the reading stops at the first event older than a day.
+    for (const line of history) {
+      const event = (() => { try { return JSON.parse(line); } catch { return null; } })();
+      if (Date.parse(event?.at) < now - 24 * 60 * 60_000) break;
+      if (event?.event !== "finished") continue;
+      for (const row of event.failed ?? []) if (wanted.has(key(row))) attempts.set(key(row), [...(attempts.get(key(row)) ?? []), event.id]);
+    }
+    const lines = new Map();
+    const lineOf = id => {
+      if (!lines.has(id)) { const request = readJson(join(queuePaths(root).request(id), "request.json")); lines.set(id, request?.branch ?? request?.checkout ?? null); }
+      return lines.get(id);
+    };
+    // A branch is compared and shown without refs/heads/, however each request recorded it.
+    const short = line => String(line).replace(/^refs\/heads\//u, "");
+    const own = short(branch).toLowerCase();
+    return [...wanted].flatMap(([name, row]) => {
+      const branches = [...new Set((attempts.get(name) ?? []).map(lineOf).filter(Boolean).map(short).filter(line => line.toLowerCase() !== own))].sort();
+      return branches.length ? [{ ...row, branches }] : [];
+    });
+  } catch { return []; }
 }
 
 /**
@@ -393,6 +430,7 @@ function printStatus(root) {
   const minutes = ms => `${Math.round(ms / 60_000)} min`;
   const { lanes, runs } = serviceRuns(record);
   console.log(`service: ${alive ? `running ${record.commit?.slice(0, 12) ?? ""} (pid ${record.pid})` : record ? `not responding since ${record.heartbeatAt}` : "never started"}`);
+  if (alive) console.log(`monitor: http://127.0.0.1:${monitorPort}`);
   if (record?.health?.reason) console.log(`health: ${record.health.reason}`);
   if (record?.health?.diskFreeGb != null) console.log(`free disk: ${record.health.diskFreeGb.toFixed(1)} GB`);
   if (record) console.log(`host: ${lanes} lane(s), ${record.health?.cpuBusyPercent ?? "unknown"}% CPU, ${record.health?.freeMemGb ?? "unknown"} GB free memory`);

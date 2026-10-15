@@ -192,6 +192,7 @@ pub struct WorkspaceActor {
     claims: ClaimAnnouncer,
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
+    current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
 }
 
 impl WorkspaceActor {
@@ -347,6 +348,7 @@ impl WorkspaceActor {
                 claims: ClaimAnnouncer::default(),
                 link_metrics,
                 link_drain_holds,
+                current_views: Arc::default(),
             }),
             Ok(Err(storage_err)) => {
                 let _ = worker.join();
@@ -368,6 +370,7 @@ impl WorkspaceActor {
             claims: self.claims.clone(),
             link_metrics: Arc::clone(&self.link_metrics),
             link_drain_holds: Arc::clone(&self.link_drain_holds),
+            current_views: Arc::clone(&self.current_views),
         }
     }
 
@@ -441,8 +444,8 @@ impl Drop for WorkspaceActor {
     }
 }
 
-/// A clonable, message-only handle to a [`WorkspaceActor`]. Holds no state of
-/// its own beyond the sender and the shared lifecycle flag.
+/// A clonable handle to a [`WorkspaceActor`]. The worker also owns its shared
+/// current view projection cache.
 #[derive(Clone)]
 pub struct ActorHandle {
     identity: EngineDbIdentity,
@@ -451,6 +454,7 @@ pub struct ActorHandle {
     claims: ClaimAnnouncer,
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
+    current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
 }
 
 /// Keeps derived link writes behind capture, including its queued commands.
@@ -500,6 +504,25 @@ impl ActorHandle {
             .0
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(listener);
+    }
+
+    pub async fn replica_current_view(
+        &self,
+        workspace: String,
+        request: dohc_engine_sync::replica_cut::CurrentViewRequest,
+    ) -> Result<dohc_engine_sync::replica_cut::ReplicaCurrentView, RuntimeError> {
+        let cache = Arc::clone(&self.current_views);
+        self.run(move |store, _| {
+            Ok(dohc_engine_sync::replica_cut::collect_current_view_cached(
+                store,
+                &workspace,
+                &request,
+                &mut cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )?)
+        })
+        .await
     }
 
     pub async fn replica_frontiers(
