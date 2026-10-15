@@ -3063,7 +3063,7 @@ pub(super) fn ydoc_settle_on_store(
             )?;
         }
         if let Some(capability) = prefix {
-            dohc_engine_sync::journal_prefix_moment_in_tx(tx,&capability.binding,&result.moment.moment_id,now_ms).map_err(StorageError::persist_public)?;
+            if !result.deduped { dohc_engine_sync::journal_prefix_moment_in_tx(tx,&capability.binding,&result.moment.moment_id,now_ms).map_err(StorageError::persist_public)?; }
             dohc_engine_collab::owner_outbox::prefix::history_committed_in_tx(tx,&capability.binding,now_ms).map_err(StorageError::persist_public)?;
         }
         let reconcile_required = settled_collection_record_reconcile_required_in_tx(

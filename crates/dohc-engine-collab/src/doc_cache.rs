@@ -55,16 +55,15 @@ const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 /// with equal tuples replay the same byte sequence, except a lineage reset that
 /// later rebuilds the same coordinates over different history. Every such reset
 /// must call [`WriterDocCache::remove`].
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheTuple {
-    head_update_seq: i64,
-    head_snapshot_seq: i64,
-    lineage_claim_id: Option<String>,
-    lineage_epoch_tag: Option<String>,
+    pub(crate) head_update_seq: i64,
+    pub(crate) head_snapshot_seq: i64,
+    pub(crate) lineage_claim_id: Option<String>,
+    pub(crate) lineage_epoch_tag: Option<String>,
     /// Sha of the log row at `head_update_seq`; `None` when the head is folded
     /// into the snapshot (`head_update_seq == head_snapshot_seq`).
-    head_row_sha: Option<String>,
+    pub(crate) head_row_sha: Option<String>,
 }
 
 impl CacheTuple {
@@ -367,7 +366,22 @@ impl WriterDocCache {
         })
     }
 
-    pub(crate) fn finish_prefix(&mut self, key: &DocKey, mut warm: PrefixWarm, tuple: CacheTuple) {
+    pub(crate) fn finish_prefix(
+        &mut self,
+        key: &DocKey,
+        mut warm: PrefixWarm,
+        tuple: CacheTuple,
+        draft: Option<crate::owner_outbox::draft::CachedOwnerDraft>,
+    ) {
+        let bytes = warm.entry.approx_bytes;
+        if bytes > self.max_total_bytes() {
+            return;
+        }
+        if let Some(draft) =
+            draft.filter(|d| bytes.saturating_add(d.approx_bytes) <= self.max_total_bytes())
+        {
+            self.put_owner_draft(key.clone(), draft);
+        }
         warm.entry.tuple = tuple;
         warm.entry.prefix_authors = Some((warm.boundary, warm.authors, warm.author_bytes));
         self.touch(&warm.entry);
@@ -386,6 +400,12 @@ impl WriterDocCache {
         key: DocKey,
         mut draft: crate::owner_outbox::draft::CachedOwnerDraft,
     ) {
+        if self.entries.get(&key).is_some_and(|e| {
+            e.prefix_authors.is_some()
+                && e.approx_bytes.saturating_add(draft.approx_bytes) > self.max_total_bytes()
+        }) {
+            return;
+        }
         if self
             .entries
             .get(&key)

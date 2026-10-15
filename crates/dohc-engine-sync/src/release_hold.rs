@@ -439,25 +439,21 @@ pub fn replay_release_held_envelope(
 // Each stage uses the document index. Merge at most 128 completed reports.
 pub(crate) const RELEASE_HOLD_PAGE_SQL: &str = "
 SELECT envelope_json FROM (
-    SELECT envelope_json FROM (
-        SELECT envelope_json,arrival FROM (
-            SELECT envelope_json,arrival FROM release_held_ops
-            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND stage='done'
-            ORDER BY arrival LIMIT 64)
-        UNION ALL
-        SELECT envelope_json,arrival FROM (
-            SELECT envelope_json,arrival FROM release_held_ops
-            WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND stage='dependency'
-            ORDER BY arrival LIMIT 64)
-    ) ORDER BY arrival LIMIT 64
-)
-UNION ALL
-SELECT envelope_json FROM (
-    SELECT envelope_json FROM release_held_ops
-    WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND stage='held'
-    ORDER BY arrival LIMIT 64
-)
-LIMIT 64";
+    SELECT envelope_json,arrival,0 AS rank FROM (
+        SELECT envelope_json,arrival FROM release_held_ops
+        WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND stage='done'
+        ORDER BY arrival LIMIT 64)
+    UNION ALL
+    SELECT envelope_json,arrival,0 AS rank FROM (
+        SELECT envelope_json,arrival FROM release_held_ops
+        WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND stage='dependency'
+        ORDER BY arrival LIMIT 64)
+    UNION ALL
+    SELECT envelope_json,arrival,1 AS rank FROM (
+        SELECT envelope_json,arrival FROM release_held_ops
+        WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND stage='held'
+        ORDER BY arrival LIMIT 64)
+) ORDER BY rank,arrival LIMIT 64";
 
 /// Recover completed reports first, then held envelopes in arrival order.
 pub fn read_release_hold_page(

@@ -345,7 +345,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     const beforeRestart = await recovered.outbox.readPending(pending.outboxId);
     expect(beforeRestart.entries.map(row => row.deliveryId)).toContain(pending.deliveryId);
     expect(await recovered.client.ownerYDocIsReceiptApplied(recovered.request(), {...target,
-      receipt: {deliveryId: pending.deliveryId, updateDigest: pending.updateDigest, journalCursor: discovered.draft.acceptedCursor + 1, acceptingHostEpoch: active.coordinate.hostEpoch}})).toBe(false);
+      receipt: {deliveryId: pending.deliveryId, updateDigest: pending.updateDigest, journalCursor: discovered.draft.acceptedCursor + 1, acceptingHostEpoch: active.coordinate.hostEpoch}})).toBe("notApplied");
     await recovered.close();
     const reopened = await startOwner("owner-b");
     expect(await reopened.outbox.readPending(pending.outboxId)).toEqual(beforeRestart);
@@ -373,7 +373,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     let receiptWhileHeld: unknown;
     reopened.client.ownerYDocIsReceiptApplied = async (...params) => {
       const applied = await nativeReceiptCheck(...params);
-      if (params[1].receipt.deliveryId === deleted.deliveryId && !applied) {
+      if (params[1].receipt.deliveryId === deleted.deliveryId && applied !== "applied") {
         receiptWhileHeld = params[1].receipt; observedReceipt();
       }
       return applied;

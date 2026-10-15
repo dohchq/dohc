@@ -31,7 +31,7 @@ function fixture(count = 1, automationDeclaration?: AutomationDeclaration, claim
       cursor = input.journalCursor;
       return {revision: cursor + 1, acceptedCursor: cursor, nativeHeadSequence: cursor};
     }),
-    ownerYDocIsReceiptApplied: vi.fn(async () => true), ownerYDocRefuseEntry: vi.fn(async () => {head++;}),
+    ownerYDocIsReceiptApplied: vi.fn(async (): Promise<"applied" | "notApplied" | "stopping"> => "applied"), ownerYDocRefuseEntry: vi.fn(async () => {head++;}),
   };
   vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockImplementation(async () => ({outboxId: "outbox", binding, baseUpdateDigest: binding.lineageClaimId,
     baseUpdate: Uint8Array.of(0, 0), state: "active", pendingBytes: (count - head) * 2, oldestEntryAtMs: 1,
@@ -71,6 +71,17 @@ it("captures once and installs each accepted frame before acknowledging a multi-
   expect(f.client.ownerYDocIsReceiptApplied.mock.invocationCallOrder[0]).toBeLessThan(f.acknowledge.mock.invocationCallOrder[0]!);
   expect(f.host.close).toHaveBeenCalledTimes(1);
   expect(f.sync.close).toHaveBeenCalledTimes(1);
+});
+
+it.each(["notApplied", "stopping"] as const)("keeps a %s receipt pending for another pass", async status => {
+  const f = fixture();
+  f.client.ownerYDocIsReceiptApplied.mockResolvedValueOnce(status);
+  await expect(f.delivery.drain(binding, new AbortController().signal)).rejects.toBeInstanceOf(AutomationRunWait);
+  expect(f.acknowledge).not.toHaveBeenCalled();
+  expect(f.quarantine).not.toHaveBeenCalled();
+  await f.delivery.drain(binding, new AbortController().signal);
+  expect(f.acknowledge).toHaveBeenCalledOnce();
+  expect(vi.mocked(f.host.submit).mock.calls.map(([input]) => input.deliveryId)).toEqual(["delivery-0", "delivery-0"]);
 });
 
 it.each(["stale-session"] as const)("backs off %s without permanently freezing the record", async reason => {

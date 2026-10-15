@@ -623,29 +623,14 @@ pub fn open_draft_in(
     if observed.revision != expected_revision {
         return Err(OwnerOutboxError::ParentMismatch);
     }
-    let marker = crate::read_marker_in(conn, &key(binding)?)
-        .map_err(collab)?
-        .ok_or(OwnerOutboxError::NotFound)?;
-    if marker.content_kind != crate::ContentKind::Richdoc
-        || marker.regime != crate::Regime::Replicated
-        || marker.head_update_seq != observed.native_head_sequence
-        || marker.lineage_claim_id.as_deref() != Some(&binding.lineage_claim_id)
-        || marker.path.as_deref() != Some(&binding.current_path)
-    {
-        return Err(OwnerOutboxError::ParentMismatch);
-    }
-    let prefix = super::prefix::progress_in(conn, &key(binding)?)?.is_some();
-    let doc = if prefix {
-        crate::durable::load_doc_in(conn, &key(binding)?).map_err(collab)?
+    let doc = if super::prefix::progress_in(conn, &key(binding)?)?.is_some() {
+        let doc = crate::durable::load_doc_in(conn, &key(binding)?).map_err(collab)?;
+        super::prefix::apply_remaining_in(conn, binding, &doc)?;
+        doc
     } else {
         let doc = Ydoc::wire();
         doc.apply(&bounded_blob(conn, &observed.checkpoint_digest)?)
             .map_err(collab)?;
-        doc
-    };
-    if prefix {
-        super::prefix::apply_remaining_in(conn, binding, &doc)?;
-    } else {
         apply_pending_in(
             conn,
             binding,
@@ -653,7 +638,8 @@ pub fn open_draft_in(
             observed.limits.max_pending_bytes,
             PendingReplay::Draft,
         )?;
-    }
+        doc
+    };
     Ok(OwnerDraft { observed, doc })
 }
 

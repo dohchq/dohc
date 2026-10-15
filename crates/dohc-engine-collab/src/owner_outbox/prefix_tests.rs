@@ -1,5 +1,182 @@
 use super::super::prefix;
 
+#[test]
+fn prefix_folded_append_retry_keeps_the_tail_moving() {
+    let (_dir, mut store, observed, _, inputs, _) = prefix_queue(40);
+    let mut cache = crate::WriterDocCache::new();
+    assert_eq!(
+        prefix_turn(&mut store, &mut cache, &observed).consumed_entries,
+        32
+    );
+    let before = store.table_row_count("owner_ydoc_outbox_entries").unwrap();
+    append_draft_cached(
+        &mut store,
+        &mut cache,
+        "workspace",
+        inputs[0].clone(),
+        &NoFaults,
+    )
+    .unwrap();
+    assert_eq!(
+        store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
+        before
+    );
+    let mut changed = inputs[0].clone();
+    changed.update = inputs[1].update.clone();
+    assert!(matches!(
+        append_draft_cached(&mut store, &mut cache, "workspace", changed, &NoFaults),
+        Err(OwnerOutboxError::AppendKeyMismatch)
+    ));
+    assert_eq!(
+        prefix_turn(&mut store, &mut cache, &observed).consumed_entries,
+        40
+    );
+}
+
+#[test]
+fn prefix_retry_between_consumed_cleanup_pages_cannot_append_twice() {
+    let (_dir, mut store, observed, _, inputs, outbox) = prefix_queue(130);
+    let key = key(&observed.binding).unwrap();
+    let mut cache = crate::WriterDocCache::new();
+    while prefix_turn(&mut store, &mut cache, &observed).consumed_entries < 130 {}
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM ydoc_owner_bindings", [])
+                .map_err(write_sql)?;
+            tx.execute("UPDATE owner_live_stops SET state='released'", [])
+                .map_err(write_sql)?;
+            {
+                prefix::close_consumed_in_tx(tx, &key, &outbox, 9)?;
+                prefix::cleanup_consumed_in_tx(tx, &key, &outbox)
+            }
+        })
+        .unwrap();
+    let missing = store.read_with(|c| {
+        inputs.iter().find(|input| !c.query_row("SELECT EXISTS(SELECT 1 FROM owner_prefix_consumed WHERE outbox_id=?1 AND append_key=?2)", params![outbox,input.append_key], |r| r.get::<_, bool>(0)).unwrap()).cloned().ok_or(OwnerOutboxError::Corrupt)
+    }).unwrap();
+    let mut appended = false;
+    let result = store.write_with(&NoFaults, |tx| {
+        prefix::append_old_session_in_tx(tx, &outbox, &missing, |_, _, _, _, _| {
+            appended = true;
+            Ok(999)
+        })
+    });
+    assert!(
+        !appended,
+        "closed session replayed an original after its consumed key was reclaimed"
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn prefix_chunk_has_a_bounded_sql_instruction_cost() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (_dir, mut store, observed, _, inputs, outbox) = prefix_queue(1);
+    let digest = hex_sha256(&inputs[0].update);
+    store.write_with(&NoFaults, |tx| {
+        for sequence in 2..=10_000 {
+            tx.execute("INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,pending,created_at_ms,result_pending_bytes,result_oldest_entry_at_ms,result_state,draft_binding_revision,person_edit) VALUES(?1,?2,?3,?3,?4,?4,?5,1,3,?5,3,'active',1,1)", params![outbox,sequence,format!("seed-{sequence}"),digest,inputs[0].update.len() as i64]).map_err(write_sql)?;
+        }
+        tx.execute("UPDATE owner_ydoc_outboxes SET pending_bytes=?2 WHERE outbox_id=?1",params![outbox,inputs[0].update.len() as i64*10_000]).map_err(write_sql)?;
+        Ok::<_,OwnerOutboxError>(())
+    }).unwrap();
+    let steps = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = steps.clone();
+    store
+        .read_with(|c| {
+            c.progress_handler(
+                100,
+                Some(move || {
+                    counter.fetch_add(100, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .map_err(read_sql)?;
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    let result = prefix::commit_prefix(
+        &mut store,
+        &mut Default::default(),
+        &observed.binding,
+        &"c".repeat(64),
+        6,
+        &NoFaults,
+        |_, _, _, _| Ok(None),
+    );
+    store
+        .read_with(|c| {
+            c.progress_handler(0, None::<fn() -> bool>)
+                .map_err(read_sql)?;
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    assert!(matches!(result.unwrap(), TxnOutcome::Committed(p) if p.consumed_entries == 32));
+    let steps = steps.load(Ordering::Relaxed);
+    println!("prefix-chunk pending=10000 vm-steps={steps}");
+    assert!(
+        steps < 30_000,
+        "one chunk scanned the remaining queue: {steps} VM steps"
+    );
+    let oldest: Option<i64> = store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT oldest_entry_at_ms FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+                [&outbox],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(oldest, Some(3));
+}
+
+#[test]
+fn prefix_small_cache_keeps_the_native_entry_instead_of_the_draft() {
+    let (_dir, mut store, observed, _, _, _) = prefix_queue(40);
+    let key = key(&observed.binding).unwrap();
+    let native_bytes = store.read_with(|c| {
+        let log: i64 = c.query_row("SELECT SUM(byte_length) FROM (SELECT byte_length FROM owner_ydoc_outbox_entries ORDER BY sequence LIMIT 32)", [], |r| r.get(0)).map_err(read_sql)?;
+        Ok::<_,OwnerOutboxError>((crate::load_doc_in(c,&key).map_err(collab)?.encode_full_state().len() + log as usize) * 2)
+    }).unwrap();
+    let mut cache = crate::WriterDocCache::with_limits_for_test(16, native_bytes);
+    open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap();
+    prefix_turn(&mut store, &mut cache, &observed);
+    assert!(
+        cache.contains_for_test(&key),
+        "the draft evicted the native replay frontier"
+    );
+}
+
+#[test]
+fn prefix_session_cleanup_reports_removed_parents() {
+    let (_dir, mut store, observed, _, _, _) = prefix_queue(1);
+    prefix_turn(&mut store, &mut Default::default(), &observed);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM ydoc_owner_bindings", [])
+                .map_err(write_sql)?;
+            tx.execute("UPDATE owner_live_stops SET state='released'", [])
+                .map_err(write_sql)?;
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    let removed = store
+        .write_with(&NoFaults, |tx| {
+            prefix::cleanup_session_page_in_tx(tx, &observed.binding)
+        })
+        .unwrap();
+    assert!(matches!(removed, TxnOutcome::Committed(1)));
+    assert!(matches!(
+        store
+            .write_with(&NoFaults, |tx| prefix::cleanup_session_page_in_tx(
+                tx,
+                &observed.binding
+            ))
+            .unwrap(),
+        TxnOutcome::Committed(0)
+    ));
+}
+
 fn seal_prefix(store: &mut EngineStore, observed: &ObservedOwnerBinding) {
     store
         .write_with(&NoFaults, |tx| {
@@ -73,7 +250,7 @@ fn prefix_turn(
         &"c".repeat(64),
         6,
         &NoFaults,
-        |_, _, _, _, _| Ok(()),
+        |_, _, _, _| Ok(None),
     )
     .unwrap()
     {
@@ -205,9 +382,11 @@ fn prefix_restarts_preserve_every_chunk_union_credit_and_warm_compaction() {
                 .unwrap()
                 .content
         );
-        assert!(store
-            .read_with(|c| super::super::accepted::read_state_in(c, &observed.binding, "relay"))
-            .is_err());
+        assert!(
+            store
+                .read_with(|c| super::super::accepted::read_state_in(c, &observed.binding, "relay"))
+                .is_err()
+        );
         prefix::compact_prefix(&mut store, &mut cache, &observed.binding, &NoFaults, 7).unwrap();
         assert_eq!(store.table_row_count("ydoc_updates").unwrap(), 0);
         drop(store);
@@ -254,16 +433,18 @@ fn prefix_cache_commit_keeps_the_union_and_refreshes_its_effective_head() {
         warm.descriptor.native_head_sequence,
         observed.native_head_sequence + progress.consumed_entries
     );
-    assert!(prefix::commit_prefix(
-        &mut store,
-        &mut cache,
-        &observed.binding,
-        &"c".repeat(64),
-        7,
-        &NoFaults,
-        |_, _, _, _, _| Err(CollabError::MissingDependencies)
-    )
-    .is_err());
+    assert!(
+        prefix::commit_prefix(
+            &mut store,
+            &mut cache,
+            &observed.binding,
+            &"c".repeat(64),
+            7,
+            &NoFaults,
+            |_, _, _, _| Err(CollabError::MissingDependencies)
+        )
+        .is_err()
+    );
     let recovered = open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap();
     let doc = Ydoc::wire();
     doc.apply(&recovered.initial_update).unwrap();
@@ -293,13 +474,15 @@ fn prefix_transaction_refusal_discards_mutated_cache_and_retries_exactly() {
         &"c".repeat(64),
         6,
         &NoFaults,
-        |_, _, _, _, _| Err(CollabError::MissingDependencies),
+        |_, _, _, _| Err(CollabError::MissingDependencies),
     );
     assert!(failure.is_err());
-    assert!(store
-        .read_with(|c| cache.doc_for_consumer(c, &key))
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .read_with(|c| cache.doc_for_consumer(c, &key))
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         store
             .read_with(|c| prefix::progress_in(c, &key))
@@ -320,16 +503,18 @@ fn prefix_bad_credit_leaves_original_rows_and_native_head_unchanged() {
         tx.execute("UPDATE owner_ydoc_outbox_entries SET agent_declaration_json='{\"agentId\":\"\",\"onBehalfOf\":null,\"depth\":2}' WHERE sequence=1",[]).map_err(write_sql)?;
         Ok::<_,OwnerOutboxError>(())
     }).unwrap();
-    assert!(prefix::commit_prefix(
-        &mut store,
-        &mut Default::default(),
-        &observed.binding,
-        &"c".repeat(64),
-        6,
-        &NoFaults,
-        |_, _, _, _, _| panic!("invalid credit must precede journal")
-    )
-    .is_err());
+    assert!(
+        prefix::commit_prefix(
+            &mut store,
+            &mut Default::default(),
+            &observed.binding,
+            &"c".repeat(64),
+            6,
+            &NoFaults,
+            |_, _, _, _| panic!("invalid credit must precede journal")
+        )
+        .is_err()
+    );
     assert_eq!(
         crate::read_marker(&store, &key)
             .unwrap()
@@ -391,9 +576,9 @@ fn prefix_keeps_automation_and_unattributed_original_credit() {
         &"c".repeat(64),
         6,
         &NoFaults,
-        |_, _, actor, attribution, _| {
+        |_, _, actor, attribution| {
             credits.push((actor.map(str::to_owned), attribution.cloned()));
-            Ok(())
+            Ok(None)
         },
     )
     .unwrap();
@@ -432,16 +617,18 @@ fn prefix_native_source_rejects_partial_credit_before_append() {
             Ok::<_, OwnerOutboxError>(())
         })
         .unwrap();
-    assert!(prefix::commit_prefix(
-        &mut store,
-        &mut Default::default(),
-        &observed.binding,
-        &"c".repeat(64),
-        6,
-        &NoFaults,
-        |_, _, _, _, _| panic!("partial native credit must precede journal")
-    )
-    .is_err());
+    assert!(
+        prefix::commit_prefix(
+            &mut store,
+            &mut Default::default(),
+            &observed.binding,
+            &"c".repeat(64),
+            6,
+            &NoFaults,
+            |_, _, _, _| panic!("partial native credit must precede journal")
+        )
+        .is_err()
+    );
     assert_eq!(store.table_row_count("owner_prefix_consumed").unwrap(), 0);
 }
 
@@ -483,14 +670,16 @@ fn prefix_seal_accepts_an_authenticated_successor_and_refuses_restore_fenced_wor
             .unwrap()
             .unwrap()
             .outbox_id;
-        assert!(store
-            .write_with(&NoFaults, |tx| prefix::append_old_session_in_tx(
-                tx,
-                &outbox,
-                &stale,
-                |_, _, _, _, _| panic!()
-            ))
-            .is_err());
+        assert!(
+            store
+                .write_with(&NoFaults, |tx| prefix::append_old_session_in_tx(
+                    tx,
+                    &outbox,
+                    &stale,
+                    |_, _, _, _, _| panic!()
+                ))
+                .is_err()
+        );
     }
     let (_dir, mut store, observed, _, _, _) = prefix_queue(1);
     let key = key(&observed.binding).unwrap();
@@ -628,17 +817,20 @@ fn prefix_late_session_keys_are_scoped_idempotent_and_expire_with_cleanup() {
         .unwrap();
     store
         .write_with(&NoFaults, |tx| {
+            prefix::close_consumed_in_tx(tx, &key, &outbox, 9)?;
             prefix::cleanup_consumed_in_tx(tx, &key, &outbox)
         })
         .unwrap();
-    assert!(store
-        .write_with(&NoFaults, |tx| prefix::append_old_session_in_tx(
-            tx,
-            &outbox,
-            &late,
-            |_, _, _, _, _| panic!("closed session must refuse")
-        ))
-        .is_err());
+    assert!(
+        store
+            .write_with(&NoFaults, |tx| prefix::append_old_session_in_tx(
+                tx,
+                &outbox,
+                &late,
+                |_, _, _, _, _| panic!("closed session must refuse")
+            ))
+            .is_err()
+    );
 }
 
 #[test]
@@ -757,17 +949,20 @@ fn prefix_consumed_cleanup_is_bounded_and_generation_changes_refuse_late_edits()
             Ok::<_, OwnerOutboxError>(())
         })
         .unwrap();
-    assert!(store
-        .write_with(&NoFaults, |tx| prefix::append_old_session_in_tx(
-            tx,
-            &outbox,
-            &inputs[0],
-            |_, _, _, _, _| panic!()
-        ))
-        .is_err());
+    assert!(
+        store
+            .write_with(&NoFaults, |tx| prefix::append_old_session_in_tx(
+                tx,
+                &outbox,
+                &inputs[0],
+                |_, _, _, _, _| panic!()
+            ))
+            .is_err()
+    );
     for remaining in [66, 2, 0] {
         store
             .write_with(&NoFaults, |tx| {
+                prefix::close_consumed_in_tx(tx, &key, &outbox, 9)?;
                 prefix::cleanup_consumed_in_tx(tx, &key, &outbox)
             })
             .unwrap();
@@ -796,9 +991,11 @@ fn prefix_union_includes_quarantined_non_parent_work_and_bumps_revision_only_for
             .revision;
         assert_eq!(revision, if pending { 2 } else { 1 });
         if pending {
-            assert!(store
-                .read_with(|c| open_draft_in(c, &observed.binding, 1))
-                .is_err());
+            assert!(
+                store
+                    .read_with(|c| open_draft_in(c, &observed.binding, 1))
+                    .is_err()
+            );
             let before = store
                 .read_with(|c| open_draft_in(c, &observed.binding, 2))
                 .unwrap();
@@ -820,7 +1017,7 @@ fn prefix_union_includes_quarantined_non_parent_work_and_bumps_revision_only_for
                 &"d".repeat(64),
                 11,
                 &NoFaults,
-                |_, _, _, _, _| Ok(()),
+                |_, _, _, _| Ok(None),
             )
             .unwrap();
             let after = store
@@ -840,4 +1037,43 @@ fn prefix_union_includes_quarantined_non_parent_work_and_bumps_revision_only_for
             );
         }
     }
+}
+
+#[test]
+fn prefix_folded_retry_cannot_change_its_base() {
+    let (_dir, mut store, observed, _, inputs, _) = prefix_queue(40);
+    let mut cache = crate::WriterDocCache::new();
+    prefix_turn(&mut store, &mut cache, &observed);
+    let before = store.table_row_count("owner_ydoc_outbox_entries").unwrap();
+    let result = store.write_with(&NoFaults, |tx| {
+        super::super::append_with_retained_base(
+            tx,
+            "workspace",
+            super::super::OwnerOutboxAppendInput {
+                binding: observed.binding.clone(),
+                base_update: vec![1, 2, 3],
+                append_key: inputs[0].append_key.clone(),
+                update: inputs[0].update.clone(),
+                limits: observed.limits.clone(),
+                created_at_ms: 20,
+            },
+            None,
+            Some(observed.revision),
+            None,
+            None,
+            true,
+        )
+    });
+    assert!(
+        matches!(result, Err(OwnerOutboxError::ParentMismatch)),
+        "{result:?}"
+    );
+    assert_eq!(
+        store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
+        before
+    );
+    assert_eq!(
+        prefix_turn(&mut store, &mut cache, &observed).consumed_entries,
+        40
+    );
 }

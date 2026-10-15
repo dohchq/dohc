@@ -687,6 +687,23 @@ fn append_with_retained_base(
     }
 
     let parent = find_parent_for_binding(tx, &binding)?;
+    if let Some(parent) = &parent {
+        let saved: Option<(String,i64)> = tx.query_row("SELECT update_digest,native_sequence FROM owner_prefix_consumed WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4 AND append_key=?5",params![binding.workspace_id,binding.main_version_id,binding.object_id,outbox_id,input.append_key],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(read_sql)?;
+        if let Some((digest, sequence)) = saved {
+            if digest != update_digest {
+                return Err(OwnerOutboxError::AppendKeyMismatch);
+            }
+            return Ok(OwnerOutboxAppendResult {
+                outbox_id: parent.outbox_id.clone(),
+                sequence,
+                delivery_id: delivery_id(&parent.outbox_id, sequence, &digest),
+                update_digest: digest,
+                pending_bytes: parent.pending_bytes,
+                oldest_entry_at_ms: parent.oldest_entry_at_ms.unwrap_or(input.created_at_ms),
+                state: parent.state,
+            });
+        }
+    }
     let parent = match parent {
         Some(parent) => {
             if parent.binding != binding || parent.base_update_digest != base_update_digest {

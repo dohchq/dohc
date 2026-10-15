@@ -1244,7 +1244,7 @@ pub fn maybe_compact(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<CompactOutcome>, CollabError> {
-    compact_with_cache(store, key, threshold, faults, now_ms, None)
+    compact_with_cache(store, key, threshold, faults, now_ms, None, false)
 }
 
 pub(crate) fn compact_with_cache(
@@ -1254,6 +1254,7 @@ pub(crate) fn compact_with_cache(
     faults: &dyn FaultInjector,
     now_ms: i64,
     cache: Option<&WriterDocCache>,
+    prefix: bool,
 ) -> Result<TxnOutcome<CompactOutcome>, CollabError> {
     // A stale cheap read only ever costs an extra full reconstruction below,
     // never a wrong compaction. Forced compaction (`threshold == 0`, used by
@@ -1270,18 +1271,21 @@ pub(crate) fn compact_with_cache(
     }
 
     let cold;
-    let doc = match cache
+    let (doc, pending, up_to) = match cache
         .map(|cache| store.read_with(|conn| cache.doc_for_consumer(conn, key)))
         .transpose()?
         .flatten()
     {
-        Some(doc) => doc,
+        Some(doc) => (doc, cheap_pending, marker.head_update_seq),
         None => {
             cold = load_persisted(store, key)?.ok_or(CollabError::NoMarker)?;
-            &cold.doc
+            (
+                &cold.doc,
+                cold.marker.head_update_seq - cold.marker.head_snapshot_seq,
+                cold.up_to_seq,
+            )
         }
     };
-    let pending = marker.head_update_seq - marker.head_snapshot_seq;
     if below_threshold(pending, threshold) {
         return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
     }
@@ -1294,7 +1298,6 @@ pub(crate) fn compact_with_cache(
     // between this reconstruct and the write below.
     let snapshot_bytes = doc.encode_full_state();
     let sv_bytes = doc.encode_state_vector();
-    let up_to = marker.head_update_seq;
 
     store.write_with(faults, |tx| {
         let snapshot_sha = put_binary_blob(tx, &snapshot_bytes)?;
@@ -1348,7 +1351,7 @@ pub(crate) fn compact_with_cache(
             ],
         )
         .map_err(map_sql)?;
-        if cache.is_some() {
+        if prefix {
             crate::owner_outbox::prefix::refresh_tuple_in_tx(tx, key, now_ms)?;
         }
         Ok(CompactOutcome::Compacted {

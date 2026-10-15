@@ -1,6 +1,183 @@
 use super::*;
 
 #[test]
+fn prefix_real_restore_fences_refuse_every_seam_without_mutating_cache() {
+    prefix_restore_refusal(false);
+}
+
+#[test]
+fn prefix_real_restore_resumed_generation_refuses_every_seam_without_mutating_cache() {
+    prefix_restore_refusal(true);
+}
+
+fn prefix_restore_refusal(resumed: bool) {
+    use crate::owner_outbox::{draft, prefix, release, OwnerOutboxLimits};
+    {
+        let mut f = Fixture::new("Before restore");
+        f.edit("Accepted before restore", 1);
+        f.owner.invalidate(&mut f.store).unwrap();
+        // Model the non-host computer before sealing. The genuine host is registered again for restore.
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "DELETE FROM live_device_application_bindings WHERE available=0",
+                    [],
+                )
+                .map_err(write_sql)
+            })
+            .unwrap();
+        let checkpoint = f.canonical().encode_full_state();
+        let observed = draft::ObservedOwnerBinding {
+            binding: f.binding.clone(),
+            relay_database_namespace: "namespace".into(),
+            revision: 1,
+            accepted_cursor: 1,
+            native_head_sequence: f.sequence,
+            checkpoint_digest: hex_sha256(&checkpoint),
+            limits: OwnerOutboxLimits {
+                max_pending_bytes: 1_000_000,
+                max_pending_age_ms: 60_000,
+            },
+        };
+        f.store
+            .write_with(&NoFaults, |tx| {
+                draft::install_observed_binding_in_tx(tx, "workspace", &observed, &checkpoint)
+            })
+            .unwrap();
+        let draft_doc = Ydoc::wire();
+        draft_doc.apply(&checkpoint).unwrap();
+        let mut input = draft::OwnerDraftAppendInput {
+            binding: observed.binding.clone(),
+            expected_revision: 1,
+            append_key: "pending".into(),
+            update: if resumed {
+                checkpoint.clone()
+            } else {
+                draft_doc.richdoc_append_paragraph("Pending original")
+            },
+            person_edit: true,
+            agent_declaration: None,
+            automation_declaration: None,
+            now_ms: 3,
+        };
+        let mut cache = WriterDocCache::new();
+        let append = draft::append_draft_cached(
+            &mut f.store,
+            &mut cache,
+            "workspace",
+            input.clone(),
+            &NoFaults,
+        )
+        .unwrap();
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                release::request_in_tx(tx, &key, 4)?;
+                prefix::seal_in_tx(tx, &observed.binding, &"c".repeat(64), 1, 5)
+            })
+            .unwrap();
+        // Retain a result for the genuine accepted native row. No extra native tail is manufactured.
+        input.append_key = "consumed".into();
+        input.update = f
+            .store
+            .read_with(|c| {
+                let digest: String = c
+                    .query_row(
+                        "SELECT update_blob_sha256 FROM ydoc_updates WHERE seq=?1",
+                        [f.sequence],
+                        |r| r.get(0),
+                    )
+                    .map_err(read_sql)?;
+                durable::binary_blob_for_gate(c, &digest).map_err(ApplicationError::from)
+            })
+            .unwrap();
+        f.store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO owner_prefix_consumed VALUES('workspace','main','object',?1,?2,?3,?4)",params![append.outbox_id,input.append_key,hex_sha256(&input.update),f.sequence]).map_err(write_sql)
+        }).unwrap();
+        let warm = f.store.read_with(|c| cache.take_prefix(c, &key)).unwrap();
+        let tuple = f
+            .store
+            .read_with(|c| crate::doc_cache::CacheTuple::read_current(c, &key))
+            .unwrap()
+            .unwrap();
+        cache.finish_prefix(&key, warm, tuple, None);
+        let capability = f
+            .store
+            .read_with(|c| prefix::PrefixSettlement::prepare_in(c, &observed.binding))
+            .unwrap();
+        f.handle = f
+            .owner
+            .register(
+                &mut f.store,
+                "namespace".into(),
+                f.host.clone(),
+                f.binding.clone(),
+            )
+            .unwrap();
+        if resumed {
+            restore_and_resume(&mut f);
+        } else {
+            f.freeze(f.baseline_point.clone());
+        }
+        assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
+        let before = (
+            f.store
+                .table_row_count("owner_ydoc_outbox_entries")
+                .unwrap(),
+            f.store.table_row_count("owner_prefix_consumed").unwrap(),
+        );
+        let cached = cache.doc_full_state_for_test(&key);
+        assert!(cached.is_some());
+        assert!(f.store.read_with(|c| capability.verify_in(c)).is_err());
+        assert!(f
+            .store
+            .read_with(|c| draft::open_draft_in(c, &observed.binding, 1))
+            .is_err());
+        assert!(prefix::compact_prefix(
+            &mut f.store,
+            &mut cache,
+            &observed.binding,
+            &NoFaults,
+            100
+        )
+        .is_err());
+        assert!(f
+            .store
+            .write_with(&NoFaults, |tx| prefix::append_old_session_in_tx(
+                tx,
+                &append.outbox_id,
+                &input,
+                |_, _, _, _, _| panic!("restore must refuse late append")
+            ))
+            .is_err());
+        assert!(prefix::commit_prefix(
+            &mut f.store,
+            &mut cache,
+            &observed.binding,
+            &"c".repeat(64),
+            100,
+            &NoFaults,
+            |_, _, _, _| panic!("restore must refuse publication")
+        )
+        .is_err());
+        assert_eq!(
+            cache.doc_full_state_for_test(&key),
+            cached,
+            "resumed={resumed}"
+        );
+        assert_eq!(
+            (
+                f.store
+                    .table_row_count("owner_ydoc_outbox_entries")
+                    .unwrap(),
+                f.store.table_row_count("owner_prefix_consumed").unwrap()
+            ),
+            before
+        );
+    }
+}
+
+#[test]
 fn evidence_json_precharges_raw_columns_and_bounds_escaping_without_changing_digest_bytes() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(

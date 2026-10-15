@@ -320,6 +320,15 @@ fn native_prefix_reuses_an_existing_base_and_waits_for_its_history_frontier() {
         q.query_map([],|r|r.get(0))?.collect::<Result<Vec<_>,_>>()
     }).unwrap();
     assert_eq!(bases.len(), 1);
+    let marker = dohc_engine_collab::read_marker(&store, &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.base_origin_id.as_deref(), Some("local"));
+    assert_eq!(marker.base_origin_seq, Some(0));
+    assert_eq!(
+        store.table_row_count("ydoc_base_relay_candidates").unwrap(),
+        1
+    );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&bases[0]).unwrap(),
         base
@@ -374,7 +383,7 @@ fn commit_native_prefix(
         &"c".repeat(64),
         6,
         faults,
-        |tx, bytes, actor, attribution, _| {
+        |tx, bytes, actor, attribution| {
             dohc_engine_sync::journal_prefix_update_in_tx(
                 tx,
                 &observed.binding,

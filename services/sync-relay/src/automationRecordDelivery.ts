@@ -122,7 +122,7 @@ export function automationRecordDelivery(options: {
           } finally {frame.release();}
         }
         const {localYDocSequence: _sequence, applicationReplayed: _replayed, ...receipt} = result.ack;
-        if (!await replica.client.ownerYDocIsReceiptApplied(request(), {...target(binding), receipt}, signal)) return {kind: "retry"};
+        if (await replica.client.ownerYDocIsReceiptApplied(request(), {...target(binding), receipt}, signal) !== "applied") return {kind: "retry"};
         return {kind: "receipt", receipt};
       },
     };
