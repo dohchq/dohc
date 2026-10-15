@@ -86,9 +86,9 @@ test("run details show a failing step's test summary and never read a file outsi
   const details = runDetails(root, "000000002-bbbbbb", "2");
   assert.equal(details.branch, "done");
   assert.deepEqual(details.steps.map(step => [step.name, step.verdict, step.seconds]), [["tests", "FAIL", 1460], ["rust", "FAIL", null], ["typecheck", "PASS", 30]]);
-  assert.equal(details.steps[0].log, "✖ failing tests:\n\ntest at scripts\\a.test.mjs:1:1\n✖ the heartbeat keeps\n", "the excerpt starts at the runner's summary, without colors");
-  assert.equal(details.steps[1].log, null, "a log outside the attempt's folder is never read");
-  assert.equal(details.steps[2].log, null, "a passing step's log is not sent");
+  assert.equal(details.steps[0].excerpt, "✖ failing tests:\n\ntest at scripts\\a.test.mjs:1:1\n✖ the heartbeat keeps\n", "the excerpt starts at the runner's summary, without colors");
+  assert.equal(details.steps[1].excerpt, null, "a log outside the attempt's folder is never read");
+  assert.equal(details.steps[2].excerpt, null, "a passing step's log is not sent");
   assert.equal(runDetails(root, "../../000000002-bbbbbb", "2"), null);
   assert.equal(runDetails(root, "000000002-bbbbbb", "2/../../1"), null);
   assert.equal(runDetails(root, "000000009-ffffff", "1"), null, "a request that is gone has no details");

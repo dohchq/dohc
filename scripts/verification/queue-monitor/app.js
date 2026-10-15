@@ -12,6 +12,8 @@ const at = t => clockFormat.format(new Date(t));
 const dur = ms => ms == null || !Number.isFinite(ms) ? "unknown" : ms >= HOUR ? `${Math.floor(ms / HOUR)} h ${String(Math.round(ms % HOUR / MIN)).padStart(2, "0")} m` : `${Math.max(0, Math.round(ms / MIN))} min`;
 const stopwatch = ms => { const s = Math.max(0, Math.floor((ms ?? 0) / 1000)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = s % 60; return h ? `${h}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}` : `${m}:${String(r).padStart(2, "0")}`; };
 const ago = t => `${dur(Date.now() - t)} ago`;
+// How fresh a log is: seconds while it is recent, then minutes.
+const freshness = t => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 5 ? "just now" : s < 60 ? `${s} s ago` : ago(t); };
 const seconds = s => s == null ? "" : s >= 60 ? `${Math.floor(s / 60)}m ${String(Math.round(s % 60)).padStart(2, "0")}s` : `${Math.round(s)}s`;
 const OUTCOME = { passed: "Passed", failed: "Failed", environment: "Machine failure", error: "Host gave up", cancelled: "Cancelled", superseded: "Replaced", interrupted: "Interrupted", running: "Running", queued: "Waiting" };
 const outcomeName = o => OUTCOME[o] ?? o;
@@ -19,7 +21,7 @@ const machine = o => o === "environment" || o === "error";
 const prLink = branch => branch === "main (nightly)" ? "https://github.com/dohchq/dohc/commits/main" : `https://github.com/dohchq/dohc/pulls?q=is%3Apr+head%3A${encodeURIComponent(branch)}`;
 const runKey = run => `${run.id}/${run.attempt}`;
 
-const ui = { data: null, load: { 1: null, 7: null }, loadRange: 1, tab: "now", range: 1, filter: "all", search: "", shown: 25, laneLog: new Map(), drawer: null, failures: 0 };
+const ui = { data: null, load: { 1: null, 7: null }, loadRange: 1, tab: "now", range: 1, filter: "all", search: "", shown: 25, pinned: new Map(), logMeta: new Map(), drawer: null, failures: 0 };
 
 // Set an element's HTML only when it changed, so unchanged parts keep focus, hover, and scroll.
 function patch(el, html) { if (el && el._html !== html) { el.innerHTML = html; el._html = html; } }
@@ -143,7 +145,11 @@ function laneShell(n) {
   el.id = `lane-${n}`;
   el.className = "lane";
   el.innerHTML = `<div class="lane-no" aria-hidden="true">${n}</div><div class="lane-head"></div><div class="lane-track"></div><div class="lane-steps"></div>
-    <div class="terminal" hidden><div class="term-head"><div class="term-tabs" role="group" aria-label="Log"></div><button class="term-open" type="button">Run details</button></div><pre class="term-body" tabindex="0" aria-label="Lane ${n} output"></pre></div>
+    <div class="terminal" hidden>
+      <div class="term-head"><select class="term-select" aria-label="Log to show"></select>
+        <div class="term-actions"><button class="term-follow" type="button" hidden>Follow the running step</button><button class="term-open" type="button">Run details</button></div></div>
+      <div class="term-status" aria-live="polite"></div>
+      <pre class="term-body" tabindex="0" aria-label="Lane ${n} output"></pre></div>
     <div class="lane-next"></div>`;
   $("#lanes").append(el);
   return el;
@@ -168,13 +174,13 @@ function laneViews({ data, running }) {
     if (data.lanes && !holder) { views.push({ n }); continue; }
     if (holder?.kind === "inline") {
       views.push({ n, source: `slot:${n}`, inline: true, item: holder, title: titleOf(holder), sub: subOf(holder) ?? holder.checkout, branch: holder.branch,
-        clockMs: holder.elapsedMs, since: holder.startedAt, head: holder.head, steps: holder.steps, logs: holder.logs, phase: holder.phase });
+        clockMs: holder.elapsedMs, since: holder.startedAt, head: holder.head, steps: holder.steps, packages: holder.packages, logs: holder.logs, phase: holder.phase });
       continue;
     }
     const run = holder ? running.find(r => r.id === holder.requestId) : running.find(r => r.lane === n);
     if (!run) { views.push({ n, waitingFor: holder?.requestId ?? null }); continue; }
     views.push({ n, source: `run:${runKey(run)}`, run, item: run, title: titleOf(run), sub: subOf(run), branch: run.branch, clockMs: run.awakeMs, since: run.startedAt,
-      head: run.head, attempt: run.attempt, scope: run.scope, steps: run.steps, logs: run.logs, phase: run.phase });
+      head: run.head, attempt: run.attempt, scope: run.scope, steps: run.steps, packages: run.packages, logs: run.logs, phase: run.phase });
   }
   return views;
 }
@@ -214,19 +220,16 @@ function renderLanes(d) {
     patch($(".lane-track", el), `<div class="steptrack">${steps.map(step => {
       const cls = step.verdict === "NOT RUN" ? "NOT" : step.verdict;
       const typical = stepTimes.get(step.name);
-      return `<i class="seg-${esc(cls)}" style="flex:0 0 ${(elapsed(step) / total * 100).toFixed(2)}%" data-tip="${esc(`${step.name}\n${step.verdict === "RUNNING" ? "running for" : step.verdict.toLowerCase()} ${seconds(elapsed(step))}${typical ? `, typically ${seconds(typical)}` : ""}`)}"></i>`;
-    }).join("")}${typicalMark}</div>`);
+      return `<i class="seg-${esc(cls)}"${step.log ? ` data-console-log="${esc(step.log)}"` : ""} style="flex:0 0 ${(elapsed(step) / total * 100).toFixed(2)}%" data-tip="${esc(`${step.name}\n${step.verdict === "RUNNING" ? "running for" : step.verdict.toLowerCase()} ${seconds(elapsed(step))}${typical ? `, typically ${seconds(typical)}` : ""}${step.log ? "\nSelect to show its log" : ""}`)}"></i>`;
+    }).join("")}${typicalMark}</div>${packageTrack(view, data.now)}`);
     const active = steps.filter(step => step.verdict === "RUNNING");
     const done = steps.filter(step => step.verdict !== "RUNNING");
     const failed = steps.filter(step => step.verdict === "FAIL");
     patch($(".lane-steps", el), `${active.map(step => `<span class="chip">${esc(step.name)}</span>`).join("")}
       <span>${done.length} step${done.length === 1 ? "" : "s"} done</span>${failed.length ? `<span class="result failed">${esc(failed.map(step => step.name).join(", "))} failed</span>` : ""}`);
-    const terminal = $(".terminal", el);
-    terminal.hidden = false;
+    $(".terminal", el).hidden = false;
     $(".term-open", el).hidden = !view.run;
-    const chosen = ui.laneLog.get(view.source) ?? defaultLog(view.logs);
-    const files = [...new Set([chosen, ...(view.logs ?? []).map(log => log.file)].filter(Boolean))].slice(0, 4);
-    patch($(".term-tabs", el), files.map(file => `<button type="button" data-lane-log="${esc(file)}" aria-pressed="${file === chosen}" title="${esc(file)}">${esc(logLabel(file))}</button>`).join(""));
+    renderConsole(el, view);
     patch($(".lane-next", el), "");
   }
   // Requests the queue has prepared, and agents' inline gates, waiting for a free lane.
@@ -238,31 +241,99 @@ function renderLanes(d) {
     <ul class="ready-list">${waiting.map(item => `<li><b>${esc(item.title)}</b>${item.sub ? `<span class="mono muted">${esc(item.sub)}</span>` : ""}<span class="muted">${esc(item.note)}, since ${esc(at(item.since))}</span></li>`).join("")}</ul></div>` : "");
 }
 
+const byStart = (a, b) => (Date.parse(a.startedAt ?? "") || 0) - (Date.parse(b.startedAt ?? "") || 0);
+// The log the console follows: the newest running test package, else the newest running step that writes a log, else the log written last.
+function followLog(view) {
+  const newestRunning = list => (list ?? []).filter(step => step.verdict === "RUNNING" && step.log).sort(byStart).at(-1);
+  return newestRunning(view.packages)?.log ?? newestRunning(view.steps)?.log ?? defaultLog(view.logs);
+}
+const consoleFile = view => ui.pinned.get(view.source) ?? followLog(view);
+const stepOfLog = (view, file) => [...(view.steps ?? []), ...(view.packages ?? [])].find(step => step.log === file) ?? null;
+const stepState = (step, now) => !step ? "" : step.verdict === "RUNNING" ? `running for ${seconds(step.startedAt ? (now - Date.parse(step.startedAt)) / 1000 : 0)}`
+  : step.verdict === "PASS" ? `passed in ${seconds(step.seconds)}` : step.verdict === "FAIL" ? `failed after ${seconds(step.seconds)}` : "not run";
+const sizeText = bytes => bytes == null ? "" : bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+const verdictMark = verdict => verdict === "PASS" ? "passed" : verdict === "FAIL" ? "failed" : verdict === "RUNNING" ? "running" : "idle";
+
+// The test packages under the gate's steps: each as wide as its time, and selecting one shows its log.
+function packageTrack(view, now) {
+  const packages = (view.packages ?? []).filter(step => step.verdict && step.name !== "inventory");
+  if (!packages.length) return "";
+  const elapsed = step => step.seconds ?? (step.startedAt ? (now - Date.parse(step.startedAt)) / 1000 : 0);
+  const total = Math.max(1, packages.reduce((sum, step) => sum + elapsed(step), 0));
+  return `<div class="pkgtrack"><span class="pkg-label">tests</span><div class="steptrack thin">${packages.map(step => {
+    const cls = step.verdict === "NOT RUN" ? "NOT" : step.verdict;
+    return `<i class="seg-${esc(cls)}"${step.log ? ` data-console-log="${esc(step.log)}"` : ""} style="flex:0 0 ${(elapsed(step) / total * 100).toFixed(2)}%" data-tip="${esc(`${step.name}\n${stepState(step, now)}${step.log ? "\nSelect to show its log" : ""}`)}"></i>`;
+  }).join("")}</div></div>`;
+}
+
+// The console's picker: every log in run order, grouped into gate steps, test packages, and other logs. Selecting one keeps showing it.
+function renderConsole(el, view) {
+  const file = consoleFile(view);
+  const mark = verdict => verdict === "PASS" ? "✓" : verdict === "FAIL" ? "✕" : verdict === "RUNNING" ? "●" : verdict === "NOT RUN" ? "–" : " ";
+  const option = (log, label) => `<option value="${esc(log)}"${log === file ? " selected" : ""}>${esc(label)}</option>`;
+  const steps = (view.steps ?? []).filter(step => step.log);
+  const packages = (view.packages ?? []).filter(step => step.log);
+  const known = new Set([...steps, ...packages].map(step => step.log));
+  const others = (view.logs ?? []).map(log => log.file).filter(name => !known.has(name)).sort((a, b) => (a === "worker.log") - (b === "worker.log") || a.localeCompare(b));
+  const groups = [
+    steps.length ? `<optgroup label="Gate steps">${steps.map(step => option(step.log, `${mark(step.verdict)} ${step.name}`)).join("")}</optgroup>` : "",
+    packages.length ? `<optgroup label="Tests by package">${packages.map(step => option(step.log, `${mark(step.verdict)} ${logLabel(step.log)}`)).join("")}</optgroup>` : "",
+    others.length ? `<optgroup label="Other logs">${others.map(name => option(name, logLabel(name))).join("")}</optgroup>` : "",
+  ].join("");
+  const select = $(".term-select", el);
+  patch(select, groups || '<option value="">No logs yet</option>');
+  select.disabled = !groups;
+  if (file && select.value !== file) select.value = file;
+  $(".term-follow", el).hidden = !ui.pinned.has(view.source);
+  renderConsoleStatus(el, view);
+}
+
+// What the console shows and its state, so an empty console is never a mystery.
+function renderConsoleStatus(el, view) {
+  const file = consoleFile(view);
+  const meta = ui.logMeta.get(`${view.source}:${file}`);
+  const step = stepOfLog(view, file);
+  const mode = ui.pinned.has(view.source) ? "Showing" : "Following";
+  patch($(".term-status", el), !file ? `<span class="mode">Waiting</span> <span>${esc(waitingWords(view))}</span>`
+    : `<span class="mode">${mode}</span> <b>${esc(step?.name ?? logLabel(file))}</b>${step ? ` <span>${esc(stepState(step, ui.data.now))}</span>` : ""}${meta?.size != null ? ` <span>${esc(sizeText(meta.size))}</span>` : ""}${meta?.modifiedAt ? ` <span>updated ${esc(freshness(Date.parse(meta.modifiedAt)))}</span>` : ""}${meta?.error ? ` <span class="warn">could not refresh: ${esc(meta.error)}, retrying</span>` : ""}`);
+}
+
+const waitingWords = view => view.phase === "preparing" ? "Getting the lane ready: checking out the branch and installing. Output appears when the first step starts."
+  : view.phase === "waiting for the host lane" ? "Prepared and waiting for a free verification lane." : "Waiting for the first step to write output.";
+
 async function refreshTerminals() {
   if (ui.tab !== "now" || document.hidden || !ui.data) return;
   const views = laneViews(derived());
-  for (const el of $$("#lanes > .lane.running")) {
-    const source = el.dataset.source;
-    const view = views.find(v => v.source === source);
-    if (!view) continue;
-    const file = ui.laneLog.get(source) ?? defaultLog(view.logs);
+  await Promise.all($$("#lanes > .lane.running").map(async el => {
+    const view = views.find(v => v.source === el.dataset.source);
+    if (!view) return;
+    const file = consoleFile(view);
     const pre = $(".term-body", el);
-    if (!file) { writeTerminal(pre, "Waiting for the first step's output.", `${source}:none`); continue; }
+    if (!file) { writeTerminal(pre, waitingWords(view), `${view.source}:none`, true); renderConsoleStatus(el, view); return; }
     const url = view.inline ? `api/log?slot=${view.n}&file=${encodeURIComponent(file)}`
       : `api/log?id=${encodeURIComponent(view.run.id)}&attempt=${encodeURIComponent(view.run.attempt)}&file=${encodeURIComponent(file)}`;
+    const key = `${view.source}:${file}`;
     try {
       const log = await getJson(url);
-      writeTerminal(pre, log?.text || "No output yet.", `${source}:${file}`);
-    } catch { /* The next refresh tries again. */ }
-  }
+      ui.logMeta.set(key, { size: log?.size ?? null, modifiedAt: log?.modifiedAt ?? null });
+      const step = stepOfLog(view, file);
+      const empty = step?.verdict === "RUNNING" ? `${step.name} has written nothing yet. It started ${seconds((Date.now() - Date.parse(step.startedAt)) / 1000)} ago.`
+        : step ? `${step.name} wrote no output.` : "This log is empty.";
+      writeTerminal(pre, log?.text?.trim() ? log.text : empty, key, !log?.text?.trim());
+    } catch (error) {
+      // Keep what is on screen and say why it is not moving.
+      ui.logMeta.set(key, { ...(ui.logMeta.get(key) ?? {}), error: error.message });
+    }
+    renderConsoleStatus(el, view);
+  }));
 }
 
 // Replace a terminal's text, and follow its end only if the reader was already at the end.
-function writeTerminal(pre, text, source) {
+function writeTerminal(pre, text, source, message = false) {
   const following = pre._source !== source || pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 24;
   if (pre._text === text && pre._source === source) return;
   pre.textContent = text;
-  pre.classList.toggle("empty", !text.trim());
+  pre.classList.toggle("empty", message || !text.trim());
   pre._text = text;
   pre._source = source;
   if (following) pre.scrollTop = pre.scrollHeight;
@@ -324,8 +395,18 @@ function lineChart(el, samples, field, { max, unit = "", cls = "run", days = 1 }
 }
 
 /* Views */
+function renderJustFinished({ data, finished }) {
+  const recent = finished.slice(-4).reverse();
+  patch($("#just-finished"), recent.length ? `<div class="panel"><div class="panel-head"><h2>Just finished</h2><button class="link" data-goto="history">All runs</button></div>
+    <ul class="finished-list">${recent.map(run => `<li><span class="result ${esc(run.outcome)}">${esc(outcomeName(run.outcome))}</span>
+      <span class="f-title"><b>${esc(titleOf(run))}</b>${run.thread ? `<span class="mono muted">${esc(run.branch)}</span>` : ""}</span>
+      <span class="muted">${esc(stopwatch(Date.parse(run.endedAt) - Date.parse(run.startedAt)))}, ${esc(ago(Date.parse(run.endedAt)))}</span>
+      <span class="f-actions"><button type="button" class="link" data-id="${esc(run.id)}" data-attempt="${run.attempt}">Summary</button><button type="button" class="link" data-id="${esc(run.id)}" data-attempt="${run.attempt}" data-pane="logs">Logs</button></span></li>`).join("")}</ul></div>` : "");
+}
+
 function renderNow(d) {
   renderLanes(d);
+  renderJustFinished(d);
   renderTower(d);
   renderTrack($("#track-now"), d, 1);
   patch($("#legend-now"), legendHtml);
@@ -471,8 +552,8 @@ async function refreshLoad(days = 1) {
 }
 
 /* The run drawer: a summary, the steps on a timeline, and every log. */
-async function openRun(id, attempt, opener) {
-  ui.drawer = { id, attempt: String(attempt), pane: "summary", file: null, data: null, opener: opener ?? document.activeElement };
+async function openRun(id, attempt, opener, pane = "summary") {
+  ui.drawer = { id, attempt: String(attempt), pane, file: null, data: null, opener: opener ?? document.activeElement };
   $("#tip").hidden = true;
   $("#drawer").hidden = false;
   $("#scrim").hidden = false;
@@ -522,7 +603,7 @@ function renderDrawer() {
     patch(body, `
       ${d.reason || d.error ? `<div class="banner${outcome === "failed" ? " bad" : ""}">${esc(d.reason ?? d.error)}</div>` : ""}
       ${d.stopped ? `<div class="banner">The run stopped after ${esc(d.stopped.after)} failed. Not run: ${esc(d.stopped.notRun.join(", "))}.</div>` : ""}
-      ${failing.map(step => `<details open><summary>${esc(step.group === "javascript" ? `tests › ${step.name}` : step.name)} <span class="muted">failed${step.seconds != null ? ` after ${esc(seconds(step.seconds))}` : ""}</span></summary>${step.error ? `<div class="muted" style="font-size:12px;margin-top:4px">${esc(step.error)}</div>` : ""}${step.log ? `<pre class="excerpt">${esc(step.log)}</pre>` : ""}</details>`).join("")}
+      ${failing.map(step => `<details open><summary>${esc(step.group === "javascript" ? `tests › ${step.name}` : step.name)} <span class="muted">failed${step.seconds != null ? ` after ${esc(seconds(step.seconds))}` : ""}</span></summary>${step.error ? `<div class="muted" style="font-size:12px;margin-top:4px">${esc(step.error)}</div>` : ""}${step.excerpt ? `<pre class="excerpt">${esc(step.excerpt)}</pre>` : ""}</details>`).join("")}
       ${!failing.length && outcome === "passed" ? '<div class="banner" style="background:var(--pass-soft);border-left-color:var(--pass)">Every selected check passed.</div>' : ""}
       ${d.flaky.length ? `<div><h2>Passed only on retry</h2>${d.flaky.map(f => `<div style="font-size:13px;margin-top:6px"><span class="mono">${esc(f.test)}</span> <span class="muted">${esc(f.step)}</span></div>`).join("")}</div>` : ""}
       ${d.slowest.length ? `<div><h2>Slowest tests</h2><div class="bars" style="margin-top:8px">${d.slowest.map(t => `<div class="bar-row"><span class="b-name" title="${esc(t.test)}">${esc(t.test)}</span><span class="b-track"><i style="width:${(t.seconds / d.slowest[0].seconds * 100).toFixed(1)}%"></i></span><span class="b-value">${esc(seconds(t.seconds))}</span></div>`).join("")}</div></div>` : ""}`);
@@ -586,13 +667,14 @@ document.addEventListener("DOMContentLoaded", () => {
     if (tab) return showTab(tab.dataset.tab);
     const goto = event.target.closest("[data-goto]");
     if (goto) return showTab(goto.dataset.goto);
-    const laneLog = event.target.closest("[data-lane-log]");
-    if (laneLog) {
-      const key = laneLog.closest(".lane").dataset.source;
-      ui.laneLog.set(key, laneLog.dataset.laneLog);
+    const consoleLog = event.target.closest(".lane [data-console-log]");
+    if (consoleLog) {
+      ui.pinned.set(consoleLog.closest(".lane").dataset.source, consoleLog.dataset.consoleLog);
       render();
       return refreshTerminals();
     }
+    const follow = event.target.closest(".term-follow");
+    if (follow) { ui.pinned.delete(follow.closest(".lane").dataset.source); render(); return refreshTerminals(); }
     const open = event.target.closest(".term-open");
     if (open) { const [id, attempt] = open.closest(".lane").dataset.key.split("/"); return openRun(id, attempt, open); }
     const pane = event.target.closest("#drawer [data-pane]");
@@ -614,7 +696,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const thread = event.target.closest("[data-thread]");
     if (thread) { ui.search = thread.dataset.thread; $("#search").value = ui.search; ui.shown = 25; return showTab("history"); }
     const run = event.target.closest("[data-id][data-attempt]");
-    if (run) return openRun(run.dataset.id, run.dataset.attempt, run);
+    if (run) return openRun(run.dataset.id, run.dataset.attempt, run, run.dataset.pane ?? "summary");
+  });
+  document.addEventListener("change", event => {
+    const select = event.target.closest(".term-select");
+    if (!select || !select.value) return;
+    ui.pinned.set(select.closest(".lane").dataset.source, select.value);
+    render();
+    refreshTerminals();
   });
   $("#drawer-close").addEventListener("click", closeRun);
   $("#scrim").addEventListener("click", closeRun);

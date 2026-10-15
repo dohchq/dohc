@@ -60,14 +60,27 @@ function attemptLogs(folder) {
   })).sort((a, b) => Date.parse(b.modifiedAt) - Date.parse(a.modifiedAt));
 }
 
-const stepRow = step => ({ name: step.name, verdict: step.verdict ?? null, startedAt: step.startedAt ?? null,
-  seconds: Number.isFinite(step.seconds) ? Math.round(step.seconds) : null });
+// A step's log as a name inside its folder, when it is one the dashboard may show.
+const logOf = (folder, path) => {
+  if (typeof path !== "string") return null;
+  const name = relative(folder, resolve(folder, path)).replaceAll("\\", "/");
+  return logName.test(name) ? name : null;
+};
+const stepRow = (step, folder) => ({ name: step.name, verdict: step.verdict ?? null, startedAt: step.startedAt ?? null,
+  seconds: Number.isFinite(step.seconds) ? Math.round(step.seconds) : null, ...(folder ? { log: logOf(folder, step.log) } : {}) });
 
-/** A running attempt's steps from its receipt so far, and its three most recently written logs. */
+/** A run's live view from its folder: its gate steps and package steps so far, each with its log, and every log it has written. */
+function liveSteps(folder) {
+  return {
+    steps: (readJson(join(folder, "result.json"))?.steps ?? []).map(step => stepRow(step, folder)),
+    packages: (readJson(join(folder, "js-tests", "result.json"))?.steps ?? []).map(step => stepRow(step, folder)),
+    logs: attemptLogs(folder),
+  };
+}
+
+/** A running attempt's live view. */
 function progress(root, id, n) {
-  const folder = queuePaths(root).attempt(id, n);
-  const steps = (readJson(join(folder, "result.json"))?.steps ?? []).map(stepRow);
-  return { steps, logs: attemptLogs(folder).slice(0, 3) };
+  return liveSteps(queuePaths(root).attempt(id, n));
 }
 
 /**
@@ -140,7 +153,7 @@ function slotView(status, threadOf) {
     const branch = owner.checkout ? checkoutBranch(owner.checkout) : null;
     const folder = owner.checkout ? inlineFolder(owner.checkout, owner.commit) : null;
     return { branch, thread: threadOf(branch, owner.checkout), checkout: owner.checkout ?? null, head: owner.commit?.slice(0, 12) ?? null, phase: owner.phase ?? null,
-      ...(folder ? { steps: (readJson(join(folder, "result.json"))?.steps ?? []).map(stepRow), logs: attemptLogs(folder).slice(0, 3) } : { steps: [], logs: [] }) };
+      ...(folder ? liveSteps(folder) : { steps: [], packages: [], logs: [] }) };
   };
   return {
     slots: status.slots,
@@ -301,7 +314,7 @@ export function runDetails(root, id, n) {
   if (!row) return null;
   const receipt = readJson(join(folder, "result.json"));
   const js = readJson(join(folder, "js-tests", "result.json"));
-  const step = (item, group) => ({ group, ...stepRow(item), error: clip(item.error, 400), log: item.verdict === "FAIL" ? failureExcerpt(folder, item.log) : null });
+  const step = (item, group) => ({ group, ...stepRow(item, folder), error: clip(item.error, 400), excerpt: item.verdict === "FAIL" ? failureExcerpt(folder, item.log) : null });
   return {
     id, attempt: Number(n), branch: branchOf(request), head: request.head.slice(0, 12), base: request.base.slice(0, 12), scope: request.scope, nightly: Boolean(request.nightly),
     state: status.state, outcome: row.outcome ?? null, cause: row.cause ?? null, reason: clip(row.reason, 600), lane: row.lane ?? null,

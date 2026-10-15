@@ -137,9 +137,32 @@ main { padding: 16px 20px 40px; }
 .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--run); }
 .terminal { margin-top: 12px; border-radius: 8px; background: var(--term); border: 1px solid var(--term-rule); overflow: hidden; }
 .term-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--term-rule); }
-.term-tabs { display: flex; gap: 4px; min-width: 0; overflow-x: auto; }
-.term-tabs button { border: 0; background: none; color: var(--term-muted); font: 12px var(--mono); padding: 3px 8px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
-.term-tabs button[aria-pressed="true"] { background: var(--term-rule); color: var(--term-ink); }
+.term-head { align-items: center; }
+.term-select { min-width: 0; max-width: 100%; flex: 1 1 auto; background: var(--term-rule); color: var(--term-ink); border: 1px solid var(--term-rule); border-radius: 6px; font: 12px var(--mono); padding: 4px 8px; }
+.term-select:focus-visible { outline: 2px solid var(--focus); }
+.pkgtrack { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 8px; align-items: center; margin: 4px 0 6px; }
+.pkg-label { font: 12px var(--mono); color: var(--muted); }
+.steptrack.thin { height: 8px; margin: 0; }
+.term-actions { display: flex; gap: 6px; flex: none; }
+.ctab { display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; background: none; color: var(--term-muted); font: 12px var(--mono); padding: 2px 8px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+.ctab:hover:not([disabled]) { color: var(--term-ink); border-color: var(--term-rule); }
+.ctab[aria-pressed="true"] { background: var(--term-rule); color: var(--term-ink); border-color: var(--term-rule); }
+.ctab[disabled] { cursor: default; opacity: .6; }
+.ctab i { width: 7px; height: 7px; border-radius: 50%; background: var(--term-muted); flex: none; }
+.ctab.passed i { background: var(--pass); } .ctab.failed i { background: var(--fail); } .ctab.running i { background: var(--run); box-shadow: 0 0 0 3px rgba(91, 157, 255, .25); }
+.term-follow { border: 1px solid var(--run); background: none; color: var(--term-ink); border-radius: 6px; font-size: 12px; padding: 3px 10px; cursor: pointer; white-space: nowrap; }
+.term-status { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; padding: 6px 12px; border-bottom: 1px solid var(--term-rule); font-size: 12px; color: var(--term-muted); }
+.term-status .mode { color: var(--run); font-weight: 600; }
+.term-status b { color: var(--term-ink); font: 600 12px var(--mono); }
+.term-status .warn { color: var(--machine); }
+.steptrack i[data-console-log] { cursor: pointer; }
+.steptrack i[data-console-log]:hover { filter: brightness(1.2); }
+.finished-list { list-style: none; margin: 0; padding: 0; }
+.finished-list li { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto auto; gap: 12px; align-items: baseline; padding: 7px 0; border-bottom: 1px solid var(--rule-2); font-size: 13px; }
+.finished-list li:last-child { border-bottom: 0; }
+.f-title { display: flex; flex-wrap: wrap; gap: 2px 10px; min-width: 0; }
+.f-title b { font: 600 14px var(--display); }
+.f-actions { display: flex; gap: 12px; }
 .term-open { border: 1px solid var(--term-rule); background: none; color: var(--term-ink); border-radius: 6px; font-size: 12px; padding: 3px 10px; cursor: pointer; white-space: nowrap; }
 .term-body { margin: 0; height: 300px; overflow: auto; padding: 10px 12px; color: var(--term-ink); font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-word; scrollbar-color: var(--term-rule) transparent; }
 .term-body.empty { color: var(--term-muted); }
@@ -307,6 +330,8 @@ details > summary { cursor: pointer; font-weight: 600; }
 }
 
 @media (max-width: 760px) {
+  .finished-list li { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  .f-title { flex: 1 1 100%; order: -1; }
   .topbar { grid-template-columns: 1fr auto; padding: 10px 12px; }
   .service { grid-column: 1 / 3; grid-row: 2; }
   .tabs { grid-column: 1 / 3; grid-row: 3; justify-self: stretch; overflow-x: auto; }
