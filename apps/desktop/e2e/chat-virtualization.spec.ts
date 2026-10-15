@@ -60,7 +60,8 @@ test.describe("chat list virtualization", () => {
       await trigger.click();
       const picker = page.getByTestId("fixture-chat-reaction-picker");
       await expect(picker).toBeVisible();
-      await page.getByRole("list").hover();
+      // The picker covers the middle of the list; scroll from its top corner.
+      await page.getByRole("list").hover({ position: { x: 8, y: 8 } });
       await page.mouse.wheel(0, -100_000);
       await expect(page.locator('[data-message-id="m-0"]')).toBeInViewport();
       await expect(picker).toHaveCount(0);
