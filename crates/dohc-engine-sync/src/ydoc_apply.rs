@@ -2700,6 +2700,18 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
                     retire_complete_ydoc_lineage_in_tx(tx, complete)?;
                     return Ok(LineageFold::NoContent);
                 }
+                // Peers already hold the settled body, so an outside edit that
+                // keeps it, such as a frontmatter change, may fold its nested
+                // items. The exact-text check below still applies.
+                Err(CollabError::MarkdownNotRepresentable)
+                    if marker.content_kind == ContentKind::Richdoc
+                        && last_settled_text_in_tx(tx, key)?.is_some_and(|settled| {
+                            markdown_body(&settled) == markdown_body(chosen_text)
+                        }) =>
+                {
+                    doc.rewrite_settled_body_for_fold(chosen_text)
+                        .map_err(map_fold_edit_error)?
+                }
                 result => result.map_err(map_fold_edit_error)?,
             };
         // Check the delta before projection, which has a separate byte cap.
@@ -2731,17 +2743,7 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
             let mut projection = canonical;
             if marker.content_kind == ContentKind::Richdoc
                 && let Some(source) = doc.settled_markdown_source(&projection.content, || {
-                    tx.query_row(
-                        "SELECT b.text FROM ydoc_docs d JOIN blobs b \
-                         ON b.sha256=COALESCE(d.last_settled_sha, \
-                           CASE WHEN d.settle_seq=0 THEN d.seed_source_sha256 END) \
-                         WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
-                        params![key.workspace_id, key.version_id, key.object_id],
-                        |row| row.get::<_, Option<String>>(0),
-                    )
-                    .optional()
-                    .map(Option::flatten)
-                    .map_err(SyncError::corrupt)
+                    last_settled_text_in_tx(tx, key)
                 })?
             {
                 projection.content = source;
@@ -5584,6 +5586,29 @@ fn refuse_ydoc_with_reason(
     crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, move |_tx, _op| {
         Ok(crate::apply::MutationOutcome::RefusedRetainingMutation { reason })
     })
+}
+
+/// The lineage's last settled text, or its seed source before any settle.
+fn last_settled_text_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<String>, SyncError> {
+    tx.query_row(
+        "SELECT b.text FROM ydoc_docs d JOIN blobs b \
+         ON b.sha256=COALESCE(d.last_settled_sha, \
+           CASE WHEN d.settle_seq=0 THEN d.seed_source_sha256 END) \
+         WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(SyncError::corrupt)
+}
+
+fn markdown_body(markdown: &str) -> &str {
+    dohc_engine_domain::collections::markdown_frontmatter_json_with_body(markdown)
+        .map_or(markdown, |(_, body)| body)
 }
 
 fn map_fold_edit_error(error: CollabError) -> SyncError {

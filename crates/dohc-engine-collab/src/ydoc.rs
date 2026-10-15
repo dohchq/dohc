@@ -661,7 +661,7 @@ impl Ydoc {
                         ContentKind::Richdoc,
                         source,
                         reading,
-                        false,
+                        FileFold::No,
                     )
                     .is_ok()
                     && staged
@@ -1241,7 +1241,12 @@ impl Ydoc {
         markdown: &str,
         reading: MarkdownReading,
     ) -> Result<Vec<u8>, CollabError> {
-        self.rewrite_content_to_markdown_checked::<true>(content_kind, markdown, reading, false)
+        self.rewrite_content_to_markdown_checked::<true>(
+            content_kind,
+            markdown,
+            reading,
+            FileFold::No,
+        )
     }
 
     /// Rewrite a file fold, refusing nested items and quote-depth overflow
@@ -1255,7 +1260,19 @@ impl Ydoc {
             content_kind,
             markdown,
             MarkdownReading::Projection,
-            true,
+            FileFold::Strict,
+        )
+    }
+
+    /// Rewrite a file fold whose body is the lineage's last settled body.
+    /// Peers already hold that body, so its nested items may fold; quote-depth
+    /// overflow still refuses.
+    pub fn rewrite_settled_body_for_fold(&self, markdown: &str) -> Result<Vec<u8>, CollabError> {
+        self.rewrite_content_to_markdown_checked::<true>(
+            ContentKind::Richdoc,
+            markdown,
+            MarkdownReading::Projection,
+            FileFold::SettledBody,
         )
     }
 
@@ -1264,8 +1281,9 @@ impl Ydoc {
         content_kind: ContentKind,
         markdown: &str,
         reading: MarkdownReading,
-        file_fold: bool,
+        fold: FileFold,
     ) -> Result<Vec<u8>, CollabError> {
+        let file_fold = fold != FileFold::No;
         let update = match content_kind {
             ContentKind::Plaintext => {
                 let t = self.doc.get_or_insert_text(ROOT_PLAINTEXT);
@@ -1301,7 +1319,7 @@ impl Ydoc {
                     normalized_body.as_deref().unwrap_or(body),
                     reading,
                 );
-                if refused || (file_fold && refused_fold_item_bodies(&blocks)) {
+                if refused || (fold == FileFold::Strict && refused_fold_item_bodies(&blocks)) {
                     return Err(CollabError::MarkdownNotRepresentable);
                 }
                 if file_fold && quote_fold_overflows(&blocks, 0) {
@@ -2579,6 +2597,15 @@ const MARKDOWN_XML_MAX_DEPTH: usize = 128;
 
 fn blank_line(line: &str) -> bool {
     line.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
+}
+
+/// How a rewrite treats outside file bytes. Only a strict fold refuses
+/// nested item bodies; a fold of the lineage's settled body keeps them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileFold {
+    No,
+    Strict,
+    SettledBody,
 }
 
 fn refused_fold_item_bodies(blocks: &[MdBlock<'_>]) -> bool {

@@ -2522,6 +2522,7 @@ mod tests {
             .expect("canonical seed");
         doc.preserve_folded_markdown_source(source)
             .expect("source witness");
+        assert_eq!(doc.preserved_markdown_source(canonical), None);
         let seed = doc.encode_full_state();
         dohc_engine_collab::record_local_update(
             store,

@@ -174,23 +174,49 @@ fn passive_store_concurrent_delayed_and_source() {
         b.project(ContentKind::Plaintext).unwrap().content
     );
     let mut source_results = Vec::new();
-    for (name, source) in [
+    // A refused source has a desktop-written witness over its canonical
+    // document, which neither Rust reader can rebuild. The lenient reading
+    // keeps the nested-list witness. Indented code loses its witness: both
+    // stores project fenced code, which the owner's next settle writes, and
+    // applying the base leaves the file as it is.
+    let fenced = "Before\n\n```\nlet value = 2;\n```\n\nAfter";
+    for (name, source, refused_canonical, settled) in [
         (
             "headings.md",
             "# Workspace\n\nText with **bold** and [a link](https://example.test).\n",
+            None,
+            None,
         ),
         (
             "table.md",
             "| Name | Value |\n| --- | --- |\n| Item | 2 |\n",
+            None,
+            None,
         ),
-        ("code.md", "Before\n\n```\nlet value = 2;\n```\n\nAfter\n"),
-        ("nested-list-witness.md", "- \n\n  - b\n - c"),
+        (
+            "code.md",
+            "Before\n\n    let value = 2;\n\nAfter\n",
+            Some(fenced),
+            Some(fenced),
+        ),
+        (
+            "fenced-code.md",
+            "Before\n\n```\nlet value = 2;\n```\n\nAfter\n",
+            None,
+            None,
+        ),
+        (
+            "nested-list-witness.md",
+            "---\nid: rec\n---\n\n- \n\n  - b\n - c",
+            Some("---\nid: rec\n---\n\n- \n\n- b\n\n- c"),
+            None,
+        ),
     ] {
         let (_scratch, _path, mut owner) = open_store();
         seed_replication_version(&mut owner, "main", "main");
         seed_text_head(&mut owner, "source", "source.md", source);
         let doc = Ydoc::wire();
-        if name == "nested-list-witness.md" {
+        if let Some(canonical) = refused_canonical {
             assert!(
                 doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
                     .is_err()
@@ -199,7 +225,7 @@ fn passive_store_concurrent_delayed_and_source() {
                 doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
                     .is_err()
             );
-            doc.rewrite_content_to_markdown(ContentKind::Richdoc, "- \n\n- b\n\n- c")
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, canonical)
                 .unwrap();
             doc.preserve_folded_markdown_source(source).unwrap();
         } else {
@@ -222,7 +248,11 @@ fn passive_store_concurrent_delayed_and_source() {
             .read_with(|conn| project_ydoc_with_store(conn, &key, &doc, ContentKind::Richdoc))
             .unwrap()
             .content;
-        assert_eq!(owner_text, source, "owner source: {name}");
+        assert_eq!(
+            owner_text,
+            settled.unwrap_or(source),
+            "owner source: {name}"
+        );
         assert_eq!(imported_source, owner_text, "replica source: {name}");
         if name == "nested-list-witness.md" {
             assert_ne!(missing_source, owner_text);
@@ -247,7 +277,7 @@ fn passive_store_concurrent_delayed_and_source() {
         );
         assert_eq!(
             head(&replica_store, "source"),
-            owner_text,
+            source,
             "settled passive store: {name}"
         );
         source_results.push(json!({"file":name,"fileBytes":source.len(),"ownerEqualsFile":owner_text==source,"replicaWithoutSnapshotEqualsOwner":missing_source==owner_text,"replicaWithSnapshotEqualsOwner":imported_source==owner_text,"ownerSha256":dohc_engine_storage::hex_sha256(owner_text.as_bytes()),"withoutSnapshotBytes":missing_source.len()}));
