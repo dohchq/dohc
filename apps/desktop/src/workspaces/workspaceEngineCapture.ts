@@ -797,6 +797,7 @@ export interface WorkspaceEngineCaptureOptions {
   onAtomicPlacementUnavailable?: () => void;
   onRecoveryUnavailable?: (unavailable: boolean) => void;
   onKeptFiles?: (paths: readonly (readonly [string, string])[]) => void;
+  onHeldFiles?: (files: import("../ipc/bridgeContract").CaptureFileHold[]) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
@@ -4062,6 +4063,7 @@ export function createWorkspaceEngineCapture(
         if (status) {
           options.onKeptFiles?.(status.keptFiles);
           options.onRecoveryUnavailable?.(status.recoveryUnavailable);
+          options.onHeldFiles?.(status.heldFiles);
         }
         if (status === undefined || (status.running && !status.terminal)) {
           await drainPendingCollectionAdoptions(engine);

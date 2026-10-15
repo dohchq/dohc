@@ -49,14 +49,14 @@ it("pages more than 1,000 grants in immutable order and rejects damaged or forei
   expect(ids).toEqual(Array.from({ length: 1001 }, (_, n) => String(n).padStart(4, "0")));
   const first = query.answer(base);
   for (const changed of [{ cursorScope: "new-account" }, { ref: { ...ref, path: "Notes/b.md" } }, { observation: { ...base.observation, listing: listing() } }]) {
-    expect(query.answer({ ...base, ...changed, cursor: first.nextCursor! })).toMatchObject({ freshness: "unknown", coverage: { complete: false }, rows: [] });
+    expect(query.answer({ ...base, ...changed, cursor: first.nextCursor! })).toMatchObject({ freshness: "unknown", unknownReason: "changed", coverage: { complete: false }, rows: [] });
   }
-  expect(query.answer({ ...base, cursor: "broken" }).freshness).toBe("unknown");
+  expect(query.answer({ ...base, cursor: "broken" })).toMatchObject({ freshness: "unknown", unknownReason: "changed" });
 });
 it("labels historical coverage and never turns missing observations into an absence claim", () => {
   const query = createAccessQuery();
   expect(query.answer({ ...input(), observation: { listing: null, checkedAtMs: null, freshness: "unknown" } }))
-    .toMatchObject({ rows: [], freshness: "unknown", coverage: { complete: false } });
+    .toMatchObject({ rows: [], freshness: "unknown", unknownReason: "not-listed-yet", coverage: { complete: false } });
   expect(query.answer({ ...input(), observation: { listing: listing(), checkedAtMs: 100, freshness: "stale" } }))
     .toMatchObject({ rows: [{ shareId: "g" }], checkedAtMs: 100, freshness: "stale", coverage: { complete: true, observation: "interval" } });
   expect(query.answer({ ...input(), ref: { ...ref, path: "Other/file" } }))
@@ -110,4 +110,17 @@ it("excludes revoked named grants, former automation writers and ended links fro
   const index = createAccessIndex([row("active", { selector: { kind: "chat", channelWireId: "channel" }, access: "read-only" }),
     row("revoked", { status: "revoked", selector: { kind: "chat", channelWireId: "channel" }, access: "read-only" })]);
   expect(index.forChat("channel").map(row => row.shareId)).toEqual(["active"]);
+});
+
+it("reports unreadable when a stored roster cannot establish grants", () => {
+  const source = { ...listing(), grants: null, problem: { kind: "unusable-listing" as const } };
+  expect(createAccessQuery().answer(input(source))).toMatchObject({ unknownReason: "unreadable", rows: [] });
+});
+it.each(["signed-out", "not-synced", "other-account", "other-server", "unreadable"] as const)("carries the owner's null-listing reason %s", unknownReason => {
+  expect(createAccessQuery().answer({ ...input(), observation: { listing: null, checkedAtMs: null, freshness: "unknown", unknownReason } }))
+    .toMatchObject({ unknownReason, rows: [] });
+});
+it("reports no received listing yet without claiming absence", () => {
+  expect(createAccessQuery().answer({ ...input(), coverage: "received-account", observation: { inventory: null, checkedAtMs: null, freshness: "unknown" } }))
+    .toMatchObject({ unknownReason: "not-listed-yet", rows: [] });
 });
