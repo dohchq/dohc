@@ -25,7 +25,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-const messages: ChatMessageRecord[] = Array.from({ length: 301 }, (_, index) => ({
+const messages: ChatMessageRecord[] = Array.from({ length: 301 }, (_, index) => ({ presentation: { group: "fixture", hue: null, self: false },
   id: `m-${index}`,
   threadId: "thread",
   authorKind: "human",

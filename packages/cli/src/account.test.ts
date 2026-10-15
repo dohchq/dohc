@@ -47,7 +47,7 @@ describe("dohc account deletePreview", () => {
 
   it("prints the same preview as JSON", async () => {
     const result = await executeCli({ argv: ["account", "deletePreview", "--json"], env: {}, request: async () => preview });
-    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 2, ...preview });
+    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 3, ...preview });
   });
 });
 
@@ -74,7 +74,7 @@ describe("dohc account delete", () => {
       argv: [...deleteArgv, "--json"], env: {}, readPassword: async () => PASSWORD,
       request: async () => ({ ok: true, finished: false, email: "ice@dohc.dev", server }),
     });
-    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 2, ok: true, finished: false, email: "ice@dohc.dev", server });
+    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 3, ok: true, finished: false, email: "ice@dohc.dev", server });
     expectNoPassword(result);
     const text = await executeCli({
       argv: deleteArgv, env: {}, readPassword: async () => PASSWORD,

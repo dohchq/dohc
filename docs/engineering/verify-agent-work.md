@@ -96,9 +96,9 @@ The runner labels its Postgres container and removes it by the recorded containe
 
 ### The verification queue on the shared Windows host
 
-On the shared Windows host, a queue service runs PR verifications one at a time.
+On the shared Windows host, a queue service runs PR verifications, one per verification lane.
 After the pre-queue checks, `pnpm verify:pr` hands the commit to the service and reports its progress until it finishes.
-The service verifies the commit in its own checkout, `C:\w\_verification\lane`, so your checkout is free to change while the request waits.
+The service verifies the commit in its own checkout, `C:\w\_verification\lane` or `C:\w\_verification\lane-2`, so your checkout is free to change while the request waits.
 Stopping `pnpm verify:pr` does not stop the request. Run the same command again to follow it, or to get its result once it has finished.
 Pass `--detach` to submit the request and return at once.
 
@@ -109,18 +109,21 @@ Pass `--detach` to submit the request and return at once.
 - A run that fails a check is reported at once. The service never retries it.
 - A run stops and fails after two hours of awake time. Time the machine spends asleep does not count.
 - While Docker does not respond, runs that need the JavaScript gate wait and Rust-only runs continue.
-- While free disk is below the 40 GB floor, no run starts. The service first deletes its own lane's build output.
+- While free memory is below 10 GB, no second run starts. A check that fails after free memory fell below 3 GB during the run is retried as a machine failure.
+- While free disk is below the 40 GB floor, no run starts. The service first deletes the build output of its lanes that have no run.
 
+Each lane runs with its own temp folder, `C:\w\_verification\tmp\<lane>`, which antivirus skips and the service empties before each run.
+Each attempt records the load it verified under in `status.json` and `C:\w\_verification\history.jsonl`: the lane count, the most runs at once, the lowest free memory, and the mean CPU use. Read them before changing the lane count.
 Each attempt has its own evidence folder, `C:\w\_verification\requests\<id>\attempts\<n>`, and its `result.json` names the request and attempt.
 Read the service's verdict from the request's `status.json`, or from the last line `pnpm verify:pr` prints.
 
-Run `pnpm verify:queue status` to see the service, the running request, the line, and wait estimates.
+Run `pnpm verify:queue status` to see the service, the running requests, the line, and wait estimates.
 Run `pnpm verify:queue cancel <id>` to stop a request. A finished request keeps its verdict.
 
 The `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
 A supervisor runs the service in a Windows job object. When the service exits or its heartbeat stops for two minutes, the supervisor stops it and everything it started, then starts it again.
 A request that was running when the service stopped runs again as a new attempt. A request whose receipt already finished keeps that result.
-Install or upgrade the service from a checkout of `origin/main` with `pnpm verify:queue install`. An upgrade takes effect when the current run ends.
+Install or upgrade the service from a checkout of `origin/main` with `pnpm verify:queue install`. An upgrade takes effect when the current runs end. No new run starts until then.
 
 CI, other platforms, and runs with their own `DOHC_BUILD_SLOT_ROOT` verify inline in their checkout.
 Pass `--inline` to do the same on the shared host when the service is unavailable. Inline runs still wait for the host's verification lane, so they never overlap a queued run.
@@ -145,21 +148,59 @@ It defers when registered gates or builds hold or wait for slots.
 If registered work arrives during measurement, it stops its own child and records the run as failed.
 Its host context covers registered lanes and does not prove that the host was otherwise idle.
 
-The lane count defaults to one. To compare one and two lanes, use an isolated root and explicit trial flags in PowerShell:
+The host runs one verification at a time unless `verification-lanes` in the slot root contains `2`.
+Every verifier and the queue service read that file, so all of them agree on the count.
+The queue service runs the second lane's requests in `C:\w\_verification\lane-2`. That checkout's build output takes about 10 GB more disk.
+
+```powershell
+Set-Content C:\w\_locks\verification-lanes 2
+```
+
+Write `1` to return to one lane. Runs already admitted to the second lane finish first.
+
+To compare lane counts without changing the host, use an isolated root with its own setting in PowerShell:
 
 ```powershell
 $env:DOHC_VERIFICATION_SLOT_ROOT = 'C:\w\_locks-verification-trial'
 $env:DOHC_VERIFICATION_TRIAL = '1'
-$env:DOHC_VERIFICATION_LANES = '2'
 pnpm verify:pr --base origin/main --inline
 ```
 
-Use that same trial root with `DOHC_VERIFICATION_LANES=1` for the comparison.
 Keep `DOHC_BUILD_SLOT_ROOT` unchanged. Cargo still uses the host's shared four-lane budget during a verification trial.
 Record other host builds and gates during the comparison; a separate outer queue does not isolate CPU, memory, or disk load.
 Compare elapsed time, queue time, failures, and peak host memory under matching work and cache conditions.
 Do not change the live queue root or remove another run's tickets to conduct a trial.
-Remove the three verification trial environment variables from the shell before returning to ordinary verification.
+Remove the two verification trial environment variables from the shell before returning to ordinary verification.
+
+### Flaky tests
+
+The gate runs a failing test once more before it fails the change.
+nextest, vitest, and Playwright retry the failing test itself. The repository and desktop script steps run again when their report names a failed test; a failed check or build is not retried. The self-host proof runs again from an empty evidence folder.
+A test that passes only on that retry does not fail the gate. `result.json` lists it under `flaky`, the verifier prints it, and the queue history records it.
+A flaky test is a defect. Fix the condition it races, or report it to whoever owns it. A test that fails twice still fails the gate.
+A repository or desktop script step reruns as a whole, after its first attempt's ignored outputs. A test that fails on a clean tree but passes beside those outputs is recorded as flaky like any other, so treat every entry as a real failure until you have read it.
+
+### Nightly run
+
+Every night at 03:07, the `dohc-verification-nightly` scheduled task submits a full verification of main's head: every gate, every package, and every proof.
+It covers everything merged since the last nightly that passed, and it runs before the rest of the line. A head that already passed is not verified again.
+`pnpm verify:queue status` shows the last passing nightly. Submit one by hand with `pnpm verify:queue nightly`.
+A failed nightly means a merged change broke main or an affected-package selection missed something. Find the change that broke it and revert or fix it the same day.
+The [`verification-triage` skill](../../.agents/skills/verification-triage/SKILL.md) has the procedure.
+
+### Affected packages
+
+The JavaScript gate runs package tests only for the packages a change affects: the packages its files are in, and every package that depends on them.
+A package depends on another when its manifest says so, or when its files reach into the other's files by a relative path, as some tests import another package's source.
+A change to any file outside the workspace packages, such as a lockfile, a crate, or a root script, runs every package. Documentation changes run none.
+Repository checks and proofs always run. `pnpm verify:plan` lists the selected packages, and `result.json` records them under `packages` and `js-tests/result.json` under `skippedPackages`.
+Pass `--full` to run every package. The nightly run on main always does.
+
+### Slowest tests
+
+Each gate keeps its 20 slowest tests in `result.json` under `slowest`, and prints the five slowest. The queue history keeps each run's step times and ten slowest tests.
+A test that takes more than a second is a scenario test. Keep it, but make it earn its time: the per-PR gate should take 15 minutes or less on an idle lane.
+A weekly review reads the history, then fixes, splits, or speeds up the tests and suites that cost the most. The [`verification-triage` skill](../../.agents/skills/verification-triage/SKILL.md) has its procedure.
 
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
 Each report states its scope. Every selected job needs passing evidence that covers the change.

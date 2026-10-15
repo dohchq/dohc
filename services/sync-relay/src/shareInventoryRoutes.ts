@@ -84,7 +84,7 @@ export function createShareInventoryRoutes(
       if (!ended && (!selector || !effectiveShareSelector(selector, grant.access))) throw notFound();
       const result = ended ? { ...coordinates, status: "ended" as const } : {
         ...coordinates, status: "active" as const,
-        ...(selector && grant.parentGrantId === null ? namedBrowserInvitation(grant.grantId, selector, grant.access) : {}),
+        ...(selector && grant.parentGrantId === null ? namedBrowserInvitation(share.workspaceId, grant.grantId, selector, grant.access) : {}),
       };
       return jsonResponse(RelayShareCopyResult.parse(result), 200, { "cache-control": "private, no-store" });
     }

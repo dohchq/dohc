@@ -1,11 +1,5 @@
 {
   "socket": {
-    "accountDeletePreview": [
-      "account.delete.preview"
-    ],
-    "accountDelete": [
-      "account.delete"
-    ],
     "accessObject": [
       "access.object.read"
     ],
@@ -166,6 +160,15 @@
     "ownerAppResponses": [
       "app.responses.list",
       "app.responses.undo"
+    ],
+    "shareCopy": [
+      "share.copy.read"
+    ],
+    "accountDeletePreview": [
+      "account.delete.preview"
+    ],
+    "accountDelete": [
+      "account.delete"
     ]
   },
   "public": {
@@ -240,6 +243,7 @@
     "automation run": "automation.run.read",
     "automation retry": "automation.run.retry",
     "automation press": "automation.button.press",
+    "share copy": "share.copy.read",
     "account deletePreview": "account.delete.preview",
     "account delete": "account.delete"
   }

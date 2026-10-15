@@ -63,6 +63,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
     ["pr", null, "rust"], ["pr", null, "rust-and-js"], ["pr", "rust", "rust"], ["pr", "js", "js"], ["pr", null, "js"],
     ["pr", null, "rust-source"], ["pr", null, "rust-cancel"],
     ["pr", "js", "accounts-skipped"], ["pr", "js", "desktop-skipped"], ["pr", "js", "onboarding-missing"], ["pr", "js", "smoke-missing"],
+    ["pr", "js", "restart-missing"], ["pr", "js", "restart-one-missing"], ["pr", "js", "restart-skipped"],
     ["pr", "js", "native-skipped"], ["pr", "js", "accounts-cancelled"], ["pr", "js", "desktop-cancelled"],
     // The gallery is required only where it runs, so its missing-proof case exists only there.
     ...(process.platform === "win32" ? [["pr", "js", "gallery-missing"]] : []),
@@ -98,7 +99,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
       put("tools/rust-engine-program/build-slot.mjs", "import {writeFileSync} from 'node:fs';export const acquireExclusiveSlot=()=>null;export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('not expected')};export const acquireVerificationSlot=()=>{writeFileSync('.dohc-dev/queued','yes');return {update(){},release(){}};};");
       git(["config", "core.logAllRefUpdates", "true"]);
       mkdirSync(join(root, ".dohc-dev"), { recursive: true });
-      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/timing.mjs", "scripts/verification/flaky.mjs", "tools/rust-engine-program/tree-provenance.mjs",
         "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs",
         "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
         put(path, readFileSync(join(repoRoot, path)));
@@ -120,7 +121,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         }});
       `);
       put(".gitignore", readFileSync(join(root, ".gitignore"), "utf8") + ".agent-artifacts/\napps/desktop/.env.local\n");
-      put("apps/desktop/package.json", '{"name":"@dohc/desktop","scripts":{"test":"unused","test:unit":"vitest run","test:scripts":"scripts","test:scripts:isolated":"isolated","test:scripts:runtime":"runtime"}}');
+      put("apps/desktop/package.json", '{"name":"@dohc/desktop","devDependencies":{"@dohc/fixture":"workspace:*"},"scripts":{"test":"unused","test:unit":"vitest run","test:scripts":"scripts","test:scripts:isolated":"isolated","test:scripts:runtime":"runtime"}}');
       for (const name of ["fixture", "mcp", "share-web", "site", "unrelated", "workspace-api"]) {
         const path = `${name === "workspace-api" ? "services" : name === "site" ? "apps" : "packages"}/${name}`;
         put(`${path}/package.json`, JSON.stringify({name:`@dohc/${name}`,scripts:{test:"vitest run"}}));
@@ -188,7 +189,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
             return {stdout:'compiled runtime'};
           }
           if(command==='pnpm' && args[0]==='install' && !existsSync(join(repoRoot,'.dohc-dev/verification/build.json.lock'))) {
-            assert.deepEqual(args,['install','--frozen-lockfile']);
+            assert.deepEqual(args,['install','--frozen-lockfile','--config.confirm-modules-purge=false']);
             writeFileSync(join(repoRoot,'node_modules/installed.txt'),readFileSync(join(repoRoot,'pnpm-lock.yaml')));
             return {stdout:''};
           }
@@ -261,7 +262,8 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
             return {stdout:''};
           }
           if(command==='pnpm' && args[2]==='run' && ['test','test:unit'].includes(args[3])) {
-            assert.deepEqual(args,['--filter',args[1],'run',...(args[1]==='@dohc/desktop'?['test:unit','--maxWorkers=${desktopWorkers}']:['test','--maxWorkers=4'])]);
+            assert.deepEqual(args.slice(0,5),['--filter',args[1],'run',...(args[1]==='@dohc/desktop'?['test:unit','--maxWorkers=${desktopWorkers}']:['test','--maxWorkers=4'])]);
+            assert.deepEqual(args.slice(5,7),['--retry=1','--reporter=default']);assert.match(args[7],/test-record-reporter.mjs$/);assert.equal(args.length,8);
             assert.ok(${JSON.stringify(packages)}.includes(args[1]),'Unknown package executed: '+args[1]);
             assert.equal(options.env.POSTGRES_URL,'postgres://dohc:dohc@127.0.0.1:1234/dohc');
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
@@ -303,12 +305,15 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
               writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({stats:{expected:2,unexpected:process.env.FIXTURE_FAULT==='accounts-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='accounts-skipped'?1:0}}));
               return {stdout:''};
             }
-            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|@self-host-onboarding'+(${gallery}?'|@states-page':''):'@verification-smoke'];
+            const restartTags=['@restart-durability-idle-external','@restart-durability-overlapping-typing','@restart-durability-capture-before-reopen','@restart-durability-person-agent'];
+            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|'+restartTags.join('|')+'|@self-host-onboarding'+(${gallery}?'|@states-page':''):'@verification-smoke'];
             assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
-            const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
+            const restartTitles=restartTags.map((tag,index)=>process.env.FIXTURE_FAULT==='restart-missing'||process.env.FIXTURE_FAULT==='restart-one-missing'&&index===3?'unrelated restart spec':tag+' restart proof');
+            const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?restartTitles:[]),...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
+            const restartSkipped=process.env.FIXTURE_FAULT==='restart-skipped';
             writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({
-              stats:{expected:pr?2:1,unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'?1:0},
-              suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:'passed'}]}]}))}]}],
+              stats:{expected:titles.length-(restartSkipped?1:0),unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'||restartSkipped?1:0},
+              suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:restartSkipped&&title.startsWith('@restart-durability-person-agent ')?'skipped':'passed'}]}]}))}]}],
             }));
             return {stdout:''};
           }
@@ -385,10 +390,19 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
           "desktop-cancelled": /Desktop verification did not complete a passing test run/,
           "desktop-skipped": /A mandatory desktop smoke test was skipped/,
           "smoke-missing": /did not pass every required proof: @verification-smoke/,
-          "onboarding-missing": /did not pass every required proof: @verification-smoke, @self-host-onboarding/,
+          "onboarding-missing": /did not pass every required proof: @verification-smoke, .*@self-host-onboarding/,
+          "restart-missing": /did not pass every required proof: .*@restart-durability/,
+          "restart-one-missing": /did not pass every required proof: .*@restart-durability-person-agent/,
+          "restart-skipped": /A mandatory desktop smoke test was skipped/,
           "gallery-missing": /did not pass every required proof: .*@states-baselines/,
         };
         assert.match(result.stderr, messages[fault]);
+        if (fault === "restart-one-missing") {
+          for (const tag of ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen"]) {
+            assert.ok(report.desktopProofs.some(title => title.split(/\s+/u).includes(tag)), `${tag} passed`);
+          }
+          assert.ok(!report.desktopProofs.some(title => title.split(/\s+/u).includes("@restart-durability-person-agent")));
+        }
         assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), desktop);
         assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), js);
         assert.equal(report.steps.some(step => step.name === "typecheck"), js);
@@ -437,9 +451,11 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
           const tests=JSON.parse(readFileSync(report.jsTests,"utf8"));
           assert.equal(tests.proofs, true);
           assert.equal(tests.steps.filter(step => step.name === "proofs").length, 1);
-          assert.deepEqual(tests.packages.map(pkg=>pkg.name).sort(),packages);
+          // A change inside one package tests it and its dependents only.
+          const tested = changed === "packages/fixture/src/index.ts" && !full ? ["@dohc/desktop", "@dohc/fixture"] : packages;
+          assert.deepEqual(tests.packages.map(pkg=>pkg.name).sort(),tested);
           const calls=readFileSync(join(root,".dohc-dev/all-calls.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
-          assert.deepEqual(calls.filter(({args})=>args[2]==="run" && ["test","test:unit"].includes(args[3])).map(({args})=>args[1]).sort(),packages);
+          assert.deepEqual(calls.filter(({args})=>args[2]==="run" && ["test","test:unit"].includes(args[3])).map(({args})=>args[1]).sort(),tested);
           for (const script of ["test:scripts:isolated", "test:scripts:runtime"]) {
             assert.equal(calls.filter(({args}) => args[3] === script).length, 1);
           }

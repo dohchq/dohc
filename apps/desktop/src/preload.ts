@@ -20,6 +20,7 @@ import type {
   WorkspaceActivityEvent,
 } from "./ipc/bridgeContract";
 import {
+  chatOperations,
   systemMotionOperations,
   serverAccountOperations,
   SitePreviewReplacedEvent,
@@ -115,6 +116,7 @@ async function invokeParsed<Schema extends z.ZodType>(
 const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
+  ...operationBridge(chatOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
@@ -220,8 +222,6 @@ const bridge: DohcDesktopBridge = {
   getBacklinks: (payload) => ipcRenderer.invoke(CHANNELS.getBacklinks, payload),
   listWorkspaceHeadings: (payload) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceHeadings, payload),
-  listChatFileMentions: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatFileMentions, payload),
   listChatBookmarks: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatBookmarks, payload),
   saveChatBookmark: (payload) =>
@@ -524,12 +524,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listFileChats, payload),
   createFileChat: (payload) =>
     ipcRenderer.invoke(CHANNELS.createFileChat, payload),
-  listChatMessages: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatMessages, payload),
   getChatThreadRevision: (payload) =>
     ipcRenderer.invoke(CHANNELS.getChatThreadRevision, payload),
-  sendChatMessage: (payload) =>
-    ipcRenderer.invoke(CHANNELS.sendChatMessage, payload),
   listChatThreadDecisions: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatThreadDecisions, payload),
   resolveChatDecision: (payload) =>
@@ -543,16 +539,10 @@ const bridge: DohcDesktopBridge = {
   listChatFollows: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatFollows, payload),
   setChatFollow: (payload) => ipcRenderer.invoke(CHANNELS.setChatFollow, payload),
-  listPersonalChatFeed: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listPersonalChatFeed, payload),
   markPersonalChatFeedSeen: (payload) =>
     ipcRenderer.invoke(CHANNELS.markPersonalChatFeedSeen, payload),
   createChatChannel: (payload) =>
     ipcRenderer.invoke(CHANNELS.createChatChannel, payload),
-  listChannelThreads: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChannelThreads, payload),
-  startChannelThread: (payload) =>
-    ipcRenderer.invoke(CHANNELS.startChannelThread, payload),
   markChatThreadRead: (payload) =>
     ipcRenderer.invoke(CHANNELS.markChatThreadRead, payload),
   listChatReactions: (payload) =>

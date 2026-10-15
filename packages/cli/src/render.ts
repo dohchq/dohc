@@ -290,6 +290,7 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
         ? `Deleted ${deleted.email} on ${deleted.server}. The dohc app disconnected from this server. Workspaces on this computer stay.`
         : `${deleted.email} on ${deleted.server} is blocked. The server will finish removing its data. The dohc app disconnected from this server. Workspaces on this computer stay.`;
     }
+    case "shareCopy":
     case "accessObject":
     case "accessSharing":
       return JSON.stringify(result, null, 2);

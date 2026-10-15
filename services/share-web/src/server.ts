@@ -4,6 +4,7 @@ import { createNamedAppMaterialResolver } from "./namedAppMaterial";
 import { createAppDiscovery } from "./appDiscovery";
 import type { AppLaunchConfig } from "./appLaunchConfig";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
+import {createNamedRecipientChatClient} from "./namedRecipientChat";
 import {createNamedRecipientDocumentsClient} from "./namedRecipientDocuments";
 import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
@@ -907,6 +908,9 @@ export function createShareWebApplication({
     relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits!,
     browserLimits: namedRecipientBrowserLimits, fetchRelay,
   }) : undefined;
+  const namedChat = namedBrowserSessionLimits ? createNamedRecipientChatClient({
+    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, fetchRelay,
+  }) : undefined;
   const accountHandler = accountAuth ? createAccountAuthHandler({
     ...accountAuth,
     fetchAuth,
@@ -1297,6 +1301,12 @@ export function createShareWebApplication({
     if (pathname === "/api/live/named-documents") {
       if (!namedDocuments) return refused();
       const result = await namedDocuments(request);
+      return response(result.body, {status: result.status, headers: result.headers});
+    }
+
+    if (pathname.startsWith("/api/named-chat/")) {
+      if (!namedChat) return refused();
+      const result = await namedChat(request);
       return response(result.body, {status: result.status, headers: result.headers});
     }
 

@@ -14,6 +14,7 @@ import { createOwnerAppPublicationRoutes } from "./ownerAppPublicationRoutes";
 import {readOwnerAppResponses} from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes } from "./linkAppPublicationRoutes";
 import { createLinkAppCollectionRoutes, type AppCollectionPolicy } from "./appCollectionRoutes";
+import {createNamedRecipientChat} from "./namedRecipientChat";
 import {createNamedRecipientDocuments} from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
@@ -85,6 +86,7 @@ import {
 } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { PresenceHub } from "./presence";
+import { ReplicaWatches } from "./replicaWatches";
 import { createPresenceRoutes } from "./presenceRoutes";
 import { createProposalRoutes } from "./proposalRoutes";
 import { parseShareId, parseWorkspaceId } from "./requestInputs";
@@ -142,6 +144,7 @@ export interface CreateSyncRelayHandlerOptions {
   // Wake-only long-poll coordination. Durable revisions and data stay in
   // storage, so replacing this hub cannot invalidate a client watermark.
   discussionActivity?: DiscussionActivityHub;
+  replicaWatches?: Pick<ReplicaWatches, "watched">;
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
@@ -200,6 +203,7 @@ export function createSyncRelayHandler({
   newId = () => randomUUID(),
   presence = new PresenceHub(),
   discussionActivity = new DiscussionActivityHub(),
+  replicaWatches = new ReplicaWatches(discussionActivity),
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
@@ -252,10 +256,14 @@ export function createSyncRelayHandler({
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
 } {
   const accountActor = resolveActor;
-  resolveActor = async (request, workspaceId) => {
-    const actor = await accountActor(request,workspaceId);
-    if (accountIsFenced(storage,actor.userId)) throw notFound();
+  const requireUnfencedActor = (actor: Awaited<ReturnType<ResolveActor>>) => {
+    if (accountIsFenced(storage, actor.userId)) throw notFound();
     return actor;
+  };
+  resolveActor = (request, workspaceId) => {
+    const actor = accountActor(request, workspaceId);
+    return typeof (actor as {then?: unknown}).then === "function"
+      ? Promise.resolve(actor).then(requireUnfencedActor) : requireUnfencedActor(actor as Awaited<ReturnType<ResolveActor>>);
   };
   const publicEditRelease = parsePublicEditRelease(releaseInput);
   const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs, pressDataset}) : undefined;
@@ -407,6 +415,7 @@ export function createSyncRelayHandler({
     storage,
     nowMs,
     discussionActivity,
+    replicaWatches,
     lookupUserDisplayName,
   );
 
@@ -447,6 +456,11 @@ export function createSyncRelayHandler({
     discussionActivity,
     lookupUserDisplayName,
   );
+
+  const namedChat = namedBrowserSessionLimits ? createNamedRecipientChat({
+    storage, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits,
+    resolveActor, lookupUserDisplayName, claimPendingShares, activity: discussionActivity, nowMs, requireShareAction, transport: respondToNamedShareTransport, reads: {chatResolverFor},
+  }) : undefined;
 
   const { respondToShareProposals, respondToWorkspaceProposals } = createProposalRoutes(
     storage,
@@ -697,6 +711,9 @@ export function createSyncRelayHandler({
       }
       if (pathname === "/sync/live/named-documents") {
         return namedDocuments ? await namedDocuments(request) : errorResponse(notFound());
+      }
+      if (pathname.startsWith("/sync/named-chat/")) {
+        return namedChat ? await namedChat(request) : errorResponse(notFound());
       }
       const route = parseRoute(request);
       if (route.route === "link-exchange") {

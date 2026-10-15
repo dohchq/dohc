@@ -76,6 +76,11 @@ describe("CLI, MCP, and app channel reference", () => {
     expect(section).toContain("`freshness` is `fresh`, `stale`, or `unknown`");
     expect(section).toContain("`checkedAtMs`");
     expect(section).toContain("`coverage`");
+    expect(section).toContain("`unknownReason`");
+    expect(section).toContain("When visibility is `hidden` or `missing`, it is null");
+    for (const reason of ["signed-out", "not-synced", "other-account", "other-server", "not-listed-yet", "changed", "unreadable"]) {
+      expect(section).toContain(reason);
+    }
   });
 
   it("parses an example of every chat verb, using every flag the verb declares", async () => {

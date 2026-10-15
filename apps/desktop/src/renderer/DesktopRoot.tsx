@@ -1,3 +1,4 @@
+import { bindOwnPresentation } from "./workbench/actorPresentation";
 import { useRequestSequence } from "./useRequestSequence";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -30,6 +31,7 @@ const LazyStatesPage = lazy(() =>
 );
 
 export function DesktopRoot() {
+  useEffect(() => bindOwnPresentation(bridge()), []);
   const [loaded, setLoaded] = useState(false);
   // What the registry read said, and the error as it arrived for the details.
   const [loadError, setLoadError] = useState<{ message: string; cause: string | null } | null>(null);

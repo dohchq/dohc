@@ -122,12 +122,16 @@ export function placeSubmission(requests, submission) {
   return { supersede: replaced.map(entry => entry.id), sequence: replaced[0]?.request.sequence ?? null };
 }
 
-/** The oldest request that can run now. A request waiting on Docker does not hold back one that needs none. */
+/**
+ * The oldest request that can run now, the nightly run of main first. A request
+ * waiting on Docker does not hold back one that needs none.
+ */
 export function nextRequest(requests, { diskOk, dockerOk }, now = Date.now()) {
   if (!diskOk) return null;
-  return requests.find(({ request, status }) => status.state === "queued"
+  const ready = ({ request, status }) => status.state === "queued"
     && (!status.notBefore || Date.parse(status.notBefore) <= now)
-    && (!request.gates?.js || dockerOk)) ?? null;
+    && (!request.gates?.js || dockerOk);
+  return requests.find(entry => entry.request.nightly && ready(entry)) ?? requests.find(ready) ?? null;
 }
 
 /** Backoff after an environment failure: 30 s, 2 min, 5 min, then every 15 min. */
@@ -152,13 +156,31 @@ export function attemptOutcome(result, grant, { stopped } = {}) {
   return { outcome: "environment", cause: "unfinished", reason: "The receipt has no verdict." };
 }
 
-/** Position among live requests, 1 for the running one. */
+/** Position among live requests, counting the running ones first, then the nightly run. */
 export function position(requests, id) {
+  const rank = entry => entry.status.state === "running" ? 0 : entry.request.nightly ? 1 : 2;
   const live = requests.filter(entry => !terminalStates.has(entry.status.state))
-    .sort((a, b) => (a.status.state === "running" ? -1 : 0) - (b.status.state === "running" ? -1 : 0) || a.id.localeCompare(b.id));
+    .sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
   const index = live.findIndex(entry => entry.id === id);
   return index < 0 ? null : index + 1;
 }
+
+/**
+ * Submit the nightly verification of main: every gate and every package at
+ * main's head, against the last nightly that passed. A head that already
+ * passed, or is already waiting, is not verified again.
+ */
+export async function submitNightly(root, repo, { fetch = () => git(["fetch", "--quiet", "origin", "main"], repo) } = {}) {
+  fetch();
+  const head = git(["rev-parse", "--verify", "origin/main^{commit}"], repo);
+  const last = listRequests(root).findLast(entry => entry.request.nightly && entry.status.state === "passed");
+  const base = last?.request.head ?? git(["rev-parse", "--verify", `${head}~1^{commit}`], repo);
+  await submit(root, { head, base, scope: "all", full: true, gates: { rust: true, js: true }, branch: "refs/heads/main", checkout: "nightly", nightly: true });
+  return { head, base };
+}
+
+/** The last nightly run of main that passed, or null. */
+export const lastNightlyPass = requests => requests.findLast(entry => entry.request.nightly && entry.status.state === "passed") ?? null;
 
 /** Hand a submission to the service. Returns its key; the service turns it into a request. */
 export async function submit(root, submission) {
@@ -191,6 +213,12 @@ export function ensureService(root, { start = () => spawnSync("schtasks.exe", ["
   const result = start();
   if (result.status !== 0) throw new Error(`The verification queue service is not installed on this host (${(result.stderr || result.stdout || "").trim()}). Run pnpm verify:queue install from a checkout of origin/main.`);
 }
+
+/** Rough wait before the request at `place` starts: the runs ahead of it, shared across the lanes. */
+export const startsInMs = (place, typical, lanes) => Math.ceil(Math.max(0, place - lanes) / lanes) * typical;
+
+/** The service's lane count and its runs. A service older than two lanes recorded one run, or null. */
+export const serviceRuns = record => ({ lanes: record?.lanes ?? 1, runs: [record?.running ?? []].flat() });
 
 /** Median awake minutes of recent passing attempts, for estimates only. */
 export function typicalRunMs(root) {
@@ -245,13 +273,41 @@ export async function verifyThroughQueue({ root, submission, detach = false, che
     }
     const place = position(requests, id);
     const typical = typicalRunMs(root);
+    const { lanes } = serviceRuns(serviceState(root).record);
     const current = status.state === "running" ? readJson(join(queuePaths(root).attempt(id, status.attempts.at(-1).n), "result.json"))?.timings?.at(-1)?.name : null;
     const line = status.state === "running" ? `running attempt ${status.attempts.at(-1).n}${current ? `, ${current}` : ""}`
-      : `queued at position ${place}${typical && place ? `, about ${Math.round(((place - 1) * typical) / 60_000)} min until it starts` : ""}${status.waiting ? `; ${status.waiting}` : ""}`;
+      : `queued at position ${place}${typical && place ? `, about ${Math.round(startsInMs(place, typical, lanes) / 60_000)} min until it starts` : ""}${status.waiting ? `; ${status.waiting}` : ""}`;
     if (line !== shown || Date.now() - shownAt > 5 * 60_000) { log(line); shown = line; shownAt = Date.now(); }
     await follow();
     await sleep(pollMs);
   }
+}
+
+export const nightlyTaskName = "dohc-verification-nightly";
+
+/** The task that submits the nightly verification of main every night at 03:07, and tries again every 10 minutes for an hour if that fails. */
+export function nightlyTaskDefinition(root) {
+  const xml = text => text.replace(/[&<>"]/gu, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" })[c]);
+  const user = `${process.env.USERDOMAIN}\\${process.env.USERNAME}`;
+  const command = `--headless pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${join(root, "nightly.ps1")}" -Root "${root}"`;
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <CalendarTrigger><Enabled>true</Enabled><StartBoundary>2026-01-01T03:07:00</StartBoundary><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>
+  </Triggers>
+  <Principals><Principal id="Author"><UserId>${xml(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
+    <Priority>4</Priority>
+    <RestartOnFailure><Interval>PT10M</Interval><Count>6</Count></RestartOnFailure>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>conhost.exe</Command><Arguments>${xml(command)}</Arguments></Exec></Actions>
+</Task>
+`;
 }
 
 export function taskDefinition(root) {
@@ -304,11 +360,16 @@ async function install(root, ref) {
   const definition = join(root, "task.xml");
   const before = [supervisorScript, definition].map(path => existsSync(path) ? readFileSync(path) : null);
   copyFileSync(join(dir, "scripts/verification/queue-supervisor.ps1"), supervisorScript);
+  copyFileSync(join(dir, "scripts/verification/queue-nightly.ps1"), join(root, "nightly.ps1"));
   const previous = existsSync(paths.current) ? readFileSync(paths.current, "utf8").trim() : null;
   await withFileRetry(() => { writeFileSync(`${paths.current}.tmp`, short); renameSync(`${paths.current}.tmp`, paths.current); });
   writeFileSync(definition, `﻿${taskDefinition(root)}`, "utf16le");
   const created = spawnSync("schtasks.exe", ["/create", "/tn", taskName, "/xml", definition, "/f"], { encoding: "utf8", windowsHide: true });
   if (created.status !== 0) throw new Error(`Task Scheduler refused the service task: ${created.stderr || created.stdout}`);
+  const nightlyDefinition = join(root, "nightly-task.xml");
+  writeFileSync(nightlyDefinition, `﻿${nightlyTaskDefinition(root)}`, "utf16le");
+  const nightly = spawnSync("schtasks.exe", ["/create", "/tn", nightlyTaskName, "/xml", nightlyDefinition, "/f"], { encoding: "utf8", windowsHide: true });
+  if (nightly.status !== 0) throw new Error(`Task Scheduler refused the nightly task: ${nightly.stderr || nightly.stdout}`);
   if (serviceState(root).alive && previous !== short) {
     // The running service exits when idle; the supervisor then starts this one.
     mkdirSync(paths.control, { recursive: true });
@@ -330,18 +391,22 @@ function printStatus(root) {
   const requests = listRequests(root);
   const typical = typicalRunMs(root);
   const minutes = ms => `${Math.round(ms / 60_000)} min`;
+  const { lanes, runs } = serviceRuns(record);
   console.log(`service: ${alive ? `running ${record.commit?.slice(0, 12) ?? ""} (pid ${record.pid})` : record ? `not responding since ${record.heartbeatAt}` : "never started"}`);
   if (record?.health?.reason) console.log(`health: ${record.health.reason}`);
   if (record?.health?.diskFreeGb != null) console.log(`free disk: ${record.health.diskFreeGb.toFixed(1)} GB`);
+  if (record) console.log(`host: ${lanes} lane(s), ${record.health?.cpuBusyPercent ?? "unknown"}% CPU, ${record.health?.freeMemGb ?? "unknown"} GB free memory`);
   const live = requests.filter(entry => !terminalStates.has(entry.status.state));
   for (const entry of live.sort((a, b) => position(requests, a.id) - position(requests, b.id))) {
     const place = position(requests, entry.id);
     // The service's heartbeat says what a running attempt is doing, such as waiting for the host lane.
-    const phase = record?.running?.id === entry.id && record.running.phase ? `, ${record.running.phase}` : "";
-    const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase}` : `#${place}${typical ? `, starts in about ${minutes((place - 1) * typical)}` : ""}`;
+    const phase = runs.find(row => row.id === entry.id)?.phase;
+    const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase ? `, ${phase}` : ""}` : `#${place}${typical ? `, starts in about ${minutes(startsInMs(place, typical, lanes))}` : ""}`;
     console.log(`${entry.id}  ${where}  ${entry.request.scope}  ${entry.request.head.slice(0, 12)}  ${entry.request.branch?.replace("refs/heads/", "") ?? entry.request.checkout}${entry.status.waiting ? `  (${entry.status.waiting})` : ""}`);
   }
   if (!live.length) console.log("no requests waiting");
+  const nightly = lastNightlyPass(requests);
+  console.log(`last passing nightly: ${nightly ? `${nightly.request.head.slice(0, 12)} (${nightly.id})` : "none yet"}`);
   for (const entry of requests.filter(entry => terminalStates.has(entry.status.state)).slice(-8)) {
     console.log(`${entry.id}  ${entry.status.state}${entry.status.cause && entry.status.state !== "passed" ? ` (${entry.status.cause})` : ""}  ${entry.request.head.slice(0, 12)}  ${entry.status.result ?? ""}`);
   }
@@ -354,9 +419,14 @@ async function main([command, ...args]) {
   if (command === "status" || !command) return printStatus(root);
   if (command === "cancel") { await cancel(root, args[0]); return console.log(`asked the service to stop ${args[0]}`); }
   if (command === "install" || command === "upgrade") return install(root, ref);
+  if (command === "nightly") {
+    const here = fileURLToPath(new URL("../..", import.meta.url));
+    const { head, base } = await submitNightly(root, resolve(git(["rev-parse", "--git-common-dir"], here), ".."));
+    return console.log(`submitted the nightly verification of main at ${head.slice(0, 12)}, against ${base.slice(0, 12)}`);
+  }
   if (command === "restart") {
     const { record, alive } = serviceState(root);
-    if (record?.running && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it will be retried.");
+    if (serviceRuns(record).runs.length && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it will be retried.");
     // The task's own process is conhost, so ending the task leaves the supervisor running. Stop the supervisor
     // itself; its job stops the service and any run. It is found by its command line, which names this root's
     // script, and stopped through a handle held before that check, so a reused pid is never stopped. The script
@@ -391,7 +461,7 @@ async function main([command, ...args]) {
     }
     return console.log("asked Task Scheduler to restart the verification queue service; it starts within five minutes");
   }
-  throw new Error("Use status, cancel <id>, install [--ref <ref>], upgrade [--ref <ref>], or restart [--now].");
+  throw new Error("Use status, cancel <id>, install [--ref <ref>], upgrade [--ref <ref>], restart [--now], or nightly.");
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

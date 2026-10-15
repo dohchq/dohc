@@ -1,4 +1,5 @@
 import {
+  chatOperations,
   systemMotionOperations,
   serverAccountOperations,
   chatDispatchNoticeOperations,
@@ -25,6 +26,7 @@ import { accessOperations } from "./accessOperations";
 
 // Add each migrated table here when B5 replaces its manual registrations.
 export const OPERATION_TABLES = [
+  chatOperations,
   shareCopyOperations,
   systemMotionOperations,
   serverAccountOperations,

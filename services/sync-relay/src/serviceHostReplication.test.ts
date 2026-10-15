@@ -24,8 +24,21 @@ async function fixture() {
     method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
     body: JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId, ops}),
   }));
-  return {...f, post};
+  const get = (path: string) => handle(new Request(`https://relay.test/sync/${scope.workspaceId}${path}`, {
+    headers: {authorization: `Bearer ${bearer}`},
+  }));
+  return {...f, post, get};
 }
+
+it("answers a service host's held read at once and never reports a watch", async () => {
+  const f = await fixture();
+  const plain = await f.get("/log?replicationEpoch=epoch&streamIdentity=stream&since=1&hold=30000");
+  const reported = await f.get("/log?replicationEpoch=epoch&streamIdentity=stream&since=1&hold=30000&watched=1");
+  expect(plain.status).toBe(200);
+  const body = await plain.text();
+  expect(body).not.toContain("watched");
+  expect(await reported.text()).toBe(body);
+});
 
 it("publishes the native mixed batch beyond its cursor while refusing unproved authors", async () => {
   const f = await fixture();
