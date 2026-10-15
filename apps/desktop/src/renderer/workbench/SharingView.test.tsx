@@ -60,12 +60,12 @@ const CHECKED_AT = Date.UTC(2026, 9, 9, 9, 30);
 function answer(lane: Lane, overrides: Partial<AccessAnswer> = {}): AccessAnswer {
   return {
     ref: null, rows: [], visibility: "visible",
-    coverage: { kind: lane === "granted" ? "granted" : "received-account", complete: true, observation: "interval" },
+    unknownReason: null, coverage: { kind: lane === "granted" ? "granted" : "received-account", complete: true, observation: "interval" },
     checkedAtMs: CHECKED_AT, freshness: "fresh", nextCursor: null, ...overrides,
   };
 }
 const UNKNOWN = (lane: Lane) => answer(lane, {
-  visibility: "unknown", coverage: { kind: "unavailable", complete: false, observation: "interval" }, checkedAtMs: null, freshness: "unknown",
+  visibility: "unknown", unknownReason: "not-listed-yet", coverage: { kind: "unavailable", complete: false, observation: "interval" }, checkedAtMs: null, freshness: "unknown",
 });
 function granted(overrides: Partial<AccessShareRow> = {}): AccessShareRow {
   return {
