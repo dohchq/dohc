@@ -18,7 +18,7 @@ import { createRendererWorkspaceOperationRunner } from "../window/rendererWorksp
 import { createExactRendererWorkspaceReferenceOwner } from "../window/exactRendererWorkspaceReference";
 import { readWorkspaceText } from "../workspaces/workspaceAssets";
 import { listFiles } from "../workspaces/workspaceFiles";
-import { workspaceWriteRefusal, type ShareViewWriteScope } from "../workspaces/shareWriteGate";
+import { shareViewWriteScopeOf, workspaceWriteRefusal, type ShareViewWriteScope } from "../workspaces/shareWriteGate";
 import { createTestScratch } from "../workspaces/testTemp";
 import { deferred } from "../testing/deferred";
 
@@ -149,7 +149,7 @@ async function harness() {
     retireRenderer: () => { rendererCurrent = false; },
     retirePhysical: () => { physicalCurrent = false; },
     reenterWorkspace: () => { generation += 1; },
-    setSharedScope: (scope: ShareViewWriteScope) => { sharedScope = scope; },
+    setSharedScope: (scope: ShareViewWriteScope | null) => { sharedScope = scope; },
     setCanInstall: (value: boolean) => { canInstall = value; },
   };
 }
@@ -457,6 +457,28 @@ describe("registered native menu handlers", () => {
     expect(h.buildMenu.mock.calls[0]![0]).toEqual(expect.arrayContaining([
       expect.objectContaining({ label: "Update and Restart", enabled: true }),
     ]));
+  });
+
+  // main's own reading of the registry marker, through the native menu. The
+  // intact row proves the menu still offers writes when nothing is damaged.
+  it.each([
+    ["intact", {}, true],
+    ["no share id", { shareId: undefined }, false],
+    ["no recipient", { recipientUserId: undefined }, false],
+  ] as const)("offers create commands for an Edit share view only when its marker is %s", async (_name, damage, offered) => {
+    const h = await harness();
+    h.setSharedScope(shareViewWriteScopeOf({
+      shareId: "share-a", recipientUserId: "recipient-a", granterEmail: "granter@example.com",
+      grantedSelector: { paths: [], versionId: "main", access: "edit" }, ...damage,
+    }));
+    for (const [kind, path] of [["root", undefined], ["folder", "notes"]] as const) {
+      h.buildMenu.mockClear();
+      await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path, kind, pinned: false });
+      const labels = h.buildMenu.mock.calls[0]![0].map((item) => item.label);
+      for (const create of ["New File", "New Collection…", "Import Files…"]) {
+        expect(labels.includes(create), `${kind}: ${create}`).toBe(offered);
+      }
+    }
   });
 
   it("reads test choices per invoke and rejects stale menu results", async () => {

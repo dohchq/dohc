@@ -180,7 +180,8 @@ async function expectCallerDescriptions(
 
 const PAID_FILE = "version: 1\nautomations:\n  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n";
 const editShare = (paths: string[], access = "edit") => ({
-  shareId: "share-1", granterEmail: "owner@example.com", genericChatWritable: false, grantedSelector: { paths, versionId: null, access },
+  shareId: "share-1", recipientUserId: "recipient-1", granterEmail: "owner@example.com", genericChatWritable: false,
+  grantedSelector: { paths, versionId: null, access },
 });
 
 describe("dataset operations from shared document buttons", () => {

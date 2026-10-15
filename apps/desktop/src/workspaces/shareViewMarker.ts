@@ -37,6 +37,29 @@ export function shareViewIsPresent(shareView: unknown): boolean {
   return shareView !== undefined;
 }
 
+// The wire schema's bounds for an opaque id (`OPAQUE_ID` in bridgeContract).
+function readableId(value: unknown): boolean {
+  return typeof value === "string" && value.length >= 1 && value.length <= 200;
+}
+
+export const SHARE_VIEW_REOPEN_MESSAGE =
+  "This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.";
+
+/**
+ * Whether a share view still names its share and the account that opened it.
+ *
+ * A marker missing either is damaged, whatever its grant says: it cannot
+ * address its share or show whose copy this is. The renderer projection
+ * presents it as damaged, and main offers and admits no write through it at
+ * any level. Its files stay readable until it is reopened.
+ */
+export function shareViewIdentityIsIntact(marker: {
+  readonly shareId?: unknown;
+  readonly recipientUserId?: unknown;
+}): boolean {
+  return readableId(marker.shareId) && readableId(marker.recipientUserId);
+}
+
 /**
  * The level a share view's PINNED grant names, or null when the grant cannot
  * be read completely.
