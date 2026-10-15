@@ -11,7 +11,33 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { mkdir, readFile, writeFile, stat } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DocumentValidationPool } from './document-size-pool.mjs';
-import { documentFixture, MiB, sha256, STATE_MAX_BYTES, restoreReservation } from './document-size-fixtures.mjs';
+import {
+  documentFixture,
+  MiB,
+  sha256,
+  STATE_MAX_BYTES,
+  RELAY_CPU_BUDGET_MS,
+  restoreReservation,
+} from './document-size-fixtures.mjs';
+import { documentStats } from './document-size-summary.mjs';
+
+const SEED_WINDOW = 128;
+
+// One row per SEED_WINDOW seeds: suffix, CPU median and wall time. Validation replays the whole
+// suffix, so its cost only grows as seeding continues. After the cold first window, a median over the
+// CPU budget means the longer timed suffix fails too.
+export function seedWindow(updates, windows, wallMs) {
+  if (updates.length < (windows.length + 1) * SEED_WINDOW) return null;
+  const recent = updates.slice(-SEED_WINDOW);
+  const cpuP50Ms = documentStats(recent.map((row) => row.cpuMs)).p50;
+  return {
+    validations: updates.length,
+    maximumSuffixCount: Math.max(...recent.map((row) => row.suffixCount)),
+    cpuP50Ms,
+    wallMsPerValidation: wallMs / SEED_WINDOW,
+    overBudget: windows.length >= 1 && cpuP50Ms > RELAY_CPU_BUDGET_MS.p50,
+  };
+}
 
 const policy = {
   maxStructVisits: 1_000_000,
@@ -385,15 +411,25 @@ export async function runRelayCase(options) {
       };
       // Real production validation and commits seed the long suffix, each document in order and the
       // documents across both workers. No measured samples or occupancy are mixed with this unpaced
-      // preparation; its wall time calibrates the run estimate.
+      // preparation. Its windows calibrate the estimate, and a gate run stops seeding over budget.
       const seedCount = options.seedUpdates ?? 0;
       if (seedCount) {
-        const seedStarted = performance.now();
-        let seedFailure;
+        const seedStarted = performance.now(),
+          windows = [];
+        let seedFailure,
+          overBudget,
+          windowStarted = seedStarted;
+        const afterSeed = () => {
+          const window = seedWindow(result.updates, windows, performance.now() - windowStarted);
+          if (!window) return;
+          windows.push(window);
+          windowStarted = performance.now();
+          if (window.overBudget && !options.pilot) overBudget ??= window;
+        };
         await Promise.all(
           docs.map(async (entry, session) => {
-            for (let index = 0; index < seedCount && !seedFailure; index++)
-              await update(entry, session, index).catch((error) => {
+            for (let index = 0; index < seedCount && !seedFailure && !overBudget; index++)
+              await update(entry, session, index).then(afterSeed, (error) => {
                 seedFailure ??= error;
               });
           }),
@@ -401,15 +437,21 @@ export async function runRelayCase(options) {
         if (seedFailure) throw seedFailure;
         result.seed = {
           updatesPerDocument: seedCount,
-          validations: seedCount * docs.length,
+          validations: result.updates.length,
           elapsedMs: performance.now() - seedStarted,
           suffixCounts: docs.map(
             (entry) => storage.readLiveUpdateJournalCut({ document: entry.document }).cut.suffixCount,
           ),
           checkpointCount: result.checkpoints.length,
+          windows,
+          overBudget: overBudget ?? null,
         };
         result.updates = [];
         result.checkpoints = [];
+        if (overBudget) {
+          result.status = 'over-budget';
+          return result;
+        }
       }
       await samplePrivate();
       started = performance.now();

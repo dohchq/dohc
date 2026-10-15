@@ -8,6 +8,8 @@ export const STATE_MAX_BYTES = 20 * MiB;
 // The relay journal checkpoints when its 4,095th entry commits, so a validation sees at most 4,094.
 export const JOURNAL_CHECKPOINT_ENTRIES = 4095;
 export const RELAY_CPU_BUDGET_MS = { p50: 50, p95: 100 };
+// Cold opens of each control, one per fresh launch.
+export const DOCUMENT_CONTROL_OPENS = 40;
 export const PILOT_PAIRS = 3;
 export function pairsForCase(options, item) {
   if (options.documentMode === 'pilot') return options.runCount;
@@ -122,6 +124,6 @@ export function runtimeEstimate() {
     basis:
       '106 lean GUI pairs at 65 s; ' +
       seedValidations +
-      ' sequential seed validations at the 50 ms CPU budget (a slower size stops before it seeds); 90 min for timed relay arms, native/socket proofs, churn and churned arms; one 60 min soak. At most one extension per size adds 17-30 pairs. A fallback soak adds 60 min and fits only when the calibrated normal run is under five hours. Baseline: 65 pairs plus 2 MiB relay and soak, about 3 h. Hard deadline 360 min; unfinished receipts are inconclusive.',
+      ' sequential seed validations at the 50 ms CPU budget (a slower size stops before or during seeding); 90 min for timed relay arms, native/socket proofs, churn and churned arms; one 60 min soak. At most one extension per size adds 17-30 pairs. A fallback soak adds 60 min and fits only when the calibrated normal run is under five hours. Baseline: 65 pairs plus 2 MiB relay and soak, about 3 h. Hard deadline 360 min; unfinished receipts are inconclusive.',
   };
 }

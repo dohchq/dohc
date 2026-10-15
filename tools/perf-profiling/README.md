@@ -175,9 +175,12 @@ node tools/perf-profiling/summarize-packaged-benchmark.mjs <pilot-directory>
 
 Read `documentSize.timing` in the summary. `pairMs` covers pairs 1 to 3 with peer and churn arms and lean pair 4.
 `relayCaseMs` is the relay work per case, and `seedMsPerValidation` is the seeding wall time per validation across both workers.
-Relay and seed costs grow with document size, so 2 MiB values understate larger sizes.
+Treat `seedMsPerValidation` as a lower bound. Each validation replays the whole suffix, and cut reads and commits run serially on the relay's main thread.
+The pilot seeds to 452 entries; the full run seeds to 3,855, about 1,930 on average.
+Scale the pilot's cost by suffix length with each relay case's `seed.windows`, which record suffix, CPU median and wall time per 128 seeds.
+Relay and seed costs also grow with document size, so 2 MiB values understate larger sizes.
 Also read each phase's `rate` and the soak's `compactionTimings` against its `compactions`.
-The pilot seeds 452 entries, not 3,855, and reaches no checkpoint. Pilots cannot choose a limit.
+The pilot reaches no checkpoint and never stops seeding. Pilots cannot choose a limit.
 
 Run the full benchmark from the harness checkout on an admitted idle Windows host.
 Run the baseline first. The candidate's `--baseline` names the baseline's output directory:
@@ -199,6 +202,8 @@ Book **six hours per package**. The uncalibrated normal estimate is **5.1 hours*
 90 for the other relay and fixture work, 60 for one soak and 10 for setup.
 Seeding is 61,680 validations, 30,840 per worker, at the 50 ms CPU budget.
 A size whose fresh separate arms exceed that budget stops before it seeds.
+Seeding itself stops once a 128-seed window after the first has a CPU median over that budget.
+These stops bound worker CPU, not main-thread wall time.
 An extension adds 18 to 33 minutes, at most one per size.
 A fallback soak adds 60 minutes. It fits only when the calibrated normal run is under five hours.
 The six-hour deadline aborts owned work and marks unfinished evidence inconclusive. It never grants a size.
@@ -210,7 +215,7 @@ about three hours. This saves baseline work without treating a refusal as perfor
 | Sizes | All 2, 5, 8 and 10 MiB, exact UTF-8 including frontmatter. | No size interpolation. |
 | Shapes/pairs | Formatted-retained: ten 2 MiB control pairs, twenty at each larger size. Other shapes: three pairs each. | Twenty-pair p95 is second-slowest; ten-pair p95 is slowest. Shape proofs have weak tail power. |
 | Extension | An arm whose planned-pair open, first-key or typing p95 is within 10% of its limit gets more pairs right away: shapes to twenty, the worst shape to forty. At most one arm per size, the first in run order. The comparator repeats the decision with the same control. | 17 to 30 more pairs. Twenty-pair p95 is second-slowest and forty-pair third-slowest, not distribution-free bounds. |
-| Stops | After each case, a candidate checks it as the comparator does. A failed or missing check ends the run, because no larger size can be chosen. In the relay, a failed separate arm or separate CPU over budget skips the case's later arms and churn. | Larger sizes stay unmeasured once a smaller size fails. |
+| Stops | After each case, a candidate checks it as the comparator does. A failed or missing check ends the run, because no larger size can be chosen. A stopped run first finishes its forty control opens in fresh launches, so a smaller passing size stays choosable. In the relay, a failed separate arm or separate CPU over budget skips the case's later arms and churn. Seeding stops once its CPU median exceeds the budget. | Larger sizes stay unmeasured once a smaller size fails. |
 | Correctness | Export/history in the first three fresh/restart pairs; full durable hash every pair. Three peer/churn renderer arms per shape. | Rare correctness failures have less repetition. |
 | Controls | Forty 5,000-paragraph opens and forty with 500 distinct local links, pooled once across fresh launches. Startup pools all launches. | One pooled control across forty fresh launches; no per-size control gate or variance estimate. |
 | Relay | Independent of GUI pairs: 240 updates/session for separate 1/2/4 and shared 4, on the worst shape at every size. Other shapes get separate/4 and native separate/1 proofs. | One independent worker/storage launch per arm; update percentiles do not estimate run-to-run GC/JIT variance. |
@@ -241,8 +246,11 @@ Boundary/25 ms worker heap samples can miss brief peaks. Exclude final heap samp
 A five-second asynchronous process sampler replaces one-second pwsh launches; its cost is recorded.
 GUI memory and history probes run independently of typing.
 The engine compacts a document once 64 updates are pending past its snapshot.
-Within eight updates of that threshold, each key waits for its own append before the next key.
-Compaction timing starts at the key whose append reaches 64 pending updates and ends when the new snapshot is visible, polled every 5 ms.
+Only the soak times compaction, and the soak gates no typing. Arms that gate typing never wait on the engine.
+Before each soak key, the harness reads the edited document's head.
+In the last four keys before the threshold, each key waits for its own append, so the crossing key is known.
+Compaction timing starts at that key's dispatch and ends when the new snapshot is visible.
+A detached 5 ms poll times it while typing continues, so compaction neither stalls the soak's rate nor goes untyped.
 The soak's compaction check needs a timing for at least half of the observed compactions.
 A 60-key arm spends most of each 125 ms key on CDP round trips and frame waits, so its rate measures the harness.
 A longer arm keeps the same per-key cost, so 60-key arms report their rate and the soak gates it. Latency samples do not depend on the rate.

@@ -1,4 +1,5 @@
 import {
+  DOCUMENT_CONTROL_OPENS,
   DOCUMENT_SHAPES,
   DOCUMENT_SIZES,
   JOURNAL_CHECKPOINT_ENTRIES,
@@ -379,7 +380,7 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
       candidate.documentSize?.controls?.legacyOpenMs,
       p,
       p === 'p50' ? 487 : 532,
-      40,
+      DOCUMENT_CONTROL_OPENS,
     );
     relative(
       'control',
@@ -387,7 +388,7 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
       candidate.documentSize?.controls?.linksOpenMs,
       baseline.documentSize?.controls?.linksOpenMs,
       p,
-      40,
+      DOCUMENT_CONTROL_OPENS,
     );
   }
   for (const mib of DOCUMENT_SIZES) {

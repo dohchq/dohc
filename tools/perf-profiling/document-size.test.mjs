@@ -10,6 +10,7 @@ import { observeDocumentReplacement, engineHistoryBytes } from './packaged-docum
 import { documentExtensionTarget, relativeBudget, soakChecks } from './document-size-summary.mjs';
 import { startGenerator } from './document-size-generator.mjs';
 import { relayArms } from './document-size-runner.mjs';
+import { seedWindow } from './document-size-relay.mjs';
 import { spawnSync } from 'node:child_process';
 import {
   DOCUMENT_SIZES,
@@ -626,6 +627,27 @@ test('separate/4 seeds every document so its timed window ends at the checkpoint
   assert.ok(relayArms({ fullRelay: false, updates: 240 }).every((arm) => arm.seedUpdates === 0));
   assert.ok(relayArms({ smoke: true, updates: 3 }).every((arm) => arm.seedUpdates === 0));
   assert.equal(relayArms({ fullRelay: true, updates: 60, pilot: true })[2].seedUpdates, 452);
+});
+test('a run stopped by a failed 5 MiB worst shape selects 2 MiB once its controls are complete', () => {
+  const candidate = passingDocumentSummary();
+  candidate.documentSize.cases['5/formatted-retained'].phases.fresh.failures = 1;
+  for (const key of Object.keys(candidate.documentSize.cases))
+    if (!key.startsWith('2/') && key !== '5/formatted-retained') delete candidate.documentSize.cases[key];
+  assert.equal(compareSummaries(passingDocumentSummary(), candidate).selectedMiB, 2);
+  // Without the finished controls, the stop would turn this answer into an inconclusive result.
+  candidate.documentSize.controls.legacyOpenMs = stats(100, 39);
+  assert.equal(compareSummaries(passingDocumentSummary(), candidate).selectedMiB, null);
+});
+test('seeding stops after the cold first window once its CPU median exceeds the budget', () => {
+  const rows = (count, cpuMs) => Array.from({ length: count }, (_, suffixCount) => ({ cpuMs, suffixCount }));
+  assert.equal(seedWindow(rows(127, 60), [], 1), null);
+  const first = seedWindow(rows(128, 60), [], 1280);
+  assert.equal(first.overBudget, false);
+  assert.equal(first.wallMsPerValidation, 10);
+  assert.equal(seedWindow(rows(255, 60), [first], 1280), null);
+  assert.equal(seedWindow(rows(256, 60), [first], 1280).overBudget, true);
+  assert.equal(seedWindow(rows(256, 50), [first], 1280).overBudget, false);
+  assert.equal(seedWindow(rows(256, 50), [first], 1280).maximumSuffixCount, 255);
 });
 test('existing soak receipts can still compare different durations', () => {
   const before = { status: 'complete', settings: { scenario: 'soak', soakMinutes: 10 } },

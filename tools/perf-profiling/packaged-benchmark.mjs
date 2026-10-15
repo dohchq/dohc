@@ -1,7 +1,7 @@
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
 import { compareDocumentSize, documentCaseBlocked, documentExtensionTarget } from './document-size-summary.mjs';
-import { documentFixture, documentMatrix, runtimeEstimate, pairsForCase, documentControlFiles } from './document-size-fixtures.mjs';
+import { documentFixture, documentMatrix, runtimeEstimate, pairsForCase, documentControlFiles, DOCUMENT_CONTROL_OPENS } from './document-size-fixtures.mjs';
 import { measurePackagedDocument } from './packaged-document-size.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs, usage } from './packaged-benchmark-options.mjs';
@@ -831,6 +831,29 @@ async function soak(instance, data, runDir) {
   return result;
 }
 
+// One cold open of each control per fresh launch, until each has its forty.
+async function documentControlOpens(page) {
+  receipt.documentControls ??= {legacyOpenMs:[],linksOpenMs:[]};
+  if(receipt.documentControls.legacyOpenMs.length>=DOCUMENT_CONTROL_OPENS) return;
+  for(const [name,key] of [['large.md','legacyOpenMs'],['links.md','linksOpenMs']]) {
+    receipt.documentControls[key].push((await openDoc(page,name)).openObservedMs);
+    await openDoc(page,'small.md');
+  }
+}
+
+// A stopped run can still choose a smaller passing size, which needs complete controls.
+async function finishDocumentControls(documentCase) {
+  let launches=0;
+  while((receipt.documentControls?.legacyOpenMs.length ?? 0)<DOCUMENT_CONTROL_OPENS) {
+    const runDir=join(output,'control-'+(++launches));await mkdir(runDir);
+    const instance=await launch(runDir,await fixture(runDir,documentCase),'fresh');
+    await documentControlOpens(instance.page);
+    await shutdown(runDir,instance);
+    await json(join(output,'result.json'),receipt);
+  }
+  return launches;
+}
+
 async function documentRelay(runDir, documentCase, deadline) {
   const relayDir=join(runDir,'relay');await mkdir(relayDir);
   const relaySettings={...documentCase,directory:relayDir,checkout:options.relayCheckout,engineBinary,
@@ -874,13 +897,7 @@ async function documentRelay(runDir, documentCase, deadline) {
         await openDoc(instance.page,'small.md');return row;
       };
       data.documentSize={...documentCase,repetition,phases:[]};
-      receipt.documentControls ??= {legacyOpenMs:[],linksOpenMs:[]};
-      if(receipt.documentControls.legacyOpenMs.length<40) {
-        for(const [name,key] of [['large.md','legacyOpenMs'],['links.md','linksOpenMs']]) {
-          receipt.documentControls[key].push((await openDoc(fresh.page,name)).openObservedMs);
-          await openDoc(fresh.page,'small.md');
-        }
-      }
+      await documentControlOpens(fresh.page);
       data.documentSize.phases.push(await phase(fresh,'fresh'));
       if(repetition<=3 && data.documentSize.phases[0].status==='complete') {
         for(const mode of ['peer','churn']) data.documentSize.phases.push(await phase(fresh,mode,{peerMode:mode,proof:false}));
@@ -908,6 +925,7 @@ async function documentRelay(runDir, documentCase, deadline) {
           if(gateCandidate && documentCaseBlocked(compareDocumentSize(documentBaseline,await summarize(receipt),DEFAULT_MARGIN,{includeSoak:false}),documentCase.key)) {
             receipt.documentStopped={key:documentCase.key,skippedPairs:tasks.length-index-1};
             tasks.splice(index+1);
+            receipt.documentStopped.controlLaunches=await finishDocumentControls(documentCase);
           }
         }
       }

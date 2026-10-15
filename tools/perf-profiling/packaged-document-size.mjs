@@ -145,17 +145,25 @@ async function poll(read, signal, timeoutMs = 120000, intervalMs = 50) {
 const COMPACTION_UPDATES = 64;
 const pendingUpdates = (head) => head.head_update_seq - head.head_snapshot_seq;
 
-export function engineHead(workspace, objectId) {
+export function engineHeads(workspace) {
   const require = createRequire(import.meta.url),
     { DatabaseSync } = require('node:sqlite');
   const db = new DatabaseSync(join(workspace.rootPath, '.dohc/engine/engine.db'), { readOnly: true });
   try {
-    return db
-      .prepare('SELECT object_id,head_update_seq,head_snapshot_seq FROM ydoc_docs WHERE object_id=?')
-      .get(objectId);
+    return db.prepare('SELECT object_id,head_update_seq,head_snapshot_seq FROM ydoc_docs').all();
   } finally {
     db.close();
   }
+}
+
+// Detached from typing: a compaction still missing after 30 s is recorded at 30 s, which fails its budget.
+async function timeCompaction(workspace, target, snapshotSeq, dispatch, index, signal) {
+  while (
+    engineHeads(workspace).find((h) => h.object_id === target).head_snapshot_seq === snapshotSeq &&
+    performance.now() - dispatch < 30000
+  )
+    await delay(5, undefined, { signal });
+  return { index, observedUpperBoundMs: performance.now() - dispatch };
 }
 
 export async function engineHistoryBytes(workspace) {
@@ -265,7 +273,7 @@ export async function measurePackagedDocument({
     let previousSnapshot = beforeHistory.heads.map((h) => h.head_snapshot_seq).join(',');
     // The measured document is the one whose update sequence moves once typing starts.
     const startSeq = new Map(beforeHistory.heads.map((h) => [h.object_id, h.head_update_seq]));
-    const compactionTimings = [];
+    const compactionPolls = [];
     let target = null;
     let memorySampling, historySampling, probeError;
     const sampleMemory = () =>
@@ -315,38 +323,36 @@ export async function measurePackagedDocument({
         await page.evaluate(
           () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
         );
-        target ??= history.at(-1)?.heads.find((h) => h.head_update_seq !== startSeq.get(h.object_id))?.object_id ?? null;
-        const latest = target && (history.at(-1) ?? beforeHistory).heads.find((h) => h.object_id === target);
-        // Near the boundary each key waits for its own append before the next key, so the key whose
-        // append reaches 64 pending is known and its compaction is timed from that key's dispatch.
-        const prior =
-          latest && pendingUpdates(latest) >= COMPACTION_UPDATES - 8 ? engineHead(workspace, target) : null;
+        // Only the soak times compaction, and it gates no typing. Each soak key reads the edited
+        // document's head first. The last four keys before 64 pending wait for their own append, so
+        // the crossing key is known; its compaction is timed from its dispatch while typing continues.
+        let prior = null;
+        if (soak) {
+          const heads = engineHeads(workspace);
+          target ??= heads.find((h) => h.head_update_seq !== startSeq.get(h.object_id))?.object_id ?? null;
+          const head = heads.find((h) => h.object_id === target);
+          if (head && pendingUpdates(head) >= COMPACTION_UPDATES - 4 && pendingUpdates(head) < COMPACTION_UPDATES)
+            prior = head;
+        }
         const dispatch = performance.now();
         await page.keyboard.press(index % 2 ? 'q' : 'x');
         const sample = await observation;
         if (!sample.triggerTrusted) throw Error('Untrusted document replacement');
         const waitStarted = performance.now();
-        if (prior && pendingUpdates(prior) < COMPACTION_UPDATES) {
+        if (prior) {
           const landed = await poll(
             () => {
-              const head = engineHead(workspace, target);
+              const head = engineHeads(workspace).find((h) => h.object_id === target);
               return head.head_update_seq > prior.head_update_seq ? head : null;
             },
             signal,
             30000,
             5,
           );
-          if (
-            landed.head_snapshot_seq !== prior.head_snapshot_seq ||
-            pendingUpdates(landed) >= COMPACTION_UPDATES
-          ) {
-            // A compaction still missing after 30 s is recorded at 30 s, which fails its budget.
-            while (
-              engineHead(workspace, target).head_snapshot_seq === prior.head_snapshot_seq &&
-              performance.now() - dispatch < 30000
-            )
-              await delay(5, undefined, { signal });
-            compactionTimings.push({ index, observedUpperBoundMs: performance.now() - dispatch });
+          if (landed.head_snapshot_seq !== prior.head_snapshot_seq || pendingUpdates(landed) >= COMPACTION_UPDATES) {
+            const timing = timeCompaction(workspace, target, prior.head_snapshot_seq, dispatch, index, signal);
+            void timing.catch(() => {});
+            compactionPolls.push(timing);
           }
         }
         const boundaryWaitMs = performance.now() - waitStarted;
@@ -369,7 +375,7 @@ export async function measurePackagedDocument({
     } finally {
       clearInterval(memoryTimer);
       clearInterval(historyTimer);
-      await Promise.all([memorySampling, historySampling]);
+      await Promise.all([memorySampling, historySampling, Promise.allSettled(compactionPolls)]);
     }
     if (probeError) throw probeError;
     row.editsPerMinute = (editCount * 60000) / editingElapsedMs;
@@ -398,7 +404,7 @@ export async function measurePackagedDocument({
     row.memory = memory;
     row.history = history;
     row.compactions = compactions;
-    row.compactionTimings = compactionTimings;
+    row.compactionTimings = await Promise.all(compactionPolls);
     row.status = row.durableBytes < fixture.bytes - 1 || row.durableBytes > fixture.bytes ? 'failed' : 'complete';
     if (row.status === 'failed') row.error = 'Constant-size replacements changed the complete document byte length';
     if (peer) {
