@@ -495,11 +495,10 @@ export async function verify(args) {
         await integrationProofs(desktopEnvironment, () => cancellation.checkpoint());
       }
     }
-    // A job's failure stops the other job unless the run keeps going. The other job's steps that never start are reported as not run.
+    // A job's failure stops the other job unless the run keeps going. Every expected step that never starts, in either job, is reported as not run.
     if (mode === "pr") Object.assign(jobSteps, { rust: !gates.rust ? [] : reuseRust ? ["rust-reuse"] : ["rust", "rust-verdict"], js: gates.js ? ["typecheck", "tests"] : [] });
     const stopOther = job => error => {
       cancellation.stop(error?.step ?? job, error);
-      if (cancellation.stopped?.error === error) delete jobSteps[job];
       throw error;
     };
     const rustWork = rustJob().catch(stopOther("rust"));

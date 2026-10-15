@@ -388,7 +388,8 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
             // The failed typecheck interrupts the running Rust job, which never counts as a pass.
             assert.deepEqual([verdicts.typecheck, verdicts.rust, verdicts["rust-verdict"]], ["FAIL", "NOT RUN", "NOT RUN"]);
             assert.equal(report.steps.find(step => step.name === "rust").reason, "stopped after typecheck failed");
-            assert.deepEqual(report.stopped, { after: "typecheck", notRun: ["rust", "rust-verdict"] });
+            // The tests the typecheck failure kept from starting are listed too.
+            assert.deepEqual(report.stopped, { after: "typecheck", notRun: ["rust", "rust-verdict", "tests"] });
             assert.deepEqual(report.failure, { kind: "check", cause: "typecheck" });
             assert.equal(report.rustEvidence, undefined);
             assert.match(result.stdout, /Stopped after typecheck failed. These steps did not finish/);
@@ -435,7 +436,8 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
             if (fault !== "rust-and-js") {
               assert.equal(report.steps.find(step => step.name === "tests").verdict, "NOT RUN");
               assert.deepEqual(JSON.parse(readFileSync(report.jsTests, "utf8")).stopped.notRun, ["desktop-runtime-packaging"]);
-              assert.deepEqual(report.stopped, { after: failedStep, notRun: ["tests", "tests: desktop-runtime-packaging"] });
+              // A failed rust step also kept its verdict check from starting.
+              assert.deepEqual(report.stopped, { after: failedStep, notRun: failedStep === "rust" ? ["tests", "rust-verdict", "tests: desktop-runtime-packaging"] : ["tests", "tests: desktop-runtime-packaging"] });
             }
           }
         }
