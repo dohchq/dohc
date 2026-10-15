@@ -46,7 +46,7 @@ it.each([
   expect(listing.granted).toEqual([expect.not.objectContaining({browserInvitationUrl: expect.anything()})]);
 });
 
-it("omits browser invitations from revoked, dependent, damaged, chat, and public grants", async () => {
+it("omits browser invitations from revoked, dependent, damaged, and public grants", async () => {
   const row: SyncRelayShareWithGrantRow = {
     share: {shareId: "share", workspaceId: "workspace", granterUserId: "owner", selectorJson: JSON.stringify({paths: ["docs"], versionId: null}), createdAtMs: 1},
     grant: {shareId: "share", grantId: "grant", principalKind: "user", principalUserId: "friend", principalEmail: null, access: "edit",
@@ -58,7 +58,21 @@ it("omits browser invitations from revoked, dependent, damaged, chat, and public
     {...row, grant: {...row.grant, parentGrantId: "parent"}},
     {...row, grant: {...row.grant, principalKind: "link", principalUserId: null}},
     {...row, share: {...row.share, selectorJson: "{}"}},
-    {...row, share: {...row.share, selectorJson: JSON.stringify({kind: "chat", channelWireId: "channel"})}, grant: {...row.grant, access: "read-write"}},
   ];
   for (const item of excluded) expect(await grantedShareSummary({ ...item, automationsGeneration: null })).not.toHaveProperty("browserInvitationUrl");
+});
+
+it.each(["chat", "group"] as const)("issues a browser invitation for a %s at either chat access level", async kind => {
+  for (const access of ["read-only", "read-write"]) {
+    const row: SyncRelayShareWithGrantRow = {
+      share: {shareId: "share", workspaceId: "workspace", granterUserId: "owner", createdAtMs: 1,
+        selectorJson: JSON.stringify({kind, channelWireId: "wire-team", ...(kind === "group" ? {paths: ["team"], versionId: null} : {})})},
+      grant: {shareId: "share", grantId: "grant:exact/with?#characters", principalKind: "user", principalUserId: "friend",
+        principalEmail: null, access, generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null},
+    };
+    const {grantedShareSummary} = createShareSummaries({findChannelCreateKind: () => "channel"}, () => ({subjectName: "Team"}), undefined, SHARE_WEB_ORIGIN);
+    expect(await grantedShareSummary({...row, automationsGeneration: null})).toMatchObject({
+      browserInvitationUrl: `${SHARE_WEB_ORIGIN}/s/chat/${encodeURIComponent(row.grant.grantId)}`,
+    });
+  }
 });
