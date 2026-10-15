@@ -88,20 +88,20 @@ test("each failed test maps to the command that reruns it alone, and a test with
   assert.equal(command("@dohc/desktop", "src/renderer/shell/ShellChatsView.test.tsx › ShellChatsView > shows Chats from View > Chats and the palette"),
     `pnpm --filter @dohc/desktop exec vitest run src/renderer/shell/ShellChatsView.test.tsx -t "^ShellChatsView (> )?shows Chats from View (> )?Chats and the palette$"`);
   assert.equal(command("@dohc/workspace-core", "src/a.test.ts › top (x) [y] $HOME 'q' \"w\" `b` 50% a|b"),
-    `pnpm --filter @dohc/workspace-core exec vitest run src/a.test.ts -t "^top .x. .y. .HOME 'q' .w. .b. 50. a.b$"`);
+    `pnpm --filter @dohc/workspace-core exec vitest run src/a.test.ts -t "^top \\(x\\) \\[y\\] .HOME 'q' .w. .b. 50. a\\|b$"`);
   // node:test reruns the top-level test, and a file that failed to load runs whole.
   assert.equal(command("repository", "scripts/verification/queue.test.mjs › parent > leaf fails"),
     `node --test --test-name-pattern "^parent( > |$)" scripts/verification/queue.test.mjs`);
   assert.equal(command("repository", "scripts/verification/broken.test.mjs › scripts\\verification\\broken.test.mjs"), "node --test scripts/verification/broken.test.mjs");
   assert.equal(command("desktop-scripts", "../../examples/fundraiser/recovery.test.ts › recovers (a) draft"),
-    `pnpm --filter @dohc/desktop exec node --experimental-transform-types --test --test-name-pattern "^recovers .a. draft( > |$)" ../../examples/fundraiser/recovery.test.ts`);
+    `pnpm --filter @dohc/desktop exec node --experimental-transform-types --test --test-name-pattern "^recovers \\(a\\) draft( > |$)" ../../examples/fundraiser/recovery.test.ts`);
   assert.equal(command("desktop-runtime-packaging", "scripts/stage-app-backend-runtime.test.mjs › stages the runtime"),
     `pnpm --filter @dohc/desktop exec node --test --test-name-pattern "^stages the runtime( > |$)" scripts/stage-app-backend-runtime.test.mjs`);
   // Playwright matches the file, the title, then the tags.
   assert.equal(command("desktop", "verification-smoke.spec.ts › @verification-smoke an editor change reaches disk"),
-    `pnpm qa:e2e -- verification-smoke.spec.ts --grep "(^| )verification-smoke.spec.ts @verification-smoke an editor change reaches disk( @\\S+)*$"`);
+    `pnpm qa:e2e -- verification-smoke.spec.ts --grep "(^| )verification-smoke\\.spec\\.ts @verification-smoke an editor change reaches disk( @\\S+)*$"`);
   assert.equal(command("accounts", "account-security.spec.ts › a device verification request cannot turn next into an external redirect"),
-    `node apps/desktop/scripts/run-playwright.mjs --config services/workspace-api/playwright.config.ts account-security.spec.ts --grep "(^| )account-security.spec.ts a device verification request cannot turn next into an external redirect( @\\S+)*$"`);
+    `node apps/desktop/scripts/run-playwright.mjs --config services/workspace-api/playwright.config.ts account-security.spec.ts --grep "(^| )account-security\\.spec\\.ts a device verification request cannot turn next into an external redirect( @\\S+)*$"`);
   // nextest names the binary, a library's or an integration test's, then the test.
   assert.equal(command("rust", "dohc-engine-sync tests::file_export_lane::lane_delete"),
     `node tools/rust-engine-program/run-rust-profile.mjs rerun -- --filter-expr "binary_id(=dohc-engine-sync) & test(=tests::file_export_lane::lane_delete)"`);
@@ -111,6 +111,23 @@ test("each failed test maps to the command that reruns it alone, and a test with
     ["@dohc/desktop", "C:\\w\\a.test.ts › absolute"], ["@dohc/desktop", null], [null, "src/a.test.ts › a"]]) assert.equal(command(step, test), null, `${step}: ${test}`);
   // A lane receipt is read back from disk, so a row can be anything.
   for (const row of [undefined, null, 7, "src/a.test.ts › a"]) assert.equal(rerunCommand(row), null);
+});
+
+test("each pattern matches its test and no sibling that differs at one regular expression character", () => {
+  // Each runner compiles the text between the quotes. Playwright also ignores case.
+  const pattern = (step, test, flags) => new RegExp(rerunCommand({ step, test }).match(/(?:-t|--test-name-pattern|--grep) "([^"]*)"/u)[1], flags);
+  const name = "esc [a] (b) {c} d* e+ f? g.h ^i j|k l/m";
+  const siblings = [..."[](){}*+?.^|"].map(character => name.replace(character, "X"));
+  // vitest matches suites and name joined by spaces, node:test the top-level name, Playwright the file, title, then tags.
+  for (const [step, test, title, flags] of [["@dohc/desktop", `src/a.test.ts › suite > ${name}`, text => `suite ${text}`],
+    ["repository", `scripts/a.test.mjs › ${name}`, text => text],
+    ["accounts", `a.spec.ts › ${name}`, text => `  a.spec.ts ${text} @tag`, "i"]]) {
+    const matcher = pattern(step, test, flags);
+    assert.ok(matcher.test(title(name)), `${step} matches its test`);
+    for (const sibling of siblings) assert.ok(!matcher.test(title(sibling)), `${step} skips ${sibling}`);
+  }
+  // Characters no shell writes the same way inside double quotes match any character there.
+  assert.ok(pattern("@dohc/desktop", "src/a.test.ts › costs $5 \"now\" `b` 50% hi! a\\b").test("costs X5 XnowX XbX 50X hiX aXb"));
 });
 
 test("Playwright and vitest reports name their flaky and failed tests", t => {

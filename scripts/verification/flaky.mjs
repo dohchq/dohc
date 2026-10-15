@@ -114,11 +114,15 @@ export function playwrightTimes(suites = []) {
   ]);
 }
 
-// A pattern that matches `text`. Each character that a shell or a regular
-// expression could read differently matches as `.`, so a command runs the same
-// in bash, PowerShell, and cmd. The runners' patterns read UTF-16 units, so
-// this one does too.
-const literally = text => text.replace(/[^\w ,:;'@#=-]/g, ".");
+// A pattern that matches `text`, written inside double quotes. A backslash there
+// reaches the runner unchanged in bash, PowerShell, and cmd, so it escapes the
+// regular expression syntax. Some characters cannot be written the same way in
+// every shell: bash and PowerShell expand `$`, PowerShell escapes with the
+// backtick, bash reads `\\` as one backslash, and cmd expands `%` and, with
+// delayed expansion, `!`. Those, `"`, and characters outside ASCII, whose
+// encoding depends on the shell, match as `.`, one per UTF-16 unit as the
+// runners read them.
+const literally = text => text.replace(/([[\](){}*+?.^|])|[^ -~]|[$"`\\%!]/g, (character, syntax) => syntax ? `\\${syntax}` : ".");
 
 /**
  * The command that reruns one failed test from the repository root, with the
