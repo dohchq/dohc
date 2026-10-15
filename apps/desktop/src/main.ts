@@ -1,3 +1,4 @@
+import { forgetWorkspacePresentation } from "./workspaces/actorPresentation";
 import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
@@ -1575,7 +1576,7 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
     return id;
   },
   assertCurrent: operation => operation.assertCurrent(),
-  account: () => cachedCredentials?.relayUrl ? { userId: cachedCredentials.userId, email: cachedCredentials.email,
+  account: () => cachedCredentials ? { userId: cachedCredentials.userId, email: cachedCredentials.email,
     relayUrl: cachedCredentials.relayUrl, generation: credentialCacheGeneration } : null,
   roster: ({ workspace }) => ownerAccessRoster(workspace, cachedCredentials, shareRosters.observation),
   received: () => receivedShareAcquisition.observation(),
@@ -1784,6 +1785,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
   canonicalizeRoot: (rootPath) => realpathSync.native(rootPath),
   createState: createDesktopWorkspaceAuthorityState,
   disposeState: async (state, binding, workspaceAtDisposal) => {
+    forgetWorkspacePresentation(binding.workspaceId);
     await folderAppDetection.retire(binding.attachmentId);
     const physicalWorkspace = {
       ...workspaceAtDisposal,
@@ -3255,6 +3257,7 @@ async function closeDispatchRunActivity(
       }), options);
       if (closing === null) return;
       await closing;
+      forgetWorkspacePresentation(current.workspaceId);
       if (!joined) lease.assertCurrent();
     },
   );
@@ -5938,7 +5941,7 @@ function registerIpcHandlers(): void {
   registerCloudIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: handleIpc,
     assertTrustedSender, cloudLogin, clearCachedCredentials, refreshCredentialCache,
-    warmCredentialCache, currentCredentials: () => cachedCredentials,
+    warmCredentialCache, currentCredentials: () => cachedCredentials, localInstallationId,
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
     reconcileCloud: () => activity.reconcileCloud(),
     notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
@@ -6639,6 +6642,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace, warmCredentialCache, localUserId,
     localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
+    readWorkspace: findWorkspace,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, resolveEngineFiles,
     activity, desktopChatBookmarks, notifyRenderer,
