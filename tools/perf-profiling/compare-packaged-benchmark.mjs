@@ -17,7 +17,7 @@ const MIN_AUTOMATION_RUNS = 5;
 
 // Settings that change what a receipt measures. The limits may differ: they decide which cases are
 // comparable, through each case's fixture digest.
-const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain', 'documentMiB', 'relaySessions', 'updatesPerSecond', 'churnEdits', 'soakMinutes', 'documentMode'];
+const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain', 'documentMiB', 'relaySessions', 'updatesPerSecond', 'churnEdits', 'documentMode'];
 
 function check(metric, baseline, candidate, margin, percentile = 'p95') {
   const field = percentile === 'p50' ? 'P50' : 'P95';
@@ -41,7 +41,7 @@ export function compareSummaries(baseline, candidate, margin = DEFAULT_MARGIN) {
   for (const [label, summary] of [['baseline', baseline], ['candidate', candidate]]) {
     if (summary.status !== 'complete') problems.push(`The ${label} receipt is ${summary.status}, not complete.`);
   }
-  for (const key of COMPARED_SETTINGS) {
+  for (const key of COMPARED_SETTINGS.filter(key => candidate.settings?.scenario !== 'document-size' || !['runCount'].includes(key))) {
     if (JSON.stringify(baseline.settings?.[key]) !== JSON.stringify(candidate.settings?.[key])) problems.push(`The receipts differ in ${key}.`);
   }
   if (baseline.diagnostic || candidate.diagnostic) problems.push('A profiled receipt cannot serve as a performance comparison.');

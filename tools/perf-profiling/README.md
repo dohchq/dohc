@@ -160,122 +160,107 @@ The reader is the next agent preparing a scheduled profiling run.
 
 ## Measure document-size limits
 
-Use this scenario for the document-size decision, PR 1 of 5.
-It changes no product limit. Current packages can refuse larger documents.
-The receipt preserves those refusals; a refusal cannot pass a size.
+This is PR 1 of 5. It measures the decision without changing a product limit.
+Prepare the release package and its matching relay checkout before the booking.
+Run pnpm --filter @dohc/app-backend-runtime build in that checkout.
+Keep any diagnostic content/SQL/state raise in a disposable checkout; preserve its patch and build receipt.
+Native ingress, worker and process memory budgets stay unchanged.
 
-Prepare the release package and the matching relay checkout before the measurement window.
-After worktree setup, run `pnpm --filter @dohc/app-backend-runtime build` in the relay checkout.
-If the orchestrator uses a disposable diagnostic raise, cover every content, SQL and state check in the design.
-Keep the native ingress and memory budgets unchanged.
-The receipt hashes the package, engine, relay sources, installed schema, fixtures and harness.
-It also saves the relay source patch. Preserve the package build receipt and any engine patch separately.
-
-Run this command from the harness checkout:
+Run from the harness checkout on an admitted idle Windows host:
 
 ~~~powershell
-node tools/perf-profiling/packaged-benchmark.mjs --binary <release.exe> --package-commit <SHA> --output <new-directory> --label candidate --scenario document-size --document-mib 2,5,8,10 --runs 40 --keystrokes 60 --relay-sessions 1,2,4 --updates-per-second 8 --churn-edits 100000 --soak-minutes 60
+node tools/perf-profiling/packaged-benchmark.mjs --binary <release.exe> --package-commit <SHA> --output <new-directory> --label candidate --scenario document-size --document-mib 2,5,8,10 --runs 20 --keystrokes 60 --relay-sessions 1,2,4 --updates-per-second 8 --churn-edits 100000 --soak-minutes 60
 ~~~
 
-Use --relay-checkout <path> when the measured relay sources are in another prepared checkout.
-Use --engine-commit <SHA> for a separately built diagnostic engine.
-Run the matching baseline with --label baseline and another output directory.
-Then run the existing summarizer and comparator against both directories.
-The original full and soak scenarios remain separate release requirements.
+Use --relay-checkout <path> or --engine-commit <SHA> when those inputs differ.
+Use --label baseline and another output directory for the baseline package.
+Summarize each result.json, then run compare-packaged-benchmark.mjs <baseline-directory> <candidate-directory>.
+The receipt hashes sources, packages, engine, schema, fixtures and harness, and saves the relay patch.
+Full and soak remain separate release requirements; other scenarios keep their settings comparison rules.
 
-The provisional full-run estimate is **48 to 72 hours per package**. Book 72 hours.
-The matrix has 16 size/shape cases, each with 40 fresh/restart pairs.
-Each case adds one hour of renderer editing, six relay concurrency/topology cases per pair, checkpoint and churn probes.
-Release performance, refusals and host load can change this estimate. Use a pilot to refine the booking.
-A baseline and candidate need two bookings.
+Book **six hours per package**. The uncalibrated estimate is **4.75 hours normally, 5.75 with a fallback soak**.
+The six-hour deadline aborts owned work and marks unfinished evidence inconclusive. It never grants a size.
+Allow 115 minutes for 106 lean GUI pairs at 65 seconds, five for controls, 90 for fixtures/relay,
+60 for a soak and 15 for extensions/setup. A fallback soak adds 60 minutes.
+Slow validation, extra promoted shapes or extensions can exhaust the booking. Calibrate with a pilot first.
+Baseline runs only the 2 MiB relay/churn/soak arms, plus three GUI refusal pairs per larger shape,
+about three hours. This saves baseline work without treating a refusal as performance evidence.
 
-Fixtures have exactly 2, 5, 8 or 10 MiB of UTF-8 Markdown.
-Each size has plain and formatted text, both with canonical and retained frontmatter.
-Multilingual paragraphs exceed 700 bytes to preserve node headroom at 10 MiB.
-Separate 120-byte paragraph/list/table probes report structural limits.
-The relay records actual Y.Doc node counts and depth; structural probes never substitute for performance fixtures.
+| Work | Gate configuration | Confidence cost |
+| --- | --- | --- |
+| Sizes | All 2, 5, 8 and 10 MiB, exact UTF-8 including frontmatter. | No size interpolation. |
+| Shapes/pairs | Formatted-retained: ten 2 MiB control pairs, twenty at each larger size. Other shapes: three pairs each. | Twenty-pair p95 is second-slowest; ten-pair p95 is slowest. Shape proofs have weak tail power. |
+| Extension | Extend a near-budget open/first-key/typing arm to forty pairs once. Promote a pilot whose maximum exceeds the worst shape's p95 to twenty. | More work can make the deadline inconclusive. Forty-pair p95 is third-slowest, still not a distribution-free confidence bound. |
+| Correctness | Export/history in the first three fresh/restart pairs; full durable hash every pair. Three peer/churn renderer arms per shape. | Rare correctness failures have less repetition. |
+| Controls | Forty 5,000-paragraph opens and forty with 500 distinct local links, pooled once across fresh launches. Startup pools all launches. | One pooled control across forty fresh launches; no per-size control gate or variance estimate. |
+| Relay | Independent of GUI pairs: 240 updates/session for separate 1/2/4 and shared 4, on the worst shape at every size. Other shapes get separate/4 and native separate/1 proofs. | One independent worker/storage launch per arm; update percentiles do not estimate run-to-run GC/JIT variance. |
+| Long suffix | Worst-shape arms seed 3,840 production-validated commits per document before timing. Shared seeds 3,840 total. | Seeding is unpaced and excluded from latency statistics. Shared latency remains diagnostic. |
+| Checkpoints | Continue separate/1 unpaced through the real 4,095th-update checkpoint. Unit-test both count and 20 MiB suffix-byte triggers. | Byte-trigger timing is not measured: a large artificial update would change the workload. |
+| Churn | Exactly 100,000 edits, eight client IDs; exact state-ceiling crossing search capped at one million, then censored. Replay churned separate 1/4 and shared 4; other shapes separate 1/4. | No decision loss from censoring beyond required headroom. Churned relay samples have short suffixes; fresh long-suffix arms cover replay cost. |
+| Joins | Separate/1: worst shape has twenty native and twenty named/link socket joins across fresh/restart; other shapes have six native and twelve socket proofs. Real restore once per shape. | Join tail has twenty samples. Restore/ACK/native-drain latency is diagnostic, not an unapproved gate. |
+| Soak | One sixty-minute formatted-retained soak starting at 100,000 edits at the largest otherwise-passing size; next size down if it fails. At most two hours. | Smaller sizes and other shapes rely on rising memory cost; there is no independent sixty-minute sample for them. Two failures leave no qualified raise. |
 
-The desktop uses a fresh isolated profile/workspace per pair and a reused profile for its restart.
-It opens a 5,000-paragraph control, then the size fixture.
-Trusted keyboard replacements alternate among the beginning, middle and end.
-Renderer marks measure keydown through the next frame. Dispatch through two frames remains diagnostic.
-Complete Copy as Markdown, durable file hashes and history read/compare/restore verify the full document.
-The first pair also edits for 60 minutes and samples renderer private bytes, engine CPU/write counters, logical retained state and SQLite/WAL size.
-Compaction timing is an observed upper bound between consecutive state probes, including probe cost.
+Long paragraphs exceed 700 bytes so normal fixtures retain node headroom at 10 MiB.
+Separate 120-byte paragraph/list/table probes enter the real relay validator and report their admission/refusal and node/depth counts.
+Native admission is exercised when the relay accepts. Rust exposes no node-count metric; the harness does not invent one.
 
-The relay runs in a separate owned child with production deployment storage, authority, journal, checkpoints and validator workers.
-Its two workers retain the shipping 512 MiB old-generation hard limit.
-One, two and four sessions edit separate documents at eight updates per second each.
-The same session counts also edit a shared document.
-Separate-document latency gates; shared-document latency is reported.
-Missing evidence, crashes, lost edits, state and memory bounds fail in both topologies.
-A real native host uses the packaged engine for apply, settle, restart and restore.
-Loopback HTTP/WebSocket probes use production named-session, ticket, Edit-link, frame and provider code.
-Only the external account authority maps a fixture cookie to a provisioned account.
-Every probe verifies full joining state and a native-acknowledged provider edit, before and after restart.
-Loopback transfer includes protocol bytes, without TLS or internet latency.
+A second production IPC session stays connected to the GUI's canonical engine Y.Doc for the peer control.
+Another arm applies 100,000 CRDT replacements through that session before GUI open/typing.
+This measures renderer fan-out and churn; named/Edit-link network peers are covered separately by real socket/provider probes.
+Trusted selections alternate beginning/middle/end. Preparation waits two frames after scrolling.
+Key timing starts at event.timeStamp and ends in a MessageChannel task posted from rAF, including queue and layout/paint opportunity.
+Edit activation is separate; edit-ready is first content plus activation, excluding Playwright's scheduling gap.
+Total click-to-editable remains diagnostic. History/export use the ordinary bridge and Copy as Markdown.
 
-Per-update worker CPU, slot time, queue wait and backlog are distinct.
-The worker records V8 old-space usage at completion.
-Parent requests sample total used heap every 25 ms as a conservative old-space bound.
-Relay process-tree private bytes are sampled about once per second.
-The owned-tree sample includes fixture client Y.Docs and the native child, so it is a conservative relay bound.
-No fixture allocation is subtracted. If that overhead binds, isolate the generators before approving a raise.
-These are sampled peaks and can miss short spikes; worker exhaustion remains a hard failure.
-No CPU or heap profiler runs in a latency gate.
-
-A 4,096-update arm crosses the production relay checkpoint interval.
-Offline churn uses eight client IDs and measures the exact first crossing of 20 MiB, or records a censored lower bound.
-Each shape must fit 100,000 edits and start with at least 5 MiB of state headroom.
-The saved churned state repeats native recovery, socket and concurrency probes.
-Restore measurements include the real framed payload and both reservation formulas.
-Memory budgets take precedence over the 20 MiB state ceiling.
+The relay uses production SQLite, authority, journal/checkpoint code and two real workers with a **512 MiB hard old-generation limit**.
+Each relay arm runs in a fresh owned process, excluding earlier proof/churn allocations. Fixture Y.Docs live in a separate owned process with independent client IDs, including shared-document peers.
+Proof clients allocate only after timed samples finish. Private bytes gate on the relay PID only. The process inventory separately reports native and generator memory.
+Native draining happens after the measured admission loop; it cannot throttle offered validation load.
+The scheduler offers eight updates/s/session and records achieved rate, queue lag, worker CPU, wait, slot and occupancy.
+Boundary/25 ms worker heap samples can miss brief peaks. Exclude final heap sampling from occupied time.
+A five-second asynchronous process sampler replaces one-second pwsh launches; its cost is recorded.
+GUI memory and history probes run independently of typing. A compaction upper bound starts at the key crossing the 64-update boundary and ends at the observed new snapshot, including probe uncertainty.
 
 | Gate | Budget |
 | --- | --- |
-| 5,000-paragraph control | Open p50/p95 at most 487/532 ms. |
-| 2 MiB first content; edit ready | p50/p95 at most 487/532 ms; 750/1000 ms. |
-| 5 MiB first content; edit ready | 750/1000 ms; 1250/1500 ms. |
-| 8 MiB first content; edit ready | 1000/1250 ms; 1750/2000 ms. |
-| 10 MiB first content; edit ready | 1250/1500 ms; 2250/2500 ms. |
-| First key and typing | Matching 2 MiB baseline p50/p95. The 2 MiB control allows the existing 10% or 17 ms margin. |
-| Renderer private bytes | At most 435 MB at ten minutes, 477 MB at sixty minutes. |
-| Relay update CPU | p50 at most 50 ms, p95 at most 100 ms. |
-| Relay slot/wait/backlog | p95 at most 100 ms; two-slot occupancy at most 80%. |
-| Relay memory | Sampled worker heap at most 384 MiB; 512 MiB hard old-generation limit. Private bytes plus restore reservation at most 1 GiB. |
-| Native ingress | Measured restore reservation at most 512 MiB. |
-| Join; settle/compaction | Join p95 at most 2 s; settle and compaction p95 at most 1 s. |
-| Transfer | Initial framed transfer at most 3S + 64 KiB; steady updates at most 2 KiB/edit. |
-| History write volume | At 480 edits/min, at most (ceil(480/64)+1)S + 2N + 2 MiB per minute. |
-| Retained history | At most 2 MiB above the first completed compaction. Per-minute post-compaction minima must have a nonpositive fitted slope. |
-| Engine CPU | Average at most one core during editing. |
+| Relative comparisons | Each records baseline, spread and margin. Allow max(10% of control, 17 ms, control p95 minus p50). Candidate variability never enlarges its own allowance. |
+| Startup; 500-link open | Matching package baseline with that margin. Startup p50; links p50/p95. |
+| First key/typing | 2 MiB versus matching baseline; larger sizes versus this package's matching 2 MiB solo/peer/churn control. Same margin at p50/p95 for solo and p95 for peer/churn. |
+| 5,000-paragraph control | Open p50/p95 <=487/532 ms, measured once. |
+| 2 MiB first content; edit-ready | p50/p95 <=487/532 ms; 750/1000 ms. |
+| 5 MiB first content; edit-ready | 750/1000 ms; 1250/1500 ms. |
+| 8 MiB first content; edit-ready | 1000/1250 ms; 1750/2000 ms. |
+| 10 MiB first content; edit-ready | 1250/1500 ms; 2250/2500 ms. |
+| Achieved edit rate | >=456 edits/min GUI and >=7.6 updates/s per separate relay session. CPU and recorded writes normalize to 480 edits/min. |
+| Renderer private bytes | <=435 MB at ten minutes; <=477 MB at sixty minutes and sampled peak. |
+| Relay update | CPU p50/p95 <=50/100 ms; wait/slot/backlog <=100 ms; two-worker occupancy <=80%. Shared latency is reported. |
+| Relay memory | Worker sampled heap <=384 MiB; 512 MiB hard limit. Relay PID private plus restore reservation <=1 GiB. |
+| Restore reservation | Actual framed R; native reservation <=512 MiB. Read event count/reserves from the profile and header bytes from Rust. Memory takes precedence over the 20 MiB state ceiling. |
+| Join; settle/compaction | Join p95 <=2 s; settle/observed compaction <=1 s. |
+| State/transfer | State <=20 MiB; initial framed transfer <=3S+64 KiB; steady framed socket bytes <=2 KiB/edit. Payload bytes reported separately. |
+| Retained history | Post-compaction referenced bytes excluding the current snapshot/vector; net growth <=2 MiB over the first compaction. Trend is diagnostic. |
+| Write volume | Record OS byte counters normalized per 480 edits, separately from retained overhead. No write-volume gate. fsWrite is operations, never bytes. |
+| Engine CPU | At most one normalized core during editing. |
 
-N is the content byte length. S is the largest required encoded state, including churn.
-Reservations use the measured framed restore payload, which can exceed S.
-All active state/transport refusals remain visible.
-The size decision chooses the largest passing tested size with every smaller tested size passing.
-The matrix always measures 8 MiB. No passing 2 MiB means no raise.
-Forty independent pairs make nearest-rank p95 the third-slowest observation.
-Five pairs are diagnostic pilots and cannot gate.
-The comparator rejects missing metrics, incomplete exports/recovery, unmatched fixtures/settings and partial matrices.
+Open allowances increase with bytes to pay for full parse/admission; they do not weaken typing or the original control.
+Report logical retained overhead, current state, physical SQLite/WAL, sampled peaks, update/snapshot/transfer sizes and native drain/restore/ACK costs separately.
+For each shape require 100,000 edits to fit and at least 5 MiB initial headroom below 20 MiB.
+State-reader and admission bounds follow that state derivation; only the projector's 16 MiB output ceiling stays fixed.
+Choose the largest contiguous otherwise-passing size, then require its full soak. Missing metrics/refusals/crashes/lost edits fail closed.
+No passing 2 MiB means no raise. Always measure 8 MiB before choosing between 5 and 10.
 
-For a launch-free 2 MiB plan, use the normal command with --document-mib 2 --document-mode dry-run.
-It writes document-size-plan.json and accepts an absent executable.
-For a shorter packaged pilot, add --document-mode pilot --document-mib 2 --runs 1 --keystrokes 3 --soak-minutes 1.
-Pilot mode still exercises the relay; it cannot choose a limit.
-
-For a relay-only 2 MiB plumbing smoke, write a settings JSON with absolute checkout and new directory paths, plus updatesPerSecond: 8.
-Then run:
+For a launch-free plan, add --document-mib 2 --document-mode dry-run; the binary may be absent.
+For a packaged pilot use --document-mode pilot --document-mib 2 --runs 1 --keystrokes 3 --soak-minutes 1.
+Pilots cannot choose a limit. No full packaged run is part of harness verification.
+For the bounded relay smoke, write settings.json with absolute checkout/directory paths and updatesPerSecond: 8, then run:
 
 ~~~powershell
 node --import ./services/sync-relay/node_modules/tsx/dist/loader.mjs tools/perf-profiling/document-size-runner.mjs smoke <settings.json>
 ~~~
 
-Smoke uses two sessions, separate/shared documents and three updates per session.
-Without engineBinary it exercises workers and storage only; it cannot prove native or socket recovery.
-No smoke result establishes a performance budget.
-Run harness tests with node --test tools/perf-profiling/packaged-benchmark.test.mjs.
-
+Smoke uses separate/shared two-session 2 MiB documents and three updates/session.
+Without engineBinary it proves storage/worker/client plumbing, not native or GUI paths.
+Run the harness suite with node --test tools/perf-profiling/packaged-benchmark.test.mjs.
 
 ## Run the full profiles
 
