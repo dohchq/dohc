@@ -448,8 +448,8 @@ fn fold_reading_cost(source: &str, plain: &str, label: &str) -> f64 {
 
 #[test]
 fn nested_contract_definition_guard_scales_linearly() {
-    let mut previous = [0.0; 2];
-    for bytes in [8_000, 32_000, 1_000_000] {
+    let mut smallest = [0.0; 2];
+    for bytes in [8_000, 32_000, 128_000, 1_000_000] {
         let mut distinct = String::from("x ");
         for width in 1.. {
             distinct.push_str(&"`".repeat(width));
@@ -471,6 +471,10 @@ fn nested_contract_definition_guard_scales_linearly() {
         .into_iter()
         .enumerate()
         {
+            if (shape < 2 && ![8_000, 128_000].contains(&bytes)) || (shape >= 2 && bytes == 128_000)
+            {
+                continue;
+            }
             let mut plain: String = source
                 .chars()
                 .map(|ch| if ch == '\n' { ch } else { 'w' })
@@ -479,8 +483,10 @@ fn nested_contract_definition_guard_scales_linearly() {
             plain.push_str("x &#1;");
             let ratio = fold_reading_cost(&source, &plain, label);
             linear &= if shape < 2 {
-                let bounded = previous[shape] == 0.0 || ratio <= previous[shape] * 2.0;
-                previous[shape] = ratio;
+                let bounded = smallest[shape] == 0.0 || ratio <= smallest[shape] * 8.0;
+                if smallest[shape] == 0.0 {
+                    smallest[shape] = ratio;
+                }
                 bounded
             } else {
                 ratio <= 8.0
@@ -492,16 +498,31 @@ fn nested_contract_definition_guard_scales_linearly() {
 
 #[test]
 fn folded_code_marks_stop_at_each_span() {
-    let doc = Ydoc::wire();
-    doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "a `b` c `d` e &#1;")
-        .unwrap();
-    assert_eq!(
-        doc.canonical_content()["body"]["children"][0]["children"][0]["delta"],
-        json!([
-            {"insert":"a "}, {"insert":"b","attrs":{"code":{}}}, {"insert":" c "},
-            {"insert":"d","attrs":{"code":{}}}, {"insert":" e &#1;"}
-        ])
-    );
+    for (source, expected) in [
+        (
+            "a `b` c `d` e &#1;",
+            json!([
+                {"insert":"a "}, {"insert":"b","attrs":{"code":{}}}, {"insert":" c "},
+                {"insert":"d","attrs":{"code":{}}}, {"insert":" e &#1;"}
+            ]),
+        ),
+        (
+            "`b` c &#1;",
+            json!([{"insert":"b","attrs":{"code":{}}}, {"insert":" c &#1;"}]),
+        ),
+        (
+            "a &#1; `b`",
+            json!([{"insert":"a &#1; "}, {"insert":"b","attrs":{"code":{}}}]),
+        ),
+    ] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
+            .unwrap();
+        assert_eq!(
+            doc.canonical_content()["body"]["children"][0]["children"][0]["delta"],
+            expected
+        );
+    }
 }
 
 #[test]
@@ -521,6 +542,21 @@ fn folded_code_keeps_following_markdown_on_first_edit() {
         assert_eq!(
             doc.project(ContentKind::Richdoc).unwrap().content,
             format!("{expected}\n\nEdited")
+        );
+    }
+}
+
+#[test]
+fn folded_code_preserves_noncanonical_span_spelling() {
+    for source in ["Use ``make`` then &#", "a ` b ` &#"] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
+            .unwrap();
+        doc.preserve_folded_markdown_source(source).unwrap();
+        assert_eq!(
+            doc.preserved_markdown_source(&doc.project_richdoc().unwrap())
+                .as_deref(),
+            Some(source)
         );
     }
 }

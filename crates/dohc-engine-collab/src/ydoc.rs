@@ -1244,7 +1244,8 @@ impl Ydoc {
         self.rewrite_content_to_markdown_checked::<true>(content_kind, markdown, reading, false)
     }
 
-    /// File folds refuse nested items and quote overflow before mutation and invalidate the old source witness.
+    /// Rewrite a file fold, refusing nested items and quote-depth overflow
+    /// before mutation. A new fold invalidates the previous exact-source witness.
     pub fn rewrite_content_to_markdown_for_fold(
         &self,
         content_kind: ContentKind,
@@ -3606,13 +3607,16 @@ fn insert_md_paragraph<F: XmlFragment>(
     let mut cursor = 0;
     let mut runs = Vec::new();
     for span in spans {
-        runs.push(Delta::Inserted(text[cursor..span.start].to_owned(), None));
         let content = &text[span.clone()];
         let width = content.bytes().take_while(|b| *b == b'`').count();
         let mut value = &text[span.start + width..span.end - width];
         if value.starts_with(' ') && value.ends_with(' ') && !value.bytes().all(|b| b == b' ') {
             value = &value[1..value.len() - 1];
         }
+        if !render_inline_code(value).is_ok_and(|rendered| rendered == content) {
+            continue;
+        }
+        runs.push(Delta::Inserted(text[cursor..span.start].to_owned(), None));
         let value = value.to_owned();
         runs.push(Delta::Inserted(value, Some(Box::new(code.clone()))));
         cursor = span.end;
