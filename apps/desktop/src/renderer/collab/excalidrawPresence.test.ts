@@ -137,7 +137,7 @@ describe("Excalidraw presence", () => {
     bobDoc.destroy();
   });
 
-  it("sanitizes malformed remote display state and derives a local color", async () => {
+  it("sanitizes malformed remote display state without unsupported colour overrides", async () => {
     const relay = sharedRelay();
     const api = fakeApi();
     const localDoc = new Y.Doc();
@@ -155,9 +155,10 @@ describe("Excalidraw presence", () => {
       transport: relay.make(),
       topic: "scene-1",
       clientId: "remote",
-      user: { name: "Remote", color: "url(javascript:bad)" },
+      user: { name: "Remote" },
       onPeers: () => undefined,
     });
+    remote.awareness.setLocalStateField("user", { name: "Remote", color: "url(javascript:bad)" });
     const selectedElementIds = Object.create(null) as Record<string, boolean>;
     selectedElementIds.good = true;
     selectedElementIds.falseValue = false;
@@ -205,8 +206,7 @@ describe("Excalidraw presence", () => {
     expect(Object.hasOwn(collaborator.selectedElementIds!, "__proto__")).toBe(
       false,
     );
-    expect(collaborator.color?.stroke).toMatch(/^#[0-9a-f]{6}$/i);
-    expect(collaborator.color?.stroke).not.toContain("url");
+    expect(collaborator).not.toHaveProperty("color");
 
     local.destroy();
     remote.destroy();

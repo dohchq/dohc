@@ -20,7 +20,7 @@ describe("document comment", () => {
     const readStdin = vi.fn(async () => "First message\n");
     const result = await executeCli({ argv: [...base, ...(stdin ? ["-"] : ["--text", "First message\n"]), "--agent", "local-agent", "--request-id", "retry-1", "--json"], cwd: "/workspace/notes", env: { DOHC_RUN_ID: "run-env" }, request, readStdin });
     expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 2, ...started });
+    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 3, ...started });
     expect(request).toHaveBeenCalledWith({ protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileChatStart", args: { cwd: resolve("/workspace/notes"), actor: "agent", path: "plan.md", title: "Budget", body: "First message\n", agent: "local-agent", requestId: "retry-1", runId: "run-env" } });
     expect(readStdin).toHaveBeenCalledTimes(stdin ? 1 : 0);
   });

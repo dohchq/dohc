@@ -36,6 +36,7 @@ import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyLookSettings } from "../theme";
 import { palette } from "../tokens";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { ownPresentation, ownAgentPresentation } from "../workbench/actorPresentation";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { AskAgentButton, type AskAgent } from "../askAgent";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
@@ -649,7 +650,7 @@ export function SettingsDialog(props: {
               testId="settings-row-your-color"
               {...customizeRow("settings-row-your-color")}
             >
-              <ChatAvatar name={userSettings.profile.preferredName ?? "You"} kind="human" own size="comment" />
+              <ChatAvatar presentation={ownPresentation} name={userSettings.profile.preferredName ?? "You"} kind="human" size="comment" />
               <HueControl
                 label="Your color"
                 shape="person"
@@ -663,7 +664,7 @@ export function SettingsDialog(props: {
               onReset={() => void saveAppearance({ yourAgentColor: null })}
               testId="settings-row-your-agent-color"
             >
-              <ChatAvatar name={userSettings.profile.agentName ?? "Agent"} kind="agent" own size="comment" />
+              <ChatAvatar presentation={ownAgentPresentation} name={userSettings.profile.agentName ?? "Agent"} kind="agent" size="comment" />
               <HueControl
                 label="Your agent's color"
                 shape="agent"

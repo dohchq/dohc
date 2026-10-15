@@ -3,6 +3,58 @@ use crate::{owner_outbox::draft::open_draft_in, DocKey};
 use dohc_engine_domain::{VersionedTextStore, WriteText};
 use dohc_test_scratch::ScratchDir;
 
+#[test]
+#[ignore = "paired release measurement"]
+fn measure_adopted_owner_apply_per_row() {
+    use crate::owner_outbox::accepted::{apply_frame_in_tx, OwnerAcceptedFrameInput};
+    let mut samples = Vec::new();
+    for _ in 0..21 {
+        let (_dir, mut store, observed, baseline) = fixture();
+        let enrollment = input(&store, &observed, baseline.clone());
+        enroll(&mut store, &enrollment, &observed.limits).unwrap();
+        let observed = store
+            .read_with(|conn| super::super::draft::read_observed_in(conn, &observed.binding))
+            .unwrap()
+            .unwrap();
+        let doc = crate::Ydoc::wire();
+        doc.apply(&baseline).unwrap();
+        let mut position = (
+            observed.revision,
+            observed.native_head_sequence,
+            observed.accepted_cursor,
+        );
+        let mut elapsed = 0.0;
+        for _ in 0..100 {
+            let input = OwnerAcceptedFrameInput {
+                binding: observed.binding.clone(),
+                relay_database_namespace: "relay".into(),
+                expected_revision: position.0,
+                expected_native_head_sequence: position.1,
+                previous_accepted_cursor: position.2,
+                journal_cursor: position.2 + 1,
+                update_bytes: doc.richdoc_append_paragraph("Applied paragraph."),
+            };
+            let start = std::time::Instant::now();
+            let result = store
+                .write_with(&NoFaults, |tx| {
+                    apply_frame_in_tx(tx, "workspace", &input, 11)
+                })
+                .unwrap();
+            elapsed += start.elapsed().as_secs_f64() * 1_000_000.0;
+            let dohc_engine_storage::TxnOutcome::Committed(r) = result else {
+                panic!("committed")
+            };
+            position = (r.revision, r.native_head_sequence, r.accepted_cursor);
+        }
+        samples.push(elapsed / 100.0);
+    }
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "ADOPTED_APPLY_US_PER_ROW median={} p95={} samples=21 rows=100",
+        samples[10], samples[19]
+    );
+}
+
 fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../tests/owner-source/owner-source-seed.json"
