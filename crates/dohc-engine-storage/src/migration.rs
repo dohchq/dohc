@@ -3241,6 +3241,14 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_HOSTED_REPLICA_DDL,
         sets_user_version: None,
     },
+    // A file retired before this names no document. It keeps its row, so
+    // its path stays held and the file still goes; its document is unknown.
+    Migration {
+        ordinal: 54,
+        id: "v2-hosted-retired-file-object",
+        sql: "ALTER TABLE hosted_retired_files ADD COLUMN object_id TEXT CHECK (length(object_id) > 0);",
+        sets_user_version: None,
+    },
 ];
 
 const V2_REPLICA_FRONTIERS_DDL: &str = "\
@@ -3334,7 +3342,6 @@ CREATE INDEX hosted_deferred_ops_by_document ON hosted_deferred_ops(workspace_id
 CREATE TABLE hosted_retired_files (
     workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
     path TEXT NOT NULL CHECK (length(path) > 0),
-    object_id TEXT NOT NULL CHECK (length(object_id) > 0),
     sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
     PRIMARY KEY (workspace_id, path)
 ) STRICT;
@@ -4027,7 +4034,11 @@ mod tests {
             ),
             (
                 "v2-hosted-replica",
-                "d23fb4dcb78d913599d006e93f03a18d52dd1a020973fccaadab12ea1c14c497",
+                "332fbe3728b51bdb26a1cc9cc0d8d1da4decd311aa991687be899f4def7c7468",
+            ),
+            (
+                "v2-hosted-retired-file-object",
+                "7eb78041929d56613f64fd29f5f68200564dd7c08421ce869e96f4a36cb5c675",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4066,8 +4077,8 @@ mod tests {
                  INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('hosted',1); \
                  INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
                  VALUES ('hosted','doc','doc.md','backfilling',0); \
-                 INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
-                 VALUES ('hosted','gone.md','gone',printf('%064d',0));",
+                 INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
+                 VALUES ('hosted','gone.md',printf('%064d',0));",
             )
             .unwrap();
             let state: (Option<String>, i64, i64, i64, i64, i64) = conn
@@ -4108,14 +4119,9 @@ mod tests {
                 "INSERT INTO hosted_withheld_befores (workspace_id,moment_id,before_object_id,\
                  before_path,before_sha256,before_content_kind) \
                  VALUES ('hosted','no-moment','private','a.md','sha','text')",
-                "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
-                 VALUES ('hosted','a.md','a','sha')",
-                "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
-                 VALUES ('ordinary','a.md','a',printf('%064d',0))",
+                "INSERT INTO hosted_retired_files (workspace_id,path,sha256) VALUES ('hosted','a.md','sha')",
                 "INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
-                 VALUES ('hosted','a.md',printf('%064d',0))",
-                "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
-                 VALUES ('hosted','a.md','',printf('%064d',0))",
+                 VALUES ('ordinary','a.md',printf('%064d',0))",
             ] {
                 assert!(conn.execute(invalid, []).is_err(), "{invalid}");
             }
@@ -4171,6 +4177,59 @@ mod tests {
             .unwrap();
         assert_eq!(replicas, 0, "an existing replica stays ordinary");
         hosted(&upgraded);
+    }
+
+    /// A file retired before files named their document keeps its row, so
+    /// its path stays held until the file goes.
+    #[test]
+    fn hosted_retired_file_object_upgrade_keeps_files_retired_before_it() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-hosted-retired-file-object");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 54);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+             VALUES ('hosted','service-host:a','epoch','stream',1); \
+             INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('hosted',1); \
+             INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
+             VALUES ('hosted','locked.md',printf('%064d',0));",
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        conn.execute(
+            "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+             VALUES ('hosted','gone.md','gone',printf('%064d',1))",
+            [],
+        )
+        .unwrap();
+        let files: Vec<(String, Option<String>)> = conn
+            .prepare("SELECT path,object_id FROM hosted_retired_files ORDER BY path")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            files,
+            [
+                ("gone.md".to_owned(), Some("gone".to_owned())),
+                ("locked.md".to_owned(), None),
+            ]
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                 VALUES ('hosted','empty.md','',printf('%064d',2))",
+                [],
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -3097,6 +3097,35 @@ fn a_departed_document_is_reported_until_its_file_is_forgotten() {
     assert!(departed(&store).is_empty());
 }
 
+/// A file retired before retired files named their document still goes,
+/// but names no departed document.
+#[test]
+fn a_file_retired_without_its_document_is_removed_but_names_none() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    client.transport().unshare("doc-b");
+    sync(&client, &mut store);
+    assert_eq!(
+        retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
+        TxnOutcome::Committed(true)
+    );
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE hosted_retired_files SET object_id=NULL", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    assert!(departed_hosted_object_ids(&store, "ws").unwrap().is_empty());
+    let files = retired_hosted_files(&store, "ws").unwrap();
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        ["a.md"]
+    );
+}
+
 /// Serve a Y.Doc delta of `object_id` at `path` on a lineage the feed never
 /// sends a base for, so the replica defers it. Answers its blob.
 fn baseless_ydoc_delta(feed: &HostedFeed, object_id: &str, path: &str) -> String {

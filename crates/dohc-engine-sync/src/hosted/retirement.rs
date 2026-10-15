@@ -82,7 +82,8 @@ pub fn departed_hosted_documents(
 
 /// The hosted documents outside the current scope that this replica has not
 /// finished removing, by object id: its rows remain, or its retired file
-/// does. A document is gone only once neither does.
+/// does. A document is gone only once neither does. A file retired before
+/// retired files named their document names none.
 pub fn departed_hosted_object_ids(
     store: &EngineStore,
     workspace_id: &str,
@@ -93,7 +94,8 @@ pub fn departed_hosted_object_ids(
             "SELECT d.object_id FROM hosted_documents d \
              JOIN hosted_replicas h ON h.workspace_id=d.workspace_id \
              WHERE d.workspace_id=?1 AND d.scope_generation<>h.scope_generation \
-             UNION SELECT object_id FROM hosted_retired_files WHERE workspace_id=?1 \
+             UNION SELECT object_id FROM hosted_retired_files \
+             WHERE workspace_id=?1 AND object_id IS NOT NULL \
              ORDER BY 1",
             &[&workspace_id],
         )
