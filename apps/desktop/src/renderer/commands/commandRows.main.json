@@ -1,0 +1,136 @@
+{
+  "base": "96e8d87ba",
+  "context": {
+    "isShareView": false,
+    "shareViewWritable": false,
+    "activeDocumentKind": "markdown",
+    "pinnedApps": [
+      {
+        "root": "apps/Trip planner",
+        "label": "Trip planner"
+      }
+    ]
+  },
+  "rows": [
+    {
+      "id": "new-file",
+      "label": "New file"
+    },
+    {
+      "id": "new-drawing",
+      "label": "New drawing"
+    },
+    {
+      "id": "new-folder",
+      "label": "New folder"
+    },
+    {
+      "id": "new-collection",
+      "label": "New collection"
+    },
+    {
+      "id": "quick-open",
+      "label": "Go to"
+    },
+    {
+      "id": "open-workspace",
+      "label": "Open workspace folder…"
+    },
+    {
+      "id": "import-files",
+      "label": "Import files"
+    },
+    {
+      "id": "export-workspace",
+      "label": "Export workspace as zip"
+    },
+    {
+      "id": "toggle-sidebar",
+      "label": "Toggle sidebar"
+    },
+    {
+      "id": "close-tab",
+      "label": "Close tab"
+    },
+    {
+      "id": "new-editor-group-right",
+      "label": "New editor group right"
+    },
+    {
+      "id": "toggle-markdown-source",
+      "label": "Toggle markdown source view"
+    },
+    {
+      "id": "toggle-about",
+      "label": "Toggle About"
+    },
+    {
+      "id": "show-explorer",
+      "label": "View: Explorer"
+    },
+    {
+      "id": "show-chats",
+      "label": "View: Chats"
+    },
+    {
+      "id": "show-search",
+      "label": "View: Search"
+    },
+    {
+      "id": "show-graph",
+      "label": "View: Graph"
+    },
+    {
+      "id": "show-sites",
+      "label": "View: Apps"
+    },
+    {
+      "id": "show-history",
+      "label": "View: History"
+    },
+    {
+      "id": "show-app-view:apps%2FTrip%20planner",
+      "label": "View: Trip planner"
+    },
+    {
+      "id": "connect-cloud",
+      "label": "Connect server"
+    },
+    {
+      "id": "settings",
+      "label": "Settings"
+    },
+    {
+      "id": "settings-appearance",
+      "label": "Settings: Open Appearance"
+    },
+    {
+      "id": "settings-agents",
+      "label": "Settings: Open Agents (MCP)"
+    },
+    {
+      "id": "check-updates",
+      "label": "Check for updates"
+    },
+    {
+      "id": "install-update",
+      "label": "Update and restart"
+    },
+    {
+      "id": "toggle-theme",
+      "label": "Toggle light/dark theme"
+    },
+    {
+      "id": "zoom-in",
+      "label": "Zoom in"
+    },
+    {
+      "id": "zoom-out",
+      "label": "Zoom out"
+    },
+    {
+      "id": "zoom-reset",
+      "label": "Reset zoom"
+    }
+  ]
+}

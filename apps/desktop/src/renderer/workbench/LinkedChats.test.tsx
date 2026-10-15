@@ -2,13 +2,57 @@ import "../../testing/legendListMock";
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState, type ComponentProps } from "react";
+import { Suspense, useState, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatThreadRecord } from "../../ipc/bridgeContract";
 import { deferred, type Deferred } from "../../testing/deferred";
 import { LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
 import { ReactionStoreProvider } from "./reactionStore";
 import type { AboutFile, AccessContext } from "./About";
+
+const messageRenderGate = vi.hoisted(() => ({
+  current: null as { resume: Promise<void>; onRender: () => void } | null,
+}));
+
+// Hold the loaded list's render so a response frame can run before commit.
+vi.mock("./chatMessages", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./chatMessages")>();
+  const { createElement } = await import("react");
+  return {
+    ...original,
+    ChatMessageList: (props: ComponentProps<typeof original.ChatMessageList>) => {
+      if (messageRenderGate.current && !props.loading && props.messages.length > 0) {
+        messageRenderGate.current.onRender();
+        throw messageRenderGate.current.resume;
+      }
+      return createElement(original.ChatMessageList, props);
+    },
+  };
+});
+
+function stubAnimationFrames() {
+  let nextId = 0;
+  const pending = new Map<number, FrameRequestCallback>();
+  const request = vi.fn((callback: FrameRequestCallback) => {
+    const id = ++nextId;
+    pending.set(id, callback);
+    return id;
+  });
+  const cancel = vi.fn((id: number) => { pending.delete(id); });
+  vi.stubGlobal("requestAnimationFrame", request);
+  vi.stubGlobal("cancelAnimationFrame", cancel);
+  return {
+    pending,
+    cancel,
+    run() {
+      for (const id of [...pending.keys()]) {
+        const callback = pending.get(id);
+        pending.delete(id);
+        callback?.(0);
+      }
+    },
+  };
+}
 
 // History stands in as the file it was given: these tests pin what the panel
 // hands it, not what History then reads.
@@ -101,6 +145,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  messageRenderGate.current = null;
   cleanup();
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -434,7 +479,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
     const onOpenPath = vi.fn();
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-file",
           threadId: searchThread.id,
           authorKind: "human",
@@ -474,7 +519,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
   it("lands on a focused message and honors a repeated open of the same thread", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-1",
           threadId: searchThread.id,
           authorKind: "human",
@@ -482,7 +527,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
           body: "First update",
           createdAtMs: 1_700_000_000_000,
         },
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-2",
           threadId: searchThread.id,
           authorKind: "human",
@@ -527,6 +572,58 @@ describe("LinkedChatsPanel initialThread consumption", () => {
     await waitFor(() => expect(scrolledMessageIds).toContain("message-2"));
   });
 
+  it("reveals a historical file message after a deferred reload commits", async () => {
+    const messages = Array.from({ length: 300 }, (_, index) => ({
+      id: `message-${index}`, threadId: searchThread.id,
+      presentation: { group: "fixture", hue: null, self: false },
+      authorKind: "human" as const, authorDisplayName: "Reader",
+      body: `File message ${index}`, createdAtMs: index + 1,
+    }));
+    bridgeMock.listChatMessages.mockResolvedValue({ messages });
+    const frames = stubAnimationFrames();
+    const scrolled: Array<string | null> = [];
+    vi.mocked(Element.prototype.scrollIntoView).mockImplementation(function (this: Element) {
+      scrolled.push(this.getAttribute("data-message-id"));
+    });
+    const view = render(
+      <Suspense fallback={null}>
+        <LinkedChatsPanel workspaceId="workspace-1" filePath="topic.md" onError={() => undefined} />
+      </Suspense>,
+    );
+    await userEvent.setup().click(await screen.findByTestId("linked-chat-open"));
+    await screen.findByText("File message 299");
+    await waitFor(() => expect(frames.pending.size).toBe(1));
+    act(() => frames.run());
+    expect(scrolled).toContain("message-299");
+    scrolled.length = 0;
+
+    const reload = deferred<{ messages: typeof messages }>();
+    const suspended = deferred<void>();
+    const resume = deferred<void>();
+    bridgeMock.listChatMessages.mockReturnValueOnce(reload.promise);
+    view.rerender(
+      <Suspense fallback={null}>
+        <LinkedChatsPanel workspaceId="workspace-1" filePath="topic.md"
+          initialThread={{ ...searchThread }} initialFocusMessageId="message-0"
+          onError={() => undefined} />
+      </Suspense>,
+    );
+    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(2));
+    messageRenderGate.current = { resume: resume.promise, onRender: () => suspended.resolve() };
+    await act(async () => { reload.resolve({ messages }); });
+    await suspended.promise;
+    // The reload has reached render, but its list cannot commit yet.
+    act(() => frames.run());
+    expect(scrolled).toEqual([]);
+    await act(async () => {
+      messageRenderGate.current = null;
+      resume.resolve();
+    });
+    await screen.findByText("File message 299");
+    act(() => frames.run());
+    expect(scrolled).toContain("message-0");
+  });
+
   it("drops a deferred scroll after a newer thread open supersedes its request", async () => {
     const secondThread = {
       ...searchThread,
@@ -536,7 +633,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
     bridgeMock.listChatMessages.mockImplementation(
       async ({ threadId }: { threadId: string }) => ({
         messages: threadId === searchThread.id
-          ? [{
+          ? [{ presentation: { group: "fixture", hue: null, self: false },
               id: "shared-message",
               threadId,
               authorKind: "human" as const,
@@ -545,7 +642,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
               createdAtMs: 1,
             }]
           : [
-              {
+              { presentation: { group: "fixture", hue: null, self: false },
                 id: "shared-message",
                 threadId,
                 authorKind: "human" as const,
@@ -553,7 +650,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
                 body: "Same id in the new DOM",
                 createdAtMs: 2,
               },
-              {
+              { presentation: { group: "fixture", hue: null, self: false },
                 id: "new-focus",
                 threadId,
                 authorKind: "human" as const,
@@ -564,11 +661,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
             ],
       }),
     );
-    const frames: FrameRequestCallback[] = [];
-    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
-      frames.push(callback);
-      return frames.length;
-    }));
+    const frames = stubAnimationFrames();
     const scrolledMessageIds: Array<string | null> = [];
     vi.mocked(Element.prototype.scrollIntoView).mockImplementation(function (
       this: Element,
@@ -586,7 +679,9 @@ describe("LinkedChatsPanel initialThread consumption", () => {
       />,
     );
     await screen.findByText("Old thread message");
-    await waitFor(() => expect(frames).toHaveLength(1));
+    await waitFor(() => expect(frames.pending.size).toBe(1));
+    const oldFrame = [...frames.pending.keys()][0]!;
+    const oldCallback = frames.pending.get(oldFrame);
 
     view.rerender(
       <LinkedChatsPanel
@@ -598,19 +693,46 @@ describe("LinkedChatsPanel initialThread consumption", () => {
       />,
     );
     await screen.findByText("New focus");
-    await waitFor(() => expect(frames).toHaveLength(2));
+    await waitFor(() => expect(frames.pending.size).toBe(1));
+    expect(frames.cancel).toHaveBeenCalledWith(oldFrame);
+    expect(frames.pending.has(oldFrame)).toBe(false);
 
-    act(() => frames[0]?.(0));
+    act(() => oldCallback?.(0));
     expect(scrolledMessageIds).toEqual([]);
-    act(() => frames[1]?.(1));
+    act(() => frames.run());
     expect(scrolledMessageIds).toEqual(["new-focus"]);
+  });
+
+  it("cancels a pending reveal when the panel unmounts", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [{
+      id: "message-1", threadId: searchThread.id, authorKind: "human",
+      presentation: { group: "fixture", hue: null, self: false },
+      authorDisplayName: "Reader", body: "Pending reveal", createdAtMs: 1,
+    }] });
+    const frames = stubAnimationFrames();
+    const view = render(
+      <LinkedChatsPanel workspaceId="workspace-1" filePath="topic.md"
+        initialThread={searchThread} initialFocusMessageId="message-1"
+        onError={() => undefined} />,
+    );
+    await screen.findByText("Pending reveal");
+    await waitFor(() => expect(frames.pending.size).toBe(1));
+    const frame = [...frames.pending.keys()][0]!;
+    vi.mocked(Element.prototype.scrollIntoView).mockClear();
+
+    view.unmount();
+
+    expect(frames.cancel).toHaveBeenCalledWith(frame);
+    expect(frames.pending.size).toBe(0);
+    act(() => frames.run());
+    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
   });
 });
 
 // A search result opens its thread while this file's Chats are still being
 // read. The two reads answer to different owners, so neither drops the other.
 describe("LinkedChatsPanel thread and file reads", () => {
-  const message = {
+  const message = { presentation: { group: "fixture", hue: null, self: false },
     id: "message-1",
     threadId: searchThread.id,
     authorKind: "human" as const,
@@ -708,7 +830,7 @@ describe("LinkedChatsPanel read cursor", () => {
   it("marks the opened thread read up to the last message it showed", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-1",
           threadId: searchThread.id,
           authorKind: "human",
@@ -716,7 +838,7 @@ describe("LinkedChatsPanel read cursor", () => {
           body: "First.",
           createdAtMs: 1_700_000_000_000,
         },
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-2",
           threadId: searchThread.id,
           authorKind: "human",
@@ -884,7 +1006,7 @@ describe("LinkedChatsPanel share level", () => {
   it("shows existing reactions but no picker when the share refuses writes", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-1",
           threadId: "thread-1",
           authorKind: "human",
@@ -936,7 +1058,7 @@ describe("LinkedChatsPanel share level", () => {
 // every Chats surface does under the shell: one write chain per cell, one
 // set of rows, and errors only for a panel still showing the thread.
 describe("LinkedChats reactions through the workspace store", () => {
-  const note = {
+  const note = { presentation: { group: "fixture", hue: null, self: false },
     id: "message-1",
     threadId: "thread-1",
     authorKind: "human" as const,

@@ -513,20 +513,20 @@ describe("workspace switch-back file listing", () => {
         payload: ListWorkspaceFilesPayload,
       ): Promise<ListWorkspaceFilesResult> => {
         if (payload.workspaceId === OTHER_WORKSPACE.workspaceId) {
-          return {
+          return { visibility: { status: "ready" as const, rules: [] },
             files: [{ path: "other.md", kind: "file" }],
             folders: [],
           };
         }
         workspaceACalls += 1;
         if (workspaceACalls === 1) {
-          return {
+          return { visibility: { status: "ready" as const, rules: [] },
             files: [{ path: "cached.md", kind: "file" }],
             folders: [],
           };
         }
         if (workspaceACalls === 2) {
-          return {
+          return { visibility: { status: "ready" as const, rules: [] },
             files: [{ path: "cached.md", kind: "file" }],
             folders: [],
             cached: true,
@@ -557,7 +557,7 @@ describe("workspace switch-back file listing", () => {
     expect(screen.queryByText("fresh.md")).toBeNull();
 
     await act(async () => {
-      revalidation.resolve({
+      revalidation.resolve({ visibility: { status: "ready" as const, rules: [] },
         files: [{ path: "fresh.md", kind: "file" }],
         folders: [],
       });
@@ -585,7 +585,7 @@ describe("workspace switch-back file listing", () => {
     );
     bridge.listWorkspaceFiles = vi
       .fn()
-      .mockResolvedValueOnce({
+      .mockResolvedValueOnce({ visibility: { status: "ready" as const, rules: [] },
         files: [{ path: "survivor.md", kind: "file" as const }],
         folders: [],
         cached: true,
@@ -602,7 +602,7 @@ describe("workspace switch-back file listing", () => {
     expect(await screen.findByTestId("tab-gone.md")).toBeTruthy();
 
     await act(async () => {
-      revalidation.resolve({
+      revalidation.resolve({ visibility: { status: "ready" as const, rules: [] },
         files: [{ path: "survivor.md", kind: "file" }],
         folders: [],
       });
@@ -623,7 +623,7 @@ describe("workspace switch-back file listing", () => {
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledOnce());
     expect(screen.queryByText("cold.md")).toBeNull();
     await act(async () => {
-      walk.resolve({
+      walk.resolve({ visibility: { status: "ready" as const, rules: [] },
         files: [{ path: "cold.md", kind: "file" }],
         folders: [],
       });
@@ -650,7 +650,7 @@ describe("file-open-start marking", () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md", "fallback.md"], "a.md")),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["a.md", "fallback.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -704,7 +704,7 @@ describe("file-open-start marking", () => {
         activeEditorGroup: "left",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["a.md", "fallback.md", "b.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -785,7 +785,7 @@ describe("file-open-start marking", () => {
       }),
     );
     const paths = ["left-old.md", "right-old.md", "left-new.md", "right-new.md"];
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: paths.map((path) => ({ path, kind: "file" as const })),
       folders: [],
     }));
@@ -888,7 +888,7 @@ describe("file-open-start marking", () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["data.db"], "data.db")),
     );
-    bridge.listWorkspaceFiles.mockResolvedValue({
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "data.db", kind: "file" }],
       folders: [],
     });
@@ -981,7 +981,7 @@ describe("file-open-start marking", () => {
         activeEditorGroup: "right",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["a.md", "b.md", "c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -1186,7 +1186,7 @@ describe("dirty tab close boundaries", () => {
         activeEditorGroup: "left",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["a.md", "b.md", "c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -1393,7 +1393,7 @@ describe("explorer destructive change flush boundaries", () => {
     const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
       moveWorkspacePath: vi.fn(async () => undefined),
     });
-    bridge.listWorkspaceFiles.mockResolvedValue({
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [
         { path: "a.md", kind: "file" as const },
         { path: "docs/b.md", kind: "file" as const },
@@ -1464,7 +1464,7 @@ describe("explorer destructive change flush boundaries", () => {
     const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
       deleteWorkspacePath: vi.fn(async () => undefined),
     });
-    bridge.listWorkspaceFiles.mockResolvedValue({
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
       files: [
         { path: "a.md", kind: "file" as const },
         { path: "docs/b.md", kind: "file" as const },

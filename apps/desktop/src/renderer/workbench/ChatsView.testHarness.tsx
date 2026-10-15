@@ -71,7 +71,7 @@ export function thread(overrides: Partial<ChannelThreadRecord> = {}): ChannelThr
 }
 
 export function message(overrides: Partial<ChatMessageRecord> = {}): ChatMessageRecord {
-  return {
+  return { presentation: { group: "fixture", hue: null, self: false },
     id: "message-1",
     threadId: "thread-1",
     authorKind: "human",
@@ -85,7 +85,7 @@ export function message(overrides: Partial<ChatMessageRecord> = {}): ChatMessage
 export function openingPreview(
   overrides: Partial<NonNullable<ChannelThreadRecord["openingMessage"]>> = {},
 ): NonNullable<ChannelThreadRecord["openingMessage"]> {
-  return {
+  return { presentation: { group: "fixture", hue: null, self: false },
     id: "message-1",
     authorKind: "human",
     authorDisplayName: "You",
