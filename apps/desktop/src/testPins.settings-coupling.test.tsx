@@ -34,7 +34,7 @@ vi.mock("./renderer/settings/ScheduleHostRow", () => ({ ScheduleHostRow: () => n
 beforeEach(() => { Element.prototype.scrollIntoView = vi.fn(); });
 afterEach(cleanup);
 function renderSettings(initialSection?: SettingsSectionId) {
-  render(<SettingsDialog workspaceId="fixture" workspacePath="/fixture" onClose={() => {}} initialSection={initialSection} />);
+  render(<SettingsDialog workspaceIsReady workspaceId="fixture" workspacePath="/fixture" onClose={() => {}} initialSection={initialSection} />);
 }
 it.each(["settingsDialog", "settingsSearch", "settingsWarning", "settingsEmptySearch"] as const)(
   "couples the %s literal to its producer", async (key) => {

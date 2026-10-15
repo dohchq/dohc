@@ -235,6 +235,40 @@ export function typicalRunMs(root) {
 }
 
 /**
+ * The failed tests, from a list of { step, test }, that another branch's attempt
+ * also failed in the last day: [{ step, test, branches }]. `branch` names this
+ * run's line as a request does, by its branch ref or else its checkout; attempts
+ * on that line do not count. A missing or unreadable queue gives none.
+ */
+export function sharedFailures(root, failed, { branch, now = Date.now() } = {}) {
+  try {
+    const key = row => `${row.step}\n${row.test}`;
+    const wanted = new Map(failed.map(row => [key(row), row]));
+    const attempts = new Map();
+    const history = wanted.size ? readFileSync(queuePaths(root).history, "utf8").trim().split("\n").reverse() : [];
+    // The history is in time order, newest last, so the reading stops at the first event older than a day.
+    for (const line of history) {
+      const event = (() => { try { return JSON.parse(line); } catch { return null; } })();
+      if (Date.parse(event?.at) < now - 24 * 60 * 60_000) break;
+      if (event?.event !== "finished") continue;
+      for (const row of event.failed ?? []) if (wanted.has(key(row))) attempts.set(key(row), [...(attempts.get(key(row)) ?? []), event.id]);
+    }
+    const lines = new Map();
+    const lineOf = id => {
+      if (!lines.has(id)) { const request = readJson(join(queuePaths(root).request(id), "request.json")); lines.set(id, request?.branch ?? request?.checkout ?? null); }
+      return lines.get(id);
+    };
+    // A branch is compared and shown without refs/heads/, however each request recorded it.
+    const short = line => String(line).replace(/^refs\/heads\//u, "");
+    const own = short(branch).toLowerCase();
+    return [...wanted].flatMap(([name, row]) => {
+      const branches = [...new Set((attempts.get(name) ?? []).map(lineOf).filter(Boolean).map(short).filter(line => line.toLowerCase() !== own))].sort();
+      return branches.length ? [{ ...row, branches }] : [];
+    });
+  } catch { return []; }
+}
+
+/**
  * Submit a verification and follow it. Stopping this process never stops the
  * request: running the same command again follows it, or returns its result.
  */
