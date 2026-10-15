@@ -51,20 +51,27 @@ function storedFiles(storage: StorageContext, workspace: string): ReplicaCurrent
     versionId: String(row.version_id), objectId: String(row.object_id), path: String(row.path), contentKind: row.content_kind as "text" | "binary", sha256: String(row.sha256), byteLength: Number(row.byte_length),
     lineageClaimId: row.lineage_claim_id === null ? null : String(row.lineage_claim_id), restoreGeneration: row.restore_generation === null ? null : Number(row.restore_generation)}));
 }
-const filePathKey = (file: ReplicaCurrentView["files"][number]) => JSON.stringify([file.versionId, file.path]);
+const filePathKey = (file: {versionId: string; path: string}) => JSON.stringify([file.versionId, file.path]);
+const fileLineageKey = (file: ReplicaCurrentView["files"][number]) => JSON.stringify([file.versionId, file.objectId, file.lineageClaimId]);
+function currentViewFences(storage: StorageContext, workspace: string) {
+  return new Map(storage.db.prepare("SELECT main_version_id,object_id,lineage_claim_id,restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id=? AND lineage_state='current'")
+    .all(workspace).map(row => [JSON.stringify([row.main_version_id, row.object_id, row.lineage_claim_id]), Number(row.restore_fence_generation)]));
+}
+function currentViewPaths(files: ReplicaCurrentView["files"], omitted: ReplicaCurrentView["omitted"], fences: Map<string, number>) {
+  const currentFiles = files.filter(file => file.lineageClaimId === null || file.restoreGeneration === (fences.get(fileLineageKey(file)) ?? 1));
+  return new Map([...currentFiles, ...omitted].map(file => [filePathKey(file), file.objectId]));
+}
 function carriedPathAvailable(file: ReplicaCurrentView["files"][number], currentPaths: Map<string, string>) {
   const owner = currentPaths.get(filePathKey(file));
   return owner === undefined || owner === file.objectId;
 }
-export function currentViewFilesAtFences(storage: StorageContext, workspace: string, files: ReplicaCurrentView["files"], previous: ReplicaCurrentView["files"]) {
-  const key = (f: ReplicaCurrentView["files"][number]) => JSON.stringify([f.versionId, f.objectId, f.lineageClaimId]);
-  const saved = new Map(previous.map(f => [key(f), f]));
-  const currentPaths = new Map(files.map(f => [filePathKey(f), f.objectId]));
-  const fences = new Map(storage.db.prepare("SELECT main_version_id,object_id,lineage_claim_id,restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id=? AND lineage_state='current'")
-    .all(workspace).map(row => [JSON.stringify([row.main_version_id, row.object_id, row.lineage_claim_id]), Number(row.restore_fence_generation)]));
+export function currentViewFilesAtFences(storage: StorageContext, workspace: string, files: ReplicaCurrentView["files"], previous: ReplicaCurrentView["files"], omitted: ReplicaCurrentView["omitted"]) {
+  const saved = new Map(previous.map(f => [fileLineageKey(f), f]));
+  const fences = currentViewFences(storage, workspace);
+  const currentPaths = currentViewPaths(files, omitted, fences);
   return files.flatMap(file => {
-    if (file.lineageClaimId === null || file.restoreGeneration === (fences.get(key(file)) ?? 1)) return [file];
-    const old = saved.get(key(file));
+    if (file.lineageClaimId === null || file.restoreGeneration === (fences.get(fileLineageKey(file)) ?? 1)) return [file];
+    const old = saved.get(fileLineageKey(file));
     return old && carriedPathAvailable(old, currentPaths) ? [old] : [];
   });
 }
@@ -75,21 +82,19 @@ function validateReplicaCurrentView(storage: StorageContext, lease: ReplicaReadL
   const saved = storage.db.prepare("SELECT * FROM sync_relay_replica_cuts WHERE workspace_id=?").get(lease.workspaceId);
   if (saved && (view.logCursor < Number(saved.log_cursor) || view.journalCursor < Number(saved.journal_cursor))) fail();
   const selectors = replicaCurrentViewSelectors(storage, lease.workspaceId), paths = new Set<string>(), objects = new Set<string>();
-  const key = (f: ReplicaCurrentView["files"][number]) => JSON.stringify([f.versionId, f.objectId, f.lineageClaimId]);
-  const previous = new Map(storedFiles(storage, lease.workspaceId).map(f => [key(f), f]));
-  const currentPaths = new Map(view.files.map(f => [filePathKey(f), f.objectId]));
-  const fence = storage.db.prepare("SELECT restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current'");
+  const previous = new Map(storedFiles(storage, lease.workspaceId).map(f => [fileLineageKey(f), f]));
+  const fences = currentViewFences(storage, lease.workspaceId);
+  const currentPaths = currentViewPaths(view.files, view.omitted, fences);
   const files: ReplicaCurrentView["files"] = [];
   for (let file of view.files) {
     if (!file.objectId || !currentViewFileVisible(selectors, file) || !/^[a-f0-9]{64}$/.test(file.sha256) ||
         !Number.isSafeInteger(file.byteLength) || file.byteLength < 0 || !["text", "binary"].includes(file.contentKind) ||
         (file.lineageClaimId === null) !== (file.restoreGeneration === null)) fail();
-    const old = previous.get(key(file));
+    const old = previous.get(fileLineageKey(file));
     if (old?.restoreGeneration != null && (file.restoreGeneration === null || file.restoreGeneration < old.restoreGeneration)) fail();
     if (file.lineageClaimId !== null) {
       if (!/^[a-f0-9]{64}$/.test(file.lineageClaimId) || !Number.isSafeInteger(file.restoreGeneration) || file.restoreGeneration! < 0) fail();
-      const row = fence.get(lease.workspaceId, file.versionId, file.objectId, file.lineageClaimId);
-      const generation = row ? Number(row.restore_fence_generation) : 1;
+      const generation = fences.get(fileLineageKey(file)) ?? 1;
       if (file.restoreGeneration! > generation) fail();
       if (file.restoreGeneration! < generation) {
         if (!old || !currentViewFileVisible(selectors, old) || !carriedPathAvailable(old, currentPaths)) continue;

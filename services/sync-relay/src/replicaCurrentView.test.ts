@@ -8,6 +8,65 @@ import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 
 afterEach(async()=>{vi.useRealTimers();cleanupLiveDeliveryFixtures();await closeTestStorages();});
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+it.each([false, true])("round6: omitted current paths win over carried restore rows (reverse=%s)", reverse => {
+  const f = registered({deployment:true});
+  try {
+    f.storage.claimWorkspaceIdentity({workspaceId:"workspace", replicationEpoch:"e", streamIdentity:"s"});
+    const lease = createReplicaReadPrincipal(f.storage).issue("workspace", "omitted-collision");
+    f.storage.bindReplicaCurrentView(lease);
+    const file = {versionId:"main", objectId:"object", path:f.input.evidence.currentPath, contentKind:"text" as const,
+      sha256:sha("old"), byteLength:3, lineageClaimId:f.input.evidence.document.lineageClaimId, restoreGeneration:1};
+    const initial = {workspaceId:"workspace", omitted:[], revision:1, logCursor:0, journalCursor:0,
+      files:[file], texts:[{sha256:sha("old"), text:"old"}]};
+    f.storage.storeReplicaCurrentView(lease, initial);
+    f.write(db => db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2"));
+    const moved = {...file, path:file.path.replace(/[^/]+$/, "moved.md")};
+    const current = {...file, objectId:"other", path:file.path.replace(/[^/]+$/, "current.md"),
+      lineageClaimId:null, restoreGeneration:null, sha256:sha("new")};
+    const omitted = [{versionId:"main", objectId:"oversized", path:file.path, sha256:sha("too large"), reason:"text-frame-limit" as const}];
+    const files = reverse ? [current, moved] : [moved, current];
+    expect.soft(f.storage.currentViewFilesAtFences("workspace", files, initial.files, omitted)).toEqual([current]);
+    expect(() => f.storage.storeReplicaCurrentView(lease, {...initial, revision:2, files, omitted,
+      texts:[{sha256:sha("new"), text:"new"}]})).not.toThrow();
+    const stored = f.storage.readReplicaCurrentView("workspace")!;
+    expect(stored.files).toEqual([current]);
+    expect(stored.omitted).toEqual(omitted);
+    expect(f.storage.readReplicaCurrentViewText("workspace", sha("old"))).toBeNull();
+    expect(f.storage.readReplicaCurrentViewText("workspace", sha("new"))).toBe("new");
+  } finally {f.close();}
+});
+
+it.each([false, true])("round6: stale manifest paths do not block carried restore rows (reverse=%s)", reverse => {
+  const f = registered({deployment:true});
+  try {
+    f.storage.claimWorkspaceIdentity({workspaceId:"workspace", replicationEpoch:"e", streamIdentity:"s"});
+    const lease = createReplicaReadPrincipal(f.storage).issue("workspace", "stale-paths");
+    f.storage.bindReplicaCurrentView(lease);
+    const a = {versionId:"main", objectId:"object", path:f.input.evidence.currentPath, contentKind:"text" as const,
+      sha256:sha("old"), byteLength:3, lineageClaimId:f.input.evidence.document.lineageClaimId, restoreGeneration:1};
+    const d = {...a, objectId:"second", path:a.path.replace(/[^/]+$/, "second.md"), sha256:sha("two")};
+    f.write(db => {
+      const row = db.prepare("SELECT * FROM sync_relay_live_documents").get()!;
+      const columns = Object.keys(row);
+      db.prepare(`INSERT INTO sync_relay_live_documents (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`)
+        .run(...columns.map(column => column === "object_id" ? d.objectId : column === "current_path" ? d.path : row[column]));
+    });
+    const initial = {workspaceId:"workspace", omitted:[], revision:1, logCursor:0, journalCursor:0,
+      files:[a, d], texts:[{sha256:a.sha256, text:"old"}, {sha256:d.sha256, text:"two"}]};
+    f.storage.storeReplicaCurrentView(lease, initial);
+    f.write(db => db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2"));
+    const movedA = {...a, path:a.path.replace(/[^/]+$/, "moved.md")};
+    const movedD = {...d, path:a.path};
+    const files = reverse ? [movedD, movedA] : [movedA, movedD];
+    const expected = reverse ? [d, a] : [a, d];
+    expect.soft(f.storage.currentViewFilesAtFences("workspace", files, initial.files, [])).toEqual(expected);
+    f.storage.storeReplicaCurrentView(lease, {...initial, revision:2, files, texts:[]});
+    expect(f.storage.readReplicaCurrentView("workspace")!.files).toEqual([a, d].sort((x,y) => x.path.localeCompare(y.path)));
+    expect(f.storage.readReplicaCurrentViewText("workspace", a.sha256)).toBe("old");
+    expect(f.storage.readReplicaCurrentViewText("workspace", d.sha256)).toBe("two");
+  } finally {f.close();}
+});
+
 it("round5: repeated page text retains its first chunk split", async () => {
   const f = await fixture();
   const shared = f.view("shared text that spans the remaining batch space");
@@ -39,7 +98,7 @@ it.each([false, true])("round5: current paths win over carried restore rows (rev
     const moved = {...file, path:file.path.replace(/[^/]+$/, "moved.md")};
     const current = {...file, objectId:"other", lineageClaimId:null, restoreGeneration:null, sha256:sha("new")};
     const files = reverse ? [current, moved] : [moved, current];
-    expect.soft(f.storage.currentViewFilesAtFences("workspace", files, initial.files)).toEqual([current]);
+    expect.soft(f.storage.currentViewFilesAtFences("workspace", files, initial.files, [])).toEqual([current]);
     expect(() => f.storage.storeReplicaCurrentView(lease, {...initial, revision:2, files,
       texts:[{sha256:sha("new"), text:"new"}]})).not.toThrow();
     expect(f.storage.readReplicaCurrentView("workspace")!.files).toEqual([current]);

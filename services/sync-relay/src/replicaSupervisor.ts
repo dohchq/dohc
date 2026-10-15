@@ -325,7 +325,7 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
       const view = memory && (!stored || memory.logCursor >= stored.logCursor && memory.journalCursor >= stored.journalCursor) ? memory : stored;
       if (!view) return null;
       const selectors = options.storage.replicaCurrentViewSelectors(workspaceId);
-      const files = options.storage.currentViewFilesAtFences(workspaceId, view.files, stored?.files ?? [])
+      const files = options.storage.currentViewFilesAtFences(workspaceId, view.files, stored?.files ?? [], view.omitted)
         .filter(f => currentViewFileVisible(selectors, f));
       const omitted = view.omitted.filter(f => currentViewFileVisible(selectors, f));
       const texts = new Map(view.texts.map(t => [t.sha256, t.text]));

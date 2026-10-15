@@ -594,7 +594,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return {...saved,texts:view.texts.filter(t=>needed.has(t.sha256))};
   }
   readReplicaCurrentView(workspaceId: string) { return replicaCurrentViews.readReplicaCurrentView(this,workspaceId); }
-  currentViewFilesAtFences(workspaceId: string, files: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[2], previous: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[3]) { return replicaCurrentViews.currentViewFilesAtFences(this,workspaceId,files,previous); }
+  currentViewFilesAtFences(workspaceId: string, files: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[2], previous: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[3], omitted: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[4]) { return replicaCurrentViews.currentViewFilesAtFences(this,workspaceId,files,previous,omitted); }
   readReplicaCurrentViewText(workspaceId: string,sha: string) { return replicaCurrentViews.readReplicaCurrentViewText(this,workspaceId,sha); }
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string) { return replicaReads.readReplicaStanding(this, workspaceId, shareGrantBindings); }
 
