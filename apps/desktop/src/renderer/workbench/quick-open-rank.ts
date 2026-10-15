@@ -1,3 +1,4 @@
+import { prepareVisibilityPolicy, sameVisibilityPolicy, type VisibilityPolicyRule } from "@dohc/security-contract/visibility-policy";
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import type { CollectionSummary } from "@dohc/workspace-contracts/collection";
 import type { ChatChannelRecord, SitePackageInfo, WorkspaceFileEntry, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
@@ -165,12 +166,10 @@ type GoToGroup = Pick<ChatChannelRecord, "id" | "name" | "kind">;
 export interface GoToListing {
   files: readonly GoToFile[];
   folders: readonly string[];
-  // Verdicts come from the visibility-rule loop, never the engine path floor.
-  // Until the listing producer supplies them, all host path rows stay withheld.
+  // Main parses the rules. Search and Go to share the same rule evaluator.
   visibility: {
     status: "ready" | "degraded" | "unavailable";
-    // Exact paths: the producer must cover folders, Collections, and apps too.
-    hiddenHostPaths: ReadonlySet<string>;
+    rules: readonly VisibilityPolicyRule[];
   };
   // The listing has already applied each share's selector and canonical overlay.
   receivedRoots: readonly { path: string; ended: boolean; damaged: boolean }[];
@@ -201,25 +200,25 @@ export interface PreparedGoToRow extends PreparedQuickOpenPath {
   listingGeneration: number;
 }
 
-function applyGoToPathState(row: PreparedGoToRow, listing: GoToListing): void {
+function applyGoToPathState(row: PreparedGoToRow, listing: GoToListing, visibilityForPath: ReturnType<typeof prepareVisibilityPolicy>): void {
   const share = listing.receivedRoots.find(root => root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/"));
   row.ended = share?.ended ?? false;
   row.visible = share ? !share.damaged : listing.visibility.status === "ready" &&
-    !listing.visibility.hiddenHostPaths.has(row.path);
+    visibilityForPath(row.path).visibility !== "hidden";
 }
 
 function samePathVerdicts(a: GoToListing, b: GoToListing | undefined): boolean {
   if (!b || a.visibility.status !== b.visibility.status) return false;
-  const hidden = a.visibility.hiddenHostPaths, previousHidden = b.visibility.hiddenHostPaths;
-  if (hidden !== previousHidden) {
-    if (hidden.size !== previousHidden.size) return false;
-    for (const path of hidden) if (!previousHidden.has(path)) return false;
-  }
+  if (!sameVisibilityPolicy(a.visibility.rules, b.visibility.rules)) return false;
   return a.receivedRoots === b.receivedRoots || a.receivedRoots.length === b.receivedRoots.length &&
     a.receivedRoots.every((root, i) => {
       const previous = b.receivedRoots[i];
       return root.path === previous.path && root.ended === previous.ended && root.damaged === previous.damaged;
     });
+}
+
+function* mapEntries<T, U>(entries: readonly T[], map: (entry: T) => U): Generator<U> {
+  for (const entry of entries) yield map(entry);
 }
 
 const KNOWN_EXTENSIONS = new Set<string>(Object.values(FILE_KIND_RECORDS).flatMap(record => [...record.extensions]));
@@ -240,28 +239,76 @@ export class GoToIndex {
   revision = 0;
   lastPreparationCount = 0;
   lastScanCount = 0;
+  lastVisibilityCheckCount = 0;
+  private visibilityForPath = prepareVisibilityPolicy([]);
   rows: readonly PreparedGoToRow[] = [];
   private files: PreparedGoToRow[] = [];
   private listingGeneration = 0;
   private readonly subsets = new Map<GoToKind, Map<string, PreparedGoToRow>>();
   private sources: GoToSources = {};
+  private verdictListing: GoToListing | undefined;
+  private preparation: Generator<void> | null = null;
+  private queued: { sources: GoToSources; context: QuickOpenContext } | null = null;
   private context: QuickOpenContext = EMPTY_CONTEXT;
   private matches: { query: string; revision: number; indices: Int32Array; count: number } | null = null;
 
   constructor(workspaceId: string) { this.workspaceId = workspaceId; }
 
+  // Synchronous callers and background preparation share one implementation.
   update(sources: GoToSources, context: QuickOpenContext = this.context): void {
+    this.queuePreparation(sources, context);
+    while (!this.prepareSlice(Infinity)) { /* Drain for non-renderer callers. */ }
+  }
+
+  queuePreparation(sources: GoToSources, context: QuickOpenContext = this.context): void {
+    this.queued = { sources, context };
+  }
+
+  prepareSlice(budgetMs = 2): boolean {
+    const deadline = performance.now() + budgetMs;
+    do {
+      if (!this.preparation) {
+        if (!this.queued) return true;
+        const { sources, context } = this.queued;
+        this.queued = null;
+        this.preparation = this.prepare(sources, context);
+      }
+      if (this.preparation.next().done) this.preparation = null;
+      if (!this.preparation && !this.queued) return true;
+    } while (performance.now() < deadline);
+    return false;
+  }
+
+  private *prepare(sources: GoToSources, context: QuickOpenContext): Generator<void> {
     this.lastPreparationCount = 0;
+    this.lastVisibilityCheckCount = 0;
+    // Withholding hides host rows without discarding their published verdicts.
+    const listing = sources.listing ? {
+      ...sources.listing,
+      visibility: sources.listing.visibility.status === "unavailable"
+        ? this.verdictListing?.visibility ?? sources.listing.visibility : sources.listing.visibility,
+    } : this.verdictListing;
+    const verdictsChanged = !!listing && !samePathVerdicts(listing, this.verdictListing);
+    const availabilityChanged = !!sources.listing && sources.listing.visibility.status !== this.sources.listing?.visibility.status;
+    if (listing && (!this.verdictListing || !sameVisibilityPolicy(listing.visibility.rules, this.verdictListing.visibility.rules))) {
+      this.visibilityForPath = prepareVisibilityPolicy(listing.visibility.rules);
+    }
+    const applyPathState = (row: PreparedGoToRow, snapshot: GoToListing) => {
+      this.lastVisibilityCheckCount += 1;
+      applyGoToPathState(row, snapshot, this.visibilityForPath);
+    };
     let changed = false;
-    const replace = (kind: GoToKind, entries: Iterable<{
+    const replace = function* (this: GoToIndex, kind: GoToKind, entries: Iterable<{
       key: string; label: string; path: string; record: PreparedGoToRow["record"];
       glyphId: PreparedGoToRow["glyphId"]; ended?: boolean; visible?: boolean;
-    }>) => {
+    }>): Generator<void> {
       const previous = this.subsets.get(kind);
       const next = new Map<string, PreparedGoToRow>();
       for (const entry of entries) {
+        if (kind === "group" && (entry.record as GoToGroup).kind !== "channel") { yield; continue; }
         let row = previous?.get(entry.key);
-        if (!row || row.path !== entry.path || row.label !== entry.label) {
+        const isNew = !row || row.path !== entry.path || row.label !== entry.label;
+        if (!row || isNew) {
           const lowercasePath = entry.path.toLowerCase();
           row = {
             id: kind + ":" + entry.key, kind, label: entry.label,
@@ -279,80 +326,91 @@ export class GoToIndex {
           // IPC can replace every record after one rename. Preserve matching fields.
           row.record = entry.record;
           row.glyphId = entry.glyphId;
-          row.ended = entry.ended ?? false;
-          row.visible = entry.visible ?? true;
+          if (kind === "version" || kind === "group") {
+            row.ended = entry.ended ?? false;
+            row.visible = entry.visible ?? true;
+          }
+        }
+        if (isNew && (kind === "folder" || kind === "collection" || kind === "app")) {
+          if (listing) applyPathState(row, listing); else row.visible = false;
         }
         next.set(entry.key, row);
+        yield;
       }
       this.subsets.set(kind, next);
       changed = true;
     };
     if (sources.listing && sources.listing !== this.sources.listing) {
-      const snapshot = sources.listing;
-      const next = this.subsets.get("file") ?? new Map<string, PreparedGoToRow>();
-      const generation = ++this.listingGeneration;
-      const verdictsChanged = !samePathVerdicts(snapshot, this.sources.listing);
-      const removedCandidates: PreparedGoToRow[] = [];
-      let fileIndex = 0;
-      for (const file of snapshot.files) {
-        const previousAtIndex = this.files[fileIndex];
-        let row = previousAtIndex?.path === file.path ? previousAtIndex : next.get(file.path);
-        if (previousAtIndex && previousAtIndex !== row) removedCandidates.push(previousAtIndex);
-        const isNew = !row;
-        if (!row) {
-          row = {
-            id: "file:" + file.path, kind: "file", label: basenameOf(file.path),
-            path: file.path, lowercasePath: file.path.toLowerCase(), lowercaseBasename: basenameOf(file.path).toLowerCase(),
-            glyphId: file.kind === "database" ? FILE_KIND_RECORDS.database.glyphId : fileKindForPath(file.path).glyphId,
-            record: file, ended: false, visible: true,
-            pinnedRank: context.pinned.includes(file.path) ? 0 : 1,
-            recentRank: context.recent.lastIndexOf(file.path) === -1 ? Number.MAX_SAFE_INTEGER : context.recent.lastIndexOf(file.path),
-            sourceIndex: fileIndex, listingGeneration: 0, target: { workspaceId: this.workspaceId, kind: "file", path: file.path },
-          };
-          this.lastPreparationCount += 1;
-          next.set(file.path, row);
-        } else {
-          if ((row.record as GoToFile).kind !== file.kind) {
-            row.glyphId = file.kind === "database" ? FILE_KIND_RECORDS.database.glyphId : fileKindForPath(file.path).glyphId;
+      const snapshot = listing!;
+      const previous = this.sources.listing;
+      if (!previous || snapshot.files !== previous.files || snapshot.folders !== previous.folders || verdictsChanged || availabilityChanged) {
+        const next = this.subsets.get("file") ?? new Map<string, PreparedGoToRow>();
+        const generation = ++this.listingGeneration;
+        const removedCandidates: PreparedGoToRow[] = [];
+        let fileIndex = 0;
+        for (const file of snapshot.files) {
+          const previousAtIndex = this.files[fileIndex];
+          let row = previousAtIndex?.path === file.path ? previousAtIndex : next.get(file.path);
+          if (previousAtIndex && previousAtIndex !== row) removedCandidates.push(previousAtIndex);
+          const isNew = !row;
+          if (!row) {
+            row = {
+              id: "file:" + file.path, kind: "file", label: basenameOf(file.path),
+              path: file.path, lowercasePath: file.path.toLowerCase(), lowercaseBasename: basenameOf(file.path).toLowerCase(),
+              glyphId: file.kind === "database" ? FILE_KIND_RECORDS.database.glyphId : fileKindForPath(file.path).glyphId,
+              record: file, ended: false, visible: true,
+              pinnedRank: context.pinned.includes(file.path) ? 0 : 1,
+              recentRank: context.recent.lastIndexOf(file.path) === -1 ? Number.MAX_SAFE_INTEGER : context.recent.lastIndexOf(file.path),
+              sourceIndex: fileIndex, listingGeneration: 0, target: { workspaceId: this.workspaceId, kind: "file", path: file.path },
+            };
+            this.lastPreparationCount += 1;
+            next.set(file.path, row);
+          } else {
+            if ((row.record as GoToFile).kind !== file.kind) {
+              row.glyphId = file.kind === "database" ? FILE_KIND_RECORDS.database.glyphId : fileKindForPath(file.path).glyphId;
+            }
+            row.record = file;
           }
-          row.record = file;
+          if (isNew || verdictsChanged) {
+            applyPathState(row, snapshot);
+          }
+          if (row.listingGeneration !== generation) this.files[fileIndex++] = row;
+          row.listingGeneration = generation;
+          yield;
         }
-        if (isNew || verdictsChanged) {
-          applyGoToPathState(row, snapshot);
-        }
-        if (row.listingGeneration !== generation) this.files[fileIndex++] = row;
-        row.listingGeneration = generation;
+        for (let i = fileIndex; i < this.files.length; i++) { removedCandidates.push(this.files[i]); yield; }
+        this.files.length = fileIndex;
+        for (const row of removedCandidates) { if (row.listingGeneration !== generation) next.delete(row.path); yield; }
+        this.subsets.set("file", next);
+        changed = true;
+        yield* replace.call(this, "folder", mapEntries(snapshot.folders, path => ({
+          key: path, path, label: basenameOf(path), record: path, glyphId: "folder",
+        })));
       }
-      for (let i = fileIndex; i < this.files.length; i++) removedCandidates.push(this.files[i]);
-      this.files.length = fileIndex;
-      for (const row of removedCandidates) if (row.listingGeneration !== generation) next.delete(row.path);
-      this.subsets.set("file", next);
-      changed = true;
-      replace("folder", snapshot.folders.map(path => ({
-        key: path, path, label: basenameOf(path), record: path, glyphId: "folder",
-      })));
-      this.sources.listing = snapshot;
+      this.sources.listing = sources.listing;
+      this.verdictListing = snapshot;
+      changed ||= availabilityChanged;
     }
     if (sources.collections && sources.collections !== this.sources.collections) {
-      replace("collection", sources.collections.map(record => ({
+      yield* replace.call(this, "collection", mapEntries(sources.collections, record => ({
         key: record.path, path: record.path, label: basenameOf(record.path), record, glyphId: "table",
       })));
       this.sources.collections = sources.collections;
     }
     if (sources.apps && sources.apps !== this.sources.apps) {
-      replace("app", sources.apps.map(record => ({
+      yield* replace.call(this, "app", mapEntries(sources.apps, record => ({
         key: record.root, path: record.root, label: record.title, record, glyphId: "box",
       })));
       this.sources.apps = sources.apps;
     }
     if (sources.versions && sources.versions !== this.sources.versions) {
-      replace("version", sources.versions.map(record => ({
+      yield* replace.call(this, "version", mapEntries(sources.versions, record => ({
         key: record.id, path: record.name, label: record.name, record, glyphId: "layers",
       })));
       this.sources.versions = sources.versions;
     }
     if (sources.groups && sources.groups !== this.sources.groups) {
-      replace("group", sources.groups.filter(record => record.kind === "channel").map(record => ({
+      yield* replace.call(this, "group", mapEntries(sources.groups, record => ({
         key: record.id, path: record.name, label: record.name, record, glyphId: "messages-square",
       })));
       this.sources.groups = sources.groups;
@@ -368,21 +426,25 @@ export class GoToIndex {
         row.pinnedRank = pinned.has(row.path) ? 0 : 1;
         row.recentRank = recent.get(row.path) ?? Number.MAX_SAFE_INTEGER;
       }
-      if (kind === "folder" || kind === "collection" || kind === "app") {
-        if (this.sources.listing) applyGoToPathState(row, this.sources.listing);
+      if (verdictsChanged && (kind === "folder" || kind === "collection" || kind === "app")) {
+        if (listing) applyPathState(row, listing);
         else row.visible = false;
       }
       // A Collection replaces its ordinary folder row.
-      if (row.visible && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) rows.push(row);
+      const pathBacked = kind === "file" || kind === "folder" || kind === "collection" || kind === "app";
+      const withheld = pathBacked && this.sources.listing?.visibility.status !== "ready" &&
+        !this.sources.listing?.receivedRoots.some(root => root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/"));
+      if (row.visible && !withheld && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) rows.push(row);
+      yield;
     }
-    this.files.forEach((row, i) => { row.sourceIndex = i; });
-    rows.forEach((row, i) => { row.sourceIndex = i; });
+    for (let i = 0; i < rows.length; i++) { rows[i].sourceIndex = i; yield; }
     this.rows = rows;
     this.revision += 1;
     this.matches = null;
   }
 
   query(query: string, limit = 50): PreparedGoToRow[] {
+    if (this.preparation || this.queued) return [];
     const boundedLimit = Math.max(0, Math.floor(limit));
     if (boundedLimit === 0) return [];
     const q = query.toLowerCase();

@@ -57,7 +57,7 @@ export function createWorkspaceEngineIpc<
   receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "workspaceFor" | "workspaceForRegistered" | "storeFor">;
   withEngineAdapter<Result>(
     workspace: EngineWorkspace,
-    work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus" | "getCollectionRecord" | "clearCaptureRecovery">) => Promise<Result>,
+    work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus" | "getCollectionRecord" | "clearCaptureRecovery" | "retryHeldCapture">) => Promise<Result>,
   ): Promise<Result | null>;
   requireEngineCapture(workspaceId: string, feature: "Engine history"): Promise<{
     capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
@@ -84,6 +84,7 @@ export function createWorkspaceEngineIpc<
   signedInAccount(): string | null;
   isOnline?(): boolean;
   notifyRenderer(target: { workspaceId: string }): void;
+  recordHeldFiles(workspace: EngineWorkspace, files: NonNullable<SyncStatusResult["heldFiles"]>): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
   retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
   retryFileObservation(workspaceId: string): Promise<void>;
@@ -393,6 +394,14 @@ export function createWorkspaceEngineIpc<
       withActiveWorkspace: (event, workspaceId, message, work) =>
         withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
     }, captureRecoveryOperations, {
+      retryHeldCapture: async (input, { event }) => {
+        return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
+          const result = await withEngineAdapter(operation.workspace, adapter => adapter.retryHeldCapture(input.path));
+          if (result === null) throw new Error("The workspace engine is not running.");
+          dependencies.recordHeldFiles(operation.workspace, result.heldFiles);
+          return result;
+        });
+      },
       getCaptureRecoveryStatus: async (input, { event }) => {
         return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
           const result = await withEngineAdapter(operation.workspace, async adapter => ({ captureRecoveries: (await adapter.watcherStatus()).captureRecoveries }));

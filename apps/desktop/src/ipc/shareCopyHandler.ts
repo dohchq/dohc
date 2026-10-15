@@ -1,25 +1,23 @@
 import { RelayShareCopyResult, ShareCopyResult, type ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
-import { assertOriginalWorkspace, createOwnerRelayShareHandler, OWNER_RELAY_SHARE_INACTIVE_MESSAGE } from "./ownerRelayShareHandler";
+import { assertOriginalWorkspace, createOwnerRelayShareOperation, OWNER_RELAY_SHARE_INACTIVE_MESSAGE } from "./ownerRelayShareHandler";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import { buildShareCode } from "../workspaces/syncCode";
 
-export function createShareCopyHandler<Sender, Workspace extends { workspaceId: string; shareView?: unknown },
-  Operation extends { workspace: Workspace; assertCurrent(): void }>(dependencies: {
-  currentSession(sender: Sender): { workspaceId: string } | null;
-  withRendererWorkspaceOperation<Result>(sender: Sender, workspaceId: string, message: string, work: (operation: Operation) => Promise<Result>): Promise<Result>;
+type CopyWorkspace = { workspaceId: string; shareView?: unknown };
+type CopyOperation<Workspace> = { workspace: Workspace; assertCurrent(): void };
+interface CopyDependencies<Workspace> {
   remoteForWorkspace(workspace: Workspace): Promise<{ credentials: CloudCredentials; credentialGeneration: number }>;
   currentCredentialGeneration(): number;
   relayJson(credentials: CloudCredentials, path: string): Promise<unknown>;
-}) {
-  const ownerRelayShareHandler = createOwnerRelayShareHandler<Sender, Workspace, Operation, CloudCredentials>({
-    withWorkspaceOperation: dependencies.withRendererWorkspaceOperation,
+}
+
+export function createShareCopyReader<Workspace extends CopyWorkspace>(dependencies: CopyDependencies<Workspace>) {
+  const read = createOwnerRelayShareOperation<Workspace, CopyOperation<Workspace>, CloudCredentials>({
     remoteForWorkspace: dependencies.remoteForWorkspace,
     credentialGeneration: dependencies.currentCredentialGeneration,
   });
-  return async (sender: Sender, input: ShareCopyInput): Promise<ShareCopyResult> => {
-    const workspaceId = dependencies.currentSession(sender)?.workspaceId;
-    if (!workspaceId) throw new Error(OWNER_RELAY_SHARE_INACTIVE_MESSAGE);
-    return ownerRelayShareHandler(sender, workspaceId, async (operation, credentials, session) => {
+  return (operation: CopyOperation<Workspace>, input: ShareCopyInput): Promise<ShareCopyResult> =>
+    read(operation, async (operation, credentials, session) => {
       const workspaceId = operation.workspace.workspaceId;
       const result = RelayShareCopyResult.parse(await session.run(() => dependencies.relayJson(credentials,
         `/sync/${encodeURIComponent(workspaceId)}/shares/${encodeURIComponent(input.shareId)}/grants/${encodeURIComponent(input.grantId)}/copy`)));
@@ -31,5 +29,18 @@ export function createShareCopyHandler<Sender, Workspace extends { workspaceId: 
         ...(result.browserInvitationUrl ? { browserInvitationUrl: result.browserInvitationUrl } : {}),
       });
     }, assertOriginalWorkspace);
+}
+
+export function createShareCopyHandler<Sender, Workspace extends CopyWorkspace,
+  Operation extends CopyOperation<Workspace>>(dependencies: CopyDependencies<Workspace> & {
+  currentSession(sender: Sender): { workspaceId: string } | null;
+  withRendererWorkspaceOperation<Result>(sender: Sender, workspaceId: string, message: string, work: (operation: Operation) => Promise<Result>): Promise<Result>;
+}) {
+  const read = createShareCopyReader(dependencies);
+  return async (sender: Sender, input: ShareCopyInput): Promise<ShareCopyResult> => {
+    const workspaceId = dependencies.currentSession(sender)?.workspaceId;
+    if (!workspaceId) throw new Error(OWNER_RELAY_SHARE_INACTIVE_MESSAGE);
+    return dependencies.withRendererWorkspaceOperation(sender, workspaceId, OWNER_RELAY_SHARE_INACTIVE_MESSAGE,
+      operation => read(operation, input));
   };
 }

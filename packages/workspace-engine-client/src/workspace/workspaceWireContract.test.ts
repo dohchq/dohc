@@ -984,6 +984,7 @@ const heldFile = {
   retryRequested: false,
 };
 const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
+  ["capture.retryHeld" as WorkspaceMethod, { settled: true, running: true, degraded: false, retried: true }],
   [WORKSPACE_METHOD.captureFlush, { settled: true, running: true, degraded: false }],
   [WORKSPACE_METHOD.captureReconcile, { settled: true, running: true, degraded: false }],
   [WORKSPACE_METHOD.watcherStatus, {
@@ -1009,6 +1010,7 @@ for (const [method, base] of holdReplies) {
     },
   );
   it(`rejects malformed ${method} held files`, () => {
+    expect(decodeWorkspaceResult(method, { ...base, heldFiles: [] })).toEqual({ ...base, heldFiles: [] });
     for (const heldFiles of [
       null,
       [{}],
