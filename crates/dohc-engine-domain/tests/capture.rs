@@ -820,6 +820,7 @@ fn capture_supersedes_an_older_pending_materialization_job() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -970,6 +971,7 @@ fn deduped_capture_marks_the_confirmed_head_as_materialized() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
