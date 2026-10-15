@@ -45,8 +45,8 @@ _Avoid_: Offering (what dohc sells), Moment (see History)
 ### History
 
 **Moment**:
-A recorded file change within a workspace version. Writes, renames, and deletions create moments, including saved live edits and restores. History shows moments as rows and groups related file changes.
-_Avoid_: version, revision, snapshot, checkpoint
+A recorded file change within a workspace version. Writes, renames, and deletions create moments, including saved live edits and restores. History shows each moment as a row. Moments from one multi-file pass, such as a merge or restore, fold into one expandable row.
+_Avoid_: version (the line of history that holds moments), snapshot (a file's current state within a version, which names its latest moment), checkpoint
 
 ### Collections
 
