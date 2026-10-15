@@ -1,3 +1,4 @@
+import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
 import {prepareHostedSettlements} from "./storage/hostedSettlement";
 import * as shareLabelsStorage from "./storage/shareLabels";
@@ -584,6 +585,20 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
   }
 
+  discardReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.discardReplicaCurrentView>[1]) { return replicaCurrentViews.discardReplicaCurrentView(this,lease); }
+  releaseReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.releaseReplicaCurrentView>[1]) { return replicaCurrentViews.releaseReplicaCurrentView(this,lease); }
+  bindReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.bindReplicaCurrentView>[1]) { return replicaCurrentViews.bindReplicaCurrentView(this,lease); }
+  replicaCurrentViewSelectors(workspaceId: string) { return replicaCurrentViews.replicaCurrentViewSelectors(this,workspaceId); }
+  stageReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2]) { return replicaCurrentViews.stageReplicaCurrentView(this,lease,view); }
+  flipReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.flipReplicaCurrentView>[1],staged: Parameters<typeof replicaCurrentViews.flipReplicaCurrentView>[2]) { return replicaCurrentViews.flipReplicaCurrentView(this,lease,staged); }
+  storeReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2]) {
+    const saved=this.flipReplicaCurrentView(lease,this.stageReplicaCurrentView(lease,view));
+    const needed=new Set(saved.files.map(f=>f.sha256));
+    return {...saved,texts:view.texts.filter(t=>needed.has(t.sha256))};
+  }
+  readReplicaCurrentView(workspaceId: string) { return replicaCurrentViews.readReplicaCurrentView(this,workspaceId); }
+  currentViewFilesAtFences(workspaceId: string, files: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[2], previous: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[3], omitted: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[4]) { return replicaCurrentViews.currentViewFilesAtFences(this,workspaceId,files,previous,omitted); }
+  readReplicaCurrentViewText(workspaceId: string,sha: string) { return replicaCurrentViews.readReplicaCurrentViewText(this,workspaceId,sha); }
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string) { return replicaReads.readReplicaStanding(this, workspaceId, shareGrantBindings); }
 
   postAutomationWake(input: noticeStorage.PostAutomationWakeInput): noticeStorage.PostedAutomationWake {
@@ -1287,6 +1302,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   // One write transaction, so a caller states what it writes rather than the
   // BEGIN/COMMIT/ROLLBACK frame around it.
+  // Current view persistence does not wake the replication observer.
+  replicaViewTx<T>(run: () => T): T { return this.owner.write(run); }
+
   tx<T>(run: () => T): T {
     if (!hasRelayWriteObservers(this)) return this.owner.write(run);
     const revision = this.db.prepare("SELECT total_changes() AS changes,(SELECT schema_version FROM pragma_schema_version) AS schema_version");
