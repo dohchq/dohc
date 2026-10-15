@@ -180,12 +180,26 @@ A test that passes only on that retry does not fail the gate. `result.json` list
 A flaky test is a defect. Fix the condition it races, or report it to whoever owns it. A test that fails twice still fails the gate.
 A repository or desktop script step reruns as a whole, after its first attempt's ignored outputs. A test that fails on a clean tree but passes beside those outputs is recorded as flaky like any other, so treat every entry as a real failure until you have read it.
 
+### A failure stops the run
+
+The first step that fails stops the rest of a PR run. A step fails only after its retry, so a test that passes on retry stops nothing.
+The runner interrupts the running Rust job, package tests, and proofs as it does on Ctrl+C. It then removes their processes, Postgres, and containers.
+The verdict is FAIL. `result.json` names the failed step under `stopped.after` and lists each step that did not finish under `stopped.notRun`.
+Each of those steps has the verdict `NOT RUN`. `js-tests/result.json` records the package tests and proofs that did not finish in the same way.
+A stopped Rust job is never a pass, so its evidence cannot be reused.
+
+Pass `--keep-going` to let both jobs finish after a failure. In the JavaScript job, running steps finish, but no new step starts.
+Use it when you need every failure, or Rust evidence to reuse after a JavaScript failure.
+A `--full` run always keeps going. On the shared host, the queue keeps going only with `--full`; add `--inline` to keep going without it.
+
 ### Nightly run
 
 Every night at 03:07, the `dohc-verification-nightly` scheduled task submits a full verification of main's head: every gate, every package, and every proof.
 It covers everything merged since the last nightly that passed, and it runs before the rest of the line. A head that already passed is not verified again.
+It keeps going after a failure, so triage sees the failures of both jobs.
 `pnpm verify:queue status` shows the last passing nightly. Submit one by hand with `pnpm verify:queue nightly`.
 A failed nightly means a merged change broke main or an affected-package selection missed something. Find the change that broke it and revert or fix it the same day.
+The [`verification-triage` skill](../../.agents/skills/verification-triage/SKILL.md) has the procedure.
 
 ### Affected packages
 
@@ -199,7 +213,7 @@ Pass `--full` to run every package. The nightly run on main always does.
 
 Each gate keeps its 20 slowest tests in `result.json` under `slowest`, and prints the five slowest. The queue history keeps each run's step times and ten slowest tests.
 A test that takes more than a second is a scenario test. Keep it, but make it earn its time: the per-PR gate should take 15 minutes or less on an idle lane.
-A weekly review reads the history, then fixes, splits, or speeds up the tests and suites that cost the most.
+A weekly review reads the history, then fixes, splits, or speeds up the tests and suites that cost the most. The [`verification-triage` skill](../../.agents/skills/verification-triage/SKILL.md) has its procedure.
 
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
 Each report states its scope. Every selected job needs passing evidence that covers the change.
@@ -209,6 +223,7 @@ Use it when a build or test step reads a changed file outside the filters.
 After a renderer fix, reuse completed Rust evidence with `pnpm verify:pr --base <target-ref> --reuse-rust <original-result.json>`.
 The current run must select Rust. Add `--job rust` to request that job explicitly.
 The verifier accepts an original Rust pass from a completed PR run, including one whose JavaScript job failed.
+Without `--keep-going`, a JavaScript failure stops the Rust job, so that run has no Rust pass.
 The original report must contain a Rust identity and every required passing gate check.
 Older reports without this identity require a fresh Rust run.
 The verifier compares Git content, tools, platform, environment, and Cargo configuration.
@@ -220,7 +235,7 @@ The reference keeps the original tested commit, report hash, gate log hash, and 
 Keep the original report and logs until review finishes. Reused evidence cannot become another reuse source.
 
 Run `pnpm verify:pr --base <target-ref> --full` before a release or when impact is uncertain.
-It runs both gates even when the filters omit one, including when the diff is empty.
+It runs both gates even when the filters omit one, including when the diff is empty, and keeps going after a failure.
 Use `pnpm verify:plan --base <target-ref> --full` to inspect that selection.
 
 Read `result.json` before reporting a pass. Include the commit, gates, and evidence directory in the PR.

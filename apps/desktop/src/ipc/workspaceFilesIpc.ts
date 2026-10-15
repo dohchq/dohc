@@ -8,6 +8,7 @@ import {
   ExportWorkspaceZipResult,
   ImportWorkspaceFilesResult,
   ListWorkspaceFilesResult,
+  type WorkspacePathListing,
   MAX_PICKED_IMAGES,
   PickImageFilesResult,
   ReadWorkspaceTextResult,
@@ -40,6 +41,7 @@ import {
   MAX_ZIP_TOTAL_BYTES,
   ZIP_TOO_LARGE_REFUSAL,
 } from "../workspaces/workspaceFiles";
+import { readWorkspaceListingVisibility } from "../workspaces/workspaceListingVisibility";
 import { collectOwnedWorkspaceZipEntries } from "../workspaces/ownedWorkspaceZip";
 import { buildStoreZip, type ZipEntry } from "../workspaces/zipWriter";
 
@@ -82,7 +84,7 @@ export function createWorkspaceFilesIpc<
   >;
   workspaceFileListings: Pick<WorkspaceFileListingCache, "list">;
   workspaceFileMutations: WorkspaceFileMutationOwner<Event>;
-  listOwnedWorkspaceFilesFor(workspace: Workspace): Promise<ListWorkspaceFilesResult>;
+  listOwnedWorkspaceFilesFor(workspace: Workspace): Promise<WorkspacePathListing>;
   readOwnedWorkspaceTextFor(
     workspace: Workspace,
     path: string,
@@ -270,7 +272,8 @@ export function createWorkspaceFilesIpc<
         allowCached: input.allowCached === true,
         load: async () => await listOwnedWorkspaceFilesFor(workspace),
       });
-      return ListWorkspaceFilesResult.parse(listing);
+      const visibility = await readWorkspaceListingVisibility(workspace);
+      return ListWorkspaceFilesResult.parse({ ...listing, visibility });
     },
 
     createWorkspaceFile: (input, { event }) => workspaceFileMutations.createFile(event, input),

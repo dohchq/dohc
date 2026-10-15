@@ -21,6 +21,7 @@ import type {
   WorkspaceActivityEvent,
 } from "./ipc/bridgeContract";
 import {
+  CaptureHoldsEvent,
   chatOperations,
   systemMotionOperations,
   SitePreviewReplacedEvent,
@@ -584,6 +585,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.getWorkspaceUiState, payload),
   setWorkspaceUiState: (payload) =>
     ipcRenderer.invoke(CHANNELS.setWorkspaceUiState, payload),
+  onCaptureHolds: listener => onEvent(CHANNELS.captureHolds, CaptureHoldsEvent, listener),
   onWorkspaceActivity: (listener: (event: WorkspaceActivityEvent) => void) => {
     // Degrades to the payload-free global ping on a malformed payload; an
     // activity notification is never dropped (see the parser's contract).

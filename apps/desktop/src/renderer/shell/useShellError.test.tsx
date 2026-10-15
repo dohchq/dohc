@@ -24,7 +24,7 @@ describe("useShellError", () => {
       observedAtMs: 1, attemptCount: 1, retryRequested: false,
     }] };
     const adapter = { reconcileCapture: async () => capture, flushCapture: async () => capture };
-    const failure = await flushDatasetSourceCapture(adapter, new AbortController().signal).catch(error => error as Error);
+    const failure = await flushDatasetSourceCapture(adapter, new AbortController().signal, ["sources/note.md"]).catch(error => error as Error);
     expect(failure).toBeInstanceOf(Error);
     if (!(failure instanceof Error)) throw Error("Expected a held source refusal");
     const retry = vi.fn();
@@ -32,7 +32,7 @@ describe("useShellError", () => {
     act(() => result.current.reportShellError("dohc could not prepare this Collection change.",
       new Error(`Error invoking remote method 'dataset': Error: ${failure.message}`), retry));
     const notice = result.current.shellErrors[0]!;
-    expect(notice.message).toBe("dohc could not prepare this Collection change. dohc cannot use the content in sources/note.md. The file is still on this computer. Edit it in another editor.");
+    expect(notice.message).toBe('dohc could not prepare this Collection change. dohc cannot use "sources/note.md" for this change. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
     expect(notice.seen).toBe(false);
     expect(notice.retry).toBe(retry);
     act(() => result.current.hideShellError(notice.id));

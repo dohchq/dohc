@@ -10,10 +10,9 @@ function fixture() {
   return { result, adapter: { reconcileCapture: vi.fn(async () => result), flushCapture: vi.fn(async () => result) }, signal: new AbortController().signal };
 }
 
-it("refuses a held source before review with its path and a repair action", async () => {
+it("returns holds for review to check only the paths it reads", async () => {
   const f = fixture();
-  await expect(flushDatasetSourceCapture(f.adapter, f.signal)).rejects.toThrow(
-    "dohc cannot use the content in sources/note.md. The file is still on this computer. Edit it in another editor.");
+  await expect(flushDatasetSourceCapture(f.adapter, f.signal)).resolves.toEqual([held]);
 });
 
 it("refuses a just-written source held by the final flush", async () => {

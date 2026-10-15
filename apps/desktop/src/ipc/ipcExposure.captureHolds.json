@@ -1,0 +1,9 @@
+{
+  "nameAdditions": [
+    "desktop:retry-held-capture",
+    "desktop:capture-holds"
+  ],
+  "channelKeyAdditions": [
+    "captureHolds"
+  ]
+}
