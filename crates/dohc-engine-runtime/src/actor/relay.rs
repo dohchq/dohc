@@ -2777,8 +2777,8 @@ fn retire_departed_hosted(
 /// the next pass. The folders a removed file leaves empty go too, so a file
 /// can take their name; an empty one that cannot go keeps the path held, and
 /// with it each folder above, until a later pass removes it; that pass walks
-/// past the folders already gone. Answers whether
-/// any path came free.
+/// past the folders already gone. A folder that cannot be inspected also
+/// keeps the path held. Answers whether any path came free.
 fn remove_retired_files(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -2794,13 +2794,17 @@ fn remove_retired_files(
         let mut stuck = false;
         let mut parent = file.path.as_str();
         while let Some((folder, _)) = parent.rsplit_once('/') {
-            match dohc_engine_files::remove_empty_directory_target(root, folder) {
-                Ok(true) => {}
+            let path = root.join(folder);
+            match left_folder(
+                dohc_engine_files::remove_empty_directory_target(root, folder),
+                || std::fs::symlink_metadata(&path).map(|m| m.is_dir()),
+                || Ok(std::fs::read_dir(&path)?.next().transpose()?.is_none()),
+            ) {
                 // An earlier pass removed it; an empty folder above may remain.
-                _ if std::fs::symlink_metadata(root.join(folder)).is_err() => {}
-                _ => {
-                    stuck =
-                        std::fs::read_dir(root.join(folder)).is_ok_and(|mut d| d.next().is_none());
+                LeftFolder::Removed | LeftFolder::Gone => {}
+                LeftFolder::HasContent => break,
+                LeftFolder::Stuck => {
+                    stuck = true;
                     break;
                 }
             }
@@ -2821,6 +2825,101 @@ fn remove_retired_files(
         }
     }
     Ok(freed)
+}
+
+/// What became of a folder a removed retired file left.
+#[derive(Debug, PartialEq, Eq)]
+enum LeftFolder {
+    Removed,
+    Gone,
+    HasContent,
+    Stuck,
+}
+
+/// Fail closed: the path goes free only past a folder that is surely gone
+/// or surely holds something; any other answer keeps it held.
+fn left_folder<E>(
+    removed: Result<bool, E>,
+    is_dir: impl FnOnce() -> std::io::Result<bool>,
+    is_empty: impl FnOnce() -> std::io::Result<bool>,
+) -> LeftFolder {
+    match removed {
+        Ok(true) => return LeftFolder::Removed,
+        Ok(false) => {}
+        Err(_) => return LeftFolder::Stuck,
+    }
+    match is_dir() {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => LeftFolder::Gone,
+        Err(_) => LeftFolder::Stuck,
+        Ok(false) => LeftFolder::HasContent,
+        Ok(true) => match is_empty() {
+            Ok(false) => LeftFolder::HasContent,
+            Ok(true) | Err(_) => LeftFolder::Stuck,
+        },
+    }
+}
+
+#[cfg(test)]
+mod left_folder_tests {
+    use super::{LeftFolder, left_folder};
+    use std::io::{Error, ErrorKind, Result};
+
+    fn unreachable() -> Result<bool> {
+        panic!("inspected a folder whose answer was already known")
+    }
+
+    fn denied() -> Result<bool> {
+        Err(Error::from(ErrorKind::PermissionDenied))
+    }
+
+    #[test]
+    fn a_removed_folder_is_not_inspected() {
+        let removed = left_folder(Ok::<_, ()>(true), unreachable, unreachable);
+        assert_eq!(removed, LeftFolder::Removed);
+    }
+
+    #[test]
+    fn a_failed_removal_keeps_the_path_held() {
+        let stuck = left_folder(Err(()), unreachable, unreachable);
+        assert_eq!(stuck, LeftFolder::Stuck);
+    }
+
+    #[test]
+    fn only_a_missing_folder_counts_as_gone() {
+        let missing = || Err(Error::from(ErrorKind::NotFound));
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), missing, unreachable),
+            LeftFolder::Gone
+        );
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), denied, unreachable),
+            LeftFolder::Stuck
+        );
+    }
+
+    #[test]
+    fn a_folder_that_holds_something_lets_the_path_go() {
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), || Ok(true), || Ok(false)),
+            LeftFolder::HasContent
+        );
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), || Ok(false), unreachable),
+            LeftFolder::HasContent
+        );
+    }
+
+    #[test]
+    fn an_empty_or_unlisted_folder_keeps_the_path_held() {
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), || Ok(true), || Ok(true)),
+            LeftFolder::Stuck
+        );
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), || Ok(true), denied),
+            LeftFolder::Stuck
+        );
+    }
 }
 
 /// The level gate on share-view enrolment, read at the one place
