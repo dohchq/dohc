@@ -127,6 +127,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   });
   const adapter = {
     reconcileCapture: vi.fn<VersionedLiveAdapter["reconcileCapture"]>(async () => ({ settled: true, running: true, degraded: false, heldFiles: [] })),
+    retryHeldCapture: vi.fn<VersionedLiveAdapter["retryHeldCapture"]>(async () => ({ settled: true, running: true, degraded: false, retried: true, heldFiles: [] })),
     watcherStatus: vi.fn<VersionedLiveAdapter["watcherStatus"]>(async () => ({ running: true, degraded: false, terminal: false, phase: "ready", noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [], heldFiles: [] })),
     clearCaptureRecovery: vi.fn<VersionedLiveAdapter["clearCaptureRecovery"]>(async () => undefined),
     listCollections: vi.fn<VersionedLiveAdapter["listCollections"]>(async () => ({ collections: [] })),
@@ -194,6 +195,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const readPolicy = vi.fn<(rootPath: string) => Promise<WorkspaceEnginePolicySnapshot>>(async () => ({ filesPolicy: null, visibilityPolicy: null, errors: [], unreadable: [] }));
   if (policyRoot) readPolicy.mockImplementation(readWorkspaceEnginePolicy);
   const recordHistoryPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
+  const recordHeldFiles = vi.fn();
   const prepareRecordHistoryPeople = vi.fn<(_workspaceId: string, userIds: readonly string[], _sender: Sender) => void>();
   const prepareNamed = vi.fn<NonNullable<EngineMomentAuthorNames["prepare"]>>();
   const historyCollections = vi.fn<() => Promise<Pick<TimelineReads, "scope" | "local" | "remote">>>(async () => ({ scope: "test", local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw new Error("unexpected remote history"); } }));
@@ -215,6 +217,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
+    recordHeldFiles,
     namedAuthorLabels: () => ({ prepare: prepareNamed, named: () => "Someone you shared with" }),
     recordHistoryPersonName,
     prepareRecordHistoryPeople,
@@ -241,7 +244,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
     storeWorkspaces, readPolicy, historyCollections,
-    sent, recordHistoryPersonName, prepareRecordHistoryPeople,
+    sent, recordHistoryPersonName, prepareRecordHistoryPeople, recordHeldFiles,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
     /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
     loading: () => {
@@ -257,7 +260,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
 const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
   CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
-  CHANNELS.getSyncStatus, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
+  CHANNELS.getSyncStatus, captureRecoveryOperations.retryHeldCapture.channel, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
   fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
   engineYDocAdmissionOperations.waitForEngineYDocAdmission.channel, engineYDocSaveOperations.retryEngineYDocSave.channel, CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
@@ -351,6 +354,16 @@ describe("workspace engine IPC registrations", () => {
     expect(h.adapter.clearCaptureRecovery).toHaveBeenCalledTimes(1);
     h.setMissingAdapter();
     await expect(h.invoke(captureRecoveryOperations.getCaptureRecoveryStatus.channel)).rejects.toThrow("not running");
+  });
+  it("retries and records held files only in the sender's workspace", async () => {
+    const h = await harness();
+    const bridge = operationBridge(captureRecoveryOperations, async (channel, payload) => h.invoke(channel, payload));
+    await bridge.retryHeldCapture({ workspaceId: "workspace", path: "notes/a.md" });
+    expect(h.adapter.retryHeldCapture).toHaveBeenCalledExactlyOnceWith("notes/a.md");
+    expect(h.recordHeldFiles).toHaveBeenCalledExactlyOnceWith(h.physical, []);
+    await expect(bridge.retryHeldCapture({ workspaceId: "other", path: "notes/a.md" })).rejects.toThrow("This workspace is no longer active.");
+    expect(h.adapter.retryHeldCapture).toHaveBeenCalledOnce();
+    expect(h.recordHeldFiles).toHaveBeenCalledOnce();
   });
   it("retries recovery only for the writable workspace this renderer shows", async () => {
     const h = await harness();

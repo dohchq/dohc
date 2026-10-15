@@ -2,7 +2,7 @@ import {
   isChatShareAccessValue,
   isShareAccessValue,
 } from "@dohc/security-contract";
-import { groupChannelIsOrdinary, isGroupSelector, effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type StoredAnyShareSelector } from "./shareFilter";
+import { chatSideOf, groupChannelIsOrdinary, isGroupSelector, effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson, type StoredAnyShareSelector } from "./shareFilter";
 import type {
   SyncRelayStorage,
   SyncRelayGrantedShareRow,
@@ -35,11 +35,14 @@ export function createShareSummaries(
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
   namedBrowserOrigin?: string,
 ) {
-  const namedBrowserInvitation = (grantId: string, selector: StoredAnyShareSelector, access: string) => {
+  const namedBrowserInvitation = (workspaceId: string, grantId: string, selector: StoredAnyShareSelector, access: string) => {
     const effective = effectiveShareSelector(selector, access);
-    return namedBrowserOrigin && effective && isLiveEditShareSelector(effective)
-      ? { browserInvitationUrl: `${namedBrowserOrigin}/s/edit/${encodeURIComponent(grantId)}` }
-      : {};
+    if (!namedBrowserOrigin || !effective) return {};
+    if (isGroupSelector(effective) && !groupChannelIsOrdinary(effective, {
+      channelKind: wireId => storage.findChannelCreateKind(workspaceId, wireId),
+    })) return {};
+    const view = chatSideOf(effective) ? "chat" : isLiveEditShareSelector(effective) ? "edit" : null;
+    return view ? {browserInvitationUrl: `${namedBrowserOrigin}/s/${view}/${encodeURIComponent(grantId)}`} : {};
   };
   const groupFileScope = (workspaceId: string, selector: StoredAnyShareSelector | null, access: string) => {
     const effective = selector && effectiveShareSelector(selector, access);
@@ -115,7 +118,7 @@ export function createShareSummaries(
       automationsGeneration: row.automationsGeneration,
       ...(selector && grant.status === "active" && grant.revokedAtMs === null && grant.parentGrantId === null &&
         (grant.principalKind === "user" || grant.principalKind === "email")
-        ? namedBrowserInvitation(grant.grantId, selector, grant.access) : {}),
+        ? namedBrowserInvitation(share.workspaceId, grant.grantId, selector, grant.access) : {}),
     };
   };
 
