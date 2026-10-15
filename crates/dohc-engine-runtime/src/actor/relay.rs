@@ -2682,9 +2682,10 @@ fn release_unready_hosted(
 /// checks pass, and its file holds its head or nothing. Each retires in its
 /// own transaction, which records its file as retired; the file goes after,
 /// and a file an earlier pass could not remove goes first. A file holding
-/// anything else is a bug in a service root nothing else writes to, so
-/// retirement stops and names it. Answers whether any document retired or
-/// any path came free.
+/// anything else is a bug in a service root nothing else writes to, so its
+/// document stays departed, the others still retire, and the pass names the
+/// first such file. Answers whether any document retired or any path came
+/// free.
 fn retire_departed_hosted(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
@@ -2696,7 +2697,8 @@ fn retire_departed_hosted(
     let active = dohc_engine_domain::VersionedTextStore::new(store)
         .get_active_version(workspace_id)?
         .version_id;
-    let mut retired = remove_retired_files(store, workspace_id, root)?;
+    let mut unexpected = None;
+    let mut retired = remove_retired_files(store, workspace_id, root, &mut unexpected)?;
     'departed: for document in dohc_engine_sync::departed_hosted_documents(store, workspace_id)? {
         let versions = document
             .heads
@@ -2739,9 +2741,8 @@ fn retire_departed_hosted(
                 File::Absent => {}
                 File::Text { sha256 } | File::Binary { sha256 } if sha256 == head.sha256 => {}
                 _ => {
-                    return Err(RuntimeError::HostedFileUnexpected {
-                        path: head.path.clone(),
-                    });
+                    unexpected.get_or_insert_with(|| head.path.clone());
+                    continue 'departed;
                 }
             }
         }
@@ -2761,27 +2762,32 @@ fn retire_departed_hosted(
             doc_cache.remove(key);
             doc_cache.unpin(key);
         }
-        remove_retired_files(store, workspace_id, root)?;
+        remove_retired_files(store, workspace_id, root, &mut unexpected)?;
     }
-    Ok(retired)
+    match unexpected {
+        Some(path) => Err(RuntimeError::HostedFileUnexpected { path }),
+        None => Ok(retired),
+    }
 }
 
 /// Remove each retired file that still holds its document's head, and free
 /// its path. One that holds anything else stays on disk with its path held,
-/// so its document stays departed, and every pass names it. A removal that
-/// fails also keeps the path held for the next pass. Answers whether any path
-/// came free.
+/// so its document stays departed; the first such path goes in `unexpected`
+/// for the pass to name. A removal that fails also keeps the path held for
+/// the next pass. Answers whether any path came free.
 fn remove_retired_files(
     store: &mut EngineStore,
     workspace_id: &str,
     root: &std::path::Path,
+    unexpected: &mut Option<String>,
 ) -> Result<bool, RuntimeError> {
-    let files = dohc_engine_sync::retired_hosted_files(store, workspace_id)?;
-    let freed = !files.is_empty();
-    for file in files {
+    let mut freed = false;
+    for file in dohc_engine_sync::retired_hosted_files(store, workspace_id)? {
         if !dohc_engine_files::remove_file_holding(root, &file.path, &file.sha256)? {
-            return Err(RuntimeError::HostedFileUnexpected { path: file.path });
+            unexpected.get_or_insert(file.path);
+            continue;
         }
+        freed = true;
         match dohc_engine_sync::forget_retired_hosted_file(
             store,
             workspace_id,
@@ -3269,6 +3275,77 @@ mod hosted_refusal_tests {
         assert!(pass(&mut store).unwrap(), "its path came free");
         assert!(departed(&store).is_empty());
         assert!(!file.exists());
+    }
+
+    /// The durability review: a stuck retired file returned before the
+    /// retired files after it and every departed document, so nothing else
+    /// in the workspace ever retired. The others still go; the stuck one
+    /// stays departed, and the pass still names it.
+    #[test]
+    fn a_stuck_retired_file_does_not_hold_back_other_retirements() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                     VALUES ('ws','a.md','doc-b',?1),('ws','z.md','doc-z',?2)",
+                    [
+                        dohc_engine_storage::hex_sha256(b"hosted b"),
+                        dohc_engine_storage::hex_sha256(b"hosted z"),
+                    ],
+                )
+                .and_then(|_| {
+                    tx.execute(
+                        "INSERT INTO hosted_documents \
+                         (workspace_id,object_id,path,state,scope_generation) \
+                         VALUES ('ws','doc-c','c.md','ready',1)",
+                        [],
+                    )
+                })
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        std::fs::write(root.path().join("a.md"), "not the head").unwrap();
+        std::fs::write(root.path().join("z.md"), "hosted z").unwrap();
+        assert_eq!(
+            dohc_engine_sync::departed_hosted_object_ids(&store, "ws").unwrap(),
+            ["doc-b", "doc-c", "doc-z"]
+        );
+
+        let refused = retire_departed_hosted(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &LeaseRegistry::default(),
+            "ws",
+            root.path(),
+            2_000,
+        );
+        assert!(
+            matches!(&refused, Err(RuntimeError::HostedFileUnexpected { path }) if path == "a.md"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            dohc_engine_sync::departed_hosted_object_ids(&store, "ws").unwrap(),
+            ["doc-b"]
+        );
+        assert!(root.path().join("a.md").exists());
+        assert!(!root.path().join("z.md").exists());
     }
 }
 

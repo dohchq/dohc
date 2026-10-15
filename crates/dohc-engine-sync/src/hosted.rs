@@ -350,7 +350,8 @@ pub(crate) fn wait_for_departed_occupant_in_tx(
 
 /// Whether a hosted document that left the scope, or the file a retired one
 /// left, holds `path` here against `object_id`. A path held this way matches
-/// like a capture hold: in any case, and with everything beneath it.
+/// like a capture hold: in any case, and with everything beneath it. It also
+/// holds each folder above it, which a file at that path would collide with.
 fn held_by_departed(
     conn: &Connection,
     workspace_id: &str,
@@ -375,7 +376,8 @@ fn held_by_departed(
         .map_err(SyncError::corrupt)?;
     for held in held {
         let held = held.map_err(SyncError::corrupt)?;
-        if dohc_engine_storage::capture_file_holds::path_is_held(&held, path) {
+        use dohc_engine_storage::capture_file_holds::path_is_held;
+        if path_is_held(&held, path) || path_is_held(path, &held) {
             return Ok(true);
         }
     }

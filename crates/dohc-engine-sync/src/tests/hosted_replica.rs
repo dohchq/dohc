@@ -2854,12 +2854,24 @@ fn departing_b() -> (
     EngineStore,
     RelaySyncClient<HostedFeed>,
 ) {
+    departing_b_at("a.md")
+}
+
+/// `doc-b` is hosted at `at` and synced.
+fn departing_b_at(
+    at: &str,
+) -> (
+    ScratchDir,
+    std::path::PathBuf,
+    EngineStore,
+    RelaySyncClient<HostedFeed>,
+) {
     let (scratch, path, mut store) = hosted_store();
     let client = RelaySyncClient::new(HostedFeed::new());
     let feed = client.transport();
     feed.append(envelope("owner", 0, "workspace.init", json!({})));
-    feed.create("owner", 1, "doc-b", "a.md", "hosted b");
-    feed.share("doc-b", "a.md");
+    feed.create("owner", 1, "doc-b", at, "hosted b");
+    feed.share("doc-b", at);
     sync(&client, &mut store);
     assert_eq!(
         content(&store).0,
@@ -3938,12 +3950,18 @@ fn a_ydoc_base_waits_for_a_retired_file_at_its_path() {
 
 /// From engine merge 4: a departed document's path, and a retired file's,
 /// matched exactly, while capture holds match case aliases and descendants.
-/// `A.md`, and separately `a.md/c.md`, waits for `doc-b`, departed and then
-/// retired, until its file is gone.
+/// The PR 4a durability review: nor did it hold the folders above it. Each
+/// incoming path waits for `doc-b`, departed and then retired, until its
+/// file is gone.
 #[test]
-fn a_departed_path_holds_its_case_aliases_and_descendants() {
-    for path in ["A.md", "a.md/c.md"] {
-        let (_scratch, _path, mut store, client) = departing_b();
+fn a_departed_path_holds_its_case_aliases_descendants_and_ancestors() {
+    for (at, path) in [
+        ("a.md", "A.md"),
+        ("a.md", "a.md/c.md"),
+        ("a.md/c.md", "a.md"),
+        ("a.md/c.md", "A.md"),
+    ] {
+        let (_scratch, _path, mut store, client) = departing_b_at(at);
         let feed = client.transport();
         feed.unshare("doc-b");
         sync(&client, &mut store);
@@ -3968,7 +3986,7 @@ fn a_departed_path_holds_its_case_aliases_and_descendants() {
         );
 
         assert_eq!(
-            forget_retired_hosted_file(&mut store, "ws", "a.md", &NoFaults).unwrap(),
+            forget_retired_hosted_file(&mut store, "ws", at, &NoFaults).unwrap(),
             TxnOutcome::Committed(())
         );
         sync(&client, &mut store);
