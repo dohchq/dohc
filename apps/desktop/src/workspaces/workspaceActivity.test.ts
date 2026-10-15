@@ -1,3 +1,4 @@
+import { createFolderAppDetection } from "./folderAppDetection";
 import { settleYDocsAfterFileObservation } from "./workspaceActivity";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -57,6 +58,34 @@ function workspace(): ActivityWorkspace {
 }
 
 describe("workspaceActivity capture hooks", () => {
+  it("pushes held status changes without generic activity and discards a retired capture's update", async () => {
+    let hooks!: WorkspaceCaptureHooks;
+    const notify = vi.fn();
+    const onHeldFiles = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      onHeldFiles,
+      captureFor: (_workspace, value) => {
+        hooks = value;
+        return { shareView: false, capture: { start: vi.fn(), stop: vi.fn(async () => {}), settleAndCloseAllLiveSessions: vi.fn(async () => {}) } as never };
+      },
+    });
+    const held = { workspaceId: "activity-test", sourceVersionId: "main", objectId: "held", path: "held.md",
+      observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
+      observedAtMs: 1, attemptCount: 1, retryRequested: false };
+    await activity.open(workspace());
+    notify.mockClear();
+    hooks.onHeldFiles([held]);
+    expect(activity.getStatus("activity-test").heldFiles).toEqual([held]);
+    expect(onHeldFiles).toHaveBeenCalledExactlyOnceWith("activity-test", [held]);
+    expect(notify).not.toHaveBeenCalled();
+    hooks.onHeldFiles([held]);
+    expect(onHeldFiles).toHaveBeenCalledOnce();
+    hooks.onHeldFiles([]);
+    expect(onHeldFiles).toHaveBeenLastCalledWith("activity-test", []);
+    await activity.stopAll();
+    hooks.onHeldFiles([held]);
+    expect(onHeldFiles).toHaveBeenCalledTimes(2);
+  });
   it("attaches observation after capture fails and queues sync only for capture announcements", async () => {
     let observation!: WorkspaceObservationCallbacks;
     const queueSync = vi.fn();
@@ -1104,3 +1133,31 @@ it("still settles healthy workspaces when an outage checkpoint fails",async()=>{
  let release!:()=>void;const healthyDrain=new Promise<void>(done=>{release=done;});const settled=vi.fn(async()=>{});
  const quit=settleYDocsAfterFileObservation([Promise.reject(Error("checkpoint disk full")),healthyDrain],settled);await Promise.resolve();expect(settled).not.toHaveBeenCalled();release();await quit;expect(settled).toHaveBeenCalledOnce();
 });
+
+ it.each(["appeared", "changed", "disappeared"] as const)("round2 policy %s reaches listing refresh but no file-work consumer", async kind => {
+  const notify = vi.fn();
+  const observeFileEvents = vi.fn();
+  const handleWatcherEvents = vi.fn();
+  const sources = vi.fn(async () => ["index.html"]);
+  const apps = createFolderAppDetection({ sources, updated: vi.fn(), failed: vi.fn() });
+  const onWatcherBatch = vi.fn((w, events) => { handleWatcherEvents(events); apps.settledEvents(w, events); });
+  let observation!: WorkspaceObservationCallbacks;
+  const w = workspace();
+  const activity = createWorkspaceActivity(notify, {
+    observationFor: (w, callbacks) => { observation = callbacks; return idleObservation(w, callbacks); },
+    onWatcherBatch,
+    captureFor: () => ({ shareView: false, capture: { start() {}, observeFileEvents, settleAndCloseAllLiveSessions: async () => {}, stop: async () => {} } as never }),
+  });
+  try {
+    await activity.open(w);
+    await apps.read(w, ".");
+    notify.mockClear();
+    observation.facts([{ path: ".dohc/visibility.toml", kind }]);
+    await apps.retire(w.attachmentId);
+    expect.soft(observeFileEvents).not.toHaveBeenCalled();
+    expect.soft(onWatcherBatch).not.toHaveBeenCalled();
+    expect.soft(handleWatcherEvents).not.toHaveBeenCalled();
+    expect.soft(sources).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledExactlyOnceWith({ workspaceId: w.workspaceId, paths: [".dohc/visibility.toml"], pathSetChanged: kind !== "changed" });
+  } finally { await activity.stopAll(); await apps.retire(w.attachmentId); }
+ });

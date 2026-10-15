@@ -146,5 +146,6 @@
   "device.motion.read",
   "usage.start",
   "usage.restore",
+  "capture.held.retry",
   "agent.run.state.read"
 ]

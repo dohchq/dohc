@@ -2359,6 +2359,14 @@ function recoverOutageTyping(workspace: CreatedWorkspace & {attachmentId: symbol
 }
 
 const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
+  onHeldFiles: (workspaceId, heldFiles) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      if (rendererWorkspaceSessions.current(win.webContents)?.workspaceId === workspaceId) {
+        win.webContents.send(CHANNELS.captureHolds, { workspaceId, heldFiles });
+      }
+    }
+  },
   onAgentRunState: (event) => sendToWorkspaceWindows(CHANNELS.agentRunState, event),
   cloudStateFor: (workspaceId) => {
     const remote = findWorkspace(workspaceId)?.remote;
@@ -3090,7 +3098,7 @@ async function syncWorkspaceForDispatch(
               // Guarded above: a shared view already returned false.
               shareView: false,
             },
-            { onCaptureOutcome: () => undefined, onAtomicPlacementUnavailable: () => undefined, onRecoveryUnavailable: () => undefined, onKeptFiles: () => undefined },
+            { onCaptureOutcome: () => undefined, onAtomicPlacementUnavailable: () => undefined, onRecoveryUnavailable: () => undefined, onKeptFiles: () => undefined, onHeldFiles: () => undefined },
             requireEngineSessions(),
           );
           if (!capture) return false;
@@ -5890,6 +5898,11 @@ function registerIpcHandlers(): void {
       };
     },
     automationAuthor, notifyRenderer,
+    recordHeldFiles: (workspace, files) => withWorkspaceActivityState(workspace.workspaceId, lease => {
+      const current = canonicalWorkspaceFor(lease);
+      if (current.attachmentId !== workspace.attachmentId) return;
+      workspaceActivity.recordHeldFiles(current, lease.state.activity, files);
+    }),
     // A shared view keeps no runs: its automations run on the owner's computer.
     signedInAccount: () => cachedCredentials?.userId ?? null,
     automationRunOnThisComputer: async (workspaceId, automationId, claimId) =>
@@ -6080,10 +6093,10 @@ function registerIpcHandlers(): void {
     flushSourceCapture: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
       await openWorkspaceActivity(workspace);
       const captured = await withEngineAdapter(workspace, async adapter => {
-        await flushDatasetSourceCapture(adapter, signal);
-        return true;
+        return flushDatasetSourceCapture(adapter, signal);
       });
       if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
+      return captured;
     },
     withAdapter: async <T>(workspace: DesktopRendererWorkspaceOperation["workspace"], work: (adapter: import("@dohc/workspace-engine-client").VersionedLiveAdapter) => Promise<T>) => {
       const result = await withEngineAdapter(workspace, work);

@@ -37,6 +37,7 @@ import shareCopyExposure from "./ipcExposure.shareCopy.json";
 import offersIpc from "./ipcExposure.offers.json";
 import sharedWriteFeedback from "./ipcExposure.sharedWriteFeedback.json";
 import systemMotionIpc from "./ipcExposure.systemMotion.json";
+import captureHoldsIpc from "./ipcExposure.captureHolds.json";
 import agentRunStateIpc from "./ipcExposure.agentRunState.json";
 
 const rows: OperationDefinition[] = OPERATION_TABLES.flatMap(table => Object.values(table));
@@ -76,7 +77,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions, ...offersIpc.nameAdditions, ...systemMotionIpc.nameAdditions, ...agentRunStateIpc.nameAdditions]) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions, ...offersIpc.nameAdditions, ...systemMotionIpc.nameAdditions, ...captureHoldsIpc.nameAdditions, ...agentRunStateIpc.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }
