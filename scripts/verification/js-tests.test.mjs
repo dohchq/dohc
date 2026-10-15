@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { cancellationScope } from "./cancellation.mjs";
 import { runBounded, testPlan, testWorkspace } from "./js-tests.mjs";
 import { affectedPackages, packageReferences, readWorkspacePackages } from "./selection.mjs";
 
@@ -96,6 +97,114 @@ test("a node:test step that failed only in its tests runs once more and records 
   };
   assert.deepEqual(drive("flaky"), { repo: 2, flaky: [{ step: "repository", test: "times out under load" }] });
   assert.deepEqual(drive("check"), { repo: 1, flaky: [] });
+});
+
+test("a confirmed failure stops the running steps unless the run keeps going, and a retried pass does not", t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-js-stop-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "scripts/verification"), { recursive: true });
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  for (const name of ["a-fail", "b-sibling", "c-queued"]) {
+    mkdirSync(join(root, "packages", name), { recursive: true });
+    writeFileSync(join(root, "packages", name, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+  }
+  // Running commands hold until the failure. A stop interrupts them as run() does; otherwise they finish.
+  writeFileSync(join(root, "scripts/verification/process.mjs"), `
+    import {existsSync,writeFileSync} from 'node:fs';
+    import {resolve} from 'node:path';
+    export const repoRoot=resolve(import.meta.dirname,'../..');
+    export const pnpm=args=>['pnpm',args];
+    const scenario=process.env.SCENARIO;
+    async function until(file,signal){
+      while(!existsSync(file)){
+        if(signal.aborted)throw Object.assign(Error('pnpm failed (interrupted).'),{interrupted:true});
+        await new Promise(done=>setTimeout(done,10));
+      }
+    }
+    export async function run(_command,args,{log,signal}){
+      if(args.includes('list'))return {stdout:JSON.stringify(['a-fail','b-sibling','c-queued'].map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
+      const name=args[0]==='run'?'repository':args[1];
+      writeFileSync(log,'ok');
+      if(scenario==='flaky'){
+        if(name==='repository'&&!existsSync('ran')){writeFileSync('ran','');await until('sibling-started',signal);writeFileSync(log,'✖ failing tests:\\n\\n✖ times out under load (30231ms)\\n');throw Object.assign(Error('tests failed'),{commandExitFailure:true});}
+        if(name==='repository')writeFileSync('repository-passed','');
+        if(name==='@dohc/b-sibling'){writeFileSync('sibling-started','');await until('repository-passed',signal);}
+        return {stdout:''};
+      }
+      if(name==='@dohc/a-fail'){await until('sibling-started',signal);writeFileSync('failed','');throw Object.assign(Error('package failed'),{commandExitFailure:true});}
+      if(name==='@dohc/b-sibling')writeFileSync('sibling-started','');
+      await until(scenario==='stop'?'never':'failed',signal);
+      return {stdout:''};
+    }
+  `);
+  writeFileSync(join(root, "driver.mjs"), `
+    import {existsSync,readFileSync} from 'node:fs';
+    import {cancellationScope} from './scripts/verification/cancellation.mjs';
+    import {testWorkspace} from './scripts/verification/js-tests.mjs';
+    const stop=cancellationScope('Fixture',{stopOnFailure:process.env.SCENARIO!=='keep-going'});
+    const error=await testWorkspace({prepared:true,output:'evidence',stop,runProofs:async()=>{}}).then(()=>null,error=>error);
+    await stop.dispose();
+    const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
+    console.log(JSON.stringify({error:error?.message??null,stoppedBy:stop.stopped?.step??null,verdict:report.verdict,stopped:report.stopped??null,
+      steps:Object.fromEntries(report.steps.filter(step=>step.name!=='inventory').map(step=>[step.name,step.verdict])),flaky:report.flaky}));
+  `);
+  const drive = scenario => {
+    for (const file of ["ran", "sibling-started", "repository-passed", "failed", "evidence"]) rmSync(join(root, file), { recursive: true, force: true });
+    const result = spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, SCENARIO: scenario } });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout.trim().split("\n").at(-1));
+  };
+  const stopped = drive("stop");
+  assert.equal(stopped.error, "package failed");
+  assert.equal(stopped.stoppedBy, "@dohc/a-fail");
+  assert.equal(stopped.verdict, "FAIL");
+  assert.deepEqual(stopped.steps, { repository: "NOT RUN", "@dohc/a-fail": "FAIL", "@dohc/b-sibling": "NOT RUN", "@dohc/c-queued": "NOT RUN", proofs: "NOT RUN" });
+  assert.equal(stopped.stopped.after, "@dohc/a-fail");
+  assert.deepEqual(stopped.stopped.notRun.toSorted(), ["@dohc/b-sibling", "@dohc/c-queued", "proofs", "repository"]);
+
+  const kept = drive("keep-going");
+  assert.equal(kept.error, "package failed");
+  assert.equal(kept.stoppedBy, null);
+  assert.equal(kept.stopped, null);
+  assert.deepEqual(kept.steps, { repository: "PASS", "@dohc/a-fail": "FAIL", "@dohc/b-sibling": "PASS" }, "running steps finish; nothing new starts, as before");
+
+  const flaky = drive("flaky");
+  assert.equal(flaky.error, null);
+  assert.equal(flaky.stoppedBy, null);
+  assert.equal(flaky.verdict, "PASS");
+  assert.deepEqual(flaky.steps, { repository: "PASS", "@dohc/a-fail": "PASS", "@dohc/b-sibling": "PASS", "@dohc/c-queued": "PASS", proofs: "PASS" });
+  assert.deepEqual(flaky.flaky, [{ step: "repository", test: "times out under load" }]);
+});
+
+test("a step stopped by another job's failure is reported as not run", async () => {
+  const scope = cancellationScope("Fixture", { stopOnFailure: true });
+  try {
+    const failure = new Error("fixture Rust failed");
+    assert.equal(scope.notRun({}, failure), false, "nothing is stopped before a failure");
+    scope.stop("rust", failure);
+    scope.stop("tests", new Error("a later failure"));
+    assert.equal(scope.stopped.step, "rust", "the first confirmed failure is the cause");
+    assert.equal(scope.signal.aborted, true);
+    const own = { verdict: "FAIL" }, interrupted = { verdict: "FAIL" }, later = { verdict: "FAIL" };
+    assert.equal(scope.notRun(own, failure), false);
+    assert.equal(scope.notRun(interrupted, Object.assign(new Error("pnpm failed (interrupted)."), { interrupted: true })), true);
+    assert.equal(scope.notRun(later, new Error("an assertion failed after the stop")), false, "a real failure is not hidden");
+    assert.deepEqual([own.verdict, interrupted, later.verdict], ["FAIL", { verdict: "NOT RUN", reason: "stopped after rust failed" }, "FAIL"]);
+    const steps = [{ name: "rust", verdict: "FAIL" }, { name: "typecheck", ...interrupted }];
+    assert.deepEqual(scope.unfinished(steps, ["rust", "rust-verdict", "typecheck", "tests"]), { after: "rust", notRun: ["typecheck", "rust-verdict", "tests"] });
+  } finally { await scope.dispose(); }
+  const kept = cancellationScope("Fixture");
+  kept.stop("rust", new Error("fixture Rust failed"));
+  assert.equal(kept.stopped, null, "a run that keeps going never stops");
+  await kept.dispose();
+  const signalled = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import {cancellationScope} from ${JSON.stringify(new URL("./cancellation.mjs", import.meta.url).href)};
+    const scope=cancellationScope('Fixture',{stopOnFailure:true});
+    process.emit('SIGTERM');
+    scope.stop('tests',new Error('pnpm failed (interrupted).'));
+    console.log(JSON.stringify({stopped:scope.stopped,error:(await scope.dispose()).message}));
+  `], { encoding: "utf8", timeout: 20_000 });
+  assert.deepEqual(JSON.parse(signalled.stdout), { stopped: null, error: "Fixture interrupted by SIGTERM." }, "a signal's interruption is not a failure");
 });
 
 test("a change affects its own packages and every package that depends on them", () => {

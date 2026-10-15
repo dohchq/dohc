@@ -46,7 +46,7 @@ function csvFile(workspaceId: string, path: string, body: string) {
 }
 
 // The shell's error list and notice center, handing its error hook to the view.
-function Shell(props: { children: (onError: ReturnType<typeof useShellError>["reportShellError"]) => ReactNode }) {
+function Shell(props: { children: (onError: ReturnType<typeof useShellError>["reportButtonError"]) => ReactNode }) {
   const shell = useShellError("ws-1");
   return (
     <>
@@ -64,7 +64,7 @@ function Shell(props: { children: (onError: ReturnType<typeof useShellError>["re
         onHide={shell.hideShellError}
         onDismiss={shell.dismissShellError}
       />
-      {props.children(shell.reportShellError)}
+      {props.children(shell.reportButtonError)}
     </>
   );
 }
