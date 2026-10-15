@@ -407,6 +407,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   serviceHostEnrollmentHasEditGrant(enrollment: Pick<serviceHostEnrollmentStorage.ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">) {
     return serviceHostEnrollmentStorage.serviceHostEnrollmentHasEditGrant(this, enrollment);
   }
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}) {
+    return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document);
+  }
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}) {
     const result = serviceHostEnrollmentStorage.releaseServiceHostEnrollment(this, input);
     if (result) notifyDesktopReadiness(this, {workspaceId: result.workspaceId, path: result.path});

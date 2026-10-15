@@ -434,11 +434,12 @@ function readOwner(lock) {
  * would steal the directory the faster sweeper's waiter had already
  * re-claimed. The lock is held for milliseconds; one left by a dead sweeper
  * is removed after 5 minutes. Returns how many slots were freed.
+ * `ownTicket` names the sweeping waiter's ticket, which is never stale.
  */
-export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot", goneMs = 2 * defaultHeartbeatMs, identify = processCreation }) {
+export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot", goneMs = 2 * defaultHeartbeatMs, identify = processCreation, ownTicket }) {
   try {
     return withSweepLock(root, owns => {
-      reclaimStaleTickets({ root, kind, owns });
+      reclaimStaleTickets({ root, kind, owns, ownTicket });
       return reclaimSlots({ root, slots, kind, staleMs, goneMs, identify, owns });
     }) ?? 0;
   } catch (error) {
@@ -585,9 +586,12 @@ function queueTickets(root, kind) {
 // Each record supplies its heartbeat interval. Temporary records get two
 // heartbeats of grace, with the default interval for missing or torn records.
 // The caller holds reclaim.lock, and stops when it no longer `owns` it.
-function reclaimStaleTickets({ root, kind, owns = () => true }) {
+// The sweeper's own ticket is live by definition, even when a busy event loop
+// has delayed its heartbeat.
+function reclaimStaleTickets({ root, kind, owns = () => true, ownTicket }) {
   for (const name of queueEntries(root, kind)) {
     if (!owns()) return;
+    if (name === ownTicket) continue;
     const temporary = name.endsWith(".json.tmp");
     if (!temporary && !name.endsWith(".json")) continue;
     const path = join(root, `${kind}-queue`, name);
@@ -960,7 +964,7 @@ async function acquireSlot({
       const sweepMs = reserved ? Math.min(pollMs, 1000) : pollMs;
       if (Date.now() - lastSweepAt >= sweepMs) {
         lastSweepAt = Date.now();
-        reclaimStaleSlots({ root, slots, staleMs, goneMs, kind });
+        reclaimStaleSlots({ root, slots, staleMs, goneMs, kind, ownTicket: ticket.name });
         refreshQueue();
       }
       if (ahead < 0) {

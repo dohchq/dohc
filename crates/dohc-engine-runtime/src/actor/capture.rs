@@ -97,6 +97,29 @@ mod capture_file_hold_tests {
         )
     }
 
+    #[test]
+    fn review2_unowned_release_only_reports_an_exact_hold() {
+        let (_scratch, mut store, refused) = seeded();
+        assert_eq!(
+            offer(&mut store, &refused).unwrap_err().code(),
+            "capture-file-held"
+        );
+        for path in ["HELD.MD", "held.md/trip.md"] {
+            assert!(
+                !clear_unowned_capture_hold(&mut store, "hold-proof", path, &NoFaults).unwrap()
+            );
+            assert!(
+                store
+                    .read_with(|conn| capture_file_holds::hold_in(conn, "hold-proof", "held.md"))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert!(
+            clear_unowned_capture_hold(&mut store, "hold-proof", "held.md", &NoFaults).unwrap()
+        );
+    }
+
     fn offer(store: &mut EngineStore, input: &CaptureIngest) -> Result<WriteResult, RuntimeError> {
         capture_ingest_on_store(
             store,
@@ -410,6 +433,7 @@ mod capture_file_hold_tests {
                     scratch.path(),
                     &job,
                     &dohc_engine_files::MaterializeOptions {
+                        holds: None,
                         policy: dohc_engine_files::DurabilityPolicy::per_os(),
                         replacer: &dohc_engine_files::StdReplacer,
                         backoff: &dohc_engine_files::NoBackoff,
@@ -681,6 +705,31 @@ pub struct CapturePassSettlement {
     pub repair_recoveries: bool,
 }
 
+fn select_released_switch_jobs(
+    conn: &Connection,
+    workspace_id: &str,
+    paths: &[CapturePlacementPath],
+    selected: &mut std::collections::HashSet<String>,
+) -> Result<(), RuntimeError> {
+    let released: Vec<String> = paths
+        .iter()
+        .filter(|path| path.released_hold)
+        .map(|path| path.path.to_lowercase())
+        .collect();
+    for (id, target) in dohc_engine_storage::pending_switch_jobs_in(conn, workspace_id)? {
+        let target = target.to_lowercase();
+        if released.iter().any(|path| {
+            target == *path
+                || target
+                    .strip_prefix(path)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        }) {
+            selected.insert(id);
+        }
+    }
+    Ok(())
+}
+
 impl ActorHandle {
     pub async fn capture_notices(
         &self,
@@ -719,22 +768,19 @@ impl ActorHandle {
                 std::collections::HashSet::new()
             } else {
                 store.read_with(|conn| {
-                    let mut query = conn
-                        .prepare_cached(
-                            "SELECT job_id FROM materialization_jobs \
-                         WHERE workspace_id IN (?1,'') AND target_path=?2 AND status='pending'",
-                        )
-                        .map_err(StorageError::corrupt_public)?;
+                    let mut query = conn.prepare_cached(
+                        "SELECT job_id FROM materialization_jobs WHERE workspace_id IN (?1,'') AND target_path=?2 AND status='pending'"
+                    ).map_err(StorageError::corrupt_public)?;
                     let mut selected = std::collections::HashSet::new();
+                    let mut released = false;
                     for path in &settlement.paths {
-                        let jobs = query
-                            .query_map(params![workspace_id, path.path], |row| {
-                                row.get::<_, String>(0)
-                            })
+                        released |= path.released_hold;
+                        let jobs = query.query_map(params![workspace_id, path.path], |row| row.get::<_, String>(0))
                             .map_err(StorageError::corrupt_public)?;
-                        for job in jobs {
-                            selected.insert(job.map_err(StorageError::corrupt_public)?);
-                        }
+                        for job in jobs { selected.insert(job.map_err(StorageError::corrupt_public)?); }
+                    }
+                    if released {
+                        select_released_switch_jobs(conn, &workspace_id, &settlement.paths, &mut selected)?;
                     }
                     Ok::<_, RuntimeError>(selected)
                 })?
@@ -744,13 +790,14 @@ impl ActorHandle {
                     .paths
                     .iter()
                     .filter(|path| path.released_hold)
-                    .map(|path| path.path.clone())
+                    .map(|path| path.path.to_lowercase())
                     .collect();
                 root_guard.validate(&root_dir)?;
                 let replay = super::materialization::replay_pending_materializations(
                     store,
                     &root_dir,
                     super::materialization::MaterializationReplayScope {
+                        holds: None,
                         workspace_id: &workspace_id,
                         self_writes: Some(self_writes.as_ref()),
                         progress: None,
@@ -1045,9 +1092,8 @@ impl ActorHandle {
         self.run(move |store, _| {
             let mut entries = capture_manifest_seed(store, &workspace_id, &version_id)?;
             let holds = store.read_with(|conn| capture_file_holds::list_in(conn, &workspace_id))?;
-            let held_paths: std::collections::HashSet<_> =
-                holds.iter().map(|hold| hold.path.as_str()).collect();
-            entries.retain(|entry| !held_paths.contains(entry.path.as_str()));
+            let held_paths = dohc_engine_files::PlacementHolds::from_holds(&workspace_id, &holds);
+            entries.retain(|entry| !held_paths.blocks(&entry.path));
             for hold in holds {
                 entries.push(CaptureManifestSeedEntry {
                     path: hold.path,
@@ -1154,7 +1200,10 @@ fn clear_unowned_capture_hold(
     path: &str,
     faults: &dyn FaultInjector,
 ) -> Result<bool, RuntimeError> {
-    if !store.placement_is_held(workspace_id, path)? {
+    if store
+        .read_with(|conn| capture_file_holds::hold_in(conn, workspace_id, path))?
+        .is_none()
+    {
         return Ok(false);
     }
     match store.write_with(faults, |tx| {
@@ -1530,6 +1579,12 @@ fn capture_ingest_in_tx(
         )?;
     }
     if held {
+        capture_file_holds::rebase_switch_jobs_in(
+            tx,
+            &input.workspace_id,
+            &input.path,
+            &dohc_engine_storage::Preimage::Present(result.snapshot.blob_sha256.clone()),
+        )?;
         capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
     }
     result.pending_placement = pending_placement;
@@ -1969,6 +2024,14 @@ fn capture_ingest_binary_on_store(
             pending_placement_in(tx, &input.workspace_id, &input.path, hold.is_some())?;
         result.released_capture_hold = hold.is_some();
         if hold.is_some() {
+            capture_file_holds::rebase_switch_jobs_in(
+                tx,
+                &input.workspace_id,
+                &input.path,
+                &dohc_engine_storage::Preimage::Present(dohc_engine_storage::hex_sha256(
+                    &input.bytes,
+                )),
+            )?;
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
         }
         Ok::<_, RuntimeError>(result)
@@ -2094,6 +2157,7 @@ pub(super) fn confirm_absent_on_disk(
             workspace_id,
             path,
             &dohc_engine_files::MaterializeOptions {
+                holds: None,
                 policy: dohc_engine_files::DurabilityPolicy::per_os(),
                 replacer: &dohc_engine_files::StdReplacer,
                 backoff: &dohc_engine_files::NoBackoff,
@@ -2233,6 +2297,12 @@ fn capture_retire_on_store(
             pending_placement_in(tx, &input.workspace_id, &input.path, hold.is_some())?;
         result.released_capture_hold = hold.is_some();
         if hold.is_some() {
+            capture_file_holds::rebase_switch_jobs_in(
+                tx,
+                &input.workspace_id,
+                &input.path,
+                &dohc_engine_storage::Preimage::Absent,
+            )?;
             capture_file_holds::clear_in(tx, &input.workspace_id, &input.path)?;
         }
         Ok::<_, RuntimeError>((result, asset_jobs))
@@ -2248,6 +2318,7 @@ fn capture_retire_on_store(
                 self_writes,
                 faults,
                 Some(root_guard),
+                None,
             )?;
             Ok(result)
         }

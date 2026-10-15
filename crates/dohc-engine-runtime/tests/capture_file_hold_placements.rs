@@ -50,8 +50,8 @@ async fn capture_file_hold_parks_relay_page_and_restart_replay() {
         .capture_ingest(&captured(&outside), &NoFaults)
         .unwrap();
     hold(&mut store, &first.snapshot.object_id, &outside);
-    // This old blob deliberately makes the disk preimage known. The hold is
-    // the reason replacement parks; unknown-preimage protection cannot mask it.
+    // The outside bytes are an old recorded blob. Relay placement still parks
+    // while held; its preimage now comes from the source version's current head.
     VersionedTextStore::new(&mut store)
         .write_text(
             &WriteText {
