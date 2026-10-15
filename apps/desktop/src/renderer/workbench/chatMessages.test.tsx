@@ -144,7 +144,8 @@ describe("chat authorship display", () => {
     // Two runs: "11:05 AM" and "12:45 PM", a two-digit hour in each.
     const runs = [["Ana", 11, 3], ["Ana", 11, 5], ["Sam", 12, 43], ["Sam", 12, 45]] as const;
     const messages = runs.map(([name, hour, minute], index): ChatMessageRecord => ({
-      id: `m${index}`, threadId: "thread", authorKind: "human", authorDisplayName: name,
+      id: `m${index}`, threadId: "thread", presentation: { group: name, hue: null, self: false },
+      authorKind: "human", authorDisplayName: name,
       body: "Hello", createdAtMs: new Date(2026, 8, 17, hour, minute).getTime(),
     }));
     render(
