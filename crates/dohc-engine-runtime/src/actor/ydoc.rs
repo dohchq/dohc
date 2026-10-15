@@ -179,6 +179,58 @@ struct YdocCloseMaterialization {
 }
 
 impl ActorHandle {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn owner_ydoc_stop(
+        &self,
+        workspace: String,
+        path: Option<String>,
+        binding: Option<dohc_engine_collab::LiveObjectBinding>,
+        document: Option<dohc_engine_collab::owner_outbox::release::OwnerStopDocument>,
+        accepted_cursor: Option<i64>,
+        action: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<
+        Result<Vec<dohc_engine_collab::owner_outbox::release::OwnerLiveStop>, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, cache| {
+            use dohc_engine_collab::owner_outbox::release;
+            if token.is_cancelled() {return Err(RuntimeError::Cancelled);}
+            if action=="list" {return Ok(store.read_with(|conn|release::list_requested_in(conn,&workspace)));}
+            let key=if let Some(b)=&binding {DocKey::new(&workspace,&b.main_version_id,&b.object_id)?}
+            else if let Some(d)=&document {DocKey::new(&workspace,&d.main_version_id,&d.object_id)?}
+            else {
+                let path=path.as_ref().ok_or(RuntimeError::Cancelled)?;
+                let found=store.read_with(|conn| {
+                    let mut stmt=conn.prepare("SELECT main_version_id,object_id FROM ydoc_owner_bindings WHERE workspace_id=?1 AND json_extract(binding_json,'$.currentPath')=?2 AND main_version_id=(SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1) UNION SELECT version_id,object_id FROM path_aliases WHERE workspace_id=?1 AND path=?2 AND version_id=(SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1) UNION SELECT main_version_id,object_id FROM owner_live_stops WHERE workspace_id=?1 AND (json_extract(binding_json,'$.document.currentPath')=?2 OR json_extract(binding_json,'$.binding.currentPath')=?2) AND main_version_id=(SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1) LIMIT 2").map_err(StorageError::corrupt_public)?;
+                    let rows=stmt.query_map(params![workspace,path],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(StorageError::corrupt_public)?;
+                    rows.collect::<Result<Vec<_>,_>>().map_err(StorageError::corrupt_public)
+                })?;
+                if found.len()>1 {return Ok(Err(OwnerOutboxError::StopConflict));}
+                let Some((version,object))=found.into_iter().next() else {return Ok(Err(OwnerOutboxError::NotFound));};
+                DocKey::new(&workspace,&version,&object)?
+            };
+            let outcome=store.write_with(faults.as_ref(),|tx|match action.as_str() {
+                "request"=>release::request_in_tx(tx,&key,now_ms).map(|row|vec![row]),
+                "clear"=>release::clear_in_tx(tx,&key).map(|()|vec![]),
+                "retired"=>release::retired_in_tx(tx,&key,now_ms).map(|()|vec![]),
+                "release"=>{
+                    let b=binding.as_ref().ok_or(OwnerOutboxError::StopConflict)?;
+                    let path:Option<String>=tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,key.version_id,key.object_id],|r|r.get(0)).optional().map_err(|_|OwnerOutboxError::Corrupt)?;
+                    let path=path.as_deref().unwrap_or(&b.current_path);
+                    release::release_in_tx(tx,b,accepted_cursor.ok_or(OwnerOutboxError::StopConflict)?,now_ms,|tx,update,actor,attribution,outcome| {
+                        journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,outcome,now_ms).map(|_|())
+                    }).map(|row|vec![row])
+                },
+                _=>Err(OwnerOutboxError::InvalidInput("invalid Stop action")),
+            });
+            if action=="release" && !matches!(&outcome,Ok(TxnOutcome::Committed(rows)) if rows.iter().all(|row|row.deferred.is_some())) {cache.remove(&key);}
+            Ok(match outcome {Ok(TxnOutcome::Committed(rows))=>Ok(rows),Ok(TxnOutcome::Crashed{..})=>Err(OwnerOutboxError::Corrupt),Err(error)=>Err(error)})
+        }).await
+    }
+
     pub async fn owner_ydoc_prepare_enrollment(
         &self,
         binding: dohc_engine_collab::LiveObjectBinding,
@@ -718,6 +770,7 @@ impl ActorHandle {
                         store,
                         &root_dir,
                         MaterializationReplayScope {
+                            holds: None,
                             workspace_id: &workspace_id,
                             self_writes: Some(self_writes.as_ref()),
                             progress: None,
@@ -2647,6 +2700,7 @@ pub(super) fn ydoc_settle_on_store(
                 root_dir,
                 &job,
                 &MaterializeOptions {
+                    holds: None,
                     policy: DurabilityPolicy::per_os(),
                     replacer: &StdReplacer,
                     backoff: &StdBackoff,
@@ -3030,6 +3084,7 @@ pub(super) fn ydoc_settle_on_store(
         root_dir,
         &job,
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &StdBackoff,
@@ -3470,6 +3525,7 @@ fn materialize_ydoc_drain(
         store,
         &materialization.root_dir,
         MaterializationReplayScope {
+            holds: None,
             workspace_id: &key.workspace_id,
             self_writes: Some(materialization.self_writes.as_ref()),
             progress: None,
@@ -4046,6 +4102,7 @@ mod scene_seed_transaction_tests {
             &mut store,
             scratch.path(),
             MaterializationReplayScope {
+                holds: None,
                 workspace_id: "workspace",
                 self_writes: None,
                 progress: None,
@@ -4090,6 +4147,7 @@ mod scene_seed_transaction_tests {
             &mut store,
             scratch.path(),
             MaterializationReplayScope {
+                holds: None,
                 workspace_id: "workspace",
                 self_writes: None,
                 progress: Some(&jobs_taken),
