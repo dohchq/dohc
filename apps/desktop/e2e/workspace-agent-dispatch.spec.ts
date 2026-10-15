@@ -102,6 +102,34 @@ async function openMyAgent(page: Page): Promise<void> {
   await expect(page.getByTestId("chats-channel-title")).toHaveText("My agent");
 }
 
+test("picking the agent in a group's post says it runs when you send, and the offer leaves after the send", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await seedWorkspaceManifest(temp, "agent-dispatch-offer-e2e");
+    await seedRunnerSettings(temp, "report");
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    const page = desktop.page;
+    await openMyAgent(page);
+    await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
+
+    const composer = page.getByTestId("chats-new-thread-composer");
+    await composer.pressSequentially("@ag");
+    await page.locator('[data-testid="chats-new-thread-mention-option"][data-candidate-id="agent:default"]').click();
+    const offer = page.getByTestId("composer-agent-offer");
+    await expect(offer).toHaveAttribute("data-state", "runs");
+    await expect(offer.getByTestId("composer-agent-offer-words")).toHaveText("runs when you send");
+
+    await composer.pressSequentially("check the exports");
+    await composer.press("Enter");
+    await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);
+    await expect(page.getByTestId("composer-agent-offer")).toHaveCount(0);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 test("My agent dispatches a fresh successful run for each human message", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;

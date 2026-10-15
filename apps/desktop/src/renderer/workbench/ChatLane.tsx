@@ -13,8 +13,10 @@ import { extractChatFileReferences } from "./chatFileMentions";
 import { ChatMessageList, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
 import { useReactions } from "./reactionStore";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
+import { useAgentOffer } from "./AgentOffer";
 import { DecisionStatus } from "./ChatPosts";
 import { ComposerNotice } from "./ChatsControls";
+import type { AgentSetupSummary } from "./ChatsView";
 
 type PaintedLane = {
   threadId: string;
@@ -43,6 +45,10 @@ export function ChatLane(props: {
   onThreadRead?: () => void;
   // Bumped by the host when a thread starts.
   revision: number;
+  // What a picked agent's offer says. The lane does not read its dispatch.
+  agentSetup?: AgentSetupSummary | null;
+  onSetupAgent?: () => void;
+  workspacePath?: string;
 }) {
   const [threadId, setThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
@@ -64,6 +70,9 @@ export function ChatLane(props: {
   const paintedRevision = useRef<PaintedLane | null>(null);
   const { workspaceId, onError } = props;
   const channelId = props.channel.id;
+  const agentOffer = useAgentOffer({
+    workspaceId, scope: `${workspaceId}:lane:${channelId}`, setup: props.agentSetup, dispatch: null, reach: props.workspacePath,
+  });
 
   const markRead = useCallback((painted: PaintedLane) => {
     if (painted.readState !== "retry") return;
@@ -350,6 +359,10 @@ export function ChatLane(props: {
           loadFileHeadings={props.loadFileHeadings}
           onChange={setComposer}
           onSend={() => void send()}
+          onRosterPick={agentOffer.onRosterPick}
+          rosterScope={agentOffer.scope}
+          agentOffer={agentOffer.offer}
+          onSetUpAgent={props.onSetupAgent}
         />
       )}
     </div>

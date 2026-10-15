@@ -6,9 +6,10 @@ import {
   matchMentionCandidates,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
-import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentRosterPick } from "../offers/agentAddressed";
+import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentAddressedOffer, type AgentRosterPick } from "../offers/agentAddressed";
 import type { ActorPresentation, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
+import { AgentOffer } from "./AgentOffer";
 import { ChatAvatar } from "./ChatAvatar";
 import { ownPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ComposerSendButton } from "./ComposerSendButton";
@@ -59,6 +60,10 @@ export function MentionComposer(props: {
   onSend: () => void;
   onRosterPick?: (pick: AgentRosterPick | null) => void;
   rosterScope?: string;
+  // What sending to the picked agent does. The parent derives it from the
+  // pick it was told about; Set up opens Settings → Agents.
+  agentOffer?: AgentAddressedOffer | null;
+  onSetUpAgent?: () => void;
   onEscape?: () => void;
   // Decision resolution is the one composer mode where an empty submit is a
   // meaningful action: the caller records the literal fallback "Resolved ✓".
@@ -655,7 +660,11 @@ export function MentionComposer(props: {
                 File
               </button>
             ) : null}
-            <span className="flex-1" />
+            {props.agentOffer ? (
+              <AgentOffer offer={props.agentOffer} surface="post" onSetUp={props.onSetUpAgent} />
+            ) : (
+              <span className="flex-1" />
+            )}
             <ComposerSendButton
               testId={`${props.testIdPrefix}-send`}
               label={props.sendLabel}
@@ -720,6 +729,9 @@ export function MentionComposer(props: {
             disabled={props.disabled === true || empty}
             shape="icon"
           />
+          {props.agentOffer ? (
+            <AgentOffer offer={props.agentOffer} surface="stream" onSetUp={props.onSetUpAgent} />
+          ) : null}
         </>
       )}
     </form>
