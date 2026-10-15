@@ -8,6 +8,62 @@ import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 
 afterEach(async()=>{vi.useRealTimers();cleanupLiveDeliveryFixtures();await closeTestStorages();});
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+it("round5: repeated page text retains its first chunk split", async () => {
+  const f = await fixture();
+  const shared = f.view("shared text that spans the remaining batch space");
+  f.storage.stageReplicaCurrentView(f.lease, shared);
+  const prefix = f.view("x".repeat(8 * 1024 * 1024 - 10), "docs/prefix.md");
+  prefix.files[0]!.objectId = "prefix";
+  const repeated = {...shared.files[0]!, objectId:"repeated", path:"docs/repeated.md"};
+  const second = {...prefix, files:[...prefix.files, repeated], texts:[...prefix.texts, ...shared.texts]};
+  f.storage.stageReplicaCurrentView(f.lease, second);
+  const complete = {...shared, files:[...shared.files, ...second.files], texts:[]};
+  const staged = f.storage.stageReplicaCurrentView(f.lease, complete);
+  expect(() => f.storage.flipReplicaCurrentView(f.lease, staged)).not.toThrow();
+  expect(f.storage.readReplicaCurrentViewText("w", shared.files[0]!.sha256)).toBe(shared.texts[0]!.text);
+  expect(f.db.prepare("SELECT count(*) AS n FROM sync_relay_replica_cut_texts WHERE sha256=?").get(shared.files[0]!.sha256)!.n).toBe(1);
+});
+
+it.each([false, true])("round5: current paths win over carried restore rows (reverse=%s)", reverse => {
+  const f = registered({deployment:true});
+  try {
+    f.storage.claimWorkspaceIdentity({workspaceId:"workspace", replicationEpoch:"e", streamIdentity:"s"});
+    const lease = createReplicaReadPrincipal(f.storage).issue("workspace", "path-collision");
+    f.storage.bindReplicaCurrentView(lease);
+    const file = {versionId:"main", objectId:"object", path:f.input.evidence.currentPath, contentKind:"text" as const,
+      sha256:sha("old"), byteLength:3, lineageClaimId:f.input.evidence.document.lineageClaimId, restoreGeneration:1};
+    const initial = {workspaceId:"workspace", omitted:[], revision:1, logCursor:0, journalCursor:0,
+      files:[file], texts:[{sha256:sha("old"), text:"old"}]};
+    f.storage.storeReplicaCurrentView(lease, initial);
+    f.write(db => db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2"));
+    const moved = {...file, path:file.path.replace(/[^/]+$/, "moved.md")};
+    const current = {...file, objectId:"other", lineageClaimId:null, restoreGeneration:null, sha256:sha("new")};
+    const files = reverse ? [current, moved] : [moved, current];
+    expect.soft(f.storage.currentViewFilesAtFences("workspace", files, initial.files)).toEqual([current]);
+    expect(() => f.storage.storeReplicaCurrentView(lease, {...initial, revision:2, files,
+      texts:[{sha256:sha("new"), text:"new"}]})).not.toThrow();
+    expect(f.storage.readReplicaCurrentView("workspace")!.files).toEqual([current]);
+    expect(f.storage.readReplicaCurrentViewText("workspace", sha("old"))).toBeNull();
+    expect(f.storage.readReplicaCurrentViewText("workspace", sha("new"))).toBe("new");
+  } finally {f.close();}
+});
+
+it.each(["dm", "agent", null, undefined] as const)("round5: a group on a blocked channel kind collects nothing (%s)", async kind => {
+  const f = await fixture();
+  f.db.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({kind:"group", channelWireId:"channel", paths:["docs"], versionId:null}));
+  vi.spyOn(f.storage, "findChannelCreateKind").mockReturnValue(kind);
+  expect(f.storage.replicaCurrentViewSelectors("w")).toEqual([]);
+  expect(() => f.storage.storeReplicaCurrentView(f.lease, f.view())).toThrow();
+});
+
+it("round5: an ordinary group channel still collects its folder", async () => {
+  const f = await fixture();
+  f.db.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({kind:"group", channelWireId:"channel", paths:["docs"], versionId:null}));
+  vi.spyOn(f.storage, "findChannelCreateKind").mockReturnValue("channel");
+  expect(f.storage.replicaCurrentViewSelectors("w")).toEqual([{paths:["docs"], versionId:null}]);
+  expect(() => f.storage.storeReplicaCurrentView(f.lease, f.view())).not.toThrow();
+});
+
 async function fixture() {
   const storage = await testStorage();
   storage.claimWorkspace({workspaceId:"w",ownerUserId:"owner",createdAtMs:1});

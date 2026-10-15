@@ -3,7 +3,7 @@ import {currentShareGrantSql} from "./currentShareGrant";
 
 const currentShare = `EXISTS (SELECT 1 FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
   WHERE s.workspace_id=sync_relay_replica_cuts.workspace_id AND ${currentShareGrantSql("g", "s")})`;
-export const currentViewSweep = `DELETE FROM sync_relay_replica_cuts WHERE NOT ${currentShare};
+const currentViewSweep = `DELETE FROM sync_relay_replica_cuts WHERE NOT ${currentShare};
   DELETE FROM sync_relay_replica_cut_texts WHERE NOT EXISTS (SELECT 1 FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
     WHERE s.workspace_id=sync_relay_replica_cut_texts.workspace_id AND ${currentShareGrantSql("g", "s")})`;
 

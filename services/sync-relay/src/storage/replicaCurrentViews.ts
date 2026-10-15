@@ -2,6 +2,7 @@ import {createHash} from "node:crypto";
 import type {ReplicaCurrentView, ReplicaCurrentViewSelector} from "@dohc/workspace-engine-client/daemon";
 import {visibleSharePath} from "@dohc/security-contract/share-selector";
 import {parseStoredAnyShareSelectorJson, targetVersionId} from "../shareFilter";
+import {selectorTargetsBlockedChannel} from "../shareAuthorization";
 import type {ReplicaReadLease} from "../replicaReadPrincipal";
 import type {StorageContext} from "./context";
 import {currentShareGrantSql} from "./currentShareGrant";
@@ -36,7 +37,9 @@ export function replicaCurrentViewSelectors(storage: StorageContext, workspace: 
   return storage.db.prepare(`SELECT DISTINCT s.selector_json FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
     WHERE s.workspace_id=? AND ${currentShareGrantSql("g", "s")}`).all(workspace).flatMap(row => {
     const selector = parseStoredAnyShareSelectorJson(String(row.selector_json));
-    if (!selector || "kind" in selector && selector.kind === "chat" || selector.paths.length === 0 && selector.versionId === null) return [];
+    if (!selector || "kind" in selector && selector.kind === "chat" ||
+        selectorTargetsBlockedChannel(storage, workspace, selector) ||
+        selector.paths.length === 0 && selector.versionId === null) return [];
     return [{versionId: selector.versionId, paths: selector.paths}];
   });
 }
@@ -48,15 +51,21 @@ function storedFiles(storage: StorageContext, workspace: string): ReplicaCurrent
     versionId: String(row.version_id), objectId: String(row.object_id), path: String(row.path), contentKind: row.content_kind as "text" | "binary", sha256: String(row.sha256), byteLength: Number(row.byte_length),
     lineageClaimId: row.lineage_claim_id === null ? null : String(row.lineage_claim_id), restoreGeneration: row.restore_generation === null ? null : Number(row.restore_generation)}));
 }
+const filePathKey = (file: ReplicaCurrentView["files"][number]) => JSON.stringify([file.versionId, file.path]);
+function carriedPathAvailable(file: ReplicaCurrentView["files"][number], currentPaths: Map<string, string>) {
+  const owner = currentPaths.get(filePathKey(file));
+  return owner === undefined || owner === file.objectId;
+}
 export function currentViewFilesAtFences(storage: StorageContext, workspace: string, files: ReplicaCurrentView["files"], previous: ReplicaCurrentView["files"]) {
   const key = (f: ReplicaCurrentView["files"][number]) => JSON.stringify([f.versionId, f.objectId, f.lineageClaimId]);
   const saved = new Map(previous.map(f => [key(f), f]));
+  const currentPaths = new Map(files.map(f => [filePathKey(f), f.objectId]));
   const fences = new Map(storage.db.prepare("SELECT main_version_id,object_id,lineage_claim_id,restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id=? AND lineage_state='current'")
     .all(workspace).map(row => [JSON.stringify([row.main_version_id, row.object_id, row.lineage_claim_id]), Number(row.restore_fence_generation)]));
   return files.flatMap(file => {
     if (file.lineageClaimId === null || file.restoreGeneration === (fences.get(key(file)) ?? 1)) return [file];
     const old = saved.get(key(file));
-    return old ? [old] : [];
+    return old && carriedPathAvailable(old, currentPaths) ? [old] : [];
   });
 }
 function validateReplicaCurrentView(storage: StorageContext, lease: ReplicaReadLease, view: ReplicaCurrentView) {
@@ -68,6 +77,7 @@ function validateReplicaCurrentView(storage: StorageContext, lease: ReplicaReadL
   const selectors = replicaCurrentViewSelectors(storage, lease.workspaceId), paths = new Set<string>(), objects = new Set<string>();
   const key = (f: ReplicaCurrentView["files"][number]) => JSON.stringify([f.versionId, f.objectId, f.lineageClaimId]);
   const previous = new Map(storedFiles(storage, lease.workspaceId).map(f => [key(f), f]));
+  const currentPaths = new Map(view.files.map(f => [filePathKey(f), f.objectId]));
   const fence = storage.db.prepare("SELECT restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current'");
   const files: ReplicaCurrentView["files"] = [];
   for (let file of view.files) {
@@ -82,11 +92,11 @@ function validateReplicaCurrentView(storage: StorageContext, lease: ReplicaReadL
       const generation = row ? Number(row.restore_fence_generation) : 1;
       if (file.restoreGeneration! > generation) fail();
       if (file.restoreGeneration! < generation) {
-        if (!old || !currentViewFileVisible(selectors, old)) continue;
+        if (!old || !currentViewFileVisible(selectors, old) || !carriedPathAvailable(old, currentPaths)) continue;
         file = old;
       }
     }
-    const object = JSON.stringify([file.versionId, file.objectId]), path = JSON.stringify([file.versionId, file.path]);
+    const object = JSON.stringify([file.versionId, file.objectId]), path = filePathKey(file);
     if (objects.has(object) || paths.has(path)) fail();
     objects.add(object); paths.add(path); files.push(file);
   }
@@ -105,7 +115,7 @@ export function discardReplicaCurrentView(storage: StorageContext, lease: Replic
 export function stageReplicaCurrentView(storage: StorageContext, lease: ReplicaReadLease, view: ReplicaCurrentView): StagedCurrentView {
   try {
     current(storage, lease);
-    const stored = new Set(storage.db.prepare("SELECT DISTINCT sha256 FROM sync_relay_replica_cut_texts WHERE workspace_id=? AND ref_count>0").all(lease.workspaceId).map(row => row.sha256));
+    const stored = new Set(storage.db.prepare("SELECT DISTINCT sha256 FROM sync_relay_replica_cut_texts WHERE workspace_id=?").all(lease.workspaceId).map(row => row.sha256));
     const requested = new Map(view.files.filter(f => f.contentKind === "text").map(f => [f.sha256, f.byteLength]));
     const insert = storage.db.prepare("INSERT INTO sync_relay_replica_cut_texts VALUES (?,?,?,?,0) ON CONFLICT(workspace_id,sha256,ordinal) DO NOTHING");
     let batch: Array<{sha: string; ordinal: number; bytes: Buffer}> = [], batchBytes = 0;
