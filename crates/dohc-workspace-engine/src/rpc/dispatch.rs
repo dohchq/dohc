@@ -171,6 +171,12 @@ impl EngineService {
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
+        if request.method == "replica.cut" {
+            return Ok(ServiceResponse::response(Response {
+                id,
+                result: self.replica_cut(request.workspace, request.params).await?,
+            }));
+        }
         if let Some(action) = request.method.strip_prefix("ydoc.ownerStop.") {
             if !matches!(action, "request" | "release" | "clear" | "list" | "retired") {
                 return Err(WireError::new(
@@ -1057,6 +1063,7 @@ impl EngineService {
             && !matches!(
                 method,
                 "workspace.close"
+                    | "replica.cut"
                     | "replica.frontiers"
                     | "replica.applyJournalPage"
                     | "sync.adoptJoinIdentity"

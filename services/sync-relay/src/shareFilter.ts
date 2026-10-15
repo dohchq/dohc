@@ -563,7 +563,7 @@ function isCanonicalSharePath(path: string): boolean {
 // or any other lineage is not admitted, on either side. The recipient runs the
 // same equality against the selector it recorded when it accepted the share
 // (`crates/dohc-engine-sync/src/share.rs`, `enforce_share_view_boundary`).
-export function targetVersionId(selector: ShareSelector): string {
+export function targetVersionId(selector: Pick<ShareSelector, "versionId">): string {
   return selector.versionId ?? MAIN_VERSION_ID;
 }
 
