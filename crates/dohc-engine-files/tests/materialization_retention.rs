@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 fn options(replacer: &dyn AtomicReplacer) -> MaterializeOptions<'_> {
     MaterializeOptions {
+        holds: None,
         policy: DurabilityPolicy::none(),
         replacer,
         backoff: &NoBackoff,
