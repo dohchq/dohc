@@ -1891,6 +1891,27 @@ describe('validateOrderedLiveUpdateCut', () => {
     )
   })
 
+  it('measures long JSON strings and keys with the same extended UTF-8 lengths', () => {
+    const pairAcrossChunk = 'a'.repeat(16_383) + '💩' + 'b'.repeat(16_384)
+    const proof = (value: unknown, tag: number) => {
+      resetProbe()
+      const cut = accepted(validateOrderedLiveUpdateCut(
+        { mode: 'registration', checkpoint: jsonItemUpdate([value]) }, highPolicy(),
+      ))
+      return { visits: cut.usage.decodedPayloadByteVisits, frame: yjsProbe.digestViews.find(view => view[0] === 0x79 && view[1] === tag) }
+    }
+    for (const [value, payloadBytes] of [
+      [pairAcrossChunk, 32_771],
+      [`${pairAcrossChunk}\uD800`, 32_774],
+      [`\uDC00${pairAcrossChunk}`, 32_774],
+    ] as const) expect(proof(value, 14).frame?.byteLength).toBe(5 + payloadBytes)
+
+    const loneKey = proof({ [`${pairAcrossChunk}\uD800`]: null }, 16)
+    const replacementKey = proof({ [`${pairAcrossChunk}�`]: null }, 16)
+    expect(loneKey.frame?.subarray(6 + 32_771, 6 + 32_774)).toEqual(new Uint8Array([0xff, 0xd8, 0x00]))
+    expect(loneKey.visits - replacementKey.visits).toBe(2 * 32_774)
+  })
+
   it('accepts semantic depth 128 and refuses depth 129 for Any binary and JSON strings', () => {
     const nested = (leaf: unknown, depth: number): unknown => {
       let value = leaf
