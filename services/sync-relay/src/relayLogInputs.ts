@@ -79,13 +79,13 @@ export function parseLogOp(value: unknown): SyncRelayLogInput {
 
 export type LogAuthorNameLookup = (userId: string) => Promise<string | null> | string | null;
 
-async function authenticatedDisplayName(actorUserId: string, lookupUserDisplayName?: LogAuthorNameLookup): Promise<string> {
-  const name = (await lookupUserDisplayName?.(actorUserId))?.trim() || actorUserId;
+async function authenticatedDisplayName(actorUserId: string, lookupUserDisplayName?: LogAuthorNameLookup, fallback = actorUserId): Promise<string> {
+  const name = (await lookupUserDisplayName?.(actorUserId))?.trim() || fallback;
   try {
     parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName: name}]);
     return name;
   } catch {
-    return actorUserId;
+    return fallback;
   }
 }
 
@@ -94,13 +94,14 @@ export async function parseNamedShareLogOps(
   actorUserId: string,
   lookupUserDisplayName?: LogAuthorNameLookup,
 ): Promise<SyncRelayLogInput[]> {
-  let displayName: Promise<string> | undefined;
-  const accountDisplayName = () => displayName ??= authenticatedDisplayName(actorUserId, lookupUserDisplayName);
-  const ops = await parseAuthenticatedLogOps(values, actorUserId, accountDisplayName);
+  let lookup: Promise<string | null> | undefined;
+  const accountName = () => lookup ??= Promise.resolve(lookupUserDisplayName?.(actorUserId) ?? null);
+  const ops = await parseAuthenticatedLogOps(values, actorUserId, accountName);
   const chatOps = ops.filter(op => op.opKind === "chat.message.append" || op.opKind === "chat.reaction.set");
   if (chatOps.length === 0) return ops;
-  const name = await accountDisplayName();
-  const humanName = name.length <= 200 && name.isWellFormed() ? name : actorUserId;
+  // Chat names a person without an account name "Unnamed", as the relay's other chat and discussion routes do.
+  const name = await authenticatedDisplayName(actorUserId, accountName, "Unnamed");
+  const humanName = name.length <= 200 && name.isWellFormed() ? name : "Unnamed";
   const snapshot = parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName}]);
   for (const op of chatOps) {
     op.admittedAuthorSnapshot = snapshot;

@@ -124,10 +124,10 @@ describe("named share chat author names", () => {
     expect(reopened.fetchLogCoordinate({workspaceId: "workspace", originId: original.originId, originSeq: 1})).toEqual(original);
   });
 
-  it.each([null, "", "  ", "x".repeat(513), "x".repeat(201)])("uses the account id when the account name is unavailable or invalid: %j", async name => {
+  it.each([null, "", "  ", "x".repeat(513), "x".repeat(201)])("names the person Unnamed when the account name is unavailable or invalid: %j", async name => {
     const f = await fixture(() => name);
     expect(await json(await f.push(sequenced([message("human")])))).toMatchObject({inserted: 1});
-    expect(JSON.parse(f.coordinate(0)!.payloadJson).authorDisplayName).toBe("recipient");
+    expect(JSON.parse(f.coordinate(0)!.payloadJson).authorDisplayName).toBe("Unnamed");
   });
 
   it.each(["human", "agent", "automation"] as const)("leaves the owner's ordinary %s payload unchanged", async authorKind => {
