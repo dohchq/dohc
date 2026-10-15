@@ -4,9 +4,10 @@
 //
 // Layout under the queue root. Each file has one writer.
 //   inbox/<key>.json             a client's submission (client)
-//   keys/<key>                   the request id a submission became (service)
+//   moves/<key>.json             a client's request to move a queued request (client)
+//   keys/<key>                   the request id a submission became, or the answer to a move (service)
 //   requests/<id>/request.json   the accepted request, never changed (service)
-//   requests/<id>/status.json    its state and attempts (service)
+//   requests/<id>/status.json    its state, attempts, and any place a move gave it (service)
 //   requests/<id>/cancel         a cancellation request (client)
 //   requests/<id>/attempts/<n>/  one worker's evidence (worker)
 //   service.json                 service identity, heartbeat, and health (service)
@@ -17,8 +18,10 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import { resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { git } from "./process.mjs";
@@ -39,6 +42,7 @@ export function queueRoot(env = process.env, platform = process.platform) {
 
 export const queuePaths = root => ({
   inbox: join(root, "inbox"),
+  moves: join(root, "moves"),
   keys: join(root, "keys"),
   requests: join(root, "requests"),
   service: join(root, "service.json"),
@@ -123,16 +127,46 @@ export function placeSubmission(requests, submission) {
   return { supersede: replaced.map(entry => entry.id), sequence: replaced[0]?.request.sequence ?? null };
 }
 
+/** A request's place in line: the order a move gave it, else its sequence. A move changes no id or sequence. */
+const orderOf = entry => entry.status.order ?? entry.request.sequence;
+const lineOrder = (a, b) => orderOf(a) - orderOf(b) || a.id.localeCompare(b.id);
+
 /**
- * The oldest request that can run now, the nightly run of main first. A request
- * waiting on Docker does not hold back one that needs none.
+ * Where a move puts a queued request: `{ order }`, first in line or just before
+ * another queued request, or `{ rejected }` with the reason. `starting` names
+ * requests the service has started that still read as queued.
+ */
+export function placeMove(requests, { id, before = null, reason }, starting = new Set()) {
+  const waiting = entry => entry.status.state === "queued" && !starting.has(entry.id);
+  const why = entry => entry.status.state === "running" || starting.has(entry.id) ? "it is running"
+    : entry.status.state === "superseded" ? `it was replaced by ${entry.status.supersededBy}, a newer commit on its branch`
+    : `it has already finished: ${entry.status.state}`;
+  const entry = requests.find(candidate => candidate.id === id);
+  const target = before && requests.find(candidate => candidate.id === before);
+  if (typeof reason !== "string" || !reason.trim()) return { rejected: "A move needs a reason." };
+  if (!entry) return { rejected: `No verification request ${id}.` };
+  if (before && !target) return { rejected: `No verification request ${before}.` };
+  if (!waiting(entry)) return { rejected: `Cannot move ${id}: ${why(entry)}. Only a queued request can move.` };
+  if (target === entry) return { rejected: `Cannot move ${id} before itself.` };
+  if (target && !waiting(target)) return { rejected: `Cannot move ${id} before ${before}: ${why(target)}. Move it before a queued request, or use --first.` };
+  // Halfway between its new neighbors, so no other request's order changes.
+  const line = requests.filter(candidate => waiting(candidate) && candidate !== entry).sort(lineOrder);
+  const at = target ? line.indexOf(target) : 0;
+  if (!line[at]) return { order: orderOf(entry) };
+  return { order: at > 0 ? (orderOf(line[at - 1]) + orderOf(line[at])) / 2 : Math.min(orderOf(entry), orderOf(line[0]) - 1) };
+}
+
+/**
+ * The first request in line that can run now, the nightly run of main first. A
+ * request waiting on Docker does not hold back one that needs none.
  */
 export function nextRequest(requests, { diskOk, dockerOk }, now = Date.now()) {
   if (!diskOk) return null;
   const ready = ({ request, status }) => status.state === "queued"
     && (!status.notBefore || Date.parse(status.notBefore) <= now)
     && (!request.gates?.js || dockerOk);
-  return requests.find(entry => entry.request.nightly && ready(entry)) ?? requests.find(ready) ?? null;
+  const line = requests.filter(ready).sort(lineOrder);
+  return line.find(entry => entry.request.nightly) ?? line[0] ?? null;
 }
 
 /** Backoff after an environment failure: 30 s, 2 min, 5 min, then every 15 min. */
@@ -157,11 +191,11 @@ export function attemptOutcome(result, grant, { stopped } = {}) {
   return { outcome: "environment", cause: "unfinished", reason: "The receipt has no verdict." };
 }
 
-/** Position among live requests, counting the running ones first, then the nightly run. */
+/** Position among live requests in line order, counting the running ones first, then the nightly run. */
 export function position(requests, id) {
   const rank = entry => entry.status.state === "running" ? 0 : entry.request.nightly ? 1 : 2;
   const live = requests.filter(entry => !terminalStates.has(entry.status.state))
-    .sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
+    .sort((a, b) => rank(a) - rank(b) || lineOrder(a, b));
   const index = live.findIndex(entry => entry.id === id);
   return index < 0 ? null : index + 1;
 }
@@ -199,6 +233,20 @@ export async function cancel(root, id) {
   if (!existsSync(join(queuePaths(root).request(id), "request.json"))) throw new Error(`No verification request ${id}.`);
   await withFileRetry(() => closeSync(openSync(join(queuePaths(root).request(id), "cancel"), "a")));
 }
+
+/**
+ * Ask the service to move a queued request first in line, or before `before`. The service
+ * answers under keys/<key>. A key starts with the time, so moves apply in the order they were asked.
+ */
+export async function requestMove(root, { id, before = null, reason, by }) {
+  const key = `move-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  await writeJson(join(queuePaths(root).moves, `${key}.json`), { id, before, reason, by, requestedAt: new Date().toISOString() });
+  return key;
+}
+
+/** How status and the dashboard describe a request's last move. Without a name, the mover is its user and checkout. */
+export const movedNote = ({ before, by, reason }, separator = ": ") =>
+  `moved ${before ? `before ${before}` : "first"} by ${by?.name || `${by?.user ?? "unknown"} in ${by?.cwd ?? "unknown"}`}${separator}${reason}`;
 
 /** The service's own record, and whether its heartbeat is current. */
 export function serviceState(root, now = Date.now()) {
@@ -440,7 +488,7 @@ function printStatus(root) {
     // The service's heartbeat says what a running attempt is doing, such as waiting for the host lane.
     const phase = runs.find(row => row.id === entry.id)?.phase;
     const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase ? `, ${phase}` : ""}` : `#${place}${typical ? `, starts in about ${minutes(startsInMs(place, typical, lanes))}` : ""}`;
-    console.log(`${entry.id}  ${where}  ${entry.request.scope}  ${entry.request.head.slice(0, 12)}  ${entry.request.branch?.replace("refs/heads/", "") ?? entry.request.checkout}${entry.status.waiting ? `  (${entry.status.waiting})` : ""}`);
+    console.log(`${entry.id}  ${where}  ${entry.request.scope}  ${entry.request.head.slice(0, 12)}  ${entry.request.branch?.replace("refs/heads/", "") ?? entry.request.checkout}${entry.status.waiting ? `  (${entry.status.waiting})` : ""}${entry.status.moved ? `  (${movedNote(entry.status.moved)})` : ""}`);
   }
   if (!live.length) console.log("no requests waiting");
   const nightly = lastNightlyPass(requests);
@@ -448,6 +496,30 @@ function printStatus(root) {
   for (const entry of requests.filter(entry => terminalStates.has(entry.status.state)).slice(-8)) {
     console.log(`${entry.id}  ${entry.status.state}${entry.status.cause && entry.status.state !== "passed" ? ` (${entry.status.cause})` : ""}  ${entry.request.head.slice(0, 12)}  ${entry.status.result ?? ""}`);
   }
+}
+
+/** Ask the service to move a queued request, and report where it went once the service applies it. */
+async function move(root, args) {
+  const usage = 'Use move <id> --first, or move <id> --before <other-id>, with --reason "<why>" and optionally --by "<name>".';
+  let parsed;
+  try { parsed = parseArgs({ args, allowPositionals: true, options: { first: { type: "boolean" }, before: { type: "string" }, reason: { type: "string" }, by: { type: "string" } } }); }
+  catch { throw new Error(usage); }
+  const { positionals: [id], values: { first = false, before = null } } = parsed;
+  const reason = parsed.values.reason?.trim();
+  if (!id || first === Boolean(before) || !reason) throw new Error(usage);
+  const { record, alive } = serviceState(root);
+  // The service makes the same check when it applies the move; this one answers at once, even while it is down.
+  const check = placeMove(listRequests(root), { id, before, reason }, new Set(alive ? serviceRuns(record).runs.map(run => run.id) : []));
+  if (check.rejected) throw new Error(check.rejected);
+  const key = await requestMove(root, { id, before, reason, by: { name: parsed.values.by?.trim() || null, user: userInfo().username, cwd: process.cwd() } });
+  if (!alive) return console.log(`The verification queue service is not running. The move of ${id} applies when the service starts.`);
+  for (let waited = 0; waited < 30_000; waited += 500) {
+    const answer = readJson(join(queuePaths(root).keys, key));
+    if (answer?.rejected) throw new Error(answer.rejected);
+    if (answer) return console.log(`moved ${id} ${before ? `before ${before}` : "first"}: now #${answer.to} in line, was #${answer.from}`);
+    await sleep(500);
+  }
+  console.log(`The service has not applied the move of ${id} yet. It applies on the service's next pass; pnpm verify:queue status shows the line. A service older than this checkout applies no moves until pnpm verify:queue upgrade.`);
 }
 
 async function main([command, ...args]) {
@@ -462,6 +534,7 @@ async function main([command, ...args]) {
     const { head, base } = await submitNightly(root, resolve(git(["rev-parse", "--git-common-dir"], here), ".."));
     return console.log(`submitted the nightly verification of main at ${head.slice(0, 12)}, against ${base.slice(0, 12)}`);
   }
+  if (command === "move") return move(root, args);
   if (command === "restart") {
     const { record, alive } = serviceState(root);
     if (serviceRuns(record).runs.length && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it will be retried.");
@@ -499,7 +572,7 @@ async function main([command, ...args]) {
     }
     return console.log("asked Task Scheduler to restart the verification queue service; it starts within five minutes");
   }
-  throw new Error("Use status, cancel <id>, install [--ref <ref>], upgrade [--ref <ref>], restart [--now], or nightly.");
+  throw new Error("Use status, cancel <id>, move <id> --first|--before <id> --reason <text>, install [--ref <ref>], upgrade [--ref <ref>], restart [--now], or nightly.");
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

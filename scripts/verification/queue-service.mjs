@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
 import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
-import { attemptOutcome, lastNightlyPass, listRequests, monitorPort, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, lastNightlyPass, listRequests, monitorPort, nextRequest, placeMove, placeSubmission, position, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
 import { startMonitor } from "./queue-monitor.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
@@ -276,6 +276,8 @@ export async function runService({
         place.sequence = requests.find(candidate => candidate.id === place.supersede[0])?.request.sequence ?? null;
       }
       if (place.attach) { await answer({ id: place.attach }); return; }
+      // A newer commit also keeps the place a move gave the request it replaces.
+      const replaced = requests.find(candidate => candidate.id === place.supersede[0])?.status;
       const order = place.sequence ?? ++sequence;
       const id = `${String(order).padStart(9, "0")}-${randomBytes(3).toString("hex")}`;
       // Pin both commits before accepting, so an accepted request can always be verified.
@@ -284,11 +286,39 @@ export async function runService({
       const { key: _key, protocol: _protocol, ...fields } = submission;
       await writeJson(join(paths.request(id), "request.json"), { ...fields, id, sequence: order, acceptedAt: new Date().toISOString(), supersedes: place.supersede });
       try {
-        await setStatus(id, { state: "queued", attempts: [] });
+        await setStatus(id, { state: "queued", attempts: [], order: replaced?.order, moved: replaced?.moved });
         for (const old of place.supersede) await setStatus(old, { ...requests.find(entry => entry.id === old).status, state: "superseded", supersededBy: id });
         await answer({ id });
       } catch (error) { error.acceptedId = id; throw error; }
       history({ event: "accepted", id, head: submission.head, scope: submission.scope, supersedes: place.supersede });
+    }
+  }
+
+  // A move changes only the order of queued requests. One this service has started cannot move, even before its status says so.
+  async function applyMoves() {
+    for (const name of names(paths.moves).filter(name => name.endsWith(".json")).sort()) {
+      const path = join(paths.moves, name);
+      const answerPath = join(paths.keys, name.slice(0, -5));
+      const discard = () => { try { rmSync(path, { force: true }); } catch { /* Removed later. */ } };
+      if (existsSync(answerPath)) { discard(); continue; }
+      // Antivirus can hold a new file for a moment; a later tick reads it.
+      const move = readJson(path);
+      if (!move) continue;
+      const requests = load();
+      let answer = placeMove(requests, move, new Set(running.keys()));
+      if (answer.rejected) log(`move ${name} refused: ${answer.rejected}`);
+      else {
+        const entry = requests.find(candidate => candidate.id === move.id);
+        const moved = { at: new Date().toISOString(), before: move.before ?? null, reason: move.reason, by: move.by ?? null };
+        const status = { ...entry.status, order: answer.order, moved };
+        await setStatus(entry.id, status);
+        const from = position(requests, entry.id);
+        const to = position(requests.map(candidate => candidate === entry ? { ...entry, status } : candidate), entry.id);
+        history({ event: "moved", id: entry.id, from, to, before: moved.before, reason: moved.reason, by: moved.by });
+        answer = { moved: entry.id, from, to };
+      }
+      await writeJson(answerPath, answer);
+      discard();
     }
   }
 
@@ -461,6 +491,7 @@ export async function runService({
       for (const entry of load().filter(entry => entry.status.state === "queued" && existsSync(join(paths.request(entry.id), "cancel")))) {
         await finish(entry, null, { outcome: "cancelled", cause: "cancelled" });
       }
+      await applyMoves();
       const requests = load();
       // An attempt can finish during the status write below, so each check keeps its own reference.
       for (const current of [...running.values()].filter(current => !current.stopped)) {

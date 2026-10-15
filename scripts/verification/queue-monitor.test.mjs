@@ -19,7 +19,7 @@ async function queueRoot(t) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const paths = queuePaths(root);
   const add = async (id, request, status) => {
-    await writeJson(join(paths.request(id), "request.json"), { head, base, scope: "all", checkout: "C:\\w\\x", submittedAt: iso(300), ...request, id });
+    await writeJson(join(paths.request(id), "request.json"), { head, base, scope: "all", checkout: "C:\\w\\x", submittedAt: iso(300), sequence: Number(id.slice(0, 9)), ...request, id });
     await writeJson(join(paths.request(id), "status.json"), status);
   };
   await add("000000001-aaaaaa", { branch: "refs/heads/old" }, { state: "passed", updatedAt: iso(9 * 1440), attempts: [{ n: 1, startedAt: iso(9 * 1440 + 30), endedAt: iso(9 * 1440), outcome: "passed" }] });
@@ -66,6 +66,23 @@ test("the snapshot shows the week's attempts with their lanes, the line in order
   assert.deepEqual(state.slowest.map(item => [item.test, item.runs, item.totalSeconds]), [["states page", 2, 540], ["capture", 1, 80]]);
   assert.deepEqual(state.nightly, { id: "000000005-eeeeee", head: head.slice(0, 12), state: "queued", at: null });
   assert.equal(state.lastNightlyPass, null);
+});
+
+test("the line is drawn in the order moves gave it, and a moved request says who moved it and why", async t => {
+  const root = await queueRoot(t);
+  const paths = queuePaths(root);
+  const add = async (id, branch, status) => {
+    await writeJson(join(paths.request(id), "request.json"), { head, base, scope: "all", checkout: "C:\\w\\y", branch, submittedAt: iso(20), sequence: Number(id.slice(0, 9)), id });
+    await writeJson(join(paths.request(id), "status.json"), { state: "queued", attempts: [], ...status });
+  };
+  await add("000000006-ffffff", "refs/heads/fix/grid", { order: 3.5,
+    moved: { at: iso(5), before: "000000004-dddddd", reason: "fixes the grid test three branches fail", by: { name: null, user: "ice", cwd: "C:\\w\\fix-grid" } } });
+  await add("000000007-gggggg", "refs/heads/later");
+  assert.deepEqual(monitorState(root, { now }).queued.map(entry => [entry.branch, entry.moved]), [
+    ["main (nightly)", null],
+    ["fix/grid", "moved before 000000004-dddddd by ice in C:\\w\\fix-grid\nfixes the grid test three branches fail"],
+    ["again", null],
+    ["later", null]], "the nightly still goes first, the moved request is ahead of the one it was moved before, and its tooltip names who moved it and why");
 });
 
 test("a service that stopped beating is shown as not responding", async t => {

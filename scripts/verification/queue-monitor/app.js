@@ -355,10 +355,13 @@ function writeTerminal(pre, text, source, message = false) {
   if (following) pre.scrollTop = pre.scrollHeight;
 }
 
+// A request someone moved in line, with who moved it and why in its tooltip.
+const movedTag = entry => entry.moved ? `<span class="tag moved" data-tip="${esc(entry.moved)}">moved</span>` : "";
+
 function renderTower({ data, starts }) {
   const rows = data.queued.slice(0, 10).map((entry, i) => `<li>
       <span class="pos">${i + 1}</span>
-      <span class="tower-branch" title="${esc(`${titleOf(entry)}\n${entry.branch}`)}">${esc(titleOf(entry))}${entry.nightly ? '<span class="tag nightly">nightly</span>' : ""}${entry.retry ? '<span class="tag retry">retry</span>' : ""}</span>
+      <span class="tower-branch" title="${esc(`${titleOf(entry)}\n${entry.branch}`)}">${esc(titleOf(entry))}${entry.nightly ? '<span class="tag nightly">nightly</span>' : ""}${entry.retry ? '<span class="tag retry">retry</span>' : ""}${movedTag(entry)}</span>
       <span class="tower-time">${data.typicalMs ? `≈ ${esc(at(starts[i]))}` : ""}</span>
       <span class="tower-sub"><span class="mono">${esc(entry.thread ? entry.branch : "")}</span><span>waited ${esc(dur(data.now - Date.parse(entry.submittedAt)))}</span></span>
     </li>`);
@@ -437,7 +440,7 @@ function renderQueue({ data, starts }) {
   patch($("#queue-table"), data.queued.length ? `<thead><tr><th class="n">#</th><th>Thread</th><th>Waited</th><th class="n">Starts</th><th>Note</th></tr></thead><tbody>${data.queued.map((q, i) => {
     const waited = data.now - Date.parse(q.submittedAt);
     return `<tr><td class="n">${i + 1}</td>
-      <td><a class="b" href="${esc(prLink(q.branch))}" target="_blank" rel="noreferrer">${esc(titleOf(q))}</a>${q.thread ? `<div class="sub mono">${esc(q.branch)}</div>` : ""}${q.nightly ? '<span class="tag nightly">nightly, goes first</span>' : ""}${q.retry ? '<span class="tag retry">retry</span>' : ""}${q.scope !== "all" ? `<span class="tag scope">${esc(q.scope)} only</span>` : ""}<div class="sub mono">${esc(q.head)}</div></td>
+      <td><a class="b" href="${esc(prLink(q.branch))}" target="_blank" rel="noreferrer">${esc(titleOf(q))}</a>${q.thread ? `<div class="sub mono">${esc(q.branch)}</div>` : ""}${q.nightly ? '<span class="tag nightly">nightly, goes first</span>' : ""}${q.retry ? '<span class="tag retry">retry</span>' : ""}${movedTag(q)}${q.scope !== "all" ? `<span class="tag scope">${esc(q.scope)} only</span>` : ""}<div class="sub mono">${esc(q.head)}</div></td>
       <td style="min-width:140px"><span class="num">${esc(dur(waited))}</span><div class="waitbar" style="width:${(waited / longest * 100).toFixed(1)}%"></div></td>
       <td class="n">${data.typicalMs ? `≈ ${esc(at(starts[i]))}` : "unknown"}</td>
       <td class="muted">${esc(q.waiting ?? "")}</td></tr>`;
