@@ -14,7 +14,7 @@ vi.hoisted(() => {
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { FileChatThreadRecord, WorkspaceUiState } from "../../ipc/bridgeContract";
+import type { ChatMessageRecord, FileChatThreadRecord, WorkspaceUiState } from "../../ipc/bridgeContract";
 import {
   SHARE_VIEW,
   WORKSPACE,
@@ -61,10 +61,15 @@ describe("Chats in the left side panel", () => {
       id: "file-thread", title: "File discussion", createdAtMs: 1, updatedAtMs: 2,
       path,
     };
+    const message: ChatMessageRecord = {
+      presentation: { group: "file-author", hue: null, self: false },
+      id: "file-message", threadId: thread.id, authorKind: "human", authorDisplayName: "You",
+      body: "Discuss this file", createdAtMs: 1,
+    };
     bridge.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [thread] });
     Object.assign(bridge, {
       listPersonalChatFeed: vi.fn(async () => ({ items: [{
-        message: { id: "file-message", threadId: thread.id, authorKind: "human", authorDisplayName: "You", body: "Discuss this file", createdAtMs: 1 },
+        message,
         thread: { id: thread.id, title: thread.title, createdAtMs: 1, updatedAtMs: 2 },
         channel: null, reactions: [],
       }], nextCursor: null })),

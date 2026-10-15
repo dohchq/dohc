@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { presencePalette } from "./presencePalette";
+import { presentationClasses, relayPresentation } from "../workbench/actorPresentation";
 import { resolvePeerDisplayName, type PresencePeer } from "./presenceChannel";
 
 // MU-C1 — calm presence UI. Small initials for who's here and a subtle typing
@@ -45,15 +45,11 @@ export function PresenceFaces(props: { others: PresencePeer[]; className?: strin
     >
       {shown.map((peer) => {
         const name = resolvePeerDisplayName(peer);
-        const color = presencePalette(peer.paletteSlot);
+        const classes = presentationClasses(relayPresentation(peer.paletteSlot, peer.isSelf));
         return (
           <span
             key={peer.faceToken}
-            className="-ml-1 flex h-5 w-5 items-center justify-center rounded-full border border-bg text-[10px] font-semibold first:ml-0"
-            style={{
-              backgroundColor: color.background,
-              color: color.stroke,
-            }}
+            className={`-ml-1 flex h-5 w-5 items-center justify-center rounded-full border border-bg text-[10px] font-semibold first:ml-0 ${classes}`}
             aria-hidden="true"
           >
             {initials(name)}

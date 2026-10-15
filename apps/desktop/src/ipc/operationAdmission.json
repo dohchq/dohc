@@ -1,5 +1,11 @@
 {
   "desktop:retry-held-capture": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },
+  "desktop:list-chat-file-mentions": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-chat-messages": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:send-chat-message": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-personal-chat-feed": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-channel-threads": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:start-channel-thread": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:get-share-copy-details": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "shareCopyHandler.withRendererWorkspaceOperation" } },
   "desktop:get-object-access": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-sharing-access": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

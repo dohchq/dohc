@@ -30,6 +30,7 @@ import {
   type AccessView,
 } from "./About";
 import { ChatAvatar } from "./ChatAvatar";
+import { neutralPresentation } from "./actorPresentation";
 import { shareSubject } from "./shareSubject";
 
 // The Sharing view: the shares this workspace granted, and the shares sent
@@ -275,7 +276,7 @@ function Faces(props: { rows: readonly AccessShareRow[] }) {
       {active.some((row) => row.via === "link") ? <LinkMark /> : null}
       {people.map((row, index) => (
         <span key={row.grantId} className={index > 0 || active.some((r) => r.via === "link") ? "-ml-1.5" : undefined}>
-          <ChatAvatar name={recipientOf(row)} kind="human" size="strip" />
+          <ChatAvatar presentation={neutralPresentation} name={recipientOf(row)} kind="human" size="strip" />
         </span>
       ))}
     </span>
@@ -481,7 +482,7 @@ function ReceivedRow(props: {
               <FolderInput size={13} aria-hidden />
             </span>
           ) : null}
-          <span title={parts.full} className="inline-flex"><ChatAvatar name={sender} kind="human" size="strip" /></span>
+          <span title={parts.full} className="inline-flex"><ChatAvatar presentation={neutralPresentation} name={sender} kind="human" size="strip" /></span>
           {word ? null : <LevelMark access={access ?? null} />}
         </>
       }

@@ -1,3 +1,4 @@
+import { isWorkspaceVisibilityPolicyPath } from "../ipc/bridgeContract";
 import {
   deriveSyncStatus,
   type WatcherEvent,
@@ -358,12 +359,13 @@ export function createWorkspaceActivity(
       entry.handle = options.observationFor(workspace, {
         facts(facts) {
           if (state.entry !== entry && state.entry !== null) return;
-          const events: WatcherEvent[] = facts.map(fact => ({ path: fact.path,
+          // Policy metadata refreshes names, not capture, automations or app discovery.
+          const events: WatcherEvent[] = facts.filter(fact => !isWorkspaceVisibilityPolicyPath(fact.path, process.platform)).map(fact => ({ path: fact.path,
             operation: fact.kind === "disappeared" ? "delete" : "update" }));
           // Deletion suppression happens before any queued work or close.
-          entry.capture?.observeFileEvents(events);
+          if (events.length) entry.capture?.observeFileEvents(events);
           if (state.entry !== entry) return;
-          options.onWatcherBatch?.(workspace, events);
+          if (events.length) options.onWatcherBatch?.(workspace, events);
           notify({ workspaceId: workspace.workspaceId, paths: facts.map(fact => fact.path),
             pathSetChanged: facts.some(fact => fact.kind !== "changed") });
         },

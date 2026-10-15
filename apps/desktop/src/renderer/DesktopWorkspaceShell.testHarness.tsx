@@ -331,6 +331,7 @@ function makeBaseBridge(
       async (
         _payload: ListWorkspaceFilesPayload,
       ): Promise<ListWorkspaceFilesResult> => ({
+        visibility: { status: "ready", rules: [] },
         files: [
           { path: "a.md", kind: "file" },
           { path: "b.md", kind: "file" },

@@ -1,4 +1,4 @@
-import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
+import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, Reply, TriangleAlert, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
@@ -458,7 +458,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   onNavCommand?: (nav: ChatsNav) => void;
   setMessageNode: (messageId: string, element: HTMLElement | null) => void;
 }) {
-  const isOwn = useIsOwnAuthor();
   const {
     nav,
     messages,
@@ -589,10 +588,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
                 <TriangleAlert size={12} strokeWidth={1.9} aria-hidden />
               </span>
             ) : (
-              <ChatAvatar
+              <ChatAvatar presentation={comment.presentation}
                 name={comment.authorDisplayName}
                 kind={comment.authorKind}
-                own={isOwn(comment.authorKind, comment, reactionControls.viewerAuthorId)}
                 size="comment"
               />
             )}
@@ -759,10 +757,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ? "My agent · thread"
             : `#${nav.channel.name} · thread`}
         </p>
-        <ChatAvatar
+        <ChatAvatar presentation={openingMessage.presentation}
           name={openingMessage.authorDisplayName}
           kind={openingMessage.authorKind}
-          own={isOwn(openingMessage.authorKind, openingMessage, reactionControls.viewerAuthorId)}
           size="row"
         />
         <div className="min-w-0 flex-1">

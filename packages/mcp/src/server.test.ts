@@ -3,10 +3,10 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DohcCliError } from "@dohc/cli/errors";
 import { createDohcMcpServer, parseArgs } from "./server";
-import type { ToolContext } from "./tools";
+import { getShareCopyDetails, type ToolContext } from "./tools";
 
 // The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
@@ -441,4 +441,36 @@ it("routes owner publication with a bearer warning and a stable link operation i
   expect(result.structuredContent).toEqual(facts);
   expect(result.content).toHaveLength(1);
   expect(JSON.parse((result.content as Array<{type:string;text:string}>)[0]!.text)).toEqual(facts);
+});
+
+
+describe("share copy profile admission", () => {
+  const input = { shareId: "share", grantId: "grant" };
+  const details = { status: "active", shareCode: "dohc-share:share:https://relay.test", browserInvitationUrl: "https://share.test/s/edit/grant" };
+  it("advertises and calls the copy tool only for the owner profile", async () => {
+    const request = vi.fn(async () => details);
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", request });
+    expect(names).toContain("dohc_read_share_copy");
+    const result = await client.callTool({ name: "dohc_read_share_copy", arguments: input });
+    expect(result.structuredContent).toEqual(details);
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "shareCopy", door: "mcp", args: { ...input, cwd: "/workspace", actor: "agent" } }));
+  });
+  it.each(["view", "comment", "edit"] as const)("refuses tools/call for a %s profile", async shareAccess => {
+    const request = vi.fn(async () => details);
+    const { names, client } = await connectedToolNames({ root: "/workspace", home: "/state", shareAccess, request });
+    expect(names).not.toContain("dohc_read_share_copy");
+    expect(await client.callTool({ name: "dohc_read_share_copy", arguments: input })).toMatchObject({ isError: true });
+    expect(request).not.toHaveBeenCalled();
+  });
+  it.each(["view", "comment", "edit"] as const)("refuses direct copy reads for a %s profile", async shareAccess => {
+    const request = vi.fn(async () => details);
+    expect(await getShareCopyDetails({ root: "/workspace", home: "/state", shareAccess, request }, input))
+      .toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+    expect(request).not.toHaveBeenCalled();
+  });
+  it.each(["workspaceId", "ownerUserId", "userId", "credentials", "relayUrl"])("refuses caller-supplied %s before transport", async key => {
+    const request = vi.fn(async () => details);
+    expect(await getShareCopyDetails({ root: "/workspace", home: "/state", request }, { ...input, [key]: "other" })).toMatchObject({ ok: false });
+    expect(request).not.toHaveBeenCalled();
+  });
 });
