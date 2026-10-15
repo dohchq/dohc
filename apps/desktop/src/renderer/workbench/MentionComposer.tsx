@@ -7,9 +7,10 @@ import {
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
 import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentRosterPick } from "../offers/agentAddressed";
-import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
+import type { ActorPresentation, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
 import { ChatAvatar } from "./ChatAvatar";
+import { ownPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import {
@@ -69,6 +70,7 @@ export function MentionComposer(props: {
   // textarea is always mounted so its pinned test id and drivers keep working.
   authorName?: string;
   authorKind?: "human" | "agent";
+  authorPresentation?: ActorPresentation;
   // Takes focus when it mounts, with the caret after its text.
   autoFocus?: boolean;
 }) {
@@ -392,7 +394,7 @@ export function MentionComposer(props: {
     >
       {isPost && props.authorName ? (
         <div className={`flex items-center gap-2.5 ${expanded ? "mb-2" : ""}`}>
-          <ChatAvatar name={props.authorName} kind={props.authorKind ?? "human"} own />
+          <ChatAvatar presentation={props.authorPresentation ?? (props.authorKind === "agent" ? ownAgentPresentation : ownPresentation)} name={props.authorName} kind={props.authorKind ?? "human"} />
           {expanded ? (
             <span className="text-[14px] font-semibold text-ink">{props.authorName}</span>
           ) : (

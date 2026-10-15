@@ -67,9 +67,10 @@ export function desktopProofCommand(args, { platform = process.platform, env = p
 // @states-baselines, and that is the proof required.
 export function desktopProofTags({platform = process.platform} = {}) {
   const gallery = platform === "win32";
+  const restart = ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"];
   return {
-    selected: ["@verification-smoke", "@self-host-onboarding", ...(gallery ? ["@states-page"] : [])],
-    required: ["@verification-smoke", "@self-host-onboarding", ...(gallery ? ["@states-baselines"] : [])],
+    selected: ["@verification-smoke", ...restart, "@self-host-onboarding", ...(gallery ? ["@states-page"] : [])],
+    required: ["@verification-smoke", ...restart, "@self-host-onboarding", ...(gallery ? ["@states-baselines"] : [])],
   };
 }
 

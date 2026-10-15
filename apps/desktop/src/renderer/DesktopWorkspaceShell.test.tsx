@@ -2008,7 +2008,7 @@ describe("workbench render cost", () => {
               messageCount: 1,
               lastReadSequence: 1,
               unreadCount: 0,
-              openingMessage: {
+              openingMessage: { presentation: { group: "fixture", hue: null, self: false },
                 id: "message-team",
                 authorKind: "human" as const,
                 authorDisplayName: "Alice",
@@ -2022,7 +2022,7 @@ describe("workbench render cost", () => {
         })),
         listChatMessages: vi.fn(async () => ({
           messages: [
-            {
+            { presentation: { group: "fixture", hue: null, self: false },
               id: "message-team",
               threadId: "thread-team",
               authorKind: "human" as const,
@@ -2088,7 +2088,7 @@ describe("workbench render cost", () => {
           ),
           listChatMessages: vi.fn(async () => ({
             messages: [
-              {
+              { presentation: { group: "fixture", hue: null, self: false },
                 id: "dm-message",
                 threadId: CANONICAL_DM.threadId!,
                 authorKind: "human" as const,

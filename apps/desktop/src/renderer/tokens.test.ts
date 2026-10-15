@@ -14,6 +14,8 @@ import {
 import { contrastRatio as contrast, luminance, mixHex as mix } from "./accentColor";
 import { MENU_FRAME } from "./ui/Menu";
 
+import { presentationColor } from "./workbench/actorPresentation";
+
 const SURFACES = ["bg", "panel", "panel2"] as const;
 
 // The ink alpha of a state fill, so the test can composite it on a surface.
@@ -284,5 +286,16 @@ describe("the type stacks name the bundled families", () => {
     it(`${token} is the family ${specifier} declares`, () => {
       expect(declaredFamilies(specifier)).toEqual(new Set([firstFamily(fonts[token])]));
     });
+  }
+});
+
+it("keeps document caret labels at AA for every hue and neutral in both themes", () => {
+  const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+  const label = css.match(/\.dohc-notion-editor \.collaboration-carets__label\s*\{([^}]+)\}/)![1]!;
+  expect(label.match(/\bcolor:\s*([^;]+);/)![1]!.trim()).toBe("var(--dohc-bg)");
+  for (const hue of [null, ...IDENTITY_HUES]) {
+    for (const mode of ["light", "dark"] as const) {
+      expect(contrast(palette[mode].bg, presentationColor({ group: "label", hue, self: false }, "human", mode).stroke), `${hue ?? "neutral"} label (${mode})`).toBeGreaterThanOrEqual(4.5);
+    }
   }
 });
