@@ -13,7 +13,7 @@ import { extractChatFileReferences } from "./chatFileMentions";
 import { ChatMessageList, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
 import { useReactions } from "./reactionStore";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
-import { useAgentOffer } from "./AgentOffer";
+import { AGENT_OFFER_SPACE, useAgentOffer } from "./AgentOffer";
 import { DecisionStatus } from "./ChatPosts";
 import { ComposerNotice } from "./ChatsControls";
 import type { AgentSetupSummary } from "./ChatsView";
@@ -323,6 +323,7 @@ export function ChatLane(props: {
         reactionControls={reactionControls}
         renderMessageFooter={renderMessageFooter}
         firstUnreadMessageId={firstUnreadMessageId}
+        bottomSpace={AGENT_OFFER_SPACE}
       />
       <span role="status" aria-live="polite" className="sr-only">
         {newCount > 0 ? `${newCount} ${newCount === 1 ? "new message" : "new messages"}` : ""}
@@ -333,7 +334,7 @@ export function ChatLane(props: {
             type="button"
             data-testid="chats-lane-new-messages"
             onClick={() => listRef.current?.scrollToEnd()}
-            className="dohc-pop-in absolute bottom-2 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-line bg-panel px-2.5 py-1 text-[11px] font-medium text-ink shadow-sm transition-colors hover:bg-line dohc-focus-visible"
+            className="dohc-pop-in absolute bottom-2 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 whitespace-nowrap rounded-full border border-line bg-panel px-2.5 py-1 text-[11px] font-medium text-ink shadow-sm transition-colors hover:bg-line dohc-focus-visible"
           >
             <ArrowDown size={11} aria-hidden />
             <span className="tabular-nums">{newCount}</span>

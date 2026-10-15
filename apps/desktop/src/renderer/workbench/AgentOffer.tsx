@@ -12,15 +12,20 @@ import { ownAgentPresentation } from "./actorPresentation";
 import { ChatAvatar } from "./ChatAvatar";
 import type { AgentSetupSummary } from "./ChatsView";
 
-// The words for a state. Dispatch's own notice names the two causes a send
+// The words for a state, and the width below which the folder chip hides so
+// the words are never cut: a post measures the offer, a stream composer
+// measures the composer. Dispatch's own notice names the two causes a send
 // does not start a run. An unknown state says nothing about running.
-const WORDS: Record<AgentOfferState, string | null> = {
-  runs: "runs when you send",
-  working: "runs after the current run",
-  paused: "dispatch paused · runs after Resume",
-  "runner-off": "Agent dispatch is off",
-  "no-command": "No agent runner is configured",
-  unknown: null,
+const STATES: Record<AgentOfferState, { words: string | null; hideFolder?: { post: string; stream: string } }> = {
+  runs: { words: "Runs when you send", hideFolder: { post: "@max-[15rem]:hidden", stream: "@max-[16rem]/composer:hidden" } },
+  working: { words: "Runs after the current run", hideFolder: { post: "@max-[17rem]:hidden", stream: "@max-[18rem]/composer:hidden" } },
+  paused: {
+    words: "Dispatch paused · runs after Resume",
+    hideFolder: { post: "@max-[21rem]:hidden", stream: "@max-[22rem]/composer:hidden" },
+  },
+  "runner-off": { words: "Agent dispatch is off" },
+  "no-command": { words: "No agent runner is configured" },
+  unknown: { words: null },
 };
 
 /** The folder name of the workspace the runner starts in. */
@@ -30,6 +35,9 @@ export function reachName(path: string): string {
 
 /** A conversation that does not exist yet: no run and no pause. */
 export const NEW_CONVERSATION: ChatDispatchStateForThreadResult = { liveRunId: null, pendingCount: 0, paused: false };
+
+/** The room, in pixels, a stream list keeps above its composer for the offer. */
+export const AGENT_OFFER_SPACE = 36;
 
 // The roster pick a composer reports, held beside that composer's draft, and
 // the offer it makes with facts already read. A pick belongs to the
@@ -65,17 +73,18 @@ export function useAgentOffer(input: {
 
 // Shown after the person picks an agent from the roster: who will see the
 // message, whether sending starts a run, and the folder the run reaches. A
-// post composer draws it in the space before Send; a stream composer floats
-// it above its top edge, over Send, so nothing moves.
+// post composer draws it in the space before Send. A stream composer floats
+// it above the composer and any bar on it, over Send, into room its list
+// always keeps, so nothing moves.
 export const AgentOffer = memo(function AgentOffer(props: {
   offer: AgentAddressedOffer;
   surface: "post" | "stream";
   onSetUp?: () => void;
 }) {
   const { offer } = props;
-  const words = WORDS[offer.state];
+  const { words } = STATES[offer.state];
+  const hideFolder = STATES[offer.state].hideFolder?.[props.surface];
   const blocked = offer.state === "runner-off" || offer.state === "no-command";
-  const narrowHidden = props.surface === "post" ? "@max-[14rem]:hidden" : "";
   return (
     <div
       role="status"
@@ -84,7 +93,7 @@ export const AgentOffer = memo(function AgentOffer(props: {
       className={`dohc-pop-in flex min-w-0 items-center gap-1.5 text-[11px] text-muted ${
         props.surface === "post"
           ? "@container flex-1 px-1.5"
-          : "absolute bottom-full right-2 z-10 mb-1.5 max-w-[calc(100%-1rem)] rounded-full border border-line bg-panel py-0.5 pl-0.5 pr-2 shadow-sm"
+          : "absolute bottom-full right-2 z-10 mb-1.5 h-7 max-w-[calc(100%-1rem)] rounded-full border border-line bg-panel pl-1 pr-2 shadow-sm"
       }`}
     >
       <span className="relative inline-grid shrink-0">
@@ -108,20 +117,24 @@ export const AgentOffer = memo(function AgentOffer(props: {
           aria-label="Set up agent dispatch in Settings → Agents"
           title="Settings → Agents"
           onClick={props.onSetUp}
-          className="h-5 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
+          className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[11px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible"
         >
           Set up
         </button>
       ) : null}
-      {!blocked && offer.reach ? (
-        // The words come first: the folder name gives way before them, down
-        // to its icon, and a narrow post drops it.
+      {offer.state === "unknown" && offer.reach ? (
+        // Alone, the folder needs its verb.
+        <span data-testid="composer-agent-offer-reach" className="min-w-0 truncate" title={`Reaches ${offer.reach}`}>
+          Reaches {reachName(offer.reach)}
+        </span>
+      ) : null}
+      {hideFolder && offer.reach ? (
         <>
-          {words ? <span aria-hidden className={`shrink-0 text-subtle ${narrowHidden}`}>·</span> : null}
+          <span aria-hidden className={`shrink-0 text-subtle ${hideFolder}`}>·</span>
           <span
             data-testid="composer-agent-offer-reach"
-            title={`reaches ${offer.reach}`}
-            className={`inline-flex h-[18px] min-w-7 shrink-[4] items-center gap-1 rounded border border-line bg-panel-2 px-1.5 font-mono text-[11px] text-muted ${narrowHidden}`}
+            title={`Reaches ${offer.reach}`}
+            className={`inline-flex h-[18px] min-w-0 shrink-[100] items-center gap-1 overflow-hidden rounded border border-line bg-panel-2 px-1.5 font-mono text-[11px] text-muted ${hideFolder}`}
           >
             <Folder size={10} strokeWidth={2} aria-hidden className="shrink-0" />
             <span className="sr-only">reaches </span>

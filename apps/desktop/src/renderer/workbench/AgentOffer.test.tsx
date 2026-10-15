@@ -64,27 +64,45 @@ afterEach(() => {
 
 describe("the agent offer", () => {
   it.each([
-    ["runs", "runs when you send", true, "run"],
-    ["working", "runs after the current run", true, "working"],
-    ["paused", "dispatch paused · runs after Resume", true, null],
-    ["runner-off", "Agent dispatch is off", false, null],
-    ["no-command", "No agent runner is configured", false, null],
-    ["unknown", null, true, null],
-  ] as const)("%s says %j", (state, words, reaches, mark) => {
+    ["runs", "Runs when you send", "reaches trip-planner", "run"],
+    ["working", "Runs after the current run", "reaches trip-planner", "working"],
+    ["paused", "Dispatch paused · runs after Resume", "reaches trip-planner", null],
+    ["runner-off", "Agent dispatch is off", null, null],
+    ["no-command", "No agent runner is configured", null, null],
+    // Alone, the folder says what it is.
+    ["unknown", null, "Reaches trip-planner", null],
+  ] as const)("%s says %j", (state, words, reach, mark) => {
     const onSetUp = vi.fn();
     render(<AgentOffer offer={offer(state)} surface="post" onSetUp={onSetUp} />);
     const node = screen.getByTestId("composer-agent-offer");
     expect(node.dataset.state).toBe(state);
     expect(screen.queryByTestId("composer-agent-offer-words")?.textContent ?? null).toBe(words);
-    expect(screen.queryByTestId("composer-agent-offer-reach")?.textContent ?? null).toBe(reaches ? "reaches trip-planner" : null);
+    expect(screen.queryByTestId("composer-agent-offer-reach")?.textContent ?? null).toBe(reach);
     const run = screen.queryByTestId("composer-agent-offer-run");
     expect(run ? (run.className.includes("bg-agent") ? "working" : "run") : null).toBe(mark);
     const setUp = screen.queryByTestId("composer-agent-offer-setup");
-    expect(setUp !== null).toBe(!reaches);
+    expect(setUp !== null).toBe(reach === null);
     if (setUp) {
       fireEvent.click(setUp);
       expect(onSetUp).toHaveBeenCalledOnce();
     }
+  });
+
+  it("shows only the agent when nothing is known, not even its folder", () => {
+    render(<AgentOffer offer={{ ...offer("unknown"), reach: null }} surface="stream" />);
+    expect(screen.getByTestId("composer-agent-offer").textContent).toBe("Nova");
+  });
+
+  it("floats over a stream composer's bars, not inside its box", () => {
+    render(
+      <MentionComposer testIdPrefix="chats" composerId="chats-composer" value="@agent " sending={false}
+        placeholder="Write a comment…" sendLabel="Send message" candidates={candidates} onChange={() => {}}
+        onSend={() => {}} agentOffer={offer("runs")}
+        above={<div data-testid="chats-replying-mode">Replying to Sam ·</div>} />,
+    );
+    const stack = screen.getByTestId("composer-agent-offer").parentElement!;
+    expect(stack.firstElementChild).toBe(screen.getByTestId("chats-replying-mode"));
+    expect(screen.getByTestId("chats-composer").closest("form")!.contains(screen.getByTestId("composer-agent-offer"))).toBe(false);
   });
 
   it("marks a known run when the rest is unknown", () => {

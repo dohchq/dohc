@@ -57,6 +57,7 @@ import { ChatAvatar } from "../workbench/ChatAvatar";
 import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
 import { ThreadMessages } from "../workbench/ChatPosts";
 import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
+import { ComposerModeBar } from "../workbench/ChatsControls";
 import { MentionComposer } from "../workbench/MentionComposer";
 import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddressed";
 import { PostCard, type PostData } from "../workbench/PostCard";
@@ -661,22 +662,33 @@ function agentOffer(state: AgentOfferState): AgentAddressedOffer {
   };
 }
 
-function AgentOfferComposer(props: { state: AgentOfferState; surface: "post" | "stream"; id: string; width?: string; focus?: boolean }) {
+function AgentOfferComposer(props: {
+  state: AgentOfferState;
+  surface: "post" | "stream";
+  id: string;
+  width?: string;
+  focus?: boolean;
+  replying?: boolean;
+}) {
   const composer = (
     <MentionComposer testIdPrefix={props.id} composerId={props.id} value={AGENT_DRAFT} sending={false}
       surface={props.surface} authorName="Ada" authorPresentation={SAMPLE_ADA}
       placeholder={props.surface === "post" ? "What's happening in #general?" : "Message #general"}
       sendLabel={props.surface === "post" ? "Start post" : "Send message"} candidates={[]} onChange={noop} onSend={noop}
-      agentOffer={agentOffer(props.state)} onSetUpAgent={noop} />
+      agentOffer={agentOffer(props.state)} onSetUpAgent={noop}
+      above={props.replying ? (
+        <ComposerModeBar testId={`${props.id}-replying-mode`} cancelTestId={`${props.id}-replying-cancel`}
+          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+      ) : undefined} />
   );
   const focused = props.focus ? (
     <div data-force-state="focus-visible" data-force-target='[data-testid="composer-agent-offer-setup"]'>{composer}</div>
   ) : composer;
-  // A stream composer floats its offer above its top edge, over the end of
-  // the conversation, so it gets that room here.
+  // A stream composer floats its offer above its top edge, into the room the
+  // end of its conversation keeps, so it gets that room here.
   return props.surface === "post"
-    ? <div className={props.width ?? "w-[560px]"}>{focused}</div>
-    : <div className={`${props.width ?? "w-[400px]"} rounded-lg border border-line bg-panel pt-8`}>{focused}</div>;
+    ? <div id={`${props.id}-specimen`} className={props.width ?? "w-[560px]"}>{focused}</div>
+    : <div id={`${props.id}-specimen`} className={`${props.width ?? "w-[400px]"} rounded-lg border border-line bg-panel pt-9`}>{focused}</div>;
 }
 
 // The About rail at the drawing's 290px, on the chrome.
@@ -2144,10 +2156,11 @@ function Pane(props: { theme: "light" | "dark" }) {
             ))}
           </div>
         </Specimen>
-        <Specimen label="Set up focused; then a narrow pane">
+        <Specimen label="Set up focused; above a reply bar; then a narrow pane">
           <div className="flex flex-col gap-3">
             <AgentOfferComposer state="no-command" surface="post" id={`states-agent-post-focus-${theme}`} focus />
             <AgentOfferComposer state="runner-off" surface="stream" id={`states-agent-stream-focus-${theme}`} focus />
+            <AgentOfferComposer state="runs" surface="stream" id={`states-agent-stream-replying-${theme}`} replying />
             <AgentOfferComposer state="runs" surface="post" id={`states-agent-post-narrow-${theme}`} width="w-[300px]" />
             <AgentOfferComposer state="paused" surface="stream" id={`states-agent-stream-narrow-${theme}`} width="w-[300px]" />
             <AgentOfferComposer state="no-command" surface="stream" id={`states-agent-stream-narrow-setup-${theme}`} width="w-[300px]" />

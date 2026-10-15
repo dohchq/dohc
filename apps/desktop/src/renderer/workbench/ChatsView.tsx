@@ -29,6 +29,7 @@ import {
   ShareReadFailureNotice,
   ChatHeader,
   joinedChannelLabel,
+  ComposerModeBar,
   ComposerNotice,
   type ShareReadFailure,
 } from "./ChatsControls";
@@ -103,7 +104,7 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
-import { NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
+import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { extractChatFileReferences } from "./chatFileMentions";
@@ -4023,6 +4024,7 @@ export function ChatsView(props: {
               onOpenPath={props.onOpenPath}
               flashMessageId={flashMessageId}
               reactionControls={reactionControls}
+              bottomSpace={AGENT_OFFER_SPACE}
             />
           ) : (
             <div
@@ -4230,59 +4232,44 @@ export function ChatsView(props: {
                 : "This group is read-only for you."}
             </ComposerNotice>
           ) : (
-            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 sm:px-4">
-              {resolveTargetMessageId ? (
-                <div
-                  data-testid="chats-resolving-mode"
-                  className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
-                >
-                  <span className="min-w-0 flex-1 truncate">
-                    {resolveChosenOption
-                      ? `Answering the poll · ${resolveChosenOption}`
-                      : "Answering the poll"}
-                  </span>
-                  <button
-                    type="button"
-                    data-testid="chats-resolving-cancel"
-                    aria-label="Cancel resolving decision"
-                    onClick={() => {
-                      if (replyTarget?.messageId === resolveTargetMessageId) {
-                        setReplyTarget(null);
-                      }
-                      setResolveTargetMessageId(null);
-                      setResolveChosenOption(null);
-                    }}
-                    className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
-                  >
-                    ×
-                  </button>
-                </div>
-              ) : null}
-              {replyTarget ? (
-                <div
-                  data-testid="chats-replying-mode"
-                  className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
-                >
-                  <span className="min-w-0 flex-1">
-                    Replying to {replyTarget.authorLabel} ·
-                  </span>
-                  <button
-                    type="button"
-                    data-testid="chats-replying-cancel"
-                    aria-label="Cancel reply"
-                    onClick={() => {
-                      if (resolveTargetMessageId === replyTarget.messageId) {
-                        setResolveTargetMessageId(null);
-                      }
-                      setReplyTarget(null);
-                    }}
-                    className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
-                  >
-                    ×
-                  </button>
-                </div>
-              ) : null}
+            // The top space holds a picked agent's offer, so it covers no comment.
+            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 pt-6 sm:px-4">
               <MentionComposer
+                above={<>
+                  {resolveTargetMessageId ? (
+                    <ComposerModeBar
+                      testId="chats-resolving-mode"
+                      cancelTestId="chats-resolving-cancel"
+                      cancelLabel="Cancel resolving decision"
+                      onCancel={() => {
+                        if (replyTarget?.messageId === resolveTargetMessageId) {
+                          setReplyTarget(null);
+                        }
+                        setResolveTargetMessageId(null);
+                        setResolveChosenOption(null);
+                      }}
+                    >
+                      {resolveChosenOption
+                        ? `Answering the poll · ${resolveChosenOption}`
+                        : "Answering the poll"}
+                    </ComposerModeBar>
+                  ) : null}
+                  {replyTarget ? (
+                    <ComposerModeBar
+                      testId="chats-replying-mode"
+                      cancelTestId="chats-replying-cancel"
+                      cancelLabel="Cancel reply"
+                      onCancel={() => {
+                        if (resolveTargetMessageId === replyTarget.messageId) {
+                          setResolveTargetMessageId(null);
+                        }
+                        setReplyTarget(null);
+                      }}
+                    >
+                      Replying to {replyTarget.authorLabel} ·
+                    </ComposerModeBar>
+                  ) : null}
+                </>}
                 testIdPrefix="chats"
                 composerId="chats-composer"
                 value={composer}

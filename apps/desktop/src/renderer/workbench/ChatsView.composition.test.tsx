@@ -785,5 +785,22 @@ describe("ChatsView agent offer", () => {
     await screen.findByTestId("chats-lane");
     await waitFor(() => expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).disabled).toBe(false));
     expect((await pickAgent(user, "chats-lane")).dataset.state).toBe("unknown");
+    expect(screen.getByTestId("composer-agent-offer-reach").textContent).toBe("Reaches work");
+  });
+
+  it("keeps the comment's reply bar clear: the offer floats above the bar", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), message({ id: "comment-1", body: "Friday works." })] });
+    renderView(vi.fn(), vi.fn(), withAgent());
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click((await screen.findAllByTestId("chats-comment-reply"))[0]!);
+    const bar = await screen.findByTestId("chats-replying-mode");
+    const offer = await pickAgent(user, "chats");
+    expect(offer.parentElement!.firstElementChild).toBe(bar);
+    await user.click(screen.getByTestId("chats-replying-cancel"));
+    expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
+    expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("runs");
   });
 });

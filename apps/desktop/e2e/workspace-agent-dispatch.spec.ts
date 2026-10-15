@@ -119,7 +119,7 @@ test("picking the agent in a group's post says it runs when you send, and the of
     await page.locator('[data-testid="chats-new-thread-mention-option"][data-candidate-id="agent:default"]').click();
     const offer = page.getByTestId("composer-agent-offer");
     await expect(offer).toHaveAttribute("data-state", "runs");
-    await expect(offer.getByTestId("composer-agent-offer-words")).toHaveText("runs when you send");
+    await expect(offer.getByTestId("composer-agent-offer-words")).toHaveText("Runs when you send");
 
     await composer.pressSequentially("check the exports");
     await composer.press("Enter");
