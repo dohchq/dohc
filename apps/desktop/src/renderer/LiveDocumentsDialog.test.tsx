@@ -66,6 +66,53 @@ afterEach(() => {
 });
 
 describe("LiveDocumentsDialog", () => {
+  it("offers Resume on a live row with a deferred Stop after local clear failed", async () => {
+    const h=harness();
+    h.load.mockResolvedValue(page([{...row("a.md"),status:"ready",canResume:true,deferredStop:{unsentEdits:1,editable:true}}]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    expect((await screen.findByTestId("live-document-row-a.md")).textContent).toContain("Live editing resumed.");
+    expect(actions("a.md")).toEqual(["Resume live editing"]);
+    fireEvent.click(await screen.findByRole("button",{name:"Resume live editing for a.md"}));
+    await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","a.md"));
+  });
+  it.each([true, false])("uses IPC Resume availability on a ready row: %s", async canResume => {
+    const h = harness();
+    h.load.mockResolvedValue(page([row("a.md", {canResume})]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const document = await screen.findByTestId("live-document-row-a.md");
+    expect(!!within(document).queryByRole("button", {name:"Resume live editing for a.md"})).toBe(canResume);
+  });
+  it.each([0,1])("describes a deferred queue of %s edits", async unsentEdits => {
+    const h=harness();
+    h.load.mockResolvedValue(page([row("a.md",{status:"retired",canResume:true,deferredStop:{unsentEdits,editable:true}})]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const stopped=await screen.findByTestId("live-document-row-a.md");
+    expect(stopped.textContent).toContain(unsentEdits===0 ? "Resume live editing to finish syncing." : "1 unsent edit remains on this computer.");
+    expect(stopped.textContent).not.toContain("1 unsent edits");
+    expect(stopped.textContent).not.toContain("They are not in History");
+  });
+  it.each([true, false])("shows deferred unsent edits and truthful editability: %s", async editable => {
+    const h=harness();
+    h.load.mockResolvedValue(page([row("a.md", {status:"retired",canResume:true,deferredStop:{unsentEdits:65,editable}})]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const stopped=await screen.findByTestId("live-document-row-a.md");
+    expect(stopped.textContent).toContain("65 unsent edits remain on this computer.");
+    expect(stopped.textContent).toContain("Resume live editing to try sending them.");
+    expect(stopped.textContent).toContain(editable ? "You can keep editing." : "Editing is paused.");
+    fireEvent.click(within(stopped).getByRole("button",{name:"Resume live editing for a.md"}));
+    await vi.waitFor(() => expect(h.resume).toHaveBeenCalledWith("ws","a.md"));
+  });
+  it("reports a waiting Stop through Notices and keeps its retry available", async () => {
+    const h = harness(); h.load.mockResolvedValue(page([row("a.md")]));
+    const error = new Error("Stop live editing is waiting. You can keep editing.");
+    h.stop.mockRejectedValueOnce(error);
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    fireEvent.click(await screen.findByRole("button", {name: "Stop live editing for a.md"}));
+    await vi.waitFor(() => expect(h.onError).toHaveBeenCalledTimes(1));
+    expect(h.onError.mock.calls[0]!.slice(0,2)).toEqual(["Stop live editing for a.md is waiting for a connection or restore.", error]);
+    expect(h.onError.mock.calls[0]![2]()).toBe(true);
+    await vi.waitFor(() => expect(h.stop).toHaveBeenCalledTimes(2));
+  });
   it("stands lines in for the first page, and keeps the words while a Reload keeps the list", async () => {
     const h = harness();
     const first = deferred<LiveDocumentPage>();
@@ -165,12 +212,12 @@ describe("LiveDocumentsDialog", () => {
         row("docs/moved.md", {
           status: "unavailable",
           reason: "document-unavailable",
-          canResume: true,
+          canResume: false,
         }),
         row("docs/elsewhere.md", {
           status: "unavailable",
           reason: "workspace-changed",
-          canResume: true,
+          canResume: false,
         }),
         row("docs/stopped.md", { status: "retired", canResume: true }),
         row("docs/stopped-gone.md", { status: "retired" }),

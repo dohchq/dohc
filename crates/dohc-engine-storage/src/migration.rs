@@ -3237,6 +3237,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 53,
+        id: "v2-owner-live-stops",
+        sql: V2_OWNER_LIVE_STOPS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 54,
         id: "v2-hosted-replica",
         sql: V2_HOSTED_REPLICA_DDL,
         sets_user_version: None,
@@ -3273,6 +3279,34 @@ CREATE TABLE replica_first_seen (
     end_clock INTEGER NOT NULL CHECK (end_clock BETWEEN 1 AND 9007199254740991 AND end_clock>start_clock),
     PRIMARY KEY(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,client_id,start_clock)
 ) STRICT;
+";
+
+const V2_OWNER_LIVE_STOPS_DDL: &str = "\
+ALTER TABLE owner_ydoc_outboxes ADD COLUMN pending_entry_count INTEGER NOT NULL DEFAULT 0 CHECK (pending_entry_count>=0);
+UPDATE owner_ydoc_outboxes SET pending_entry_count=(SELECT COUNT(*) FROM owner_ydoc_outbox_entries e WHERE e.outbox_id=owner_ydoc_outboxes.outbox_id AND e.pending=1);
+CREATE TRIGGER owner_outbox_count_insert AFTER INSERT ON owner_ydoc_outbox_entries WHEN NEW.pending=1 BEGIN
+    UPDATE owner_ydoc_outboxes SET pending_entry_count=pending_entry_count+1 WHERE outbox_id=NEW.outbox_id;
+END;
+CREATE TRIGGER owner_outbox_count_delete AFTER DELETE ON owner_ydoc_outbox_entries WHEN OLD.pending=1 BEGIN
+    UPDATE owner_ydoc_outboxes SET pending_entry_count=pending_entry_count-1 WHERE outbox_id=OLD.outbox_id;
+END;
+CREATE TRIGGER owner_outbox_count_update AFTER UPDATE OF pending,outbox_id ON owner_ydoc_outbox_entries WHEN OLD.pending<>NEW.pending OR OLD.outbox_id<>NEW.outbox_id BEGIN
+    UPDATE owner_ydoc_outboxes SET pending_entry_count=pending_entry_count-OLD.pending WHERE outbox_id=OLD.outbox_id;
+    UPDATE owner_ydoc_outboxes SET pending_entry_count=pending_entry_count+NEW.pending WHERE outbox_id=NEW.outbox_id;
+END;
+CREATE TABLE owner_live_stops (
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    relay_database_namespace TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('requested','released')),
+    binding_json TEXT NOT NULL CHECK (json_valid(binding_json)),
+    requested_at_ms INTEGER NOT NULL CHECK (requested_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= requested_at_ms),
+    PRIMARY KEY(workspace_id,main_version_id,object_id),
+    FOREIGN KEY(workspace_id,main_version_id,object_id) REFERENCES ydoc_docs(workspace_id,version_id,object_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX idx_owner_live_stops_requested ON owner_live_stops(workspace_id,main_version_id,object_id) WHERE state='requested';
 ";
 
 /// A session host's replica of the documents the relay's scoped feed serves
@@ -4025,6 +4059,10 @@ mod tests {
                 "b42454c383b3e4b2b7c107a4c2b7abe56476235d857dba46aa3fbbae1a790af3",
             ),
             (
+                "v2-owner-live-stops",
+                "fd9a692216dd5b73e9c3f08bee04b16dbcd313084e370a3592db4c8bc59d9adb",
+            ),
+            (
                 "v2-hosted-replica",
                 "332fbe3728b51bdb26a1cc9cc0d8d1da4decd311aa991687be899f4def7c7468",
             ),
@@ -4038,6 +4076,40 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    fn owner_stop_upgrade_counts_pending_entries_and_tracks_terminal_changes() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-owner-live-stops");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let digest = crate::blob::put_binary_blob(&conn, b"x").unwrap();
+        conn.execute("INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,created_at_ms) VALUES('outbox','ws','main','object','lineage','owner.md','[]',0,?1,?1,1,'active',2,1,4,1)",[&digest]).unwrap();
+        for sequence in 1..=3 {
+            conn.execute("INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state) VALUES('outbox',?1,?2,?2,?3,?4,1,1,?5,2,1,'active')",rusqlite::params![sequence,format!("key-{sequence}"),digest,(sequence<=2).then_some(&digest),i64::from(sequence<=2)]).unwrap();
+        }
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let count = |conn: &Connection| {
+            conn.query_row(
+                "SELECT pending_entry_count FROM owner_ydoc_outboxes WHERE outbox_id='outbox'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count(&conn), 2);
+        conn.execute("INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state) VALUES('outbox',4,'key-4','key-4',?1,?1,1,1,1,3,1,'active')",[&digest]).unwrap();
+        assert_eq!(count(&conn), 3);
+        conn.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,update_blob_digest=NULL WHERE sequence=4",[]).unwrap();
+        assert_eq!(count(&conn), 2);
+        conn.execute("DELETE FROM owner_ydoc_outbox_entries WHERE pending=0", [])
+            .unwrap();
+        assert_eq!(count(&conn), 2);
+        conn.execute("DELETE FROM owner_ydoc_outbox_entries", [])
+            .unwrap();
+        assert_eq!(count(&conn), 0);
     }
 
     #[test]

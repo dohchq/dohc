@@ -2,6 +2,7 @@ import type { ReadOnlyTransitionCause } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { rearmDesktopAdmission } from "./rearmDesktopAdmission";
 import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState";
+import { captureHeldLiveMessage } from "../../ipc/errorWords";
 import { UNKNOWN_SAVE_STATE, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { useEffect, useRef, useState } from "react";
 import type * as Y from "yjs";
@@ -92,6 +93,7 @@ export type UseEngineDoc = {
   // stays read-only, states the reason, and offers a retry (bump retryKey),
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: boolean;
+  openRefusal?: string;
   // The canonical drawing's image records conflict with authoritative
   // storage. Retrying cannot repair this state.
   artifactAssetsInvalid: boolean;
@@ -258,7 +260,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const opening = input.enabled && outcome === null;
   const notInVersion = outcome?.kind === "not-in-version";
   const documentUnavailable = outcome?.kind === "document-unavailable";
-  const engineMayHoldDocument = outcome?.kind === "engine-may-hold-document";
+  const engineMayHoldDocument = outcome?.kind === "engine-may-hold-document" || outcome?.kind === "capture-held";
   const artifactAssetsInvalid = outcome?.kind === "artifact-assets-invalid";
   const artifactAssets =
     outcome?.kind === "bound" ? outcome.artifactAssets : [];
@@ -323,6 +325,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     liveHostUnavailable: outcome?.kind === "live-host-unavailable" || outcome?.kind === "shared-waiting",
     sharedWaiting: outcome?.kind === "shared-waiting" ? outcome.waiting : null,
     engineMayHoldDocument,
+    openRefusal: outcome?.kind === "capture-held" ? captureHeldLiveMessage(input.path) : undefined,
     artifactAssetsInvalid,
     deletedWhileEditing,
     goneCause,

@@ -41,6 +41,7 @@ export const CAPABILITIES = {
   "share.restore.pending.read": capability("Read unfinished Stop and restore progress.", {ipc: ["pendingStopAndRestores"]}),
   "share.restore.pending.dismiss": capability("Dismiss unfinished Stop and restore progress.", {ipc: ["dismissStopAndRestore"]}),
   "capture.recovery.read": capability("Read capture recovery status.", {ipc: ["getCaptureRecoveryStatus"]}),
+  "capture.held.retry": capability("Retry recording the outside edit to a held file.", {ipc: ["retryHeldCapture"]}),
   "capture.recovery.clear": capability("Clear a capture recovery notice persistently.", {ipc: ["clearCaptureRecovery"]}),
   "file.observation.retry": capability("Retry reading a workspace's file changes.", {ipc: ["retryFileObservation"]}),
   "app.recognition.read": capability("Read folder app recognition for contextual offers.", {ipc: ["getFolderApp"]}),
