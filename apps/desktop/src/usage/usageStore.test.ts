@@ -253,15 +253,33 @@ describe("local usage store", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(saved().counts[0]!.count).toBe(2);
   });
-  it.each(["clear", "off"] as const)("drops retired ids and permits %s while keeping known data where appropriate", async action => {
+  it.each(["clear", "off"] as const)("clears retired ids explicitly and permits %s while keeping known data where appropriate", async action => {
     const initial = { ...seed(), counts: [{ ...pair, day: today(), count: 3 },
       { capabilityId: "retired.action", door: "renderer", day: today(), count: 9 }],
       coverage: [{ appVersion: "0.1.0", pairs: [...mapping, { capabilityId: "retired.action", door: "renderer", status: "covered" }] }] };
-    const { store, saved } = memoryStore(initial);
+    const { store, disk, path } = memoryStore(initial);
     if (action === "clear") await store.clear(); else await store.setEnabled(false);
-    expect(saved().counts).toEqual(action === "clear" ? [] : [{ ...pair, day: today(), count: 3 }]);
-    expect(saved().coverage[0]!.pairs).toEqual(mapping);
-    expect(saved().enabled).toBe(action === "clear");
+    const persisted = JSON.parse(disk.get(path)!);
+    expect(persisted.counts).toEqual(action === "clear" ? [] : [
+      { ...pair, day: today(), count: 3 },
+      { capabilityId: "retired.action", door: "renderer", day: today(), count: 9 },
+    ]);
+    expect(persisted.coverage[0]!.pairs).toEqual(action === "clear" ? mapping : [
+      ...mapping, { capabilityId: "retired.action", door: "renderer", status: "covered" },
+    ]);
+    expect(persisted.enabled).toBe(action === "clear");
+  });
+  it("preserves unknown ids and pairs through a non-destructive rewrite", async () => {
+    const unknownCount = { capabilityId: "future.action", door: "renderer", day: today(), count: 9 };
+    const unknownPair = { capabilityId: "future.action", door: "renderer", status: "covered" };
+    const initial = { ...seed(), counts: [{ ...pair, day: today(), count: 3 }, unknownCount],
+      coverage: [{ appVersion: "0.1.0", pairs: [...mapping, unknownPair] }] };
+    const { store, disk, path } = memoryStore(initial);
+    await store.load();
+    await store.setEnabled(false);
+    const persisted = JSON.parse(disk.get(path)!);
+    expect(persisted.counts).toContainEqual(unknownCount);
+    expect(persisted.coverage[0].pairs).toContainEqual(unknownPair);
   });
   it.each(["EBUSY", "EPERM", "EACCES"])("leaves the record byte-identical while controls retry a persistent %s", async code => {
     const initial = seed(false);

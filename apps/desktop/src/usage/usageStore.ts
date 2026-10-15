@@ -3,9 +3,10 @@ import * as fs from "node:fs/promises";
 import { join } from "node:path";
 import {
   UsageAppVersion, UsageInvocation, UsageVersionCoverage, decodeUsageSnapshot,
-  USAGE_MAX_COUNT, USAGE_RETENTION_DAYS, localUsageDay, queryUsage, usageRowKey,
+  USAGE_ACTION_IDS, USAGE_DOORS, USAGE_MAX_COUNT, USAGE_RETENTION_DAYS, localUsageDay, queryUsage, usageRowKey,
   type UsageBuildPair, type UsageCount, type UsageDayRecord, type UsageQuery, type UsageSnapshot,
 } from "@dohc/workspace-contracts/usage";
+import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
 import { INVALID_USAGE_RECORD } from "../ipc/bridgeContract";
 
 export const USAGE_WRITE_INTERVAL_MS = 30_000;
@@ -55,6 +56,14 @@ const nodeFiles: UsageFileSystem = {
 };
 const errorCode = (error: unknown) => (error as NodeJS.ErrnoException | null)?.code;
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
+type UsageDoor = (typeof USAGE_DOORS)[number];
+type UsageCoverageStatus = "covered" | "uncovered" | "unavailable";
+type UnknownUsageCount = { day: string; capabilityId: string; door: UsageDoor; count: number };
+type UnknownUsagePair = { capabilityId: string; door: UsageDoor; status: UsageCoverageStatus };
+type UnknownUsageCoverage = { appVersion: string; pairs: UnknownUsagePair[] };
+type StoredUsageSnapshot = { counts: UnknownUsageCount[]; coverage: UnknownUsageCoverage[] };
+const unknownUsageRowKey = (row: Pick<UnknownUsageCount, "day" | "capabilityId" | "door">) =>
+  `${row.day}:${row.capabilityId}:${row.door}`;
 
 // Main supplies the fixed coverage mapping for this build.
 // Early successes queue only aggregates until the saved setting is loaded.
@@ -75,6 +84,10 @@ export function createUsageStore(deps: {
   const days = new Map<string, UsageDayRecord>();
   const counts = new Map<string, UsageCount>();
   const coverage = new Map<string, UsageVersionCoverage>();
+  // Older builds cannot interpret newer action ids or capability pairs, but
+  // they must carry them through a read-modify-write for a newer build.
+  const unknownCounts = new Map<string, UnknownUsageCount>();
+  const unknownCoverage = new Map<string, UnknownUsageCoverage>();
   const pending: UsageCount[] = [];
   let pendingOverflow = false;
   let enabled = true;
@@ -148,9 +161,15 @@ export function createUsageStore(deps: {
         if (row.day < oldest) { map.delete(key); changed(); }
       }
     }
+    for (const [key, row] of unknownCounts) {
+      if (row.day < oldest) { unknownCounts.delete(key); changed(); }
+    }
     const versions = new Set([...days.values()].flatMap(day => day.appVersions));
     for (const version of coverage.keys()) {
       if (version !== appVersion && !versions.has(version)) { coverage.delete(version); changed(); }
+    }
+    for (const version of unknownCoverage.keys()) {
+      if (version !== appVersion && !versions.has(version)) { unknownCoverage.delete(version); changed(); }
     }
     touchDay(today);
     activeDay = today;
@@ -228,6 +247,16 @@ export function createUsageStore(deps: {
         for (const row of restored.days) days.set(row.day, row);
         for (const row of restored.counts) counts.set(usageRowKey(row), row);
         for (const version of restored.coverage) coverage.set(version.appVersion, version);
+        const stored = JSON.parse(raw!) as StoredUsageSnapshot;
+        const actionIds = new Set<string>(USAGE_ACTION_IDS);
+        const capabilityIds = new Set(Object.keys(CAPABILITIES));
+        for (const row of stored.counts) {
+          if (!actionIds.has(row.capabilityId)) unknownCounts.set(unknownUsageRowKey(row), row);
+        }
+        for (const version of stored.coverage) {
+          const pairs = version.pairs.filter(pair => !capabilityIds.has(pair.capabilityId));
+          if (pairs.length) unknownCoverage.set(version.appVersion, { appVersion: version.appVersion, pairs });
+        }
       }
       coverage.set(appVersion, buildCoverage);
       changed();
@@ -253,6 +282,16 @@ export function createUsageStore(deps: {
         pairs: version.pairs.map(pair => ({ capabilityId: pair.capabilityId, door: pair.door, status: pair.status })) })),
     };
   }
+  function storedSnapshot(cleanExit = false): StoredUsageSnapshot & UsageSnapshot {
+    const current = snapshot(cleanExit);
+    const versions = new Map(current.coverage.map(version => [version.appVersion, version.pairs]));
+    for (const version of unknownCoverage.values()) {
+      const pairs = versions.get(version.appVersion);
+      if (pairs) pairs.push(...version.pairs as UsageBuildPair[]);
+      else current.coverage.push({ appVersion: version.appVersion, pairs: version.pairs as UsageBuildPair[] });
+    }
+    return { ...current, counts: [...current.counts, ...unknownCounts.values()] as UsageCount[] };
+  }
   // `justRead` skips the check for a file load read a moment ago.
   async function write(cleanExit = false, justRead = false) {
     if (!loaded) return;
@@ -274,7 +313,7 @@ export function createUsageStore(deps: {
         throw error;
       }
       // Maps contain only validated aggregates; avoid re-validating the whole store.
-      const data = JSON.stringify(snapshot(cleanExit));
+      const data = JSON.stringify(storedSnapshot(cleanExit));
       await io.mkdir(directory, { recursive: true });
       await io.writeFile(path + ".tmp", data, { mode: 0o600 });
       await io.rename(path + ".tmp", path);
@@ -401,7 +440,7 @@ export function createUsageStore(deps: {
     if (writeTimer) clearTimeout(writeTimer);
     if (dayTimer) clearTimeout(dayTimer);
     writeTimer = undefined; dayTimer = undefined;
-    days.clear(); counts.clear(); coverage.clear();
+    days.clear(); counts.clear(); coverage.clear(); unknownCounts.clear(); unknownCoverage.clear();
     pending.length = 0; pendingOverflow = false;
     loaded = false; admissionReady = false; unreadable = undefined; loading = undefined; activeDay = undefined;
     revision = 0; savedRevision = 0; committedCleanExit = true; lastBytes = undefined;
@@ -490,9 +529,10 @@ export function createUsageStore(deps: {
     },
     clear(): Promise<void> {
       return control(async () => {
-        const saved = { days: [...days], counts: [...counts], coverage: [...coverage] };
+        const saved = { days: [...days], counts: [...counts], coverage: [...coverage],
+          unknownCounts: [...unknownCounts], unknownCoverage: [...unknownCoverage] };
         pending.length = 0; pendingOverflow = false;
-        counts.clear(); days.clear(); coverage.clear();
+        counts.clear(); days.clear(); coverage.clear(); unknownCounts.clear(); unknownCoverage.clear();
         coverage.set(appVersion, buildCoverage);
         refreshDay(); incomplete(); changed();
         try {
@@ -504,6 +544,8 @@ export function createUsageStore(deps: {
           for (const [key, row] of saved.days) days.set(key, row);
           for (const [key, row] of saved.counts) counts.set(key, row);
           for (const [key, row] of saved.coverage) coverage.set(key, row);
+          for (const [key, row] of saved.unknownCounts) unknownCounts.set(key, row);
+          for (const [key, row] of saved.unknownCoverage) unknownCoverage.set(key, row);
           incomplete(); changed();
           throw error;
         }

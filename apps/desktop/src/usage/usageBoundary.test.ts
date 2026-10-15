@@ -108,4 +108,14 @@ describe("usage import boundary", () => {
     const usage = readFileSync(join(root, "apps/desktop/src/usage/rendererUsage.ts"), "utf8");
     expect(usage).not.toMatch(/usage\.(read|query|copy)/);
   });
+
+  it("uses the server-scoped workspace owner check for local and history labels", () => {
+    const main = readFileSync(join(root, "apps/desktop/src/main.ts"), "utf8");
+    expect(main).toContain("return !entry.remote || workspaceRemoteMatchesCredentials(entry.remote, cachedCredentials);");
+    expect(main).toContain("workspaceRemoteMatchesCredentials(workspace.remote, cachedCredentials)");
+    expect(main).toContain("if (!workspaceRemoteMatchesCredentials(workspace.remote, credentials)) return null;");
+    expect(main).not.toContain("cachedCredentials?.userId === entry.remote.ownerUserId");
+    expect(main).not.toContain("cachedCredentials?.userId === workspace.remote.ownerUserId");
+    expect(main).not.toContain("if (credentials.userId !== workspace.remote.ownerUserId) return null;");
+  });
 });
