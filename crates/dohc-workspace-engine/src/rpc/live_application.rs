@@ -1039,7 +1039,9 @@ impl EngineService {
     /// the writer released in the same step. Durable work stays. One task
     /// runs both, so a caller that stops waiting cannot keep them open. The
     /// close waits on `session_ops`, so a registration in flight is dropped
-    /// here or refused natively.
+    /// here or refused natively. Only the relay observes cancellation, before
+    /// a step runs or while it waits on the network, so a step that landed is
+    /// answered after its close and never reported as failed.
     pub(super) async fn hosted_execute(
         &self,
         ctx: &RequestContext,
@@ -1093,13 +1095,25 @@ impl EngineService {
             }
             Ok::<_, dohc_engine_runtime::RuntimeError>(outcome)
         });
-        tokio::select! {
-            biased;
-            outcome = task => outcome
-                .map_err(|_| WireError::new(ErrorCode::Internal, "hosted-sync-interrupted"))?
-                .map_err(map_runtime),
-            () = cancellation.token.cancelled() => Err(cancellation.interruption(label)),
-        }
+        task.await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "hosted-sync-interrupted"))?
+            .map_err(|error| match error {
+                dohc_engine_runtime::RuntimeError::Cancelled => cancellation.interruption(label),
+                error => map_runtime(error),
+            })
+    }
+
+    /// Hold the workspace's session lock, as an editor or registration step
+    /// in flight holds it.
+    #[cfg(feature = "harness")]
+    #[doc(hidden)]
+    pub async fn session_ops_for_harness(
+        &self,
+        handle: &WorkspaceHandle,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, WireError> {
+        Ok(Arc::clone(&self.open(Some(handle))?.session_ops)
+            .lock_owned()
+            .await)
     }
 
     pub(crate) fn live_application_registration(

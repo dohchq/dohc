@@ -1398,6 +1398,121 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
     .await;
 }
 
+/// How many cursors the hosted replica has committed.
+fn cursor_commits(scratch: &ScratchDir) -> i64 {
+    Connection::open(engine_db_path(scratch).expect("db path"))
+        .expect("open db")
+        .query_row(
+            "SELECT cursor_commits FROM hosted_replicas WHERE workspace_id=?1",
+            [WORKSPACE],
+            |row| row.get(0),
+        )
+        .expect("cursor commits")
+}
+
+/// A landed commit is never reported as failed. The commit that leaves held
+/// `doc-a` held lands while an editor step holds the session lock, so its
+/// close of `doc-a`'s session waits. The caller cancelled then still gets the
+/// commit once the close has run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_commit_cancelled_after_it_lands_answers_committed_once_its_close_runs() {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-a", "a.txt", "hosted a");
+    relay.share("doc-a", "a.txt");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    relay.relay().share("doc-a", "moved.txt");
+    host.pull().await;
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("held"));
+    let pass = host.pull().await;
+    let session = host
+        .call(
+            "ydoc.open",
+            json!({"versionId": "main", "path": "a.txt", "contentKind": "plaintext",
+                "seedFromArtifact": false}),
+        )
+        .await["sessionId"]
+        .clone();
+    let params = json!({"workspaceId": WORKSPACE, "pendingCursor": pass["pendingCursor"]});
+    assert_eq!(
+        host.call("sync.materializePendingCursor", params.clone())
+            .await,
+        json!({"materialized": true})
+    );
+    let before = cursor_commits(&scratch);
+
+    let held = service
+        .session_ops_for_harness(&host.handle)
+        .await
+        .expect("session lock");
+    let ctx = RequestContext::unbounded();
+    let cancel = ctx.cancel.clone();
+    host.id += 1;
+    let commit = request(
+        host.id,
+        "sync.commitCursor",
+        Some(host.handle.clone()),
+        params,
+    );
+    let mut committing = tokio::spawn({
+        let service = Arc::clone(&service);
+        async move {
+            service
+                .call(ctx, commit)
+                .await
+                .map(|response| response.response.result)
+        }
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while cursor_commits(&scratch) == before {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the commit never landed"
+        );
+        tokio::task::yield_now().await;
+    }
+    cancel.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut committing)
+            .await
+            .is_err(),
+        "the answer waits for the close"
+    );
+    drop(held);
+    let answer = committing
+        .await
+        .expect("commit task")
+        .expect("a landed commit answers");
+    assert_eq!(answer["committed"], true);
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("held"));
+    // The close ran before the answer.
+    let edit = base64::engine::general_purpose::STANDARD
+        .encode(dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "closed "));
+    host.id += 1;
+    call_error(
+        &host.transport,
+        &host.handle,
+        host.id,
+        "ydoc.recordUpdate",
+        json!({"sessionId": session, "updateBase64": edit}),
+    )
+    .await;
+}
+
 /// The session host as it runs: a configured live host whose own connection
 /// syncs the hosted replica under a real publication budget.
 struct SessionHost {
