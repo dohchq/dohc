@@ -718,6 +718,7 @@ impl ActorHandle {
                         store,
                         &root_dir,
                         MaterializationReplayScope {
+                            holds: None,
                             workspace_id: &workspace_id,
                             self_writes: Some(self_writes.as_ref()),
                             progress: None,
@@ -2647,6 +2648,7 @@ pub(super) fn ydoc_settle_on_store(
                 root_dir,
                 &job,
                 &MaterializeOptions {
+                    holds: None,
                     policy: DurabilityPolicy::per_os(),
                     replacer: &StdReplacer,
                     backoff: &StdBackoff,
@@ -3030,6 +3032,7 @@ pub(super) fn ydoc_settle_on_store(
         root_dir,
         &job,
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &StdBackoff,
@@ -3470,6 +3473,7 @@ fn materialize_ydoc_drain(
         store,
         &materialization.root_dir,
         MaterializationReplayScope {
+            holds: None,
             workspace_id: &key.workspace_id,
             self_writes: Some(materialization.self_writes.as_ref()),
             progress: None,
@@ -4046,6 +4050,7 @@ mod scene_seed_transaction_tests {
             &mut store,
             scratch.path(),
             MaterializationReplayScope {
+                holds: None,
                 workspace_id: "workspace",
                 self_writes: None,
                 progress: None,
@@ -4090,6 +4095,7 @@ mod scene_seed_transaction_tests {
             &mut store,
             scratch.path(),
             MaterializationReplayScope {
+                holds: None,
                 workspace_id: "workspace",
                 self_writes: None,
                 progress: Some(&jobs_taken),
