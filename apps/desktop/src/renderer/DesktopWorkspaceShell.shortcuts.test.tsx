@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { makeBridge, renderShell, STORED_STATE, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
 import { SHORTCUTS, matchShellShortcut, type ShortcutId } from "../shortcuts/shortcutRegistry";
 import { buildMenuTemplate } from "../window/applicationMenu";
 import type { MenuItemConstructorOptions } from "electron";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
 
 async function ready(platform: NodeJS.Platform = "win32") {
   const bridge = makeBridge(Promise.resolve(STORED_STATE), platform);
@@ -97,8 +99,63 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     await screen.findByTestId("command-palette");
     act(() => bridge.emitMenuCommand("command-palette"));
     expect(screen.getByTestId("command-palette")).toBeTruthy();
-    fireEvent(window, keyEvent(binding, platform));
+    fireEvent(screen.getByRole("textbox", { name: "Command" }), keyEvent(binding, platform));
     expect(screen.queryByTestId("command-palette")).toBeNull();
+  });
+
+  it("does not toggle the workspace behind Settings, while Escape closes Settings", async () => {
+    await ready(platform);
+    fireEvent(window, keyEvent(SHORTCUTS.settings.accelerators[0], platform));
+    await screen.findByTestId("settings-dialog");
+
+    fireEvent(window, keyEvent(SHORTCUTS["toggle-sidebar"].accelerators[0], platform));
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+
+    fireEvent.keyDown(screen.getByTestId("settings-dialog"), { key: "Escape", bubbles: true });
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+  });
+
+  it.each([
+    ["command palette", "command-palette", "command-palette"],
+    ["Go to", "quick-open", "quick-open"],
+  ] as const)("does not toggle the workspace behind the %s, while Escape closes it", async (_name, shortcutId, testId) => {
+    await ready(platform);
+    fireEvent(window, keyEvent(SHORTCUTS[shortcutId].accelerators[0], platform));
+    await screen.findByTestId(testId);
+
+    fireEvent(window, keyEvent(SHORTCUTS["toggle-sidebar"].accelerators[0], platform));
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+
+    fireEvent.keyDown(screen.getByRole("textbox", { name: testId === "quick-open" ? "File" : "Command" }), { key: "Escape", bubbles: true });
+    await waitFor(() => expect(screen.queryByTestId(testId)).toBeNull());
+  });
+
+  it("does not toggle the workspace behind a confirm dialog, while Escape closes it", async () => {
+    await ready(platform);
+    function ConfirmFixture() {
+      const [open, setOpen] = useState(true);
+      return open ? (
+        <ConfirmDialog
+          title="Confirm"
+          confirmLabel="Confirm"
+          testId="shortcut-confirm"
+          cancelTestId="shortcut-confirm-cancel"
+          confirmTestId="shortcut-confirm-action"
+          onCancel={() => setOpen(false)}
+          onConfirm={() => setOpen(false)}
+        >
+          Confirm this action?
+        </ConfirmDialog>
+      ) : null;
+    }
+    render(<ConfirmFixture />);
+    await screen.findByTestId("shortcut-confirm");
+
+    fireEvent(window, keyEvent(SHORTCUTS["toggle-sidebar"].accelerators[0], platform));
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+
+    fireEvent.keyDown(screen.getByTestId("shortcut-confirm"), { key: "Escape", bubbles: true });
+    await waitFor(() => expect(screen.queryByTestId("shortcut-confirm")).toBeNull());
   });
 
   it.each(["menu", "shell", "chip"])("takes a changed registry binding through %s", async (consumer) => {

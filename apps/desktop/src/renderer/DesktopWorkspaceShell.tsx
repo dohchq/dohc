@@ -3898,11 +3898,17 @@ export function DesktopWorkspaceShell(props: {
       if (storeUpdateRequiredRef.current) return;
       const command = matchShellShortcut(event);
       if (!command) return;
+      // A modal owns the keyboard while it is visible. Native/main-owned
+      // shortcuts such as Close Window and zoom never reach this listener,
+      // so they continue to work over a modal.
+      const commandPaletteOwnShortcut =
+        command === "command-palette" &&
+        event.target instanceof Element &&
+        event.target.closest("[data-testid='command-palette']") !== null;
+      if (hasBlockingModal() && !commandPaletteOwnShortcut) return;
       if (command === "settings") {
-        if (!hasBlockingModal()) {
-          event.preventDefault();
-          openSettings();
-        }
+        event.preventDefault();
+        openSettings();
         return;
       }
       if (command === "history-restore-undo") {
@@ -3933,6 +3939,7 @@ export function DesktopWorkspaceShell(props: {
 
   useEffect(() => {
     return bridge().onMenuCommand((command) => {
+      if (hasBlockingModal()) return;
       if (command === "command-palette") setPaletteOpen(true);
       else if (isCommandAvailable(command, commandContext)) commandHandlers[command]();
     });
