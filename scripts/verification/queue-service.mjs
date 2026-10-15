@@ -14,7 +14,8 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
 import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
-import { attemptOutcome, lastNightlyPass, listRequests, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, lastNightlyPass, listRequests, monitorPort, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { startMonitor } from "./queue-monitor.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
 const sha = /^[0-9a-f]{40}$/u;
@@ -134,12 +135,14 @@ export async function runService({
   freeDisk = () => freeDiskGb(lane) ?? freeDiskGb(root), docker = dockerResponds,
   prepare = prepareLane, sweep = sweepContainers, holdLane = holdLegacyLane,
   worker = defaultWorker, retryDelay = retryDelayMs, cleanupRetryMs = 60_000, prepareLimitMs = 45 * 60_000, stop, log = defaultLog(root),
-  lanes = () => 1,
+  lanes = () => 1, monitor = null,
 }) {
   const paths = queuePaths(root);
   for (const path of [paths.inbox, paths.keys, paths.requests, paths.control]) mkdirSync(path, { recursive: true });
   const instance = await holdInstance(root);
   if (!instance) { log("another service already serves this queue root"); return 0; }
+  // The page only reads the queue's files, so it starts with the service and never holds up its loop.
+  const page = monitor === null ? null : startMonitor({ root, port: monitor, log });
   const startedAt = new Date().toISOString();
   // The previous service's last heartbeat says how long its interrupted runs had been awake.
   const previousRuns = serviceRuns(readJson(paths.service)).runs;
@@ -307,8 +310,9 @@ export async function runService({
     running.set(entry.id, current);
     let lease;
     try {
-      await setStatus(entry.id, { ...entry.status, state: "running", attempts: [...entry.status.attempts, { n, startedAt: current.startedAt }], notBefore: null, waiting: null });
-      history({ event: "started", id: entry.id, attempt: n });
+      const laneNumber = checkouts.indexOf(checkout) + 1;
+      await setStatus(entry.id, { ...entry.status, state: "running", attempts: [...entry.status.attempts, { n, startedAt: current.startedAt, lane: laneNumber }], notBefore: null, waiting: null });
+      history({ event: "started", id: entry.id, attempt: n, lane: laneNumber });
       mkdirSync(output, { recursive: true });
       await prepare({ lane: checkout, repo, head: entry.request.head, signal: current.abort.signal });
       current.phase = "waiting for the host lane";
@@ -514,6 +518,7 @@ export async function runService({
   } finally {
     clearInterval(pulse);
     clearInterval(clock);
+    page?.close();
     instance.close();
   }
 }
@@ -536,7 +541,7 @@ async function main(argv) {
     if (!go) throw new Error("The supervisor never said go; this process may be outside its job.");
   }
   const repo = resolve(git(["rev-parse", "--git-common-dir"], here), "..");
-  return runService({ root, repo, commit: git(["rev-parse", "HEAD"], here), lanes: () => verificationLanes(process.env) });
+  return runService({ root, repo, commit: git(["rev-parse", "HEAD"], here), lanes: () => verificationLanes(process.env), monitor: monitorPort });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
