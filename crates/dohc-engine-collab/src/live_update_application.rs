@@ -986,6 +986,7 @@ impl ApplicationOwner {
         };
         let outcome = store.write_with(&NoFaults, |tx| {
             require_workspace(tx, &registration)?;
+            require_hosted_ready(tx, &key)?;
             restore_fence::require_registration(
                 tx,
                 &key,
@@ -1127,6 +1128,24 @@ impl Drop for ApplicationOwner {
 
 fn require_workspace(tx: &Connection, registration: &Registration) -> Result<(), ApplicationError> {
     require_binding_workspace(tx, &registration.workspace_id, &registration.binding)
+}
+
+/// A hosted replica registers only a document its current scope holds ready.
+fn require_hosted_ready(tx: &Connection, key: &DocKey) -> Result<(), ApplicationError> {
+    let ready: Option<bool> = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM hosted_documents d WHERE d.workspace_id=h.workspace_id
+                AND d.object_id=?2 AND d.scope_generation=h.scope_generation AND d.state='ready')
+             FROM hosted_replicas h WHERE h.workspace_id=?1",
+            params![key.workspace_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    if ready == Some(false) {
+        return Err(ApplicationError::Conflict);
+    }
+    Ok(())
 }
 
 /// Refuse invalid caller bindings before retiring an existing registration.

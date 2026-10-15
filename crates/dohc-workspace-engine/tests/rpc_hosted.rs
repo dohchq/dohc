@@ -13,14 +13,20 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use dohc_engine_collab::live_update_application::ApplicationHostCoordinate;
 use dohc_engine_protocol::{
-    error::ErrorCode,
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    error::{ErrorCode, WireError},
+    transport::{
+        ConnectionOwner, EngineService as _, EngineTransport, InProcessTransport, OutputGuard,
+        RequestContext,
+    },
     wire::WorkspaceHandle,
 };
 use dohc_engine_storage::hex_sha256;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
-use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
+use dohc_workspace_engine::{
+    EngineService, LiveApplicationHostConfig, root_binding::write_root_binding,
+};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
@@ -1138,6 +1144,255 @@ async fn a_departed_document_keeps_its_head_until_its_session_settles() {
     host.sync().await;
     assert_eq!(document_state(&scratch, "doc-b"), None);
     assert_eq!(std::fs::read_to_string(&file).expect("a.txt"), "hosted a");
+}
+
+/// The session host's live host on a hosted replica: the trusted owner of its
+/// registrations, called as the relay calls it.
+struct LiveHost {
+    service: Arc<EngineService>,
+    owner: ConnectionOwner,
+    workspace: WorkspaceHandle,
+    main_version_id: String,
+}
+
+impl LiveHost {
+    async fn provision(service: Arc<EngineService>, host: &Host, scratch: &ScratchDir) -> Self {
+        let owner = ConnectionOwner::authenticated();
+        service
+            .provision_live_application(
+                owner.handle(),
+                LiveApplicationHostConfig {
+                    workspace: host.handle.clone(),
+                    namespace: "hosted-relay".into(),
+                    coordinate: ApplicationHostCoordinate {
+                        host_id: "host".into(),
+                        host_epoch: 1,
+                        instance_id: "instance".into(),
+                        connection_id: "connection".into(),
+                    },
+                    max_registrations: 4,
+                },
+            )
+            .await
+            .expect("provision live host");
+        let main_version_id = Connection::open(engine_db_path(scratch).expect("db path"))
+            .expect("open db")
+            .query_row(
+                "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
+                [WORKSPACE],
+                |row| row.get(0),
+            )
+            .expect("main version");
+        Self {
+            service,
+            owner,
+            workspace: host.handle.clone(),
+            main_version_id,
+        }
+    }
+
+    async fn call(&self, method: &str, params: Value) -> Result<Value, WireError> {
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(self.owner.handle());
+        self.service
+            .call(
+                ctx,
+                request(900, method, Some(self.workspace.clone()), params),
+            )
+            .await
+            .map(|response| response.response.result)
+    }
+
+    /// Register `object_id` under the lineage [`journal_live_update`] names.
+    async fn register(&self, object_id: &str, path: &str) -> Result<Value, WireError> {
+        let binding = json!({
+            "workspaceId": WORKSPACE, "mainVersionId": self.main_version_id,
+            "objectId": object_id, "lineageClaimId": "0".repeat(64),
+            "currentPath": path, "selectorPaths": [path], "restoreFenceGeneration": 0,
+        });
+        self.call("liveApplication.register", json!({"binding": binding}))
+            .await
+            .map(|registered| registered["registrationId"].clone())
+    }
+
+    /// Whether the registration still answers its owner.
+    async fn registered(&self, registration: &Value) -> bool {
+        self.output(registration).await.is_ok()
+    }
+
+    /// The guard on the registration's output to its owner, as an
+    /// acknowledgement read leaves it.
+    async fn output(&self, registration: &Value) -> Result<Arc<dyn OutputGuard>, WireError> {
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(self.owner.handle());
+        let read = request(
+            900,
+            "liveApplication.ack",
+            Some(self.workspace.clone()),
+            json!({"registrationId": registration, "deliveryId": "probe",
+                "updateDigest": "00".repeat(32)}),
+        );
+        self.service
+            .call(ctx, read)
+            .await
+            .map(|response| response.output_guard.expect("output guard"))
+    }
+}
+
+/// Each live binding the writer holds for the hosted replica, and whether it
+/// is available.
+fn native_bindings(scratch: &ScratchDir) -> Vec<(String, bool)> {
+    let conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
+    let mut statement = conn
+        .prepare(
+            "SELECT object_id,available FROM live_device_application_bindings \
+             WHERE workspace_id=?1 ORDER BY object_id",
+        )
+        .expect("bindings");
+    statement
+        .query_map([WORKSPACE], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("bindings")
+        .collect::<Result<_, _>>()
+        .expect("bindings")
+}
+
+/// Part 5's held fence. `doc-a` and `doc-b` are ready, each with a live
+/// registration and an editor session, when the scope moves `doc-a` off its
+/// head's path. The pass that holds it drops its registration and session
+/// before it replies; `doc-b` keeps both, and `doc-a`'s accepted work still
+/// reaches the relay. `doc-a` registers again only once a commit settles it
+/// ready at its new path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_document_held_while_live_loses_its_registration_and_session_in_the_same_pass() {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-a", "a.txt", "hosted a");
+    relay.create("owner", 2, "doc-b", "b.txt", "hosted b");
+    relay.share("doc-a", "a.txt");
+    relay.share("doc-b", "b.txt");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    let live = LiveHost::provision(service, &host, &scratch).await;
+    let registration_a = live.register("doc-a", "a.txt").await.expect("register a");
+    let registration_b = live.register("doc-b", "b.txt").await.expect("register b");
+    let mut sessions = Vec::new();
+    for path in ["a.txt", "b.txt"] {
+        let opened = host
+            .call(
+                "ydoc.open",
+                json!({"versionId": "main", "path": path, "contentKind": "plaintext",
+                    "seedFromArtifact": false}),
+            )
+            .await;
+        sessions.push(opened["sessionId"].clone());
+    }
+    let edit = |text: &str| {
+        base64::engine::general_purpose::STANDARD
+            .encode(dohc_engine_collab::Ydoc::wire().plaintext_insert(0, text))
+    };
+    // An accepted live update of doc-a, journaled for the relay.
+    journal_live_update(&scratch, "doc-a", "a.txt", b"accepted");
+    let output_a = live.output(&registration_a).await.expect("output a");
+    let output_b = live.output(&registration_b).await.expect("output b");
+
+    relay.relay().share("doc-a", "moved.txt");
+    let adopted = host.pull().await;
+    assert_eq!(adopted["pendingCursor"], Value::Null);
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("held"));
+    assert!(!output_a.is_current());
+    assert!(output_b.is_current());
+    assert!(!live.registered(&registration_a).await);
+    assert!(live.registered(&registration_b).await);
+    assert_eq!(
+        native_bindings(&scratch),
+        [("doc-a".to_owned(), false), ("doc-b".to_owned(), true)]
+    );
+    host.id += 1;
+    call_error(
+        &host.transport,
+        &host.handle,
+        host.id,
+        "ydoc.recordUpdate",
+        json!({"sessionId": sessions[0], "updateBase64": edit("closed ")}),
+    )
+    .await;
+
+    // Its accepted work stays, waiting for the relay.
+    let outbox: i64 = Connection::open(engine_db_path(&scratch).expect("db path"))
+        .expect("open db")
+        .query_row(
+            "SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1 AND imported=0 \
+             AND op_kind='ydoc.update' AND json_extract(payload_json,'$.objectId')='doc-a'",
+            [WORKSPACE],
+            |row| row.get(0),
+        )
+        .expect("outbox");
+    assert_eq!(outbox, 1);
+
+    // Held, it registers nowhere until a commit settles it ready, and a
+    // commit that leaves it held closes a session opened since its pass.
+    assert_eq!(
+        live.register("doc-a", "moved.txt")
+            .await
+            .map_err(|error| error.code),
+        Err(ErrorCode::Conflict)
+    );
+    let still_held = host.pull().await;
+    let reopened = host
+        .call(
+            "ydoc.open",
+            json!({"versionId": "main", "path": "a.txt", "contentKind": "plaintext",
+                "seedFromArtifact": false}),
+        )
+        .await["sessionId"]
+        .clone();
+    assert!(host.commit(&still_held["pendingCursor"]).await);
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("held"));
+    host.id += 1;
+    call_error(
+        &host.transport,
+        &host.handle,
+        host.id,
+        "ydoc.recordUpdate",
+        json!({"sessionId": reopened, "updateBase64": edit("closed ")}),
+    )
+    .await;
+    relay.relay().rename(
+        "owner",
+        3,
+        "doc-a",
+        "a.txt",
+        "moved.txt",
+        "hosted a",
+        "moment-owner-1",
+    );
+    let pass = host.pull().await;
+    assert_eq!(pass["held"], json!([]));
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("held"));
+    assert!(live.register("doc-a", "moved.txt").await.is_err());
+    assert!(host.commit(&pass["pendingCursor"]).await);
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
+    let registered = live.register("doc-a", "moved.txt").await.expect("ready");
+    assert!(live.registered(&registered).await);
+    assert!(live.registered(&registration_b).await);
+    host.call(
+        "ydoc.recordUpdate",
+        json!({"sessionId": sessions[1], "updateBase64": edit("still open ")}),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

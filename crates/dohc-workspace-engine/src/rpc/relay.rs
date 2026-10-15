@@ -510,7 +510,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "morePending": outcome.more_pending,
         }),
         RelayOperationOutcome::HostedReplicaCreated => json!({ "hosted": true }),
-        RelayOperationOutcome::HostedPass(pass) => hosted_pass_json(pass),
+        RelayOperationOutcome::HostedPass { pass, .. } => hosted_pass_json(pass),
         // A pass fetched under a scope that has since moved commits nothing.
         // A commit that retired a departed document has more to pull: work
         // that waited for its path. A retirement that failed is reported as
@@ -518,6 +518,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
         RelayOperationOutcome::HostedCursorCommitted {
             committed,
             retirement,
+            ..
         } => json!({
             "committed": committed,
             "hasMore": matches!(retirement, Ok(true)),
@@ -1118,7 +1119,8 @@ impl EngineService {
             open.request_collection_reconcile();
         }
         // A hosted replica takes no part in enrollment.
-        if matches!(outcome, RelayOperationOutcome::HostedCursorCommitted { .. }) {
+        if let RelayOperationOutcome::HostedCursorCommitted { unready, .. } = &outcome {
+            self.close_unready_hosted(&open, unready).await;
             return relay_outcome_json(outcome);
         }
         // A cursor commit can be what makes enrollment ready, as a push can.
@@ -1365,12 +1367,13 @@ impl EngineService {
                 "sync.pullHosted",
             )
             .await?;
-        let RelayOperationOutcome::HostedPass(mut pass) = outcome else {
+        let RelayOperationOutcome::HostedPass { mut pass, unready } = outcome else {
             return Err(WireError::new(
                 ErrorCode::Internal,
                 "unexpected hosted pass outcome",
             ));
         };
+        self.close_unready_hosted(&open, &unready).await;
         for facts in std::mem::take(&mut pass.record_facts) {
             emit_record_events(&self.events, &open.workspace_id, &facts);
         }

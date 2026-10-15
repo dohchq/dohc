@@ -1033,6 +1033,38 @@ impl EngineService {
         })
     }
 
+    /// Drop the registrations and editor sessions of each document a hosted
+    /// pass left unready, whose native registrations the writer released in
+    /// the same step. Durable work stays. Behind `session_ops`, so a
+    /// registration in flight is dropped here or refused natively.
+    pub(super) async fn close_unready_hosted(&self, open: &Arc<OpenWorkspace>, unready: &[String]) {
+        if unready.is_empty() {
+            return;
+        }
+        let _serial = Arc::clone(&open.session_ops).lock_owned().await;
+        let handles: Vec<WorkspaceHandle> = lock(&self.handles)
+            .iter()
+            .filter(|(_, candidate)| Arc::ptr_eq(candidate, open))
+            .map(|(handle, _)| handle.clone())
+            .collect();
+        lock(&self.live_applications)
+            .registrations
+            .retain(|_, registration| {
+                if Arc::ptr_eq(&registration.host.open, open)
+                    && unready.contains(&registration.object_id)
+                {
+                    let _fence = lock(&registration.host.output_fence);
+                    registration.retired.cancel();
+                    false
+                } else {
+                    true
+                }
+            });
+        lock(&self.sessions).retain(|_, session| {
+            !handles.contains(&session.workspace) || !unready.contains(&session.key.object_id)
+        });
+    }
+
     pub(crate) fn live_application_registration(
         &self,
         connection: &ConnectionHandle,

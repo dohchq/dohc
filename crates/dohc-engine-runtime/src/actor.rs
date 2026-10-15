@@ -157,9 +157,13 @@ impl LifecycleState {
 }
 
 type ActorWork = Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache) + Send>;
+type RegistrationWork =
+    Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache, &mut live_application::Registry) + Send>;
 
 enum Command {
     Run(ActorWork),
+    /// Work that may release live application registrations in the same step.
+    RunWithRegistrations(RegistrationWork),
     LiveApplication(Box<live_application::Request>),
     /// Break the loop and release the connection. Carries no reply: the caller
     /// joins the worker, and the join is the completion signal (so `close`
@@ -464,6 +468,29 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    async fn run_with_registrations<R: Send + 'static>(
+        &self,
+        work: impl FnOnce(
+            &mut EngineStore,
+            &mut WriterDocCache,
+            &mut live_application::Registry,
+        ) -> Result<R, RuntimeError>
+        + Send
+        + 'static,
+    ) -> Result<R, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::RunWithRegistrations(Box::new(
+                move |store, cache, registrations| {
+                    let outcome = work(store, cache, registrations);
+                    let _ = reply.send(outcome);
+                },
+            )))
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     fn run_blocking<R: Send + 'static>(
         &self,
         work: impl FnOnce(&mut EngineStore, &mut WriterDocCache) -> Result<R, RuntimeError>
@@ -665,6 +692,9 @@ fn worker_main(
         }
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
+            Command::RunWithRegistrations(work) => {
+                work(&mut store, &mut doc_cache, &mut live_applications);
+            }
             Command::LiveApplication(request) => {
                 request.execute(&mut live_applications, &mut store, &mut doc_cache);
             }

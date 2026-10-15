@@ -737,6 +737,7 @@ mod deferred_relay_tests {
                 operation.clone(),
                 &LeaseRegistry::default(),
                 &ClaimAnnouncer::default(),
+                &mut crate::actor::live_application::Registry::default(),
             )
         };
         assert!(matches!(run(&mut store, &mut cache),
@@ -800,6 +801,7 @@ mod deferred_relay_tests {
             operation.clone(),
             &LeaseRegistry::default(),
             &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
         );
         assert!(
             second_phase.is_ok(),
@@ -817,6 +819,7 @@ mod deferred_relay_tests {
             next_operation,
             &LeaseRegistry::default(),
             &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
         );
         assert!(matches!(next,
             Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING));
@@ -912,6 +915,7 @@ mod deferred_relay_tests {
                 operation.clone(),
                 &LeaseRegistry::default(),
                 &ClaimAnnouncer::default(),
+                &mut crate::actor::live_application::Registry::default(),
             ) {
                 Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => break,
                 Err(RuntimeError::Relay(RelayError::Local(reason)))
@@ -972,6 +976,7 @@ mod deferred_relay_tests {
                                 },
                                 &LeaseRegistry::default(),
                                 &ClaimAnnouncer::default(),
+                                &mut crate::actor::live_application::Registry::default(),
                             ) {
                                 Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                                     ..
@@ -1702,7 +1707,12 @@ pub enum RelayOperationOutcome {
     ShareProposalSubmitted(ShareProposalSubmitOutcome),
     DirectWritesPushed(DirectWritePushOutcome),
     HostedReplicaCreated,
-    HostedPass(HostedPassOutcome),
+    HostedPass {
+        pass: HostedPassOutcome,
+        /// Each document of the scope that is not ready after the pass. Its
+        /// live registrations were released before the pass replied.
+        unready: Vec<String>,
+    },
     HostedCursorCommitted {
         /// `false` when the scope moved since the pass fetched; nothing
         /// committed.
@@ -1711,6 +1721,8 @@ pub enum RelayOperationOutcome {
         /// the scope retired, so work that waited for its path can apply and
         /// the caller pulls again. Its failure leaves the commit standing.
         retirement: Result<bool, RuntimeError>,
+        /// As for [`Self::HostedPass`], after the commit.
+        unready: Vec<String>,
     },
 }
 
@@ -1897,7 +1909,7 @@ impl ActorHandle {
             let queued_reservation = reservation.clone();
             let queued_claims = self.claims.clone();
             let outcome = self
-                .run(move |store, cache| {
+                .run_with_registrations(move |store, cache, registrations| {
                     let _reservation = queued_reservation;
                     let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
                     let outcome = if queued_token.is_cancelled() {
@@ -1910,6 +1922,7 @@ impl ActorHandle {
                             queued_operation,
                             &queued_leases,
                             &queued_claims,
+                            registrations,
                         )
                     };
                     // Push handles enrollment resets below. Every other
@@ -2256,9 +2269,10 @@ fn execute_relay_operation(
     operation: RelayOperation,
     leases: &LeaseRegistry,
     claims: &ClaimAnnouncer,
+    registrations: &mut super::live_application::Registry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
     let client = RelaySyncClient::new(transport);
-    let outcome = run_relay_operation(store, doc_cache, &client, operation, leases);
+    let outcome = run_relay_operation(store, doc_cache, &client, operation, leases, registrations);
     claims.announce(&client.take_automation_claims());
     outcome
 }
@@ -2269,6 +2283,7 @@ fn run_relay_operation(
     client: &RelaySyncClient<DeferredRelayTransport>,
     operation: RelayOperation,
     leases: &LeaseRegistry,
+    registrations: &mut super::live_application::Registry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
     let replicas = operation.replicas();
     if store.is_passive()
@@ -2600,7 +2615,10 @@ fn run_relay_operation(
             if pass.pending_cursor.is_none() {
                 retire_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms)?;
             }
-            Ok(RelayOperationOutcome::HostedPass(pass))
+            Ok(RelayOperationOutcome::HostedPass {
+                pass,
+                unready: release_unready_hosted(store, registrations, &workspace_id)?,
+            })
         }
         RelayOperation::CommitHostedCursor {
             workspace_id,
@@ -2608,20 +2626,43 @@ fn run_relay_operation(
             root,
             now_ms,
         } => match client.commit_hosted_cursor(store, &workspace_id, &cursor, &NoFaults)? {
-            TxnOutcome::Committed(committed) => Ok(RelayOperationOutcome::HostedCursorCommitted {
-                committed,
-                retirement: retire_departed_hosted(
-                    store,
-                    doc_cache,
-                    leases,
-                    &workspace_id,
-                    &root,
-                    now_ms,
-                ),
-            }),
+            TxnOutcome::Committed(committed) => {
+                let retirement =
+                    retire_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms);
+                Ok(RelayOperationOutcome::HostedCursorCommitted {
+                    committed,
+                    retirement,
+                    unready: release_unready_hosted(store, registrations, &workspace_id)?,
+                })
+            }
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
     }
+}
+
+/// Release the live registrations of each document of the hosted scope that
+/// is not ready, held or backfilling again: none can be edited live until a
+/// later commit settles it ready. Its durable work stays. A document that
+/// left the scope keeps its registrations until it drains.
+fn release_unready_hosted(
+    store: &mut EngineStore,
+    registrations: &mut super::live_application::Registry,
+    workspace_id: &str,
+) -> Result<Vec<String>, RuntimeError> {
+    let unready = dohc_engine_sync::read_hosted_replica(store, workspace_id)?
+        .map(|replica| {
+            replica
+                .documents
+                .into_iter()
+                .filter(|(_, document)| {
+                    document.status != dohc_engine_sync::HostedDocumentStatus::Ready
+                })
+                .map(|(object_id, _)| object_id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    registrations.release(store, workspace_id, &unready)?;
+    Ok(unready)
 }
 
 /// Retire each hosted document that left the scope once nothing of it is
@@ -2781,6 +2822,7 @@ mod share_view_identity_tests {
                     operation.clone(),
                     &LeaseRegistry::default(),
                     &ClaimAnnouncer::default(),
+                    &mut crate::actor::live_application::Registry::default(),
                 );
                 assert!(
                     matches!(result, Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING)
@@ -2800,7 +2842,8 @@ mod share_view_identity_tests {
                     transport.clone(),
                     push.clone(),
                     &LeaseRegistry::default(),
-                    &ClaimAnnouncer::default()
+                    &ClaimAnnouncer::default(),
+                    &mut crate::actor::live_application::Registry::default()
                 ),
                 Err(RuntimeError::Relay(RelayError::IdentityRequired))
             ));
@@ -2811,6 +2854,7 @@ mod share_view_identity_tests {
                 operation.clone(),
                 &LeaseRegistry::default(),
                 &ClaimAnnouncer::default(),
+                &mut crate::actor::live_application::Registry::default(),
             );
             assert!(result.is_err());
             let request = transport.take_pending().unwrap();
@@ -2823,7 +2867,8 @@ mod share_view_identity_tests {
                     transport,
                     operation,
                     &LeaseRegistry::default(),
-                    &ClaimAnnouncer::default()
+                    &ClaimAnnouncer::default(),
+                    &mut crate::actor::live_application::Registry::default()
                 ),
                 Ok(RelayOperationOutcome::Claimed)
             ));
@@ -2856,6 +2901,7 @@ mod share_view_identity_tests {
             },
             &LeaseRegistry::default(),
             &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
         )
         .expect("recording runs");
         match outcome {
@@ -3128,6 +3174,7 @@ mod hosted_refusal_tests {
                 operation.clone(),
                 &LeaseRegistry::default(),
                 &ClaimAnnouncer::default(),
+                &mut crate::actor::live_application::Registry::default(),
             );
             assert!(
                 matches!(&refused, Err(RuntimeError::Relay(refusal))
