@@ -1,3 +1,4 @@
+import { shortcutText } from "../shortcuts/shortcutRegistry";
 import { SAVED_HERE, SAVING, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { RecordButtonsRow } from "./collections/RecordButtonsRow";
@@ -2003,7 +2004,7 @@ export function MarkdownView(props: {
                 label: showSource ? "Editor" : "Source",
                 testId: "markdown-source-toggle",
                 pressed: showSource,
-                title: "Toggle markdown source (Ctrl+/)",
+                title: `Toggle markdown source (${shortcutText("toggle-markdown-source", window.dohcDesktop?.platform)})`,
                 onClick: toggleSourceView,
               }}
               menu={{
@@ -2210,7 +2211,7 @@ export function MarkdownView(props: {
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding. */}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
-        <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.sharedWaiting?.message} />
+        <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.openRefusal ?? engine.sharedWaiting?.message} />
       ) : null}
       {engine.removalInProgress ? (
         <EngineRemovalInProgressNotice

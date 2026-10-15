@@ -1,17 +1,18 @@
 import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
 import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+import { createActorPresentationRequest } from "../workspaces/actorPresentation";
+import type { ActorPresentation } from "./bridgeContract";
 import { type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import {
+  chatOperations,
   ListFileChatsPayload,
   CreateFileChatPayload,
   CreateFileChatResult,
-  ListChatMessagesPayload,
   ListChatMessagesResult,
   GetChatThreadRevisionPayload,
   GetChatThreadRevisionResult,
-  SendChatMessagePayload,
   SendChatMessageResult,
   ListChatThreadDecisionsPayload,
   ListChatThreadDecisionsResult,
@@ -25,14 +26,11 @@ import {
   ListChatFollowsResult,
   SetChatFollowPayload,
   SetChatFollowResult,
-  ListPersonalChatFeedPayload,
   ListPersonalChatFeedResult,
   MarkPersonalChatFeedSeenPayload,
   CreateChatChannelPayload,
   CreateChatChannelResult,
-  ListChannelThreadsPayload,
   ListChannelThreadsResult,
-  StartChannelThreadPayload,
   StartChannelThreadResult,
   MarkChatThreadReadPayload,
   MarkChatThreadReadResult,
@@ -42,7 +40,6 @@ import {
   SetChatReactionResult,
   ChatThreadRecord,
   ChatMessageRecord,
-  ListChatFileMentionsPayload,
   ListChatFileMentionsResult,
   ListChatBookmarksPayload,
   ListChatBookmarksResult,
@@ -52,6 +49,7 @@ import {
   ArchiveChatBookmarkResult,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { registerOperations, type OperationHandlers } from "./operationTable";
 import { listFileChatsForIpc } from "./fileChatsIpc";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import {
@@ -115,8 +113,9 @@ function automationForIpc(automation: NonNullable<ChatMessage["automation"]>, co
   return { automationId: automation.automationId, collectionPath: collectionOf(automation.automationId) };
 }
 
-export function chatMessageForIpc(message: ChatMessage, collectionOf: AutomationCollectionOf): ChatMessageRecord {
+export function chatMessageForIpc(message: ChatMessage, collectionOf: AutomationCollectionOf, presentation: ActorPresentation): ChatMessageRecord {
   return {
+    presentation,
     id: message.id,
     threadId: message.threadId,
     authorKind: message.author.kind,
@@ -151,6 +150,7 @@ export function registerChatsIpcHandlers<
   warmCredentialCache(): Promise<void>;
   localUserId(): string;
   localInstallationId(): string;
+  readWorkspace(workspaceId: string): RegistryEntry | null;
   currentCredentials(): CloudCredentials | null;
   chatRelayIdentityFor(
     workspaceId: string, target: ChatRelayIdentityTarget, store: DesktopLinkedChatStore,
@@ -191,6 +191,14 @@ export function registerChatsIpcHandlers<
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark } = desktopChatBookmarks;
+  async function presentationRequest(workspace: RegistryEntry, store: DesktopLinkedChatStore, assertCurrent: () => void) {
+    await warmCredentialCache();
+    assertCurrent();
+    return createActorPresentationRequest({
+      readWorkspace: () => dependencies.readWorkspace(workspace.workspaceId), store, assertCurrent,
+      installationId: localInstallationId(), credentials: currentCredentials(),
+    });
+  }
   function chatThreadForIpc(thread: ChatThread): ChatThreadRecord {
     return {
       id: thread.id,
@@ -241,9 +249,7 @@ export function registerChatsIpcHandlers<
     });
   });
 
-  registerHandler(CHANNELS.listChatFileMentions, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListChatFileMentionsPayload.parse(payload);
+  const listChatFileMentions: OperationHandlers<typeof chatOperations, Event, Operation>["listChatFileMentions"] = async (input, { event, operation }) => {
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -254,6 +260,7 @@ export function registerChatsIpcHandlers<
     const requestedFile = await capture.resolveFileForPath(input.path);
     const objectId = requestedFile?.objectId ?? null;
     const store = linkedChatStoreFor(workspace);
+    const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
     const mentions = await store.listFileMentions({
       workspaceId: workspace.workspaceId,
       ...(objectId ? { objectId } : { pathHint: input.path }),
@@ -284,7 +291,7 @@ export function registerChatsIpcHandlers<
       ...(rowsUncovered > 0
         ? { sharedChannelRowsUncovered: rowsUncovered }
         : {}),
-      mentions: mentions.flatMap((mention) => {
+      mentions: (await Promise.all(mentions.map(async (mention) => {
         const currentPath = resolveChatFileMentionPath({
           requestedObjectId: objectId,
           ...(mention.attachment.objectId
@@ -302,7 +309,7 @@ export function registerChatsIpcHandlers<
               ...mention.attachment,
               pathHint: currentPath,
             }),
-            message: chatMessageForIpc(mention.message, automationCollectionOf(workspace.workspaceId)),
+            message: chatMessageForIpc(mention.message, automationCollectionOf(workspace.workspaceId), await presentation(mention.message, mention.message.threadId)),
             thread: chatThreadForIpc(mention.thread),
             ...(mention.channel
               ? {
@@ -321,10 +328,9 @@ export function registerChatsIpcHandlers<
               : {}),
           },
         ];
-      }),
+      }))).flat(),
     });
-  });
-
+  };
   registerHandler(CHANNELS.listChatBookmarks, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatBookmarksPayload.parse(payload);
@@ -426,9 +432,7 @@ export function registerChatsIpcHandlers<
     return CreateFileChatResult.parse({ thread: chatThreadForIpc(thread) });
   });
 
-  registerHandler(CHANNELS.listChatMessages, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListChatMessagesPayload.parse(payload);
+  const listChatMessages: OperationHandlers<typeof chatOperations, Event, Operation>["listChatMessages"] = async (input, { event, operation }) => {
     // Reachable from a share view at every level, for a thread on
     // a file the share already served.
     const { workspace, store } = await requireChatScope(input.workspaceId);
@@ -436,11 +440,11 @@ export function registerChatsIpcHandlers<
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
     });
+    const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
     return ListChatMessagesResult.parse({
-      messages: messages.map((message) => chatMessageForIpc(message, automationCollectionOf(workspace.workspaceId))),
+      messages: await Promise.all(messages.map(async (message) => chatMessageForIpc(message, automationCollectionOf(workspace.workspaceId), await presentation(message, message.threadId)))),
     });
-  });
-
+  };
   registerHandler(CHANNELS.getChatThreadRevision, async (event, payload) => {
     assertTrustedSender(event);
     const input = GetChatThreadRevisionPayload.parse(payload);
@@ -452,9 +456,7 @@ export function registerChatsIpcHandlers<
     return GetChatThreadRevisionResult.parse({ revision });
   });
 
-  registerHandler(CHANNELS.sendChatMessage, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SendChatMessagePayload.parse(payload);
+  const sendChatMessage: OperationHandlers<typeof chatOperations, Event, Operation>["sendChatMessage"] = async (input, { event, operation }) => {
     // A share view resolves a scope instead of a capture so reads still work.
     // chatWrites refuses every received share before persistence.
     const scope = await requireChatScope(input.workspaceId);
@@ -470,9 +472,9 @@ export function registerChatsIpcHandlers<
           input.fileReferences,
         ),
     });
-    return SendChatMessageResult.parse({ message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId)) });
-  });
-
+    const presentation = await presentationRequest(scope.workspace, scope.store, operation.assertCurrent);
+    return SendChatMessageResult.parse({ message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId), await presentation(message, message.threadId)) });
+  };
   registerHandler(CHANNELS.listChatThreadDecisions, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatThreadDecisionsPayload.parse(payload);
@@ -563,10 +565,11 @@ export function registerChatsIpcHandlers<
   function channelThreadForIpc(
     summary: ChannelThreadSummary,
     collectionOf: AutomationCollectionOf,
-    reactionViewer?: {
+    reactionViewer: {
       viewerAuthorId: string;
       localFallbackAuthorId: string;
-    },
+    } | undefined,
+    presentation: ActorPresentation | null,
   ) {
     const openingReactions =
       summary.openingMessage?.reactions.map(chatReactionForIpc) ?? [];
@@ -579,6 +582,7 @@ export function registerChatsIpcHandlers<
       openDecisionCount: summary.openDecisionCount,
       openingMessage: summary.openingMessage
         ? {
+            presentation,
             id: summary.openingMessage.id,
             authorKind: summary.openingMessage.author.kind,
             authorDisplayName: summary.openingMessage.author.displayName,
@@ -767,9 +771,7 @@ export function registerChatsIpcHandlers<
     return SetChatFollowResult.parse({ follow: chatFollowForIpc(follow) });
   });
 
-  registerHandler(CHANNELS.listPersonalChatFeed, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListPersonalChatFeedPayload.parse(payload);
+  const listPersonalChatFeed: OperationHandlers<typeof chatOperations, Event, Operation>["listPersonalChatFeed"] = async (input, { event, operation }) => {
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -777,6 +779,7 @@ export function registerChatsIpcHandlers<
     await warmCredentialCache();
     const rowsUncovered = await syncWorkspaceSharedChannels(workspace.workspaceId);
     const store = linkedChatStoreFor(workspace);
+    const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
     const ownerUserId = localUserId();
     await store.ensureDefaultChannelFollows({
       workspaceId: workspace.workspaceId,
@@ -821,8 +824,8 @@ export function registerChatsIpcHandlers<
     );
     return ListPersonalChatFeedResult.parse({
       ...(rowsUncovered > 0 ? { sharedChannelRowsUncovered: rowsUncovered } : {}),
-      items: page.items.map((item) => ({
-        message: chatMessageForIpc(item.message, automationCollectionOf(workspace.workspaceId)),
+      items: await Promise.all(page.items.map(async (item) => ({
+        message: chatMessageForIpc(item.message, automationCollectionOf(workspace.workspaceId), await presentation(item.message, item.message.threadId)),
         thread: chatThreadForIpc(item.thread),
         viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
         // An automation is neither a person nor an agent to follow.
@@ -849,22 +852,21 @@ export function registerChatsIpcHandlers<
             }
           : {}),
         ...(item.parentMessage
-          ? { parentMessage: chatMessageForIpc(item.parentMessage, automationCollectionOf(workspace.workspaceId)) }
+          ? { parentMessage: chatMessageForIpc(item.parentMessage, automationCollectionOf(workspace.workspaceId), await presentation(item.parentMessage, item.parentMessage.threadId)) }
           : {}),
         ...(item.openingMessage
-          ? { openingMessage: chatMessageForIpc(item.openingMessage, automationCollectionOf(workspace.workspaceId)) }
+          ? { openingMessage: chatMessageForIpc(item.openingMessage, automationCollectionOf(workspace.workspaceId), await presentation(item.openingMessage, item.openingMessage.threadId)) }
           : {}),
         reactions: reactionsForViewer(item.reactions.map(chatReactionForIpc), {
           viewerAuthorId: viewerByThread.get(item.thread.id) ?? localFallbackAuthorId,
           localFallbackAuthorId,
         }),
         matchedBy: item.matchedBy,
-      })),
+      }))),
       ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
       ...(page.headCursor ? { headCursor: page.headCursor } : {}),
     });
-  });
-
+  };
   registerHandler(CHANNELS.markPersonalChatFeedSeen, async (event, payload) => {
     assertTrustedSender(event);
     const input = MarkPersonalChatFeedSeenPayload.parse(payload);
@@ -937,15 +939,14 @@ export function registerChatsIpcHandlers<
     }),
   );
 
-  registerHandler(CHANNELS.listChannelThreads, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListChannelThreadsPayload.parse(payload);
+  const listChannelThreads: OperationHandlers<typeof chatOperations, Event, Operation>["listChannelThreads"] = async (input, { event, operation }) => {
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
     );
     const localFallbackAuthorId = localInstallationId();
     const store = linkedChatStoreFor(workspace);
+    const presentation = await presentationRequest(workspace, store, operation.assertCurrent);
     const viewerAuthorId = await chatViewerAuthorId({
       localFallbackAuthorId,
       resolveReplicationAuthorId: async () =>
@@ -968,19 +969,16 @@ export function registerChatsIpcHandlers<
       ...(input.lane ? { lane: input.lane } : {}),
     });
     return ListChannelThreadsResult.parse({
-      threads: threads.map((thread) =>
+      threads: await Promise.all(threads.map(async (thread) =>
         channelThreadForIpc(thread, automationCollectionOf(workspace.workspaceId), {
           viewerAuthorId,
           localFallbackAuthorId,
-        }),
-      ),
+        }, thread.openingMessage ? await presentation(thread.openingMessage, thread.thread.id) : null),
+      )),
       viewerAuthorId,
     });
-  });
-
-  registerHandler(CHANNELS.startChannelThread, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = StartChannelThreadPayload.parse(payload);
+  };
+  const startChannelThread: OperationHandlers<typeof chatOperations, Event, Operation>["startChannelThread"] = async (input, { event, operation }) => {
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -998,6 +996,7 @@ export function registerChatsIpcHandlers<
       resolveAttachments: () =>
         resolveChatFileReferences(workspace, capture.fileObjectIdForPath, input.fileReferences),
     });
+    const presentation = await presentationRequest(workspace, linkedChatStoreFor(workspace), operation.assertCurrent);
     return StartChannelThreadResult.parse({
       thread: channelThreadForIpc({
         thread: started.thread,
@@ -1005,13 +1004,12 @@ export function registerChatsIpcHandlers<
         lastReadSequence: 1,
         unreadCount: 0,
         openDecisionCount: 0,
-      }, automationCollectionOf(workspace.workspaceId)),
-      message: chatMessageForIpc(started.message, automationCollectionOf(workspace.workspaceId)),
+      }, automationCollectionOf(workspace.workspaceId), undefined, null),
+      message: chatMessageForIpc(started.message, automationCollectionOf(workspace.workspaceId), await presentation(started.message, started.message.threadId)),
       viewerAuthorId:
         started.message.authorUserId ?? localInstallationId(),
     });
-  });
-
+  };
   registerHandler(
     CHANNELS.markChatThreadRead,
     createMarkChatThreadReadIpcHandler({
@@ -1095,5 +1093,12 @@ export function registerChatsIpcHandlers<
       viewerAuthorId: reaction.author.authorId,
     });
   });
+
+  registerOperations<typeof chatOperations, Event, Operation>({
+    handle: registerHandler,
+    assertTrustedSender,
+    withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
+      withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
+  }, chatOperations, { listChatFileMentions, listChatMessages, sendChatMessage, listPersonalChatFeed, listChannelThreads, startChannelThread });
 
 }

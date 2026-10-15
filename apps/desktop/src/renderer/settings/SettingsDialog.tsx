@@ -1,3 +1,4 @@
+import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import { desktopPins, settingsSectionPin } from "../../testPins";
 import { useRequestSequence } from "../useRequestSequence";
 import { StateMark } from "../ui/StateMark";
@@ -36,6 +37,7 @@ import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyLookSettings } from "../theme";
 import { palette } from "../tokens";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { ownPresentation, ownAgentPresentation } from "../workbench/actorPresentation";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { AskAgentButton, type AskAgent } from "../askAgent";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
@@ -520,7 +522,7 @@ export function SettingsDialog(props: {
     DEFAULT_USER_SETTINGS.appearance.zoomLevel,
   );
   const editorSizeModified = isModified(userSettings.editor.fontSize, DEFAULT_USER_SETTINGS.editor.fontSize);
-  const modifierKey = window.dohcDesktop?.platform === "darwin" ? "⌘" : "Ctrl";
+  const shortcutPlatform = window.dohcDesktop?.platform;
 
   const warnings = [
     userResult?.warning,
@@ -609,21 +611,21 @@ export function SettingsDialog(props: {
                 value={`${zoomPercent(userSettings.appearance.zoomLevel)}%`}
                 decrease={{
                   label: "Zoom out",
-                  keys: [modifierKey, "-"],
+                  keys: shortcutKeys("zoom-out", shortcutPlatform),
                   disabled: userSettings.appearance.zoomLevel <= MIN_ZOOM_LEVEL,
                   onClick: () => void stepZoomSetting("out"),
                 }}
                 reset={{
                   label: `Reset to ${zoomPercent(DEFAULT_USER_SETTINGS.appearance.zoomLevel)}%`,
                   to: `${zoomPercent(DEFAULT_USER_SETTINGS.appearance.zoomLevel)}%`,
-                  keys: [modifierKey, "0"],
+                  keys: shortcutKeys("zoom-reset", shortcutPlatform),
                   onClick: () => {
                     if (zoomModified) void stepZoomSetting("reset");
                   },
                 }}
                 increase={{
                   label: "Zoom in",
-                  keys: [modifierKey, "="],
+                  keys: shortcutKeys("zoom-in", shortcutPlatform),
                   disabled: userSettings.appearance.zoomLevel >= MAX_ZOOM_LEVEL,
                   onClick: () => void stepZoomSetting("in"),
                 }}
@@ -649,7 +651,7 @@ export function SettingsDialog(props: {
               testId="settings-row-your-color"
               {...customizeRow("settings-row-your-color")}
             >
-              <ChatAvatar name={userSettings.profile.preferredName ?? "You"} kind="human" own size="comment" />
+              <ChatAvatar presentation={ownPresentation} name={userSettings.profile.preferredName ?? "You"} kind="human" size="comment" />
               <HueControl
                 label="Your color"
                 shape="person"
@@ -663,7 +665,7 @@ export function SettingsDialog(props: {
               onReset={() => void saveAppearance({ yourAgentColor: null })}
               testId="settings-row-your-agent-color"
             >
-              <ChatAvatar name={userSettings.profile.agentName ?? "Agent"} kind="agent" own size="comment" />
+              <ChatAvatar presentation={ownAgentPresentation} name={userSettings.profile.agentName ?? "Agent"} kind="agent" size="comment" />
               <HueControl
                 label="Your agent's color"
                 shape="agent"

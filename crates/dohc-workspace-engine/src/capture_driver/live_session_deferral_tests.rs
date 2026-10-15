@@ -1352,10 +1352,7 @@ async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() 
             CancellationToken::new(),
         )
     };
-    assert_eq!(
-        format!("{:?}", switch().await.unwrap_err()),
-        format!("HeldFiles({:?})", vec![path])
-    );
+    assert!(switch().await.is_ok(), "an isolated hold permits switching");
     std::fs::write(harness.root.join(path), "Completed\n").unwrap();
     assert!(
         switch().await.is_ok(),

@@ -295,7 +295,7 @@ it("resumes a real configured service activation after a lost native adoption re
       openSocket: (input, protocols) => {const url = new URL(input); expect(url.origin).toBe(audience.replace("https:", "wss:"));
         const socket = new WebSocket(`ws://127.0.0.1:${port}${url.pathname}${url.search}`, protocols, {headers: {host: new URL(audience).host, origin: audience, cookie}, perMessageDeflate: false});
         sockets.push(socket); socket.on("error", () => undefined); socket.once("unexpected-response", (_request, response) => {response.resume(); socket.terminate();}); return socket as unknown as BrowserSocket;}});
-    const provider = manager.select({accountId: namedUser.id, workspaceId: "workspace", grantId: "grant", objectId}); providers.push(provider);
+    const provider = manager.select({accountId: namedUser.id, workspaceId: "named:grant", grantId: "grant", objectId}); providers.push(provider);
     await provider.reconnect(); await stateWhen(provider, state => state.status === "live");
     expect(yDocToMarkdown(provider.doc)).toBe(yDocToMarkdown(ownerDoc));
     const beforeNamedCursor = provider.state().lastApplied?.journalCursor ?? 0;

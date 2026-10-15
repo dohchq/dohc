@@ -1,8 +1,9 @@
-import {useCallback, useEffect, useRef, useState, type FormEvent} from "react";
+import {useCallback, useEffect, useRef, useState} from "react";
 import {createNamedLiveBrowserTransport, type NamedLiveBrowserState, type NamedLiveSelection} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {accountUser, namedFiles, namedRequest, ShareAccessRemovedError, type NamedRecipientFiles} from "./namedRecipient";
 import {NamedDocumentEditor, type NamedDocumentSession} from "./NamedDocumentEditor";
 import {DiscardDraft} from "./DiscardDraft";
+import {NamedSignIn, SIGN_IN_FAILED} from "./NamedSignIn";
 
 type Account = {id: string; name: string};
 type Selection = {session: NamedDocumentSession; path: string; objectId: string};
@@ -58,13 +59,11 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
       void session.reconnect();
     });
   };
-  const signIn = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); const form = event.currentTarget, values = new FormData(form), controller = start();
-    const email = String(values.get("email") ?? ""), password = String(values.get("password") ?? "");
-    form.reset();
-    void namedRequest("/api/account/sign-in", controller.signal, {email, password}).then(
+  const signIn = (credentials: {email: string; password: string}) => {
+    const controller = start();
+    void namedRequest("/api/account/sign-in", controller.signal, credentials).then(
       () => load(controller).catch((cause: unknown) => {if (!controller.signal.aborted) setError(cause instanceof ShareAccessRemovedError ? cause.message : "dohc could not open this invitation. Retry or sign in with the invited account.");}),
-      () => {if (!controller.signal.aborted) setError("dohc could not sign you in. Check your email and password, then retry.");},
+      () => {if (!controller.signal.aborted) setError(SIGN_IN_FAILED);},
     )
       .finally(() => {if (!controller.signal.aborted) setBusy(false);});
   };
@@ -80,12 +79,7 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
       {account && <div className="header-actions"><span>{account.name}</span><button disabled={busy} className="handoff-button secondary" onClick={signOut}>Sign out</button></div>}
     </header>
     {!grantId ? <main className="download-card"><p>This invitation is unavailable. Open the invitation the owner shared with you.</p></main> :
-      !account ? <main className="download-card"><h2>Sign in to edit</h2><p>Use the account the owner invited.</p>
-        <form className="comment-composer" onSubmit={signIn}><label>Email<input name="email" type="email" autoComplete="username" required disabled={busy}/></label>
-          <label>Password<input name="password" type="password" autoComplete="current-password" required disabled={busy}/></label>
-          <button className="handoff-button primary" disabled={busy}>Sign in</button></form>
-        {busy && <p role="status">Checking your account…</p>}{error && <p role="alert">{error}</p>}
-      </main> : <main className="layout named-recipient-layout">
+      !account ? <NamedSignIn title="Sign in to edit" busy={busy} error={error} onSignIn={signIn}/> : <main className="layout named-recipient-layout">
         <nav className="named-file-list" aria-label="Shared Markdown files"><p className="section-label">Files</p>
           {files?.files.map(file => <button className="handoff-button secondary named-file" key={file.objectId} disabled={busy}
             aria-current={selection?.objectId === file.objectId ? "page" : undefined} onClick={() => open(file.objectId, file.path)}>{file.path}</button>)}

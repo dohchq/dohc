@@ -6,14 +6,14 @@ import {
   linkLogWaitGroup,
   type DiscussionActivityHub,
 } from "./discussionActivity";
-import { badRequest, notFound, relayError } from "./errors";
+import { notFound, relayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
 import type { LinkEgressRateLimiter, ValidatedLinkCapability } from "./linkSecurity";
-import { assertSha256, parseCursor, parseLimit } from "./requestInputs";
+import { assertSha256, parseCursor, parseLimit, parseLinkLogHold } from "./requestInputs";
 import { targetVersionId } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
-import { MAX_BLOB_BYTES, MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
+import { MAX_BLOB_BYTES } from "./wireLimits";
 
 export type LinkReadRoute =
   | { route: "link-share" }
@@ -345,22 +345,4 @@ export function createLinkReadRoutes(
       }
     }
   };
-}
-
-function parseLinkLogHold(value: string | null): number {
-  if (value === null) return 0;
-  if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
-    throw badRequest("hold must be a non-negative integer");
-  }
-  const hold = Number(value);
-  if (
-    !Number.isSafeInteger(hold) ||
-    hold < 0 ||
-    hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS
-  ) {
-    throw badRequest(
-      `hold must be a non-negative integer no greater than ${String(MAX_DISCUSSION_ACTIVITY_HOLD_MS)}`,
-    );
-  }
-  return hold;
 }
