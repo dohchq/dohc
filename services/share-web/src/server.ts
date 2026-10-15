@@ -25,6 +25,7 @@ export {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 import {serveRemoteMcp} from "./remoteMcp";
 import {COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES} from "./collectionWrites";
 import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError } from "./relayVersion";
+import { viewerPage } from "../viewer/src/pages";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 
@@ -956,16 +957,15 @@ export function createShareWebApplication({
 
   async function serveViewer(pathname: string): Promise<Response> {
     if (!viewerAssetsDir) return refused();
-    const relative = pathname.startsWith("/s/assets/")
-      ? pathname.slice("/s/".length)
-      : "index.html";
+    const page = !pathname.startsWith("/s/assets/");
+    const relative = page ? viewerPage(pathname) : pathname.slice("/s/".length);
     if (relative.includes("..") || relative.includes("\\")) return refused();
     try {
       const bytes = await readFile(join(viewerAssetsDir, relative));
       const result = response(bodyBuffer(bytes), {
         headers: { "content-type": contentTypeForAsset(relative) },
       });
-      if (relative === "index.html" && appLaunchConfig) result.headers.set("content-security-policy", SHARE_WEB_CSP.replace("form-action 'none'", `form-action https://*.${appLaunchConfig.appDomain}`));
+      if (page && appLaunchConfig) result.headers.set("content-security-policy", SHARE_WEB_CSP.replace("form-action 'none'", `form-action https://*.${appLaunchConfig.appDomain}`));
       return result;
     } catch {
       return refused();
