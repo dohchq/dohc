@@ -25,6 +25,16 @@ const ui = { data: null, load: { 1: null, 7: null }, loadRange: 1, tab: "now", r
 
 // Set an element's HTML only when it changed, so unchanged parts keep focus, hover, and scroll.
 function patch(el, html) { if (el && el._html !== html) { el.innerHTML = html; el._html = html; } }
+// Run an async job one at a time. A call during a run asks for one more run after it, so the newest request always lands last.
+function singleFlight(job) {
+  let running = null, again = false;
+  return () => {
+    if (running) { again = true; return running; }
+    running = (async () => { do { again = false; await job(); } while (again); })().finally(() => { running = null; });
+    return running;
+  };
+}
+
 async function getJson(url) {
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -301,7 +311,8 @@ function renderConsoleStatus(el, view) {
 const waitingWords = view => view.phase === "preparing" ? "Getting the lane ready: checking out the branch and installing. Output appears when the first step starts."
   : view.phase === "waiting for the host lane" ? "Prepared and waiting for a free verification lane." : "Waiting for the first step to write output.";
 
-async function refreshTerminals() {
+const refreshTerminals = singleFlight(() => refreshTerminalsOnce());
+async function refreshTerminalsOnce() {
   if (ui.tab !== "now" || document.hidden || !ui.data) return;
   const views = laneViews(derived());
   await Promise.all($$("#lanes > .lane.running").map(async el => {
@@ -315,6 +326,7 @@ async function refreshTerminals() {
     const key = `${view.source}:${file}`;
     try {
       const log = await getJson(url);
+      if (el.dataset.source !== view.source || consoleFile(view) !== file) return;
       ui.logMeta.set(key, { size: log?.size ?? null, modifiedAt: log?.modifiedAt ?? null });
       const step = stepOfLog(view, file);
       const empty = step?.verdict === "RUNNING" ? `${step.name} has written nothing yet. It started ${seconds((Date.now() - Date.parse(step.startedAt)) / 1000)} ago.`
@@ -535,7 +547,8 @@ function render() {
   if (ui.tab === "nightly") renderNightly(d);
 }
 
-async function refresh() {
+const refresh = singleFlight(() => refreshOnce());
+async function refreshOnce() {
   try {
     ui.data = await getJson("api/state");
     ui.failures = 0;
@@ -546,7 +559,9 @@ async function refresh() {
   }
 }
 
-async function refreshLoad(days = 1) {
+const loadFetchers = {};
+const refreshLoad = (days = 1) => (loadFetchers[days] ??= singleFlight(() => refreshLoadOnce(days)))();
+async function refreshLoadOnce(days = 1) {
   try { ui.load[days] = (await getJson(`api/load?days=${days}`)).samples; render(); }
   catch { /* The next refresh tries again. */ }
 }
@@ -572,7 +587,8 @@ function closeRun() {
   if (opener?.isConnected) opener.focus();
 }
 
-async function loadRun() {
+const loadRun = singleFlight(() => loadRunOnce());
+async function loadRunOnce() {
   const drawer = ui.drawer;
   if (!drawer) return;
   try {
@@ -632,12 +648,13 @@ function renderDrawer() {
 
 async function loadDrawerLog() {
   const drawer = ui.drawer;
-  if (!drawer?.file) return;
+  const file = drawer?.file;
+  if (!file) return;
   const pre = $("#drawer-log");
   if (!pre) return;
   try {
-    const log = await getJson(`api/log?id=${encodeURIComponent(drawer.id)}&attempt=${encodeURIComponent(drawer.attempt)}&file=${encodeURIComponent(drawer.file)}`);
-    if (ui.drawer === drawer) writeTerminal(pre, log?.text || "This log is empty.", `${drawer.id}/${drawer.attempt}:${drawer.file}`);
+    const log = await getJson(`api/log?id=${encodeURIComponent(drawer.id)}&attempt=${encodeURIComponent(drawer.attempt)}&file=${encodeURIComponent(file)}`);
+    if (ui.drawer === drawer && drawer.file === file) writeTerminal(pre, log?.text || "This log is empty.", `${drawer.id}/${drawer.attempt}:${file}`);
   } catch { /* The next refresh tries again. */ }
 }
 
