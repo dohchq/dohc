@@ -23,7 +23,7 @@ function Shell(props: { workspaceId: string; refresh: number }) {
   useEffect(() => { void refreshFiles().catch(() => undefined); }, [refreshFiles, props.refresh]);
   const listing = useMemo(() => ({ files, folders, visibility, receivedRoots: [] }), [files, folders, visibility]);
   const index = useGoToIndex(props.workspaceId, { listing }, context);
-  return <><output data-testid="explorer">{files.map(file => file.path).join(",")}</output><output data-testid="names">{index.query("").map(row => row.path).join(",")}</output></>;
+  return <><output data-testid="explorer">{files.map(file => file.path).join(",")}</output><output data-testid="names">{index.query("").map(row => row.path).join(",")}</output><output data-testid="preparing">{index.preparing ? "preparing" : "ready"}</output></>;
 }
 function Root(props: { workspaceId: string; refresh?: number }) {
   return <Shell key={props.workspaceId} workspaceId={props.workspaceId} refresh={props.refresh ?? 0} />;
@@ -172,17 +172,20 @@ it("does not reapply existing file verdicts for unchanged metadata", () => {
 
 it("withholds a hidden host path from Go to while Explorer retains it", async () => {
   const update = vi.spyOn(GoToIndex.prototype, "update");
-  listWorkspaceFiles.mockResolvedValueOnce({ ...answer("private.md"), visibility: { status: "ready", rules: [{ path: "private.md", visibility: "hidden" }] } });
+  listWorkspaceFiles.mockResolvedValueOnce({ ...answer("private.md"), files: [{ path: "private.md", kind: "file" }, { path: "public.md", kind: "file" }], visibility: { status: "ready", rules: [{ path: "private.md", visibility: "hidden" }] } });
   render(<Root workspaceId="A" />);
-  await waitFor(() => expect(screen.getByTestId("explorer").textContent).toBe("private.md"));
+  await waitFor(() => expect(screen.getByTestId("explorer").textContent).toBe("private.md,public.md"));
   await waitFor(() => expect(update).toHaveBeenCalled());
-  await waitFor(() => expect(screen.getByTestId("names").textContent).toBe(""));
+  await waitFor(() => expect(screen.getByTestId("names").textContent).toBe("public.md"));
+  expect(screen.getByTestId("names").textContent).not.toContain("private.md");
 });
 it.each(["degraded", "unavailable"] as const)("withholds host names when visibility is %s", async status => {
-  listWorkspaceFiles.mockResolvedValueOnce({ ...answer("private.md"), visibility: { status, rules: [] } });
+  listWorkspaceFiles.mockResolvedValueOnce({ ...answer("private.md"), files: [{ path: "private.md", kind: "file" }, { path: "public.md", kind: "file" }], visibility: { status, rules: [] } });
   render(<Root workspaceId="A" />);
-  await waitFor(() => expect(screen.getByTestId("explorer").textContent).toBe("private.md"));
-  await waitFor(() => expect(screen.getByTestId("names").textContent).toBe(""));
+  await waitFor(() => expect(screen.getByTestId("explorer").textContent).toBe("private.md,public.md"));
+  await waitFor(() => expect(screen.getByTestId("preparing").textContent).toBe("ready"));
+  expect(screen.getByTestId("names").textContent).not.toContain("private.md");
+  expect(screen.getByTestId("names").textContent).not.toContain("public.md");
 });
 it("cancels the task on unmount even if its callback arrives late", () => {
   const queue = taskQueue();

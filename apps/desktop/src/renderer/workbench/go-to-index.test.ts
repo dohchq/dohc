@@ -352,6 +352,21 @@ it("reuses published verdicts after an unchanged policy save while withholding h
   expect(index.query("secret")).toEqual([]);
 });
 
+it("does not admit a file added while visibility is unavailable when the same rules return", () => {
+  const index = new GoToIndex("workspace");
+  const ready = listing(["public.md"]);
+  ready.visibility.rules = [{ path: "private/**", visibility: "hidden" }];
+  update(index, { listing: ready });
+  const unavailable = { ...ready,
+    files: [...ready.files, { path: "private/new.md", kind: "file" as const }],
+    visibility: { status: "unavailable" as const, rules: ready.visibility.rules },
+  };
+  update(index, { listing: unavailable });
+  expect(index.query("new")).toEqual([]);
+  update(index, { listing: { ...unavailable, visibility: { status: "ready" as const, rules: ready.visibility.rules } } });
+  expect(index.query("new")).toEqual([]);
+});
+
 const drain = (run: ReturnType<GoToIndex["update"]>) => { while (run && !run.step(() => 0)) {} };
 it("withholds unsafe partial revisions across every source pass", () => {
   const index = new GoToIndex("workspace");

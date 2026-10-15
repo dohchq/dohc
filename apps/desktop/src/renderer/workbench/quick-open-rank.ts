@@ -544,7 +544,7 @@ export class GoToIndex {
           if (isNew || verdictsChanged) {
             if (sources.listing) {
               index.lastVisibilityCheckCount += 1;
-              row = yield* applyGoToPathState(row, sources.listing, work, visibilityForPath);
+              row = yield* applyGoToPathState(row, verdictListing!, work, visibilityForPath);
             }
             else if (row.visible) row = { ...row, visible: false, includedRevision: -1 };
           }
@@ -591,7 +591,7 @@ export class GoToIndex {
       })(), visibilityVerdictsChanged);
       if (force || snapshot.folders !== this.sources.listing?.folders || visibilityVerdictsChanged) yield* replace("folder", (function* () {
         for (const path of snapshot.folders) yield { key: path, path, label: basenameOf(path), record: path, glyphId: "folder" as const };
-      })());
+      })(), visibilityVerdictsChanged);
       changed = true;
     }
     if (sources.collections && (force || sources.collections !== this.sources.collections)) {
@@ -630,7 +630,7 @@ export class GoToIndex {
         if (visibilityVerdictsChanged && (kind === "folder" || kind === "collection" || kind === "app")) {
           if (sources.listing) {
             index.lastVisibilityCheckCount += 1;
-            row = yield* applyGoToPathState(row, sources.listing, work, visibilityForPath);
+            row = yield* applyGoToPathState(row, verdictListing!, work, visibilityForPath);
           }
           else if (row.visible) row = { ...row, visible: false, includedRevision: -1 };
         }
