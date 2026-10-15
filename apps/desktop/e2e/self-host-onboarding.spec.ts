@@ -19,8 +19,9 @@ async function readFileIfPresent(path: string): Promise<string> {
   }
 }
 
-test("@self-host-onboarding a real account connects two fresh desktops and keeps synced work after restart", async ({ browser, request }) => {
+test("@self-host-onboarding a real account connects two fresh desktops and keeps synced work after restart", async ({ browser, request }, testInfo) => {
   test.setTimeout(240_000);
+  const signal = AbortSignal.timeout(testInfo.timeout - 10_000);
   const first = await createTempWorkspace();
   const second = await createTempWorkspace();
   let stack: Awaited<ReturnType<typeof startSelfHostOnboardingStack>> | undefined;
@@ -31,7 +32,7 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
   let bodyFailure: { error: unknown } | undefined;
   const account = { email: `desktop-${randomUUID()}@example.test`, password: `Desktop-proof-${randomUUID()}` };
   try {
-    stack = await startSelfHostOnboardingStack(first.baseDir);
+    stack = await startSelfHostOnboardingStack(first.baseDir, { signal });
     expect((await request.get(`${stack.account.origin}/ready`)).status()).toBe(200);
     expect(await (await request.get(`${stack.account.origin}/.well-known/dohc-server`)).json()).toMatchObject({
       version: 1, authUrl: stack.account.origin, relayUrl: stack.relayUrl,
