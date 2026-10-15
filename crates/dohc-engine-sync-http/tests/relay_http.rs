@@ -1173,7 +1173,11 @@ fn expected_relay_error(code: &str) -> RelayError {
         | "invalid_version" | "secret_path" | "too_many_paths" => RelayError::BadRequest,
         "blob_missing" => RelayError::BlobReferenceMissing,
         "blob_not_found" => RelayError::BlobMissing,
-        "conflict" | "dependents_changed" | "notice_list_full" | "stale" => RelayError::Conflict,
+        "conflict"
+        | "dependents_changed"
+        | "notice_list_full"
+        | "restore-in-progress"
+        | "stale" => RelayError::Conflict,
         "collection_write_rate_limited" => RelayError::HttpStatus(429),
         "discussion_limit_reached" => RelayError::QuotaExceeded,
         "discussion_rate_limited" => RelayError::DiscussionRateLimited,

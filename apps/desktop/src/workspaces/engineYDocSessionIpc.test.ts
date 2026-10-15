@@ -31,6 +31,13 @@ import { deferred } from "../testing/deferred";
 
 const AUTHORITY_ID = Symbol("attachment-a");
 
+it("returns the held-file reason through the live-open bridge", async () => {
+  const h = harness();
+  vi.spyOn(h.capture, "openYDocSession").mockRejectedValue(new DaemonRefusalError({ code: "CONFLICT", message: "capture-file-held: notes/a.md", retry: "no" }, undefined));
+  expect(await h.ipc.open(new FakeSender(7), openPayload)).toEqual({ available: false, captureHeld: true });
+  await h.ipc.shutdown();
+});
+
 class FakeSender implements EngineYDocIpcSender {
   readonly sent: Array<{ channel: string; payload: unknown }> = [];
   readonly #destroyedListeners: Array<() => void> = [];

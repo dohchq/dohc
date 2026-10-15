@@ -376,6 +376,32 @@ pub fn check_admission_in(
         .map(|admission| admission.request_settlement)
 }
 
+/// Reserve a burst's credits against one interval snapshot, before appending.
+pub(crate) fn check_batch_admission_in<'a>(
+    conn: &Connection,
+    key: &DocKey,
+    credits: impl Iterator<Item = (Option<&'a str>, Option<&'a ChangeAttribution>)>,
+) -> Result<bool, CollabError> {
+    let mut covered = reserved_in(conn, key)?;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut settle = false;
+    for (actor, attribution) in credits {
+        let json = dohc_engine_domain::moment_author_json(actor, attribution);
+        let actorless = json.is_none();
+        let json = json.unwrap_or_else(|| r#"[{"kind":"unattributed"}]"#.to_owned());
+        if !seen.insert(json.clone()) {
+            continue;
+        }
+        let bytes = admit(&mut covered, &json)?;
+        if actorless {
+            retain_pending_in(conn, key, &[json])?;
+        }
+        settle |=
+            bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD;
+    }
+    Ok(settle && !unresolved_in(conn, key)?)
+}
+
 struct Admission {
     request_settlement: bool,
     introduced_unattributed: bool,

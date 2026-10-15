@@ -676,22 +676,23 @@ it("reads only the current scope with the workspace's one credential as document
   expect((await f.request("GET", "log?replicationEpoch=epoch-2&streamIdentity=stream-2")).status).toBe(404);
 });
 
-it("keeps a paused or stopped document in scope until the session host releases it", async () => {
+it("keeps a paused document in scope until the session host releases it, and drops a stopped one at once", async () => {
   const f = await fixture();
   f.enroll("docs/b.md");
   const set = (path: string, enabled: boolean, retire = false) =>
     f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, retire, nowMs: 30, guard() {}});
   const release = (objectId: string) => f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId, nowMs: 31});
   const documents = async () => (await f.read()).scope.documents.map(row => row.objectId);
-  // A pending Pause or Stop keeps the binding, and so the scope, while unsettled work settles.
+  // A pending Pause keeps the binding, and so the scope, while unsettled work settles.
   set("docs/a.md", false);
+  // Stop fences new acceptance at once; the relay's live journal already holds what the host accepted.
   set("docs/b.md", false, true);
-  expect(await documents()).toEqual([binding.objectId, "object-b"]);
+  expect(await documents()).toEqual([binding.objectId]);
+  expect([...f.storage.readServiceHostFeedScope(ws)!.hosted.keys()]).toEqual([binding.objectId]);
   expect((await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]])).status).toBe(200);
   // Resuming before the release cancels the Pause.
   set("docs/a.md", true);
   expect(release(binding.objectId)).toBeNull();
-  expect(release("object-b")).toMatchObject({enabled: false, retired: true});
   expect(await documents()).toEqual([binding.objectId]);
   expect(await f.blobStatus(B.sha256)).toBe(404);
   // Revocation cuts reads at once; writes stay open until the release retires the document.
