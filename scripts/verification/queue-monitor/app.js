@@ -183,7 +183,7 @@ function laneViews({ data, running }) {
     const holder = data.lanes?.holders.find(h => h.slot === n);
     if (data.lanes && !holder) { views.push({ n }); continue; }
     if (holder?.kind === "inline") {
-      views.push({ n, source: `slot:${n}`, inline: true, item: holder, title: titleOf(holder), sub: subOf(holder) ?? holder.checkout, branch: holder.branch,
+      views.push({ n, source: `slot:${n}:${holder.startedAt}`, inline: true, item: holder, title: titleOf(holder), sub: subOf(holder) ?? holder.checkout, branch: holder.branch,
         clockMs: holder.elapsedMs, since: holder.startedAt, head: holder.head, steps: holder.steps, packages: holder.packages, logs: holder.logs, phase: holder.phase });
       continue;
     }
@@ -198,6 +198,10 @@ function laneViews({ data, running }) {
 function renderLanes(d) {
   const { data, starts, running } = d;
   const views = laneViews(d);
+  // Forget the log choices and log facts of gates that have left their lanes, so a lane's next gate starts by following.
+  const live = new Set(views.map(view => view.source).filter(Boolean));
+  for (const source of ui.pinned.keys()) if (!live.has(source)) ui.pinned.delete(source);
+  for (const key of ui.logMeta.keys()) if (![...live].some(source => key.startsWith(`${source}:`))) ui.logMeta.delete(key);
   for (const el of $$("#lanes > .lane")) if (Number(el.id.slice(5)) > views.length) el.remove();
   const stepTimes = new Map((data.stepTimes ?? []).map(step => [step.name, step.medianSeconds]));
   for (const view of views) {
