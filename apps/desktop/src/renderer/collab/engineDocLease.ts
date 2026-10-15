@@ -150,6 +150,7 @@ type EngineDocOpenOutcome =
       flushPendingLocalUpdates: EngineYDocBinding["flushPendingLocalUpdates"];
     }
   | { kind: "unavailable" }
+  | { kind: "capture-held" }
   // Their own kinds, not flags on "unavailable": only the unqualified outcome
   // means "fall back to the plain editor". Collapsing these outcomes would put
   // distinct user states and retry rules behind one flag.
@@ -206,6 +207,7 @@ function makeTransport(
         ...(result.liveHostUnavailable ? { liveHostUnavailable: true } : {}),
         ...(result.sharedWaiting ? { sharedWaiting: result.sharedWaiting } : {}),
         ...(result.documentUnavailable ? { documentUnavailable: true } : {}),
+        ...(result.captureHeld ? { captureHeld: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
         ...(result.artifactAssetsInvalid ? { artifactAssetsInvalid: true } : {}),
         ...(result.removalInProgress
@@ -1271,7 +1273,9 @@ function createEngineDocSession(
             // would write the phantom the engine just refused, and
             // when the engine may still hold the document, where a plain
             // autosave would race the session it still binds.
-            if (bound.notInVersion) {
+            if (bound.captureHeld) {
+              setOutcome({ kind: "capture-held" });
+            } else if (bound.notInVersion) {
               setOutcome({ kind: "not-in-version" });
             } else if (bound.sharedWaiting) {
               setOutcome({ kind: "shared-waiting", waiting: bound.sharedWaiting });
