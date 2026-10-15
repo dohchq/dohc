@@ -267,12 +267,21 @@ function downgradeToV2(f: Awaited<ReturnType<typeof fixture>>) {
     COMMIT;`);
 }
 
-it("migrates v2 enrollments to nullable host drain tracking", async () => {
+it("migrates v2 enrollments with released rows already drained", async () => {
   const f = await fixture(), enrolled = f.enroll();
+  f.seed(scope.workspaceId, "paused-object", "docs/paused.md", "paused-share");
+  f.seed(scope.workspaceId, "retired-object", "docs/retired.md", "retired-share");
+  f.enroll({path: "docs/paused.md", shareId: "paused-share"});
+  f.enroll({path: "docs/retired.md", shareId: "retired-share"});
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, path: "docs/paused.md", enabled: false, nowMs: 20});
+  f.release("paused-object");
+  f.stop({path: "docs/retired.md"});
   downgradeToV2(f);
   const reopened = openSyncRelayStorage(f.path, f.config);
   try {
-    expect(reopened.readServiceHostEnrollment(scope.workspaceId, enrolled.path)).toMatchObject({hostDrainedAtMs: null});
+    expect(reopened.readServiceHostEnrollment(scope.workspaceId, enrolled.path)).toMatchObject({enabled: true, hostDrainedAtMs: null});
+    expect(reopened.readServiceHostEnrollment(scope.workspaceId, "docs/paused.md")).toMatchObject({enabled: false, retired: false, hostDrainedAtMs: 25});
+    expect(reopened.readServiceHostEnrollment(scope.workspaceId, "docs/retired.md")).toMatchObject({enabled: false, retired: true, hostDrainedAtMs: 25});
     expect(f.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id=?").get("service-host-enrollments-v3")).toBeTruthy();
   } finally {reopened.close();}
 });
@@ -293,9 +302,9 @@ it("migrates v1 enrollments in place and keeps the enabled document hosted", asy
     const reopened = openSyncRelayStorage(f.path, f.config);
     try {
       expect(f.raw.prepare(`SELECT path,enabled,retired,accounted_bytes FROM ${SERVICE_HOST_ENROLLMENTS} ORDER BY path`).all()).toEqual(before);
-      expect(reopened.listServiceHostEnrollments(scope.workspaceId).map(row => [row.path, row.enabled, row.ownerStop]))
-        .toEqual([["docs/a.md", true, null], ["docs/paused.md", false, "pause"]]);
-      expect(reopened.listRetiredServiceHostEnrollments(scope.workspaceId).documents.map(row => [row.path, row.ownerStop])).toEqual([["docs/retired.md", "retire"]]);
+      expect(reopened.listServiceHostEnrollments(scope.workspaceId).map(row => [row.path, row.enabled, row.ownerStop, row.hostDrainedAtMs]))
+        .toEqual([["docs/a.md", true, null, null], ["docs/paused.md", false, "pause", 25]]);
+      expect(reopened.listRetiredServiceHostEnrollments(scope.workspaceId).documents.map(row => [row.path, row.ownerStop, row.hostDrainedAtMs])).toEqual([["docs/retired.md", "retire", 25]]);
       // A retired v1 document stays out of a new Edit share's reach, as it did before.
       expect(reopened.hasKeptServiceHostEnrollment(scope.workspaceId, "docs/retired.md")).toBe(true);
       expect(serviceHostDocumentEnabled(reopened as StorageContext, binding)).toBe(true);

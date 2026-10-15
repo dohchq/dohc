@@ -694,7 +694,7 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
   for (const sha256 of [A.sha256, Y.sha256, B.sha256]) expect(await f.blobStatus(sha256)).toBe(404);
   expect((await f.request("GET", `log?${identity}&scope=${paused.scope.token}&since=0&object=object-b`)).status).toBe(400);
   // The paused document keeps its binding, so the host's accepted work still lands while it settles.
-  expect([...f.storage.readServiceHostFeedScope(ws)!.hosted.keys()]).toEqual([binding.objectId, "object-b"]);
+  expect([...f.storage.readServiceHostFeedScope(ws)!.hosted.keys()]).toEqual([binding.objectId]);
   const settling = blob("settling edit");
   await f.upload(settling);
   expect(await (await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", settling)]])).json())
@@ -739,6 +739,8 @@ it("keeps only the hosted credential alive for an undrained Stop and then drops 
   expect(empty.scope.documents).toEqual([]);
   expect(f.objects(empty)).toEqual(["workspace"]);
   expect(await f.blobStatus(A.sha256)).toBe(404);
+  expect((await f.request("POST", "blobs/have", JSON.stringify({sha256s: [A.sha256]}))).status).toBe(404);
+  expect((await f.request("PUT", `blobs/${A.sha256}`, A.content, "application/octet-stream")).status).toBe(404);
 
   expect(f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: binding.objectId, nowMs: 21}))
     .toMatchObject({retired: true, enabled: false, hostDrainedAtMs: 21});
@@ -779,7 +781,7 @@ it("admits the engine's own settlement batch for its hosted document, both ways"
   const settlement = nativeAuthoredSettlement.find(op => op.opKind === "live.audit.settlement")!;
   const document = (settlement.payload as {record: {binding: {workspaceId: string; objectId: string; currentPath: string}}}).record.binding;
   const held = new Map([[document.objectId, document.currentPath]]);
-  const hosted = {workspaceId: document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream", hosted: held, writable: new Set(held.keys()),
+  const hosted = {workspaceId: document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream", hosted: held,
     departed: new Set<string>(), shared: held, token: "token"};
   for (const op of nativeAuthoredSettlement) {
     expect(hostedWriteAllowed(hosted, op.opKind, op.payload), op.opKind).toBe(true);

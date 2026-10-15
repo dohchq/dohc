@@ -85,7 +85,8 @@ export function hostedRowDecision(
  * The document an op writes, when the host may append it. It may write only
  * the content of a document it hosts, at its enrolled path: never move, delete
  * or replace it, and never touch another file. A revoked share or a move
- * leaves the enrolled document writable, so edits the host accepted can settle.
+ * leaves the enabled enrolled document writable, so edits the host accepted
+ * can settle.
  */
 function hostedWriter(scope: ServiceHostFeedScope, opKind: string, payload: unknown): string | null {
   const record = asRecord(payload);
@@ -93,7 +94,6 @@ function hostedWriter(scope: ServiceHostFeedScope, opKind: string, payload: unkn
   const claim = claimedDocument(opKind, record);
   const objectId = hostedObject(scope, claim, scope.hosted);
   if (objectId === null) return null;
-  if (!scope.writable.has(objectId)) return null;
   if (opKind === "live.audit.application") return objectId;
   const path = scope.hosted.get(objectId)!;
   if (claim!.path !== path) return null;
@@ -281,6 +281,8 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
     }
 
     if (head === "blobs" && second === "have" && route.length === 2 && request.method === "POST") {
+      let scope = currentScope(workspaceId);
+      if (!scope.hosted.size) throw notFound();
       const body = await readJsonObject(request);
       if (!Array.isArray(body.sha256s)) throw badRequest("sha256s must be an array");
       if (body.sha256s.length > MAX_BLOB_HAVE) throw badRequest("too many sha256s");
@@ -290,7 +292,9 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
         return value;
       });
       guard();
-      const stored = new Set(sha256s.filter(blobReach(currentScope(workspaceId))));
+      scope = currentScope(workspaceId);
+      if (!scope.hosted.size) throw notFound();
+      const stored = new Set(sha256s.filter(blobReach(scope)));
       for (const sha256 of storage.missingBlobs(workspaceId, [...stored])) stored.delete(sha256);
       return jsonResponse({ ok: true, missing: sha256s.filter(sha256 => !stored.has(sha256)) });
     }
@@ -304,10 +308,15 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
 
     if (head === "blobs" && second && second !== "have" && route.length === 2 && request.method === "PUT") {
       assertSha256(second);
+      guard();
+      let scope = currentScope(workspaceId);
+      if (!scope.hosted.size) throw notFound();
       const bytes = await readBytes(request, MAX_BLOB_BYTES);
       if (sha256Hex(bytes) !== second) throw badRequest("blob content does not match sha256 path");
       guard();
-      const known = blobReach(currentScope(workspaceId))(second);
+      scope = currentScope(workspaceId);
+      if (!scope.hosted.size) throw notFound();
+      const known = blobReach(scope)(second);
       const put = storage.putServiceHostBlob({ workspaceId, sha256: second, content: bytes, createdAtMs: Date.now() });
       // Whether the owner already held these bytes is theirs to know, unless the host could already fetch them.
       return jsonResponse({ ok: true, workspaceId, sha256: second, byteLength: put.byteLength, alreadyHad: put.alreadyHad && known });

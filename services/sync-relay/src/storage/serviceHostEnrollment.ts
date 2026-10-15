@@ -153,7 +153,7 @@ export function initializeServiceHostEnrollmentSchema(db: SqliteDb): void {
       db.exec(`ALTER TABLE ${SERVICE_HOST_ENROLLMENTS} RENAME TO ${SERVICE_HOST_ENROLLMENTS}_v2;
         ${SQL};
         INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,host_drained_at_ms,accounted_bytes)
-          SELECT workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,NULL,accounted_bytes
+          SELECT workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,CASE WHEN enabled=0 THEN updated_at_ms END,accounted_bytes
           FROM ${SERVICE_HOST_ENROLLMENTS}_v2;
         DROP TABLE ${SERVICE_HOST_ENROLLMENTS}_v2;
         ${ACTIVE_INDEX_SQL};
@@ -167,9 +167,10 @@ export function initializeServiceHostEnrollmentSchema(db: SqliteDb): void {
     // A v1 retired row could come from Stop or from revocation; both stay retired until Resume, as before.
     db.exec(`ALTER TABLE ${SERVICE_HOST_ENROLLMENTS} RENAME TO ${SERVICE_HOST_ENROLLMENTS}_v1;
       ${SQL};
-      INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes)
+      INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,host_drained_at_ms,accounted_bytes)
         SELECT workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,
-          CASE WHEN retired=1 THEN 'retire' WHEN enabled=0 THEN 'pause' END,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes
+          CASE WHEN retired=1 THEN 'retire' WHEN enabled=0 THEN 'pause' END,enabled,retired,created_at_ms,updated_at_ms,
+          CASE WHEN enabled=0 THEN updated_at_ms END,accounted_bytes
         FROM ${SERVICE_HOST_ENROLLMENTS}_v1;
       DROP TABLE ${SERVICE_HOST_ENROLLMENTS}_v1;
       ${ACTIVE_INDEX_SQL};
@@ -359,7 +360,8 @@ export function currentServiceHostWorkspace(storage: StorageContext, workspaceId
 /** The current identity's undrained enrollments, in one SQL snapshot. */
 export function currentServiceHostEnrollments(storage: StorageContext, workspaceId: string): readonly ServiceHostEnrollment[] {
   storage.captureStanding();
-  const values = storage.db.prepare(`SELECT e.* ${CURRENT_UNDRAINED} ORDER BY e.path`).all(parseWorkspaceId(workspaceId));
+  const values = storage.db.prepare(`SELECT e.* ${CURRENT} ORDER BY e.path LIMIT ?`).all(parseWorkspaceId(workspaceId), SERVICE_HOST_MAX_DOCUMENTS + 1);
+  if (values.length > SERVICE_HOST_MAX_DOCUMENTS) throw new Error("Service host enrollment capacity is damaged.");
   return values.map(row);
 }
 export class ServiceHostRetirementConflict extends Error {
