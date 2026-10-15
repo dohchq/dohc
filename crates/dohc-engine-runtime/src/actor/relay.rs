@@ -2775,8 +2775,9 @@ fn retire_departed_hosted(
 /// so its document stays departed; the first such path goes in `unexpected`
 /// for the pass to name. A removal that fails also keeps the path held for
 /// the next pass. The folders a removed file leaves empty go too, so a file
-/// can take their name; one that cannot go stays. Answers whether any path
-/// came free.
+/// can take their name; an empty one that cannot go keeps the path held, and
+/// with it each folder above, until a later pass removes it. Answers whether
+/// any path came free.
 fn remove_retired_files(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -2789,15 +2790,20 @@ fn remove_retired_files(
             unexpected.get_or_insert(file.path);
             continue;
         }
+        let mut stuck = false;
         let mut parent = file.path.as_str();
         while let Some((folder, _)) = parent.rsplit_once('/') {
             if !matches!(
                 dohc_engine_files::remove_empty_directory_target(root, folder),
                 Ok(true)
             ) {
+                stuck = std::fs::read_dir(root.join(folder)).is_ok_and(|mut d| d.next().is_none());
                 break;
             }
             parent = folder;
+        }
+        if stuck {
+            continue;
         }
         freed = true;
         match dohc_engine_sync::forget_retired_hosted_file(

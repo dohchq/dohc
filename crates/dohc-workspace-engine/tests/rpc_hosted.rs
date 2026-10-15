@@ -1048,6 +1048,89 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
     assert_eq!(host.pull().await["departed"], json!([]));
 }
 
+/// The durability review: `doc-b` left the scope at `a.md/x/c.md` and
+/// `doc-a` was created at `a.md`. When `a.md/x` could not go, its file was
+/// forgotten anyway, so `doc-a`'s write met the empty folder and hosted pull
+/// stalled for good. The file keeps `a.md` held while its empty folder
+/// stays, and once the folder can go, a later pass removes it and `doc-a`
+/// lands.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retired_file_holds_its_path_while_its_empty_folder_cannot_go() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-b", "a.md/x/c.md", "hosted b");
+    relay.share("doc-b", "a.md/x/c.md");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    {
+        let mut relay = relay.relay();
+        relay.unshare("doc-b");
+        relay.create("owner", 2, "doc-a", "a.md", "hosted a");
+        relay.share("doc-a", "a.md");
+    }
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS, to open a folder
+        .share_mode(0x1 | 0x2) // read | write, no delete
+        .open(scratch.path().join("a.md/x"))
+        .expect("lock a.md/x");
+
+    // doc-b retires; its file goes, but its folder cannot.
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b"), None);
+    assert!(!scratch.path().join("a.md/x/c.md").exists());
+    let pass = host.pull().await;
+    assert_eq!(pass["departed"], json!(["doc-b"]));
+    if pass["pendingCursor"].is_object() {
+        let commit = host.commit_answer(&pass["pendingCursor"]).await;
+        assert_eq!(commit["committed"], true, "{commit}");
+    }
+    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let (heads, retired): (i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM snapshots WHERE object_id='doc-a'), \
+                    (SELECT COUNT(*) FROM hosted_retired_files)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("count");
+    assert_eq!(
+        (heads, retired),
+        (0, 1),
+        "doc-a's write waits for the folder"
+    );
+    assert!(scratch.path().join("a.md/x").is_dir());
+
+    drop(lock);
+    host.sync().await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("a.md")).expect("a.md"),
+        "hosted a"
+    );
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
+    let retired: i64 = conn
+        .query_row("SELECT COUNT(*) FROM hosted_retired_files", [], |row| {
+            row.get(0)
+        })
+        .expect("count");
+    assert_eq!(retired, 0);
+    assert_eq!(host.pull().await["departed"], json!([]));
+}
+
 /// The retirement round's open case, on disk: `doc-b` left the scope at
 /// `a.md`, the owner moved it to `b.md`, and `doc-a` took `a.md`. When
 /// `doc-b` returns, it is held without touching `doc-a` or its file, and the
