@@ -84,6 +84,7 @@ import {
 } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { PresenceHub } from "./presence";
+import { ReplicaWatches } from "./replicaWatches";
 import { createPresenceRoutes } from "./presenceRoutes";
 import { createProposalRoutes } from "./proposalRoutes";
 import { parseShareId, parseWorkspaceId } from "./requestInputs";
@@ -141,6 +142,7 @@ export interface CreateSyncRelayHandlerOptions {
   // Wake-only long-poll coordination. Durable revisions and data stay in
   // storage, so replacing this hub cannot invalidate a client watermark.
   discussionActivity?: DiscussionActivityHub;
+  replicaWatches?: Pick<ReplicaWatches, "watched">;
   // Relay-instance HMAC key. When absent, every link route refuses without
   // touching storage. main.ts requires it outside development and test.
   linkKey?: string | Uint8Array;
@@ -199,6 +201,7 @@ export function createSyncRelayHandler({
   newId = () => randomUUID(),
   presence = new PresenceHub(),
   discussionActivity = new DiscussionActivityHub(),
+  replicaWatches = new ReplicaWatches(discussionActivity),
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
@@ -399,6 +402,7 @@ export function createSyncRelayHandler({
     storage,
     nowMs,
     discussionActivity,
+    replicaWatches,
     lookupUserDisplayName,
   );
 

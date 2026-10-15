@@ -36,6 +36,7 @@ pub mod faults;
 pub mod limits;
 pub mod materialize;
 pub mod remote_changes;
+pub mod replica;
 pub mod store;
 
 pub(crate) mod migration;

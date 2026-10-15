@@ -29,7 +29,7 @@ const limits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVecto
   maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384},
   maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4},
   maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10};
-const files = (grantId = "grant", userId = "alice") => ({subjectName: "Trip", sharerName: "Ana (ana@example.test)", access: "edit", userId, workspaceId: "workspace", shareId: "share", grantId, limits,
+const files = (grantId = "grant", userId = "alice") => ({subjectName: "Trip", sharerName: "Ana (ana@example.test)", access: "edit", userId, workspaceId: `named:${grantId}`, shareId: "share", grantId, limits,
   files: [{objectId: "a", path: "docs/a.md"}, {objectId: "b", path: "docs/b.md"}]});
 let container: HTMLDivElement, root: Root;
 beforeEach(() => {
