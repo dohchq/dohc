@@ -169,6 +169,8 @@ export function placeMove(requests, { id, before = null }, starting = new Set())
   if (!waiting(entry)) return { rejected: `Cannot move ${id}: ${why(entry)}. Only a queued request can move.` };
   if (target === entry) return { rejected: `Cannot move ${id} before itself.` };
   if (target && !waiting(target)) return { rejected: `Cannot move ${id} before ${before}: ${why(target)}. Move it before a queued request, or use --first.` };
+  // The nightly runs first whatever its place in the line, so a move before it would change nothing.
+  if (target?.request.nightly) return { rejected: `Cannot move ${id} before ${before}: the nightly run always goes first. Use --first to put ${id} at the front of the rest of the line.` };
   const line = requests.filter(waiting).sort(lineOrder);
   if (target && line.indexOf(entry) < line.indexOf(target)) return { rejected: `Cannot move ${id} before ${before}: ${id} is already ahead of ${before}. A move only brings a request forward.` };
   // The line hands its own order values out again in the new order. They stay whole numbers however many

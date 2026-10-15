@@ -110,6 +110,7 @@ test("a move puts a queued request first or before another, the line follows it,
   assert.match(refused({ id: a.id, before: running.id }), /before 000000001-aaaaaa: it is running/u, "nothing goes ahead of a running request");
   assert.match(refused({ id: a.id, before: a.id }), /before itself/u);
   assert.equal(refused({ id: c.id, before: a.id }), `Cannot move ${c.id} before ${a.id}: ${c.id} is already ahead of ${a.id}. A move only brings a request forward.`);
+  assert.equal(refused({ id: a.id, before: nightly.id }), `Cannot move ${a.id} before ${nightly.id}: the nightly run always goes first. Use --first to put ${a.id} at the front of the rest of the line.`);
   assert.match(placeMove(requests, { id: a.id }, new Set([a.id])).rejected, /it is running/u, "a request the service has started cannot move before its status says so");
 });
 
