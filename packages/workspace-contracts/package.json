@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./actor-presentation": "./src/actorPresentation.ts",
     "./workspace-ref": "./src/workspaceRef.ts",
     "./actor-identity": "./src/actorIdentity.ts",
     "./access": "./src/access.ts",
