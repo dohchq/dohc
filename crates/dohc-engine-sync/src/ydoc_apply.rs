@@ -2702,7 +2702,8 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
                 }
                 // Peers already hold the settled body, so an outside edit that
                 // keeps it, such as a frontmatter change, may fold its nested
-                // items. The exact-text check below still applies.
+                // items. Parse refusals and quote overflow still apply; the
+                // settled-rule exception below then keeps the exact bytes.
                 Err(CollabError::MarkdownNotRepresentable)
                     if marker.content_kind == ContentKind::Richdoc
                         && last_settled_text_in_tx(tx, key)?.is_some_and(|settled| {

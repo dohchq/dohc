@@ -256,6 +256,11 @@ fn passive_store_concurrent_delayed_and_source() {
         assert_eq!(imported_source, owner_text, "replica source: {name}");
         if name == "nested-list-witness.md" {
             assert_ne!(missing_source, owner_text);
+        } else {
+            assert_eq!(
+                missing_source, owner_text,
+                "replica without snapshot: {name}"
+            );
         }
         replica(&mut replica_store);
         let bytes = doc.encode_full_state();
