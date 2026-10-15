@@ -42,8 +42,8 @@ const RUN_HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
 // A folder is read whole at most this often, so a busy automation's runs
 // are not all read every pass; a run may stay this much past its 30 days.
 const WHOLE_READ_MS = 24 * 60 * 60 * 1000;
-// The most plan files one expiry batch reads.
-const EXPIRE_BATCH_RUNS = 200;
+// The most plan files one expiry batch reads, unless the store is told otherwise.
+export const EXPIRE_BATCH_RUNS = 200;
 
 // Values are this computer's own writes, read back as JSON.parse left them;
 // the write seam checks each one again before it writes.
@@ -896,9 +896,14 @@ export interface MetadataDirResolver {
 /**
  * The run store of the workspace at `rootPath`, under `automations` in the
  * folder `resolveMetadataDir` answers. Reads that change nothing make no
- * folders.
+ * folders. Tests lower `expireBatchRuns` to cross batches with a few runs.
  */
-export function createAutomationRunStore(rootPath: string, resolveMetadataDir: MetadataDirResolver, assertCurrent: () => void = () => {}): AutomationRunStore {
+export function createAutomationRunStore(
+  rootPath: string,
+  resolveMetadataDir: MetadataDirResolver,
+  assertCurrent: () => void = () => {},
+  { expireBatchRuns = EXPIRE_BATCH_RUNS }: { expireBatchRuns?: number } = {},
+): AutomationRunStore {
   const writeCurrentUnlocked = (path: string, text: string) => {
     assertCurrent();
     return writeDurablyUnlocked(path, text, assertCurrent);
@@ -1420,7 +1425,7 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         }
         const current = expiring!;
         for (let index = name === fromFolder ? Number(fromIndex) : 0; index < current.claims.length; index += 1) {
-          if (read >= EXPIRE_BATCH_RUNS) return `${name}/${index}`;
+          if (read >= expireBatchRuns) return `${name}/${index}`;
           const names = current.claims[index]!;
           read += names.length;
           let weighed = await weigh(current.path, names, now, standing);
