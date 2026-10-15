@@ -4,11 +4,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { monitorState, runDetails, startMonitor } from "./queue-monitor.mjs";
-import { queuePaths, writeJson } from "./queue.mjs";
+import { loadSampler, monitorState, runDetails, runLog, startMonitor, waitingIntervals } from "./queue-monitor.mjs";
+import { listRequests, queuePaths, writeJson } from "./queue.mjs";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
 const iso = minutesAgo => new Date(now - minutesAgo * 60_000).toISOString();
@@ -27,15 +27,20 @@ async function queueRoot(t) {
     { n: 1, startedAt: iso(200), endedAt: iso(190), outcome: "environment", cause: "service restart", lane: 1, awakeMs: 600_000 },
     { n: 2, startedAt: iso(180), endedAt: iso(150), outcome: "passed", cause: "pass", lane: 1, awakeMs: 1_800_000, flaky: [{ step: "rust", test: "engine::settles" }] }] });
   await add("000000003-cccccc", { branch: "refs/heads/now" }, { state: "running", attempts: [{ n: 1, startedAt: iso(10), lane: 2 }] });
-  await writeJson(join(paths.attempt("000000003-cccccc", 1), "result.json"), { verdict: "RUNNING", steps: [{ name: "install", verdict: "PASS" }, { name: "tests", verdict: "RUNNING" }, { name: "rust", verdict: "RUNNING" }] });
+  await writeJson(join(paths.attempt("000000003-cccccc", 1), "result.json"), { verdict: "RUNNING", steps: [{ name: "install", verdict: "PASS", seconds: 2.4 }, { name: "tests", verdict: "RUNNING", startedAt: iso(8) }, { name: "rust", verdict: "RUNNING", startedAt: iso(9) }] });
+  // The running attempt's logs: the verifier's own, then a step's, written later.
+  for (const [name, minutesAgo] of [["worker.log", 5], ["rust.log", 1]]) {
+    writeFileSync(join(paths.attempt("000000003-cccccc", 1), name), `${name}\n`);
+    utimesSync(join(paths.attempt("000000003-cccccc", 1), name), new Date(now - minutesAgo * 60_000), new Date(now - minutesAgo * 60_000));
+  }
   await add("000000004-dddddd", { branch: "refs/heads/again" }, { state: "queued", waiting: "Docker did not answer. Retrying.", attempts: [{ n: 1, startedAt: iso(60), endedAt: iso(55), outcome: "environment" }] });
   await add("000000005-eeeeee", { branch: "refs/heads/main", checkout: "nightly", nightly: true }, { state: "queued", attempts: [] });
   await writeJson(paths.service, { protocol: 1, pid: 1, commit: "c".repeat(40), startedAt: iso(500), heartbeatAt: iso(0.1), lanes: 2,
     running: [{ id: "000000003-cccccc", attempt: 1, checkout: "C:\\w\\_verification\\lane-2", phase: "verifying", startedAt: iso(10), awakeMs: 540_000 }], health: { cpuBusyPercent: 40, freeMemGb: 20 } });
   const event = (minutesAgo, fields) => appendFileSync(paths.history, `${JSON.stringify({ at: iso(minutesAgo), event: "finished", ...fields })}\n`);
   event(9 * 1440, { flaky: [{ step: "rust", test: "engine::settles" }], slowest: [{ step: "desktop", test: "states page", seconds: 900 }] });
-  event(150, { flaky: [{ step: "rust", test: "engine::settles" }], slowest: [{ step: "desktop", test: "states page", seconds: 280 }, { step: "rust", test: "capture", seconds: 80 }] });
-  event(100, { flaky: [{ step: "rust", test: "engine::settles" }, { step: "repository", test: "heartbeat" }], slowest: [{ step: "desktop", test: "states page", seconds: 260 }] });
+  event(150, { outcome: "passed", steps: { tests: 1000, rust: 900 }, flaky: [{ step: "rust", test: "engine::settles" }], slowest: [{ step: "desktop", test: "states page", seconds: 280 }, { step: "rust", test: "capture", seconds: 80 }] });
+  event(100, { outcome: "passed", steps: { tests: 1200 }, flaky: [{ step: "rust", test: "engine::settles" }, { step: "repository", test: "heartbeat" }], slowest: [{ step: "desktop", test: "states page", seconds: 260 }] });
   appendFileSync(paths.history, "a torn line\n");
   return root;
 }
@@ -49,7 +54,10 @@ test("the snapshot shows the week's attempts with their lanes, the line in order
     ["000000002-bbbbbb", 1, "environment", 1], ["000000002-bbbbbb", 2, "passed", 1], ["000000004-dddddd", 1, "environment", null], ["000000003-cccccc", 1, "running", 2]],
     "an attempt older than the week is left out, and each keeps its lane");
   const running = state.runs.find(run => run.outcome === "running");
-  assert.deepEqual([running.steps, running.done, running.awakeMs, running.phase], [["tests", "rust"], 1, 540_000, "verifying"], "a running attempt shows its steps from its receipt so far");
+  assert.deepEqual(running.steps.map(step => [step.name, step.verdict, step.seconds]), [["install", "PASS", 2], ["tests", "RUNNING", null], ["rust", "RUNNING", null]], "a running attempt shows its steps from its receipt so far");
+  assert.deepEqual([running.awakeMs, running.phase, running.head], [540_000, "verifying", head.slice(0, 12)]);
+  assert.deepEqual(running.logs.map(log => log.file), ["rust.log", "worker.log"], "its logs, the most recently written first");
+  assert.deepEqual(state.stepTimes.map(step => [step.name, step.runs, step.medianSeconds]), [["tests", 2, 1200], ["rust", 1, 900]], "each step's median in the week's passing runs");
   assert.equal(state.runs.find(run => run.outcome === "passed").flaky, 1);
   assert.equal(state.typicalMs, 1_800_000);
   assert.deepEqual(state.queued.map(entry => [entry.branch, entry.retry, entry.nightly]), [["main (nightly)", false, true], ["again", true, false]], "the nightly run goes first");
@@ -86,6 +94,35 @@ test("run details show a failing step's test summary and never read a file outsi
   assert.equal(runDetails(root, "000000009-ffffff", "1"), null, "a request that is gone has no details");
 });
 
+test("a log is read from its end, only by a log name inside the attempt", async t => {
+  const root = await queueRoot(t);
+  const folder = queuePaths(root).attempt("000000002-bbbbbb", 2);
+  mkdirSync(join(folder, "js-tests"), { recursive: true });
+  const lines600 = Array.from({ length: 600 }, (_, i) => `line ${i}`).join("\n");
+  writeFileSync(join(folder, "js-tests", "_dohc_desktop.log"), `${lines600}\n\x1b[32mbuilding 10%\rbuilding 100%\x1b[39m\n`);
+  writeFileSync(join(root, "secret.log"), "secret");
+  const log = runLog(root, "000000002-bbbbbb", "2", "js-tests/_dohc_desktop.log");
+  const lines = log.text.split("\n");
+  assert.equal(lines.at(-2), "building 100%", "a progress line shows its last state, without colors");
+  assert.equal(lines[0], "line 202", "only the last 400 lines");
+  for (const file of ["../../secret.log", "js-tests/../../../secret.log", "..\\..\\secret.log", "status.json", "/etc/passwd"]) assert.equal(runLog(root, "000000002-bbbbbb", "2", file), null, file);
+  assert.equal(runLog(root, "000000002-bbbbbb", "9", "js-tests/_dohc_desktop.log"), null);
+  assert.deepEqual(runDetails(root, "000000002-bbbbbb", "2").logs.map(item => item.file), ["js-tests/_dohc_desktop.log"]);
+});
+
+test("the waiting count is rebuilt from the requests: until each first attempt, and between a machine failure and its retry", async t => {
+  const root = await queueRoot(t);
+  const requests = listRequests(root);
+  const waiting = at => waitingIntervals(requests, now).filter(([start, end]) => start <= at && at < end).length;
+  assert.equal(waiting(Date.parse(iso(185))), 4, "the retry of a machine failure waits again");
+  assert.equal(waiting(Date.parse(iso(100))), 3);
+  assert.equal(waiting(Date.parse(iso(30))), 3, "a request that failed for the machine waits for its retry");
+  const buckets = loadSampler(root, () => ({ runs: [], queued: [] }), { everyMs: 3_600_000 }).read(1, 120, requests, now);
+  assert.equal(buckets.length, 120);
+  assert.equal(buckets.at(-1).queued, 2, "six minutes ago: the nightly run and the retry wait");
+  assert.equal(buckets.at(-1).running, 1);
+});
+
 function get(port, path, { host = `127.0.0.1:${port}`, method = "GET" } = {}) {
   return new Promise((done, fail) => {
     const call = httpRequest({ host: "127.0.0.1", port, path, method, headers: { host } }, response => {
@@ -115,4 +152,10 @@ test("the server answers only reads, and only on this host's names and the tailn
   assert.equal((await get(port, "/api/state", { method: "POST" })).status, 405);
   assert.equal((await get(port, "/api/run?id=000000002-bbbbbb&attempt=7")).status, 404);
   assert.equal((await get(port, "/elsewhere")).status, 404);
+  const script = await get(port, "/app.js");
+  assert.equal(script.status, 200);
+  assert.match(script.type, /javascript/u);
+  assert.equal((await get(port, "/api/log?id=000000003-cccccc&attempt=1&file=..%2F..%2Fstatus.json")).status, 404);
+  assert.equal(JSON.parse((await get(port, "/api/log?id=000000003-cccccc&attempt=1&file=rust.log")).body).text, "rust.log\n");
+  assert.equal(JSON.parse((await get(port, "/api/load?days=7")).body).samples.length, 288);
 });

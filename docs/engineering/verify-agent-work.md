@@ -120,8 +120,8 @@ Read the service's verdict from the request's `status.json`, or from the last li
 Run `pnpm verify:queue status` to see the service, the running requests, the line, and wait estimates.
 Run `pnpm verify:queue cancel <id>` to stop a request. A finished request keeps its verdict.
 
-The service also serves a page at `http://127.0.0.1:4250` on the host. It shows the running requests and their current steps, the line with start estimates, each lane's runs over the last day or week, the nightly run, and the week's flaky and slowest tests.
-Select a run to see its steps and the failing step's test summary. The page refreshes every five seconds and cannot change the queue.
+The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows each lane's run with its steps and its live output, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Tests, and Nightly tabs show the whole line, every run this week, the slowest and flaky tests, and the nightly runs.
+Select a run to see its failing step's test summary, its steps on a timeline, and any of its logs. The dashboard refreshes every few seconds and cannot change the queue. It records the host's CPU and free memory once a minute in `monitor-load.json` in the queue root.
 To open it from another device, serve it on the tailnet only:
 
 ```powershell

@@ -10,6 +10,7 @@
 //   requests/<id>/cancel         a cancellation request (client)
 //   requests/<id>/attempts/<n>/  one worker's evidence (worker)
 //   service.json                 service identity, heartbeat, and health (service)
+//   monitor-load.json            the dashboard's minute samples of host load (service)
 //   lane/                        the checkout the service verifies in
 //   service/<commit>/, current   installed service checkouts, and the active one
 
