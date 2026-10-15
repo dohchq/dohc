@@ -48,6 +48,7 @@ import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
 import { createLocalDatasetHost, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { localCollectionEngine } from "./workspaces/localCollectionEngine";
 import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
@@ -3558,8 +3559,17 @@ async function openWorkspaceActivityForOperation(
     automationHosts.open(canonicalWorkspace.workspaceId);
     void operation.state.collectionAutomations.open();
     operation.state.relayedPresses.start();
+    reconcileLocalCollectionApps(canonicalWorkspace);
   }
   return result;
+}
+
+// Responses a local Collection app admitted before a quit, crash, or engine
+// restart settle once the engine is back. Only an existing store opens.
+function reconcileLocalCollectionApps(workspace: { workspaceId: string; rootPath: string }): void {
+  if (!existsSync(join(workspace.rootPath, ".dohc", "datasets", "state.sqlite"))) return;
+  void localDatasetHostFor(workspace, new AbortController().signal).then(host => host.apps.reconcile())
+    .catch(error => console.warn("[desktop] local Collection app reconciliation:", error));
 }
 
 function openWorkspaceActivityWith(
@@ -4534,6 +4544,21 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
           if (failed) automations?.failuresChanged();
         },
         onDatasetsChanged: () => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(),
+        collectionEngine: () => {
+          const capture = activity.engineCaptureFor(workspace.workspaceId, workspace.rootPath);
+          if (!capture) throw new Error("The workspace engine is unavailable.");
+          return localCollectionEngine({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, capture,
+            withAdapter: async work => {
+              const result = await withEngineAdapter({ ...workspace, attachmentId: attachment.attachmentId }, async adapter => ({ value: await work(adapter) }));
+              if (result === null) throw new Error("The workspace engine is unavailable.");
+              return result.value;
+            } });
+        },
+        collectionAuthor: async () => {
+          const run = withWorkspaceAttachment(attachment, lease => workspaceActivity.agentRun(lease.state.activity));
+          if (run === undefined) throw new Error("The Collection workspace attachment changed.");
+          return run ? { kind: "agent", agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId, ...(run.depth > 0 ? { depth: run.depth } : {}) } : await localPerson();
+        },
       });
       slot.pending = pending;
       activeDatasetHosts.add(pending);
@@ -4827,6 +4852,7 @@ const desktopEngine = createDesktopEngine({
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
+    if (workspace && activity.engineCaptureFor(workspaceId)) reconcileLocalCollectionApps(workspace);
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });

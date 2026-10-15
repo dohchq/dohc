@@ -26,6 +26,7 @@ import saveRetryIpc from "./ipcExposure.saveRetry.json";
 import fileObservationIpc from "./ipcExposure.fileObservation.json";
 import usageRecordIpc from "./ipcExposure.usageRecord.json";
 import shareCopyCli from "./cliExposure.shareCopy.json";
+import localCollectionCli from "./cliExposure.localCollection.json";
 import mainCli from "./cliExposure.main.json";
 import pinnedCliCapabilities from "./cliCapabilities.pinned.json";
 import { CLI_DISPATCH_ARGUMENTS } from "./cliDispatchInputs.fixture";
@@ -107,7 +108,8 @@ describe("B1 main inventories (a4be19d5b)", () => {
       help[group] = renderCliHelp({ help: [group] });
       for (const verb of Object.keys(command.verbs)) help[`${group} ${verb}`] = renderCliHelp({ help: [group, verb] });
     }
-    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help, ...commentsCli.help, ...accessExposure.help, ...shareCopyCli.help });
+    // Hand-reviewed local Collection app help: local withdrawal and its unconfirmed result.
+    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help, ...commentsCli.help, ...accessExposure.help, ...shareCopyCli.help, ...localCollectionCli.help });
   });
   it("pins each row's guard, scope, and handler check to the hand-edited admission record", () => {
     expect(Object.fromEntries(rows.map(row => [row.channel, {

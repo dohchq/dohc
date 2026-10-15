@@ -960,6 +960,25 @@ export class VersionedLiveAdapter {
     return files;
   }
 
+  /** One page of the files under the folder `under` after `afterPath`, or from the folder's start. */
+  async listTextFilePage(input: {
+    workspaceId: string;
+    versionId: string;
+    under: string;
+    afterPath?: string;
+    limit: number;
+  }): Promise<{ files: VersionedTextListEntry[]; more: boolean }> {
+    this.assertWorkspace(input.workspaceId);
+    const prefix = `${input.under}/`;
+    const page = await this.request(VERSIONED_METHOD.textList, {
+      versionId: input.versionId,
+      limit: input.limit,
+      afterPath: input.afterPath ?? prefix,
+    });
+    const files = page.files.filter((file) => file.path.startsWith(prefix));
+    return { files, more: files.length === page.files.length && page.nextAfterPath !== null };
+  }
+
   async captureSourceMetadata(input: {
     workspaceId: string;
     versionId: string;

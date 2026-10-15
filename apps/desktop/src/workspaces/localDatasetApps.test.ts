@@ -93,7 +93,7 @@ function approveAsOlderBuild(db: DatabaseSync, app: Awaited<ReturnType<typeof fi
 describe("local approved dataset apps", () => {
   it("persists approval provenance with the captured candidate without changing app authority", async () => {
     const f = await fixture();
-    f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+    await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
     const agent = { kind: "agent", label: "Builder", labelSource: "agent-declared" } as const;
     const publication = await f.host.apps.activate(f.app, new AbortController().signal, agent);
     const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
@@ -136,10 +136,10 @@ describe("local approved dataset apps", () => {
 
   it("counts active apps instead of exhausting approval slots after 64 withdrawals", async () => {
     const f = await fixture();
-    f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+    await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
     for (let n = 0; n < 66; n++) {
       const publication = await f.host.apps.activate(await f.prepareApp('cycle-' + n), new AbortController().signal);
-      f.host.apps.withdraw(publication.publicationId, publication.authorityRevision);
+      await f.host.apps.withdraw(publication.publicationId, publication.authorityRevision);
       expect(f.host.apps.list('cycle-' + n)).toMatchObject([{ active: false }]);
     }
   }, 90_000);
@@ -195,7 +195,7 @@ describe("local approved dataset apps", () => {
 
   it("adopts a baseline-shaped approval below the saved root revision without reviving old sessions", async () => {
     const f = await fixture();
-    f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+    await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
     const prior = await f.host.apps.activate(f.app, new AbortController().signal);
     await f.host.close();
     const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
@@ -271,7 +271,7 @@ describe("local approved dataset apps", () => {
 
   it("adopts an older build's new approval on a root cleared at a higher revision", async () => {
     const f = await fixture();
-    const withdrawn = f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+    const withdrawn = await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
     await f.host.close();
     const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
     let oldApproval;
@@ -288,6 +288,42 @@ describe("local approved dataset apps", () => {
     expect(adopted.authorityRevision).toBeGreaterThan(withdrawn.authorityRevision);
     expect(() => reopened.apps.assertBrowserPublication(adopted.publicationId, oldApproval.authorityRevision)).toThrow(/approval changed/);
     expect(await reopened.apps.request(adopted.publicationId, "invoke", { ...f.invocation(), authorityRevision: adopted.authorityRevision })).toMatchObject({ replayed: false });
+  });
+
+  it("withdraws an approval whose Dataset was archived, releasing the active slot it still holds", async () => {
+    const f = await fixture(), path = join(f.workspaceRoot, ".dohc/datasets/state.sqlite");
+    f.host.archive({ datasetId: id(1) });
+    expect(f.host.apps.list("app")).toMatchObject([{ publicationId: f.published.publicationId, approved: true, active: false }]);
+    await expect(f.host.apps.request(f.published.publicationId, "invoke", f.invocation())).rejects.toThrow(/unavailable/);
+    const filler = new DatabaseSync(path);
+    try { for (let n = 0; n < 63; n++) filler.prepare("INSERT INTO local_app_roots VALUES(?,1,'dataset',?)").run(`filler-${n}`, `filler-${n}`); } finally { filler.close(); }
+    // The archived app still holds one of the 64 active slots.
+    f.host.restore({ datasetId: id(1) });
+    const next = await f.prepareApp("next");
+    await expect(f.host.apps.activate(next, new AbortController().signal)).rejects.toThrow(/Remove an app/);
+    f.host.archive({ datasetId: id(1) });
+    const withdrawn = await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+    expect(withdrawn).toEqual({ kind: "withdrawn", publicationId: f.published.publicationId, authorityRevision: f.published.authorityRevision + 1 });
+    expect(f.host.apps.list("app")).toMatchObject([{ approved: false, active: false }]);
+    expect(await f.host.apps.withdraw(f.published.publicationId, withdrawn.authorityRevision)).toEqual(withdrawn);
+    const db = new DatabaseSync(path);
+    try {
+      expect(db.prepare("SELECT count(*) AS n FROM dohc_dataset_bindings WHERE app_id=?").get(f.published.publicationId)!.n).toBe(0);
+      expect(db.prepare("SELECT count(*) AS n FROM local_app_roots WHERE active_publication_id IS NOT NULL").get()!.n).toBe(63);
+    } finally { db.close(); }
+    f.host.restore({ datasetId: id(1) });
+    expect(await f.host.apps.activate(next, new AbortController().signal)).toMatchObject({ authorityRevision: 1 });
+  });
+
+  it("releases an archived Dataset's app approval when the Dataset is deleted", async () => {
+    const f = await fixture();
+    f.host.archive({ datasetId: id(1) });
+    const preview = f.host.deletePreview({ datasetId: id(1) });
+    await f.host.deleteDataset({ datasetId: id(1), expected: preview.cursor, reviewToken: preview.reviewToken, acknowledge: true });
+    expect(f.host.apps.list("app")).toEqual([]);
+    const db = new DatabaseSync(join(f.workspaceRoot, ".dohc/datasets/state.sqlite"));
+    try { expect(db.prepare("SELECT revision,active_kind FROM local_app_roots WHERE app_root='app'").get()).toEqual({ revision: f.published.authorityRevision + 1, active_kind: null }); }
+    finally { db.close(); }
   });
 
   it("opens and deletes a Dataset even when a stored app candidate no longer parses", async () => {
@@ -322,7 +358,7 @@ describe("local approved dataset apps", () => {
     expect(await restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "get" })).toEqual(first);
     expect(await restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "clear", token: first.attempt.token })).toEqual({ attempt: null });
     await expect(restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, operation: "list", action: "get" })).rejects.toThrow(/not approved/);
-    restarted.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+    await restarted.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
     await expect(restarted.apps.request(f.published.publicationId, "attempt", { ...envelope, action: "get" })).rejects.toThrow(/approval changed/);
   });
   it("refuses an uncommitted submission before fencing local writes and allows transfer after confirmation", async () => {
@@ -363,7 +399,7 @@ describe("local approved dataset apps", () => {
   });
 
   it("revokes a publication independently of its Collection and permits a reviewed reactivation", async () => {
-    const f = await fixture(); f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+    const f = await fixture(); await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
     expect(() => f.host.apps.browserPublication(f.published.publicationId)).toThrow();
     expect(f.host.describe(id(1)).name).toBe("Registrations");
     const next = await f.host.apps.activate(f.app, new AbortController().signal);
@@ -388,7 +424,7 @@ describe("local approved dataset apps", () => {
     await expect(f.host.apps.readBrowserFile(admin.publicationId,{...request,fileId:pending.file.fileId,input:{fileId:pending.file.fileId,guess:true}})).rejects.toThrow(/unavailable/);
     await expect(f.host.apps.request(admin.publicationId, "upload", { authorityRevision: admin.authorityRevision, idempotencyKey: "other", name: "receipt.pdf", contentType: "application/pdf", bytesBase64: "JVBERi0=" })).rejects.toThrow(/cannot upload/);
     const disclosure=f.host.apps.readBrowserFile(admin.publicationId,request);
-    f.host.apps.withdraw(admin.publicationId,admin.authorityRevision);
+    await f.host.apps.withdraw(admin.publicationId,admin.authorityRevision);
     await expect(disclosure).rejects.toThrow();
   });
 
@@ -404,7 +440,7 @@ describe("local approved dataset apps", () => {
   it("refuses a queued operation when app approval ends before its commit", async () => {
     const f = await fixture();
     const pending = f.host.apps.request(f.published.publicationId, "invoke", f.invocation());
-    f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+    await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
     await expect(pending).rejects.toThrow();
     const rows = await f.host.query({ datasetId: id(1), revision: 1, revisionSha256: f.revision.revisionSha256, operationId: id(7), input: {}, idempotencyKey: "after-revoke" });
     expect(rows.result).toMatchObject({ rows: [] });
@@ -461,7 +497,7 @@ it("keeps local form uploads, submissions and selected fields working through re
   await expect(restarted.apps.request(restricted.publicationId,"invoke",{...invoke,authorityRevision:restricted.authorityRevision})).rejects.toThrow("cannot submit those fields");
   expect(await restarted.apps.readBrowserFile(admin.publicationId,{authorityRevision:admin.authorityRevision,fileId:uploaded.file.fileId,operation:"fileRead",input:{fileId:uploaded.file.fileId}})).toMatchObject({bytesBase64:"JVBERi0="});
   expect(await restarted.apps.request(f.published.publicationId,"invoke",f.invocation("Next","after-restart"))).toMatchObject({replayed:false});
-  restarted.apps.withdraw(f.published.publicationId,1);
+  await restarted.apps.withdraw(f.published.publicationId,1);
   await expect(restarted.apps.request(f.published.publicationId,"invoke",invoke)).rejects.toThrow("approval changed");
 });
 
@@ -539,9 +575,9 @@ describe("local app write attribution", () => {
     f.setRun({ depth: 1 });
     await expect(f.host.apps.request(f.published.publicationId, "invoke", { ...f.invocation("x", "listed"), operation: "list" })).rejects.toThrow(/not approved/);
     for (const forged of [{ agent: { depth: 0 } }, { depth: 0 }, { actor: { kind: "owner" } }]) {
-      expect(() => f.host.apps.request(f.published.publicationId, "invoke", { ...f.invocation("x", "forged"), ...forged })).toThrow(/Unexpected app backend fields/);
+      await expect(f.host.apps.request(f.published.publicationId, "invoke", { ...f.invocation("x", "forged"), ...forged })).rejects.toThrow(/Unexpected app backend fields/);
     }
-    f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+    await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
     await expect(f.invoke("revoked")).rejects.toThrow(/approval changed/);
     expect(f.host.automations.next()).toBeNull();
     expect(f.host.history({ datasetId: id(1) }).entries).toEqual([]);

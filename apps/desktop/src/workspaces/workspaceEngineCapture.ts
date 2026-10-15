@@ -1178,6 +1178,14 @@ export class UnsupportedWorkspacePathError extends Error {
   }
 }
 
+/** The workspace's write policy refuses this path; the same write cannot succeed later. */
+export class EngineWritePolicyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EngineWritePolicyError";
+  }
+}
+
 // The refusal half of the absent-head contract stated on
 // `WorkspaceEngineCapture.openYDocSession`: the entered version has no snapshot
 // for this path and no artifact on disk, so the path is not in this version.
@@ -1536,7 +1544,7 @@ function assertEngineWritablePath(
     throw new UnsupportedWorkspacePathError(path);
   }
   if (!check.ok || check.normalized !== path) {
-    throw new Error(`Engine refused to write unsafe workspace path: ${path}`);
+    throw new EngineWritePolicyError(`Engine refused to write unsafe workspace path: ${path}`);
   }
   if (options.protected) {
     // A protected materialization may only ever land on a secret-classified
@@ -1548,10 +1556,10 @@ function assertEngineWritablePath(
     return;
   }
   if (isSecretPath(path)) {
-    throw new Error(`Engine refused to write secret path through the text flow: ${path}`);
+    throw new EngineWritePolicyError(`Engine refused to write secret path through the text flow: ${path}`);
   }
   if (!policyTracksPath(path, policy)) {
-    throw new Error(`Engine refused to write non-engine-owned path: ${path}`);
+    throw new EngineWritePolicyError(`Engine refused to write non-engine-owned path: ${path}`);
   }
 }
 
