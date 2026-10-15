@@ -10,6 +10,7 @@
 //   requests/<id>/cancel         a cancellation request (client)
 //   requests/<id>/attempts/<n>/  one worker's evidence (worker)
 //   service.json                 service identity, heartbeat, and health (service)
+//   monitor-load.json            the dashboard's minute samples of host load (service)
 //   lane/                        the checkout the service verifies in
 //   service/<commit>/, current   installed service checkouts, and the active one
 
@@ -206,6 +207,8 @@ export function serviceState(root, now = Date.now()) {
 }
 
 export const taskName = "dohc-verification-queue";
+// The service serves its read-only monitor page here, on this host only.
+export const monitorPort = 4250;
 
 /** Start the installed service if its heartbeat is not current. Starting a running task does nothing. */
 export function ensureService(root, { start = () => spawnSync("schtasks.exe", ["/run", "/tn", taskName], { windowsHide: true, encoding: "utf8" }) } = {}) {
@@ -393,6 +396,7 @@ function printStatus(root) {
   const minutes = ms => `${Math.round(ms / 60_000)} min`;
   const { lanes, runs } = serviceRuns(record);
   console.log(`service: ${alive ? `running ${record.commit?.slice(0, 12) ?? ""} (pid ${record.pid})` : record ? `not responding since ${record.heartbeatAt}` : "never started"}`);
+  if (alive) console.log(`monitor: http://127.0.0.1:${monitorPort}`);
   if (record?.health?.reason) console.log(`health: ${record.health.reason}`);
   if (record?.health?.diskFreeGb != null) console.log(`free disk: ${record.health.diskFreeGb.toFixed(1)} GB`);
   if (record) console.log(`host: ${lanes} lane(s), ${record.health?.cpuBusyPercent ?? "unknown"}% CPU, ${record.health?.freeMemGb ?? "unknown"} GB free memory`);
