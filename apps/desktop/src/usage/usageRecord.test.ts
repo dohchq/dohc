@@ -41,6 +41,13 @@ function setup(options: { readError?: NodeJS.ErrnoException } = {}) {
     rm: vi.fn(async (path: string) => { disk.delete(path); }),
     sync: vi.fn(async () => {}),
     syncDirectory: vi.fn(async () => {}),
+    open: vi.fn(async (file: string, flags: string): Promise<{
+      writeFile(data: string): Promise<void>; sync(): Promise<void>; close(): Promise<void>;
+    }> => ({
+      writeFile: async data => { await io.writeFile(file, data); },
+      sync: async () => { if (flags === "r") await io.syncDirectory(); else await io.sync(); },
+      close: async () => {},
+    })),
   } satisfies UsageFileSystem;
   const store = createUsageStore({ stateDir: () => "state", appVersion: "0.1.0", coverage: DESKTOP_USAGE_COVERAGE, io });
   stores.push(store);
