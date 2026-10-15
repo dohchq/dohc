@@ -1,12 +1,10 @@
 import { expect, it } from "vitest";
 import { advertisedCapabilityTools } from "./capabilityExposure.fixture";
-import shareCopyTools from "./toolsList.shareCopy.json";
 import mainTools from "./toolsList.main.json";
-import publicationTools from "./toolsList.pr1659.json";
-import chatBodyTools from "./toolsList.pr1705.json";
 
 it.each(["owner", "view", "comment", "edit"] as const)("preserves main tools/list output for %s", async level => {
-  // Hand-reviewed #1659 additions. Never regenerate the hashed main baseline.
+  // Hand-reviewed baseline. A PR that adds or changes an MCP tool edits this file directly;
+  // the generator does not regenerate it and folded changes must not hide in delta files.
   const expected: { name: string; inputSchema: Record<string, unknown> }[] = structuredClone(mainTools[level]);
   if (level === "owner") {
     const dataset = expected.find(tool => tool.name === "dohc_dataset")!;
@@ -14,24 +12,21 @@ it.each(["owner", "view", "comment", "edit"] as const)("preserves main tools/lis
       properties: { request: { oneOf: { properties: { action: { const: string } } & Record<string, unknown> }[] } };
     };
     const actions = schema.properties.request.oneOf;
-    for (const [action, properties] of Object.entries(publicationTools.datasetPropertyAdditions)) {
+    for (const [action, properties] of Object.entries({
+      approve: { agentLabel: { type: "string", minLength: 1, maxLength: 160 } },
+      approveMigration: { agentLabel: { type: "string", minLength: 1, maxLength: 160 } },
+    })) {
       const schema = actions.find(option => option.properties.action.const === action)!;
-      for (const name of Object.keys(properties)) expect(schema.properties).not.toHaveProperty(name);
-      Object.assign(schema.properties, properties);
+      for (const [name, value] of Object.entries(properties)) expect(schema.properties).toHaveProperty(name, value);
     }
-    for (const tool of [...publicationTools.ownerToolAdditions, ...shareCopyTools.ownerToolAdditions]) {
-      expect(expected.some(existing => existing.name === tool.name)).toBe(false);
-    }
-    expected.push(...publicationTools.ownerToolAdditions, ...shareCopyTools.ownerToolAdditions);
-    expected.sort((a, b) => a.name.localeCompare(b.name));
+    for (const name of ["dohc_publish_app", "dohc_read_share_copy"]) expect(expected.some(tool => tool.name === name)).toBe(true);
   }
   // Hand-reviewed #1705 removals: desktop admission counts normalized UTF-8 bytes.
-  for (const removal of chatBodyTools.bodyMaxLengthRemovals) {
-    const tool = expected.find(tool => tool.name === removal.name);
+  for (const name of ["dohc_start_file_chat", "dohc_start_group_chat", "dohc_reply_to_chat"]) {
+    const tool = expected.find(tool => tool.name === name);
     if (!tool) continue;
     const schema = tool.inputSchema as { properties: { body: { maxLength?: number } } };
-    expect(schema.properties.body.maxLength).toBe(removal.maxLength);
-    delete schema.properties.body.maxLength;
+    expect(schema.properties.body).not.toHaveProperty("maxLength");
   }
   expect(await advertisedCapabilityTools(level === "owner" ? undefined : level)).toEqual(expected);
 });
