@@ -145,6 +145,19 @@ pub fn publication_tag(binding: &LiveObjectBinding, release_digest: &str) -> ser
     serde_json::json!({"releaseDigest":release_digest,"restoreFenceGeneration":binding.restore_fence_generation,"document":{"workspaceId":binding.workspace_id,"mainVersionId":binding.main_version_id,"objectId":binding.object_id,"lineageClaimId":binding.lineage_claim_id}})
 }
 
+pub fn publication_tag_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+) -> Result<serde_json::Value, OwnerOutboxError> {
+    let key = key(binding)?;
+    let stop = super::release::read_in(conn, &key)?.ok_or(OwnerOutboxError::StopConflict)?;
+    if stop.binding.as_ref() != Some(binding) {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    let progress = stop.prefix.ok_or(OwnerOutboxError::StopConflict)?;
+    Ok(publication_tag(binding, &progress.release_digest))
+}
+
 pub fn history_committed_in_tx(
     tx: &rusqlite::Transaction<'_>,
     binding: &LiveObjectBinding,
@@ -182,12 +195,12 @@ fn require_publication_tag_in_tx(
     let started = std::time::Instant::now();
     let tagged = tx
         .query_row(
-            "SELECT json_extract(payload_json,'$.release.releaseDigest')=?4
-                AND json_extract(payload_json,'$.release.restoreFenceGeneration')=?5
-                AND json_extract(payload_json,'$.release.document.workspaceId')=?1
-                AND json_extract(payload_json,'$.release.document.mainVersionId')=?2
-                AND json_extract(payload_json,'$.release.document.objectId')=?3
-                AND json_extract(payload_json,'$.release.document.lineageClaimId')=?6
+            "SELECT json_extract(payload_json,'$.release.releaseDigest') IS ?4
+                AND json_extract(payload_json,'$.release.restoreFenceGeneration') IS ?5
+                AND json_extract(payload_json,'$.release.document.workspaceId') IS ?1
+                AND json_extract(payload_json,'$.release.document.mainVersionId') IS ?2
+                AND json_extract(payload_json,'$.release.document.objectId') IS ?3
+                AND json_extract(payload_json,'$.release.document.lineageClaimId') IS ?6
              FROM replication_log
              WHERE workspace_id=?1 AND origin_id=?7 AND origin_seq=?8
                AND op_kind IN ('ydoc.update','moment.append')",
@@ -472,6 +485,7 @@ pub fn commit_prefix(
     release_digest: &str,
     now_ms: i64,
     faults: &dyn FaultInjector,
+    // Return `true` only for a row `journal_prefix_op_in_tx` appended in this call for this binding.
     mut journal: impl FnMut(
         &rusqlite::Transaction<'_>,
         &[u8],

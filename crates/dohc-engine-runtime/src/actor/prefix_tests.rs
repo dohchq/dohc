@@ -175,10 +175,8 @@ fn native_prefix_unchanged_projection_records_credit_once() {
     commit_native_prefix(&mut store, &mut cache, &observed, &NoFaults).unwrap();
     settle_native_prefix(&mut store, &mut cache, &root, &observed, &NoFaults).unwrap();
 
-    // Reopen the same projected moment through the write path. This models a
-    // replay after the durable frontier marker was cleared: the moment ID is
-    // unchanged, so the projected write is deduped and the prefix journal
-    // guard is the only thing keeping replication at one row.
+    // Build the replay state with SQL so the unchanged moment ID reaches the
+    // projected write and proves that the prefix journal guard keeps one row.
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -261,16 +259,34 @@ fn native_prefix_refuses_an_external_coordinate_without_this_release_tag() {
         TxnOutcome::Committed(seq) => seq,
         _ => panic!("unexpected journal crash"),
     };
-    let result = prefix::commit_prefix(
-        &mut store,
-        &mut cache,
-        &observed.binding,
-        &"c".repeat(64),
-        6,
-        &NoFaults,
-        |_, _, _, _| Ok(Some(("local".into(), foreign_seq, false))),
-    );
-    assert!(matches!(result, Err(OwnerOutboxError::Corrupt)));
+    let no_tag_seq = match store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_sync::journal_local_op_in_tx(
+                tx,
+                "workspace",
+                "ydoc.update",
+                &serde_json::json!({}),
+                5,
+            )
+            .map_err(StorageError::persist_public)
+        })
+        .unwrap()
+    {
+        TxnOutcome::Committed(seq) => seq,
+        _ => panic!("unexpected journal crash"),
+    };
+    for coordinate in [foreign_seq, no_tag_seq] {
+        let result = prefix::commit_prefix(
+            &mut store,
+            &mut cache,
+            &observed.binding,
+            &"c".repeat(64),
+            6,
+            &NoFaults,
+            |_, _, _, _| Ok(Some(("local".into(), coordinate, false))),
+        );
+        assert!(matches!(result, Err(OwnerOutboxError::Corrupt)));
+    }
     assert_eq!(
         store
             .read_with(|c| prefix::progress_in(
@@ -282,6 +298,52 @@ fn native_prefix_refuses_an_external_coordinate_without_this_release_tag() {
             .consumed_entries,
         0
     );
+}
+
+#[test]
+fn native_prefix_journal_rejects_a_different_restore_generation() {
+    let (_root, _path, mut store, observed, doc) = native_prefix_fixture();
+    let mut cache = WriterDocCache::new();
+    draft::append_draft_cached(
+        &mut store,
+        &mut cache,
+        "workspace",
+        draft::OwnerDraftAppendInput {
+            person_edit: true,
+            binding: observed.binding.clone(),
+            expected_revision: 1,
+            append_key: "mismatched-generation".into(),
+            update: doc.richdoc_append_paragraph("mismatched generation"),
+            now_ms: 3,
+            agent_declaration: None,
+            automation_declaration: None,
+        },
+        &NoFaults,
+    )
+    .unwrap();
+    prepare_native_prefix(&mut store, &observed);
+    let mut mismatched = observed.binding.clone();
+    mismatched.restore_fence_generation += 1;
+    let result = prefix::commit_prefix(
+        &mut store,
+        &mut cache,
+        &observed.binding,
+        &"c".repeat(64),
+        6,
+        &NoFaults,
+        |tx, bytes, actor, attribution| {
+            dohc_engine_sync::journal_prefix_update_in_tx(
+                tx,
+                &mismatched,
+                bytes,
+                actor,
+                attribution,
+                6,
+            )
+            .map_err(|e| CollabError::Storage(StorageError::persist_public(e)))
+        },
+    );
+    assert!(result.is_err());
 }
 
 #[test]
