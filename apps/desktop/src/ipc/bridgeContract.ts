@@ -400,6 +400,7 @@ export const OwnerLiveDocument = z.object({
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
   reason: z.enum(["document-unavailable", "workspace-changed"]).optional(),
   canResume: z.boolean(),
+  deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
@@ -452,7 +453,7 @@ export const WorkspaceFileEntry = z.object({
 });
 export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntry>;
 
-export const ListWorkspaceFilesResult = z.object({
+export const WorkspacePathListing = z.object({
   files: z.array(WorkspaceFileEntry),
   // Directories ride along so empty folders
   // appear in the tree. Optional so older fixtures/consumers keep parsing;
@@ -462,6 +463,21 @@ export const ListWorkspaceFilesResult = z.object({
   // the owned-workspace walk; a cached answer must be revalidated before the
   // renderer uses it as evidence that a path is missing.
   cached: z.literal(true).optional(),
+});
+export type WorkspacePathListing = z.infer<typeof WorkspacePathListing>;
+
+export const WorkspaceListingVisibility = z.object({
+  status: z.enum(["ready", "degraded", "unavailable"]),
+  rules: z.array(z.object({
+    path: z.string().min(1),
+    visibility: z.enum(["visible", "hidden"]).optional(),
+    export: z.enum(["included", "excluded", "redacted"]).optional(),
+  })),
+});
+export type WorkspaceListingVisibility = z.infer<typeof WorkspaceListingVisibility>;
+
+export const ListWorkspaceFilesResult = WorkspacePathListing.extend({
+  visibility: WorkspaceListingVisibility,
 });
 export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 
@@ -1305,6 +1321,16 @@ type _AllEngineStoreRefusalsRepresented = AssertNever<
   Exclude<EngineStoreRefusal, (typeof ENGINE_STORE_REFUSALS)[number]>
 >;
 
+export const CaptureFileHold = z.object({
+  workspaceId: z.string().min(1), sourceVersionId: z.string().min(1), objectId: z.string().min(1), path: z.string().min(1),
+  observedSha256: z.string().min(1), observedSize: z.number().int(),
+  reason: z.literal("ydoc-resolution-not-representable"), observedAtMs: z.number().int(),
+  attemptCount: z.number().int(), retryRequested: z.boolean(),
+});
+export type CaptureFileHold = z.infer<typeof CaptureFileHold>;
+export const CaptureHoldsEvent = z.object({ workspaceId: WORKSPACE_ID, heldFiles: z.array(CaptureFileHold) }).strict();
+export type CaptureHoldsEvent = z.infer<typeof CaptureHoldsEvent>;
+
 const SYNC_STATUS_BASE_FIELDS = {
   state: z.enum([
     "synced",
@@ -1342,6 +1368,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   atomicPlacementUnavailable: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
+  heldFiles: z.array(CaptureFileHold).optional(),
   // Why the last sync pass failed, present until a pass succeeds. Local work
   // is saved either way. A refused claim waits for Try again; network failures back off.
   syncFailure: z
@@ -1356,6 +1383,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "restart-required"]).optional(),
+  ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
@@ -1438,6 +1466,15 @@ export const ClearCaptureRecoveryPayload = WorkspaceIdPayload.extend({ momentId:
 export type ClearCaptureRecoveryPayload = z.infer<typeof ClearCaptureRecoveryPayload>;
 
 export const captureRecoveryOperations = {
+  retryHeldCapture: {
+    capabilityId: "capture.held.retry",
+    channel: "desktop:retry-held-capture",
+    payload: WorkspaceIdPayload.extend({ path: PATH_STRING }),
+    result: z.object({ settled: z.boolean(), running: z.boolean(), degraded: z.boolean(), retried: z.boolean(), heldFiles: z.array(CaptureFileHold) }),
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation", reason: "Only the sending window's active workspace can retry a held file." },
+  },
   getCaptureRecoveryStatus: {
     capabilityId: "capture.recovery.read",
     channel: "desktop:get-capture-recovery-status",
@@ -1830,9 +1867,18 @@ const CHAT_MESSAGE_AUTOMATION = z.object({
   collectionPath: SAFE_RELATIVE_PATH.nullable(),
 });
 
+// Display only. This token grants no workspace or author authority.
+export const ActorPresentation = z.object({
+  group: z.string(),
+  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose", "olive"]).nullable(),
+  self: z.boolean(),
+});
+export type ActorPresentation = z.infer<typeof ActorPresentation>;
+
 export const ChatMessageRecord = z.object({
   id: OPAQUE_ID,
   threadId: OPAQUE_ID,
+  presentation: ActorPresentation,
   authorKind: CHAT_MESSAGE_AUTHOR_KIND,
   authorDisplayName: z.string().min(1).max(200),
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
@@ -2201,6 +2247,7 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
   openingMessage: z
     .object({
       id: OPAQUE_ID,
+      presentation: ActorPresentation,
       authorKind: CHAT_MESSAGE_AUTHOR_KIND,
       authorDisplayName: z.string().min(1).max(200),
       authorOwnerDisplayName: z.string().min(1).max(200).optional(),
@@ -3383,7 +3430,11 @@ export function activityPathsAffectWorkspaceListing(
   paths: readonly string[],
   platform: NodeJS.Platform,
 ): boolean {
-  return paths.some((path) => !hasEngineIgnoredSegment(path, platform));
+  return paths.some((path) => isWorkspaceVisibilityPolicyPath(path, platform) || !hasEngineIgnoredSegment(path, platform));
+}
+
+export function isWorkspaceVisibilityPolicyPath(path: string, platform: NodeJS.Platform): boolean {
+  return (platform === "win32" ? path.toLowerCase() : path) === ".dohc/visibility.toml";
 }
 
 // An activity ping must never be dropped on a schema failure: under-notifying is the staleness bug the channel exists to
@@ -3427,6 +3478,7 @@ export const CloudStatusPayload = z.object({
 export type CloudStatusPayload = z.infer<typeof CloudStatusPayload>;
 
 export const CloudStatusResult = z.object({
+  ownPresentation: ActorPresentation.optional(),
   connected: z.boolean(),
   email: z.string().optional(),
   serverUrl: z.string().optional(),
@@ -6518,6 +6570,7 @@ export const engineYDocSaveOperations = {
 
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
+  captureHeld: z.boolean().optional(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
   objectId: z.string().min(1).optional(),
   versionId: z.string().min(1).optional(),
@@ -6739,8 +6792,42 @@ export const systemMotionOperations = {
   },
 } as const satisfies OperationTable;
 
+export const chatOperations = {
+  listChatFileMentions: {
+    capabilityId: "chat.read", scope: "workspace",
+    channel: "desktop:list-chat-file-mentions", payload: ListChatFileMentionsPayload, result: ListChatFileMentionsResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  listChatMessages: {
+    capabilityId: "chat.read", scope: "workspace",
+    channel: "desktop:list-chat-messages", payload: ListChatMessagesPayload, result: ListChatMessagesResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  sendChatMessage: {
+    capabilityId: "chat.reply", scope: "workspace",
+    channel: "desktop:send-chat-message", payload: SendChatMessagePayload, result: SendChatMessageResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  listPersonalChatFeed: {
+    capabilityId: "chat.inbox.read", scope: "workspace",
+    channel: "desktop:list-personal-chat-feed", payload: ListPersonalChatFeedPayload, result: ListPersonalChatFeedResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  listChannelThreads: {
+    capabilityId: "chat.threads.list", scope: "workspace",
+    channel: "desktop:list-channel-threads", payload: ListChannelThreadsPayload, result: ListChannelThreadsResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  startChannelThread: {
+    capabilityId: "chat.post", scope: "workspace",
+    channel: "desktop:start-channel-thread", payload: StartChannelThreadPayload, result: StartChannelThreadResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+} as const satisfies OperationTable;
+
 export interface DohcDesktopBridge
-  extends OperationBridge<typeof shareCopyOperations>,
+  extends OperationBridge<typeof chatOperations>,
+    OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
@@ -6860,9 +6947,6 @@ export interface DohcDesktopBridge
   listWorkspaceHeadings(
     payload: ListWorkspaceHeadingsPayload,
   ): Promise<ListWorkspaceHeadingsResult>;
-  listChatFileMentions(
-    payload: ListChatFileMentionsPayload,
-  ): Promise<ListChatFileMentionsResult>;
   listChatBookmarks(payload: ListChatBookmarksPayload): Promise<ListChatBookmarksResult>;
   saveChatBookmark(payload: SaveChatBookmarkPayload): Promise<SaveChatBookmarkResult>;
   archiveChatBookmark(
@@ -7068,13 +7152,9 @@ export interface DohcDesktopBridge
   ): Promise<RestoreEngineMomentFileResult>;
   listFileChats(payload: ListFileChatsPayload): Promise<ListFileChatsResponse>;
   createFileChat(payload: CreateFileChatPayload): Promise<CreateFileChatResult>;
-  listChatMessages(
-    payload: ListChatMessagesPayload,
-  ): Promise<ListChatMessagesResult>;
   getChatThreadRevision(
     payload: GetChatThreadRevisionPayload,
   ): Promise<GetChatThreadRevisionResult>;
-  sendChatMessage(payload: SendChatMessagePayload): Promise<SendChatMessageResult>;
   listChatThreadDecisions(
     payload: ListChatThreadDecisionsPayload,
   ): Promise<ListChatThreadDecisionsResult>;
@@ -7093,19 +7173,10 @@ export interface DohcDesktopBridge
   ): Promise<ListChatChannelsResult>;
   listChatFollows(payload: ListChatFollowsPayload): Promise<ListChatFollowsResult>;
   setChatFollow(payload: SetChatFollowPayload): Promise<SetChatFollowResult>;
-  listPersonalChatFeed(
-    payload: ListPersonalChatFeedPayload,
-  ): Promise<ListPersonalChatFeedResult>;
   markPersonalChatFeedSeen(payload: MarkPersonalChatFeedSeenPayload): Promise<void>;
   createChatChannel(
     payload: CreateChatChannelPayload,
   ): Promise<CreateChatChannelResult>;
-  listChannelThreads(
-    payload: ListChannelThreadsPayload,
-  ): Promise<ListChannelThreadsResult>;
-  startChannelThread(
-    payload: StartChannelThreadPayload,
-  ): Promise<StartChannelThreadResult>;
   markChatThreadRead(
     payload: MarkChatThreadReadPayload,
   ): Promise<MarkChatThreadReadResult>;
@@ -7191,6 +7262,7 @@ export interface DohcDesktopBridge
   // workspace plus global events. The payload is additive context — a
   // subscriber may ignore it. Returns an unsubscribe function.
   onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
+  onCaptureHolds(listener: (event: CaptureHoldsEvent) => void): () => void;
   // Live push: automation runs finished, an Undo put records back, a claim
   // failed, or a retry queued one, so run history and dataset records may
   // have changed. A poke, not the

@@ -25,7 +25,7 @@ describe("targeted chat navigation", () => {
         targetKind: "file",
         createdAtMs: 0,
       },
-      message: {
+      message: { presentation: { group: "fixture", hue: null, self: false },
         id: "message-dm",
         threadId: "dm-thread",
         authorKind: "human",

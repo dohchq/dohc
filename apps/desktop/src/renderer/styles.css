@@ -42,8 +42,8 @@
   --dohc-danger: #a43e2a;
   --dohc-selection: rgba(58, 126, 233, 0.22);
 
-  /* Identity hues: one per person, chosen by a hash of who they are (see
-   * ChatAvatar). Muted so they sit on the paper; text-strength on every
+  /* Identity hues: the shared human hash excludes olive; colour choices include it.
+   * Muted so they sit on the paper; text-strength on every
    * surface and on their own 15% tint (tokens.test.ts). */
   --dohc-hue-rust: #88412c;
   --dohc-hue-amber: #705012;
@@ -2074,7 +2074,7 @@ body {
   z-index: 20;
   padding: 1px 6px;
   border-radius: 3px 3px 3px 0;
-  color: #fff;
+  color: var(--dohc-bg);
   font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 600;

@@ -15,7 +15,7 @@ import {
   type TextFileSnapshot,
   type VersionedTextMoment,
 } from "@dohc/workspace-contracts/engine";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { MAX_WORKSPACE_SETTINGS_FILE_BYTES } from "./workspaceSettingsFile";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
@@ -194,4 +194,23 @@ export async function readWorkspaceEnginePolicy(
       ...(visibility.errors.length ? [".dohc/visibility.toml" as const] : []),
     ],
   };
+}
+
+/** Read the same visibility policy as search without applying files.toml admission. */
+export async function readWorkspaceVisibilityPolicy(rootPath: string): Promise<PolicyReadResult<VisibilityPolicyRule>> {
+  try {
+    const dir = await resolveWorkspaceMetadataDir(rootPath, { create: false });
+    if (dir !== null) return readPolicyFile(dir, "visibility.toml", parseVisibilityPolicy);
+    // The metadata resolver tolerates failed stats. Verify absence before widening names.
+    await realpath(rootPath);
+    try {
+      await lstat(join(rootPath, ".dohc"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { rules: null, errors: [] };
+      throw error;
+    }
+    return { rules: null, errors: ["Workspace policy directory could not be read."] };
+  } catch (error) {
+    return { rules: null, errors: [errorMessage(error)] };
+  }
 }
