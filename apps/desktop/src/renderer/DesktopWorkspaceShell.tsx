@@ -633,12 +633,6 @@ export function DesktopWorkspaceShell(props: {
   }, []);
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
 
-  const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
-    props.workspace.workspaceId,
-    props.userSettings,
-    settingsSection,
-  );
-
   const workspaceId = props.workspace.workspaceId;
   const focusRoot = useRef<HTMLDivElement>(null);
   useFocusReturn(true, focusRoot, () => document.querySelector<HTMLElement>('[data-focus-surface="workspace"]'));
@@ -739,6 +733,13 @@ export function DesktopWorkspaceShell(props: {
   const workspaceIsReady =
     workspaceReadyFor?.workspaceId === workspaceId &&
     workspaceReadyFor.selectionGeneration === workspaceSelectionGeneration;
+  const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
+    workspaceId,
+    props.userSettings,
+    settingsSection,
+    workspaceIsReady,
+  );
+
   const [workspaceOpenFailedFor, setWorkspaceOpenFailedFor] = useState<{
     workspaceId: string;
     selectionGeneration: number;
@@ -920,7 +921,7 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError],
   );
   const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
-    useCloudPresence(workspaceId, reportCloudStatusUnavailable);
+    useCloudPresence(workspaceId, reportCloudStatusUnavailable, workspaceIsReady);
   // Closing Settings reads the status again, as the old Cloud dialog did on
   // close. The page's own refresh after an enable covers only its own
   // change: another window's Try again can make main adopt this account's
@@ -1770,6 +1771,7 @@ export function DesktopWorkspaceShell(props: {
   // by the same rule as every other answer, and issued after the observation,
   // so it is the freshest thing available.
   const refreshAgentLane = useCallback(() => {
+    if (!workspaceIsReady) return;
     const token = ++engineHistoryToken.current;
     agentActiveLane.settle(
       token,
@@ -1780,7 +1782,7 @@ export function DesktopWorkspaceShell(props: {
           refreshAgentLane(),
         ),
     );
-  }, [agentActiveLane, reportLaneFailure, workspaceId]);
+  }, [agentActiveLane, reportLaneFailure, workspaceId, workspaceIsReady]);
   const onSettingsAgentActiveChange = useCallback(
     ({ active, mutated }: { active: boolean; mutated: boolean }) => {
       if (!mutated) {
@@ -6224,6 +6226,8 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
+            workspaceIsReady={workspaceIsReady}
+            workspaceOpenFailed={!!workspaceOpenFailure}
             onError={reportSettingsFailure}
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
