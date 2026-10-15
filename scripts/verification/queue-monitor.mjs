@@ -277,12 +277,25 @@ function inside(folder, path) {
   return !within || within.startsWith("..") || isAbsolute(within) ? null : full;
 }
 
-/** A failing log's test summary, or its last lines, without terminal colors. */
+/** The end of a file: its last `bytes`, without the partial first line when it was cut. Reads only that end, however large the file. */
+function readEnd(path, bytes) {
+  const fd = openSync(path, "r");
+  try {
+    const { size } = fstatSync(fd);
+    const length = Math.min(size, bytes);
+    const buffer = Buffer.alloc(length);
+    readSync(fd, buffer, 0, length, size - length);
+    const text = buffer.toString("utf8");
+    return length < size ? text.slice(text.indexOf("\n") + 1) : text;
+  } finally { closeSync(fd); }
+}
+
+/** A failing log's test summary, or its last lines, without terminal colors. A runner prints its summary at the end, so only the last 2 MB are read. */
 function failureExcerpt(folder, path) {
   const full = inside(folder, path);
   if (!full) return null;
   try {
-    const lines = plain(readFileSync(full, "utf8")).split(/\r?\n/u);
+    const lines = plain(readEnd(full, 2 * 1024 * 1024)).split(/\r?\n/u);
     const start = lines.findLastIndex(line => failureSummary.test(line));
     return (start >= 0 ? lines.slice(start, start + 200) : lines.slice(-80)).join("\n").slice(0, 16_000);
   } catch { return null; }
@@ -290,15 +303,7 @@ function failureExcerpt(folder, path) {
 
 /** The last lines of a file, reading only its end. A line a progress bar rewrote with \r shows its last state. */
 function tail(path, bytes = 96 * 1024, lines = 400) {
-  const fd = openSync(path, "r");
-  try {
-    const { size } = fstatSync(fd);
-    const length = Math.min(size, bytes);
-    const buffer = Buffer.alloc(length);
-    readSync(fd, buffer, 0, length, size - length);
-    const rows = plain(buffer.toString("utf8")).split("\n").map(row => row.split("\r").filter(Boolean).at(-1) ?? "");
-    return (length < size ? rows.slice(1) : rows).slice(-lines).join("\n");
-  } finally { closeSync(fd); }
+  return plain(readEnd(path, bytes)).split("\n").map(row => row.split("\r").filter(Boolean).at(-1) ?? "").slice(-lines).join("\n");
 }
 
 const attemptFolder = (root, id, n) => requestId.test(id ?? "") && /^\d{1,3}$/u.test(String(n ?? "")) ? queuePaths(root).attempt(id, n) : null;
