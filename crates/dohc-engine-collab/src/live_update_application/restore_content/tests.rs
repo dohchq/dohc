@@ -3623,3 +3623,74 @@ fn restore_fence_keeps_host_progress_when_its_observed_checkpoint_is_stale() {
         Ok::<_, rusqlite::Error>(())
     }).unwrap();
 }
+
+/// A hosted pass releases a held document this way: its handle stops
+/// applying, and its binding stays available, so the update it accepted
+/// still proves for the host's push.
+#[test]
+fn a_released_registration_still_proves_the_update_it_accepted() {
+    use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+    let mut f = Fixture::new("Original");
+    let update = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Accepted")
+        .unwrap();
+    f.accept(update.clone(), 1);
+    f.owner.release(&f.binding.object_id);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let proof = f
+        .store
+        .read_with(|conn| {
+            contains_in(
+                conn,
+                &key,
+                &f.binding.current_path,
+                Some(&f.binding.lineage_claim_id),
+                PublicationContentKind::Ydoc,
+                &hex_sha256(&update),
+                &mut 4_000_000,
+            )
+        })
+        .unwrap();
+    assert_eq!(proof, PublicationProof::Contained);
+    let next = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Refused")
+        .unwrap();
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "event-2".into(),
+                    update_digest: hex_sha256(&next),
+                    journal_cursor: 2,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 2,
+            },
+            first_seen: vec![],
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
+        },
+        update_bytes: next,
+    };
+    assert_eq!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap(),
+        ApplicationResult::Pending(ApplicationPending::ApplicabilityUnavailable)
+    );
+}

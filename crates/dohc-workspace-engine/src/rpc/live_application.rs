@@ -1033,36 +1033,72 @@ impl EngineService {
         })
     }
 
-    /// Drop the registrations and editor sessions of each document a hosted
-    /// pass left unready, whose native registrations the writer released in
-    /// the same step. Durable work stays. Behind `session_ops`, so a
-    /// registration in flight is dropped here or refused natively.
-    pub(super) async fn close_unready_hosted(&self, open: &Arc<OpenWorkspace>, unready: &[String]) {
-        if unready.is_empty() {
-            return;
-        }
-        let _serial = Arc::clone(&open.session_ops).lock_owned().await;
+    /// Run a hosted pull or commit, then drop the registrations and editor
+    /// sessions of each document it left unready, whose native registrations
+    /// the writer released in the same step. Durable work stays. One task
+    /// runs both, so a caller that stops waiting cannot keep them open. The
+    /// close waits on `session_ops`, so a registration in flight is dropped
+    /// here or refused natively.
+    pub(super) async fn hosted_execute(
+        &self,
+        ctx: &RequestContext,
+        open: &Arc<OpenWorkspace>,
+        configuration: dohc_engine_runtime::RelayConfiguration,
+        operation: dohc_engine_runtime::RelayOperation,
+        label: &str,
+    ) -> Result<dohc_engine_runtime::RelayOperationOutcome, WireError> {
+        use dohc_engine_runtime::RelayOperationOutcome as Outcome;
+        let cancellation = super::request::OperationCancellation::new(ctx);
         let handles: Vec<WorkspaceHandle> = lock(&self.handles)
             .iter()
             .filter(|(_, candidate)| Arc::ptr_eq(candidate, open))
             .map(|(handle, _)| handle.clone())
             .collect();
-        lock(&self.live_applications)
-            .registrations
-            .retain(|_, registration| {
-                if Arc::ptr_eq(&registration.host.open, open)
-                    && unready.contains(&registration.object_id)
-                {
-                    let _fence = lock(&registration.host.output_fence);
-                    registration.retired.cancel();
-                    false
-                } else {
-                    true
-                }
-            });
-        lock(&self.sessions).retain(|_, session| {
-            !handles.contains(&session.workspace) || !unready.contains(&session.key.object_id)
+        let registry = Arc::clone(&self.live_applications);
+        let sessions = Arc::clone(&self.sessions);
+        let leases = self.leases.scoped(&open.root);
+        let token = cancellation.token();
+        let open = Arc::clone(open);
+        let task = tokio::spawn(async move {
+            let outcome = open
+                .actor
+                .relay(configuration, operation, leases, token, None)
+                .await?;
+            let unready: &[String] = match &outcome {
+                Outcome::HostedPass { unready, .. }
+                | Outcome::HostedCursorCommitted {
+                    unready: Ok(unready),
+                    ..
+                } => unready,
+                _ => &[],
+            };
+            if !unready.is_empty() {
+                let _serial = Arc::clone(&open.session_ops).lock_owned().await;
+                lock(&registry).registrations.retain(|_, registration| {
+                    if Arc::ptr_eq(&registration.host.open, &open)
+                        && unready.contains(&registration.object_id)
+                    {
+                        let _fence = lock(&registration.host.output_fence);
+                        registration.retired.cancel();
+                        false
+                    } else {
+                        true
+                    }
+                });
+                lock(&sessions).retain(|_, session| {
+                    !handles.contains(&session.workspace)
+                        || !unready.contains(&session.key.object_id)
+                });
+            }
+            Ok::<_, dohc_engine_runtime::RuntimeError>(outcome)
         });
+        tokio::select! {
+            biased;
+            outcome = task => outcome
+                .map_err(|_| WireError::new(ErrorCode::Internal, "hosted-sync-interrupted"))?
+                .map_err(map_runtime),
+            () = cancellation.token.cancelled() => Err(cancellation.interruption(label)),
+        }
     }
 
     pub(crate) fn live_application_registration(

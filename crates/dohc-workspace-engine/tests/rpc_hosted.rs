@@ -25,7 +25,8 @@ use dohc_engine_protocol::{
 use dohc_engine_storage::hex_sha256;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{
-    EngineService, LiveApplicationHostConfig, root_binding::write_root_binding,
+    ConfiguredLiveHostConfig, EngineService, LiveApplicationHostConfig,
+    live_application_ingress::LiveApplicationIngress, root_binding::write_root_binding,
 };
 use rusqlite::Connection;
 use serde_json::{Value, json};
@@ -1316,9 +1317,11 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
     assert!(output_b.is_current());
     assert!(!live.registered(&registration_a).await);
     assert!(live.registered(&registration_b).await);
+    // The release is in memory: the binding stays available, so doc-a's
+    // accepted work still proves and pushes.
     assert_eq!(
         native_bindings(&scratch),
-        [("doc-a".to_owned(), false), ("doc-b".to_owned(), true)]
+        [("doc-a".to_owned(), true), ("doc-b".to_owned(), true)]
     );
     host.id += 1;
     call_error(
@@ -1393,6 +1396,184 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
         json!({"sessionId": sessions[1], "updateBase64": edit("still open ")}),
     )
     .await;
+}
+
+/// The session host as it runs: a configured live host whose own connection
+/// syncs the hosted replica under a real publication budget.
+struct SessionHost {
+    service: Arc<EngineService>,
+    owner: ConnectionOwner,
+    _ingress: LiveApplicationIngress,
+    workspace: WorkspaceHandle,
+    id: u64,
+}
+
+impl SessionHost {
+    async fn start(scratch: &ScratchDir, relay: &FakeRelay) -> Self {
+        let config: ConfiguredLiveHostConfig = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "hosted-relay",
+            "host": {"hostId": "host", "hostEpoch": 1, "instanceId": "instance",
+                "connectionId": "connection"},
+            "workspaces": [{"root": scratch.path(), "workspaceId": WORKSPACE, "maxRegistrations": 4,
+                "relay": {"baseUrl": relay.base_url, "bearerToken": BEARER,
+                    "allowInsecureLoopbackForTests": true}}],
+            "ingress": {"aggregateBytes": 512 * 1024 * 1024,
+                "applicationWorkingReserveBytes": 8 * 1024 * 1024, "maxUploads": 2,
+                "uploadDeadlineMs": 30_000},
+            "sync": {"policy": {"maxClientVectorBytes": 100_000, "maxHostVectorBytes": 100_000,
+                "maxOutputBytes": 1_000_000, "maxReadBytes": 4_000_000},
+                "workingReserveBytes": 4_000_000},
+        }))
+        .expect("host configuration");
+        let (service, owner, ingress) = EngineService::configured_live_host(config)
+            .await
+            .expect("session host");
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let hosts = service
+            .call(ctx, request(1, "liveApplication.hosts", None, json!({})))
+            .await
+            .expect("hosts")
+            .response
+            .result;
+        let workspace = serde_json::from_value(hosts["workspaces"][0]["workspaceHandle"].clone())
+            .expect("workspace handle");
+        Self {
+            service,
+            owner,
+            _ingress: ingress,
+            workspace,
+            id: 1,
+        }
+    }
+
+    fn context(&self) -> RequestContext {
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(self.owner.handle());
+        ctx
+    }
+
+    async fn call(&mut self, method: &str, params: Value) -> Result<Value, WireError> {
+        self.id += 1;
+        let call = request(self.id, method, Some(self.workspace.clone()), params);
+        self.service
+            .call(self.context(), call)
+            .await
+            .map(|response| response.response.result)
+    }
+
+    async fn sync(&mut self) {
+        let workspace = json!({"workspaceId": WORKSPACE});
+        for _ in 0..16 {
+            let pass = self
+                .call("sync.pullHosted", workspace.clone())
+                .await
+                .expect("pull");
+            let mut more = pass["hasMore"] == true;
+            if pass["pendingCursor"].is_object() {
+                let cursor =
+                    json!({"workspaceId": WORKSPACE, "pendingCursor": pass["pendingCursor"]});
+                self.call("sync.materializePendingCursor", cursor.clone())
+                    .await
+                    .expect("materialize");
+                let commit = self
+                    .call("sync.commitCursor", cursor)
+                    .await
+                    .expect("commit");
+                assert_eq!(
+                    (&commit["committed"], &commit["retirement"]),
+                    (&json!(true), &Value::Null)
+                );
+                more |= commit["hasMore"] == true;
+            }
+            if !more {
+                return;
+            }
+        }
+        panic!("the hosted replica did not catch up");
+    }
+
+    async fn register(&mut self, binding: &Value) -> Result<Value, WireError> {
+        self.call("liveApplication.register", json!({"binding": binding}))
+            .await
+            .map(|registered| registered["registrationId"].clone())
+    }
+}
+
+/// Part 5's held fence under the session host's real publication budget. The
+/// release is in memory: held `doc-a` keeps its binding available, so work it
+/// accepted still proves, and the host's push carries the later write of
+/// ready `doc-b`. Held, `doc-a` cannot register; once it leaves the scope, it
+/// can, so work it accepted can settle and drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_document_leaves_the_push_running_and_registers_once_it_departs() {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-a", "a.md", "hosted a");
+    relay.create("owner", 2, "doc-b", "b.md", "hosted b");
+    relay.share("doc-a", "a.md");
+    relay.share("doc-b", "b.md");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut host = SessionHost::start(&scratch, &relay).await;
+    let workspace = json!({"workspaceId": WORKSPACE});
+    host.call(
+        "sync.createHostedReplica",
+        json!({"workspaceId": WORKSPACE, "replicationEpoch": "epoch-2", "streamIdentity": "stream-2"}),
+    )
+    .await
+    .expect("create");
+    host.sync().await;
+    let main: String = Connection::open(engine_db_path(&scratch).expect("db path"))
+        .expect("open db")
+        .query_row(
+            "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
+            [WORKSPACE],
+            |row| row.get(0),
+        )
+        .expect("main version");
+    let binding = json!({
+        "workspaceId": WORKSPACE, "mainVersionId": main, "objectId": "doc-a",
+        "lineageClaimId": "0".repeat(64), "currentPath": "a.md",
+        "selectorPaths": ["a.md"], "restoreFenceGeneration": 0,
+    });
+    host.register(&binding).await.expect("register");
+
+    relay.relay().share("doc-a", "moved.md");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("held"));
+    assert_eq!(native_bindings(&scratch), [("doc-a".to_owned(), true)]);
+    assert_eq!(
+        host.register(&binding).await.map_err(|error| error.code),
+        Err(ErrorCode::Conflict)
+    );
+
+    journal_live_update(&scratch, "doc-b", "b.md", b"later write");
+    let pushed = host
+        .call("sync.push", workspace.clone())
+        .await
+        .expect("push");
+    assert_eq!(
+        (&pushed["pushed"], &pushed["hasMore"]),
+        (&json!(1), &json!(false))
+    );
+    assert_eq!(
+        relay.relay().pushed[0]["ops"][0]["payload"]["objectId"],
+        "doc-b"
+    );
+
+    // Work of doc-a still waits for the relay, so it does not retire when it
+    // leaves the scope.
+    journal_live_update(&scratch, "doc-a", "a.md", b"waiting write");
+    relay.relay().unshare("doc-a");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("held"));
+    host.register(&binding)
+        .await
+        .expect("a departed document registers to settle");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

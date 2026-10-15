@@ -20,7 +20,7 @@ use dohc_engine_storage::{
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 const SAFE: i64 = 9_007_199_254_740_991;
 
@@ -1035,6 +1035,19 @@ impl ApplicationOwner {
         }
         Ok(())
     }
+    /// Retire one document's registration in memory only. Its handles stop
+    /// applying and settling, and its binding row stays available, so the
+    /// accepted work it journaled still proves and pushes.
+    pub fn release(&mut self, object_id: &str) {
+        self.current.retain(|current| {
+            let mut held = current.lock().unwrap_or_else(PoisonError::into_inner);
+            let released = held.binding.object_id == object_id;
+            if released {
+                held.live = false;
+            }
+            !released
+        });
+    }
 }
 
 /// Work a host must finish before it unloads a document.
@@ -1130,19 +1143,19 @@ fn require_workspace(tx: &Connection, registration: &Registration) -> Result<(),
     require_binding_workspace(tx, &registration.workspace_id, &registration.binding)
 }
 
-/// A hosted replica registers only a document its current scope holds ready.
+/// A hosted replica refuses a document its current scope holds but not ready.
+/// One that left the scope registers, so its accepted work can settle and drain.
 fn require_hosted_ready(tx: &Connection, key: &DocKey) -> Result<(), ApplicationError> {
-    let ready: Option<bool> = tx
+    let unready: bool = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM hosted_documents d WHERE d.workspace_id=h.workspace_id
-                AND d.object_id=?2 AND d.scope_generation=h.scope_generation AND d.state='ready')
-             FROM hosted_replicas h WHERE h.workspace_id=?1",
+            "SELECT EXISTS(SELECT 1 FROM hosted_documents d JOIN hosted_replicas h
+                ON h.workspace_id=d.workspace_id AND h.scope_generation=d.scope_generation
+             WHERE d.workspace_id=?1 AND d.object_id=?2 AND d.state<>'ready')",
             params![key.workspace_id, key.object_id],
             |row| row.get(0),
         )
-        .optional()
         .map_err(read_sql)?;
-    if ready == Some(false) {
+    if unready {
         return Err(ApplicationError::Conflict);
     }
     Ok(())

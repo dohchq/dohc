@@ -1721,8 +1721,10 @@ pub enum RelayOperationOutcome {
         /// the scope retired, so work that waited for its path can apply and
         /// the caller pulls again. Its failure leaves the commit standing.
         retirement: Result<bool, RuntimeError>,
-        /// As for [`Self::HostedPass`], after the commit.
-        unready: Vec<String>,
+        /// As for [`Self::HostedPass`], after the commit. A failure to read
+        /// them released nothing and leaves the commit standing; the next
+        /// pass releases them.
+        unready: Result<Vec<String>, RuntimeError>,
     },
 }
 
@@ -2632,7 +2634,7 @@ fn run_relay_operation(
                 Ok(RelayOperationOutcome::HostedCursorCommitted {
                     committed,
                     retirement,
-                    unready: release_unready_hosted(store, registrations, &workspace_id)?,
+                    unready: release_unready_hosted(store, registrations, &workspace_id),
                 })
             }
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
@@ -2642,10 +2644,11 @@ fn run_relay_operation(
 
 /// Release the live registrations of each document of the hosted scope that
 /// is not ready, held or backfilling again: none can be edited live until a
-/// later commit settles it ready. Its durable work stays. A document that
-/// left the scope keeps its registrations until it drains.
+/// later commit settles it ready. The release is in memory only, so its
+/// accepted work still pushes. A document that left the scope keeps its
+/// registrations until it drains.
 fn release_unready_hosted(
-    store: &mut EngineStore,
+    store: &EngineStore,
     registrations: &mut super::live_application::Registry,
     workspace_id: &str,
 ) -> Result<Vec<String>, RuntimeError> {
@@ -2661,7 +2664,7 @@ fn release_unready_hosted(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    registrations.release(store, workspace_id, &unready)?;
+    registrations.release(workspace_id, &unready);
     Ok(unready)
 }
 

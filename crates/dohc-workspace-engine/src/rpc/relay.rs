@@ -514,14 +514,16 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
         // A pass fetched under a scope that has since moved commits nothing.
         // A commit that retired a departed document has more to pull: work
         // that waited for its path. A retirement that failed is reported as
-        // the error it would have been, beside the commit that stands.
+        // the error it would have been, beside the commit that stands. A
+        // commit that could not read what it left unready has more to pull,
+        // whose pass releases them or reports why it cannot.
         RelayOperationOutcome::HostedCursorCommitted {
             committed,
             retirement,
-            ..
+            unready,
         } => json!({
             "committed": committed,
-            "hasMore": matches!(retirement, Ok(true)),
+            "hasMore": matches!(retirement, Ok(true)) || unready.is_err(),
             "retirement": retirement.err().map(map_runtime),
             "sharingDeclined": [],
         }),
@@ -1095,6 +1097,7 @@ impl EngineService {
         let (issued, reconcile_collections) =
             self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
         let share_view = matches!(&issued, IssuedCursor::ShareView(_));
+        let hosted = matches!(&issued, IssuedCursor::Hosted(_));
         let operation = match issued {
             IssuedCursor::Relay(cursor) => RelayOperation::CommitCursor {
                 workspace_id: open.workspace_id.clone(),
@@ -1112,16 +1115,18 @@ impl EngineService {
                 now_ms: now_ms()?,
             },
         };
+        // A hosted replica takes no part in enrollment.
+        if hosted {
+            let outcome = self
+                .hosted_execute(ctx, &open, configuration, operation, "sync.commitCursor")
+                .await?;
+            return relay_outcome_json(outcome);
+        }
         let mut outcome = self
             .relay_execute(ctx, &open, configuration, operation, "sync.commitCursor")
             .await?;
         if share_view && reconcile_collections {
             open.request_collection_reconcile();
-        }
-        // A hosted replica takes no part in enrollment.
-        if let RelayOperationOutcome::HostedCursorCommitted { unready, .. } = &outcome {
-            self.close_unready_hosted(&open, unready).await;
-            return relay_outcome_json(outcome);
         }
         // A cursor commit can be what makes enrollment ready, as a push can.
         let (_, declined) = self.originate_live_sessions(ctx, &open).await?;
@@ -1355,7 +1360,7 @@ impl EngineService {
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
-            .relay_execute(
+            .hosted_execute(
                 ctx,
                 &open,
                 configuration,
@@ -1367,13 +1372,12 @@ impl EngineService {
                 "sync.pullHosted",
             )
             .await?;
-        let RelayOperationOutcome::HostedPass { mut pass, unready } = outcome else {
+        let RelayOperationOutcome::HostedPass { mut pass, .. } = outcome else {
             return Err(WireError::new(
                 ErrorCode::Internal,
                 "unexpected hosted pass outcome",
             ));
         };
-        self.close_unready_hosted(&open, &unready).await;
         for facts in std::mem::take(&mut pass.record_facts) {
             emit_record_events(&self.events, &open.workspace_id, &facts);
         }
@@ -2083,6 +2087,20 @@ mod tests {
         );
         assert_eq!(value["refusals"][0]["originSeq"], 4);
         assert_eq!(value["refusals"][0]["code"], "share-boundary-violation");
+    }
+
+    #[test]
+    fn a_hosted_commit_that_could_not_read_its_unready_documents_stands_and_pulls_again() {
+        let value = relay_outcome_json(RelayOperationOutcome::HostedCursorCommitted {
+            committed: true,
+            retirement: Ok(false),
+            unready: Err(dohc_engine_runtime::RuntimeError::ActorUnavailable),
+        })
+        .expect("commit JSON");
+        assert_eq!(
+            (&value["committed"], &value["hasMore"], &value["retirement"]),
+            (&json!(true), &json!(true), &Value::Null)
+        );
     }
 
     #[test]
