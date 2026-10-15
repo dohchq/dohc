@@ -7,7 +7,7 @@ import {
   ListWorkspaceHeadingsResult,
   ReadWorkspaceGraphPayload,
   WorkspaceGraphResult,
-  type ListWorkspaceFilesResult,
+  type WorkspacePathListing,
   type ReadWorkspaceTextResult,
 } from "./bridgeContract";
 import type { RegistryEntry } from "../workspaces/registryStore";
@@ -45,7 +45,7 @@ export function registerWorkspaceGraphIpcHandlers<
     work: (operation: Operation) => Result | Promise<Result>,
   ): Promise<Result>;
   workspaceFileListings: Pick<WorkspaceFileListingCache, "list">;
-  listOwnedWorkspaceFilesFor(workspace: Workspace): Promise<ListWorkspaceFilesResult>;
+  listOwnedWorkspaceFilesFor(workspace: Workspace): Promise<WorkspacePathListing>;
   readOwnedWorkspaceTextFor(
     workspace: Workspace,
     path: string,
