@@ -44,8 +44,9 @@ it.skipIf(process.env.DOHC_REPLICA_READ_PERF !== "1")("measures authorized curre
   const view = {workspaceId:"w",revision:1,logCursor:storage.readReplicaStanding("w")!.logSeq,journalCursor:0,files,
     texts:uniqueTexts.map(text=>({sha256:sha256(text),text})),omitted:[]};
   storage.storeReplicaCurrentView(lease,view);
+  let liveView = view;
   const supervisor = createReplicaSupervisor({storage,storeRoot:await tempRoot("read-perf"),startChild:async()=>({
-    pull:async()=>{},close:async()=>{},currentView:async()=>({...view,moved:false,nextCursor:null,refusedFiles:[]})})});
+    pull:async()=>{},close:async()=>{},currentView:async()=>({...liveView,moved:false,nextCursor:null,refusedFiles:[]})})});
   const queries = createShareReadQueries(storage,500);
   const authorize = () => {
     const result = authorizeShareGrantAction({storage,...input,action:"read"});
@@ -89,6 +90,21 @@ it.skipIf(process.env.DOHC_REPLICA_READ_PERF !== "1")("measures authorized curre
     console.log(name,JSON.stringify(results[name]));
   };
   try {
+    const fenceState = process.env.DOHC_REPLICA_READ_FENCE_STATE;
+    if (fenceState) {
+      if (!["a","b","c"].includes(fenceState)) throw Error(`unknown fence state: ${fenceState}`);
+      const rowGeneration = fenceState === "b" ? 2 : 1;
+      context.db.prepare("UPDATE sync_relay_live_documents SET restore_fence_generation=?,admission_state='open' WHERE workspace_id=?")
+        .run(fenceState === "a" ? 1 : 2,"w");
+      liveView = {...view,revision:2,files:view.files.map(file => file.lineageClaimId === null ? file : {...file,restoreGeneration:rowGeneration})};
+      await supervisor.activate("w");
+      const profiler = process.env.DOHC_REPLICA_READ_PROFILE === "1" ? new Session() : undefined;
+      if(profiler) {profiler.connect();await profiler.post("Profiler.enable");await profiler.post("Profiler.start");}
+      pair(`live-list-state-${fenceState}`,existingList,()=>storage.listReplicaCurrentViewFiles(input,supervisor),validateList);
+      if(profiler) {const profile=await profiler.post("Profiler.stop");writeFileSync(`${process.env.DOHC_REPLICA_READ_PERF_OUT}.cpuprofile`,JSON.stringify(profile.profile));profiler.disconnect();}
+      if (process.env.DOHC_REPLICA_READ_PERF_OUT) writeFileSync(process.env.DOHC_REPLICA_READ_PERF_OUT,JSON.stringify({node:process.version,pairs:31,alternating:true,warmups:5,files:20_000,state:fenceState,results},null,2));
+      return;
+    }
     const start=performance.now();validateList(storage.listReplicaCurrentViewFiles(input));
     results["stored-first-list-after-flip"]={mainThreadOccupiedMs:performance.now()-start};
     const profiler = process.env.DOHC_REPLICA_READ_PROFILE === "1" ? new Session() : undefined;

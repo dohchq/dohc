@@ -53,7 +53,7 @@ function readFences(storage: StorageContext, where: string, args: unknown[]) {
   if (!statements) fenceStatements.set(storage,statements=new Map());
   let statement = statements.get(where);
   if (!statement) {
-    statement=storage.db.prepare(`SELECT main_version_id,object_id,lineage_claim_id,current_path,restore_fence_generation,baseline_moment_relay_seq
+    statement=storage.db.prepare(`SELECT main_version_id,object_id,lineage_claim_id,current_path,restore_fence_generation,admission_state
       FROM sync_relay_live_documents WHERE lineage_state='current' AND ${where}`);
     statements.set(where,statement);
   }
@@ -94,8 +94,7 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"]): Vie
     }
   }
   for (const text of view.texts) {
-    if (texts.has(text.sha256) || !shaPattern.test(text.sha256) ||
-      byteLengths.has(text.sha256) && byteLengths.get(text.sha256) !== Buffer.byteLength(text.text)) return null;
+    if (texts.has(text.sha256) || !shaPattern.test(text.sha256)) return null;
     texts.set(text.sha256,text.text); Object.freeze(text);
   }
   // Metadata and verified text only. No grant or selector decision is cached.
@@ -138,6 +137,12 @@ function touchLatestIndex(storage: StorageContext, workspace: string, files?: Vi
 /** Release the per-workspace read index when replica retirement ends its lease. */
 export function forgetReplicaCurrentViewReadCache(storage: StorageContext, workspace: string) {
   latestIndexes.get(storage)?.delete(workspace);
+}
+
+/** Drop both immutable read caches when a share or workspace mutation removes their authority. */
+export function forgetReplicaCurrentViewCaches(storage: StorageContext, workspace: string) {
+  forgetReplicaCurrentViewReadCache(storage,workspace);
+  forgetReplicaCurrentViewStoredCache(storage,workspace);
 }
 
 /** @internal Test-only cache accounting. */
@@ -202,15 +207,19 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
       const occupant = old && index.files.get(version)?.get(old.path)?.row;
       if (occupant?.lineageClaimId != null) objects.add(occupant.objectId);
     }
-    let fences = realPath === undefined ? readFences(storage,"workspace_id=? AND main_version_id=?",[workspace,version]) : objects.size ?
+    let fences = realPath === undefined ? readFences(storage,"workspace_id=? AND main_version_id=? AND restore_fence_generation>1",[workspace,version]) : objects.size ?
       readFences(storage,"workspace_id=? AND main_version_id=? AND object_id IN (SELECT value FROM json_each(?))",[workspace,version,JSON.stringify([...objects])]) : [];
-    const generations = new Map(fences.map(f=>[lineageKey(String(f.main_version_id),String(f.object_id),String(f.lineage_claim_id)),Number(f.restore_fence_generation)]));
-    const current = (f: IndexedFile) => f.row.lineageClaimId === null || f.row.restoreGeneration === (generations.get(f.lineage) ?? 1);
+    const generations = new Map(fences.map(f=>[String(f.object_id),{lineageClaimId:String(f.lineage_claim_id),generation:Number(f.restore_fence_generation)}]));
+    const generationFor = (row: ViewFile) => {
+      const fence = row.lineageClaimId === null ? undefined : generations.get(row.objectId);
+      return fence?.lineageClaimId === row.lineageClaimId ? fence.generation : 1;
+    };
+    const current = (f: IndexedFile) => f.row.lineageClaimId === null || f.row.restoreGeneration === generationFor(f.row);
     for (const incoming of selected) {
       const old = current(incoming) ? undefined : previous?.lineages.get(incoming.lineage);
       const occupant = old && index.files.get(version)?.get(old.row.path);
       const reservedBy = old && (index.omittedPaths.get(pathKey(version,old.row.path)) ?? (occupant && current(occupant) ? occupant.row.objectId : undefined));
-      const row = currentViewFileAtFence(incoming.row,generations.get(incoming.lineage) ?? 1,old?.row,reservedBy);
+      const row = currentViewFileAtFence(incoming.row,generationFor(incoming.row),old?.row,reservedBy);
       const indexed = row === incoming.row ? incoming : old;
       if (!row || !indexed) continue;
       const file = row;
@@ -231,20 +240,24 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
     // A restore can remove an unfenced row before its replacement reaches the view.
     for (const fence of fences) {
       const fenceLineage = lineageKey(String(fence.main_version_id),String(fence.object_id),String(fence.lineage_claim_id));
-      if (index.lineages.has(fenceLineage) || Number(fence.restore_fence_generation) <= 1 ||
-        Number(fence.baseline_moment_relay_seq) <= view.logCursor ||
-        !visible(String(fence.main_version_id), String(fence.current_path))) continue;
-      const path = project(String(fence.current_path));
-      if (path !== null && (requestedPath === undefined || path === requestedPath) && !files.has(path)) files.set(path, {path, status:"updating"});
+      const inView = index.lineages.get(fenceLineage), generation = Number(fence.restore_fence_generation);
+      const pending = inView ? inView.row.restoreGeneration! < generation : fence.admission_state === "closed";
+      if (!pending) continue;
+      const currentPath = String(fence.current_path);
+      if (realPath !== undefined && currentPath !== realPath) continue;
+      const path = project(currentPath);
+      if (path === null || files.has(path) || !visible(String(fence.main_version_id), currentPath)) continue;
+      if (requestedPath === undefined || path === requestedPath) files.set(path, {path, status:"updating"});
     }
     const sorted = [...files.values()].sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
     return read({files:sorted, rows, inventoryEtag:()=>inventoryEtag(index,sorted), readText:row => {
       const text = index.texts.get(row.sha256);
       if (text !== undefined) {
-        let checked = index.textChecks.get(row.sha256);
+        const checkKey = JSON.stringify([row.sha256,row.byteLength]);
+        let checked = index.textChecks.get(checkKey);
         if (checked === undefined) {
           checked = digest(text) === row.sha256 && Buffer.byteLength(text) === row.byteLength;
-          index.textChecks.set(row.sha256,checked);
+          index.textChecks.set(checkKey,checked);
         }
         return checked ? text : null;
       }

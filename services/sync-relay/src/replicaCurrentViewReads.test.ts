@@ -188,7 +188,7 @@ it("a pending restore without a saved row reads as updating", () => {
   try {
     f.storage.claimWorkspaceIdentity({workspaceId:"workspace", replicationEpoch:"e", streamIdentity:"s"});
     const lease = createReplicaReadPrincipal(f.storage).issue("workspace", "restore"); f.storage.bindReplicaCurrentView(lease);
-    f.write(db => db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2"));
+    f.write(db => db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2,admission_state='closed'"));
     f.storage.storeReplicaCurrentView(lease, {workspaceId:"workspace", revision:1,logCursor:0,journalCursor:0,omitted:[],texts:[{sha256:sha256("old"),text:"old"}],
       files:[{versionId:"main",objectId:"object",path:f.input.evidence.currentPath,contentKind:"text",sha256:sha256("old"),byteLength:3,lineageClaimId:f.input.evidence.document.lineageClaimId,restoreGeneration:1}]});
     const input = {grantId:"grant", generation:4, principal:{kind:"user" as const,userId:"reader"}};
@@ -207,6 +207,70 @@ it("a pending restore without a saved row reads as updating", () => {
     const after = f.storage.readReplicaCurrentViewFile({...input,path:f.input.evidence.currentPath});
     expect(after).toMatchObject({status:"ready",text:"old"}); expect(after).not.toEqual(before);
   } finally {f.close();}
+});
+
+it("a fenced restore without a view row stays updating until admission resumes", () => {
+  const f = registered({deployment:true});
+  try {
+    f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"e",streamIdentity:"s"});
+    const lease = createReplicaReadPrincipal(f.storage).issue("workspace", "restore-missing"); f.storage.bindReplicaCurrentView(lease);
+    f.write(db => db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2,admission_state='closed'"));
+    f.storage.appendLogBatch({workspaceId:"workspace",originId:"owner",ops:[{originSeq:0,opKind:"workspace.restore",payloadJson:"{}",recordedAtMs:1}]});
+    const input = {grantId:"grant", generation:4, principal:{kind:"user" as const,userId:"reader"}};
+    f.storage.storeReplicaCurrentView(lease,{workspaceId:"workspace",revision:1,logCursor:1,journalCursor:0,omitted:[],texts:[],files:[]});
+    expect(f.storage.listReplicaCurrentViewFiles(input)).toMatchObject({files:[{path:f.input.evidence.currentPath,status:"updating"}]});
+    expect(f.storage.readReplicaCurrentViewFile({...input,path:f.input.evidence.currentPath})).toEqual({status:"updating"});
+    f.write(db => db.exec("UPDATE sync_relay_live_documents SET admission_state='open'"));
+    expect(f.storage.listReplicaCurrentViewFiles(input)).toMatchObject({status:"ready",files:[]});
+    expect(f.storage.readReplicaCurrentViewFile({...input,path:f.input.evidence.currentPath})).toEqual({status:"not-found"});
+  } finally {f.close();}
+});
+
+it("a live generation-one row stays updating against a closed generation-two fence", () => {
+  const f = registered({deployment:true});
+  try {
+    f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"e",streamIdentity:"s"});
+    const lease = createReplicaReadPrincipal(f.storage).issue("workspace", "restore-live-pending"); f.storage.bindReplicaCurrentView(lease);
+    f.write(db => db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2,admission_state='closed'"));
+    f.storage.appendLogBatch({workspaceId:"workspace",originId:"owner",ops:[{originSeq:0,opKind:"workspace.restore",payloadJson:"{}",recordedAtMs:1}]});
+    const input = {grantId:"grant", generation:4, principal:{kind:"user" as const,userId:"reader"}};
+    const view = {workspaceId:"workspace",revision:1,logCursor:1,journalCursor:0,omitted:[],texts:[{sha256:sha256("old"),text:"old"}],
+      files:[{versionId:"main",objectId:"object",path:f.input.evidence.currentPath,contentKind:"text" as const,sha256:sha256("old"),byteLength:3,lineageClaimId:f.input.evidence.document.lineageClaimId,restoreGeneration:1}]};
+    expect(f.storage.readReplicaCurrentViewFile({...input,path:f.input.evidence.currentPath},{currentReadView:()=>({view})})).toEqual({status:"updating"});
+  } finally {f.close();}
+});
+
+it("a source generation-one row stays updating against a closed generation-two fence without a previous row", () => {
+  const f = registered({deployment:true});
+  try {
+    f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"e",streamIdentity:"s"});
+    const lease = createReplicaReadPrincipal(f.storage).issue("workspace", "restore-source-pending"); f.storage.bindReplicaCurrentView(lease);
+    f.write(db => db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2,admission_state='closed'"));
+    f.storage.appendLogBatch({workspaceId:"workspace",originId:"owner",ops:[{originSeq:0,opKind:"workspace.restore",payloadJson:"{}",recordedAtMs:1}]});
+    const input = {grantId:"grant", generation:4, principal:{kind:"user" as const,userId:"reader"}};
+    const view = {workspaceId:"workspace",revision:1,logCursor:1,journalCursor:0,omitted:[],texts:[{sha256:sha256("old"),text:"old"}],
+      files:[{versionId:"main",objectId:"object",path:f.input.evidence.currentPath,contentKind:"text" as const,sha256:sha256("old"),byteLength:3,lineageClaimId:f.input.evidence.document.lineageClaimId,restoreGeneration:1}]};
+    const source = {currentReadView:()=>({view,previous:undefined})};
+    expect(f.storage.listReplicaCurrentViewFiles(input,source)).toMatchObject({files:[{path:f.input.evidence.currentPath,status:"updating"}]});
+    expect(f.storage.readReplicaCurrentViewFile({...input,path:f.input.evidence.currentPath},source)).toEqual({status:"updating"});
+  } finally {f.close();}
+});
+
+it("a revoked grant forgets caches without a running replica", async () => {
+  const storage = await testStorage(), context = storage as StorageContext;
+  try {
+    storage.claimWorkspace({workspaceId:"cache-revoke",ownerUserId:"owner",createdAtMs:1});
+    storage.claimWorkspaceIdentity({workspaceId:"cache-revoke",replicationEpoch:"epoch",streamIdentity:"stream"});
+    storage.createShare({share:{shareId:"cache-revoke-share",workspaceId:"cache-revoke",granterUserId:"owner",selectorJson:'{"paths":["docs"],"versionId":null}',createdAtMs:1},
+      grant:{grantId:"cache-revoke-grant",shareId:"cache-revoke-share",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"edit",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
+    const lease = createReplicaReadPrincipal(storage).issue("cache-revoke","cache-revoke"); storage.bindReplicaCurrentView(lease);
+    const text = "cached", file = {versionId:"main",objectId:"object",path:"docs/a.md",contentKind:"text" as const,sha256:sha256(text),byteLength:text.length,lineageClaimId:null,restoreGeneration:null};
+    storage.storeReplicaCurrentView(lease,{workspaceId:"cache-revoke",revision:1,logCursor:0,journalCursor:0,files:[file],omitted:[],texts:[{sha256:file.sha256,text}]});
+    expect(storage.readReplicaCurrentViewFile({grantId:"cache-revoke-grant",generation:1,principal:{kind:"user",userId:"reader"},path:file.path})).toMatchObject({status:"ready"});
+    expect(replicaCurrentViewReadCacheSize(context)).toBe(1); expect(replicaCurrentViewStoredCacheSize(context)).toBe(1);
+    expect(storage.revokeShareGrant({shareId:"cache-revoke-share",grantId:"cache-revoke-grant",revokedAtMs:2}).ok).toBe(true);
+    expect(replicaCurrentViewReadCacheSize(context)).toBe(0); expect(replicaCurrentViewStoredCacheSize(context)).toBe(0);
+  } finally {closeTestStorage(storage);}
 });
 
 it("a landed restore does not leave a deleted path updating", () => {

@@ -597,7 +597,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     streamIdentity: string;
     rotatedAtMs: number;
   }): RotateWorkspaceIdentityResult {
-    return workspacesStorage.rotateWorkspaceIdentity(this, input);
+    const result = workspacesStorage.rotateWorkspaceIdentity(this, input);
+    if (result === "rotated") replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,input.workspaceId);
+    return result;
   }
 
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
@@ -607,7 +609,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   discardReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.discardReplicaCurrentView>[1]) { return replicaCurrentViews.discardReplicaCurrentView(this,lease); }
   releaseReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.releaseReplicaCurrentView>[1]) {
     replicaCurrentViews.releaseReplicaCurrentView(this,lease);
-    replicaCurrentViewReads.forgetReplicaCurrentViewReadCache(this,lease.workspaceId);
+    replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,lease.workspaceId);
   }
   bindReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.bindReplicaCurrentView>[1]) { return replicaCurrentViews.bindReplicaCurrentView(this,lease); }
   replicaCurrentViewSelectors(workspaceId: string) { return replicaCurrentViews.replicaCurrentViewSelectors(this,workspaceId); }
@@ -986,7 +988,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     guard: () => void;
     mintCredential?: () => SyncRelayLinkCredentialMint;
   }): LinkGrantTransitionResult {
+    const workspaceId = this.getShare(input.shareId)?.workspaceId;
     const result = sharesStorage.retuneShareGrant(this, input);
+    if (result.ok && workspaceId) replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,workspaceId);
     if (result.ok) notifyDesktopReadiness(this, {shareId: result.grant.shareId});
     return result;
   }
@@ -998,7 +1002,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     expectedDependentGrantIds?: readonly string[];
     guard?: () => void;
   }): LinkGrantTransitionResult {
+    const workspaceId = this.getShare(input.shareId)?.workspaceId;
     const result = sharesStorage.revokeShareGrant(this, input);
+    if (result.ok && workspaceId) replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,workspaceId);
     if (result.ok) notifyDesktopReadiness(this, {shareId: result.grant.shareId});
     return result;
   }
@@ -1201,7 +1207,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   removeShareAccess(input: shareRemovalStorage.ShareRemovalInput) {
+    const workspaceId = this.getShare(input.shareId)?.workspaceId;
     const result = shareRemovalStorage.removeShareAccess(this, input);
+    if (result.ok && workspaceId) replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,workspaceId);
     if (result.ok) notifyDesktopReadiness(this, {shareId: result.grant?.shareId ?? input.shareId});
     return result;
   }
@@ -1211,7 +1219,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   undoShareRemoval(input: Parameters<typeof shareRemovalStorage.undoShareRemoval>[1]) {
-    return shareRemovalStorage.undoShareRemoval(this, input);
+    const workspaceId = this.getShare(input.shareId)?.workspaceId;
+    const result = shareRemovalStorage.undoShareRemoval(this, input);
+    if (workspaceId) replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,workspaceId);
+    return result;
   }
 
   listRemovedSharesForRecipient(userId: string, shareId?: string) {
@@ -1219,8 +1230,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   revokeShare(shareId: string, revokedAtMs: number): boolean {
+    const workspaceId = this.getShare(shareId)?.workspaceId;
     try { return sharesStorage.revokeShare(this, shareId, revokedAtMs); }
-    finally { notifyDesktopReadiness(this, {shareId}); }
+    finally {
+      if (workspaceId) replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,workspaceId);
+      notifyDesktopReadiness(this, {shareId});
+    }
   }
 
   listObjectMomentLogRowsByBlob(input: {
