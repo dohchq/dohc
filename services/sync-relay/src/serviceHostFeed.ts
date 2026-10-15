@@ -182,7 +182,7 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
  */
 export function createServiceHostFeed(storage: SyncRelayStorage) {
   // It passes no session reauthentication, so a held log read answers at once.
-  const replication = createWorkspaceReplicationRoutes(storage, Date.now, { wakeLog() {}, wait: async () => {} });
+  const replication = createWorkspaceReplicationRoutes(storage, Date.now, { wakeLog() {}, wait: async () => {} }, { watched: () => false });
   const blobReach = createBlobReach(storage);
   const currentScope = (workspaceId: string) => {
     const scope = storage.readServiceHostFeedScope(workspaceId);

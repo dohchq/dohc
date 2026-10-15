@@ -832,6 +832,16 @@ export interface SyncRelayStorage {
     beforeRelaySeq: number | null;
     limit: number;
   }): SyncRelayLogRow[];
+  fetchChatMessages(input: {
+    workspaceId: string; channelWireId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
+  }): FetchLogPageResult & {latestCursor: number};
+  fetchChatMessage(input: {
+    workspaceId: string; originId: string; messageId: string;
+  }): SyncRelayLogRow | null;
+  appendBrowserChatBatch(input: {
+    workspaceId: string; originId: string; messageId: string; ops: SyncRelayLogInput[];
+    guard?: (context: AppendLogBatchGuardContext) => void;
+  }): AppendLogBatchResult;
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;
