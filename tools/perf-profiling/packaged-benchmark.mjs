@@ -1,3 +1,5 @@
+import { documentFixture, documentMatrix, runtimeEstimate } from './document-size-fixtures.mjs';
+import { measurePackagedDocument } from './packaged-document-size.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs, usage } from './packaged-benchmark-options.mjs';
 import { runSoakCycles } from './packaged-soak.mjs';
@@ -24,13 +26,21 @@ if (options.help) {
   console.log(usage);
   process.exit(0);
 }
+if (options.scenario === 'document-size' && options.documentMode === 'dry-run') {
+  await createEvidenceDirectory(options.output);
+  const plan = { diagnostic: true, status: 'dry-run', settings: options, matrix: documentMatrix(options), estimate: runtimeEstimate() };
+  await writeFile(join(options.output, 'document-size-plan.json'), JSON.stringify(plan, null, 2));
+  console.log(JSON.stringify(plan, null, 2));
+  process.exit(0);
+}
 if (process.platform !== 'win32') throw Error('The packaged release benchmark requires Windows');
 const root = resolve('.');
 const { output, binary, label, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records, findCap, writeCap } = options;
 await createEvidenceDirectory(output);
 const json = (path, value) => writeFile(path, JSON.stringify(value, null, 2));
 const settings = { runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records,
-  ...(scenario === 'collection' ? { findCap, writeCap } : {}) };
+  ...(scenario === 'collection' ? { findCap, writeCap } : {}),
+  ...(scenario === 'document-size' ? { documentMiB: options.documentMiB, relaySessions: options.relaySessions, updatesPerSecond: options.updatesPerSecond, churnEdits: options.churnEdits, documentMode: options.documentMode } : {}) };
 const receipt = { label, binary, packageCommit: options.packageCommit, engineCommit: options.engineCommit,
   startedAt: new Date().toISOString(), platform: process.platform, node: process.version, settings, runs: [], status: 'setup' };
 const feedRequests = [];
@@ -64,12 +74,22 @@ const automationsModule = join(dirname(fileURLToPath(import.meta.url)), 'package
 const datasetCliScript = join(dirname(fileURLToPath(import.meta.url)), 'dataset-cli.mjs');
 const processRunner = fileURLToPath(new URL('../../scripts/verification', import.meta.url));
 const processRunnerPaths = ['process.mjs', 'windows-job.ps1', 'windows-command.mjs'];
+if (scenario === 'document-size') {
+  const patch = execFileSync('git', ['-C', options.relayCheckout, 'diff', 'HEAD', '--', 'services/sync-relay/src', 'packages/ydoc-projection/src', 'packages/live-session-contract/src'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  await writeFile(join(output, 'relay-source.patch'), patch);
+  receipt.relayCheckout = options.relayCheckout;
+  receipt.relayCommit = execFileSync('git', ['-C', options.relayCheckout, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  receipt.relayPatchSha256 = createHash('sha256').update(patch).digest('hex');
+}
 Object.assign(receipt, {
   label, binary, binarySha256: await sha256(binary), asar, asarSha256: await sha256(asar),
   packageCommit: options.packageCommit,
   engineBinary, engineSha256: await sha256(engineBinary), engineCommit: options.engineCommit,
   packageDescription: 'Windows packaged release; check companion build and signature receipt for ownership and signing status.',
   harnessSha256: await sha256(fileURLToPath(import.meta.url)),
+  ...(scenario === 'document-size' ? { documentSizeHarnessSha256: await sha256Tree(root, ['tools/perf-profiling/document-size-fixtures.mjs', 'tools/perf-profiling/packaged-document-size.mjs', 'tools/perf-profiling/document-size-pool.mjs', 'tools/perf-profiling/document-size-worker.mjs', 'tools/perf-profiling/document-size-relay.mjs', 'tools/perf-profiling/document-size-native.mjs', 'tools/perf-profiling/document-size-sockets.mjs', 'tools/perf-profiling/document-size-runner.mjs', 'tools/perf-profiling/document-size-summary.mjs']),
+    relaySourceSha256: await sha256Tree(options.relayCheckout, ['services/sync-relay/src', 'packages/ydoc-projection/src', 'packages/live-session-contract/src']),
+    runtimeEstimate: runtimeEstimate() } : {}),
   samplerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-process-snapshot.ps1')),
   windowControllerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-window-state.ps1')),
   windowClientSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'window-controller.mjs')),
@@ -154,11 +174,12 @@ async function ready(page) {
   if (await state.jsonValue() === 'editing-refused') throw Error('Actual packaged app refused document editing: dohc could not open this document for editing.');
   await painted(page);
 }
-async function fixture(runDir) {
+async function fixture(runDir, documentCase) {
   const profile = join(runDir, 'profile');
   await mkdir(profile, { recursive: true });
   const workspaces = [];
   const fixtureHashes = [];
+  const sizeDocument = documentCase ? documentFixture(documentCase.mib, documentCase.shape) : null;
   for (let index = 0; index < 2; index++) {
     cancellation.signal.throwIfAborted();
     const workspace = { workspaceId: `perf4-package-${index}`, rootPath: join(runDir, `workspace-${index}`).replaceAll('\\', '/'), kind: 'personal', mode: 'local-first' };
@@ -191,12 +212,16 @@ async function fixture(runDir) {
         return writeFile(join(workspace.rootPath, file.path), file.content);
       }));
     }
-    fixtureHashes.push({ workspaceId: workspace.workspaceId, files: scenario === 'go-to-mixed' ? 2 : fixtureFiles, collectionFiles: collection.length, digest: workspaceHash.digest('hex'), algorithm: 'SHA256 of name,NUL,UTF8-content,NUL in generation order; workspace metadata excluded' });
+    if (sizeDocument && index === 0) {
+      await writeFile(join(workspace.rootPath, 'document-size.md'), sizeDocument.text);
+      workspaceHash.update('document-size.md\0' + sizeDocument.text + '\0');
+    }
+    fixtureHashes.push({ workspaceId: workspace.workspaceId, files: scenario === 'go-to-mixed' ? 2 : fixtureFiles + (sizeDocument && index === 0 ? 1 : 0), collectionFiles: collection.length, digest: workspaceHash.digest('hex'), algorithm: 'SHA256 of name,NUL,UTF8-content,NUL in generation order; workspace metadata excluded' });
     workspaces.push(workspace);
   }
   await json(join(profile, 'dohc-workspaces.json'), { version: 1, workspaces });
   await json(join(runDir, 'fixture.json'), fixtureHashes);
-  return { profile, workspaces, fixtureHashes };
+  return { profile, workspaces, fixtureHashes, sizeDocument };
 }
 async function launch(runDir, fixture, phase) {
   const startupTarget = phase === 'fresh'
@@ -791,17 +816,56 @@ async function soak(instance, data, runDir) {
   windowController = await helperStartup;
   receipt.windowHelper = { pid: windowController.pid, prewarmMs: performance.now() - helperStarted };
   await json(join(output, 'result.json'), receipt);
-  for (let index = 0; index < runCount; index++) {
+  const documentCases = scenario === 'document-size' ? documentMatrix(options) : [null];
+  for (let index = 0; index < runCount * documentCases.length; index++) {
     cancellation.signal.throwIfAborted();
     const runDir = join(output, `run-${index + 1}`);
     const data = { index: index + 1 };
     receipt.runs.push(data);
     await mkdir(runDir, { recursive: true });
-    const f = await fixture(runDir);
+    const documentCase = documentCases[Math.floor(index / runCount)];
+    const repetition = index % runCount + 1;
+    const f = await fixture(runDir, documentCase);
     let fresh = await launch(runDir, f, 'fresh');
     data.freshStartup = fresh.startup;
     await json(join(output, 'result.json'), receipt);
     console.log(JSON.stringify({ label, run: index + 1, phase: 'fresh-ready', ms: fresh.startup.editablePaintObservedMs }));
+    if (scenario === 'document-size') {
+      const phase = async (instance, phase, soak = false) => {
+        await filesListed(instance.page, fixtureFiles + 1);
+        const row = await measurePackagedDocument({ instance, fixture: f.sizeDocument, options, signal: cancellation.signal, snapshot, phase, soak });
+        await openDoc(instance.page, 'small.md');
+        return row;
+      };
+      data.documentSize = { ...documentCase, repetition, phases: [] };
+      data.documentSize.legacyOpen = await openDoc(fresh.page, 'large.md');
+      await openDoc(fresh.page, 'small.md');
+      data.documentSize.phases.push(await phase(fresh, 'fresh'));
+      await json(join(output, 'result.json'), receipt);
+      await shutdown(runDir, fresh);
+      const restart = await launch(runDir, f, 'restart');
+      data.restartStartup = restart.startup;
+      data.documentSize.phases.push(await phase(restart, 'restart'));
+      if (repetition === 1 && data.documentSize.phases.every(row => row.status === 'complete')) {
+        data.documentSize.soak = await phase(restart, 'soak', true);
+      }
+      await shutdown(runDir, restart);
+      const relayDir = join(runDir, 'relay');
+      await mkdir(relayDir);
+      const relaySettings = { ...documentCase, directory: relayDir, checkout: options.relayCheckout, engineBinary,
+        relaySessions: options.relaySessions, updates: Math.max(65, keystrokes), updatesPerSecond: options.updatesPerSecond,
+        churnEdits: options.churnEdits, churn: repetition === 1, checkpointProbe: repetition === 1 };
+      const settingsPath = join(relayDir, 'settings.json');
+      await json(settingsPath, relaySettings);
+      const relayRequire = createRequire(join(root, 'services/sync-relay/package.json'));
+      await runOwnedCommand(process.execPath, ['--import', relayRequire.resolve('tsx'),
+        join(root, 'tools/perf-profiling/document-size-runner.mjs'), 'run', settingsPath], {
+        cwd: root, env, signal: cancellation.signal, timeoutMs: 12 * 60 * 60 * 1000, log: join(relayDir, 'runner.log'),
+      });
+      data.documentSize.relay = JSON.parse(await readFile(join(relayDir, 'relay.json'), 'utf8'));
+      await json(join(output, 'result.json'), receipt);
+      continue;
+    }
     if (scenario === 'startup') {
       await shutdown(runDir, fresh);
       const restart = await launch(runDir, f, 'restart');

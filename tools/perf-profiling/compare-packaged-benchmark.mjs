@@ -1,3 +1,4 @@
+import { compareDocumentSize } from './document-size-summary.mjs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,7 +17,7 @@ const MIN_AUTOMATION_RUNS = 5;
 
 // Settings that change what a receipt measures. The limits may differ: they decide which cases are
 // comparable, through each case's fixture digest.
-const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain'];
+const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain', 'documentMiB', 'relaySessions', 'updatesPerSecond', 'churnEdits', 'soakMinutes', 'documentMode'];
 
 function check(metric, baseline, candidate, margin, percentile = 'p95') {
   const field = percentile === 'p50' ? 'P50' : 'P95';
@@ -51,6 +52,10 @@ export function compareSummaries(baseline, candidate, margin = DEFAULT_MARGIN) {
   const baselineRuns = fewestRuns(baseline), candidateRuns = fewestRuns(candidate);
   if ([baselineRuns, candidateRuns].some(count => count !== null && count < MIN_AUTOMATION_RUNS)) {
     problems.push(`Automation cases need at least ${MIN_AUTOMATION_RUNS} runs on each side; the fewest recorded are baseline: ${baselineRuns ?? 'no cases'}, candidate: ${candidateRuns ?? 'no cases'}.`);
+  }
+  if (candidate.settings?.scenario === 'document-size') {
+    const documentSize = compareDocumentSize(baseline, candidate, margin);
+    return { ...documentSize, pass: problems.length === 0 && documentSize.pass, margin, problems: [...problems, ...documentSize.problems], documentSize };
   }
   const checks = [];
   if (baseline.collection || candidate.collection) checks.push(check('collection open to rows painted', baseline.collection?.openToRowsPaintedMs, candidate.collection?.openToRowsPaintedMs, margin));
