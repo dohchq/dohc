@@ -33,9 +33,9 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 const STATES_PAGE_HASH = "#/dev/states";
 const WIDTH = 1440;
 // The parts sit 32px apart. Each capture takes half of that around its
-// part, room for a shadow or a focus ring at its edge. A part's whole
-// shadow stays in that room (SHADOW_ROOM in StatesPage.tsx), so among the
-// others no neighbor reaches into its capture.
+// part, room for a shadow or a focus ring at its edge. A part's padding
+// (SHADOW_ROOM in StatesPage.tsx) and this room hold its whole shadow, so
+// among the others no neighbor reaches into its capture.
 const BLEED = 16;
 const THEMES = ["light", "dark"] as const;
 // Every part the page has, so a section dropped by mistake fails here
@@ -114,7 +114,7 @@ function mismatch(expected: Pixels, actual: Pixels): string | null {
 // in a channel, and none by more than 62. A part whose styles change how
 // others paint moves far more: #1983's mask on a tab strip dropped subpixel
 // text across the page, and moved 1,328 pixels of buttons by more than 16.
-// The limit is three times the worst noise and a twentieth of that.
+// The limit is three times the worst noise and a twentieth of #1983's 1,328.
 const IN_CONTEXT_LEVELS = 16;
 const IN_CONTEXT_PIXELS = 64;
 
@@ -470,13 +470,18 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     // Then every part among the others, held roughly to the baseline the
     // pass above compared or wrote. A part that starts on a fraction of a
     // pixel antialiases every edge differently, so each part's height is
-    // rounded up first, and every part starts on a whole pixel.
-    await page.evaluate(() => {
+    // rounded up first, and every part starts on a whole pixel. The heights
+    // are taken at rest, since the menu passes cleared the forced states; a
+    // forced state that changes a part's height fails on its size. The
+    // viewport grows again to the taller page.
+    const roundedHeight = await page.evaluate(() => {
       document.getElementById("states-only")?.remove();
       const parts = [...document.querySelectorAll<HTMLElement>("[data-part]")];
       const heights = parts.map((part) => Math.ceil(part.getBoundingClientRect().height));
       for (const [index, part] of parts.entries()) part.style.height = `${heights[index]}px`;
+      return document.documentElement.scrollHeight;
     });
+    await page.setViewportSize({ width: WIDTH, height: roundedHeight });
     await checkEvery(false, async (name, theme) => {
       const path = test.info().snapshotPath(`${name}-${theme}.png`);
       if (!existsSync(path)) return;
@@ -490,7 +495,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       if (far !== null) {
         const { pixels, unsettled } = await captureStill(page, around(box));
         actual = pixels;
-        far = unsettled === null ? farFrom(expected, decode(pixels)) : `did not settle; the last capture ${unsettled}`;
+        far = unsettled === null ? farFrom(expected, decode(pixels)) : `did not settle in ${STILL_CAPTURES} captures; the last one ${unsettled}`;
       }
       if (far === null) return;
       const actualPath = test.info().outputPath(`${name}-${theme}-among-others-actual.png`);
