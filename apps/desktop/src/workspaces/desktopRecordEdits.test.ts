@@ -29,7 +29,7 @@ async function scratchRoot(): Promise<string> {
 async function contextFor(materializeOutcome: string) {
   const capture: DesktopRecordEditHost["capture"] = {
     openRecordSession: () => Promise.reject(new Error("not used")),
-    writeAuthoredFile: async (absolutePath) => ({ resolvedAbsolutePath: absolutePath, materializeOutcome }),
+    writeAuthoredFile: async (absolutePath) => ({ resolvedAbsolutePath: absolutePath, materializeOutcome, objectId: "object", momentId: "moment", deduped: false }),
   };
   return desktopRecordEditContext({
     capture,
@@ -46,7 +46,7 @@ describe("desktopRecordEditContext createFile for an automation", () => {
     const inputs: Array<Parameters<DesktopRecordEditHost["capture"]["writeAuthoredFile"]>> = [];
     const context = desktopRecordEditContext({ capture: {
       openRecordSession: async () => { throw Error("unused"); },
-      writeAuthoredFile: async (...args) => { inputs.push(args); return { resolvedAbsolutePath: args[0], materializeOutcome: "applied" }; },
+      writeAuthoredFile: async (...args) => { inputs.push(args); return { resolvedAbsolutePath: args[0], materializeOutcome: "applied", objectId: "object", momentId: "moment", deduped: false }; },
     }, workspaceRoot: await scratchRoot(), person: personNamed("local"), withAdapter: async () => null,
     onCaptureSettled: () => () => undefined, signal: new AbortController().signal });
     const text = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n";
@@ -79,7 +79,7 @@ it("names main's person on a hand-made record and the run's person on an automat
       openRecordSession: () => Promise.reject(new Error("not used")),
       writeAuthoredFile: async (...args) => {
         writes.push(args);
-        return { resolvedAbsolutePath: args[0], materializeOutcome: "applied" };
+        return { resolvedAbsolutePath: args[0], materializeOutcome: "applied", objectId: "object", momentId: "moment", deduped: false };
       },
     },
     workspaceRoot: await scratchRoot(),
@@ -167,7 +167,7 @@ it("a hand-made record keeps the person who asked while it waits for its workspa
 it("marks a deduped creation committed before publication checks", async () => {
   const context = desktopRecordEditContext({ capture: {
     openRecordSession: async () => { throw Error("unused"); },
-    writeAuthoredFile: async absolutePath => ({ resolvedAbsolutePath: absolutePath, materializeOutcome: "superseded", deduped: true }),
+    writeAuthoredFile: async absolutePath => ({ resolvedAbsolutePath: absolutePath, materializeOutcome: "superseded", objectId: "object", momentId: "moment", deduped: true }),
   }, workspaceRoot: await scratchRoot(), person: personNamed("local"), withAdapter: async () => null,
   onCaptureSettled: () => () => undefined, signal: new AbortController().signal });
   await expect(context.createFile("Tasks/made.md", "text", automation)).rejects.toBeInstanceOf(AutomationCreationCommitted);
