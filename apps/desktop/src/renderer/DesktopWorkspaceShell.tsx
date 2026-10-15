@@ -3851,12 +3851,14 @@ export function DesktopWorkspaceShell(props: {
   // routes through it (onMenuCommand below) — one definition per action.
   const commandContext = useMemo<CommandContext>(
     () => ({
-      isShareView,
-      shareViewWritable,
+      // A damaged marker's grant cannot be read, so it names no level.
+      shareView: isShareView
+        ? { access: shareViewDamaged ? null : shareAccess ?? null, ended: shareViewEnded }
+        : null,
       activeDocumentKind: activeDocumentPath ? fileKindForPath(activeDocumentPath).displayKind : null,
       pinnedApps,
     }),
-    [isShareView, shareViewWritable, activeDocumentPath, pinnedApps],
+    [isShareView, shareViewDamaged, shareAccess, shareViewEnded, activeDocumentPath, pinnedApps],
   );
   const commandHandlers = useMemo<CommandHandlers>(
     () => ({
