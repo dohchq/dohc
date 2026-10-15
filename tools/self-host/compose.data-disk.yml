@@ -2,6 +2,10 @@
 # They stay named volumes so archive can find them. A missing folder fails the
 # volume mount instead of starting a fresh deployment, because Docker does not
 # create the device folder of a bound volume.
+services:
+  # The data-disk check runs in this service and reads all three folders.
+  relay-initialize:
+    volumes: [dohc_self_host_host_data:/host-data:ro]
 volumes:
   dohc_self_host_sync_relay:
     driver: local

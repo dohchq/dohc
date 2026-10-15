@@ -21,9 +21,9 @@ const config = { name: "dohc-self-host", services: { postgres: { image: "postgre
 const deployment = ["/pg/PG_VERSION", "/continuity/deployment.json", "/data/sync-relay.sqlite"];
 const accounts = { "dohc-self-host_dohc_self_host_postgres": { Driver: "local", Options: null } };
 
-// Runs each Docker check against an in-memory host: `volumes` exist in Docker, `files` exist inside them.
-// `fail` names a Docker call that fails without saying why, as a busy or restarting daemon does.
-function host({ files = deployment, volumes = accounts, fail = () => false } = {}) {
+// Runs each Docker check against an in-memory host: `volumes` exist in Docker, `files` exist inside them,
+// and `containers` are running. `fail` names a Docker call that fails without saying why, as a busy or restarting daemon does.
+function host({ files = deployment, volumes = accounts, containers = [], fail = () => false } = {}) {
   const calls = [], present = new Set(files);
   return { calls, run(command, args) {
     calls.push([command, ...args]);
@@ -31,24 +31,29 @@ function host({ files = deployment, volumes = accounts, fail = () => false } = {
     if (args.includes("config")) return { status: 0, stdout: JSON.stringify(config) };
     if (fail(args)) return { status: 125, stdout: "", stderr: "Cannot connect to the Docker daemon." };
     if (args[0] === "volume" && args[1] === "inspect") {
-      return volumes[args[2]] ? { status: 0, stdout: JSON.stringify([{ Name: args[2], ...volumes[args[2]] }]) }
-        : { status: 1, stdout: "", stderr: `Error response from daemon: get ${args[2]}: no such volume` };
+      const names = args.slice(2), missing = names.find(name => !volumes[name]);
+      return missing ? { status: 1, stdout: "", stderr: `Error response from daemon: get ${missing}: no such volume` }
+        : { status: 0, stdout: JSON.stringify(names.map(name => ({ Name: name, ...volumes[name] }))) };
     }
+    if (args[0] === "ps") return { status: 0, stdout: containers.map(container => `${container.Id}\n`).join("") };
+    if (args[0] === "inspect") return { status: 0, stdout: JSON.stringify(containers.filter(container => args.includes(container.Id))) };
     if (args[0] === "run" && args.includes("sh")) {
       const [, file] = /^if test -s (\S+); then echo present; else echo missing; fi$/.exec(args.at(-1));
       return { status: 0, stdout: present.has(file) ? "present\n" : "missing\n" };
     }
-    if (args.includes("relay-initialize")) return { status: relayCheck(args.at(-1), present), stdout: "" };
+    if (args.includes("relay-initialize")) return relayCheck(args.at(-1), present);
     throw new Error(`Unexpected Docker call: ${args.join(" ")}`);
   } };
 }
 function relayCheck(script, present) {
   const fs = { statSync: path => present.has(path) ? {} : undefined,
     readdirSync: folder => [...present].filter(path => path.startsWith(`${folder}/`)) };
-  const process = { exitCode: 0 };
-  new Function("require", "process", "console", script)(name => { assert.equal(name, "node:fs"); return fs; }, process, { error() {} });
-  return process.exitCode;
+  const process = { exitCode: 0 }, output = [];
+  new Function("require", "process", "console", script)(name => { assert.equal(name, "node:fs"); return fs; }, process,
+    { error() {}, log: line => output.push(`${line}\n`) });
+  return { status: process.exitCode, stdout: output.join("") };
 }
+const container = (name, ...mounts) => ({ Id: name, Name: `/${name}`, Mounts: mounts });
 const started = calls => calls.some(([command]) => command !== "docker");
 const changed = calls => calls.some(([command, ...args]) => command === "docker" && (args.includes("up") || args.includes("rm") || args.includes("create")));
 
@@ -58,6 +63,9 @@ test("move checks volumes, accounts and the relay deployment through Docker befo
   const check = mock.calls.find(call => call.includes("relay-initialize"));
   assert.ok(check.includes("tools/self-host/compose.data-disk.yml"));
   assert.deepEqual(check.slice(check.indexOf("run")), ["run", "--rm", "--no-deps", "-T", "--entrypoint", "node", "relay-initialize", "-e", check.at(-1)]);
+  // Running containers are checked for writers before any check container runs.
+  assert.ok(mock.calls.findIndex(([, first]) => first === "ps") >= 0);
+  assert.ok(mock.calls.findIndex(([, first]) => first === "ps") < mock.calls.findIndex(([, first]) => first === "run"));
   const probe = mock.calls.find(call => call.includes("sh"));
   assert.ok(probe.includes("type=volume,source=dohc-self-host_dohc_self_host_postgres,target=/pg,readonly"));
   // The accounts volume is inspected before a container mounts it, so a missing volume is never created.
@@ -87,13 +95,58 @@ test("move never starts when Docker cannot complete a check", async t => {
     [args => args[0] === "volume" && args.includes("dohc-self-host_dohc_self_host_postgres"), /Docker could not inspect volume dohc-self-host_dohc_self_host_postgres/],
     [args => args.includes("sh"), /Could not check Docker volume dohc-self-host_dohc_self_host_postgres/],
     [args => args.includes("relay-initialize"), /Could not check the data disk in \/mnt\/disk\/dohc/],
+    [args => args[0] === "ps", /Docker could not check which running containers can write this deployment's storage/],
+    [args => args[0] === "inspect", /Docker could not check which running containers can write this deployment's storage/],
+    [args => args[0] === "volume" && args.includes("monitor_cache"), /Docker could not check which running containers can write/],
   ];
+  // A running container with only an unrelated volume makes the writer check inspect that volume and the container.
+  const containers = [container("monitor", { Type: "volume", Name: "monitor_cache", RW: true })];
+  const volumes = { ...accounts, monitor_cache: { Driver: "local", Options: null } };
   for (const [fail, refusal] of failures) {
     // Without the failure every check passes, as the first test shows, so the failed check alone must refuse.
-    const mock = host({ fail });
+    const mock = host({ fail, containers, volumes });
     assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal);
     assert.equal(started(mock.calls), false, String(refusal));
   }
+});
+
+test("move refuses while a running container can write the deployment's storage and names each one", async t => {
+  const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n");
+  const relay = { Driver: "local", Options: bind("sync-relay") };
+  const writers = [
+    // The old project still runs on this host, with this deployment's own volume.
+    [{ volumes: { ...accounts, "dohc-self-host_dohc_self_host_sync_relay": relay },
+      containers: [container("dohc-self-host-sync-relay-1", { Type: "volume", Name: "dohc-self-host_dohc_self_host_sync_relay", RW: true })] },
+    "dohc-self-host-sync-relay-1 (dohc-self-host_dohc_self_host_sync_relay)"],
+    // Another Compose project binds the same disk folder through its own volume.
+    [{ volumes: { ...accounts, old_continuity: { Driver: "local", Options: bind("continuity") } },
+      containers: [container("old-sync-relay-1", { Type: "volume", Name: "old_continuity", RW: true })] }, "old-sync-relay-1 (old_continuity)"],
+    [{ volumes: { ...accounts, old_disk: { Driver: "local", Options: { type: "none", o: "rbind", device: "/mnt/disk" } } },
+      containers: [container("old-sync-relay-1", { Type: "volume", Name: "old_disk", RW: true })] }, "old-sync-relay-1 (old_disk)"],
+    // A bind of a parent folder, and of a folder whose volume Docker has not created yet.
+    [{ containers: [container("backup", { Type: "bind", Source: "/mnt/disk", RW: true }), container("agent", { Type: "bind", Source: "/", RW: true })] },
+      "backup (/mnt/disk), agent (/)"],
+    [{ containers: [container("old-sync-relay-1", { Type: "bind", Source: "/mnt/disk/dohc/host-data", RW: true })] }, "old-sync-relay-1 (/mnt/disk/dohc/host-data)"],
+  ];
+  for (const [options, named] of writers) {
+    const mock = host(options);
+    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}),
+      { message: `Running containers can write this deployment's storage. Stop them before you start the deployment here: ${named}.` });
+    // The refusal comes before any container runs, including the relay check.
+    assert.equal(mock.calls.some(call => call.includes("run") || call.includes("relay-initialize")), false, named);
+    assert.equal(started(mock.calls), false, named);
+  }
+});
+
+test("move starts beside read-only mounts and containers that write other folders", async t => {
+  const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n");
+  const mock = host({ containers: [
+    container("monitor", { Type: "bind", Source: "/mnt/disk/dohc", RW: false }, { Type: "bind", Source: "/", RW: false },
+      { Type: "volume", Name: "dohc-self-host_dohc_self_host_postgres", RW: false }),
+    container("other", { Type: "bind", Source: "/mnt/disk/dohc-old", RW: true }, { Type: "bind", Source: "/mnt/disk/other/sync-relay", RW: true }),
+  ] });
+  runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {});
+  assert.equal(started(mock.calls), true);
 });
 
 test("move never mounts a missing accounts volume", async t => {

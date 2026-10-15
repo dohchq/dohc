@@ -208,7 +208,7 @@ node scripts/check-self-host.mjs --start
 
 With `DOHC_DATA_DIRECTORY` set, add `--first-start` for the first start only.
 After that, every start and upgrade refuses to run without the relay deployment on the disk and the accounts database in its volume.
-A first start refuses unless the disk folders are empty.
+A first start refuses unless all three disk folders are empty, and names each folder that holds data.
 A start also refuses when Docker cannot complete these checks.
 
 The deployment initializes fresh storage, applies authentication migrations, and starts the services.

@@ -239,6 +239,7 @@ node scripts/self-host/move.mjs
 
 The command refuses to start anything in these cases:
 
+- A running container on this host, such as an old server on the same host, can write the deployment's storage.
 - An existing deployment volume on this host keeps its data somewhere other than the disk.
 - The accounts volume is missing or holds no database.
 - `deployment.json` or the relay database is missing from the disk. The command checks through the relay's own volumes.

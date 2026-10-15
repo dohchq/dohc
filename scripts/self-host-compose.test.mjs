@@ -136,7 +136,9 @@ test('a data directory selects the data-disk overlay for relay, continuity and h
   assert.ok(args.indexOf('tools/self-host/compose.private.yml') < args.indexOf('tools/self-host/compose.data-disk.yml'));
   assert.ok(args.indexOf('tools/self-host/compose.data-disk.yml') < args.indexOf('up'));
   const overlay = load(readFileSync('tools/self-host/compose.data-disk.yml', 'utf8'), { schema: YAML11_SCHEMA });
-  assert.deepEqual(Object.keys(overlay), ['volumes']);
+  assert.deepEqual(Object.keys(overlay), ['services', 'volumes']);
+  // The data-disk check runs in relay-initialize, so it must see host data too; it never writes it.
+  assert.deepEqual(overlay.services, {'relay-initialize': {volumes: ['dohc_self_host_host_data:/host-data:ro']}});
   const folders = {dohc_self_host_sync_relay: 'sync-relay', dohc_self_host_relay_continuity: 'continuity', dohc_self_host_host_data: 'host-data'};
   assert.deepEqual(Object.keys(overlay.volumes), Object.keys(folders));
   for (const [name, folder] of Object.entries(folders)) {
@@ -171,37 +173,53 @@ test('existing volumes stored anywhere but the configured disk folder are refuse
   assert.equal(check({Driver: 'other', Options: {...options}}).length, 1);
 });
 
-// Runs the relay deployment check against in-memory folders, with the status `node -e` would exit with.
-function relayCheckStatus(files, unreadable = false) {
+// Runs the relay deployment check against in-memory folders, with the status and output `node -e` would give.
+function relayCheck(files, unreadable = false) {
   const fs = {statSync: path => files.includes(path) ? {} : undefined, readdirSync: folder => {
     if (unreadable) throw Object.assign(new Error('permission denied'), {code: 'EACCES'});
     return files.filter(path => path.startsWith(`${folder}/`));
   }};
-  const process = {exitCode: 0};
-  try { new Function('require', 'process', 'console', relayDeploymentCheck)(() => fs, process, {error() {}}); } catch { return 1; }
-  return process.exitCode;
+  const process = {exitCode: 0}, output = [];
+  try {
+    new Function('require', 'process', 'console', relayDeploymentCheck)(() => fs, process, {error() {}, log: line => output.push(line)});
+  } catch { return {status: 1, stdout: ''}; }
+  return {status: process.exitCode, stdout: output.map(line => `${line}\n`).join('')};
 }
 
 test('only the first start of a data-disk deployment may initialize its relay', () => {
   const settings = {DOHC_DATA_DIRECTORY: '/mnt/disk/dohc'};
-  const record = '/continuity/deployment.json', database = '/data/sync-relay.sqlite';
-  const result = (status, firstStart) => relayDeploymentError('.env.self-host', settings, args => {
+  const record = '/continuity/deployment.json', database = '/data/sync-relay.sqlite', hostData = '/host-data/automations/replica.db';
+  const result = (check, firstStart) => relayDeploymentError('.env.self-host', settings, args => {
     assert.ok(args.includes('tools/self-host/compose.data-disk.yml') && args.includes('relay-initialize'));
-    return {status, stdout: ''};
+    return check;
   }, firstStart);
-  const found = relayCheckStatus([record, database]), empty = relayCheckStatus([]);
+  const found = relayCheck([record, database]), empty = relayCheck([]);
+  // The session host and automations rebuild their copies from the relay, so a later start accepts empty host data.
   assert.equal(result(found, false), '');
+  assert.equal(result(relayCheck([record, database, hostData]), false), '');
   assert.equal(result(empty, true), '');
-  assert.match(result(empty, false), /No relay deployment found in \/mnt\/disk\/dohc\. Mount the data disk there and try again\. Never recreate its folders/);
-  for (const files of [[record, database], [record], [database], ['/continuity/history/continuity.sqlite']]) {
-    assert.match(result(relayCheckStatus(files), true), /\/mnt\/disk\/dohc already holds relay data\. Start without --first-start/, files.join());
+  for (const files of [[], [hostData]]) {
+    assert.match(result(relayCheck(files), false), /No relay deployment found in \/mnt\/disk\/dohc\. Mount the data disk there and try again\. Never recreate its folders/);
   }
+  const refusals = [
+    [[record, database], '/mnt/disk/dohc/sync-relay, /mnt/disk/dohc/continuity already hold data'],
+    [[record, database, hostData], '/mnt/disk/dohc/sync-relay, /mnt/disk/dohc/continuity, /mnt/disk/dohc/host-data already hold data'],
+    [[record], '/mnt/disk/dohc/continuity already holds data'], [[database], '/mnt/disk/dohc/sync-relay already holds data'],
+    [['/continuity/history/continuity.sqlite'], '/mnt/disk/dohc/continuity already holds data'],
+  ];
+  for (const [files, holding] of refusals) {
+    assert.equal(result(relayCheck(files), true), `${holding}. A first start needs empty disk folders. Start without --first-start.`, files.join());
+  }
+  // Leftover host data alone still refuses a first start, which would otherwise run on another deployment's host state.
+  assert.equal(result(relayCheck([hostData]), true), '/mnt/disk/dohc/host-data already holds data. A first start needs empty disk folders. ' +
+    'Check that DOHC_DATA_DIRECTORY names a new deployment folder.');
   for (const files of [[record], [database]]) {
-    assert.match(result(relayCheckStatus(files), false), /The relay deployment in \/mnt\/disk\/dohc is missing its record or its database/, files.join());
+    assert.match(result(relayCheck(files), false), /The relay deployment in \/mnt\/disk\/dohc is missing its record or its database/, files.join());
   }
   // A failed check never reads as an empty disk or a found deployment.
-  for (const status of [relayCheckStatus([], true), 1, 125, null]) {
-    for (const firstStart of [false, true]) assert.match(result(status, firstStart), /Could not check the data disk in \/mnt\/disk\/dohc/, `${status}`);
+  for (const check of [relayCheck([], true), {status: 1, stdout: ''}, {status: 125, stdout: ''}, {status: null}, {status: 0, stdout: ''},
+    {status: 0, stdout: 'Creating network\n'}, {status: 1, stdout: empty.stdout}, {status: 0, stdout: '{"deployment":false,"holding":["other"]}\n'}]) {
+    for (const firstStart of [false, true]) assert.match(result(check, firstStart), /Could not check the data disk in \/mnt\/disk\/dohc/, JSON.stringify(check));
   }
 });
 

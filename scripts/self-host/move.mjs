@@ -2,14 +2,16 @@
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { accountsDatabaseError, composeConfig, dataDiskVolumeErrors, readSettings, relayDeploymentError } from "../../tools/self-host/config.mjs";
+import { accountsDatabaseError, composeConfig, dataDiskVolumeErrors, describeWriters, inspectVolume, readSettings, relayDeploymentError,
+  storageWriters } from "../../tools/self-host/config.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const usage = `node scripts/self-host/move.mjs [--env-file PATH]
 
 Starts this deployment on a new host from its attached data disk, then checks it.
 Stop the old server first and make sure it cannot start again.
-The command refuses to start without the accounts database and the relay deployment on the disk.
+The command refuses to start while a running container can write the deployment's storage,
+or without the accounts database and the relay deployment on the disk.
 See "Move to a new host" in docs/how-to/self-host-recovery.md.`;
 
 function spawn(command, args) {
@@ -34,6 +36,16 @@ export function runMove(options, run = spawn, log = console.log) {
   const config = composeConfig(options.envFile, settings, docker);
   const errors = dataDiskVolumeErrors(config, docker);
   if (errors.length) throw new Error(errors.join("\n"));
+  const output = args => {
+    const result = docker(args);
+    if (result.status !== 0) throw new Error("Docker could not check which running containers can write this deployment's storage. Check that Docker is running, then try again.");
+    return result.stdout;
+  };
+  const volumes = Object.values(config.volumes ?? {}).map(volume => inspectVolume(volume.name, docker)).filter(Boolean);
+  const writers = storageWriters(config, volumes, output)();
+  if (writers.length) {
+    throw new Error(`Running containers can write this deployment's storage. Stop them before you start the deployment here: ${describeWriters(writers)}.`);
+  }
   const problem = accountsDatabaseError(config, docker) || relayDeploymentError(options.envFile, settings, docker, false);
   if (problem) throw new Error(problem);
   log("Found the accounts database and the relay deployment. Starting the deployment.");
