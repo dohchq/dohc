@@ -184,6 +184,155 @@ test("a confirmed failure stops the running steps unless the run keeps going, an
   assert.deepEqual(flaky.flaky, [{ step: "repository", test: "times out under load" }]);
 });
 
+// A fixture whose package and repository steps fail their tests under each scenario, and whose runs of a single test pass or fail alone.
+function isolatedRetry(t) {
+  const root = mkdtempSync(join(tmpdir(), "dohc-js-alone-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "scripts/verification"), { recursive: true });
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  // The repository script's last command tests a and b; source runs in an earlier command.
+  writeFileSync(join(root, "package.json"), JSON.stringify({ scripts: { "test:repo": "pnpm test:repo:source && node --test --test-concurrency=2 scripts/a.test.mjs scripts/b.test.mjs" } }));
+  for (const name of ["sibling", "tail"]) {
+    mkdirSync(join(root, "packages", name), { recursive: true });
+    writeFileSync(join(root, "packages", name, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+  }
+  writeFileSync(join(root, "scripts/verification/process.mjs"), String.raw`
+    import {appendFileSync,existsSync,writeFileSync} from 'node:fs';
+    import {resolve} from 'node:path';
+    export const repoRoot=resolve(import.meta.dirname,'../..');
+    export const pnpm=args=>['pnpm',args];
+    export const calls=[];
+    const scenario=process.env.SCENARIO;
+    const record=(env,...lines)=>appendFileSync(env.DOHC_TEST_RECORD,lines.map(line=>JSON.stringify(line)+'\n').join(''));
+    const failure=()=>Object.assign(Error('tests failed'),{commandExitFailure:true});
+    const failing=(...tests)=>tests.map(([,name])=>'✖ '+name+' (30231ms)\n').join('')+'✖ failing tests:\n\n'+tests.map(([file,name])=>'test at '+file+':3:1\n✖ '+name+' (30231ms)\n').join('\n');
+    const underLoad={test:'src/a.test.ts › load > fails under load',flaky:false,failed:true,seconds:0.1};
+    async function until(file,signal){
+      while(!existsSync(file)){
+        if(signal.aborted)throw Object.assign(Error('pnpm failed (interrupted).'),{interrupted:true});
+        await new Promise(done=>setTimeout(done,10));
+      }
+    }
+    export async function run(command,args,{log,env,signal}){
+      const alone=command===process.execPath||args.includes('exec');
+      const step=command===process.execPath||args[0]==='run'?'repository':args[1];
+      calls.push({step,alone,args:args.join(' '),aborted:signal.aborted,require:env.DOHC_REQUIRE_POSTGRES});
+      writeFileSync(log,'ok');
+      if(args.includes('list'))return {stdout:JSON.stringify(['sibling','tail'].map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
+      if(step==='repository'&&!alone&&scenario.startsWith('node-')){
+        const first=!existsSync('ran');writeFileSync('ran','');
+        writeFileSync(log,scenario==='node-earlier'?failing(['scripts\\source.test.mjs','checks the source'])
+          :failing(...(first&&scenario==='node-alone'?[['scripts\\a.test.mjs','settles on retry']]:[]),['scripts\\b.test.mjs','times out under load']));
+        throw failure();
+      }
+      if(step==='repository'&&alone){
+        writeFileSync(log,scenario==='node-alone'?'✔ times out under load (12ms)\nℹ pass 1\n':'✔ scripts\\b.test.mjs (100ms)\nℹ pass 1\n');
+        return {stdout:''};
+      }
+      if(step==='@dohc/sibling'&&scenario==='fails-alone'){
+        // A test this step recorded as failed would run alone, if the step had failed by itself.
+        writeFileSync('sibling-started','');
+        record(env,{test:'src/b.test.ts › waits',flaky:false,failed:true,seconds:0.1},{run:'failed',outside:0,passed:1});
+        await until('never',signal);
+      }
+      if(step==='@dohc/tail'&&!alone&&!scenario.startsWith('node-')){
+        if(scenario==='fails-alone')await until('sibling-started',signal);
+        record(env,scenario==='inexact'?{...underLoad,test:'fails without a file'}:underLoad,{run:'failed',outside:scenario==='outside'?1:0,passed:3});
+        throw failure();
+      }
+      if(step==='@dohc/tail'&&alone){
+        if(scenario==='fails-alone'){record(env,underLoad,{run:'failed',outside:0,passed:0});throw failure();}
+        record(env,{run:'passed',outside:0,passed:scenario==='unmatched'?0:1});
+      }
+      return {stdout:''};
+    }
+  `);
+  writeFileSync(join(root, "driver.mjs"), `
+    import {readFileSync} from 'node:fs';
+    import {cancellationScope} from './scripts/verification/cancellation.mjs';
+    import {testWorkspace} from './scripts/verification/js-tests.mjs';
+    import {calls} from './scripts/verification/process.mjs';
+    const stop=cancellationScope('Fixture',{stopOnFailure:true});
+    const error=await testWorkspace({prepared:true,output:'evidence',stop,env:{...process.env,DOHC_REQUIRE_POSTGRES:'1'}}).then(()=>null,error=>error);
+    await stop.dispose();
+    const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
+    console.log(JSON.stringify({error:error?.message??null,stoppedBy:stop.stopped?.step??null,verdict:report.verdict,
+      steps:Object.fromEntries(report.steps.filter(step=>step.name!=='inventory').map(step=>[step.name,step.verdict])),flaky:report.flaky,failed:report.failed,
+      repository:calls.filter(call=>call.step==='repository'&&!call.alone).length,alone:calls.filter(call=>call.alone).map(({alone:_alone,...call})=>call)}));
+  `);
+  return scenario => {
+    for (const file of ["ran", "sibling-started", "evidence"]) rmSync(join(root, file), { recursive: true, force: true });
+    const result = spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, SCENARIO: scenario } });
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout.trim().split("\n").at(-1));
+  };
+}
+
+const underLoad = "src/a.test.ts › load > fails under load";
+
+test("a vitest test that fails both tries and then passes alone passes its step, and is recorded as passed alone", t => {
+  const passed = isolatedRetry(t)("pass-alone");
+  assert.equal(passed.error, null);
+  assert.equal(passed.verdict, "PASS");
+  assert.deepEqual(passed.steps, { repository: "PASS", "@dohc/sibling": "PASS", "@dohc/tail": "PASS" });
+  assert.deepEqual(passed.flaky, [{ step: "@dohc/tail", test: underLoad, passedAlone: true }]);
+  assert.deepEqual(passed.failed, [], "a test that passed alone did not fail");
+  assert.equal(passed.alone.length, 1);
+  const [alone] = passed.alone;
+  assert.ok(alone.args.startsWith(`--filter @dohc/tail exec vitest run src/a.test.ts -t ^load (> )?fails under load$ --maxWorkers=1 --no-file-parallelism --retry=0 --reporter=default --reporter=`), alone.args);
+  assert.equal(alone.require, "1", "the test runs alone with the step's env");
+});
+
+test("a test that fails alone too fails its step, and only then stops the run", t => {
+  const drive = isolatedRetry(t);
+  const failed = drive("fails-alone");
+  assert.equal(failed.error, "tests failed");
+  assert.equal(failed.stoppedBy, "@dohc/tail");
+  assert.equal(failed.verdict, "FAIL");
+  assert.equal(failed.steps["@dohc/tail"], "FAIL");
+  assert.equal(failed.steps["@dohc/sibling"], "NOT RUN");
+  assert.deepEqual(failed.alone.map(({ step, aborted }) => ({ step, aborted })), [{ step: "@dohc/tail", aborted: false }],
+    "the test ran alone while its sibling still ran, before the failure stopped the run");
+  assert.deepEqual(failed.flaky, []);
+  assert.ok(failed.failed.some(row => row.step === "@dohc/tail" && row.test === underLoad));
+  const unmatched = drive("unmatched");
+  assert.equal(unmatched.alone.length, 1);
+  assert.equal(unmatched.verdict, "FAIL", "a run alone that passed no test is no pass");
+  assert.deepEqual(unmatched.failed, [{ step: "@dohc/tail", test: underLoad }]);
+});
+
+test("a step that failed outside its tests, or in a test that cannot run alone, gets no isolated retry", t => {
+  const drive = isolatedRetry(t);
+  assert.equal(drive("pass-alone").alone.length, 1, "the same test failure inside its tests runs alone");
+  for (const [scenario, reason] of [["outside", "vitest counted an error no test owns"], ["inexact", "no command reruns a test without a file"],
+    ["node-earlier", "a failure in an earlier command of the script stopped the commands after it"]]) {
+    const result = drive(scenario);
+    assert.equal(result.verdict, "FAIL", reason);
+    assert.deepEqual(result.alone, [], reason);
+  }
+});
+
+test("a node:test step that fails its whole-step rerun, then passes alone, passes", t => {
+  const drive = isolatedRetry(t);
+  const passed = drive("node-alone");
+  assert.equal(passed.verdict, "PASS");
+  assert.equal(passed.repository, 2);
+  assert.deepEqual(passed.flaky, [{ step: "repository", test: "scripts/a.test.mjs › settles on retry" },
+    { step: "repository", test: "scripts/b.test.mjs › times out under load", passedAlone: true }], "a test that failed only the first try passed on retry");
+  assert.deepEqual(passed.failed, []);
+  assert.deepEqual(passed.alone, [{ step: "repository", args: "--test --test-concurrency=1 --test-name-pattern ^times out under load( > |$) scripts/b.test.mjs", aborted: false, require: "1" }]);
+  const unmatched = drive("node-unmatched");
+  assert.equal(unmatched.alone.length, 1);
+  assert.equal(unmatched.verdict, "FAIL", "node:test reports a file whose tests the pattern skipped as a pass");
+});
+
+test("an interrupted step gets no isolated retry", t => {
+  // The sibling recorded a failed test before the tail's confirmed failure stopped it.
+  const stopped = isolatedRetry(t)("fails-alone");
+  assert.equal(stopped.steps["@dohc/sibling"], "NOT RUN");
+  assert.deepEqual(stopped.alone.map(call => call.step), ["@dohc/tail"], "only the step that failed by itself ran a test alone");
+});
+
 test("a step stopped by another job's failure is reported as not run", async () => {
   const scope = cancellationScope("Fixture", { stopOnFailure: true });
   try {

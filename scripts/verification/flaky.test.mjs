@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import TestRecordReporter from "./test-record-reporter.mjs";
-import { nextestFailures, nextestFlaky, nextestTimes, nodeTestFailures, nodeTestTimes, playwrightFailures, playwrightFlaky, playwrightTimes, readTestRecord, rerunCommand, slowest, vitestFailures } from "./flaky.mjs";
+import { nextestFailures, nextestFlaky, nextestTimes, nodeTestFailures, nodeTestPassed, nodeTestTimes, playwrightFailures, playwrightFlaky, playwrightTimes, readTestRecord, recordedRun, rerunCommand, slowest, vitestFailures } from "./flaky.mjs";
 
 test("nextest's FLAKY lines name each test once", () => {
   const log = [
@@ -80,6 +80,14 @@ test("a node:test report names its failed tests by file and parent tests, and a 
     "scripts/verification/queue.test.mjs › parent > leaf fails", "scripts/verification/broken.test.mjs › scripts\\verification\\broken.test.mjs"]);
   assert.deepEqual(nodeTestFailures("✖ failing tests:\n\n✖ times out under load (30231ms)\n"), ["times out under load"], "a report without locations names the test alone");
   assert.deepEqual(nodeTestFailures("check-brand: 2 files use the old name\nELIFECYCLE Command failed"), []);
+});
+
+test("a node:test report shows a failed test passed alone only when the test itself ran", () => {
+  const leaf = "scripts/a.test.mjs › parent > leaf fails", broken = "scripts/broken.test.mjs › scripts\\broken.test.mjs";
+  assert.equal(nodeTestPassed("▶ parent\n  ✔ leaf fails (0.2ms)\n✔ parent (1.1ms)\nℹ pass 1", leaf), true, "its top-level test passed");
+  assert.equal(nodeTestPassed("✔ scripts\\a.test.mjs (107.3ms)\nℹ pass 1", leaf), false, "node:test passes a file whose tests the pattern skipped");
+  assert.equal(nodeTestPassed("✔ loads (2.1ms)\nℹ pass 1", broken), true, "a file that failed to load passes when its tests do");
+  assert.equal(nodeTestPassed("✔ scripts\\broken.test.mjs (95.4ms)\nℹ pass 1", broken), false);
 });
 
 test("each failed test maps to the command that reruns it alone, and a test without one maps to none", () => {
@@ -159,12 +167,18 @@ test("the vitest reporter records the tests that passed on retry, failed both tr
   reporter.onTestCaseResult(testCase("drives a whole scenario", false, 12_500));
   // vitest reports a test that failed its retry too once, as failed and not flaky.
   reporter.onTestCaseResult(testCase("fails both tries", false, 25, "failed"));
+  // The run ends with a file that failed to load, a failed beforeAll, and an unhandled error, none of which a test owns.
+  const suite = errors => ({ errors: () => errors });
+  const module = (errors, passed, suites = []) => ({ ...suite(errors), children: { allSuites: () => suites.values(), allTests: state => Array(state === "passed" ? passed : 0).fill({}).values() } });
+  reporter.onTestRunEnd([module([], 2, [suite([{ message: "beforeAll failed" }])]), module([{ message: "SyntaxError" }], 0)], [{ message: "unhandled" }], "failed");
   assert.deepEqual(readTestRecord(log), [
     { test: "src/a.test.ts › settles on retry", flaky: true, failed: false, seconds: 0.04 },
     { test: "src/a.test.ts › drives a whole scenario", flaky: false, failed: false, seconds: 12.5 },
     { test: "src/a.test.ts › fails both tries", flaky: false, failed: true, seconds: 0.025 },
   ]);
+  assert.deepEqual(recordedRun(log), { run: "failed", outside: 3, passed: 2 });
   assert.deepEqual(readTestRecord(join(root, "missing.jsonl")), []);
+  assert.equal(recordedRun(join(root, "missing.jsonl")), null, "a run that never ended has no end");
 });
 
 test("each runner's report gives its test times, and the slowest are kept longest first", () => {

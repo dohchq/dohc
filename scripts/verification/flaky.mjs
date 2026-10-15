@@ -1,5 +1,6 @@
 // Tests that passed only on retry, tests that failed on their last try, and the
-// slowest tests. The gate retries a failing test once, so a flaky test no longer
+// slowest tests. The gate retries a failing test once, and a package or node:test
+// step's test that fails both tries once more alone, so a flaky test no longer
 // fails a change it has nothing to do with, and records each one here so it gets
 // fixed instead of hidden. Failed tests use the same names, so the queue can tell
 // when other branches fail the same test, and the gate can print the command that
@@ -79,10 +80,13 @@ export function vitestFailures(path) {
   } catch { return []; }
 }
 
+const recordLines = path => read(path).split(/\r?\n/u).filter(Boolean).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
+
 /** The tests the vitest reporter recorded in `path`: { test, flaky, failed, seconds }. */
-export function readTestRecord(path) {
-  return read(path).split(/\r?\n/u).filter(Boolean).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
-}
+export const readTestRecord = path => recordLines(path).filter(line => typeof line?.test === "string");
+
+/** How the recorded vitest run ended: { run, outside, passed }, with `outside` counting the errors no test owns. Null when it never ended. */
+export const recordedRun = path => recordLines(path).findLast(line => typeof line?.run === "string") ?? null;
 
 /**
  * nextest's per-test times, in seconds, one per test: the longest finished
@@ -101,6 +105,19 @@ export function nextestTimes(log) {
 /** node:test's per-test times from a spec report, in seconds. */
 export function nodeTestTimes(log) {
   return [...plain(log).matchAll(/^\s*✔ (.+?) \(([\d.]+)ms\)\s*$/gmu)].map(match => ({ test: match[1], seconds: Number(match[2]) / 1000 }));
+}
+
+/**
+ * Whether a spec report shows a failed test, named as nodeTestFailures names it,
+ * passed when its rerun command ran it: its top-level test, or the tests of a file
+ * that failed to load. node:test reports a file whose tests a pattern skipped as
+ * a passed test named by the file, so that line is no pass.
+ */
+export function nodeTestPassed(log, test) {
+  const at = test.indexOf(" › ");
+  const file = test.slice(0, at), name = test.slice(at + 3);
+  const passed = nodeTestTimes(log).map(row => row.test);
+  return name.replaceAll("\\", "/") === file ? passed.some(row => row.replaceAll("\\", "/") !== file) : passed.includes(name.split(" > ")[0]);
 }
 
 /** Playwright's per-test times from its JSON report, in seconds: the attempt that passed. A test with none has no time. */
