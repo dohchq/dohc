@@ -1,3 +1,4 @@
+import { chatOperations } from "../ipc/bridgeContract";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -33,7 +34,7 @@ const USAGE_EVENTS: Readonly<Record<string, (result: unknown) => UsageEvent | nu
     const outcome = result as { kind?: unknown; local?: unknown } | null;
     return outcome?.kind === "published" ? { name: "app_published", local: outcome.local === true } : null;
   },
-  [CHANNELS.sendChatMessage]: () => ({ name: "chat_message_sent" }),
+  [chatOperations.sendChatMessage.channel]: () => ({ name: "chat_message_sent" }),
 };
 
 /** The usage event a request that answered `result` counts, if any. */

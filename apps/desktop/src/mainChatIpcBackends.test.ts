@@ -1,3 +1,4 @@
+import { chatOperations } from "./ipc/bridgeContract";
 import {
   type Request,
   type Response,
@@ -91,7 +92,7 @@ function registerChatFlowHandlers(
     }),
   );
   ipc.handle(
-    CHANNELS.startChannelThread,
+    chatOperations.startChannelThread.channel,
     createWritableChatIpcHandler({
       ...deps,
       parsePayload: (payload) =>
@@ -110,7 +111,7 @@ function registerChatFlowHandlers(
     }),
   );
   ipc.handle(
-    CHANNELS.listChannelThreads,
+    chatOperations.listChannelThreads.channel,
     async (event, payload) => {
       deps.assertTrustedSender(event);
       return await context.store.listChannelThreads(
@@ -119,7 +120,7 @@ function registerChatFlowHandlers(
     },
   );
   ipc.handle(
-    CHANNELS.sendChatMessage,
+    chatOperations.sendChatMessage.channel,
     createWritableChatIpcHandler({
       ...deps,
       parsePayload: (payload) =>
@@ -137,7 +138,7 @@ function registerChatFlowHandlers(
     }),
   );
   ipc.handle(
-    CHANNELS.listChatMessages,
+    chatOperations.listChatMessages.channel,
     async (event, payload) => {
       deps.assertTrustedSender(event);
       return await context.store.listMessages(
@@ -317,14 +318,14 @@ describe("main chat IPC live backend", () => {
           expect.objectContaining({ id: channel.id, name: "Planning" }),
         ]);
 
-        const started = (await ipc.invoke(CHANNELS.startChannelThread, {
+        const started = (await ipc.invoke(chatOperations.startChannelThread.channel, {
           workspaceId: workspace.workspaceId,
           channelId: channel.id,
           body: "Choose a direction",
           needsDecision: true,
         })) as Awaited<ReturnType<LinkedChatStore["startChannelThread"]>>;
         await expect(
-          ipc.invoke(CHANNELS.listChannelThreads, {
+          ipc.invoke(chatOperations.listChannelThreads.channel, {
             workspaceId: workspace.workspaceId,
             channelId: channel.id,
           }),
@@ -334,7 +335,7 @@ describe("main chat IPC live backend", () => {
           }),
         ]);
 
-        const resolution = (await ipc.invoke(CHANNELS.sendChatMessage, {
+        const resolution = (await ipc.invoke(chatOperations.sendChatMessage.channel, {
           workspaceId: workspace.workspaceId,
           threadId: started.thread.id,
           body: "Use the Rust path",
@@ -346,7 +347,7 @@ describe("main chat IPC live backend", () => {
           }),
         ).resolves.toEqual({ revision: 3 });
         await expect(
-          ipc.invoke(CHANNELS.listChatMessages, {
+          ipc.invoke(chatOperations.listChatMessages.channel, {
             workspaceId: workspace.workspaceId,
             threadId: started.thread.id,
           }),

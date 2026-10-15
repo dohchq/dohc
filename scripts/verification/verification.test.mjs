@@ -39,14 +39,15 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
 });
 
-test("desktop proofs require smoke and onboarding everywhere and the pixel baseline on Windows", () => {
+test("desktop proofs require each restart proof, smoke and onboarding everywhere and the pixel baseline on Windows", () => {
+  const restart = ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"];
   assert.deepEqual(desktopProofTags({platform: "win32"}), {
-    selected: ["@verification-smoke", "@self-host-onboarding", "@states-page"],
-    required: ["@verification-smoke", "@self-host-onboarding", "@states-baselines"],
+    selected: ["@verification-smoke", ...restart, "@self-host-onboarding", "@states-page"],
+    required: ["@verification-smoke", ...restart, "@self-host-onboarding", "@states-baselines"],
   });
   for (const platform of ["linux", "darwin"]) {
     assert.deepEqual(desktopProofTags({platform}), {
-      selected: ["@verification-smoke", "@self-host-onboarding"], required: ["@verification-smoke", "@self-host-onboarding"],
+      selected: ["@verification-smoke", ...restart, "@self-host-onboarding"], required: ["@verification-smoke", ...restart, "@self-host-onboarding"],
     });
   }
 });
