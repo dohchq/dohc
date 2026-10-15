@@ -90,8 +90,8 @@ export function dataDiskVolumeErrors(config, docker) {
 }
 
 /**
- * A first start needs all three disk folders empty. Every later start needs the relay deployment on the disk;
- * the session host and automations rebuild their copies from the relay when host-data is empty.
+ * A first start needs all three disk folders empty. Every later start needs the relay deployment on the disk.
+ * An empty host-data starts: documents rebuild from the relay, but claims in progress are lost (#2016).
  */
 export function relayDeploymentError(envFile, settings, docker, firstStart) {
   const { status, stdout } = docker(composeArgs(envFile, settings, 'run', '--rm', '--no-deps', '-T',

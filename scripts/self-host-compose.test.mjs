@@ -194,7 +194,7 @@ test('only the first start of a data-disk deployment may initialize its relay', 
     return check;
   }, firstStart);
   const found = relayCheck([record, database]), empty = relayCheck([]);
-  // The session host and automations rebuild their copies from the relay, so a later start accepts empty host data.
+  // A later start accepts empty host data: documents rebuild from the relay (claims in progress do not, #2016).
   assert.equal(result(found, false), '');
   assert.equal(result(relayCheck([record, database, hostData]), false), '');
   assert.equal(result(empty, true), '');
