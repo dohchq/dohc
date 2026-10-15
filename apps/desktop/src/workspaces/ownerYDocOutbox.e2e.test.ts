@@ -1,4 +1,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import {createHash} from "node:crypto";
+import {DatabaseSync} from "node:sqlite";
+import {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {selfHostLiveProfile} from "../../../../services/sync-relay/src/selfHostLiveProfile";
+import {reconcileOwnerLiveStops} from "./ownerLiveStop";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
@@ -34,6 +39,61 @@ const LIMITS = {
   maxPendingBytes: 1_000_000,
   maxPendingAgeMs: 86_400_000,
 } as const;
+
+it.skipIf(engine.missing)("measures Stop reconciliation at startup and each sync pass with real daemon rows", async () => {
+  const root = await createTestScratch("dohc-stop-reconcile-cost-");
+  const paths = Array.from({length: 10}, (_, i) => `owner-${i}.md`);
+  await Promise.all(paths.map(path => writeFile(join(root, path), `# ${path}\n`, "utf8")));
+  const profile = selfHostLiveProfile(), configPath = join(root, ".dohc", "owner-ingress.json");
+  await mkdir(join(root, ".dohc"), {recursive: true});
+  await writeFile(configPath, JSON.stringify(profile.nativeIngress));
+  const lifecycle = createRealDaemonLifecycle({command: engine.require(), maxRestarts: 0,
+    privateOwnerHost: {configPath, client: profile.nativeClient}});
+  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  const workspace = {workspaceId: "stop-reconcile-cost", rootPath: root, attachmentId: Symbol("stop-cost")};
+  const capture = createWorkspaceEngineCapture({...workspace, rustEngineSessions: sessions});
+  try {
+    await lifecycle.start();
+    capture.observeFileEvents(paths.map(path => ({path, operation: "update" as const})));
+    await capture.flush();
+    await sessions.run(workspace, async ({workspace: handle}) => {
+      const client = lifecycle.currentClient(); if (!(client instanceof EngineClient)) throw new Error("Expected native client");
+      const request = (current = handle) => ({id: 0, workspace: current, deadlineMs: 20_000});
+      const measure = async (rows: number) => {
+        const pass = () => sessions.run(workspace, async ({workspace: current}) => reconcileOwnerLiveStops({client, workspaceHandle: current, workspaceId: workspace.workspaceId,
+          signal: AbortSignal.timeout(20_000), assertCurrent() {}, retire: async () => null}));
+        const startup = performance.now(); await pass(); const startupMs = performance.now() - startup;
+        const samples: number[] = [];
+        for (let i = 0; i < 20; i++) {const start = performance.now(); await pass(); samples.push(performance.now() - start);}
+        samples.sort((a,b) => a-b);
+        console.log(`stop_reconcile rows=${rows} startup_ms=${startupMs.toFixed(3)} sync_median_ms=${samples[10]!.toFixed(3)} sync_p95_ms=${samples[19]!.toFixed(3)} rpc_per_pass=${1+2*rows}`);
+      };
+      await measure(0);
+      for (const path of paths) {
+        const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate() {}});
+        const checkpoint = Y.encodeStateAsUpdate(session.doc);
+        await session.close();
+        const db = new DatabaseSync(join(root, ".dohc", "engine", "engine.db"));
+        // Seed an observed cut to measure local reconciliation independently of
+        // relay setup. The Stop requests and all measured passes use real RPCs.
+        try {
+          const native = db.prepare("SELECT version_id,object_id,head_update_seq FROM ydoc_docs WHERE path=?").get(path)!;
+          const digest = createHash("sha256").update(checkpoint).digest("hex");
+          const binding = {workspaceId: workspace.workspaceId, mainVersionId: String(native.version_id), objectId: String(native.object_id),
+            lineageClaimId: digest, currentPath: path, selectorPaths: [path], restoreFenceGeneration: 0};
+          db.prepare("INSERT OR IGNORE INTO binary_blobs(sha256,bytes,byte_length) VALUES(?,?,?)").run(digest,checkpoint,checkpoint.length);
+          db.prepare("UPDATE ydoc_docs SET regime='replicated',lineage_claim_status='exact',lineage_claim_id=? WHERE path=?").run(digest,path);
+          db.prepare("INSERT INTO ydoc_owner_bindings VALUES(?,?,?,?,?,'relay-cost',1,0,?,?,1000000,86400000)")
+            .run(workspace.workspaceId,native.version_id!,native.object_id!,digest,JSON.stringify(binding),native.head_update_seq!,digest);
+        } finally {db.close();}
+        await sessions.run(workspace, async ({workspace: current}) => {
+          await client.ownerYDocStopRequest(request(current), path);
+        });
+      }
+      await measure(10);
+    });
+  } finally {await capture.stop(); await sessions.closeAll(); await lifecycle.stop();}
+}, 120_000);
 
 it("maps an interrupted outbox snapshot to caller-scheduled retry without authority, delivery, or ACK", async () => {
   const methods: string[] = [];

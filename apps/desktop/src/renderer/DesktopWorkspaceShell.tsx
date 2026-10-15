@@ -1,5 +1,6 @@
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
+import { withClosedEngineDocSession } from "./collab/engineDocLease";
 import { CreationPartialError } from "@dohc/cli/creation";
 import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
@@ -22,6 +23,7 @@ import {
   useState,
 } from "react";
 import type {
+  CaptureFileHold,
   ResolveAutomationControlsResult,
   ChatFileMentionRecord,
   ChatThreadRecord,
@@ -96,6 +98,7 @@ import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
+import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
@@ -812,6 +815,7 @@ export function DesktopWorkspaceShell(props: {
     showKeptCopies,
     showKeptCopySaved,
     showCaptureRecoveries,
+    showCaptureHolds,
     showDirectWriteNotice,
     dismissShellError,
     retryShellError,
@@ -866,7 +870,7 @@ export function DesktopWorkspaceShell(props: {
   );
   const stopLiveDocument = useCallback(
     (id: string, path: string) =>
-      bridge().stopOwnerLiveDocument({ workspaceId: id, path }),
+      withClosedEngineDocSession(id, path, () => bridge().stopOwnerLiveDocument({ workspaceId: id, path })),
     [],
   );
   const resumeLiveDocument = useCallback(
@@ -1649,6 +1653,26 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
+  const shownStopFailures=useRef(new Map<string,string>());
+  useEffect(() => {
+    if (captureDecidedFor!==workspaceId || syncStatus===null) return;
+    const failures=syncStatus.ownerLiveStopFailures ?? [];
+    const identities=new Set(failures.map(failure => `owner-stop:${workspaceId}:${failure.path}`));
+    for (const identity of shownStopFailures.current.keys()) {
+      if (identity.startsWith(`owner-stop:${workspaceId}:`) && !identities.has(identity)) {
+        shownStopFailures.current.delete(identity);clearIdentity(identity);
+      }
+    }
+    for (const failure of failures) {
+      const identity=`owner-stop:${workspaceId}:${failure.path}`;
+      if (shownStopFailures.current.get(identity)===failure.detail) continue;
+      shownStopFailures.current.set(identity,failure.detail);
+      const retry=() => {void withClosedEngineDocSession(workspaceId,failure.path,()=>bridge().stopOwnerLiveDocument({workspaceId,path:failure.path})).catch(error => {
+        if (!workspaceAdmission.superseded) reportShellError("dohc could not stop live editing.",error,retry,undefined,identity);
+      });};
+      reportShellFailure({message:`dohc could not stop live editing for "${failure.path}".`,details:[["Reason",failure.detail]],retry,identity});
+    }
+  },[captureDecidedFor,syncStatus,workspaceId,workspaceAdmission,reportShellError,reportShellFailure,clearIdentity]);
   const refreshShareViewRef = useRef<(trigger?: "manual" | "background" | "press-burst") => Promise<ShareViewRefresh>>(async () => "current");
   const shareRefreshFlight = useRef<{ admission: typeof workspaceAdmission; promise: Promise<ShareViewRefresh>; trigger: "manual" | "background" | "press-burst"; followUp?: Promise<ShareViewRefresh> } | null>(null);
   const checkShareAccess = useSharedViewAccess({
@@ -2694,6 +2718,16 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     openRecovery: openCaptureRecovery,
   });
+  const [heldEvent, setHeldEvent] = useState<{ admission: typeof workspaceAdmission; files: CaptureFileHold[] } | null>(null);
+  useCaptureHoldNotices({ workspaceId,
+    heldFiles: heldEvent?.admission === workspaceAdmission ? heldEvent.files : syncStatus?.heldFiles,
+    show: showCaptureHolds, reportShellError, reportShellFailure });
+  useEffect(() => {
+    return bridge().onCaptureHolds(event => {
+      if (event.workspaceId !== workspaceId || workspaceAdmission.superseded) return;
+      setHeldEvent(current => workspaceAdmission.superseded ? current : { admission: workspaceAdmission, files: event.heldFiles });
+    });
+  }, [workspaceId, workspaceAdmission]);
   // Restore resolves this change's notice, including a Copy fallback that
   // the engine no longer lists.
   const onHistoryRestored = useCallback((momentId?: string) => {

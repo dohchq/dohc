@@ -400,6 +400,7 @@ export const OwnerLiveDocument = z.object({
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
   reason: z.enum(["document-unavailable", "workspace-changed"]).optional(),
   canResume: z.boolean(),
+  deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
@@ -1320,6 +1321,16 @@ type _AllEngineStoreRefusalsRepresented = AssertNever<
   Exclude<EngineStoreRefusal, (typeof ENGINE_STORE_REFUSALS)[number]>
 >;
 
+export const CaptureFileHold = z.object({
+  workspaceId: z.string().min(1), sourceVersionId: z.string().min(1), objectId: z.string().min(1), path: z.string().min(1),
+  observedSha256: z.string().min(1), observedSize: z.number().int(),
+  reason: z.literal("ydoc-resolution-not-representable"), observedAtMs: z.number().int(),
+  attemptCount: z.number().int(), retryRequested: z.boolean(),
+});
+export type CaptureFileHold = z.infer<typeof CaptureFileHold>;
+export const CaptureHoldsEvent = z.object({ workspaceId: WORKSPACE_ID, heldFiles: z.array(CaptureFileHold) }).strict();
+export type CaptureHoldsEvent = z.infer<typeof CaptureHoldsEvent>;
+
 const SYNC_STATUS_BASE_FIELDS = {
   state: z.enum([
     "synced",
@@ -1357,6 +1368,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   atomicPlacementUnavailable: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
+  heldFiles: z.array(CaptureFileHold).optional(),
   // Why the last sync pass failed, present until a pass succeeds. Local work
   // is saved either way. A refused claim waits for Try again; network failures back off.
   syncFailure: z
@@ -1371,6 +1383,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "restart-required"]).optional(),
+  ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
@@ -1453,6 +1466,15 @@ export const ClearCaptureRecoveryPayload = WorkspaceIdPayload.extend({ momentId:
 export type ClearCaptureRecoveryPayload = z.infer<typeof ClearCaptureRecoveryPayload>;
 
 export const captureRecoveryOperations = {
+  retryHeldCapture: {
+    capabilityId: "capture.held.retry",
+    channel: "desktop:retry-held-capture",
+    payload: WorkspaceIdPayload.extend({ path: PATH_STRING }),
+    result: z.object({ settled: z.boolean(), running: z.boolean(), degraded: z.boolean(), retried: z.boolean(), heldFiles: z.array(CaptureFileHold) }),
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation", reason: "Only the sending window's active workspace can retry a held file." },
+  },
   getCaptureRecoveryStatus: {
     capabilityId: "capture.recovery.read",
     channel: "desktop:get-capture-recovery-status",
@@ -6548,6 +6570,7 @@ export const engineYDocSaveOperations = {
 
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
+  captureHeld: z.boolean().optional(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
   objectId: z.string().min(1).optional(),
   versionId: z.string().min(1).optional(),
@@ -7239,6 +7262,7 @@ export interface DohcDesktopBridge
   // workspace plus global events. The payload is additive context — a
   // subscriber may ignore it. Returns an unsubscribe function.
   onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
+  onCaptureHolds(listener: (event: CaptureHoldsEvent) => void): () => void;
   // Live push: automation runs finished, an Undo put records back, a claim
   // failed, or a retry queued one, so run history and dataset records may
   // have changed. A poke, not the
