@@ -183,6 +183,8 @@ export async function verify(args) {
   const jobIndex = args.indexOf("--job");
   const job = jobIndex < 0 ? null : args[jobIndex + 1];
   const full = args.includes("--full");
+  // A failed step stops the rest of a PR run unless it keeps going. A full run, such as the nightly, always keeps going so triage sees every failure.
+  const keepGoing = full || args.includes("--keep-going");
   const detach = args.includes("--detach");
   const inline = args.includes("--inline");
   // The queue service runs this verifier in its lane with a grant; it must not queue again.
@@ -193,6 +195,7 @@ export async function verify(args) {
     throw new Error("Use --reuse-rust <canonical-result.json> with a PR run that includes Rust.");
   }
   if (full && !["pr", "plan"].includes(mode)) throw new Error("--full is available only for PR verification and planning.");
+  if (args.includes("--keep-going") && mode !== "pr") throw new Error("--keep-going is available only for PR verification.");
   if (jobIndex >= 0 && (mode !== "pr" || !["rust", "js"].includes(job))) throw new Error("--job rust|js is available only for PR verification.");
   if (["pr", "plan"].includes(mode) && (!base || base.startsWith("--"))) throw new Error("Supply --base <ref> for PR gate selection.");
   function selection() {
@@ -218,7 +221,7 @@ export async function verify(args) {
   let treeState;
   const output = grant ? grantOutput : join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
-  const report = { version: 1, mode, scope: job ?? "all", full, root: repoRoot, base, ...(grant ? { grant } : {}), ...total, steps: [], timings: [], treeReadings: [], flaky: [], output, verdict: "RUNNING" };
+  const report = { version: 1, mode, scope: job ?? "all", full, keepGoing, root: repoRoot, base, ...(grant ? { grant } : {}), ...total, steps: [], timings: [], treeReadings: [], flaky: [], output, verdict: "RUNNING" };
   // Tests that passed only on retry: { step, test }.
   const flaky = report.flaky;
   // Every test time the gate saw, from which result.json keeps the slowest: { step, test, seconds }.
@@ -257,22 +260,28 @@ export async function verify(args) {
   let desktopEnvironment;
   let originalRustIdentity;
   let rustTools;
+  const jobSteps = {};
   async function checkedStep(row, action, checkpoint = () => cancellation.checkpoint()) {
     await checkpoint();
+    cancellation.signal.throwIfAborted();
     lane?.update?.({phase: row.name});
     checkoutOwner?.update?.({phase: row.name});
     report.steps.push(row); save();
-    const result = await timed(row, action, save).catch(error => { if (error && typeof error === "object") error.step ??= row.name; throw error; });
+    const result = await timed(row, action, save).catch(error => {
+      if (error && typeof error === "object") error.step ??= row.name;
+      if (cancellation.notRun(row, error)) save();
+      throw error;
+    });
     await checkTree(row.name);
     return result;
   }
   function step(name, command, commandArgs, env = process.env, checkpoint) {
     const row = { name, command, args: commandArgs, log: join(output, `${name}.log`) };
-    return checkedStep(row, () => run(command, commandArgs, { env, log: row.log }), checkpoint);
+    return checkedStep(row, () => run(command, commandArgs, { env, log: row.log, signal: cancellation.signal }), checkpoint);
   }
   const typecheck = () => pnpm(["run", "typecheck"]);
   save();
-  const cancellation = cancellationScope("Verification");
+  const cancellation = cancellationScope("Verification", { stopOnFailure: !keepGoing });
   try {
     if (mode === "pr") process.env.CARGO_INCREMENTAL = "0";
     desktopEnvironment = {...process.env, DOHC_TEST_ENGINE_BINARY: stagedEnginePath};
@@ -314,6 +323,7 @@ export async function verify(args) {
       });
       const queue = grant || inline ? null : queueRoot();
       if (queue && reuseRust) throw new Error("The queue cannot reuse Rust evidence yet. Add --inline to reuse it in this checkout.");
+      if (queue && keepGoing && !full) throw new Error("The queue keeps going only with --full. Add --full, or --inline to keep going in this checkout.");
       if (queue) {
         // The service verifies the commit in its own checkout, so this checkout is free to change now.
         checkoutOwner.release();
@@ -322,7 +332,11 @@ export async function verify(args) {
           head: report.commit, base: report.baseCommit, baseRef: base, scope: report.scope, full,
           gates, branch, checkout: repoRoot, requester: { pid: process.pid } } }));
         report.queue = outcome;
-        try { flaky.push(...(JSON.parse(readLog(outcome.result ?? "") || "{}").flaky ?? [])); } catch { /* The lane receipt is the record. */ }
+        try {
+          const receipt = JSON.parse(readLog(outcome.result ?? "") || "{}");
+          flaky.push(...(receipt.flaky ?? []));
+          if (receipt.stopped) report.stopped = receipt.stopped;
+        } catch { /* The lane receipt is the record. */ }
         save();
         if (detach) { report.verdict = "QUEUED"; return report; }
         if (outcome.verdict !== "PASS") throw Object.assign(new Error(outcome.reason ?? `The queued run ended ${outcome.state}.`), { queued: outcome.state });
@@ -467,7 +481,7 @@ export async function verify(args) {
         try {
           await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
             () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, changed: full ? null : report.files,
-              beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled),
+              beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled), stop: cancellation,
               runProofs: checkpoint => integrationProofs(env, checkpoint) }));
         } finally {
           try {
@@ -481,9 +495,16 @@ export async function verify(args) {
         await integrationProofs(desktopEnvironment, () => cancellation.checkpoint());
       }
     }
-    const rustWork = rustJob();
+    // A job's failure stops the other job unless the run keeps going. Every expected step that never starts, in either job, is reported as not run.
+    if (mode === "pr") Object.assign(jobSteps, { rust: !gates.rust ? [] : reuseRust ? ["rust-reuse"] : ["rust", "rust-verdict"], js: gates.js ? ["typecheck", "tests"] : [] });
+    const stopOther = job => error => {
+      cancellation.stop(error?.step ?? job, error);
+      throw error;
+    };
+    const rustWork = rustJob().catch(stopOther("rust"));
     const rustSettled = rustWork.then(() => {}, () => {});
-    const [rustResult, javascriptResult] = await Promise.allSettled([rustWork, javascriptJob()]);
+    const [rustResult, javascriptResult] = await Promise.allSettled([rustWork, javascriptJob().catch(stopOther("js"))]);
+    if (cancellation.stopped) throw cancellation.stopped.error;
     await cancellation.checkpoint();
     if (javascriptResult.status === "rejected") throw javascriptResult.reason;
     if (rustResult.status === "rejected") throw rustResult.reason;
@@ -529,10 +550,17 @@ export async function verify(args) {
         else process.env.CARGO_INCREMENTAL = previousIncremental;
       }
       finishTiming(); Object.assign(report, total);
+      const stopped = cancellation.unfinished(report.steps, Object.values(jobSteps).flat());
+      if (stopped) {
+        try { stopped.notRun.push(...(JSON.parse(readLog(report.jsTests ?? "") || "{}").stopped?.notRun ?? []).map(name => `tests: ${name}`)); }
+        catch { /* No package report. */ }
+        report.stopped = stopped;
+      }
       // Nothing after this changes the verdict. The queue accepts only a final receipt.
       report.final = true;
       report.slowest = slowest(times);
       save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
+      if (report.stopped?.notRun.length) console.log(`[verification] Stopped after ${report.stopped.after} failed. These steps did not finish, so coverage is partial (--keep-going runs them):\n${report.stopped.notRun.map(name => `  ${name}`).join("\n")}`);
       if (report.slowest.length) console.log(`[verification] slowest tests:\n${report.slowest.slice(0, 5).map(row => `  ${row.seconds}s ${row.step}: ${row.test}`).join("\n")}`);
       if (flaky.length) console.log(`[verification] ${flaky.length} flaky test(s) passed only on retry. Each one is a defect to fix:\n${flaky.map(row => `  ${row.step}: ${row.test}`).join("\n")}`);
     } finally { checkoutOwner?.release(); }
