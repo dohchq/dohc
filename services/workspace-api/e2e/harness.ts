@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { createServer } from "node:net";
@@ -47,12 +48,19 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
   child.stdout.on("data", chunk => { logs = (logs + String(chunk)).slice(-16_384); });
   child.stderr.on("data", chunk => { logs = (logs + String(chunk)).slice(-16_384); });
   let exited = false;
-  const exit = new Promise<void>(resolve => child.once("close", () => { exited = true; resolve(); }));
+  const killOnExit = () => { child.kill(); };
+  process.once("exit", killOnExit);
+  const exit = new Promise<void>(resolve => child.once("close", () => {
+    exited = true;
+    process.off("exit", killOnExit);
+    resolve();
+  }));
   const controller = new AbortController();
   const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
   let lastReadyBody = "No HTTP response.";
-  const onError = (error: Error) => controller.abort(error);
-  const onExit = (code: number | null, signal: NodeJS.Signals | null) => controller.abort(new Error(`Account server exited before readiness (code ${code}, signal ${signal}).`));
+  let childError: Error | undefined;
+  const onError = (error: Error) => { childError = error; controller.abort(error); };
+  const onExit = (code: number | null, exitSignal: NodeJS.Signals | null) => controller.abort(new Error(`Account server exited before readiness (code ${code}, signal ${exitSignal}).`));
   child.on("error", onError);
   child.once("exit", onExit);
   try {
@@ -84,10 +92,14 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
     origin, listenOrigin, mail, pool, pid: child.pid,
     logs: () => logs,
     async close() {
-      if (!exited) child.kill();
-      await exit;
-      await mail.close();
-      await pool.end();
+      try {
+        if (!exited) child.kill();
+        if (childError) throw childError;
+        if (!exited) await once(child, "close");
+      } finally {
+        await mail.close();
+        await pool.end();
+      }
     },
   };
 }

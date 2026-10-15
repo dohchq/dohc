@@ -30,6 +30,7 @@ it("waits through slow readiness beyond the former 20 second deadline", async ()
   let entered!: () => void;
   const probing = new Promise<void>(resolve => { entered = resolve; });
   const probe = vi.fn()
+    .mockRejectedValueOnce(new TypeError("fetch failed: ECONNREFUSED"))
     .mockResolvedValueOnce(Response.json({ ok: false, database: "unreachable" }, { status: 503 }))
     .mockResolvedValueOnce(Response.json({ ok: false, database: "unreachable" }, { status: 503 }))
     .mockImplementationOnce(() => { entered(); return new Promise<Response>(resolve => { ready = resolve; }); });
@@ -46,7 +47,7 @@ it("waits through slow readiness beyond the former 20 second deadline", async ()
   ready(Response.json({ ok: true }));
   const result = await outcome;
   if (!("server" in result)) throw result.error;
-  expect(probe).toHaveBeenCalledTimes(3);
+  expect(probe).toHaveBeenCalledTimes(4);
   expect(fixture.spawn.mock.calls[0][1]).toEqual(["--import", "tsx", "src/main.ts"]);
   await result.server.close();
   expect(fixture.close).toHaveBeenCalledOnce();
@@ -108,15 +109,31 @@ it("fails promptly on a child error", async () => {
   expect(fixture.end).toHaveBeenCalledOnce();
 });
 
-it("keeps an error listener for shutdown after startup", async () => {
+it.each(["synchronous", "asynchronous"])("reports a %s shutdown error after startup", async mode => {
   const server = await startAccountServer({ port: 12345 });
+  const failure = new Error("kill failed");
   child.kill.mockImplementation(() => {
-    child.emit("error", new Error("kill failed"));
-    child.emit("exit", 0, null); child.emit("close", 0);
-    return true;
+    if (mode === "synchronous") child.emit("error", failure);
+    else queueMicrotask(() => child.emit("error", failure));
+    return false;
   });
-  await expect(server.close()).resolves.toBeUndefined();
+  await expect(server.close()).rejects.toBe(failure);
   expect(child.listenerCount("error")).toBe(1);
   expect(fixture.close).toHaveBeenCalledOnce();
   expect(fixture.end).toHaveBeenCalledOnce();
+  child.emit("close", 0);
+});
+
+it("kills an owned child if its worker exits and removes the guard after shutdown", async () => {
+  const previous = process.listeners("exit");
+  vi.stubGlobal("fetch", pendingProbe());
+  const outcome = startAccountServer({ port: 12345 }).catch(error => error);
+  await spawned;
+  const guards = process.listeners("exit").filter(listener => !previous.includes(listener));
+  expect(guards).toHaveLength(1);
+  guards[0].call(process, 0);
+  const error = await outcome;
+  expect(error.message).toContain("exited before readiness");
+  expect(child.kill).toHaveBeenCalledOnce();
+  expect(process.listeners("exit")).toEqual(previous);
 });
