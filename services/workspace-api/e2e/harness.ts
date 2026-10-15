@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { build } from "esbuild";
+import { setTimeout as delay } from "node:timers/promises";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
@@ -20,7 +23,22 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
   const listenOrigin = `http://127.0.0.1:${port}`;
   const origin = options.publicOrigin ?? listenOrigin;
   const mail = await startSmtpCapture();
-  const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
+  // Compile before the startup wait, rather than making every module load use tsx.
+  const artifacts = fileURLToPath(new URL("../.agent-artifacts/", import.meta.url));
+  await mkdir(artifacts, { recursive: true });
+  const directory = await mkdtemp(join(artifacts, "account-server-"));
+  const entry = join(directory, "main.mjs");
+  try {
+    await build({ entryPoints: [fileURLToPath(new URL("../src/main.ts", import.meta.url))], outfile: entry,
+      bundle: true, platform: "node", format: "esm", target: "node24",
+      external: ["better-auth", "better-auth/*", "pg", "nodemailer"], logLevel: "silent" });
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    await mail.close();
+    await pool.end();
+    throw error;
+  }
+  const child = spawn(process.execPath, [entry], {
     cwd: fileURLToPath(new URL("../", import.meta.url)),
     env: {
       ...process.env,
@@ -46,22 +64,38 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
   child.stdout.on("data", chunk => { logs = (logs + String(chunk)).slice(-16_384); });
   child.stderr.on("data", chunk => { logs = (logs + String(chunk)).slice(-16_384); });
   let exited = false;
-  const exit = new Promise<void>(resolve => child.once("exit", () => { exited = true; resolve(); }));
-  const ready = await new Promise<void>((resolve, reject) => {
-    const abort = setTimeout(() => reject(new Error("Account server did not start within 20 seconds.")), 20_000);
-    child.once("error", error => { clearTimeout(abort); reject(error); });
-    child.once("exit", code => { clearTimeout(abort); reject(new Error(`Account server exited before startup (${code}). ${logs}`)); });
-    const inspect = () => {
-      if (logs.includes("listening on")) { clearTimeout(abort); resolve(); }
-    };
-    child.stdout.on("data", inspect);
-  }).catch(async error => {
-    child.kill();
+  const exit = new Promise<void>(resolve => child.once("close", () => { exited = true; resolve(); }));
+  const controller = new AbortController();
+  const abort = setTimeout(() => controller.abort(new Error("Account server was not ready within 20 seconds.")), 20_000);
+  const onError = (error: Error) => controller.abort(error);
+  const onExit = (code: number | null) => controller.abort(new Error(`Account server exited before readiness (${code}).`));
+  child.once("error", onError);
+  child.once("exit", onExit);
+  try {
+    while (true) {
+      controller.signal.throwIfAborted();
+      try {
+        const response = await fetch(`${listenOrigin}/ready`, { signal: controller.signal });
+        const report = await response.json();
+        controller.signal.throwIfAborted();
+        if (response.ok && report.ok === true) break;
+      } catch {
+        controller.signal.throwIfAborted();
+      }
+      await delay(100, undefined, { signal: controller.signal });
+    }
+  } catch (error) {
+    if (!exited) child.kill();
+    await exit;
     await mail.close();
     await pool.end();
-    throw error;
-  });
-  void ready;
+    await rm(directory, { recursive: true, force: true });
+    throw new Error(`Account server startup failed. ${logs}`, { cause: error });
+  } finally {
+    clearTimeout(abort);
+    child.off("error", onError);
+    child.off("exit", onExit);
+  }
   return {
     origin, listenOrigin, mail, pool, pid: child.pid,
     logs: () => logs,
@@ -70,6 +104,7 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
       await exit;
       await mail.close();
       await pool.end();
+      await rm(directory, { recursive: true, force: true });
     },
   };
 }
