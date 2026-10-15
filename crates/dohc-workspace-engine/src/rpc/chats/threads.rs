@@ -230,6 +230,10 @@ pub(super) fn thread_b2_json(thread: &ChatThread) -> Value {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct OpeningMessageWire<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_actor_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin: Option<&'a str>,
     id: &'a str,
     author: AuthorWire<'a>,
     created_at_ms: i64,
@@ -266,6 +270,8 @@ fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
             .opening_message
             .as_ref()
             .map(|opening| OpeningMessageWire {
+                author_actor_key: opening.author_actor_key.as_deref(),
+                origin: opening.origin.as_deref(),
                 id: &opening.message_id,
                 author: AuthorWire::new(opening.author_kind, &opening.author_display_name),
                 created_at_ms: opening.created_at_ms,
@@ -709,6 +715,8 @@ mod tests {
                 .is_none()
         );
         let opening = ChannelOpeningMessage {
+            author_actor_key: Some("stored-key".to_owned()),
+            origin: Some("cli".to_owned()),
             message_id: "message".to_owned(),
             author_kind: ChatActorKind::Automation,
             author_display_name: "Stamp".to_owned(),
@@ -730,6 +738,8 @@ mod tests {
             channel_thread_summary_json(&summary)["openingMessage"],
             json!({
                 "id": "message",
+                "authorActorKey": "stored-key",
+                "origin": "cli",
                 "author": { "kind": "automation", "displayName": "Stamp" },
                 "createdAtMs": 10,
                 "bodySnippet": "hello",

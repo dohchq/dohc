@@ -310,7 +310,7 @@ describe("ChatsView presence (MU-C1)", () => {
 
   it("publishes typing while composing and clears it on send", async () => {
     bridgeMock.sendChatMessage.mockResolvedValue({
-      message: {
+      message: { presentation: { group: "fixture", hue: null, self: false },
         id: "message-9",
         threadId: "thread-1",
         authorKind: "human",

@@ -452,7 +452,7 @@ export const WorkspaceFileEntry = z.object({
 });
 export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntry>;
 
-export const ListWorkspaceFilesResult = z.object({
+export const WorkspacePathListing = z.object({
   files: z.array(WorkspaceFileEntry),
   // Directories ride along so empty folders
   // appear in the tree. Optional so older fixtures/consumers keep parsing;
@@ -462,6 +462,21 @@ export const ListWorkspaceFilesResult = z.object({
   // the owned-workspace walk; a cached answer must be revalidated before the
   // renderer uses it as evidence that a path is missing.
   cached: z.literal(true).optional(),
+});
+export type WorkspacePathListing = z.infer<typeof WorkspacePathListing>;
+
+export const WorkspaceListingVisibility = z.object({
+  status: z.enum(["ready", "degraded", "unavailable"]),
+  rules: z.array(z.object({
+    path: z.string().min(1),
+    visibility: z.enum(["visible", "hidden"]).optional(),
+    export: z.enum(["included", "excluded", "redacted"]).optional(),
+  })),
+});
+export type WorkspaceListingVisibility = z.infer<typeof WorkspaceListingVisibility>;
+
+export const ListWorkspaceFilesResult = WorkspacePathListing.extend({
+  visibility: WorkspaceListingVisibility,
 });
 export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 
@@ -1830,9 +1845,18 @@ const CHAT_MESSAGE_AUTOMATION = z.object({
   collectionPath: SAFE_RELATIVE_PATH.nullable(),
 });
 
+// Display only. This token grants no workspace or author authority.
+export const ActorPresentation = z.object({
+  group: z.string(),
+  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose", "olive"]).nullable(),
+  self: z.boolean(),
+});
+export type ActorPresentation = z.infer<typeof ActorPresentation>;
+
 export const ChatMessageRecord = z.object({
   id: OPAQUE_ID,
   threadId: OPAQUE_ID,
+  presentation: ActorPresentation,
   authorKind: CHAT_MESSAGE_AUTHOR_KIND,
   authorDisplayName: z.string().min(1).max(200),
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
@@ -2201,6 +2225,7 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
   openingMessage: z
     .object({
       id: OPAQUE_ID,
+      presentation: ActorPresentation,
       authorKind: CHAT_MESSAGE_AUTHOR_KIND,
       authorDisplayName: z.string().min(1).max(200),
       authorOwnerDisplayName: z.string().min(1).max(200).optional(),
@@ -3383,7 +3408,11 @@ export function activityPathsAffectWorkspaceListing(
   paths: readonly string[],
   platform: NodeJS.Platform,
 ): boolean {
-  return paths.some((path) => !hasEngineIgnoredSegment(path, platform));
+  return paths.some((path) => isWorkspaceVisibilityPolicyPath(path, platform) || !hasEngineIgnoredSegment(path, platform));
+}
+
+export function isWorkspaceVisibilityPolicyPath(path: string, platform: NodeJS.Platform): boolean {
+  return (platform === "win32" ? path.toLowerCase() : path) === ".dohc/visibility.toml";
 }
 
 // An activity ping must never be dropped on a schema failure: under-notifying is the staleness bug the channel exists to
@@ -3427,6 +3456,7 @@ export const CloudStatusPayload = z.object({
 export type CloudStatusPayload = z.infer<typeof CloudStatusPayload>;
 
 export const CloudStatusResult = z.object({
+  ownPresentation: ActorPresentation.optional(),
   connected: z.boolean(),
   email: z.string().optional(),
   serverUrl: z.string().optional(),
@@ -6739,8 +6769,42 @@ export const systemMotionOperations = {
   },
 } as const satisfies OperationTable;
 
+export const chatOperations = {
+  listChatFileMentions: {
+    capabilityId: "chat.read", scope: "workspace",
+    channel: "desktop:list-chat-file-mentions", payload: ListChatFileMentionsPayload, result: ListChatFileMentionsResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  listChatMessages: {
+    capabilityId: "chat.read", scope: "workspace",
+    channel: "desktop:list-chat-messages", payload: ListChatMessagesPayload, result: ListChatMessagesResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  sendChatMessage: {
+    capabilityId: "chat.reply", scope: "workspace",
+    channel: "desktop:send-chat-message", payload: SendChatMessagePayload, result: SendChatMessageResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  listPersonalChatFeed: {
+    capabilityId: "chat.inbox.read", scope: "workspace",
+    channel: "desktop:list-personal-chat-feed", payload: ListPersonalChatFeedPayload, result: ListPersonalChatFeedResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  listChannelThreads: {
+    capabilityId: "chat.threads.list", scope: "workspace",
+    channel: "desktop:list-channel-threads", payload: ListChannelThreadsPayload, result: ListChannelThreadsResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  startChannelThread: {
+    capabilityId: "chat.post", scope: "workspace",
+    channel: "desktop:start-channel-thread", payload: StartChannelThreadPayload, result: StartChannelThreadResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+} as const satisfies OperationTable;
+
 export interface DohcDesktopBridge
-  extends OperationBridge<typeof shareCopyOperations>,
+  extends OperationBridge<typeof chatOperations>,
+    OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
@@ -6860,9 +6924,6 @@ export interface DohcDesktopBridge
   listWorkspaceHeadings(
     payload: ListWorkspaceHeadingsPayload,
   ): Promise<ListWorkspaceHeadingsResult>;
-  listChatFileMentions(
-    payload: ListChatFileMentionsPayload,
-  ): Promise<ListChatFileMentionsResult>;
   listChatBookmarks(payload: ListChatBookmarksPayload): Promise<ListChatBookmarksResult>;
   saveChatBookmark(payload: SaveChatBookmarkPayload): Promise<SaveChatBookmarkResult>;
   archiveChatBookmark(
@@ -7068,13 +7129,9 @@ export interface DohcDesktopBridge
   ): Promise<RestoreEngineMomentFileResult>;
   listFileChats(payload: ListFileChatsPayload): Promise<ListFileChatsResponse>;
   createFileChat(payload: CreateFileChatPayload): Promise<CreateFileChatResult>;
-  listChatMessages(
-    payload: ListChatMessagesPayload,
-  ): Promise<ListChatMessagesResult>;
   getChatThreadRevision(
     payload: GetChatThreadRevisionPayload,
   ): Promise<GetChatThreadRevisionResult>;
-  sendChatMessage(payload: SendChatMessagePayload): Promise<SendChatMessageResult>;
   listChatThreadDecisions(
     payload: ListChatThreadDecisionsPayload,
   ): Promise<ListChatThreadDecisionsResult>;
@@ -7093,19 +7150,10 @@ export interface DohcDesktopBridge
   ): Promise<ListChatChannelsResult>;
   listChatFollows(payload: ListChatFollowsPayload): Promise<ListChatFollowsResult>;
   setChatFollow(payload: SetChatFollowPayload): Promise<SetChatFollowResult>;
-  listPersonalChatFeed(
-    payload: ListPersonalChatFeedPayload,
-  ): Promise<ListPersonalChatFeedResult>;
   markPersonalChatFeedSeen(payload: MarkPersonalChatFeedSeenPayload): Promise<void>;
   createChatChannel(
     payload: CreateChatChannelPayload,
   ): Promise<CreateChatChannelResult>;
-  listChannelThreads(
-    payload: ListChannelThreadsPayload,
-  ): Promise<ListChannelThreadsResult>;
-  startChannelThread(
-    payload: StartChannelThreadPayload,
-  ): Promise<StartChannelThreadResult>;
   markChatThreadRead(
     payload: MarkChatThreadReadPayload,
   ): Promise<MarkChatThreadReadResult>;

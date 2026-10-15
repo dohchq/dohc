@@ -124,6 +124,8 @@ describe("workspace summary changes", () => {
     vi.stubGlobal("dohcDesktop", {
       ...noticeBridge(),
       getWorkspaceRegistry,
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" })),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn((listener: typeof emit) => { emit = listener; return () => undefined; }),
@@ -252,6 +254,8 @@ describe("DesktopRoot", () => {
       windowRole: "workspace",
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
@@ -291,6 +295,8 @@ describe("DesktopRoot", () => {
       windowRole: "workspace",
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
@@ -315,6 +321,8 @@ describe("DesktopRoot", () => {
       devTools,
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
@@ -351,6 +359,8 @@ describe("DesktopRoot", () => {
       windowRole: "workspace",
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
@@ -384,6 +394,8 @@ describe("DesktopRoot", () => {
       windowRole: "workspace",
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
@@ -419,6 +431,8 @@ describe("DesktopRoot", () => {
       windowRole: "workspace",
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
@@ -460,6 +474,8 @@ describe("DesktopRoot", () => {
       windowRole: "workspace",
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(() => registry.promise),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
@@ -503,6 +519,8 @@ describe("DesktopRoot", () => {
     vi.stubGlobal("dohcDesktop", {
       ...noticeBridge(),
       getWorkspaceRegistry,
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings,
       onUserSettingsChanged: vi.fn((callback: typeof settingsChanged) => {
         settingsChanged = callback;
@@ -549,6 +567,8 @@ describe("a settings file save", () => {
     vi.stubGlobal("dohcDesktop", {
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [workspace("a")] })),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings,
       onUserSettingsChanged: vi.fn((callback: typeof settingsChanged) => {
         settingsChanged = callback;
@@ -602,6 +622,8 @@ describe("startup selection", () => {
       windowRole: "workspace",
       ...noticeBridge(),
       getWorkspaceRegistry,
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
@@ -644,6 +666,8 @@ describe("registry read failure", () => {
           "Error invoking remote method 'desktop:get-workspace-registry': Error [EACCES]: EACCES: permission denied, open 'C:\\dohc\\dohc-workspaces.json'",
         );
       }),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" as const })),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
@@ -678,6 +702,8 @@ describe("registry read failure", () => {
       getWorkspaceRegistry: vi.fn(async () => {
         throw new Error("Error invoking remote method 'desktop:get-workspace-registry': Error [EACCES]: EACCES: permission denied");
       }),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" as const })),
       onUserSettingsChanged: vi.fn(() => () => undefined),
       onWorkspaceActivity: vi.fn(() => () => undefined),
@@ -707,6 +733,8 @@ describe("registry grows under an idle first-run window", () => {
       windowRole: "workspace",
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(async () => registry),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
@@ -753,6 +781,8 @@ describe("registry emptied under an open workspace", () => {
       windowRole: "workspace",
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(async () => registry),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
@@ -784,6 +814,8 @@ describe("registry emptied under an open workspace", () => {
       windowRole: "workspace",
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(async () => registry),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
@@ -823,6 +855,8 @@ describe("reaction writes across first run", () => {
       windowRole: "workspace",
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(async () => registry),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,
@@ -888,6 +922,8 @@ describe("opening a notice in another workspace", () => {
       windowRole: "workspace",
       ...noticeBridge(),
       getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [workspace("a"), workspace("b")] })),
+      cloudStatus: vi.fn(async () => ({ connected: false })),
+      onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({
         settings: DEFAULT_USER_SETTINGS,
         source: "default" as const,

@@ -86,6 +86,7 @@ export function createNamedLiveBrowserHttp(options: {
         } else {
           if (typeof value !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(value)) return refusal();
           const context = await sessions.resolve(authenticated, value);
+          // Share-web's server reads the real workspace ID here; never forward it to a browser.
           result = context && { userId: context.userId, workspaceId: context.workspaceId, shareId: context.shareId, grantId: context.grantId };
           controller.signal.throwIfAborted();
         }

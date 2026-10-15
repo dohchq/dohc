@@ -684,6 +684,8 @@ const ChatMentionSchema = mutableStruct({
   createdAtMs: AnyInt,
 });
 const ChatChannelOpeningMessageSchema = mutableStruct({
+  authorActorKey: Schema.optionalKey(Schema.String),
+  origin: Schema.optionalKey(Schema.Literal("cli")),
   id: Schema.String,
   author: ChatActorSchema,
   authorOwnerDisplayName: Schema.optionalKey(Schema.String),

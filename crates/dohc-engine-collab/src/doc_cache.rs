@@ -21,8 +21,10 @@
 //! drain projection. Forced compaction, close, `claim_base`, origination, and
 //! lineage successor always fully reconstruct. Durable lineage bytes are never
 //! derived from the cache.
-//! The byte-replay document, frontier, tuple, map, and accounting are never
-//! mutated inside a transaction. The check-4-only persistent scratch applies a
+//! Resident writer caches never mutate their byte-replay document, frontier,
+//! tuple, map, or accounting inside a transaction. A transaction cache advances
+//! its private copy within its own transaction and discards it on rollback.
+//! The check-4-only persistent scratch applies a
 //! gated candidate in place; the transaction probe retains it only after an
 //! exact commit and evicts it after any rollback or post-mutation refusal.
 //!
@@ -366,6 +368,14 @@ impl WriterDocCache {
         Ok(self
             .validated_entry(conn, key, &marker)?
             .map(|entry| &entry.doc))
+    }
+
+    /// Read immediately after `finish_local_append` validated and advanced this
+    /// transaction's private entry. An evicted entry requires reconstruction.
+    pub(crate) fn missing_updates_after_append(&self, key: &DocKey) -> Option<bool> {
+        self.entries
+            .get(key)
+            .map(|entry| entry.doc.has_missing_updates())
     }
 
     fn validated_entry(

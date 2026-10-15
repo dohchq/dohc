@@ -546,7 +546,7 @@ const server = serveFetchHandler({
     isAutomationServerPath(url.pathname) ? AUTOMATION_SERVER_MAX_BODY_BYTES :
     (url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     (url.pathname === "/sync/live/named-tickets" || isLinkLivePath(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
-    isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
+    (isNamedBrowserSessionPath(url.pathname) || url.pathname === "/sync/named-chat/messages") && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? MAX_LINK_EXCHANGE_BODY_BYTES
       : MAX_BODY_BYTES),
