@@ -85,7 +85,7 @@ fn empty_bootstrap_outbox_does_not_require_owner_adoption() {
     let outbox =
         crate::owner_outbox::outbox_id(b, &b.lineage_claim_id, &serde_json::to_string(b).unwrap());
     f.store.write_with(&NoFaults,|tx| -> Result<(),ApplicationError> {
-        tx.execute("INSERT INTO owner_ydoc_outboxes VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?5,?5,?9,'active',0,NULL,1,NULL,NULL,0)",
+        tx.execute("INSERT INTO owner_ydoc_outboxes (outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?5,?5,?9,'active',0,NULL,1,NULL,NULL,0)",
             params![outbox,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).unwrap(),b.restore_fence_generation,f.doc.encode_full_state().len() as i64]).map_err(write_sql)?;
         Ok(())
     }).unwrap();

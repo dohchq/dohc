@@ -619,6 +619,7 @@ export interface SyncRelayStorage {
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   serviceHostEnrollmentHasEditGrant(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean;
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}): boolean;
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   postNotice(input: import("./notices").PostNoticeInput): void;
   postAutomationWake(input: import("./notices").PostAutomationWakeInput): import("./notices").PostedAutomationWake;
@@ -769,6 +770,16 @@ export interface SyncRelayStorage {
     rotatedAtMs: number;
   }): RotateWorkspaceIdentityResult;
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
+  discardReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
+  releaseReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
+  bindReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease): void;
+  replicaCurrentViewSelectors(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentViewSelector[];
+  stageReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView): import("./replicaCurrentViews").StagedCurrentView;
+  flipReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, staged: import("./replicaCurrentViews").StagedCurrentView): void;
+  storeReplicaCurrentView(lease: import("../replicaReadPrincipal").ReplicaReadLease, view: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView;
+  readReplicaCurrentView(workspaceId: string): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView | null;
+  currentViewFilesAtFences(workspaceId: string, files: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"], previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"], omitted: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["omitted"]): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"];
+  readReplicaCurrentViewText(workspaceId: string,sha: string): string | null;
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string): ReturnType<typeof import("./replicaReads").readReplicaStanding>;
   putBlob(input: {
     workspaceId: string;
@@ -823,6 +834,16 @@ export interface SyncRelayStorage {
     beforeRelaySeq: number | null;
     limit: number;
   }): SyncRelayLogRow[];
+  fetchChatMessages(input: {
+    workspaceId: string; channelWireId: string; cursor: number | null; direction: "older" | "newer"; limit: number;
+  }): FetchLogPageResult & {latestCursor: number};
+  fetchChatMessage(input: {
+    workspaceId: string; originId: string; messageId: string;
+  }): SyncRelayLogRow | null;
+  appendBrowserChatBatch(input: {
+    workspaceId: string; originId: string; messageId: string; ops: SyncRelayLogInput[];
+    guard?: (context: AppendLogBatchGuardContext) => void;
+  }): AppendLogBatchResult;
   fetchLogCoordinate(input: {
     workspaceId: string;
     originId: string;

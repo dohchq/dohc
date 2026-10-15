@@ -23,6 +23,11 @@ import {
   makeBridge,
   renderShell,
 } from "../DesktopWorkspaceShell.testHarness";
+// The shell loads Chats and the open b.md tab's read view and editor lazily.
+// Load them here so their first import does not count against a test's wait.
+import "../workbench/ChatsView";
+import "../markdown/IncrementalMarkdownDocument";
+import "../editor/MarkdownEditor";
 
 function channel(id: string, name: string, createdAtMs: number) {
   return {

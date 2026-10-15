@@ -30,9 +30,11 @@ const jsonFields: Readonly<Record<string, unknown>> = {
 export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>> = {
   "access object": ['{"kind":"path","path":"Notes/a.md"}'],
   "access sharing": ["received"],
+  "share copy": ["share", "grant"],
   "document read": ["Notes/a.md"],
   "document edit": ["Notes/a.md", "--text", "Updated"],
   "document create": ["Notes/new.md"],
+  "document chats": ["Notes/a.md"],
   "document comment": ["Notes/a.md", "--title", "Review", "--text", "Comment"],
   "chat groups": [], "chat threads": ["group"], "chat inbox": [], "chat show": ["thread"],
   "chat post": ["group", "Post"], "chat reply": ["thread", "Reply"], "chat react": ["message", "thumbsup"],

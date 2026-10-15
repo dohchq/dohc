@@ -56,13 +56,14 @@ test("fixture reports an ordinary nonzero command exit as status", { timeout: 20
 
 test("verification prepares before parallel jobs and runs every JavaScript package and proof", { concurrency: 2 }, async (t) => {
   const cases = [];
-  for (const [mode, job, fault, changed = "pnpm-lock.yaml", full = false] of [
+  for (const [mode, job, fault, changed = "pnpm-lock.yaml", full = false, keepGoing = false] of [
     ["pr", null, null], ["pr", "rust", null], ["pr", "js", null],
     ["smoke", null, null], ["e2e", null, null],
     ["pr", null, "rust-verdict"], ["pr", "rust", "cargo-version"], ["pr", null, "source"],
     ["pr", null, "rust"], ["pr", null, "rust-and-js"], ["pr", "rust", "rust"], ["pr", "js", "js"], ["pr", null, "js"],
     ["pr", null, "rust-source"], ["pr", null, "rust-cancel"],
     ["pr", "js", "accounts-skipped"], ["pr", "js", "desktop-skipped"], ["pr", "js", "onboarding-missing"], ["pr", "js", "smoke-missing"],
+    ["pr", "js", "restart-missing"], ["pr", "js", "restart-one-missing"], ["pr", "js", "restart-skipped"],
     ["pr", "js", "native-skipped"], ["pr", "js", "accounts-cancelled"], ["pr", "js", "desktop-cancelled"],
     // The gallery is required only where it runs, so its missing-proof case exists only there.
     ...(process.platform === "win32" ? [["pr", "js", "gallery-missing"]] : []),
@@ -71,7 +72,11 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
     ["pr", null, null, null, true], ["pr", "js", null, null, true], ["pr", "rust", null, null, true],
     ["pr", "js", null, null],
     ["pr", null, "warm"], ["pr", null, "pre-typecheck"], ["pr", "rust", "pre-clippy"],
-  ]) cases.push(t.test([mode, job, fault, changed ?? "empty diff", full ? "full" : ""].filter(Boolean).join(" "), async (context) => {
+    // A package test that another branch also failed in the last day, run inline beside a queue history.
+    ["pr", "js", "shared"],
+    // A failure stops the other job unless the run keeps going.
+    ["pr", null, "js", undefined, false, true],
+  ]) cases.push(t.test([mode, job, fault, changed ?? "empty diff", full ? "full" : "", keepGoing ? "keep-going" : ""].filter(Boolean).join(" "), async (context) => {
     const rust = mode === "pr" && job !== "js" && (full || job === "rust" || changed === "pnpm-lock.yaml");
     const js = mode === "pr" && job !== "rust";
     const warm = ["warm", "pre-typecheck"].includes(fault);
@@ -206,7 +211,8 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
             if(${rust && js}) {
               writeFileSync(join(repoRoot,'.dohc-dev/rust-running'),'yes');
               releaseJavascript();
-              await javascriptStarted;
+              // A stop interrupts the running Rust job as run() does.
+              await Promise.race([javascriptStarted, new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(Object.assign(Error('cargo failed (interrupted).'), {interrupted: true}))))]);
               assert.equal(readFileSync(join(repoRoot,'.dohc-dev/jobs-overlapped'),'utf8'),'yes');
             }
             rustFinished = true;
@@ -233,7 +239,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
               await rustStarted;
               assert.equal(readFileSync(join(repoRoot,'.dohc-dev/rust-running'),'utf8'),'yes');
               writeFileSync(join(repoRoot,'.dohc-dev/jobs-overlapped'),'yes');
-              if(['js','rust-and-js'].includes(process.env.FIXTURE_FAULT))releaseRust();
+              if(process.env.FIXTURE_FAULT==='rust-and-js' || process.env.FIXTURE_FAULT==='js' && ${keepGoing})releaseRust();
             }
             if(args[1]==='typecheck' && ['js','rust-and-js'].includes(process.env.FIXTURE_FAULT))throw Error('fixture JS failed');
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
@@ -266,6 +272,10 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
             assert.ok(${JSON.stringify(packages)}.includes(args[1]),'Unknown package executed: '+args[1]);
             assert.equal(options.env.POSTGRES_URL,'postgres://dohc:dohc@127.0.0.1:1234/dohc');
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
+            if(process.env.FIXTURE_FAULT==='shared' && args[1]==='@dohc/fixture') {
+              appendFileSync(options.env.DOHC_TEST_RECORD,JSON.stringify({test:'src/index.test.ts › keeps its value',flaky:false,failed:true,seconds:0.1})+'\\n');
+              throw Object.assign(Error('fixture package test failed'),{commandExitFailure:true});
+            }
             return {stdout:''};
           }
           if(command==='pnpm' && args[0]==='exec') {
@@ -304,12 +314,15 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
               writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({stats:{expected:2,unexpected:process.env.FIXTURE_FAULT==='accounts-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='accounts-skipped'?1:0}}));
               return {stdout:''};
             }
-            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|@self-host-onboarding'+(${gallery}?'|@states-page':''):'@verification-smoke'];
+            const restartTags=['@restart-durability-idle-external','@restart-durability-overlapping-typing','@restart-durability-capture-before-reopen','@restart-durability-person-agent'];
+            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|'+restartTags.join('|')+'|@self-host-onboarding'+(${gallery}?'|@states-page':''):'@verification-smoke'];
             assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
-            const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
+            const restartTitles=restartTags.map((tag,index)=>process.env.FIXTURE_FAULT==='restart-missing'||process.env.FIXTURE_FAULT==='restart-one-missing'&&index===3?'unrelated restart spec':tag+' restart proof');
+            const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?restartTitles:[]),...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
+            const restartSkipped=process.env.FIXTURE_FAULT==='restart-skipped';
             writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({
-              stats:{expected:pr?2:1,unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'?1:0},
-              suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:'passed'}]}]}))}]}],
+              stats:{expected:titles.length-(restartSkipped?1:0),unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'||restartSkipped?1:0},
+              suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:restartSkipped&&title.startsWith('@restart-durability-person-agent ')?'skipped':'passed'}]}]}))}]}],
             }));
             return {stdout:''};
           }
@@ -322,7 +335,15 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         put(changed, changed === "pnpm-lock.yaml" ? "gate-lock" : "export const value = 2;\n");
         git(["add", "."]); git(["commit", "-m", "Change fixture input"]);
       }
-      const args = mode === "pr" ? [mode, "--base", base, ...(job ? ["--job", job] : []), ...(full ? ["--full"] : [])]
+      const queue = join(root, ".dohc-dev/queue");
+      if (fault === "shared") {
+        const branch = git(["symbolic-ref", "HEAD"]);
+        const hourAgo = new Date(Date.now() - 60 * 60_000).toISOString();
+        const failed = [{ step: "@dohc/fixture", test: "src/index.test.ts › keeps its value" }];
+        for (const [id, line] of [["000000001-aaaaaa", "refs/heads/feat/a"], ["000000002-bbbbbb", branch]]) put(`.dohc-dev/queue/requests/${id}/request.json`, JSON.stringify({ id, branch: line, checkout: "C:\\w\\other" }));
+        put(".dohc-dev/queue/history.jsonl", ["000000001-aaaaaa", "000000002-bbbbbb"].map(id => JSON.stringify({ at: hourAgo, event: "finished", id, failed, outcome: "failed" })).join("\n") + "\n");
+      }
+      const args = mode === "pr" ? [mode, "--base", base, ...(job ? ["--job", job] : []), ...(full ? ["--full"] : []), ...(keepGoing ? ["--keep-going"] : []), ...(fault === "shared" ? ["--inline"] : [])]
         : mode === "e2e" ? [mode, "--", "--project", "fixture"] : [mode];
       const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
       const result = await runFixture(process.execPath, ["--input-type=module", "-e", `
@@ -352,7 +373,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         }
       `, ...args], { cwd: root, timeout: 120_000, signal: context.signal, env: { ...process.env,
         NODE_PATH: join(dirname(require.resolve("js-yaml/package.json")), ".."), FIXTURE_MODE: mode, FIXTURE_FAULT: fault ?? "",
-        CARGO_INCREMENTAL: previousIncremental,
+        CARGO_INCREMENTAL: previousIncremental, ...(fault === "shared" ? { DOHC_VERIFICATION_QUEUE_ROOT: queue } : {}),
         POSTGRES_URL:"postgres://must-not-use-inherited-database/foreign" } });
       assert.equal(result.error, undefined, result.stderr);
       assert.deepEqual(JSON.parse(readFileSync(join(root, ".dohc-dev/incremental.json"), "utf8")),
@@ -368,9 +389,26 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
       } else if (fault && !warm) {
         assert.equal(result.status, fault === "rust-cancel" ? 143 : 1, result.stderr);
         assert.equal(report.verdict, "FAIL");
-        assert.ok(report.steps.every(step => ["PASS", "FAIL"].includes(step.verdict)));
+        assert.ok(report.steps.every(step => ["PASS", "FAIL", "NOT RUN"].includes(step.verdict)));
+        assert.equal(report.final, true);
+        assert.equal(report.keepGoing, keepGoing);
         if (fault === "rust-and-js") assert.match(report.rustError, /fixture Rust failed/);
-        if (fault === "js" && rust) assert.equal(report.steps.find(step => step.name === "rust-verdict").verdict, "PASS");
+        if (fault === "js" && rust) {
+          const verdicts = Object.fromEntries(report.steps.map(step => [step.name, step.verdict]));
+          if (keepGoing) {
+            assert.equal(verdicts["rust-verdict"], "PASS", "a run that keeps going finishes the other job");
+            assert.equal(report.stopped, undefined);
+          } else {
+            // The failed typecheck interrupts the running Rust job, which never counts as a pass.
+            assert.deepEqual([verdicts.typecheck, verdicts.rust, verdicts["rust-verdict"]], ["FAIL", "NOT RUN", "NOT RUN"]);
+            assert.equal(report.steps.find(step => step.name === "rust").reason, "stopped after typecheck failed");
+            // The tests the typecheck failure kept from starting are listed too.
+            assert.deepEqual(report.stopped, { after: "typecheck", notRun: ["rust", "rust-verdict", "tests"] });
+            assert.deepEqual(report.failure, { kind: "check", cause: "typecheck" });
+            assert.equal(report.rustEvidence, undefined);
+            assert.match(result.stdout, /Stopped after typecheck failed. These steps did not finish/);
+          }
+        }
         const messages = {
           source: /Source changed during verification/,
           "rust-source": /Source changed during verification/,
@@ -386,10 +424,28 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
           "desktop-cancelled": /Desktop verification did not complete a passing test run/,
           "desktop-skipped": /A mandatory desktop smoke test was skipped/,
           "smoke-missing": /did not pass every required proof: @verification-smoke/,
-          "onboarding-missing": /did not pass every required proof: @verification-smoke, @self-host-onboarding/,
+          "onboarding-missing": /did not pass every required proof: @verification-smoke, .*@self-host-onboarding/,
+          "restart-missing": /did not pass every required proof: .*@restart-durability/,
+          "restart-one-missing": /did not pass every required proof: .*@restart-durability-person-agent/,
+          "restart-skipped": /A mandatory desktop smoke test was skipped/,
           "gallery-missing": /did not pass every required proof: .*@states-baselines/,
+          shared: /fixture package test failed/,
         };
         assert.match(result.stderr, messages[fault]);
+        if (fault === "shared") {
+          const row = { step: "@dohc/fixture", test: "src/index.test.ts › keeps its value" };
+          // The lookup only reports. The package test's failure decides the verdict, as it would without a queue.
+          assert.deepEqual(report.failure, { kind: "check", cause: "tests" });
+          assert.deepEqual(report.failed, [row]);
+          assert.deepEqual(report.shared, [{ ...row, branches: ["feat/a"] }], "this branch's own run does not count");
+          assert.match(result.stdout, /\[verification\] 1 failed test also failed on other branches in the last day\. [^\n]*:\n {2}@dohc\/fixture: src\/index\.test\.ts › keeps its value \(also feat\/a\)\n/u);
+        } else assert.equal(report.shared, undefined, "a failure without failed tests looks nothing up");
+        if (fault === "restart-one-missing") {
+          for (const tag of ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen"]) {
+            assert.ok(report.desktopProofs.some(title => title.split(/\s+/u).includes(tag)), `${tag} passed`);
+          }
+          assert.ok(!report.desktopProofs.some(title => title.split(/\s+/u).includes("@restart-durability-person-agent")));
+        }
         assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), desktop);
         assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), js);
         assert.equal(report.steps.some(step => step.name === "typecheck"), js);
@@ -399,7 +455,13 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
           if (js) {
             const typecheck = report.steps.find(step => step.name === "typecheck");
             assert.equal(typecheck.verdict, fault === "rust-and-js" ? "FAIL" : "PASS");
-            if (fault !== "rust-and-js") assert.equal(report.steps.find(step => step.name === "tests").verdict, "PASS");
+            // The Rust failure stops the tests before runtime packaging, their last step.
+            if (fault !== "rust-and-js") {
+              assert.equal(report.steps.find(step => step.name === "tests").verdict, "NOT RUN");
+              assert.deepEqual(JSON.parse(readFileSync(report.jsTests, "utf8")).stopped.notRun, ["desktop-runtime-packaging"]);
+              // A failed rust step also kept its verdict check from starting.
+              assert.deepEqual(report.stopped, { after: failedStep, notRun: failedStep === "rust" ? ["tests", "rust-verdict", "tests: desktop-runtime-packaging"] : ["tests", "tests: desktop-runtime-packaging"] });
+            }
           }
         }
         if (fault === "js") {
