@@ -71,6 +71,7 @@ const PARTS = [
   "offers",
   "page-identity",
   "settings-sync",
+  "data-grid",
   "chat-messages",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an

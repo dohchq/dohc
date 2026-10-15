@@ -79,7 +79,7 @@ describe("ChatsView decisions", () => {
 
   it("answers a poll by picking a choice, and the choice travels with the answer", async () => {
     const user = userEvent.setup();
-    const opening = message({ authorKind: "agent", authorDisplayName: "You", body: "Ship on which day?" });
+    const opening = message({ presentation: { group: "fixture", hue: null, self: false }, authorKind: "agent", authorDisplayName: "You", body: "Ship on which day?" });
     const poll = {
       threadId: "thread-1",
       messageId: opening.id,
@@ -299,7 +299,7 @@ describe("ChatsView work and run links", () => {
     const user = userEvent.setup();
     const onOpenPath = vi.fn();
     const opening = message();
-    const agentComment = message({
+    const agentComment = message({ presentation: { group: "fixture", hue: null, self: false },
       id: "agent-report",
       parentMessageId: opening.id,
       authorKind: "agent",

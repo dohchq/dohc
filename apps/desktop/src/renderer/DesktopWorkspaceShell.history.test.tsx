@@ -639,7 +639,7 @@ describe("history page", () => {
         activeEditorGroup: "right",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["race-a.txt", "b.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -701,7 +701,7 @@ describe("history page", () => {
     const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["race-a.txt", "b.md"], "race-a.txt")),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["race-a.txt", "b.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -761,7 +761,7 @@ describe("history page", () => {
         activeEditorGroup: "right",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
       files: ["a.md", "dirty.txt"].map((path) => ({
         path,
         kind: "file" as const,

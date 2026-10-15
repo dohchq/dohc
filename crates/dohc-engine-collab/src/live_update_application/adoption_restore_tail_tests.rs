@@ -689,7 +689,7 @@ fn native_restore_classifies_a_lost_ack_before_the_accepted_checkpoint() {
                     },
                     update_bytes: vec![0, 0],
                 };
-                accepted_history::append(tx, &held, &event, 100_000_000)?;
+                accepted_history::append_native(tx, &held, &event, 100_000_000)?;
                 insert_application(tx, &held, &event, ack.local_ydoc_sequence)?;
                 terminal = event.metadata.accepted.receipt;
             }

@@ -1,23 +1,12 @@
 import { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { ChatMessageRecord } from "../../../src/ipc/bridgeContract";
+import { chatListMessage } from "./messages";
 import { ChatMessageList, type ChatMessageListHandle } from "../../../src/renderer/workbench/chatMessages";
 import type {} from "./api";
 import "./styles.css";
 
 const sparse = new URLSearchParams(location.search).has("sparse");
-function message(index: number): ChatMessageRecord {
-  return {
-    id: `m-${index}`,
-    threadId: "conversation",
-    authorKind: "human",
-    authorDisplayName: `Person ${Math.abs(Math.floor(index / 3) % 4)}`,
-    createdAtMs: 1_700_000_000_000 + index * 60_000,
-    body: `Message ${index}. ` + (sparse
-      ? index % 100 === 0 ? `See @[notes/plan-${index}.md].` : "Plain text."
-      : "A varied length conversation for scrolling and reading. ".repeat(1 + Math.abs(index % 4))),
-  };
-}
+const message = (index: number) => chatListMessage(index, sparse);
 
 function ChatFixture() {
   const listRef = useRef<ChatMessageListHandle | null>(null);

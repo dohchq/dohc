@@ -27,6 +27,7 @@ const RANGE_BYTES: usize = 16;
 const MAX_HEADER_BYTES: usize = dohc_engine_storage::limits::MAX_LIVE_ACCEPTED_HEADER_BYTES;
 const MAX_CHUNK_BYTES: usize = 256 * 1024;
 mod adoption;
+mod replica;
 mod restore;
 pub(crate) use restore::RestoreConfig;
 
@@ -132,6 +133,10 @@ struct SyncParams {
 }
 
 enum Metadata {
+    Replica {
+        after: i64,
+        epoch_log_floor: i64,
+    },
     Owner(crate::rpc::owner_delivery::OwnerUpload),
     Sync(dohc_engine_collab::live_update_application::AppliedSyncPolicy),
     Apply(RelayAcceptedLiveUpdate),
@@ -414,7 +419,8 @@ impl LiveApplicationIngress {
         }
         if !matches!(
             request.method.as_str(),
-            "liveApplication.apply"
+            "replica.applyJournalPage"
+                | "liveApplication.apply"
                 | "ydoc.ownerDelivery.applyAcceptedFrame"
                 | "ydoc.ownerDelivery.applyInitialSync"
                 | "ydoc.ownerDelivery.enroll"
@@ -446,6 +452,28 @@ impl LiveApplicationIngress {
             let (stream_id, byte_length, digest) = params.stream();
             let stream = Stream::new(stream_id, byte_length, digest)?;
             (Metadata::Owner(params), 0, stream, None, 0)
+        } else if request.method == "replica.applyJournalPage" {
+            self.service.replica_open(request.workspace.as_ref())?;
+            let p: replica::Params = serde_json::from_value(std::mem::take(&mut request.params))
+                .map_err(|_| invalid("invalid replica upload"))?;
+            if p.after < 0
+                || p.after as u64 > MAX_WIRE_INTEGER
+                || p.epoch_log_floor < 0
+                || p.epoch_log_floor as u64 > MAX_WIRE_INTEGER
+                || p.byte_length == 0
+            {
+                return Err(invalid("invalid replica upload bounds"));
+            }
+            (
+                Metadata::Replica {
+                    after: p.after,
+                    epoch_log_floor: p.epoch_log_floor,
+                },
+                0,
+                Stream::new(p.stream_id, p.byte_length, p.digest)?,
+                None,
+                0,
+            )
         } else if request.method == "liveApplication.adoptOwner" {
             let config = self
                 .service
@@ -551,7 +579,7 @@ impl LiveApplicationIngress {
         }) {
             return Err(invalid("invalid-live-application-bounds"));
         }
-        let registration = if matches!(&metadata, Metadata::Owner(_)) {
+        let registration = if matches!(&metadata, Metadata::Owner(_) | Metadata::Replica { .. }) {
             None
         } else {
             Some(self.service.live_application_registration(
@@ -560,7 +588,12 @@ impl LiveApplicationIngress {
                 registration_id,
             )?)
         };
-        let reserved = if matches!(&metadata, Metadata::Owner(_)) {
+        let reserved = if matches!(&metadata, Metadata::Replica { .. }) {
+            update
+                .expected
+                .checked_mul(8)
+                .and_then(|n| n.checked_add(self.config.application_working_reserve_bytes))
+        } else if matches!(&metadata, Metadata::Owner(_)) {
             Some(self.owner_admission()?.bytes as usize)
         } else if let Metadata::Sync(_) = &metadata {
             Some(self.service.sync_admission(connection)?.1.bytes as usize)
@@ -758,6 +791,21 @@ impl LiveApplicationIngress {
             Ok(admitted) => admitted,
             Err(error) => return Ok(Some(UploadCompletion::Refused(upload.request.id, error))),
         };
+        if let Metadata::Replica {
+            after,
+            epoch_log_floor,
+        } = admitted.metadata
+        {
+            return Ok(Some(UploadCompletion::Admitted(
+                upload.request,
+                LiveApplicationInput::Replica(Box::new(crate::rpc::replica::ReplicaInput {
+                    after,
+                    epoch_log_floor,
+                    rows: replica::decode(&upload.bytes)?,
+                    reservation: admitted.permit,
+                })),
+            )));
+        }
         if let Metadata::Owner(params) = admitted.metadata {
             return Ok(Some(UploadCompletion::Admitted(
                 upload.request,
@@ -769,6 +817,7 @@ impl LiveApplicationIngress {
             )));
         }
         let operation = match admitted.metadata {
+            Metadata::Replica { .. } => unreachable!("replica dispatched above"),
             Metadata::Owner(_) => unreachable!("owner dispatched above"),
             Metadata::Sync(policy) => LiveApplicationOperation::SyncOpen(upload.bytes, policy),
             Metadata::Apply(accepted) => {
