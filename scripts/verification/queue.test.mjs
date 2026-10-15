@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { attemptOutcome, cancel, lastNightlyPass, listRequests, nextRequest, nightlyTaskDefinition, placeSubmission, position, queuePaths, readJson, serviceRuns, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, cancel, lastNightlyPass, listRequests, nextRequest, nightlyTaskDefinition, placeSubmission, position, queuePaths, readJson, serviceRuns, sharedFailures, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
 import { laneTemp, runService, sweepContainers } from "./queue-service.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
 import { run } from "./process.mjs";
@@ -126,6 +126,43 @@ test("the service task restarts a dead supervisor from the session that installe
   assert.match(xml, /<Priority>4<\/Priority>/u, "the default priority runs every gate below normal");
 });
 
+test("a failed test is shared when another branch's run failed it in the last day; runs of the same branch do not count", async t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-queue-shared-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const paths = queuePaths(root);
+  const now = Date.parse("2026-10-15T12:00:00Z");
+  const grid = { step: "@dohc/desktop", test: "src/grid.test.tsx › draws the table" };
+  const rust = { step: "rust", test: "dohc-engine-sync tests::lane_delete" };
+  const own = { step: "repository", test: "fails only on this branch" };
+  const lines = { "000000001-aaaaaa": "refs/heads/feat/a", "000000002-bbbbbb": "refs/heads/fix/b", "000000003-cccccc": "refs/heads/mine",
+    "000000004-dddddd": "refs/heads/old", "000000005-eeeeee": "refs/heads/other-step", "000000006-ffffff": null };
+  for (const [id, branch] of Object.entries(lines)) await writeJson(join(paths.request(id), "request.json"), { id, branch, checkout: `C:\\w\\${id.slice(-6)}` });
+  const finished = (hours, id, failed) => JSON.stringify({ at: new Date(now - hours * 60 * 60_000).toISOString(), event: "finished", id, attempt: 1, failed, outcome: "failed" });
+  writeFileSync(paths.history, [
+    finished(30, "000000004-dddddd", [grid, rust]),
+    finished(5, "000000001-aaaaaa", [grid]),
+    "{torn",
+    JSON.stringify({ at: new Date(now - 4 * 60 * 60_000).toISOString(), event: "started", id: "000000002-bbbbbb", failed: [rust] }),
+    finished(3, "000000002-bbbbbb", [grid, rust]),
+    finished(3, "000000005-eeeeee", [{ step: "@dohc/sync-relay", test: grid.test }]),
+    finished(2, "000000003-cccccc", [grid, own]),
+    finished(1, "000000006-ffffff", [rust]),
+    finished(1, "000000009-pruned", [own]),
+  ].join("\n") + "\n");
+  const failed = [grid, rust, own, { step: "rust", test: "fails nowhere else" }];
+  assert.deepEqual(sharedFailures(root, failed, { branch: "refs/heads/mine", now }), [
+    { ...grid, branches: ["feat/a", "fix/b"] },
+    { ...rust, branches: ["C:\\w\\ffffff", "fix/b"] },
+  ], "a run older than a day, the same test in another step, this branch's runs, and a request with no record do not count; a detached run is named by its checkout");
+  assert.deepEqual(sharedFailures(root, failed, { branch: "Mine", now }), sharedFailures(root, failed, { branch: "refs/heads/mine", now }), "a branch named without refs/heads/ is still this branch");
+  assert.deepEqual(sharedFailures(root, [own], { branch: "refs/heads/mine", now }), []);
+  assert.deepEqual(sharedFailures(root, [], { branch: "refs/heads/mine", now }), []);
+  assert.deepEqual(sharedFailures(join(root, "missing"), failed, { branch: "refs/heads/mine", now }), [], "a missing queue root gives none");
+  rmSync(paths.history);
+  mkdirSync(paths.history);
+  assert.deepEqual(sharedFailures(root, failed, { branch: "refs/heads/mine", now }), [], "an unreadable history gives none");
+});
+
 test("a request whose status cannot be read is skipped, never taken for a new one", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-status-"));
   try {
@@ -197,7 +234,7 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
     if (behavior === "pass") receipt({ verdict: "PASS" });
     else if (behavior === "pass-on-retry") receipt({ verdict: "PASS", flaky: [{ step: "repository", test: "times out under load" }],
       timings: [{ name: "tests", seconds: 1260.4 }, { name: "rust", seconds: 990.2 }], slowest: [{ step: "desktop", test: "restarts", seconds: 66 }] });
-    else if (behavior === "fail") receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } });
+    else if (behavior === "fail") receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" }, failed: [{ step: "repository", test: "times out under load" }] });
     else if (behavior === "slow-fail") { await sleep(300); receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } }); }
     else if (behavior === "fail-as-host-fails") { hostFails(calls.length); receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } }); }
     else if (behavior === "flaky-host") receipt(calls.filter(call => call.id === grant.request).length === 1
@@ -301,6 +338,8 @@ test("two lanes run two requests at once, each in its own checkout, and the next
   await cancel(root, first.id);
   assert.equal((await settled(first.id)).status.state, "cancelled");
   assert.equal(state(second.id), "running", "a stop reaches only its own run");
+  const laneOf = id => listRequests(root).find(candidate => candidate.id === id).status.attempts[0].lane;
+  assert.deepEqual([laneOf(first.id), laneOf(second.id)], [one, two].map(call => call.lane.endsWith("-2") ? 2 : 1), "each attempt names the lane it ran in");
   // Each attempt records the load it verified under, in its status and in the history.
   const load = listRequests(root).find(candidate => candidate.id === first.id).status.attempts[0].load;
   assert.equal(load.lanes, 2);
@@ -342,6 +381,18 @@ test("a pass with tests that needed a retry records them in its attempt and the 
   // The history keeps the step times and slowest tests for the weekly review.
   assert.deepEqual(finished.steps, { tests: 1260, rust: 990 });
   assert.deepEqual(finished.slowest, [{ step: "desktop", test: "restarts", seconds: 66 }]);
+});
+
+test("a failed run records the tests that failed in its attempt and the history, where another branch finds them", async t => {
+  const { root, request, settled } = harness(t);
+  const failed = await settled((await request("fail")).id);
+  const expected = [{ step: "repository", test: "times out under load" }];
+  assert.equal(failed.status.verdict, "FAIL");
+  assert.deepEqual(failed.status.attempts[0].failed, expected);
+  const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.event === "finished" && event.id === failed.id);
+  assert.deepEqual(finished.failed, expected);
+  assert.deepEqual(sharedFailures(root, expected, { branch: "refs/heads/other" }), [{ ...expected[0], branches: ["fail"] }]);
+  assert.deepEqual(sharedFailures(root, expected, { branch: "refs/heads/fail" }), []);
 });
 
 test("an attempt that never sampled the host records its load as null", async t => {

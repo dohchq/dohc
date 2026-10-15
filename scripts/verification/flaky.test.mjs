@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import TestRecordReporter from "./test-record-reporter.mjs";
-import { nextestFlaky, nextestTimes, nodeTestFailures, nodeTestTimes, playwrightFlaky, playwrightTimes, readTestRecord, slowest, vitestFailures } from "./flaky.mjs";
+import { nextestFailures, nextestFlaky, nextestTimes, nodeTestFailures, nodeTestTimes, playwrightFailures, playwrightFlaky, playwrightTimes, readTestRecord, slowest, vitestFailures } from "./flaky.mjs";
 
 test("nextest's FLAKY lines name each test once", () => {
   const log = [
@@ -15,6 +15,42 @@ test("nextest's FLAKY lines name each test once", () => {
   ].join("\n");
   assert.deepEqual(nextestFlaky(log), ["dohc-workspace-engine::configured_live_host reloads_accepted_edits"]);
   assert.deepEqual(nextestFlaky("     Summary [ 9.0s] 3 tests run: 3 passed"), []);
+});
+
+test("nextest's summary names the tests that failed on their last try, as FLAKY names the ones that passed on retry", () => {
+  // cargo-nextest 0.9.143 with one retry: an in-run failure that passed on retry is not a failure.
+  const retried = [
+    "  \x1b[31mTRY 1 FAIL\x1b[0m [   0.027s] (───) sample tests::flaky_once",
+    "  stdout ───",
+    "    test tests::flaky_once ... FAILED",
+    "        PASS [   0.035s] (1/3) sample tests::passes",
+    "  TRY 1 FAIL [   0.043s] (───) sample tests::fails_twice",
+    "  TRY 2 PASS [   0.019s] (2/3) sample tests::flaky_once",
+    "  TRY 2 FAIL [   0.021s] (3/3) sample tests::fails_twice",
+    "────────────",
+    "     Summary [   0.069s] 3 tests run: 2 passed (1 flaky), 1 failed, 0 skipped",
+    "   FLAKY 2/2 [   0.019s] (2/3) sample tests::flaky_once",
+    "  TRY 2 FAIL [   0.021s] (3/3) sample tests::fails_twice",
+    "error: test run failed",
+  ].join("\n");
+  assert.deepEqual(nextestFailures(retried), ["sample tests::fails_twice"]);
+  assert.deepEqual(nextestFlaky(retried), ["sample tests::flaky_once"]);
+  // A gate log without retries: a timeout, a Windows abort, and a test binary that could not start all fail.
+  const crashed = [
+    "        FAIL [   3.748s] (2361/3893) dohc-engine-sync tests::file_export_lane::lane_delete",
+    "     Summary [1253.042s] 3893 tests run: 3873 passed (11 slow), 2 failed, 1 exec failed, 1 timed out, 32 skipped",
+    "        FAIL [   3.748s] (2361/3893) dohc-engine-sync tests::file_export_lane::lane_delete",
+    "       XFAIL [   0.001s] (2406/3893) dohc-engine-sync tests::owner_publication::reused_state",
+    "       ABORT [   0.018s] (2411/3893) dohc-engine-sync tests::owner_publication::blocked_origin",
+    "           - with code 0xc000012d: The paging file is too small for this operation to complete. (os error 1455)",
+    "     TIMEOUT [ 180.077s] (3142/3893) dohc-engine-sync tests::passive_store::first_pull",
+    "error: test run failed",
+    "",
+    "--- doctests ---",
+  ].join("\n");
+  assert.deepEqual(nextestFailures(crashed), ["dohc-engine-sync tests::file_export_lane::lane_delete", "dohc-engine-sync tests::owner_publication::reused_state",
+    "dohc-engine-sync tests::owner_publication::blocked_origin", "dohc-engine-sync tests::passive_store::first_pull"]);
+  assert.deepEqual(nextestFailures("  TRY 1 FAIL [   0.9s] (───) sample tests::interrupted\nCancelling due to interrupt"), [], "a run without a summary names none");
 });
 
 test("a node:test report names its failed tests, and a failure outside the tests names none", () => {
@@ -34,8 +70,12 @@ test("a node:test report names its failed tests, and a failure outside the tests
 
 test("Playwright and vitest reports name their flaky and failed tests", t => {
   const suites = [{ specs: [{ file: "a.spec.ts", title: "steady", tests: [{ status: "expected" }] }],
-    suites: [{ specs: [{ file: "b.spec.ts", title: "settles on retry", tests: [{ status: "flaky" }] }] }] }];
+    suites: [{ specs: [{ file: "b.spec.ts", title: "settles on retry", tests: [{ status: "flaky" }] },
+      { file: "b.spec.ts", title: "@states-page every shared part matches its baseline", ok: false, tests: [{ status: "unexpected", results: [{ status: "failed", retry: 0 }, { status: "timedOut", retry: 1 }] }] },
+      { file: "b.spec.ts", title: "stopped mid-run", tests: [{ status: "skipped", results: [{ status: "interrupted", retry: 0 }] }] }] }] }];
   assert.deepEqual(playwrightFlaky(suites), ["b.spec.ts › settles on retry"]);
+  assert.deepEqual(playwrightFailures(suites), ["b.spec.ts › @states-page every shared part matches its baseline"]);
+  assert.deepEqual(playwrightFailures(undefined), []);
   const root = mkdtempSync(join(tmpdir(), "dohc-flaky-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const report = join(root, "vitest.json");
@@ -44,20 +84,23 @@ test("Playwright and vitest reports name their flaky and failed tests", t => {
   assert.deepEqual(vitestFailures(join(root, "missing.json")), []);
 });
 
-test("the vitest reporter records the tests that passed on retry, and the slow ones", t => {
+test("the vitest reporter records the tests that passed on retry, failed both tries, and the slow ones", t => {
   const root = mkdtempSync(join(tmpdir(), "dohc-flaky-"));
   const log = join(root, "tests.jsonl");
   const previous = process.env.DOHC_TEST_RECORD;
   process.env.DOHC_TEST_RECORD = log;
   t.after(() => { rmSync(root, { recursive: true, force: true }); if (previous === undefined) delete process.env.DOHC_TEST_RECORD; else process.env.DOHC_TEST_RECORD = previous; });
-  const testCase = (fullName, flaky, duration) => ({ fullName, module: { moduleId: join(process.cwd(), "src", "a.test.ts") }, diagnostic: () => ({ flaky, duration }) });
+  const testCase = (fullName, flaky, duration, state = "passed") => ({ fullName, module: { moduleId: join(process.cwd(), "src", "a.test.ts") }, diagnostic: () => ({ flaky, duration }), result: () => ({ state }) });
   const reporter = new TestRecordReporter();
   reporter.onTestCaseResult(testCase("steady", false, 30));
   reporter.onTestCaseResult(testCase("settles on retry", true, 40));
   reporter.onTestCaseResult(testCase("drives a whole scenario", false, 12_500));
+  // vitest reports a test that failed its retry too once, as failed and not flaky.
+  reporter.onTestCaseResult(testCase("fails both tries", false, 25, "failed"));
   assert.deepEqual(readTestRecord(log), [
-    { test: "src/a.test.ts › settles on retry", flaky: true, seconds: 0.04 },
-    { test: "src/a.test.ts › drives a whole scenario", flaky: false, seconds: 12.5 },
+    { test: "src/a.test.ts › settles on retry", flaky: true, failed: false, seconds: 0.04 },
+    { test: "src/a.test.ts › drives a whole scenario", flaky: false, failed: false, seconds: 12.5 },
+    { test: "src/a.test.ts › fails both tries", flaky: false, failed: true, seconds: 0.025 },
   ]);
   assert.deepEqual(readTestRecord(join(root, "missing.jsonl")), []);
 });
