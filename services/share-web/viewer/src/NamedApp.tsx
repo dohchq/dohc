@@ -1,6 +1,7 @@
 import {normalizeShareLabel, shareAccessLabel} from "@dohc/security-contract/share-labels";
-import {useEffect, useRef, useState, type FormEvent} from "react";
+import {useEffect, useRef, useState} from "react";
 import {accountUser, namedRequest} from "./namedRecipient";
+import {NamedSignIn, SIGN_IN_FAILED} from "./NamedSignIn";
 import {AppLaunchError, launchSharedApp} from "./OpenSharedApp";
 import type {NamedAppTarget} from "./namedAppRoute";
 import "./namedRecipient.css";
@@ -8,7 +9,6 @@ import "./namedRecipient.css";
 type Account = {id: string; name: string};
 type Pending = "account" | "sign-in" | "sign-out" | "open" | null;
 const CHECK_FAILED = "dohc could not check your account. Try again.";
-const SIGN_IN_FAILED = "dohc could not sign you in. Check your email and password, then retry.";
 const SIGN_OUT_FAILED = "dohc could not sign you out. Retry sign-out.";
 const LAUNCH_REFUSED = "dohc could not open this app with this account. Ask the owner to share it with you.";
 const LAUNCH_UNAVAILABLE = "dohc could not reach the app. Check your connection, then try again.";
@@ -44,11 +44,9 @@ export default function NamedApp({target}: {target: NamedAppTarget | null}) {
     setSummary(null); check();
     return () => request.current?.abort();
   }, [target?.workspaceId, target?.publicationId]);
-  const signIn = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); const form = event.currentTarget, values = new FormData(form), controller = start("sign-in");
-    const email = String(values.get("email") ?? ""), password = String(values.get("password") ?? "");
-    form.reset();
-    void namedRequest("/api/account/sign-in", controller.signal, {email, password}).then(
+  const signIn = (credentials: {email: string; password: string}) => {
+    const controller = start("sign-in");
+    void namedRequest("/api/account/sign-in", controller.signal, credentials).then(
       () => load(controller).then(() => finish(controller, null), () => finish(controller, CHECK_FAILED)),
       () => finish(controller, SIGN_IN_FAILED));
   };
@@ -71,13 +69,9 @@ export default function NamedApp({target}: {target: NamedAppTarget | null}) {
       {account && <div className="header-actions"><span>{account.name}</span><button disabled={pending === "sign-out"} className="handoff-button secondary" onClick={signOut}>Sign out</button></div>}
     </header>
     {!target ? <main className="download-card"><p>This app link is unavailable. Open the link the owner shared with you.</p></main> :
-      !account ? <main className="download-card"><h2>Sign in to open this app</h2><p>Use the account the owner invited.</p>
-        <form className="comment-composer" onSubmit={signIn}><label>Email<input name="email" type="email" autoComplete="username" required disabled={busy}/></label>
-          <label>Password<input name="password" type="password" autoComplete="current-password" required disabled={busy}/></label>
-          <button className="handoff-button primary" disabled={busy}>Sign in</button></form>
-        {busy && <p role="status">Checking your account…</p>}{error && <p role="alert">{error}</p>}
+      !account ? <NamedSignIn title="Sign in to open this app" busy={busy} error={error} onSignIn={signIn}>
         {error === CHECK_FAILED && <button className="handoff-button secondary" onClick={check}>Try again</button>}
-      </main> : <main className="download-card" aria-label="Shared app"><h2>Open this app</h2>
+      </NamedSignIn> : <main className="download-card" aria-label="Shared app"><h2>Open this app</h2>
         <p>This app can use external services. Its author decides where it sends data.</p>
         <p>It opens with the access the owner gave your account.</p>
         <button className="handoff-button primary" disabled={busy} onClick={open}>{pending === "open" ? "Opening app" : "Open app"}</button>
