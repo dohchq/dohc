@@ -120,6 +120,17 @@ Read the service's verdict from the request's `status.json`, or from the last li
 Run `pnpm verify:queue status` to see the service, the running requests, the line, and wait estimates.
 Run `pnpm verify:queue cancel <id>` to stop a request. A finished request keeps its verdict.
 
+The service also serves a page at `http://127.0.0.1:4250` on the host. It shows the running requests and their current steps, the line with start estimates, each lane's runs over the last day or week, the nightly run, and the week's flaky and slowest tests.
+Select a run to see its steps and the failing step's test summary. The page refreshes every five seconds and cannot change the queue.
+To open it from another device, serve it on the tailnet only:
+
+```powershell
+tailscale serve --bg --https=8446 http://127.0.0.1:4250
+```
+
+Then open `https://<host>.<tailnet>.ts.net:8446`. Do not use Tailscale Funnel: the page shows branch names and test output.
+The page answers only to the host's own names and to tailnet names.
+
 The `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
 A supervisor runs the service in a Windows job object. When the service exits or its heartbeat stops for two minutes, the supervisor stops it and everything it started, then starts it again.
 A request that was running when the service stopped runs again as a new attempt. A request whose receipt already finished keeps that result.
