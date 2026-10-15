@@ -1,3 +1,5 @@
+import {namedFiles} from "../viewer/src/namedRecipient";
+import type {StorageContext} from "../../sync-relay/src/storage/context";
 import {afterEach, expect, it, vi} from "vitest";
 import {getCookies} from "better-auth/cookies";
 import {UnauthorizedError, type ResolveActor} from "@dohc/workspace-auth/session";
@@ -48,15 +50,16 @@ it("opens only current selected Markdown objects through the named account and k
   input.headers.set("authorization", "Bearer forged"); input.headers.set("x-user-id", "owner"); input.headers.set("x-dohc-relay-exchange-key", "forged");
   const response = await f.web(input);
   expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({subjectName: "Trip", sharerName: "Ana (owner@dohc.test)", access: "edit", userId: "alice", workspaceId: "workspace", grantId: "grant", shareId: "share",
+  expect(await response.json()).toMatchObject({subjectName: "Trip", sharerName: "Ana (owner@dohc.test)", access: "edit", userId: "alice", workspaceId: "named:grant", grantId: "grant", shareId: "share",
     files: [{objectId: "a", path: "docs/a.md"}], limits: browserLimits});
   expect(f.actor).toHaveBeenCalledTimes(1);
   expect(f.forwarded[0]!.headers.has("authorization")).toBe(false);
   expect(f.forwarded[0]!.headers.has("x-user-id")).toBe(false);
   expect(f.forwarded[0]!.headers.get("x-dohc-relay-exchange-key")).toBe(exchangeKey);
 });
-it.each(["other-account", "revoked", "view", "pinned", "oversized", "claims", "cross-origin"])("refuses named navigation for %s", async mode => {
-  const f = await fixture(mode === "oversized" ? 1 : 8, mode === "view" ? "view" : "edit");
+it.each(["other-account", "revoked", "view", "comment", "link", "pinned", "oversized", "claims", "cross-origin"])("refuses named navigation for %s", async mode => {
+  const f = await fixture(mode === "oversized" ? 1 : 8, mode === "view" || mode === "comment" ? mode : "edit");
+  if (mode === "link") (f.storage as StorageContext).db.prepare("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL").run();
   if (mode === "revoked") f.storage.revokeShareGrant({shareId: "share", grantId: "grant", revokedAtMs: 4});
   if (mode === "pinned") {
     const share = f.storage.getShare("share")!;
@@ -123,4 +126,36 @@ it("explains removal only to the verified recipient through the web proxy", asyn
   expect(await response.json()).toEqual({ok: false, code: "share_access_removed", error: "The owner removed your access."});
   const probe = await f.web(request("bob")); expect(probe.status).toBe(404);
   expect(await probe.json()).toEqual({ok: false, error: "not found"});
+});
+
+it.each(["direct", "claimed-email", "link-dependent"] as const)("returns only the named grant binding through the browser proxy for %s", async kind => {
+  const f = await fixture();
+  const db = (f.storage as StorageContext).db;
+  if (kind === "claimed-email") {
+    db.prepare("UPDATE sync_relay_share_grants SET principal_kind='email', principal_user_id=NULL, principal_email='alice@example.test' WHERE grant_id='grant'").run();
+    expect(f.storage.claimPendingSharesForEmail("alice@example.test", "alice")).toBe(1);
+  } else if (kind === "link-dependent") {
+    db.prepare(`INSERT INTO sync_relay_share_grants
+      (grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES ('parent-link','share','link',NULL,NULL,'edit',1,'active',1,NULL,NULL)`).run();
+    db.prepare("UPDATE sync_relay_share_grants SET parent_grant_id='parent-link' WHERE grant_id='grant'").run();
+  }
+  const response = await f.web(request());
+  expect(response.status).toBe(200);
+  const body = await response.json();
+  expect(body).toMatchObject({workspaceId: "named:grant", grantId: "grant", files: [{objectId: "a", path: "docs/a.md"}]});
+  expect(JSON.stringify(body)).not.toContain('"workspace"');
+  expect(namedFiles(body, "alice", "grant").workspaceId).toBe("named:grant");
+  for (const workspaceId of ["workspace", "named:other-grant"]) {
+    expect(() => namedFiles({...body, workspaceId}, "alice", "grant")).toThrow("Invalid selection");
+  }
+});
+
+it.each(["workspace", "named:other-grant"])("never forwards a mismatched named binding %s from the relay", async workspaceId => {
+  const web = createNamedRecipientDocumentsClient({relayUrl: "https://relay.test", publicOrigin: origin, exchangeKey, limits, browserLimits,
+    fetchRelay: async () => Response.json({subjectName: null, sharerName: null, access: "edit", userId: "alice", workspaceId,
+      grantId: "grant", shareId: "share", files: [{objectId: "a", path: "docs/a.md"}]})});
+  const response = await web(request());
+  expect(response.status).toBe(404);
+  expect(await response.json()).toEqual({ok: false, error: "not found"});
 });

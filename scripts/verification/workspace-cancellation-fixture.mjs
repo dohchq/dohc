@@ -8,7 +8,7 @@ export async function runCanonicalCancellationFixture(root, sourceRoot) {
   // use offline adapters. No database or native build starts in this fixture.
   const put = (path, text) => { mkdirSync(dirname(join(root,path)),{recursive:true}); writeFileSync(join(root,path),text); };
   put('package.json','{"type":"module"}');
-  for(const file of ['verify.mjs','ticket-evidence.mjs','queue.mjs','js-tests.mjs','selection.mjs','process.mjs','cancellation.mjs','timing.mjs'])
+  for(const file of ['verify.mjs','ticket-evidence.mjs','queue.mjs','js-tests.mjs','selection.mjs','process.mjs','cancellation.mjs','timing.mjs','flaky.mjs'])
     put(`scripts/verification/${file}`,readFileSync(join(sourceRoot,'scripts/verification',file)));
   for(const file of ['git-read.mjs','gate-commands.mjs'])put(`tools/rust-engine-program/${file}`,readFileSync(join(sourceRoot,'tools/rust-engine-program',file)));
   put('apps/desktop/package.json','{}');

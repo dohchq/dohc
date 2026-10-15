@@ -1,4 +1,5 @@
 import { withWorkspaceSyncTransition } from "../workspaces/stopWorkspaceSync";
+import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { CHANNELS } from "./channels";
 import { registerOperations } from "./operationTable";
 import {
@@ -42,6 +43,7 @@ export function registerCloudIpcHandlers<
   refreshCredentialCache(): Promise<void>;
   warmCredentialCache(): Promise<void>;
   currentCredentials(): CloudCredentials | null;
+  localInstallationId(): string;
   loadAndCacheCurrentCredentials(): Promise<CloudCredentials | null>;
   closeAllRelayTransportWorkspaces(options?: { accountChanged?: boolean }): Promise<void>;
   activity: {
@@ -167,6 +169,7 @@ export function registerCloudIpcHandlers<
     }
     return CloudStatusResult.parse({
       ...status,
+      ownPresentation: ownActorPresentation(dependencies.localInstallationId(), currentCredentials()),
       ...(input.workspaceId
         ? {
             workspaceSyncOwned: !!workspace && !workspace.shareView,

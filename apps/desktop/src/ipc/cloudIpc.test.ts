@@ -1,3 +1,4 @@
+import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
@@ -134,6 +135,7 @@ async function harness() {
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
     cloudLogin: () => login,
+    localInstallationId: () => "device",
     clearCachedCredentials: () => { steps.push("clear"); cache.clear(); },
     refreshCredentialCache: async () => { steps.push("refresh"); await cache.refresh(login.credentials); },
     warmCredentialCache: async () => { await cache.warm(login.credentials); },
@@ -182,6 +184,15 @@ async function harness() {
 }
 
 describe("registered cloud handlers", () => {
+  it.each(["https://account.example.test?query=1", "https://account.example.test#fragment"])("keeps cloud status available with malformed account URL %s", async (serverUrl) => {
+    const h = await harness();
+    h.cache.set({ ...credentials, serverUrl });
+    h.login.status.mockResolvedValue({ connected: true, email: credentials.email, serverUrl });
+    await expect(h.invoke(CHANNELS.cloudStatus)).resolves.toMatchObject({
+      connected: true, email: credentials.email, serverUrl,
+      ownPresentation: ownActorPresentation("device", null),
+    });
+  });
   it("registers the original sequence and rejects untrusted senders before any work", async () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
@@ -320,6 +331,7 @@ describe("registered cloud handlers", () => {
     h.workspace.remote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
     h.login.status.mockResolvedValue({ ...credentials, connected: true });
     await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toEqual({
+      ownPresentation: ownActorPresentation("device", credentials),
       connected: true, email: credentials.email, serverUrl: credentials.serverUrl,
       relayUrl: credentials.relayUrl,
       workspaceSyncOwned: true, workspaceSynced: true, workspaceSyncConnected: true, workspaceSecretState: "none",

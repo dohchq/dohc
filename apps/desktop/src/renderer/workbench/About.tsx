@@ -32,6 +32,7 @@ import { StateMark } from "../ui/StateMark";
 import { PresenceFaces } from "../collab/PresenceIndicators";
 import type { AboutConversation } from "./aboutConversation";
 import { ChatAvatar } from "./ChatAvatar";
+import { neutralPresentation, ownPresentation, ownAgentPresentation, relayPresentation } from "./actorPresentation";
 import { engineMomentSourceLabel, engineMomentSummary } from "./EngineHistory";
 import { historyHiddenWords } from "./HistoryPolicyStates";
 
@@ -107,6 +108,7 @@ export const ABOUT_ROW_BUTTON = `${ABOUT_ROW} cursor-pointer hover:bg-hover hove
 export function AboutHeader(props: { subject: { path: string } | AboutConversation }) {
   const { subject } = props;
   const name = "path" in subject ? basenameOf(subject.path) : subject.name;
+  const person = "path" in subject || subject.kind !== "person" ? undefined : subject.present.find(peer => !peer.isSelf);
   return (
     <div
       data-testid="about-header"
@@ -117,7 +119,7 @@ export function AboutHeader(props: { subject: { path: string } | AboutConversati
       ) : subject.kind === "group" ? (
         <Hash size={14} aria-hidden className="shrink-0 text-muted" />
       ) : (
-        <ChatAvatar name={subject.name} kind={subject.kind === "agent" ? "agent" : "human"} own={subject.kind === "agent"} size="strip" />
+        <ChatAvatar presentation={subject.kind === "agent" ? ownAgentPresentation : person ? relayPresentation(person.paletteSlot) : neutralPresentation} name={subject.name} kind={subject.kind === "agent" ? "agent" : "human"} size="strip" />
       )}
       <span title={"path" in subject ? subject.path : subject.name} className="min-w-0 truncate font-semibold text-ink">
         {name}
@@ -298,12 +300,12 @@ const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 function MomentAuthor(props: { moment: EngineMomentRecord }) {
   const { moment } = props;
   if (moment.agentAuthorName !== undefined) {
-    return <ChatAvatar name={moment.agentAuthorName} kind="agent" size="strip" />;
+    return <ChatAvatar presentation={neutralPresentation} name={moment.agentAuthorName} kind="agent" size="strip" />;
   }
-  if (moment.automationAuthor) return <ChatAvatar name={moment.automationAuthor.name} kind="automation" size="strip" />;
-  if (moment.namedAuthor) return <ChatAvatar name={moment.namedAuthor.label} kind="human" size="strip" />;
+  if (moment.automationAuthor) return <ChatAvatar presentation={neutralPresentation} name={moment.automationAuthor.name} kind="automation" size="strip" />;
+  if (moment.namedAuthor) return <ChatAvatar presentation={neutralPresentation} name={moment.namedAuthor.label} kind="human" size="strip" />;
   if (moment.personAuthorName !== undefined) {
-    return <ChatAvatar name={moment.personAuthorName} kind="human" own size="strip" />;
+    return <ChatAvatar presentation={ownPresentation} name={moment.personAuthorName} kind="human" size="strip" />;
   }
   if (moment.publicAuthor || moment.linkAuthor) return <LinkMark />;
   return <FileText size={14} aria-hidden className="shrink-0 text-subtle" />;
@@ -471,7 +473,7 @@ function AccessRowView(props: { row: AccessRow }) {
     return (
       <div className={`${ABOUT_ROW} h-7`}>
         {row.appId === null ? (
-          <ChatAvatar name={row.principal} kind="human" size="strip" />
+          <ChatAvatar presentation={neutralPresentation} name={row.principal} kind="human" size="strip" />
         ) : (
           <AppGlyph size={14} className="text-subtle" />
         )}
@@ -498,7 +500,7 @@ function AccessRowView(props: { row: AccessRow }) {
       {row.via === "link" ? (
         <LinkMark />
       ) : (
-        <ChatAvatar name={who} kind="human" own={row.via === "received"} size="strip" />
+        <ChatAvatar presentation={row.via === "received" ? ownPresentation : neutralPresentation} name={who} kind="human" size="strip" />
       )}
       <span className="min-w-0 flex-1 truncate">{who}</span>
       {row.status !== "active" ? (
@@ -656,7 +658,7 @@ export function AccessUnknown(props: {
 }) {
   const { answer, setup, testId } = props;
   if (answer.visibility === "hidden") {
-    return <AboutNote testId={`${testId}-unknown`} reason="hidden" icon={EyeOff}>Shares do not include this file.</AboutNote>;
+    return <AboutNote testId={`${testId}-unknown`} reason="hidden" icon={EyeOff}>Shares do not include this {props.noun ?? "file"}.</AboutNote>;
   }
   if (answer.visibility === "missing") {
     return (

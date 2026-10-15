@@ -26,3 +26,8 @@
 # `period` keeps nextest's default of 60s, so the SLOW warnings the gate log
 # already prints stay as they are.
 slow-timeout = { period = "60s", terminate-after = 6 }
+# A failing test runs once more, including one stopped at the timeout above, so
+# a hung test fails after two timeouts, 12 minutes. A test that passes only on
+# that retry reports FLAKY and does not fail the gate; the verifier records it
+# in result.json, and it is a defect to fix. A test that fails twice fails.
+retries = 1

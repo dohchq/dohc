@@ -28,7 +28,7 @@ export interface ResolvedChatRelayIdentity {
   authorUserId?: string;
 }
 
-function serverUrlsMatch(left: string, right: string): boolean {
+export function serverUrlsMatch(left: string, right: string): boolean {
   return left.replace(/\/+$/u, "") === right.replace(/\/+$/u, "");
 }
 

@@ -14,8 +14,8 @@ import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 
-export const CLI_PROTOCOL_VERSION = 4;
-export const CLI_JSON_SCHEMA_VERSION = 2;
+export const CLI_PROTOCOL_VERSION = 5;
+export const CLI_JSON_SCHEMA_VERSION = 3;
 
 // Who runs a CLI command. The CLI never writes as an automation.
 const cliActorSchema = z.enum(["human", "agent"]);
