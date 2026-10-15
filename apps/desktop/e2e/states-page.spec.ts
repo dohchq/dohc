@@ -107,31 +107,32 @@ const CSS_PIXELS = { scale: "css" } as const;
 const STILL_CAPTURES = 20;
 
 // Captures `clip` until two captures in a row are equal, so no part is
-// compared while it is still settling.
-async function captureStill(page: Page, clip: Box): Promise<Buffer> {
-  let previous = await page.screenshot({ ...CSS_PIXELS, clip });
-  let difference: string | null = null;
+// compared while it is still settling. When none are, `unsettled` says how
+// the last two differ.
+async function captureStill(page: Page, clip: Box): Promise<{ pixels: Buffer; unsettled: string | null }> {
+  let pixels = await page.screenshot({ ...CSS_PIXELS, clip });
+  let unsettled: string | null = null;
   for (let captures = 1; captures < STILL_CAPTURES; captures += 1) {
     const next = await page.screenshot({ ...CSS_PIXELS, clip });
-    difference = mismatch(decode(previous), decode(next));
-    if (difference === null) return next;
-    previous = next;
+    unsettled = mismatch(decode(pixels), decode(next));
+    pixels = next;
+    if (unsettled === null) break;
   }
-  throw new Error(`the capture did not settle in ${STILL_CAPTURES} tries; the last one ${difference}`);
+  return { pixels, unsettled };
 }
 
-// Shows one part in each pane and hides the rest, or every part for `null`.
-// Chromium rasterizes the page in tiles, and a rounded corner or an icon
-// that a tile's edge crosses antialiases a little differently, so a part
-// captured in place changed whenever a part above it changed height. Alone,
-// a part sits at the top of its pane wherever it is on the page, and no
-// neighbor's shadow reaches into its capture.
-async function showOnly(page: Page, name: string | null): Promise<void> {
+// Shows one part in each pane and hides the rest. Chromium rasterizes the
+// page in tiles, and a rounded corner or an icon that a tile's edge crosses
+// antialiases a little differently, so a part captured in place changed
+// whenever a part above it changed height. Alone, a part sits at the top of
+// its pane wherever it is on the page, and no neighbor's shadow reaches
+// into its capture.
+async function showOnly(page: Page, name: string): Promise<void> {
   await page.evaluate((name) => {
     const style =
       document.getElementById("states-only") ??
       document.head.appendChild(Object.assign(document.createElement("style"), { id: "states-only" }));
-    style.textContent = name === null ? "" : `[data-part]:not([data-part="${name}"]) { display: none; }`;
+    style.textContent = `[data-part]:not([data-part="${name}"]) { display: none; }`;
   }, name);
 }
 
@@ -238,8 +239,10 @@ async function press(page: Page, button: Locator): Promise<void> {
 // @states-page and must not stand in for the pixels.
 test("@states-page @states-baselines every shared part matches its baseline in both themes", async () => {
   test.skip(process.platform !== "win32", "the baselines were taken on Windows");
-  // About 210s unloaded (3.5 min in gate logs), and over 240s with a gate or build alongside.
-  test.setTimeout(480_000);
+  // About 110s unloaded (1.8 min in gate logs) and 140s in a slower gate
+  // run. The limit is about twice the slower run: a loaded host still
+  // passes, and a hang fails within five minutes.
+  test.setTimeout(300_000);
   await withDesktop({ DOHC_DEV_TOOLS: "1" }, async (page) => {
     expect(await page.evaluate(() => window.devicePixelRatio), "the baselines are one device pixel per CSS pixel").toBe(1);
     await page.setViewportSize({ width: WIDTH, height: 900 });
@@ -314,61 +317,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     // when it mounted, before the clock was faked. Three composers per theme.
     await expect(page.locator('[data-part="composer-sending"] button[aria-busy="true"]')).toHaveCount(2 * 3);
 
-    const cdp = await page.context().newCDPSession(page);
-    await cdp.send("DOM.enable");
-    await cdp.send("CSS.enable");
-    // A menu's rows exist only while it is open, so a part with a menu is
-    // marked after it opens its menu. A part marked data-menus="rest" holds
-    // menus without being about them, and is captured with them closed.
-    await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:is([data-menus="rest"], :not(:has([aria-haspopup="menu"])))`);
-
-    const seen = new Set<string>();
     const failures: string[] = [];
-    // Captures a part shown alone, with its height rounded up to a whole pixel.
-    const capture = async (name: string, theme: string, part: Locator) => {
-      const box = await part.boundingBox();
-      if (!box) throw new Error(`${name} (${theme}) has no box on the page`);
-      const pixels = await captureStill(page, {
-        x: box.x - BLEED,
-        y: box.y - BLEED,
-        width: box.width + 2 * BLEED,
-        height: Math.ceil(box.height) + 2 * BLEED,
-      });
-      const failure = await compareWithBaseline(`${name}-${theme}`, pixels);
-      if (failure) failures.push(failure);
-    };
-    const menuParts: { name: string; theme: string; part: Locator }[] = [];
-    for (const theme of THEMES) {
-      const pane = page.getByTestId(`states-${theme}`);
-      for (const part of await pane.locator("[data-part]").all()) {
-        const name = await part.getAttribute("data-part");
-        if (!name) throw new Error("every part needs a data-part name");
-        if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
-        seen.add(`${name}-${theme}`);
-        const menus = (await part.getAttribute("data-menus")) === "rest" ? 0 : await part.locator("[aria-haspopup='menu']").count();
-        if (menus > 1) throw new Error(`${name} (${theme}) has ${menus} menus; a part opens one`);
-        if (menus === 1) {
-          menuParts.push({ name, theme, part });
-          continue;
-        }
-        await showOnly(page, name);
-        await capture(name, theme, part);
-      }
-    }
-    // Each marking pass starts from a fresh DOM.getDocument, which clears the
-    // states forced before it, so the menu parts are captured last. One menu is open at a time: opening
-    // another moves focus and closes the first.
-    for (const { name, theme, part } of menuParts) {
-      const trigger = part.locator("[aria-haspopup='menu']");
-      const menu = part.getByRole("menu");
-      await showOnly(page, name);
-      await openMenu(page, trigger, menu);
-      await forceMarkedStates(cdp, `[data-testid="states-${theme}"] [data-part="${name}"]`);
-      await capture(name, theme, part);
-      await closeMenu(page, trigger, menu);
-    }
-    // The tab rows are measured below with every part shown.
-    await showOnly(page, null);
     // A tab row keeps Share and the document's controls inside itself at any
     // width, and its save state gives way before the tab's file name: the
     // name is cut only once the save state shows no more than one character
@@ -408,6 +357,72 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       const label = page.getByTestId(`states-tab-row-actions-cut-${theme}`).locator(".truncate");
       if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
         failures.push(`the narrow tab row's save state (${theme}) is not cut short`);
+      }
+    }
+
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("DOM.enable");
+    await cdp.send("CSS.enable");
+    // A menu's rows exist only while it is open, so a part with a menu is
+    // marked after it opens its menu. A part marked data-menus="rest" holds
+    // menus without being about them, and is captured with them closed.
+    await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:is([data-menus="rest"], :not(:has([aria-haspopup="menu"])))`);
+
+    const seen = new Set<string>();
+    const plainParts = new Set<string>();
+    const menuParts = new Set<string>();
+    for (const theme of THEMES) {
+      for (const part of await page.getByTestId(`states-${theme}`).locator("[data-part]").all()) {
+        const name = await part.getAttribute("data-part");
+        if (!name) throw new Error("every part needs a data-part name");
+        if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
+        seen.add(`${name}-${theme}`);
+        const menus = (await part.getAttribute("data-menus")) === "rest" ? 0 : await part.locator("[aria-haspopup='menu']").count();
+        if (menus > 1) throw new Error(`${name} (${theme}) has ${menus} menus; a part opens one`);
+        (menus === 1 ? menuParts : plainParts).add(name);
+      }
+    }
+    const partIn = (theme: string, name: string) => page.getByTestId(`states-${theme}`).locator(`[data-part="${name}"]`);
+    // Captures a part shown alone, with its height rounded up to a whole
+    // pixel. It must keep its box while it settles, or the capture would
+    // be cut to the box it had before.
+    const capture = async (name: string, theme: string) => {
+      const box = await partIn(theme, name).boundingBox();
+      if (!box) throw new Error(`${name} (${theme}) has no box on the page`);
+      const { pixels, unsettled } = await captureStill(page, {
+        x: box.x - BLEED,
+        y: box.y - BLEED,
+        width: box.width + 2 * BLEED,
+        height: Math.ceil(box.height) + 2 * BLEED,
+      });
+      if (unsettled !== null) {
+        failures.push(`${name}-${theme} did not settle in ${STILL_CAPTURES} captures; the last one ${unsettled}`);
+        return;
+      }
+      const settled = await partIn(theme, name).boundingBox();
+      if (JSON.stringify(settled) !== JSON.stringify(box)) {
+        failures.push(`${name}-${theme} moved from ${JSON.stringify(box)} to ${JSON.stringify(settled)} while it settled`);
+        return;
+      }
+      const failure = await compareWithBaseline(`${name}-${theme}`, pixels);
+      if (failure) failures.push(failure);
+    };
+    for (const name of plainParts) {
+      await showOnly(page, name);
+      for (const theme of THEMES) await capture(name, theme);
+    }
+    // Each marking pass starts from a fresh DOM.getDocument, which clears the
+    // states forced before it, so the menu parts are captured last. One menu is open at a time: opening
+    // another moves focus and closes the first.
+    for (const name of menuParts) {
+      await showOnly(page, name);
+      for (const theme of THEMES) {
+        const trigger = partIn(theme, name).locator("[aria-haspopup='menu']");
+        const menu = partIn(theme, name).getByRole("menu");
+        await openMenu(page, trigger, menu);
+        await forceMarkedStates(cdp, `[data-testid="states-${theme}"] [data-part="${name}"]`);
+        await capture(name, theme);
+        await closeMenu(page, trigger, menu);
       }
     }
     expect(failures, "every part must equal its baseline").toEqual([]);

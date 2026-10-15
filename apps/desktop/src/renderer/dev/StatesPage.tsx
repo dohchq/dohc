@@ -110,8 +110,8 @@ const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), 
 
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
-// A floating part draws a shadow up to 38px below and 28px beside itself,
-// and its whole shadow must stay in its own capture. The toasts get this
+// A floating part draws a shadow up to 41px below and 31px beside itself in
+// the dark theme, and its whole shadow must stay in its own capture. The toasts get this
 // padding; the menus get the same room from their taller boxes.
 const SHADOW_ROOM = "p-10";
 
@@ -587,10 +587,11 @@ const CHAT_THREAD_MESSAGES = [
 const CHAT_THREAD_NAV = { level: "thread", channel: CHAT_CHANNEL, thread: CHAT_POSTS[0]!.thread } as const;
 const NO_BOOKMARKS = new Set<string>();
 
-// A thread at the drawing's column, its second comment hovered.
+// A thread at the drawing's column, its second comment hovered. Its
+// toolbar's shadow takes the room below.
 function ChatThreadSpecimen() {
   return (
-    <div className="w-[560px]" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
+    <div className="w-[560px] pb-6" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
       <ThreadMessages
         nav={CHAT_THREAD_NAV}
         messages={CHAT_THREAD_MESSAGES}
@@ -871,8 +872,9 @@ const dangerMenuItems: MenuEntry[] = [
 
 // The editor's menus draw themselves at fixed places. Laid out inside a box
 // with `contain: layout`, which is the containing block for fixed children,
-// they land in their part. The box leaves room for the shadow.
-const EDITOR_MENU_BOX = "relative [contain:layout]";
+// they land in their part. The box's margin and height leave room for the
+// shadow beside and below.
+const EDITOR_MENU_BOX = "relative ml-6 [contain:layout]";
 
 const BLOCK_MENU_OPEN = {
   open: true,
@@ -1342,7 +1344,7 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       <Section part="menu-field" title="Menu with a name field">
         <Specimen label="field: focus, hint">
-          <div className="flex h-48 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
+          <div className="flex h-52 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
             <MenuSpecimen label="Versions" items={fieldMenuItems} width={240} testId={`states-menu-field-${theme}`} />
           </div>
         </Specimen>
@@ -1424,7 +1426,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Near the end, so a change here moves only the file header below it. */}
       <Section part="history" title="History held back by its rules">
         <Specimen label="panel: rules can't be read">
           <div className="flex h-64 w-64 flex-col rounded-lg border border-line bg-panel">
@@ -1551,14 +1552,13 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The editor's listboxes share these rows, after History so no part
-          above them moves. The editor keeps focus, and the option Enter acts
-          on draws the outline. The page link and emoji pickers are not here:
+      {/* The editor's listboxes share these rows. The editor keeps focus,
+          and the option Enter acts on draws the outline. The page link and emoji pickers are not here:
           an open picker takes Enter from the whole window, which would take
           it from this page's other parts. */}
       <Section part="slash-menu" title="Slash menu">
         <Specimen label="third option active; the list scrolls">
-          <div className={`${EDITOR_MENU_BOX} h-[272px] w-[330px]`}>
+          <div className={`${EDITOR_MENU_BOX} h-[290px] w-[330px]`}>
             <SlashCommandMenu state={SLASH_MENU_OPEN} onSelect={noop} onHover={noop} />
           </div>
         </Specimen>

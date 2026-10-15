@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ObserverStub } from "../DesktopWorkspaceShell.testSupport";
 import { setOwnPresentation } from "../workbench/actorPresentation";
 import { setChosenColors } from "../workbench/chosenColors";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
@@ -20,8 +19,6 @@ describe("states page", () => {
 
   it("renders both themes side by side and holds the document light while open", () => {
     vi.stubGlobal("dohcDesktop", {});
-    // jsdom has no ResizeObserver; parts such as the tab rows measure themselves.
-    vi.stubGlobal("ResizeObserver", ObserverStub);
     try {
     document.documentElement.dataset.theme = "dark";
     setOwnPresentation({ group: "own", hue: "plum", self: true });
