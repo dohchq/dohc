@@ -30,3 +30,8 @@ items that text was written for; tests live in
 This preserves negative zero across Yjs import, snapshot encoding, and reopen.
 Ordinary integer values keep their existing bytes. Regression tests cover
 signed zero, safe integer extrema, and the shared bootstrap projection vectors.
+
+`src/id_set.rs` adds `Ranges::subset_of`, which forwards to the existing
+`IdRange::subset_of`. Stop's release checks that each client's deleted ranges
+are covered without looking the client up again. The collab owner-outbox
+unsorted-delete and incomplete-checkpoint-delete tests cover it.

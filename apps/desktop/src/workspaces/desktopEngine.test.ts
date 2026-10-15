@@ -49,6 +49,7 @@ class Client implements EngineDaemonClient {
     return { id: request.id, result: request.method === "workspace.open"
       ? { workspace: String(workspaceIdOf(request)).startsWith("desktop-startup-smoke-") ? "smoke" : "workspace-handle" }
       : request.method === "workspace.close" ? { closed: true }
+      : request.method === "ydoc.ownerStop.list" ? { stops: [] }
       : request.method === "engine.ping" ? { ok: true } : null };
   }
 
@@ -712,6 +713,40 @@ describe("private owner peer lifecycle", () => {
 });
 
 describe("server owner peer lifecycle", () => {
+  it("delivers another document when a requested Stop release is corrupt", async () => {
+    const f = fixture(), credentials = new AbortController();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-stop-isolation-");
+    f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+    const binding = {workspaceId: "owner", mainVersionId: "main", objectId: "broken", lineageClaimId: "a".repeat(64),
+      currentPath: "broken.md", selectorPaths: ["broken.md"], restoreFenceGeneration: 1};
+    const row = {binding, document: {mainVersionId: "main", objectId: "broken", currentPath: "broken.md"},
+      retirementOwed: true, relayDatabaseNamespace: "namespace", state: "requested" as const};
+    const document = {binding: {...binding, objectId: "working", currentPath: "working.md", selectorPaths: ["working.md"]},
+      relayDatabaseNamespace: "namespace", shareId: "share"};
+    const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+      frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+        maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
+      attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
+    const client = f.client as unknown as EngineClient;
+    vi.spyOn(client, "ownerYDocStopList").mockResolvedValue([row]);
+    vi.spyOn(client, "ownerYDocStopRequest").mockResolvedValue(row);
+    vi.spyOn(client, "ownerYDocRelease").mockRejectedValue(new Error("owner-stop-corrupt"));
+    const documents = vi.fn(async () => ({ok: true, documents: [{path: "working.md", status: "ready", document}]}));
+    f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
+      connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
+        assertCurrent() {}, retire: async () => 0, refusals: async () => {}, documents})};
+    ownerDeliveryMock.pass.mockResolvedValue("acknowledged");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalledWith(expect.objectContaining({document})));
+      expect(documents).toHaveBeenCalled();
+      expect(f.engine.ownerLiveStopFailures("owner")).toEqual([{path: "broken.md", detail: "owner-stop-corrupt"}]);
+      f.engine.clearOwnerLiveStopFailure("owner",{objectId:"broken"});
+      expect(f.engine.ownerLiveStopFailures("owner")).toEqual([]);
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
   it("keeps local work available when optional owner ingress preparation fails", async () => {
     const f = fixture();
     f.dependencies.serverOwnerDelivery = {prepare: async () => {throw new Error("readonly profile");}, workspaceIds: () => ["owner"], hasRefusals: () => undefined, connect: async () => null};
@@ -738,7 +773,7 @@ describe("server owner peer lifecycle", () => {
     f.dependencies.notifyOwnerDeliveryChanged = changed;
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => credentials.signal.aborted ? [] : ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        refusals: async () => {},
+        retire: async () => 0, refusals: async () => {},
         documents: async () => ({ok: true, documents: [{path: "a.md", status, document},
           ...(outcome === "frozen" ? [{path: "b.md", status, document: {...document, binding: {...document.binding, objectId: "other", currentPath: "b.md"}}}] : [])]})})};
     ownerDeliveryMock.pass.mockResolvedValue(outcome);
@@ -779,7 +814,7 @@ describe("server owner peer lifecycle", () => {
     const documents = vi.fn(async () => ({ok: true, documents: [{path: "a.md", status: "ready", document}]}));
     f.dependencies.serverOwnerDelivery = {prepare: vi.fn(async () => config), workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "actual-token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal,
-        assertCurrent: () => credentials.signal.throwIfAborted(), documents, refusals: async () => {}})};
+        assertCurrent: () => credentials.signal.throwIfAborted(), documents, retire: async () => 0, refusals: async () => {}})};
     let passOptions!: Parameters<typeof import("./nativeOwnerDelivery")["runNativeOwnerDeliveryPass"]>[0];
     ownerDeliveryMock.pass.mockImplementation(async options => {passOptions = options; entered.resolve(); await settled.promise; options.assertCurrent(); return "empty";});
     try {
