@@ -36,6 +36,7 @@ import { resolveOwnedWorkspaceSharePath } from "../workspaces/ownedWorkspaceFile
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
 import { createHistoryPresentationRequest } from "../workspaces/actorPresentation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
+import type { readSyncHistory } from "../workspaces/syncHistory";
 
 type EngineStoreAuthorityState = {
   operationLanes: Map<string, Promise<void>>;
@@ -64,6 +65,7 @@ export function createWorkspaceEngineIpc<
     capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
   }>;
   readWorkspaceEnginePolicy: typeof readWorkspaceEnginePolicy;
+  readSyncHistory: typeof readSyncHistory;
   localAgentDisplayName(): string;
   localPersonId(): string;
   /** This computer's person as History names them. */
@@ -113,7 +115,7 @@ export function createWorkspaceEngineIpc<
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
     receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, localPersonName, localPerson,
-    localInstallationId, warmCredentialCache, currentCredentials, automationAuthor, namedAuthorLabels, readWorkspaceEnginePolicy,
+    localInstallationId, warmCredentialCache, currentCredentials, automationAuthor, namedAuthorLabels, readWorkspaceEnginePolicy, readSyncHistory,
     automationRunOnThisComputer, serverRuns, signedInAccount,
     notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
@@ -301,19 +303,30 @@ export function createWorkspaceEngineIpc<
         presentations: EngineMomentAuthorNames["presentations"],
       ) => Promise<Result>,
     ): Promise<Result> {
-      // A replaced registry entry may name another server, so the read stops.
+      // The read stops only when its folder, server, or shared view changes. Other
+      // registry writes replace the entry too, such as the last-opened stamp.
       const entry = requireWorkspace(workspaceId);
       const assertCurrent = () => {
-        if (requireWorkspace(workspaceId) !== entry) throw new Error("History stopped loading because the workspace changed.");
+        const current = requireWorkspace(workspaceId);
+        if (current.rootPath !== entry.rootPath || current.remote?.serverUrl !== entry.remote?.serverUrl
+          || shareViewIsPresent(current.shareView) !== shareViewIsPresent(entry.shareView)) {
+          throw new Error("History stopped loading because the workspace changed.");
+        }
       };
       if (!shareViewIsPresent(entry.shareView)) {
         const { capture } = await requireEngineCapture(workspaceId, "Engine history");
         assertCurrent();
         await warmCredentialCache();
         assertCurrent();
+        const credentials = currentCredentials();
+        // A folder that records a sync but has no remote can't say which server its ids
+        // belong to. An unreadable record may say it synced.
+        const synced = entry.remote !== undefined
+          || (credentials !== null && ["synced", "unknown"].includes(await readSyncHistory(entry.rootPath)));
+        assertCurrent();
         return read(capture, entry.rootPath, createHistoryPresentationRequest({
-          source: "own-store", workspaceId, assertCurrent, serverUrl: entry.remote?.serverUrl,
-          installationId: localInstallationId(), credentials: currentCredentials(),
+          source: "own-store", workspaceId, assertCurrent, serverUrl: entry.remote?.serverUrl, synced,
+          installationId: localInstallationId(), credentials,
         }));
       }
       return withRendererWorkspaceOperation(event.sender, workspaceId,

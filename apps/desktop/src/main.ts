@@ -5856,7 +5856,7 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
+    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, readSyncHistory, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
     localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
     recordHistoryPersonName: (workspaceId, userId, sender) => {

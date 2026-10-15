@@ -142,7 +142,7 @@ describe("chat presentation admission", () => {
 
 describe("History presentation", () => {
   const history = (serverUrl: string | undefined = issuer) => createHistoryPresentationRequest({
-    source: "own-store", workspaceId: "w", assertCurrent: () => undefined, serverUrl, installationId: "device", credentials,
+    source: "own-store", workspaceId: "w", assertCurrent: () => undefined, serverUrl, synced: serverUrl !== undefined, installationId: "device", credentials,
   });
   const received = () => createHistoryPresentationRequest({ source: "received", workspaceId: "w", assertCurrent: () => undefined });
   const named = (userId: string): MomentAuthor => ({ kind: "named", userId, grantId: "grant", grantGeneration: 1 });
@@ -189,7 +189,8 @@ describe("History presentation", () => {
 
   it.each([["no server", true], ["invalid", false], ["https://account.test?query=1", false]] as const)("leaves named authors neutral for %s", (serverUrl, mine) => {
     const [sam, person] = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
-      serverUrl: serverUrl === "no server" ? undefined : serverUrl, installationId: "device", credentials })([named("sam"), { kind: "human", humanId: "alice" }]);
+      serverUrl: serverUrl === "no server" ? undefined : serverUrl, synced: serverUrl !== "no server", installationId: "device", credentials,
+    })([named("sam"), { kind: "human", humanId: "alice" }]);
     expect(sam).toMatchObject({ hue: null, self: false });
     expect(sam!.group).toMatch(/^unknown:/);
     // An unsynced store has no other server's ids; a server it can't read can't confirm yours.
@@ -206,6 +207,13 @@ describe("History presentation", () => {
     expect(sam).toMatchObject({ hue: "rose", self: false });
     // The same id on your own server is you.
     expect(history("https://account.test/")([{ kind: "human", humanId: "alice" }])[0]!.self).toBe(true);
+  });
+
+  it("does not take an account for you in a folder that synced and has no remote now", () => {
+    const [person, installation] = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
+      serverUrl: undefined, synced: true, installationId: "device", credentials })([{ kind: "human", humanId: "alice" }, { kind: "human", humanId: "device" }]);
+    expect(person).toMatchObject({ hue: "rose", self: false });
+    expect(installation!.self).toBe(true);
   });
 
   it("makes the named-author issuer once per request", () => {

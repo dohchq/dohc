@@ -25,6 +25,7 @@ import type { WorkspaceEngineCapture, WorkspaceEngineYDocProviderSession, probeE
 import { EngineStoreRecoveryFailedError } from "../workspaces/engineStoreRebuild";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
+import type { SyncHistory } from "../workspaces/syncHistory";
 import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import { deferred } from "../testing/deferred";
@@ -200,8 +201,9 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const prepareNamed = vi.fn<NonNullable<EngineMomentAuthorNames["prepare"]>>();
   const identity: { credentials: CloudCredentials | null } = { credentials: null };
   const warmCredentialCache = vi.fn(async () => undefined);
+  const readSyncHistory = vi.fn(async (_rootPath: string): Promise<SyncHistory> => "never-synced");
   const registrations = createWorkspaceEngineIpc({
-    readWorkspaceEnginePolicy: readPolicy,
+    readWorkspaceEnginePolicy: readPolicy, readSyncHistory,
     localPersonId: () => "person-local",
     localPersonName: () => "Ice",
     localInstallationId: () => "install-local",
@@ -244,7 +246,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
-    storeWorkspaces, readPolicy, identity, warmCredentialCache,
+    storeWorkspaces, readPolicy, identity, warmCredentialCache, readSyncHistory,
     sent, recordHistoryPersonName, prepareRecordHistoryPeople,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
     /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
@@ -982,6 +984,29 @@ describe("workspace engine IPC registrations", () => {
       capturing.requireEngineCapture.mockImplementation(async () => { replace(capturing); return { capture: capturing.capture }; });
       await expect(capturing.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).rejects.toThrow("the workspace changed");
       expect(capturing.warmCredentialCache).not.toHaveBeenCalled();
+    });
+
+    it("keeps reading through a registry write that leaves its folder, server, and shared view alone", async () => {
+      const h = await harness();
+      h.capture.listMoments.mockImplementation(async () => {
+        const reopened = { ...h.workspace, lastOpenedAt: 99 };
+        h.requireWorkspace.mockImplementation(() => reopened);
+        return page([sam]);
+      });
+      await expect(tokens(h)).resolves.toEqual([[{ group: expect.any(String), hue: null, self: false }]]);
+    });
+
+    it("keeps an account from being you in a folder that synced and has no remote now", async () => {
+      const h = await harness();
+      h.identity.credentials = account;
+      h.capture.listMoments.mockResolvedValue(page([{ kind: "human", humanId: "person-local" }], [{ kind: "human", humanId: "install-local" }]));
+      const [unsynced] = await tokens(h);
+      expect(unsynced![0]!.self).toBe(true);
+      h.readSyncHistory.mockResolvedValue("synced");
+      const [synced, installation] = await tokens(h);
+      expect(synced).toEqual([{ group: expect.any(String), hue: ownActorPresentation("install-local", account).hue, self: false }]);
+      expect(installation![0]!.self).toBe(true);
+      expect(h.readSyncHistory).toHaveBeenCalledWith("C:/alias");
     });
   });
 

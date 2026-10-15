@@ -102,7 +102,7 @@ export function createActorPresentationRequest(input: Omit<Parameters<typeof res
  * Received authors get no issuer and never borrow credentials, so they stay owner-asserted and never self.
  */
 export function createHistoryPresentationRequest(input: { workspaceId: string; assertCurrent(): void } & (
-  | { source: "own-store"; serverUrl: string | undefined; installationId: string; credentials: CloudCredentials | null }
+  | { source: "own-store"; serverUrl: string | undefined; synced: boolean; installationId: string; credentials: CloudCredentials | null }
   | { source: "received" }
 )): (authors: readonly MomentAuthor[]) => ActorPresentation[] {
   let context: Parameters<typeof deriveMomentActor>[1] = { source: "received" };
@@ -112,9 +112,10 @@ export function createHistoryPresentationRequest(input: { workspaceId: string; a
     try { relayIssuer = input.serverUrl === undefined ? undefined : createActorIssuer(input.serverUrl); }
     catch { /* An invalid server leaves named authors neutral. */ }
     // Moments name people by user id alone. A synced store's ids belong to its server, so an
-    // account on another server, or beside a server that can't be read, is not you here.
+    // account on another server, beside a server that can't be read, or in a folder that
+    // synced and has no remote now, is not you here.
     const signedIn = localAccount(input.credentials);
-    const account = signedIn && (input.serverUrl === undefined || signedIn.issuer === relayIssuer) ? signedIn : null;
+    const account = signedIn && (input.serverUrl === undefined ? !input.synced : signedIn.issuer === relayIssuer) ? signedIn : null;
     context = { source: "own-store", identity: { installationId: input.installationId, account },
       workspaceId: input.workspaceId, ...(relayIssuer ? { relayIssuer } : {}) };
     own = localPersonKeys(input.installationId, account);
