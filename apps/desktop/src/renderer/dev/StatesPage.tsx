@@ -1,3 +1,4 @@
+import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
@@ -5,11 +6,13 @@ import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
+  ActorPresentation,
   ChannelThreadRecord,
   ChatChannelRecord,
   ChatMessageRecord,
   ChatThreadRecord,
   CloudStatusResult,
+  DatabaseSnapshotResult,
   EngineMomentRecord,
   HistoryPolicyUnreadableResult,
   SitePackageInfo,
@@ -19,6 +22,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
+import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
 import { PageIdentity } from "../PageIdentity";
@@ -53,6 +57,7 @@ import { AppRows } from "../workbench/AppsView";
 import { siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
 import { ThreadMessages } from "../workbench/ChatPosts";
 import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
 import { MentionComposer } from "../workbench/MentionComposer";
@@ -100,6 +105,11 @@ import { closeStatesPage } from "./statesRoute";
 // used (a menu open, a copy acknowledged) is reached that way: the capture
 // opens the menu or presses the button. On the page itself, hover and press
 // the parts.
+
+// Specimens ignore this installation and live account colour choices.
+const SAMPLE_ADA: ActorPresentation = { group: "states-ada", hue: "teal", self: false };
+const SAM_PALETTE_SLOT = 1;
+const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), group: "states-sam" };
 
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
@@ -541,7 +551,7 @@ const ABOUT_ACCESS_UNKNOWN: AccessAnswer = {
 const aboutPeer = (faceToken: string, displayName: string, paletteSlot: number): PresencePeer => ({
   faceToken, sessionToken: `${faceToken}-session`, isSelf: false, displayName, paletteSlot, state: null, updatedAtMs: 0,
 });
-const ABOUT_PRESENT = [aboutPeer("face-sam", "Sam Rivera", 1), aboutPeer("face-nova", "Nova", 4)];
+const ABOUT_PRESENT = [aboutPeer("face-sam", "Sam Rivera", SAM_PALETTE_SLOT), aboutPeer("face-nova", "Nova", 4)];
 const ABOUT_GROUP: AboutConversation = {
   kind: "group", name: "general", channelWireId: "wire-general", received: false, present: ABOUT_PRESENT,
 };
@@ -565,7 +575,7 @@ const CHAT_CHANNEL: ChatChannelRecord = {
 };
 const chatPost = (
   id: string,
-  author: { authorKind: "human" | "agent"; authorDisplayName: string },
+  author: { authorKind: "human" | "agent"; authorDisplayName: string; presentation: ActorPresentation },
   title: string,
   bodySnippet: string,
   counts: Partial<Pick<ChannelThreadRecord, "messageCount" | "unreadCount" | "openDecisionCount">> = {},
@@ -576,18 +586,21 @@ const chatPost = (
   },
   data: { openingMessage: { id: `${id}-opening`, createdAtMs: CHAT_AT, bodySnippet, ...author }, reactions: [], viewerAuthorId: "you" },
 });
-const SAM = { authorKind: "human", authorDisplayName: "Sam" } as const;
+const SAM = { authorKind: "human", authorDisplayName: "Sam", presentation: SAMPLE_SAM } as const;
 const CHAT_POSTS = [
   chatPost("post-plain", SAM, "Pricing page copy", "Pricing page copy\nDraft is in research/competitors.md for now. Comments welcome."),
-  chatPost("post-hover", { authorKind: "agent", authorDisplayName: "Agent" }, "The funnel numbers changed since last week.",
+  chatPost("post-hover", { authorKind: "agent", authorDisplayName: "Agent", presentation: neutralPresentation }, "The funnel numbers changed since last week.",
     "The funnel numbers changed since last week.", { unreadCount: 1 }),
   chatPost("post-poll", SAM, "Can we get the launch checklist into shape before Friday?",
     "Can we get the launch checklist into shape before Friday?", { messageCount: 5, unreadCount: 2, openDecisionCount: 1 }),
+  chatPost("post-unkeyed", { authorKind: "human", authorDisplayName: "Kim", presentation: neutralPresentation },
+    "Launch checklist notes", "Launch checklist notes\nI added the remaining review notes."),
 ];
 // The feed's rows, then two kept rows with keyboard focus: on the row, and
 // on Comment inside its toolbar.
 const CHAT_FEED_SPECIMENS: { key: string; post: (typeof CHAT_POSTS)[number]; force?: { row?: string; button?: string }; last?: boolean }[] = [
   { key: "titled", post: CHAT_POSTS[0]! },
+  { key: "unkeyed", post: CHAT_POSTS[3]! },
   { key: "hovered", post: CHAT_POSTS[1]!, force: { row: "hover" } },
   { key: "poll", post: CHAT_POSTS[2]! },
   { key: "row-focus", post: CHAT_POSTS[0]!, force: { row: "focus focus-visible" } },
@@ -1137,17 +1150,22 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="avatars" title="Avatars">
         <Specimen label="human: post, row, comment, strip">
           {avatarSizes.map((size) => (
-            <ChatAvatar key={size} name="Ice de Vera" kind="human" size={size} />
+            <ChatAvatar presentation={neutralPresentation} key={size} name="Ice de Vera" kind="human" size={size} />
+          ))}
+        </Specimen>
+        <Specimen label="coloured person: post, row, comment, strip">
+          {avatarSizes.map((size) => (
+            <ChatAvatar presentation={SAMPLE_SAM} key={size} name="Sam Rivera" kind="human" size={size} />
           ))}
         </Specimen>
         <Specimen label="agent: post, row, comment, strip">
           {avatarSizes.map((size) => (
-            <ChatAvatar key={size} name="Agent" kind="agent" size={size} />
+            <ChatAvatar presentation={neutralPresentation} key={size} name="Agent" kind="agent" size={size} />
           ))}
         </Specimen>
         <Specimen label="automation: post, row, comment, strip">
           {avatarSizes.map((size) => (
-            <ChatAvatar key={size} name="Nightly digest" kind="automation" size={size} />
+            <ChatAvatar presentation={neutralPresentation} key={size} name="Nightly digest" kind="automation" size={size} />
           ))}
         </Specimen>
       </Section>
@@ -1836,7 +1854,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="chat-rows" title="Chat rows">
-        <Specimen label="feed: titled; hovered, unread; untitled, unread, poll, comments; focus on a row; focus in its toolbar">
+        <Specimen label="feed: identified and unknown authors; hovered, unread; untitled, unread, poll, comments; focus on a row; focus in its toolbar">
           <div className="w-[560px]">
             {CHAT_FEED_SPECIMENS.map(({ key, post, force, last }) => (
               // Each row is painted in its own box, as the feed list's items are.
@@ -1871,7 +1889,7 @@ function Pane(props: { theme: "light" | "dark" }) {
             <div className="min-w-0 flex-1 px-8 py-7">
               <div className="max-w-[640px]">
                 <SettingRow title="Your name">
-                  <PreferredNameControl value="Ada" onChange={async () => undefined} testIdPrefix={`states-name-${theme}`} />
+                  <PreferredNameControl presentation={SAMPLE_ADA} value="Ada" onChange={async () => undefined} testIdPrefix={`states-name-${theme}`} />
                 </SettingRow>
                 <SettingRow title="Editor font" modified onReset={noop}>
                   <SegmentedControl label="Editor font" value="serif" options={EDITOR_FONT_OPTIONS} onChange={noop} />
@@ -1981,7 +1999,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="sending, after a second: a new post">
           <div className="w-[560px]">
             <MentionComposer testIdPrefix={`states-composer-post-${theme}`} composerId={`states-composer-post-${theme}`}
-              value={COMPOSER_DRAFT} sending surface="post" authorName="Ada" placeholder="What's happening in #general?"
+              value={COMPOSER_DRAFT} sending surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA} placeholder="What's happening in #general?"
               sendLabel="Start post" candidates={[]} onChange={noop} onSend={noop} />
           </div>
         </Specimen>
@@ -2235,8 +2253,10 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* Last, so the parts above keep their places. A CSV's rows and
           columns: numbers at the right in mono, row numbers in the gutter,
-          and each row's and column's actions only on hover or focus. */}
-      <Section part="data-grid" title="Data grid">
+          and each row's and column's actions only on hover or focus. A
+          database table: each column's type as an icon, the active cell,
+          the editing cell, a sort, and the read-only mark. */}
+      <Section part="data-grid" title="Data grid" menusAtRest>
         <Specimen label="CSV at rest: numbers, Add row and Add column">
           <CsvGridSpecimen />
         </Specimen>
@@ -2274,6 +2294,33 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="CSV the preview's bound">
           <CsvPreviewBound rowCount={1240} />
         </Specimen>
+        <Specimen label="database at rest: text, numbers, bytes and an untyped column">
+          <DatabaseGridSpecimen />
+        </Specimen>
+        <Specimen label="database sorted by count, descending">
+          <DatabaseGridSpecimen sort={{ column: "count", direction: "desc" }} />
+        </Specimen>
+        {/* The cell holds focus itself, as an arrow key or a click leaves it. */}
+        <Specimen label="database the active cell">
+          <div data-force-state="focus focus-visible focus-within" data-force-target="tbody tr:nth-child(2) td:nth-child(2)">
+            <DatabaseGridSpecimen />
+          </div>
+        </Specimen>
+        <Specimen label="database the editing cell">
+          <div data-force-state="focus-within" data-force-target="tbody tr:nth-child(2) td:nth-child(2)">
+            <div data-force-state="focus focus-visible" data-force-target="tbody tr:nth-child(2) td:nth-child(2) input">
+              <DatabaseGridSpecimen editing />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="database read-only, shared with you to read" className="w-full">
+          <TabRowActionsSpecimen width="w-full" path="data/funnel.sqlite">
+            <DatabaseViewActions onShare={noop} readOnlyReason="This database is shared with you to read." />
+            <div className="bg-bg px-4 pt-3">
+              <DatabaseGridSpecimen readOnly />
+            </div>
+          </TabRowActionsSpecimen>
+        </Specimen>
       </Section>
     </section>
   );
@@ -2292,6 +2339,47 @@ function CsvGridSpecimen(props: { rows?: string[][]; locked?: boolean }) {
   return (
     <CsvTable rows={rows} columns={csvColumns(rows)} locked={props.locked ?? false}
       onUpdateCell={noop} onEndEdit={noop} onDeleteRow={noop} onDeleteColumn={noop} onAddRow={noop} onAddColumn={noop} />
+  );
+}
+
+const GRID_DATABASE: DatabaseSnapshotResult["tables"][number] = {
+  name: "funnel",
+  columns: [
+    { name: "stage", type: "TEXT" },
+    { name: "count", type: "INTEGER", nullable: false },
+    { name: "conversion", type: "REAL" },
+    { name: "export", type: "BLOB" },
+    { name: "note", type: "" },
+  ],
+  rows: [
+    { __dohc_rowid: 1, stage: "Visited", count: 4820, conversion: 1, export: "<blob 16 bytes>", note: null },
+    { __dohc_rowid: 2, stage: "Signed up", count: 1290, conversion: 0.27, export: "<blob 16 bytes>", note: "trial" },
+    { __dohc_rowid: 3, stage: "Created doc", count: 860, conversion: 0.18, export: null, note: null },
+    { __dohc_rowid: 4, stage: "Invited agent", count: 340, conversion: 0.07, export: null, note: "team" },
+  ],
+  nextOffset: null,
+};
+const GRID_DATABASE_ROWS = GRID_DATABASE.rows.map((row, sourceIndex) => ({ row, sourceIndex }));
+
+function DatabaseGridSpecimen(props: {
+  sort?: ComponentProps<typeof DatabaseGrid>["sort"];
+  editing?: boolean;
+  readOnly?: boolean;
+}) {
+  // The rows are already in descending count, as the sort specimen shows them.
+  return (
+    <DatabaseGrid
+      table={GRID_DATABASE}
+      rows={GRID_DATABASE_ROWS}
+      readOnly={props.readOnly ?? false}
+      editing={props.editing ? editOf(GRID_DATABASE, GRID_DATABASE.rows[1]!, "stage") : null}
+      draftRef={{ current: "Signed in" }}
+      sort={props.sort ?? null}
+      onSort={noop}
+      onBeginEdit={noop}
+      onCommit={noop}
+      onCancel={noop}
+    />
   );
 }
 
@@ -2318,6 +2406,8 @@ const FILE_VIEW_TEXT_STATES: { label: string; saveState: SaveState }[] = [
 const CLOUD_SIGNED_IN: CloudStatusResult = {
   connected: true,
   email: "sam@hollis.studio",
+  // Fixed, so the account avatar doesn't take this run's installation colour.
+  ownPresentation: { group: "own", hue: "amber", self: true },
   serverUrl: "https://dohc.hollis.studio",
   relayUrl: "https://relay.hollis.studio",
   workspaceSynced: false,
@@ -2334,15 +2424,15 @@ const EDITOR_FONT_OPTIONS = [
   { value: "mono", label: "Mono" },
 ];
 
-// Appearance's zoom stepper, with the keys this platform shows.
+// Appearance's zoom stepper keeps its existing Windows specimen text on every host.
 function ZoomSpecimen(props: { percent: number; atMost?: boolean }) {
   return (
     <StepperControl
       setting="zoom"
       value={`${props.percent}%`}
-      decrease={{ label: "Zoom out", keys: ["Ctrl", "-"], onClick: noop }}
-      reset={{ label: "Reset to 100%", to: "100%", keys: ["Ctrl", "0"], onClick: noop }}
-      increase={{ label: "Zoom in", keys: ["Ctrl", "="], disabled: props.atMost, onClick: noop }}
+      decrease={{ label: "Zoom out", keys: shortcutKeys("zoom-out", "win32"), onClick: noop }}
+      reset={{ label: "Reset to 100%", to: "100%", keys: shortcutKeys("zoom-reset", "win32"), onClick: noop }}
+      increase={{ label: "Zoom in", keys: shortcutKeys("zoom-in", "win32"), disabled: props.atMost, onClick: noop }}
     />
   );
 }

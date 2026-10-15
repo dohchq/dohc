@@ -1,3 +1,4 @@
+import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
@@ -56,6 +57,7 @@ import {
 import { basename, join } from "node:path";
 
 export const MCP_TOOL_CAPABILITIES = {
+  dohc_read_share_copy: ["share.copy.read"],
   dohc_list_automations: ["automation.list"],
   dohc_switch_automation: ["automation.switch"],
   dohc_dataset: Object.values(DATASET_CAPABILITIES),
@@ -1869,6 +1871,13 @@ async function requestCli<Verb extends CliVerb>(
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
+}
+
+export async function getShareCopyDetails(ctx: ToolContext, input: unknown) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Share copy details require the owning workspace." };
+  const parsed = ShareCopyInput.safeParse(input);
+  if (!parsed.success) return { ok: false as const, reason: "Invalid share copy request." };
+  return requestCli(ctx, "shareCopy", parsed.data);
 }
 
 /** Publication uses the same owner-local attachment as the CLI. */

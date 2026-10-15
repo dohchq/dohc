@@ -160,6 +160,9 @@
     "ownerAppResponses": [
       "app.responses.list",
       "app.responses.undo"
+    ],
+    "shareCopy": [
+      "share.copy.read"
     ]
   },
   "public": {
@@ -234,6 +237,7 @@
     "automation runs": "automation.runs.list",
     "automation run": "automation.run.read",
     "automation retry": "automation.run.retry",
-    "automation press": "automation.button.press"
+    "automation press": "automation.button.press",
+    "share copy": "share.copy.read"
   }
 }

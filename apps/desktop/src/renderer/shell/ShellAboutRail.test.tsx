@@ -194,6 +194,7 @@ describe("About rail (right side)", () => {
     const thread = { id: "file-thread", title: "Long file conversation", createdAtMs: 1, updatedAtMs: 1 };
     const messages = Array.from({ length: 300 }, (_, index) => ({
       id: `file-message-${index}`, threadId: thread.id,
+      presentation: { group: "fixture", hue: null, self: false },
       authorKind: "human" as const, authorDisplayName: "Reader",
       body: `File message ${index}`, createdAtMs: index + 1,
     }));
