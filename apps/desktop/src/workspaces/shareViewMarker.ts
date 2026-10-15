@@ -38,7 +38,7 @@ export function shareViewIsPresent(shareView: unknown): boolean {
 }
 
 // The wire schema's bounds for an opaque id (`OPAQUE_ID` in bridgeContract).
-function readableId(value: unknown): boolean {
+function readableId(value: unknown): value is string {
   return typeof value === "string" && value.length >= 1 && value.length <= 200;
 }
 
@@ -53,10 +53,9 @@ export const SHARE_VIEW_REOPEN_MESSAGE =
  * presents it as damaged, and main offers and admits no write through it at
  * any level. Its files stay readable until it is reopened.
  */
-export function shareViewIdentityIsIntact(marker: {
-  readonly shareId?: unknown;
-  readonly recipientUserId?: unknown;
-}): boolean {
+export function shareViewIdentityIsIntact<
+  Marker extends { readonly shareId?: unknown; readonly recipientUserId?: unknown },
+>(marker: Marker): marker is Marker & { shareId: string; recipientUserId: string } {
   return readableId(marker.shareId) && readableId(marker.recipientUserId);
 }
 

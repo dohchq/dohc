@@ -4679,8 +4679,8 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       (marker.grantedSelector.versionId !== null && marker.grantedSelector.versionId !== "main")) {
       throw new SharedDocumentWaitingError({ state: "failed", message: "dohc could not open this document for editing. Check the share's Edit access." });
     }
-    const identity = (value: typeof marker | undefined) => JSON.stringify({shareId: value?.shareId, relayUrl: value?.relayUrl,
-      selector: value?.grantedSelector, ended: value?.ended === true});
+    const identity = (value: ShareViewIdentity | undefined) => JSON.stringify({shareId: value?.shareId,
+      recipientUserId: value?.recipientUserId, relayUrl: value?.relayUrl, selector: value?.grantedSelector, ended: value?.ended === true});
     const pinned = identity(marker);
     return createNamedDesktopLiveCapture({ shareId: marker.shareId, selector: marker.grantedSelector,
       accessEnded: () => findWorkspace(workspace.workspaceId)?.shareView?.ended === true,
