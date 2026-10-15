@@ -44,7 +44,7 @@ const conversation = (overrides: Partial<AboutConversation>): AboutConversation 
 function answer(rows: AccessAnswer["rows"] = []): AccessAnswer {
   return {
     ref: { kind: "chat", channelWireId: "wire-general" }, rows, visibility: "visible",
-    coverage: { kind: "granted", complete: true, observation: "interval" },
+    unknownReason: null, coverage: { kind: "granted", complete: true, observation: "interval" },
     checkedAtMs: Date.UTC(2026, 9, 9), freshness: "fresh", nextCursor: null,
   };
 }

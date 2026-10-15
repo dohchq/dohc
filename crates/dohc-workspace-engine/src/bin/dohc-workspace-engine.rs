@@ -20,7 +20,9 @@ use dohc_engine_protocol::{
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
 #[cfg(test)]
 use dohc_workspace_engine::EngineEventNotice;
-use dohc_workspace_engine::live_application_ingress::{LiveApplicationIngress, UploadCompletion};
+use dohc_workspace_engine::live_application_ingress::{
+    LiveApplicationIngress, LiveApplicationIngressConfig, UploadCompletion,
+};
 use dohc_workspace_engine::{ConfiguredLiveHostConfig, EngineService, LiveApplicationInput};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
@@ -85,7 +87,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
         return Ok(());
     }
-    if !args.is_empty() {
+    let passive = args == ["--store-role", "passive"];
+    if !args.is_empty() && !passive {
         return Err(io::Error::other("unknown engine arguments").into());
     }
     let auth_token = std::env::var(AUTH_TOKEN_ENV)
@@ -94,10 +97,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "engine auth token missing")
         })?;
-    tokio::runtime::Runtime::new()?.block_on(run_stdio(auth_token))
+    tokio::runtime::Runtime::new()?.block_on(run_stdio(auth_token, passive))
 }
 
-async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
+fn passive_ingress(
+    service: Arc<EngineService>,
+    passive: bool,
+) -> Result<Option<(ConnectionOwner, LiveApplicationIngress)>, Box<dyn Error>> {
+    if !passive {
+        return Ok(None);
+    }
+    let ingress = LiveApplicationIngress::new(
+        service,
+        LiveApplicationIngressConfig {
+            aggregate_bytes: 2 * 1024 * 1024 * 1024,
+            application_working_reserve_bytes: 32 * 1024 * 1024,
+            max_uploads: 1,
+            upload_deadline: std::time::Duration::from_secs(120),
+        },
+    )?;
+    Ok(Some((ConnectionOwner::authenticated(), ingress)))
+}
+
+async fn run_stdio(auth_token: String, passive: bool) -> Result<(), Box<dyn Error>> {
+    if passive
+        && (std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
+            || std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some())
+    {
+        return Err(io::Error::other("passive daemon takes no live host configuration").into());
+    }
     if std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
         && std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some()
     {
@@ -121,7 +149,11 @@ async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
                 let (service, owner, ingress) = EngineService::ordinary_live_host(config)?;
                 (service, Some((owner, ingress)))
             }
-            None => (Arc::new(EngineService::new()), None),
+            None => {
+                let service = Arc::new(EngineService::new());
+                let live = passive_ingress(service.clone(), passive)?;
+                (service, live)
+            }
         },
     };
     let supervisor = Arc::new(Supervisor::new(
@@ -463,7 +495,8 @@ where
                         Envelope::Request(request)
                             if matches!(
                                 request.method.as_str(),
-                                "liveApplication.apply"
+                                "replica.applyJournalPage"
+                                    | "liveApplication.apply"
                                     | "ydoc.ownerDelivery.applyAcceptedFrame"
                                     | "ydoc.ownerDelivery.applyInitialSync"
                                     | "ydoc.ownerDelivery.enroll"
@@ -1349,6 +1382,20 @@ mod tests {
     use tokio::sync::Notify;
 
     const TEST_AUTH_TOKEN: &str = "r14-test-token";
+
+    #[test]
+    fn desktop_daemon_keeps_live_upload_methods_on_dispatch() {
+        assert!(
+            passive_ingress(Arc::new(EngineService::new()), false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            passive_ingress(Arc::new(EngineService::new()), true)
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires an owned external consumer fixture"]

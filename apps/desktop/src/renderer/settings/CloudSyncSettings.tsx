@@ -170,6 +170,7 @@ export function CloudSyncSettings(props: {
     <>
       <CloudAccountRow
         email={status.email ?? ""}
+        presentation={status.ownPresentation}
         serverUrl={status.serverUrl ?? ""}
         networkAccess={status.networkAccess ?? null}
         onSettled={props.cloud.onChanged}

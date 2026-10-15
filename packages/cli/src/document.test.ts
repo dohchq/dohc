@@ -23,7 +23,7 @@ describe("document commands", () => {
       cwd: "/workspace", request, readStdin,
     });
     expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 2, ok: true, path: "plan.md", changed: true, warning: "Read the document to check." });
+    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 3, ok: true, path: "plan.md", changed: true, warning: "Read the document to check." });
     expect(request).toHaveBeenCalledWith({
       protocolVersion: CLI_PROTOCOL_VERSION, verb: "documentEdit",
       args: { cwd: resolve("/workspace"), actor: "agent", path: "plan.md", find: "Draft", replacement: "--json\n", requestId: "edit-1", agent: "local-agent" },
@@ -57,7 +57,7 @@ describe("document commands", () => {
   it("prints read JSON and allows an empty replacement to delete matching text", async () => {
     const read = await executeCli({ argv: ["document", "read", "a.md", "--json"],
       request: async () => ({ ok: true, path: "a.md", markdown: "Live\n" }) });
-    expect(JSON.parse(read.stdout)).toEqual({ schemaVersion: 2, ok: true, path: "a.md", markdown: "Live\n" });
+    expect(JSON.parse(read.stdout)).toEqual({ schemaVersion: 3, ok: true, path: "a.md", markdown: "Live\n" });
     const request = vi.fn(async () => ({ ok: true, path: "a.md", changed: true }));
     const edit = await executeCli({ argv: ["document", "edit", "a.md", "--find", "--json", "-"], request, readStdin: async () => "" });
     expect(edit.stdout).toBe("Updated a.md\n");
