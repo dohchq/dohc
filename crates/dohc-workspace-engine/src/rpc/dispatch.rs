@@ -146,6 +146,9 @@ impl EngineService {
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         match input {
+            crate::LiveApplicationInput::Replica(input) => {
+                self.replica_apply(ctx, request, *input).await
+            }
             crate::LiveApplicationInput::Admitted(input) => {
                 self.live_application_apply(ctx, request, *input).await
             }
@@ -169,6 +172,18 @@ impl EngineService {
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
+        if request.method == "replica.frontiers" {
+            if request.params != serde_json::json!({}) {
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "invalid frontier request",
+                ));
+            }
+            return Ok(ServiceResponse::response(Response {
+                id,
+                result: self.replica_frontiers(request.workspace).await?,
+            }));
+        }
         if request.method == "ydoc.ownerDelivery.prepareEnrollment" {
             return self.owner_delivery_prepare_enrollment(ctx, request).await;
         }
@@ -1035,6 +1050,8 @@ impl EngineService {
             && !matches!(
                 method,
                 "workspace.close"
+                    | "replica.frontiers"
+                    | "replica.applyJournalPage"
                     | "sync.adoptJoinIdentity"
                     | "sync.pull"
                     | "sync.commitCursor"

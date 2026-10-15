@@ -435,7 +435,7 @@ describe("shared view banner", () => {
     Object.assign(bridge, {
       listChatMessages: vi.fn(async () => ({
         messages: [
-          {
+          { presentation: { group: "fixture", hue: null, self: false },
             id: "existing-message",
             threadId: "existing-thread",
             authorKind: "human" as const,

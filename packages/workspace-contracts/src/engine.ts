@@ -786,6 +786,8 @@ export interface ChannelThreadSummary {
   // without making callers load every message in every listed thread. Older
   // consumers can omit it; an empty thread has no preview.
   openingMessage?: {
+    authorActorKey?: string;
+    origin?: "cli";
     id: ChatMessageId;
     author: ChatActor;
     authorOwnerDisplayName?: string;

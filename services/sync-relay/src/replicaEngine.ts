@@ -3,7 +3,9 @@ import { randomBytes } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { Duplex } from "node:stream";
-import { EngineClient, DuplexEngineClientConnection } from "@dohc/workspace-engine-client/daemon";
+import { parseCanonicalAdmittedLiveUpdateMetadata } from "@dohc/live-session-contract";
+import type { ReplicaLiveJournalPage } from "./storage/liveUpdateJournal";
+import { replicaFrontiers, type ReplicaJournalRow, type ReplicaPageResult, EngineClient, DuplexEngineClientConnection } from "@dohc/workspace-engine-client/daemon";
 import type { ReplicaChild, ReplicaChildInput } from "./replicaSupervisor";
 
 export interface ReplicaEngineOptions {
@@ -26,13 +28,13 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
   return async ({ storeDir, lease }: ReplicaChildInput): Promise<ReplicaChild> => {
     if (!(await stat(options.engineExecutable)).isFile()) throw new TypeError("Replica engine executable must be a file.");
     const authToken = randomBytes(32).toString("hex");
-    const child = spawn(options.engineExecutable, [], { cwd: storeDir, env: { DOHC_ENGINE_AUTH_TOKEN: authToken,
+    const child = spawn(options.engineExecutable, ["--store-role", "passive"], { cwd: storeDir, env: { DOHC_ENGINE_AUTH_TOKEN: authToken,
       ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}) },
       windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     const termination = new Promise<void>(resolve => child.once("close", () => resolve()));
     const stream = Duplex.from({ readable: child.stdout, writable: child.stdin });
     const client = new EngineClient(new DuplexEngineClientConnection(stream), { authToken, protocolVersion: 2,
-      capabilities: ["blobs"], connectTimeoutMs: deadlineMs }, () => child.kill("SIGKILL"), termination);
+      capabilities: ["blobs"], connectTimeoutMs: deadlineMs, privateLiveApplication: {aggregateBytes: 1024 * 1024 * 1024, maxUploads: 1} }, () => child.kill("SIGKILL"), termination);
     child.on("error", error => stream.destroy(error));
     child.on("close", (code, signal) => client.notifyProcessExit(code, signal));
     child.stderr.resume();
@@ -56,7 +58,7 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
       workspace = String(opened.workspace);
       await request("sync.adoptJoinIdentity", { workspaceId: lease.workspaceId,
         replicationEpoch: lease.replicationEpoch, streamIdentity: lease.streamIdentity });
-      return { pid: child.pid, exited: termination, close, async pull() {
+      const pullOrdinary = async () => {
         let page: Record<string, unknown>;
         let previous: number | undefined;
         do {
@@ -68,7 +70,59 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
           await request("sync.commitCursor", { workspaceId: lease.workspaceId, pendingCursor: page.pendingCursor });
           previous = page.nextCursor;
         } while (page.hasMore);
+      };
+      return { pid: child.pid, exited: termination, close, async pull() {
+        await pullOrdinary();
+        const frontiers = replicaFrontiers(await request("replica.frontiers", {}));
+        await drainReplicaJournal(frontiers.journalCursor, async after => {
+          const url = new URL(`/sync/${encodeURIComponent(lease.workspaceId)}/live-journal`, options.baseUrl);
+          url.searchParams.set("after", String(after)); url.searchParams.set("limit", "500");
+          const response = await fetch(url, { headers: {authorization: `Bearer ${lease.bearer}`}, signal: AbortSignal.timeout(deadlineMs) });
+          if (!response.ok) throw new Error(`Replica journal read failed (${response.status}).`);
+          return await response.json() as ReplicaLiveJournalPage;
+        }, async (after, page) => {
+          const rows: ReplicaJournalRow[] = page.rows.map(r => ({...r,
+            admitted: {metadata: parseCanonicalAdmittedLiveUpdateMetadata(r.admitted.metadata), updateBytes: decodeJournalBytes(r.admitted.updateBytes)},
+            restore: r.restore ? {operationId: r.restore.operationId, checkpointDigest: r.restore.checkpoint.digest,
+              checkpointBytes: decodeJournalBytes(r.restore.checkpoint.bytes), proof: r.restore.proof} : null}));
+          return await client.applyReplicaJournalPage({id: id++, workspace: workspace!, deadlineMs}, after, lease.epochLogFloor, rows);
+        }, pullOrdinary);
       } };
     } catch (error) { await close(); throw error; }
   };
+}
+
+function decodeJournalBytes(value: string): Uint8Array {
+  if (typeof value !== "string") throw new TypeError("Invalid journal bytes.");
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) throw new TypeError("Invalid journal base64.");
+  return bytes;
+}
+
+export async function drainReplicaJournal(after: number,
+  read: (after: number) => Promise<ReplicaLiveJournalPage>,
+  apply: (after: number, page: ReplicaLiveJournalPage) => Promise<ReplicaPageResult>,
+  pullOrdinary: () => Promise<void>): Promise<void> {
+  let retriedCursor: number | undefined;
+  for (;;) {
+    const page = await read(after);
+    if (!Array.isArray(page.rows) || page.rows.length > 500 || typeof page.hasMore !== "boolean" ||
+      !Number.isSafeInteger(page.nextCursor) || page.nextCursor < after ||
+      (page.rows.length === 0 && (page.hasMore || page.nextCursor !== after)) ||
+      page.rows.some((row, i) => !Number.isSafeInteger(row.journalCursor) || row.journalCursor <= (i ? page.rows[i-1]!.journalCursor : after)) ||
+      (page.rows.length > 0 && page.rows.at(-1)!.journalCursor !== page.nextCursor)) throw new Error("Replica journal page did not progress.");
+    if (page.rows.length === 0) return;
+    const result = await apply(after, page);
+    if (result.journalCursor < after || result.journalCursor > page.nextCursor) throw new Error("Replica journal apply did not produce a valid cursor.");
+    after = result.journalCursor;
+    if (result.blockedCursor !== null) {
+      if (retriedCursor === result.blockedCursor) throw new Error(`Replica journal cursor ${result.blockedCursor} cannot apply after ordinary catch-up.`);
+      retriedCursor = result.blockedCursor;
+      await pullOrdinary();
+      continue;
+    }
+    if (after !== page.nextCursor) throw new Error("Replica journal apply did not drain its page.");
+    retriedCursor = undefined;
+    if (!page.hasMore) return;
+  }
 }
