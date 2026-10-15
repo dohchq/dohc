@@ -986,6 +986,19 @@ describe("workspace engine IPC registrations", () => {
       expect(capturing.warmCredentialCache).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ["its folder moves", { rootPath: "C:/moved" }],
+      ["it becomes a shared view", { shareView: {} as NonNullable<RegistryEntry["shareView"]> }],
+    ])("stops a read when %s", async (_change, fields) => {
+      const h = await harness();
+      h.capture.listMoments.mockImplementation(async () => {
+        const replacement = { ...h.workspace, ...fields };
+        h.requireWorkspace.mockImplementation(() => replacement);
+        return page([sam]);
+      });
+      await expect(h.invoke(CHANNELS.listEngineMoments)).rejects.toThrow("the workspace changed");
+    });
+
     it("keeps reading through a registry write that leaves its folder, server, and shared view alone", async () => {
       const h = await harness();
       h.capture.listMoments.mockImplementation(async () => {
@@ -1007,6 +1020,10 @@ describe("workspace engine IPC registrations", () => {
       expect(synced).toEqual([{ group: expect.any(String), hue: ownActorPresentation("install-local", account).hue, self: false }]);
       expect(installation![0]!.self).toBe(true);
       expect(h.readSyncHistory).toHaveBeenCalledWith("C:/alias");
+      // A record dohc can't read may say the folder synced.
+      h.readSyncHistory.mockResolvedValue("unknown");
+      const [unreadable] = await tokens(h);
+      expect(unreadable![0]!.self).toBe(false);
     });
   });
 
