@@ -192,6 +192,17 @@ A test that passes only on that retry does not fail the gate. `result.json` list
 A flaky test is a defect. Fix the condition it races, or report it to whoever owns it. A test that fails twice still fails the gate.
 A repository or desktop script step reruns as a whole, after its first attempt's ignored outputs. A test that fails on a clean tree but passes beside those outputs is recorded as flaky like any other, so treat every entry as a real failure until you have read it.
 
+### Failures other branches share
+
+`result.json` lists each test that failed on its last try under `failed`, with the same step and test names as `flaky`. The queue records both lists for each attempt in `status.json` and the queue history.
+The list covers package tests, the repository and desktop script tests, the account and desktop browser proofs, and the Rust tests. A step that fails outside a test, such as typecheck, lists none.
+
+When a run fails on the shared host, the verifier looks for its failed tests in the last day of queue history. It prints each test that another branch's run also failed, with those branches, and records them in `result.json` under `shared`. Runs of your own branch do not count.
+A failure that other branches share often comes from main or from a flaky test, not from your change.
+
+When the gate prints that list, check the test on `origin/main` and in the [last nightly](#nightly-run). Do this before you change your branch for that test.
+Do not add a workaround for that failure to your PR. Fix main or the flaky test in its own PR, or wait for that fix and rebase.
+
 ### A failure stops the run
 
 The first step that fails stops the rest of a PR run. A step fails only after its retry, so a test that passes on retry stops nothing.

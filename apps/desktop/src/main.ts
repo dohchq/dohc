@@ -168,6 +168,7 @@ import { collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/
 import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./workspaces/desktopRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
+import { scheduleHostHandlers } from "./ipc/scheduleHostIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
 import { createUsageStore, USAGE_SNAPSHOT_NAME } from "./usage/usageStore";
 import { createRendererUsage } from "./usage/rendererUsage";
@@ -2052,9 +2053,9 @@ const { queueChatBookmarkProjection, projectPendingChatBookmarks } = desktopChat
 const {
   runWorkspaceSharedChannelPass,
   syncWorkspaceSharedChannels,
-  syncRendererWorkspaceSharedChannels,
   syncSharedChannelsForChatTarget,
   syncRendererSharedChannelsForChatTarget,
+  syncRendererWorkspaceSharedChannels,
 } = createDesktopSharedChannelSync<
   DesktopWorkspaceAuthorityState,
   DesktopRendererWorkspaceOperation
@@ -5900,7 +5901,7 @@ function registerIpcHandlers(): void {
     automationRunOnThisComputer: async (workspaceId, automationId, claimId) =>
       !sharedViewOf(workspaceId) && (await collectionAutomationsOf(workspaceId)?.hasRun(automationId, claimId) ?? false),
     serverRuns,
-    requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
+    assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     retryCloudSync: (workspaceId, reason) => activity.retryCloudSync(workspaceId, reason),
     retryFileObservation: workspaceId => activity.retryFileObservation(workspaceId),
@@ -5968,7 +5969,7 @@ function registerIpcHandlers(): void {
     notifyRenderer, findWorkspace,
     engineDaemonStartup: () => desktopEngine.startup,
     requireEngineSessions, currentEngineSessions: () => desktopEngine.sessions,
-    withPhysicalWorkspaceOperation, withRendererWorkspaceOperation, receivedShareEngine,
+    withRendererWorkspaceOperation, receivedShareEngine,
     readWorkspaceSecretState, readWorkspaceDataKeyForEnrollment, assertWritableWorkspace,
     relayClientForWorkspace, enrollWorkspaceKeyEnvelope, installWorkspaceDataKey,
     setWorkspaceRemote: async (workspaceId, remote) => {
@@ -6366,7 +6367,7 @@ function registerIpcHandlers(): void {
       detectAgentTools(workspaceRoot, signal, resourcesBasePath()),
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, requireEngineCapture,
-    linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace, assertAgentRunnableWorkspace,
+    linkedChatStoreFor, agentDispatchStoreHandleFor, assertAgentRunnableWorkspace,
     assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
     agentIntegration, mcpShareAccessOf, mcpConfigFor,
     senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
@@ -6812,17 +6813,9 @@ function registerIpcHandlers(): void {
     },
   }));
 
-  registerOperations(operationBoundary, scheduleHostOperations, {
-    readScheduleHost: (input) => scheduleHostState(input.workspaceId),
-    chooseScheduleHost: (input) => scheduleHostState(input.workspaceId, {
-      action: "choose",
-      body: { installId: input.installId, generation: input.generation },
-    }),
-    takeOverScheduleHost: (input) => scheduleHostState(input.workspaceId, {
-      action: "take-over",
-      body: { generation: input.generation },
-    }),
-  });
+  registerOperations(operationBoundary, scheduleHostOperations, scheduleHostHandlers<WebContents, IpcMainInvokeEvent>({
+    currentRendererSession: sender => rendererWorkspaceSessions.current(sender), scheduleHostState,
+  }));
 
   registerOperations(operationBoundary, chatDispatchNoticeOperations, {
     registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),
