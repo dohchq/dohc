@@ -1,5 +1,5 @@
 import { workspacePathKey } from "./workspacePathKey";
-import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
+import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import type { ShareViewFilesTarget } from "./shareViewFiles";
 import type { WorkspaceFileListingScope } from "./workspaceFileListingScope";
 
@@ -11,7 +11,7 @@ export interface OwnedWorkspaceSearchSource {
 }
 
 export interface OwnedWorkspaceReadPortInput {
-  listFiles(scope?: WorkspaceFileListingScope): Promise<ListWorkspaceFilesResult>;
+  listFiles(scope?: WorkspaceFileListingScope): Promise<WorkspacePathListing>;
   hasShareState: boolean;
   searchSources: readonly OwnedWorkspaceSearchSource[];
   repairProjection(target: ShareViewFilesTarget): Promise<void>;
@@ -27,13 +27,13 @@ export interface OwnedWorkspaceSearchView {
   allowPath(path: string): boolean;
   // null means every path belongs to the local workspace, so callers do not
   // need an owner listing to filter a full-workspace search.
-  listing: ListWorkspaceFilesResult | null;
+  listing: WorkspacePathListing | null;
 }
 
 /** The owned workspace's file listing and search scope: owner bytes for
  * received shares, the disk for everything else. */
 export interface OwnedWorkspaceReadPort {
-  listFiles(scope?: WorkspaceFileListingScope): Promise<ListWorkspaceFilesResult>;
+  listFiles(scope?: WorkspaceFileListingScope): Promise<WorkspacePathListing>;
   prepareSearch(path?: string): Promise<OwnedWorkspaceSearchView>;
 }
 
@@ -51,7 +51,7 @@ function literalGlob(path: string): string {
 }
 
 function includeGlobForOwnerListing(
-  listed: Pick<ListWorkspaceFilesResult, "files" | "folders">,
+  listed: Pick<WorkspacePathListing, "files" | "folders">,
   requestedPath: string | undefined,
 ): string | undefined {
   if (requestedPath === undefined) return undefined;
