@@ -54,19 +54,22 @@ fn every_retained_vector_matches_current_owner_settlement_without_a_snapshot() {
     }
 }
 #[test]
-fn nested_list_source_is_canonical_without_the_owners_snapshot() {
+fn nested_list_source_remains_preserved_without_the_owners_snapshot() {
     let source = "---\nid: rec\n---\n\n- parent\n  - nested\n";
     let doc = Ydoc::wire();
     doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
         .unwrap();
     let canonical = doc.project(ContentKind::Richdoc).unwrap().content;
-    assert_eq!(doc.preserved_markdown_source(&canonical), None);
+    assert_eq!(
+        doc.preserved_markdown_source(&canonical),
+        Some(source.to_owned())
+    );
     assert_eq!(
         doc.settled_markdown_source(&canonical, || Ok::<_, ()>(Some(source.to_owned())))
             .unwrap(),
         Some(source.to_owned())
     );
-    assert_eq!(assert_owner_parity(&[doc.encode_full_state()]), canonical);
+    assert_eq!(assert_owner_parity(&[doc.encode_full_state()]), source);
 }
 #[test]
 fn forged_source_is_never_projected() {

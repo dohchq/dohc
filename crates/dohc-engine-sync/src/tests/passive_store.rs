@@ -183,18 +183,29 @@ fn passive_store_concurrent_delayed_and_source() {
             "table.md",
             "| Name | Value |\n| --- | --- |\n| Item | 2 |\n",
         ),
-        ("code.md", "Before\n\n    let value = 2;\n\nAfter\n"),
-        (
-            "nested-list-witness.md",
-            "---\nid: rec\n---\n\n- parent\n  - nested\n",
-        ),
+        ("code.md", "Before\n\n```\nlet value = 2;\n```\n\nAfter\n"),
+        ("nested-list-witness.md", "- \n\n  - b\n - c"),
     ] {
         let (_scratch, _path, mut owner) = open_store();
         seed_replication_version(&mut owner, "main", "main");
         seed_text_head(&mut owner, "source", "source.md", source);
         let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
-            .unwrap();
+        if name == "nested-list-witness.md" {
+            assert!(
+                doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+                    .is_err()
+            );
+            assert!(
+                doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
+                    .is_err()
+            );
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, "- \n\n- b\n\n- c")
+                .unwrap();
+            doc.preserve_folded_markdown_source(source).unwrap();
+        } else {
+            doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
+                .unwrap();
+        }
         let key = dohc_engine_collab::DocKey::new("ws", "main", "source").unwrap();
         let owner_text = owner
             .read_with(|conn| project_ydoc_with_store(conn, &key, &doc, ContentKind::Richdoc))
