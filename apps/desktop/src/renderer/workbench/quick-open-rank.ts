@@ -1,3 +1,4 @@
+import { prepareVisibilityPolicy, sameVisibilityPolicy, type VisibilityPolicyRule } from "@dohc/security-contract/visibility-policy";
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import type { CollectionSummary } from "@dohc/workspace-contracts/collection";
 import type { ChatChannelRecord, SitePackageInfo, WorkspaceFileEntry, WorkspaceVersionRecord } from "../../ipc/bridgeContract";
@@ -165,12 +166,10 @@ type GoToGroup = Pick<ChatChannelRecord, "id" | "name" | "kind">;
 export interface GoToListing {
   files: readonly GoToFile[];
   folders: readonly string[];
-  // Verdicts come from the visibility-rule loop, never the engine path floor.
-  // Until the listing producer supplies them, all host path rows stay withheld.
+    // Main parses the rules. Search and Go to share the same rule evaluator.
   visibility: {
     status: "ready" | "degraded" | "unavailable";
-    // Exact paths: the producer must cover folders, Collections, and apps too.
-    hiddenHostPaths: ReadonlySet<string>;
+      rules: readonly VisibilityPolicyRule[];
   };
   // The listing has already applied each share's selector and canonical overlay.
   receivedRoots: readonly { path: string; ended: boolean; damaged: boolean }[];
@@ -226,26 +225,25 @@ function withGoToRanks(row: PreparedGoToRow, pinned: ReadonlySet<string>, recent
   return row.pinnedRank === pinnedRank && row.recentRank === recentRank ? row : { ...row, pinnedRank, recentRank, includedRevision: -1 };
 }
 
-function* applyGoToPathState(row: PreparedGoToRow, listing: GoToListing, work: { operations: number }): Generator<void, PreparedGoToRow> {
+function* applyGoToPathState(row: PreparedGoToRow, listing: GoToListing, work: { operations: number }, visibilityForPath: ReturnType<typeof prepareVisibilityPolicy>): Generator<void, PreparedGoToRow> {
   let share: GoToListing["receivedRoots"][number] | undefined;
   for (const root of listing.receivedRoots) {
     if (root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/")) { share = root; break; }
     if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
   }
   const ended = share?.ended ?? false;
-  const visible = share ? !share.damaged : listing.visibility.status === "ready" &&
-    !listing.visibility.hiddenHostPaths.has(row.path);
+  // Keep the published host verdict while a listing is degraded or unavailable.
+  // The admission pass withholds host rows until a ready policy arrives.
+  const visible = share ? !share.damaged : listing.visibility.status === "ready"
+    ? visibilityForPath(row.path).visibility !== "hidden"
+    : row.visible;
   return row.ended === ended && row.visible === visible ? row : { ...row, ended, visible, includedRevision: -1 };
 }
 
 function samePathVerdicts(a: GoToListing | undefined, b: GoToListing | undefined): boolean {
   if (a === b) return true;
   if (!a || !b || a.visibility.status !== b.visibility.status) return false;
-  const hidden = a.visibility.hiddenHostPaths, previous = b.visibility.hiddenHostPaths;
-  if (hidden !== previous) {
-    if (hidden.size !== previous.size) return false;
-    for (const path of hidden) if (!previous.has(path)) return false;
-  }
+  if (!sameVisibilityPolicy(a.visibility.rules, b.visibility.rules)) return false;
   return sameEntries(a.receivedRoots, b.receivedRoots, (x, y) => x.path === y.path && x.ended === y.ended && x.damaged === y.damaged);
 }
 function sameEntries<T>(a: readonly T[] | undefined, b: readonly T[] | undefined, equal: (a: T, b: T) => boolean): boolean {
@@ -336,6 +334,7 @@ export class GoToIndex {
   preparing = false;
   private withholding = false;
   lastPreparationCount = 0;
+  lastVisibilityCheckCount = 0;
   lastScanCount = 0;
   private completeRows: readonly PreparedGoToRow[] = [];
   private orderedRows: readonly PreparedGoToRow[] = [];
@@ -359,6 +358,7 @@ export class GoToIndex {
   private requestedSources: GoToSources = {};
   private context: QuickOpenContext = EMPTY_CONTEXT;
   private requestedContext: QuickOpenContext = EMPTY_CONTEXT;
+  private visibilityForPath = prepareVisibilityPolicy([]);
   private active: GoToPreparation | null = null;
   private interrupted = false;
   private matches: { query: string; revision: number; indices: Int32Array; count: number } | null = null;
@@ -377,6 +377,7 @@ export class GoToIndex {
     if (!this.interrupted && sameSources(nextSources, this.requestedSources) &&
       samePaths(context.pinned, this.requestedContext.pinned) && samePaths(context.recent, this.requestedContext.recent)) {
       this.lastPreparationCount = 0;
+      this.lastVisibilityCheckCount = 0;
       return this.active;
     }
     this.active?.cancel();
@@ -438,6 +439,7 @@ export class GoToIndex {
 
   private *prepare(sources: GoToSources, context: QuickOpenContext, work: { operations: number }): Generator<void> {
     this.lastPreparationCount = 0;
+    this.lastVisibilityCheckCount = 0;
     this.lastReorderedCount = 0;
     const force = this.interrupted;
     const forceVerdicts = force && this.withholding;
@@ -451,6 +453,7 @@ export class GoToIndex {
       }
     }
     let changed = false;
+    if (sources.listing) this.visibilityForPath = prepareVisibilityPolicy(sources.listing.visibility.rules);
     const pinned = new Set<string>();
     const recent = new Map<string, number>();
     for (const path of context.pinned) { pinned.add(path); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
@@ -528,7 +531,10 @@ export class GoToIndex {
         }
         if (kind === "file" || kind === "folder" || kind === "collection" || kind === "app") {
           if (isNew || verdictsChanged) {
-            if (sources.listing) row = yield* applyGoToPathState(row, sources.listing, work);
+            if (sources.listing) {
+              index.lastVisibilityCheckCount += 1;
+              row = yield* applyGoToPathState(row, sources.listing, work, index.visibilityForPath);
+            }
             else if (row.visible) row = { ...row, visible: false, includedRevision: -1 };
           }
         }
@@ -611,12 +617,18 @@ export class GoToIndex {
         let row = previous;
         if (contextChanged) row = withGoToRanks(row, pinned, recent);
         if (kind === "folder" || kind === "collection" || kind === "app") {
-          if (sources.listing) row = yield* applyGoToPathState(row, sources.listing, work);
+          if (sources.listing) {
+            index.lastVisibilityCheckCount += 1;
+            row = yield* applyGoToPathState(row, sources.listing, work, index.visibilityForPath);
+          }
           else if (row.visible) row = { ...row, visible: false, includedRevision: -1 };
         }
         if (row !== previous) subset.set(goToRowKey(row), row);
         if (kind === "file") this.files[fileIndex++] = row;
-        if (row.visible && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) {
+        const pathBacked = kind === "file" || kind === "folder" || kind === "collection" || kind === "app";
+        const mounted = sources.listing?.receivedRoots.some(root => root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/"));
+        const withheldHostPath = pathBacked && sources.listing?.visibility.status !== "ready" && !mounted;
+        if (row.visible && !withheldHostPath && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) {
           if (forceVerdicts || row.includedRevision !== this.revision || row.sourceIndex < previousKeptIndex) {
             addedRows.push(row);
             row.includedRevision = -1;

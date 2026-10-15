@@ -403,6 +403,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   serviceHostEnrollmentHasEditGrant(enrollment: Pick<serviceHostEnrollmentStorage.ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">) {
     return serviceHostEnrollmentStorage.serviceHostEnrollmentHasEditGrant(this, enrollment);
   }
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}) {
+    return serviceHostEnrollmentStorage.serviceHostDocumentEnabled(this, document);
+  }
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}) {
     const result = serviceHostEnrollmentStorage.releaseServiceHostEnrollment(this, input);
     if (result) notifyDesktopReadiness(this, {workspaceId: result.workspaceId, path: result.path});
@@ -1413,6 +1416,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     limit: number;
   }): SyncRelayLogRow[] {
     return logStorage.fetchLogPageDescending(this, input);
+  }
+
+  fetchChatMessages(input: Parameters<typeof logStorage.fetchChatMessages>[1]): ReturnType<typeof logStorage.fetchChatMessages> {
+    return logStorage.fetchChatMessages(this, input);
+  }
+
+  fetchChatMessage(input: Parameters<typeof logStorage.fetchChatMessage>[1]): SyncRelayLogRow | null {
+    return logStorage.fetchChatMessage(this, input);
+  }
+
+  appendBrowserChatBatch(input: Parameters<typeof logStorage.appendBrowserChatBatch>[1]): AppendLogBatchResult {
+    return logStorage.appendBrowserChatBatch(this, input);
   }
 
   fetchLogCoordinate(input: {

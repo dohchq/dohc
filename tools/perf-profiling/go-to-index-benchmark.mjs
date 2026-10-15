@@ -68,7 +68,9 @@ try {
   };
   const receipt = { head: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(), source: baseline === -1 ? "checkout" : process.argv[baseline + 1],
     node: process.version, host: { cpu: cpus()[0].model, logicalProcessors: cpus().length, loadAverage: loadavg(), note: "Windows loadavg is unavailable; capture Win32_Processor.LoadPercentage beside this receipt" },
-    samples, scope: "pure module, long paths, first query on a fresh complete index; MessageChannel task yields; excludes packaged paint, Chromium postTask scheduling and renderer private bytes", measurements: [] };
+    samples, scope: "pure module, long paths, first query on a fresh complete index; MessageChannel task yields; excludes packaged paint, Chromium postTask scheduling and renderer private bytes",
+    renameInputs: "fresh file records, visibility object and rules, and mount array and records, as supplied to the hook; metadata construction is timed",
+    budgetsMs: { listingUpdateMedian: 8, firstKeystroke: 4, typingDuringRename: 16 }, measurements: [] };
   const shapes = [
     { name: "no-hit", first: "z", narrow: "zz", expected: 0, narrowExpected: 0, pathQuery: false },
     { name: "many-hit", first: "c", narrow: "cu", expected: 50, narrowExpected: 50, pathQuery: false },
@@ -126,7 +128,7 @@ try {
     for (let n = 0; n < samples; n++) {
       const start = performance.now();
       const files = sources.listing.files.map((file, i) => i === 4242 ? { ...file, path: file.path.replace("004242", "renamed-" + n) } : { ...file });
-      const listing = { ...sources.listing, files, visibility: { ...sources.listing.visibility, hiddenHostPaths: new Set(sources.listing.visibility.hiddenHostPaths) }, receivedRoots: sources.listing.receivedRoots.map(root => ({ ...root })) };
+      const listing = { ...sources.listing, files, visibility: { ...sources.listing.visibility, rules: sources.listing.visibility.rules.map(rule => ({ ...rule })) }, receivedRoots: sources.listing.receivedRoots.map(root => ({ ...root })) };
       const measurement = await prepare(index, { listing }, slices, undefined, "c");
       preparations.push(measurement.elapsedMs); preparationWork.push(measurement.workMs);
       renameWithholding.push(measurement.withheldMs);
@@ -187,6 +189,35 @@ try {
     index = null; sources = null;
     global.gc();
   }
+  // Every sample is the first query on a newly prepared index, never a narrowed no-hit query.
+  const longSources = goToLongPathFixture(30000);
+  const lengths = longSources.listing.files.map(file => file.path.length).sort((a, b) => a - b);
+  const firstScans = [];
+  let longIndex;
+  for (let n = 0; n < 5; n++) {
+    longIndex = new GoToIndex("long-paths");
+    await prepare(longIndex, longSources, [], undefined);
+    const queryStart = performance.now();
+    const result = longIndex.query("z");
+    const milliseconds = performance.now() - queryStart;
+    if (result.length !== 0 || longIndex.lastScanCount !== longIndex.rows.length) throw Error("worst scan must visit every row and match nothing");
+    firstScans.push({ milliseconds, scannedRows: longIndex.lastScanCount, matches: result.length });
+  }
+  const renameSamples = [];
+  for (let n = 0; n < 5; n++) {
+    const files = longSources.listing.files.map((file, i) => i === 4242 ? { ...file, path: file.path.replace("004242", "renamed-" + n) } : { ...file });
+    const updateStart = performance.now();
+    const listing = { ...longSources.listing, files,
+      visibility: { ...longSources.listing.visibility, rules: longSources.listing.visibility.rules.map(rule => ({ ...rule })) },
+      receivedRoots: longSources.listing.receivedRoots.map(root => ({ ...root })),
+    };
+    await prepare(longIndex, { listing }, [], undefined, "z");
+    const preparedAt = performance.now();
+    longIndex.query("z");
+    renameSamples.push({ preparationMs: preparedAt - updateStart, updateAndQueryMs: performance.now() - updateStart, preparedRows: longIndex.lastPreparationCount });
+  }
+  receipt.worstFirstKeystroke = { files: 30000, query: "z", pathLength: { min: lengths[0], median: lengths[Math.floor(lengths.length / 2)], max: lengths.at(-1) },
+    firstScans, renameSamples, scope: "pure module, realistic long paths, first single-letter query matches nothing; renderer paint remains separate" };
   const cpuEnd = cpuSnapshot();
   receipt.host.busyPercent = 100 * (1 - (cpuEnd.idle - cpuStart.idle) / (cpuEnd.total - cpuStart.total));
   console.log(JSON.stringify(receipt, null, 2));

@@ -401,6 +401,16 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
+  it("retries a held path with the real flush and retried result", async () => {
+    const result = { settled: true, running: true, degraded: false, retried: false, heldFiles: [] };
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
+      requests.push(request); return { id: request.id, result };
+    } }, WORKSPACE, { workspaceId: WORKSPACE });
+    expect(await adapter.retryHeldCapture("notes/held.md")).toEqual(result);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ method: "capture.retryHeld", params: { path: "notes/held.md" } });
+  });
   it.each(["workspaceId", "engineUuid", "versionId", "objectId"] as const)("rejects a History cursor from another %s", async field => {
     const engine = new VersionedLoopbackEngine();
     const adapter = new VersionedLiveAdapter({ sendRequest: request => engine.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });

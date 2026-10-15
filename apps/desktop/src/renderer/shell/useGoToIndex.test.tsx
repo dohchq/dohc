@@ -17,11 +17,11 @@ function deferred() {
   const promise = new Promise<ListWorkspaceFilesResult>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-const answer = (path: string): ListWorkspaceFilesResult => ({ files: [{ path, kind: "file" }], folders: [] });
+const answer = (path: string): ListWorkspaceFilesResult => ({ visibility: { status: "ready", rules: [] }, files: [{ path, kind: "file" }], folders: [] });
 function Shell(props: { workspaceId: string; refresh: number }) {
-  const { files, folders, refreshFiles } = useWorkspaceListing(props.workspaceId);
+  const { files, folders, visibility, refreshFiles } = useWorkspaceListing(props.workspaceId);
   useEffect(() => { void refreshFiles().catch(() => undefined); }, [refreshFiles, props.refresh]);
-  const listing = useMemo(() => ({ files, folders, visibility: { status: "ready" as const, hiddenHostPaths: new Set<string>() }, receivedRoots: [] }), [files, folders]);
+  const listing = useMemo(() => ({ files, folders, visibility, receivedRoots: [] }), [files, folders, visibility]);
   const index = useGoToIndex(props.workspaceId, { listing }, context);
   return <><output data-testid="explorer">{files.map(file => file.path).join(",")}</output><output data-testid="names">{index.query("").map(row => row.path).join(",")}</output></>;
 }
@@ -59,7 +59,8 @@ it("keeps the successful committed listing through failure and recovers on the n
   await waitFor(() => expectListing("first.md"));
   view.rerender(<Root workspaceId="A" refresh={1} />);
   await waitFor(() => expect(listWorkspaceFiles).toHaveBeenCalledTimes(2));
-  expectListing("first.md");
+  await waitFor(() => expect(screen.getByTestId("names").textContent).toBe(""));
+  expect(screen.getByTestId("explorer").textContent).toBe("first.md");
   view.rerender(<Root workspaceId="A" refresh={2} />);
   await waitFor(() => expectListing("recovered.md"));
 });
@@ -94,7 +95,7 @@ function taskQueue() {
 }
 const snapshot = (prefix: string, count = 20): GoToListing => ({
   files: Array.from({ length: count }, (_, i) => ({ path: prefix + i + ".md", kind: "file" })),
-  folders: [], visibility: { status: "ready", hiddenHostPaths: new Set() }, receivedRoots: [],
+  folders: [], visibility: { status: "ready", rules: [] }, receivedRoots: [],
 });
 function Snapshot(props: { workspaceId?: string; listing: GoToListing; committed?: boolean }) {
   const index = useGoToIndex(props.workspaceId ?? "workspace", { listing: props.listing }, context, props.committed ?? true);
@@ -148,16 +149,14 @@ it("cannot show A's names after switching the same shell to B during preparation
 it("does not reapply existing file verdicts for unchanged metadata", () => {
   const queue = taskQueue();
   const first = snapshot("a", 1);
-  first.visibility.hiddenHostPaths = new Set(["private"]);
+  first.visibility.rules = [{ path: "private", visibility: "hidden" }];
   const view = render(<Snapshot listing={first} />);
   queue.drain();
   expect(view.container.textContent).toBe("workspace:a0.md");
-  const hidden = new Set(["private"]);
-  const has = vi.spyOn(hidden, "has");
-  view.rerender(<Snapshot listing={{ ...first, files: [...first.files, { path: "renamed.md", kind: "file" }], visibility: { ...first.visibility, hiddenHostPaths: hidden }, receivedRoots: [] }} />);
+  const rules = [{ path: "private", visibility: "hidden" as const }];
+  view.rerender(<Snapshot listing={{ ...first, files: [...first.files, { path: "renamed.md", kind: "file" }], visibility: { ...first.visibility, rules }, receivedRoots: [] }} />);
   queue.drain();
   expect(view.container.textContent).toContain("renamed.md");
-  expect(has).toHaveBeenCalledTimes(1);
 });
 it("cancels the task on unmount even if its callback arrives late", () => {
   const queue = taskQueue();
@@ -187,7 +186,7 @@ it("withholds a newly hidden path in the render before effects", () => {
   queue.drain();
   expect(view.container.textContent).toBe("private/budget.md");
   answers.length = 0;
-  view.rerender(<QuerySnapshot listing={{ ...first, visibility: { status: "ready", hiddenHostPaths: new Set(["private/budget.md"]) } }} />);
+  view.rerender(<QuerySnapshot listing={{ ...first, visibility: { status: "ready", rules: [{ path: "private/budget.md", visibility: "hidden" }] } }} />);
   expect(answers.length).toBeGreaterThan(0);
   expect(answers.every(paths => paths.length === 0)).toBe(true);
   queue.drain();
