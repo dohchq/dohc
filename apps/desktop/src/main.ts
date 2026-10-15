@@ -400,6 +400,7 @@ import {
 import {
   broadcastWorkspaceActivity,
   coalesceWorkspaceActivity,
+  sendToWorkspaceWindows as sendToWorkspaceWindowsOf,
   workspaceActivityPayload,
   type WorkspaceActivityScope,
 } from "./ipc/workspaceActivityBroadcast";
@@ -3377,11 +3378,12 @@ function rememberPendingCliRunMessageLink(
 
 // Sends a workspace's event only to windows showing that workspace.
 function sendToWorkspaceWindows(channel: string, event: { workspaceId: string }): void {
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (window.webContents.isDestroyed()) continue;
-    if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId !== event.workspaceId) continue;
-    window.webContents.send(channel, event);
-  }
+  sendToWorkspaceWindowsOf({
+    windows: BrowserWindow.getAllWindows(),
+    workspaceIdOf: (webContents) => rendererWorkspaceSessions.current(webContents)?.workspaceId,
+    channel,
+    event,
+  });
 }
 
 const chatDispatchNotices = createChatDispatchNotices((event) => {
