@@ -656,6 +656,7 @@ fn place_undo_members(
             store,
             root,
             MaterializationReplayScope {
+                holds: None,
                 workspace_id: ws,
                 self_writes: Some(recorder),
                 progress: None,
