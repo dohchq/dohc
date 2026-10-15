@@ -17,7 +17,9 @@ import { createRecoveryInstaller } from "@dohc/app-backend-runtime/recovery-inst
 import { createDatasetSupervisor, type DatasetInvocationResult, type DatasetSupervisorOptions } from "@dohc/app-backend-runtime/supervisor";
 import type { AppBackendRuntimeOptions, JsonValue } from "@dohc/app-backend-runtime";
 import type { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset-compiler";
-import { createLocalDatasetApps, type LocalDatasetAppContext } from "./localDatasetApps";
+import { createLocalAppStore, type LocalAppStore } from "./localAppStore";
+import { createLocalApps } from "./localApps";
+import { createLocalDatasetApps, localDatasetAppStorage, type LocalDatasetAppContext } from "./localDatasetApps";
 import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
 import { createLocalDatasetRecovery } from "./localDatasetRecovery";
@@ -230,6 +232,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       if (stageCursor) await new Promise<void>(resolve => setImmediate(resolve));
     } while (stageCursor);
     let apps: ReturnType<typeof createLocalDatasetApps>;
+    let appStore: LocalAppStore;
     const exportDirectory = join(directory, "exports");
     const host = createDatasetHost<LocalContext>({ db, transaction, journal, supervisor, runtime: options.runtime, persistentRuntime: options.persistentRuntime,
       wakeAutomations: (_scope, failed) => { if (!closed) options.onAutomationClaims?.(failed); },
@@ -300,8 +303,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         db.prepare("DELETE FROM local_dataset_usage WHERE dataset_id=?").run(key.datasetId);
         for (const table of ["local_dataset_files","local_dataset_recovery_files"])
           db.prepare(`DELETE FROM ${table} WHERE workspace_id=? AND dataset_id=?`).run(workspaceId,key.datasetId);
-        db.prepare("DELETE FROM local_dataset_app_artifacts WHERE publication_id IN(SELECT publication_id FROM local_dataset_apps WHERE dataset_id=?)").run(key.datasetId);
-        db.prepare("DELETE FROM local_dataset_apps WHERE dataset_id=?").run(key.datasetId);
+        appStore.deleteResources("dataset", key.datasetId);
       },
       operationResources(context, request) {
         const extra = resources?.operationResources?.(context, request);
@@ -603,7 +605,8 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         })();
       },
     };
-    apps = createLocalDatasetApps({ db, workspaceId, ownerId, assertCurrent, charge, agentRun: () => options.agentRun?.() ?? null, localPersonId: () => options.localPersonId(),
+    appStore = createLocalAppStore({ db, sources: [localDatasetAppStorage(db)], assertCurrent, transaction, charge: (_kind, resourceId, bytes) => charge(resourceId, bytes) });
+    apps = createLocalDatasetApps({ db, store: appStore, workspaceId, ownerId, assertCurrent, agentRun: () => options.agentRun?.() ?? null, localPersonId: () => options.localPersonId(),
       approved: datasetId => host.approvedArtifacts(owner, { workspaceId, datasetId }),
       bind: (datasetId, appId, binding, commit) => host.setBinding(owner, { workspaceId, datasetId, appId, binding }, commit),
       invoke: (context, input) => tracked(() => host.invoke(context, { ...input, signal: signal(input.signal) })),
@@ -623,7 +626,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         });
       },
     });
-    return { ...local, apps: apps.api };
+    return { ...local, apps: createLocalApps(appStore, apps) };
   } catch (error) {
     closed = true; lifetime.abort();
     try { await supervisor?.close(); } finally { db.close(); }
