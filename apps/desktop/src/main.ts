@@ -1576,7 +1576,7 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
     return id;
   },
   assertCurrent: operation => operation.assertCurrent(),
-  account: () => cachedCredentials?.relayUrl ? { userId: cachedCredentials.userId, email: cachedCredentials.email,
+  account: () => cachedCredentials ? { userId: cachedCredentials.userId, email: cachedCredentials.email,
     relayUrl: cachedCredentials.relayUrl, generation: credentialCacheGeneration } : null,
   roster: ({ workspace }) => ownerAccessRoster(workspace, cachedCredentials, shareRosters.observation),
   received: () => receivedShareAcquisition.observation(),

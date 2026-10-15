@@ -46,7 +46,7 @@ function answer(overrides: Partial<AccessAnswer> = {}): AccessAnswer {
     ref: { kind: "path", path: "docs/plan.md", versionId: null },
     rows: [],
     visibility: "visible",
-    coverage: { kind: "granted", complete: true, observation: "interval" },
+    unknownReason: null, coverage: { kind: "granted", complete: true, observation: "interval" },
     checkedAtMs: CHECKED_AT,
     freshness: "fresh",
     nextCursor: null,
@@ -56,7 +56,7 @@ function answer(overrides: Partial<AccessAnswer> = {}): AccessAnswer {
 
 // What main answers when it has no observation to read: no coverage at all.
 const UNKNOWN = answer({
-  coverage: { kind: "unavailable", complete: false, observation: "interval" },
+  unknownReason: "not-listed-yet", coverage: { kind: "unavailable", complete: false, observation: "interval" },
   checkedAtMs: null,
   freshness: "unknown",
 });
@@ -222,7 +222,7 @@ describe("About Access", () => {
   it("names a received file's own grant within its coverage", async () => {
     bridgeMock.getObjectAccess.mockResolvedValue(
       answer({
-        coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
+        unknownReason: null, coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
         rows: [share({ via: "received", sharerName: "Ice de Vera", access: "comment" })],
       }),
     );
@@ -286,7 +286,7 @@ describe("About Access", () => {
     ["hidden", "Shares do not include this file."],
     ["missing", "This file is no longer available at this path."],
   ] as const)("says what main found for a %s file whatever the account", async (visibility, words) => {
-    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, visibility });
+    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, visibility, unknownReason: null });
     render(<Access facts={SIGNED_OUT} />);
     const unknown = await screen.findByTestId("about-access-unknown");
     expect(unknown.dataset.reason).toBe(visibility);
@@ -486,9 +486,18 @@ describe("About Access", () => {
   });
 
   it("says a chat main cannot find is gone", async () => {
-    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, visibility: "missing" });
+    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, visibility: "missing", unknownReason: null });
     render(<ChatAccess channelWireId="wire-general" received={false} />);
     expect((await screen.findByTestId("about-access-unknown")).textContent).toBe("This chat is no longer in this workspace.");
+  });
+
+  it("names a hidden local chat in a share view as a chat", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue({ ...UNKNOWN, ref: { kind: "chat", channelWireId: "wire-local" }, visibility: "hidden", unknownReason: null });
+    render(<ChatAccess channelWireId="wire-local" received={false} facts={{ ...SYNCED, shareView: true }} />);
+    const unknown = await screen.findByTestId("about-access-unknown");
+    expect(unknown.dataset.reason).toBe("hidden");
+    expect(unknown.textContent).toBe("Shares do not include this chat.");
+    expect(within(unknown).queryByRole("button")).toBeNull();
   });
 
   it("does not read again when only the chat's share lane becomes known", async () => {

@@ -1,5 +1,7 @@
+import type { CommandId } from "../renderer/commands/commandRows";
+
 // Closed tuples and channel names shared by main, the bridge contract, and the
-// preload. This module imports nothing so main-side modules can read a tuple
+// preload. This module has no runtime imports so main-side modules can read a tuple
 // without loading the whole contract.
 
 export const MENU_COMMANDS = [
@@ -20,7 +22,7 @@ export const MENU_COMMANDS = [
   "install-update",
   "new-editor-group-right",
   "close-tab",
-] as const;
+] as const satisfies readonly (CommandId | "command-palette")[];
 
 // Explorer context menu: the renderer names what was right-clicked, main pops
 // a native menu built from main-owned labels over this closed set, and the

@@ -21,6 +21,66 @@ export function readWorkspacePackages(root) {
   }).filter(pkg => pkg.path !== "").sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * The workspace packages a change can affect: the packages its files are in,
+ * and every package that depends on one of them, directly or through others.
+ * Null means every package, because a file outside all packages, such as a
+ * lockfile, a crate, or a root script that package tests import, can affect
+ * any of them, and so does an empty change. Documentation changes affect none.
+ * `packages` carry a path relative to the repository root and their manifest.
+ * `references` are [target, importer] package names from packageReferences: a
+ * package whose files another package reaches into affects that package too.
+ */
+export function affectedPackages(files, packages, references = []) {
+  // With no changed file to attribute, as in an explicit job on an unchanged branch, every package runs.
+  if (!files.length) return null;
+  const owners = new Set();
+  for (const file of files) {
+    // docs/reference holds generated references that package tests compare against, so it is not documentation here.
+    if ((file.startsWith("docs/") || file.endsWith(".md")) && !file.startsWith("docs/reference/")) continue;
+    const owner = packages.filter(pkg => file.startsWith(`${pkg.path}/`)).sort((a, b) => b.path.length - a.path.length)[0];
+    if (!owner) return null;
+    owners.add(owner.name);
+  }
+  const dependents = new Map(packages.map(pkg => [pkg.name, []]));
+  for (const pkg of packages) {
+    for (const field of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+      // An alias such as "renamed": "workspace:@dohc/a@*" depends on @dohc/a.
+      for (const [name, spec] of Object.entries(pkg.manifest[field] ?? {})) {
+        const target = /^workspace:((?:@[^/@]+\/)?[^@]+)@/u.exec(String(spec))?.[1] ?? name;
+        dependents.get(target)?.push(pkg.name);
+      }
+    }
+  }
+  for (const [target, importer] of references) dependents.get(target)?.push(importer);
+  const pending = [...owners];
+  while (pending.length) for (const name of dependents.get(pending.pop())) if (!owners.has(name)) { owners.add(name); pending.push(name); }
+  return [...owners].sort();
+}
+
+/**
+ * Packages that reach into another package's files by relative path, which no
+ * manifest declares: a test in sync-relay that imports a desktop source file, or
+ * reads a fixture from another package. Returns [target, importer] name pairs.
+ * `packages` carry paths relative to `root`; build output is not read.
+ */
+export function packageReferences(root, packages) {
+  const owner = path => packages.filter(pkg => path === pkg.path || path.startsWith(`${pkg.path}/`)).sort((a, b) => b.path.length - a.path.length)[0];
+  const skipped = name => /(^|\/)(node_modules|dist|build|coverage)$/u.test(name.replaceAll("\\", "/"));
+  const references = new Set();
+  for (const pkg of packages) {
+    for (const file of globSync(`${pkg.path}/**/*.{ts,tsx,mts,cts,js,mjs,cjs}`, { cwd: root, exclude: skipped })) {
+      const path = file.replaceAll("\\", "/");
+      if (owner(path)?.name !== pkg.name) continue;
+      for (const match of readFileSync(join(root, path), "utf8").matchAll(/["'\x60](\.\.\/[^"'\x60\s$]*)["'\x60]/gu)) {
+        const target = owner(posix.normalize(posix.join(posix.dirname(path), match[1])));
+        if (target && target.name !== pkg.name) references.add(`${target.name}\n${pkg.name}`);
+      }
+    }
+  }
+  return [...references].sort().map(pair => pair.split("\n"));
+}
+
 const gateReadCalls = new Set(["include_str!", "include_bytes!", "read_to_string", "fs::read", "File::open",
   "readFileSync", "readFile", "createReadStream", "existsSync"]);
 const gatePathCalls = new Set(["Path::new", "PathBuf::from", "URL", "join", "resolve"]);
