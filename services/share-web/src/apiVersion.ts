@@ -1,8 +1,6 @@
 import {
   checkApiVersion, SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER, type ApiVersionRange,
 } from "@dohc/workspace-contracts/relay-values";
-import { readBoundedJson } from "@dohc/service-http";
-import { asRecord } from "@dohc/workspace-core/records";
 import { SHARE_WEB_SECURITY_HEADERS } from "./securityHeaders";
 
 export const SHARE_WEB_API_VERSIONS: ApiVersionRange = Object.freeze({min: 1, max: SHARE_WEB_API_VERSION});
@@ -32,20 +30,6 @@ export function shareWebApiVersionRefusal(request: Request, versions: ApiVersion
   if (check === "accepted") return null;
   const code = check === "malformed" ? "bad_request" : check === "too_old" ? "api_version_too_old" : "api_version_too_new";
   return Response.json({ok: false, code, api: "share-web", apiVersions: range, discovery: "/api/mcp",
-    error: check === "malformed"
-      ? "The share-web API version header must contain one positive integer. See /api/mcp."
-      : "The requested share-web API version is unsupported. See /api/mcp for supported versions.",
+    error: check === "malformed" ? "Invalid share-web API version header." : "Unsupported share-web API version.",
   }, {status: check === "malformed" ? 400 : 409, headers: SHARE_WEB_SECURITY_HEADERS});
-}
-
-// Only the internal share-web refusal may cross MCP unchanged. Relay refusals
-// continue through the opaque link-refusal mapper.
-export async function readShareWebApiVersionRefusal(response: Response, signal: AbortSignal): Promise<Response | null> {
-  if (![400, 409].includes(response.status) || response.headers.get("content-type")?.split(";", 1)[0] !== "application/json") return null;
-  const value = asRecord(await readBoundedJson(response.clone(), 4096, signal).catch(() => null));
-  const range = asRecord(value?.apiVersions);
-  if (value?.api !== "share-web" || value.ok !== false || value.discovery !== "/api/mcp" || typeof value.error !== "string" ||
-      !range || !Number.isSafeInteger(range.min) || !Number.isSafeInteger(range.max) ||
-      (response.status === 400 ? value.code !== "bad_request" : value.code !== "api_version_too_old" && value.code !== "api_version_too_new")) return null;
-  return Response.json(value, {status: response.status, headers: SHARE_WEB_SECURITY_HEADERS});
 }

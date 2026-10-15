@@ -45,7 +45,7 @@ export function CollectionFileEditor({session, path, blobSha256, available, onCl
     request.current?.abort();
     const controller = new AbortController(); request.current = controller;
     setStatus({kind: "loading"});
-    void fetchShareWeb(`/api/view/blob/${hash}`, {credentials: "same-origin", headers: {[SESSION_HEADER]: session}, signal: controller.signal})
+    void fetch(`/api/view/blob/${hash}`, {credentials: "same-origin", headers: {[SESSION_HEADER]: session}, signal: controller.signal})
       .then(async response => {
         if (!response.ok) throw new Error("refused");
         const bytes = new Uint8Array(await response.arrayBuffer());

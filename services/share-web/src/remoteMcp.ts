@@ -6,7 +6,6 @@ import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refu
 import {relayLinkRefusal} from "./linkRefusal";
 import { asRecord } from "@dohc/workspace-core/records";
 import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
-import { readShareWebApiVersionRefusal } from "./apiVersion";
 import { remoteLiveDocument } from "./remoteLiveDocument";
 import { shareLinkSummary } from "./shareSummary";
 import type { createLinkLiveClient } from "./linkLiveClient";
@@ -224,7 +223,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
 export async function serveRemoteMcp(request: Request, options: RemoteOptions): Promise<{ body: BodyInit | null; status: number; headers: Headers }> {
   const metadataResponse = await options.request("/api/view/meta");
   if (!metadataResponse.ok) {
-    const result = await readShareWebApiVersionRefusal(metadataResponse, options.signal) ?? await relayLinkRefusal(metadataResponse, options.signal);
+    const result = await relayLinkRefusal(metadataResponse, options.signal);
     await metadataResponse.body?.cancel().catch(() => {});
     return {body: result.body, status: result.status, headers: result.headers};
   }

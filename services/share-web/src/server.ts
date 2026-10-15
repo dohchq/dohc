@@ -11,7 +11,7 @@ import { extname, join } from "node:path";
 import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { TokenBucketLimiter, readBoundedJson } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core";
-import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER, SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER, type ApiVersionRange } from "@dohc/workspace-contracts/relay-values";
+import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER, SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
 import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type NamedLiveBrowserSessionContext } from "./namedLiveBrowserClient";
@@ -112,7 +112,6 @@ interface RelayCall {
 }
 
 export interface CreateShareWebApplicationOptions {
-  apiVersions?: ApiVersionRange;
   appLaunch?: AppLaunchConfig;
   publicEditRelease?: PublicEditRelease;
   relayUrl: string;
@@ -886,8 +885,11 @@ export function createShareWebApplication({
   linkLive: linkLiveConfig,
   publicEditRelease: releaseInput,
   appLaunch: appLaunchConfig,
-  apiVersions = SHARE_WEB_API_VERSIONS,
 }: CreateShareWebApplicationOptions): ShareWebApplication {
+  const apiVersions = SHARE_WEB_API_VERSIONS;
+  if (SHARE_WEB_API_VERSION < apiVersions.min || SHARE_WEB_API_VERSION > apiVersions.max) {
+    throw new TypeError("Share-web API version range must include the compiled version.");
+  }
   // Every relay request names the relay API version this build speaks.
   const fetchRelay: RelayFetch = (request) => {
     const headers = new Headers(request.headers);
@@ -1216,7 +1218,7 @@ export function createShareWebApplication({
     const appRequest = appLaunch?.matches(request) ?? false;
     if (!appRequest && !publicHosts.has(host)) return refused();
     const viewerAppRoute = pathname === "/api/apps/launch" || pathname === "/api/apps/summary";
-    if (viewerAppRoute ? request.headers.get("host") === viewerHost : !appRequest) {
+    if (viewerAppRoute ? viewerHost === undefined || request.headers.get("host") === viewerHost : !appRequest) {
       const refusal = shareWebApiVersionRefusal(request, apiVersions);
       if (refusal) return refusal;
     }

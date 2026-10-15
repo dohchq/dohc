@@ -1,12 +1,18 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createShareWebApplication, type CreateShareWebApplicationOptions } from "./server";
 
-const compiledVersion = vi.hoisted(() => ({value: 1}));
+const build = vi.hoisted(() => ({compiled: 1, accepted: {min: 1, max: 1}}));
 vi.mock("@dohc/workspace-contracts/relay-values", async importOriginal => {
   const actual = await importOriginal<typeof import("@dohc/workspace-contracts/relay-values")>();
-  return {...actual, get SHARE_WEB_API_VERSION() {return compiledVersion.value;}};
+  return {...actual, get SHARE_WEB_API_VERSION() {return build.compiled;}};
 });
-afterEach(() => {compiledVersion.value = 1;});
+vi.mock("./apiVersion", async importOriginal => {
+  const actual = await importOriginal<typeof import("./apiVersion")>();
+  return {...actual, get SHARE_WEB_API_VERSIONS() {return build.accepted;}};
+});
+// A later build speaks `compiled` and still accepts versions from `min`.
+const release = (compiled: number, min: number) => {build.compiled = compiled; build.accepted = {min, max: compiled};};
+afterEach(() => release(1, 1));
 
 const host = "share.example.com", origin = "https://" + host;
 const header = "x-dohc-share-web-api-version";
@@ -40,7 +46,10 @@ function fixture(extra: Partial<CreateShareWebApplicationOptions> = {}) {
   const send = (path: string, init: RequestInit = {}) => app.handle(new Request(origin + path, {...init, headers: {host, ...init.headers}}));
   const exchange = (version?: string, agent = false) => send(agent ? "/api/mcp/exchange" : "/api/exchange", {method: "POST",
     headers: {"content-type": "application/json", ...versionHeader(version)}, body: JSON.stringify({secret})});
-  return {app, send, exchange, relay, calls, revoke() {revoked = true;}};
+  const mcp = (bearer: string, version?: string) => send("/mcp", {method: "POST", headers: {authorization: "Bearer " + bearer,
+    "content-type": "application/json", accept: "application/json, text/event-stream", ...versionHeader(version)},
+    body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/list"})});
+  return {app, send, exchange, mcp, relay, calls, revoke() {revoked = true;}};
 }
 
 it.each(routes)("refuses %s %s before authentication, body reads or upstream calls", async (method, path) => {
@@ -80,31 +89,35 @@ it("keeps wrong hosts, unknown paths, unsupported methods and excluded routes op
   }
 });
 
+it("gates viewer app routes the same way with or without app launch configured", async () => {
+  for (const path of ["/api/apps/launch", "/api/apps/summary"]) {
+    const results = [];
+    for (const appLaunch of [undefined, {viewerOrigin: origin, appDomain: "example.net"}]) {
+      const f = fixture({appLaunch});
+      const response = await f.send(path, {method: "POST", headers: {[header]: "99"}});
+      results.push({status: response.status, body: await response.json(), headers: [...response.headers]});
+      expect((await f.app.handle(new Request("https://wrong.test" + path, {method: "POST", headers: {host: "wrong.test", [header]: "99"}}))).status).toBe(404);
+    }
+    expect(results[0]).toEqual(results[1]);
+    expect(results[0]!.status).toBe(409);
+  }
+});
+
 it("keeps discovery ungated and publishes route-specific versions", async () => {
-  const result = await fixture({apiVersions: {min: 2, max: 2}}).send("/api/mcp", {headers: {[header]: "garbage"}});
+  release(2, 2);
+  const result = await fixture().send("/api/mcp", {headers: {[header]: "garbage"}});
   expect(result.status).toBe(200);
   expect(await result.json()).toMatchObject({api: "share-web", apiVersions: {min: 2, max: 2}, versionHeader: header, defaultVersion: 1, mcpApiVersions: {min: 1, max: 2}});
 });
 
-it("passes an internal MCP version refusal unchanged rather than relabeling requests", async () => {
-  const f = fixture({apiVersions: {min: 2, max: 2}});
-  expect((await f.exchange()).status).toBe(409);
-  expect((await f.exchange("1")).status).toBe(409);
-  expect((await f.exchange("2")).status).toBe(200);
-  expect((await f.exchange("1", true)).status).toBe(200);
-  const exchanged = await f.exchange(undefined, true);
-  expect(exchanged.status).toBe(200);
-  const {bearer} = await exchanged.json();
-  const result = await f.send("/mcp", {method: "POST", headers: {authorization: "Bearer " + bearer, "content-type": "application/json", accept: "application/json, text/event-stream"},
-    body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/list"})});
-  // A current compiled v1 bridge against a v2-only HTTP API must preserve the refusal, not impersonate v2.
-  expect(result.status).toBe(409);
-  expect(await result.json()).toMatchObject({api: "share-web", code: "api_version_too_old", apiVersions: {min: 2, max: 2}, discovery: "/api/mcp"});
-  expect((await f.exchange("99", true)).status).toBe(409);
+it("refuses to start unless it accepts the version its own MCP bridge sends", () => {
+  build.accepted = {min: 2, max: 2};
+  expect(() => fixture()).toThrow(TypeError);
 });
 
 it.each([undefined, "1", "2"])("keeps authorization, revocation and body/rate bounds under every accepted version %s", async version => {
-  const f = fixture({apiVersions: {min: 1, max: 2}});
+  release(2, 1);
+  const f = fixture();
   const headers = versionHeader(version);
   expect((await f.send("/api/view/meta", {headers})).status).toBe(404);
   const exchanged = await f.exchange(version);
@@ -114,6 +127,8 @@ it.each([undefined, "1", "2"])("keeps authorization, revocation and body/rate bo
   expect((await f.send("/api/view/meta", {headers: authorized})).status).toBe(200);
   expect((await f.send("/api/view/collection-writes", {method: "POST", headers: {...authorized, origin, "content-type": "application/json"}, body: "{}"})).status).toBe(404);
   expect(new URL(f.calls.at(-1)!.url).pathname).toBe("/sync/link/share");
+  const {bearer} = await (await f.exchange(version, true)).json();
+  expect((await f.mcp(bearer, version)).status).toBe(200);
   const calls = f.calls.length;
   const oversized = JSON.stringify({secret, padding: "x".repeat(8192)});
   for (let i = 0; i < 12; i++) expect((await f.send("/api/exchange", {method: "POST", headers: {...headers, "content-type": "application/json"}, body: oversized})).status).toBe(404);
@@ -121,6 +136,7 @@ it.each([undefined, "1", "2"])("keeps authorization, revocation and body/rate bo
   expect(f.calls).toHaveLength(calls);
   f.revoke();
   expect((await f.send("/api/view/meta", {headers: authorized})).status).toBe(404);
+  expect((await f.mcp(bearer, version)).status).toBe(404);
 });
 
 it("forwards only relay log keys and never interprets query versions", async () => {
@@ -148,11 +164,12 @@ it("returns the same public refusal with account routes enabled or disabled", as
   expect(results[0]).toEqual(results[1]);
 });
 
-it("does not consume an untrusted body before refusing its wire version", async () => {
+// Production buffers every other body before `handle` runs (`streamBody` in main.ts).
+it.each(["/mcp", "/api/view/collection-writes"])("does not consume a streamed %s body before refusing its wire version", async path => {
   let pulled = 0;
   const stream = new ReadableStream<Uint8Array>({pull() {pulled++;}}, {highWaterMark: 0});
   const f = fixture();
-  const request = new Request(origin + "/api/mcp/exchange", {method: "POST", headers: {host, [header]: "99"}, body: stream, duplex: "half"} as RequestInit);
+  const request = new Request(origin + path, {method: "POST", headers: {host, [header]: "99"}, body: stream, duplex: "half"} as RequestInit);
   expect((await f.app.handle(request)).status).toBe(409);
   expect(pulled).toBe(0);
   expect(f.calls).toHaveLength(0);
@@ -160,19 +177,19 @@ it("does not consume an untrusted body before refusing its wire version", async 
 });
 
 it("keeps headerless MCP working when a later build retires ordinary HTTP v1", async () => {
-  compiledVersion.value = 2;
-  const f = fixture({apiVersions: {min: 2, max: 2}});
+  release(2, 2);
+  const f = fixture();
   const {bearer} = await (await f.exchange(undefined, true)).json();
   expect((await f.exchange()).status).toBe(409);
-  const result = await f.send("/mcp", {method: "POST", headers: {authorization: "Bearer " + bearer, "content-type": "application/json", accept: "application/json, text/event-stream"},
-    body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/list"})});
+  const result = await f.mcp(bearer);
   expect(result.status).toBe(200);
   expect(await result.text()).toContain("dohc_list_files");
 });
 
 it("never forwards a client's version header to the relay or auth service", async () => {
   const authRequests: Request[] = [];
-  const f = fixture({apiVersions: {min: 1, max: 2}, accountAuth: {publicOrigin: origin, upstreamUrl: "https://auth.test"},
+  release(2, 1);
+  const f = fixture({accountAuth: {publicOrigin: origin, upstreamUrl: "https://auth.test"},
     fetchAuth: async request => {authRequests.push(request); return Response.json(null);}});
   expect((await f.exchange("2")).status).toBe(200);
   expect((await f.send("/api/account/session", {headers: {[header]: "2", "x-dohc-api-version": "99"}})).status).toBe(200);

@@ -1,5 +1,5 @@
-import {SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER} from "@dohc/workspace-contracts/relay-values";
 // @vitest-environment jsdom
+import {SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER} from "@dohc/workspace-contracts/relay-values";
 // App discovery has its own request, cancellation, and rendering tests.
 vi.mock("./PublishedApps", () => ({PublishedApps: () => null}));
 import { jsonResponse, requestPath as fullRequestPath, settle, setControlValue } from "./testing";
