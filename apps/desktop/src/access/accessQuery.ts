@@ -21,8 +21,13 @@ export function decodeAccessCursor(cursor: string, query: string): string | null
   } catch { return null; }
 }
 
-export function unknownAccess(ref: AccessObjectRef | null, visibility: AccessAnswer["visibility"] = "unknown"): AccessAnswer {
-  return { ref, rows: [], visibility, coverage: { kind: "unavailable", complete: false, observation: "interval" },
+export type AccessRosterObservation = RosterObservation & { unknownReason?: NonNullable<AccessAnswer["unknownReason"]>; visibility?: "hidden" };
+
+export function unknownAccess(ref: AccessObjectRef | null, ...cause:
+  | [unknownReason: NonNullable<AccessAnswer["unknownReason"]>, visibility?: "visible" | "unknown"]
+  | [unknownReason: null, visibility: "hidden" | "missing"]): AccessAnswer {
+  const [unknownReason, visibility = "unknown"] = cause;
+  return { ref, rows: [], visibility, unknownReason, coverage: { kind: "unavailable", complete: false, observation: "interval" },
     checkedAtMs: null, freshness: "unknown", nextCursor: null };
 }
 
@@ -113,7 +118,7 @@ function receivedRows(observation: ReceivedObservation, recipientUserId: string)
 export function createAccessQuery() {
   const granted = new WeakMap<RosterListing, ReturnType<typeof createAccessIndex>>();
   const received = new WeakMap<NonNullable<ReceivedObservation["inventory"]>, Map<string, ReturnType<typeof createAccessIndex>>>();
-  function indexFor(observation: RosterObservation | ReceivedObservation, recipientUserId: string) {
+  function indexFor(observation: AccessRosterObservation | ReceivedObservation, recipientUserId: string) {
     if ("listing" in observation) {
       if (!observation.listing || observation.listing.grants === null) return null;
       let index = granted.get(observation.listing);
@@ -128,10 +133,16 @@ export function createAccessQuery() {
     return index;
   }
   return {
-    answer(input: { observation: RosterObservation | ReceivedObservation; recipientUserId: string; cursorScope: string;
+    answer(input: { observation: AccessRosterObservation | ReceivedObservation; recipientUserId: string; cursorScope: string;
       ref: AccessObjectRef | null; coverage: "granted" | "received-own-grant" | "received-account"; shareId?: string; shareRoot?: boolean; cursor?: string }): AccessAnswer {
+      if ("listing" in input.observation && input.observation.visibility === "hidden") return unknownAccess(input.ref, null, "hidden");
       const index = indexFor(input.observation, input.recipientUserId);
-      if (!index) return unknownAccess(input.ref, input.ref === null ? "unknown" : "visible");
+      if (!index) {
+        const reason = "listing" in input.observation
+          ? input.observation.unknownReason ?? (input.observation.listing ? "unreadable" : "not-listed-yet")
+          : "not-listed-yet";
+        return unknownAccess(input.ref, reason, input.ref === null ? "unknown" : "visible");
+      }
       let rows = input.shareRoot ? index.rows : input.ref?.kind === "path" ? index.forPath(input.ref)
         : input.ref?.kind === "chat" ? index.forChat(input.ref.channelWireId) : index.rows;
       if (input.shareId) {
@@ -140,8 +151,8 @@ export function createAccessQuery() {
       }
       const query = digest(JSON.stringify([index.fingerprint, input.cursorScope, input.ref, input.coverage, input.shareId, input.shareRoot]));
       const page = accessPage(rows, key, query, input.cursor);
-      if (!page) return unknownAccess(input.ref);
-      return { ref: input.ref, ...page, visibility: "visible",
+      if (!page) return unknownAccess(input.ref, "changed");
+      return { ref: input.ref, ...page, visibility: "visible", unknownReason: null,
         coverage: { kind: input.coverage, complete: true, observation: "interval" },
         checkedAtMs: input.observation.checkedAtMs, freshness: input.observation.freshness };
     },

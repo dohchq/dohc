@@ -96,7 +96,7 @@ describe("dataset CLI", () => {
     const send = vi.fn(async () => result);
     const executed = await executeCli({argv:["--as-agent","dataset","invoke",JSON.stringify(request),"--json"],request:send,env:{}});
     expect(executed.exitCode).toBe(0);
-    expect(JSON.parse(executed.stdout)).toEqual({schemaVersion:2,...result});
+    expect(JSON.parse(executed.stdout)).toEqual({schemaVersion:3,...result});
     expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({verb:"dataset",args:expect.objectContaining({actor:"agent",request})}));
     expect(parseCliResult("dataset",result)).toEqual(result);
   });

@@ -51,10 +51,22 @@ fn parameters(held: &Registration) -> [&str; 5] {
     ]
 }
 
-pub(super) fn initial_digest(held: &Registration) -> Result<String, ApplicationError> {
+pub(super) fn initial_digest(
+    namespace: &str,
+    binding: &LiveObjectBinding,
+) -> Result<String, ApplicationError> {
     Ok(hex_sha256(
-        &serde_json::to_vec(&("accepted-history-v1", parameters(held)))
-            .map_err(|_| ApplicationError::Corrupt)?,
+        &serde_json::to_vec(&(
+            "accepted-history-v1",
+            [
+                namespace,
+                &binding.workspace_id,
+                &binding.main_version_id,
+                &binding.object_id,
+                &binding.lineage_claim_id,
+            ],
+        ))
+        .map_err(|_| ApplicationError::Corrupt)?,
     ))
 }
 
@@ -194,7 +206,7 @@ pub(super) fn initialize(
         terminal: None,
         binding: held.binding.clone(),
         state_digest: put_binary_blob(tx, baseline)?,
-        evidence_digest: initial_digest(held)?,
+        evidence_digest: initial_digest(&held.namespace, &held.binding)?,
     };
     insert_checkpoint(
         tx,
@@ -362,7 +374,7 @@ fn checkpoint_in(
     }
     if count == 0
         && (state_digest != held.binding.lineage_claim_id
-            || evidence_digest != initial_digest(held)?)
+            || evidence_digest != initial_digest(&held.namespace, &held.binding)?)
     {
         return Err(ApplicationError::Corrupt);
     }
@@ -572,7 +584,7 @@ fn segment_position(
 
 /// A full accepted history is initialized only by verified bootstrap or adoption.
 /// Other application users can keep applying without gaining restore authority.
-pub(super) fn append(
+pub(super) fn append_native(
     tx: &Transaction<'_>,
     held: &Registration,
     event: &AdmittedLiveUpdate,
@@ -709,26 +721,16 @@ fn append_inner(
     };
     let count = count + 1;
     let evidence = next_digest(&previous, count, &event.metadata)?;
-    let update = put_binary_blob(tx, &event.update_bytes)?;
-    tx.execute(
-        "INSERT INTO live_accepted_updates VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-        params![
-            p[0],
-            p[1],
-            p[2],
-            p[3],
-            p[4],
-            count,
-            event.metadata.accepted.receipt.journal_cursor,
-            event.metadata.accepted.receipt.delivery_id,
-            native_state::json(&event.metadata)?,
-            update,
-            events,
-            bytes,
-            evidence
-        ],
-    )
-    .map_err(write_sql)?;
+    append(
+        tx,
+        &held.namespace,
+        &held.binding,
+        event,
+        count,
+        events,
+        bytes,
+        &evidence,
+    )?;
     if restored.is_some()
         || events == CHECKPOINT_EVENTS
         || bytes >= CHECKPOINT_BYTES
@@ -780,6 +782,47 @@ fn append_inner(
             budget,
         )?;
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+    event: &AdmittedLiveUpdate,
+    count: i64,
+    events: i64,
+    bytes: i64,
+    evidence: &str,
+) -> Result<(), ApplicationError> {
+    let p = [
+        namespace,
+        &binding.workspace_id,
+        &binding.main_version_id,
+        &binding.object_id,
+        &binding.lineage_claim_id,
+    ];
+    let update = put_binary_blob(tx, &event.update_bytes)?;
+    tx.execute(
+        "INSERT INTO live_accepted_updates VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        params![
+            p[0],
+            p[1],
+            p[2],
+            p[3],
+            p[4],
+            count,
+            event.metadata.accepted.receipt.journal_cursor,
+            event.metadata.accepted.receipt.delivery_id,
+            native_state::json(&event.metadata)?,
+            update,
+            events,
+            bytes,
+            evidence
+        ],
+    )
+    .map_err(write_sql)?;
     Ok(())
 }
 
@@ -1003,7 +1046,7 @@ pub(super) fn accepted_source(
     require_document(held, &metadata.accepted.binding)?;
     metadata.accepted.receipt.validate()?;
     let previous = if count == 1 {
-        initial_digest(held)?
+        initial_digest(&held.namespace, &held.binding)?
     } else {
         let p = parameters(held);
         let length: i64 = conn.query_row(
@@ -1131,7 +1174,7 @@ mod tests {
                 binding,
                 live: true,
             };
-            let initial = initial_digest(&held).unwrap();
+            let initial = initial_digest(&held.namespace, &held.binding).unwrap();
             assert_eq!(initial, row["initialDigest"].as_str().unwrap(), "{case}");
             assert_eq!(
                 serde_json::to_string(&metadata).unwrap(),

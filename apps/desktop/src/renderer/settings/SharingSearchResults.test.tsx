@@ -27,7 +27,7 @@ function share(index: number): AccessShareRow {
 }
 function page(rows: AccessShareRow[], nextCursor: string | null, coverage: AccessAnswer["coverage"]["kind"] = "granted"): AccessAnswer {
   return {
-    ref: null, rows, visibility: "visible", coverage: { kind: coverage, complete: true, observation: "interval" },
+    ref: null, rows, visibility: "visible", unknownReason: null, coverage: { kind: coverage, complete: true, observation: "interval" },
     checkedAtMs: 1, freshness: "fresh", nextCursor,
   };
 }

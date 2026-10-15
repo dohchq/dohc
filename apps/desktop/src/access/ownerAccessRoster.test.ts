@@ -27,28 +27,28 @@ it.each([
 });
 
 it.each([
-  ["different server", { ...credentials, serverUrl: "https://other-server.test" }],
-  ["different server with a relay matching the workspace server", { ...credentials,
+  ["different server", "other-server", { ...credentials, serverUrl: "https://other-server.test" }],
+  ["different server and account", "other-server", { ...credentials, serverUrl: "https://other-server.test", userId: "other-owner" }],
+  ["different server with a relay matching the workspace server", "other-server", { ...credentials,
     serverUrl: "https://other-server.test", relayUrl: workspace.remote.serverUrl }],
-  ["different account", { ...credentials, userId: "other-owner" }],
-  ["signed out", null],
-  ["missing relay", { ...credentials, relayUrl: undefined }],
-] as const)("withholds owner Access for %s", async (_case, account) => {
+  ["different account", "other-account", { ...credentials, userId: "other-owner" }],
+  ["different account without relay", "other-account", { ...credentials, userId: "other-owner", relayUrl: undefined }],
+  ["signed out", "signed-out", null],
+  ["missing relay", "unreadable", { ...credentials, relayUrl: undefined }],
+] as const)("withholds owner Access for %s", async (_case, unknownReason, account) => {
   const h = harness(workspace, account);
   for (const answer of [await h.owner.object(workspace, { ref }), h.owner.sharing(workspace, { lane: "granted" })]) {
-    expect(answer).toMatchObject({ freshness: "unknown", checkedAtMs: null, rows: [], coverage: { complete: false } });
+    expect(answer).toMatchObject({ freshness: "unknown", unknownReason, checkedAtMs: null, rows: [], coverage: { complete: false } });
   }
   expect(h.readObservation).not.toHaveBeenCalled();
 });
 
-it.each([
-  { ...workspace, remote: undefined },
-  { ...workspace, shareView: { shareId: "received", granterEmail: null, genericChatWritable: false,
-    grantedSelector: { paths: ["Notes"], versionId: null, access: "view" as const } } },
-])("does not use an owner's roster without an owned remote workspace", async entry => {
+it("does not use an owner's roster without an enrolled workspace", async () => {
+  const entry = { ...workspace, remote: undefined };
+  const unknownReason = "not-synced";
   const h = harness(entry, credentials);
   for (const answer of [await h.owner.object(entry, { ref }), h.owner.sharing(entry, { lane: "granted" })]) {
-    expect(answer).toMatchObject({ freshness: "unknown", checkedAtMs: null, rows: [], coverage: { complete: false } });
+    expect(answer).toMatchObject({ freshness: "unknown", unknownReason, checkedAtMs: null, rows: [], coverage: { complete: false } });
   }
   expect(h.readObservation).not.toHaveBeenCalled();
 });
@@ -60,9 +60,19 @@ function harness(entry: Pick<RegistryEntry, "workspaceId" | "remote" | "shareVie
     resolve: async (_workspace: typeof entry, ref) => ({ ref, visibility: "visible" as const }),
     roster: workspace => ownerAccessRoster(workspace, account, readObservation),
     received: () => ({ inventory: null, checkedAtMs: null, freshness: "unknown" as const }),
-    account: () => account?.relayUrl ? { ...account, relayUrl: account.relayUrl, generation: 1 } : null,
+    account: () => account ? { ...account, generation: 1 } : null,
     scope: () => "workspace-account-scope", assertCurrent: () => undefined,
     permissions: async () => { throw new Error("unused"); }, refresh: async () => undefined,
   });
   return { owner, readObservation };
 }
+
+it("withholds the owner roster by design in a share view", async () => {
+  const entry = { ...workspace, shareView: { shareId: "received", granterEmail: null, genericChatWritable: false,
+    grantedSelector: { paths: ["Notes"], versionId: null, access: "view" as const } } };
+  const h = harness(entry, credentials);
+  for (const answer of [await h.owner.object(entry, { ref }), h.owner.sharing(entry, { lane: "granted" })]) {
+    expect(answer).toMatchObject({ visibility: "hidden", unknownReason: null, rows: [], coverage: { kind: "unavailable" } });
+  }
+  expect(h.readObservation).not.toHaveBeenCalled();
+});
