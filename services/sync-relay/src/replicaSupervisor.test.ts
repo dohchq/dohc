@@ -7,6 +7,7 @@ import { closeTestStorages, inspectDatabase, storagePath, tempRoot, testStorage 
 import { createReplicaReadPrincipal } from "./replicaReadPrincipal";
 import { createReplicaSupervisor, type ReplicaChild, type ReplicaChildInput } from "./replicaSupervisor";
 import { createReplicaEngineStarter } from "./replicaEngine";
+import {registered, cleanupLiveDeliveryFixtures} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 
 const fsFailure = vi.hoisted(() => ({ path: "" }));
 vi.mock("node:fs/promises", async original => {
@@ -110,6 +111,44 @@ function deferred() {
   const promise = new Promise<void>(done => { resolve = done; });
   return { promise, resolve };
 }
+
+it("wakes for a journal commit without an ordinary log write", async () => {
+  const f = registered({deployment: true});
+  f.storage.claimWorkspaceIdentity({workspaceId: "workspace", replicationEpoch: "epoch", streamIdentity: "stream"});
+  const pull = vi.fn(async () => {});
+  const supervisor = createReplicaSupervisor({storage: f.storage, storeRoot: await tempRoot("journal-wake"),
+    startChild: async () => ({pull, close: async () => {}})});
+  try {
+    await supervisor.activate("workspace");
+    expect(pull).toHaveBeenCalledTimes(1);
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update(), "journal-only")).result.kind).toBe("accepted");
+    expect(f.raw.prepare("SELECT count(*) AS n FROM sync_relay_log").get()!.n).toBe(0);
+    await expect.poll(() => pull.mock.calls.length).toBe(2);
+    await supervisor.settled("workspace");
+  } finally {await supervisor.close(); f.close(); cleanupLiveDeliveryFixtures();}
+});
+
+it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("measures the owner's journal commit path with an active replica observer", async () => {
+  const samples:number[]=[];
+  for(let sample=0;sample<21;sample++) {
+    const f=registered({deployment:true});
+    f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"epoch",streamIdentity:"stream"});
+    const supervisor=createReplicaSupervisor({storage:f.storage,storeRoot:await tempRoot("journal-push-measure"),
+      startChild:async()=>({pull:async()=>{},close:async()=>{}})});
+    try {
+      await supervisor.activate("workspace");let elapsed=0;
+      for(let i=0;i<100;i++) {
+        const input=f.capture(f.update("counter",String(i)),`measure-${i}`), start=performance.now();
+        expect(f.storage.commitLiveUpdateJournal(input).result.kind).toBe("accepted");elapsed+=performance.now()-start;
+      }
+      samples.push(elapsed/100);
+    }finally{await supervisor.close();f.close();cleanupLiveDeliveryFixtures();}
+  }
+  samples.sort((a,b)=>a-b);
+  const result={median:samples[10],p95:samples[19],samples,rows:100};
+  if(process.env.DOHC_REPLICA_MEASURE_OUT)writeFileSync(process.env.DOHC_REPLICA_MEASURE_OUT,JSON.stringify(result));
+  console.log(`OWNER_COMMIT_MS_PER_ROW median=${result.median} p95=${result.p95} samples=21 rows=100`);
+},120_000);
 
 it("coalesces an append during pull and never starts two children for one workspace", async () => {
   const { storage } = await fixture();

@@ -24,7 +24,7 @@ function card(data: PostData, onOpenPath?: (path: string) => void, onOpen = vi.f
   return onOpen;
 }
 
-const opening = {
+const opening = { presentation: { group: "fixture", hue: null, self: false },
   id: "message-1", authorKind: "automation" as const, authorDisplayName: "Stamp the finish date",
   authorOwnerDisplayName: "Ice", createdAtMs: 1, bodySnippet: "Finished Book hotel",
 };

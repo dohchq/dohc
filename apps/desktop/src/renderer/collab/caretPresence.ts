@@ -1,5 +1,4 @@
 import type { Awareness } from "y-protocols/awareness";
-import type { DocPresenceUser } from "./docPresence";
 
 // Remote collaboration carets (CollaborationCaret, editor/MarkdownEditor.tsx).
 // docPresence.ts already binds an Awareness to the doc for exactly this:
@@ -13,8 +12,8 @@ import type { DocPresenceUser } from "./docPresence";
 // Muted, brand-adjacent hues (warm paper + graphite) — deliberately not
 // rainbow. Picked at a saturation/lightness band that reads as a clear
 // border on both the light paper background and the dark graphite
-// background, and gives the extension's white caret-label text comfortable
-// contrast against every entry (verified >= 3.9:1 white-on-color).
+// background. Caret labels use the theme's paper foreground (--dohc-bg),
+// set in styles.css.
 export const CARET_PALETTE = [
   "#767e44", // olive
   "#905d47", // clay
@@ -54,8 +53,8 @@ export function caretFallbackName(clientId: number): string {
 // this never clobbers a real display name; otherwise falls back to a stable
 // "Editor N". Color is always the hash — never trusts an existing value, so
 // every client agrees on the same peer's color from the clientID alone.
-export function resolveCaretUser(awareness: Awareness): DocPresenceUser {
-  const existing = (awareness.getLocalState() as { user?: Partial<DocPresenceUser> } | null)
+export function resolveCaretUser(awareness: Awareness): { name: string; color: string } {
+  const existing = (awareness.getLocalState() as { user?: { name?: string } } | null)
     ?.user;
   const name =
     typeof existing?.name === "string" && existing.name.trim()

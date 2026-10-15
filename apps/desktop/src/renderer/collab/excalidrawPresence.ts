@@ -1,5 +1,3 @@
-import { presenceColorHash } from "./presenceColorHash";
-import { presencePalette } from "./presencePalette";
 import type {
   Collaborator,
   ExcalidrawImperativeAPI,
@@ -90,9 +88,6 @@ export function excalidrawPresenceTopic(input: {
   ])}`;
 }
 
-function colorFor(value: string | number) {
-  return presencePalette(presenceColorHash(value) % 7);
-}
 
 function cleanName(value: unknown): string {
   if (typeof value !== "string") return "Someone";
@@ -186,12 +181,10 @@ function collaboratorsFromAwareness(
         ? state.button
         : undefined;
     const selectedElementIds = cleanSelection(state.selectedElementIds);
-    const color = presencePalette(typeof rawUser.paletteSlot === "number" ? rawUser.paletteSlot : 3);
     collaborators.set(socketId, {
       socketId,
       id: socketId,
       username: cleanName(rawUser.name),
-      color: { ...color },
       ...(pointer ? { pointer } : {}),
       ...(button ? { button } : {}),
       ...(selectedElementIds ? { selectedElementIds } : {}),
@@ -223,7 +216,6 @@ export function bindExcalidrawPresence(options: {
     clientId: options.clientId,
     user: {
       name: cleanName(options.displayName),
-      color: colorFor(options.clientId).stroke,
     },
     onPeers: () => undefined,
   });
