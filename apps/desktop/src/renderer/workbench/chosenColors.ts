@@ -2,8 +2,8 @@ import type { DesktopUserSettings } from "../../settings/userSettings";
 import type { IdentityHue } from "../tokens";
 
 // The colors the settings file chooses for you and your agent. ChatAvatar
-// reads them through useSyncExternalStore, so a change repaints only the
-// avatars that show them, and the shell does not render again.
+// and canvas presentation subscribe, so a change repaints their colours
+// without rendering the shell again.
 
 let chosen: Record<"human" | "agent", IdentityHue | null> = { human: null, agent: null };
 const listeners = new Set<() => void>();

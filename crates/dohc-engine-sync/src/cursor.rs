@@ -118,6 +118,9 @@ pub fn commit_relay_cursor(
                 ],
             )
             .map_err(SyncError::persist)?;
+            if passive {
+                dohc_engine_storage::replica::advance_frontiers(tx, workspace_id, cursor.cursor, 0)?;
+            }
             // Cursor commit is the per-pass level trigger. Re-scan here so an
             // oversized unclaimed base stays visible until it can originate.
             let sharing_declined = if passive {

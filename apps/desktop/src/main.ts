@@ -1,3 +1,4 @@
+import { forgetWorkspacePresentation } from "./workspaces/actorPresentation";
 import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
 import { writeTypingCheckpointSync, typingRecoveryFailure, hasUnresolvedTypingCheckpoints, flushTypingCheckpoints, writeTypingCheckpoint, readTypingCheckpoints, retireTypingCheckpoint, importTypingCheckpoints, type TypingRecoveryFailure } from "./workspaces/outageTypingRecovery";
@@ -98,7 +99,7 @@ import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster } from "./access/accessOwner";
 import { hasAccessChat, locateAccessVersionPath, resolveAccessFileObject, resolveAccessObject } from "./access/accessObjectResolution";
-import { createShareCopyHandler } from "./ipc/shareCopyHandler";
+import { createShareCopyHandler, createShareCopyReader } from "./ipc/shareCopyHandler";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
 import { assertResolvedWorkspacePath } from "./workspaces/workspaceRealPath";
@@ -1575,7 +1576,7 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
     return id;
   },
   assertCurrent: operation => operation.assertCurrent(),
-  account: () => cachedCredentials?.relayUrl ? { userId: cachedCredentials.userId, email: cachedCredentials.email,
+  account: () => cachedCredentials ? { userId: cachedCredentials.userId, email: cachedCredentials.email,
     relayUrl: cachedCredentials.relayUrl, generation: credentialCacheGeneration } : null,
   roster: ({ workspace }) => ownerAccessRoster(workspace, cachedCredentials, shareRosters.observation),
   received: () => receivedShareAcquisition.observation(),
@@ -1784,6 +1785,7 @@ const workspaceAuthorities = createWorkspaceAuthorityOwner({
   canonicalizeRoot: (rootPath) => realpathSync.native(rootPath),
   createState: createDesktopWorkspaceAuthorityState,
   disposeState: async (state, binding, workspaceAtDisposal) => {
+    forgetWorkspacePresentation(binding.workspaceId);
     await folderAppDetection.retire(binding.attachmentId);
     const physicalWorkspace = {
       ...workspaceAtDisposal,
@@ -2355,6 +2357,14 @@ function recoverOutageTyping(workspace: CreatedWorkspace & {attachmentId: symbol
 }
 
 const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
+  onHeldFiles: (workspaceId, heldFiles) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      if (rendererWorkspaceSessions.current(win.webContents)?.workspaceId === workspaceId) {
+        win.webContents.send(CHANNELS.captureHolds, { workspaceId, heldFiles });
+      }
+    }
+  },
   cloudStateFor: (workspaceId) => {
     const remote = findWorkspace(workspaceId)?.remote;
     return {
@@ -3084,7 +3094,7 @@ async function syncWorkspaceForDispatch(
               // Guarded above: a shared view already returned false.
               shareView: false,
             },
-            { onCaptureOutcome: () => undefined, onAtomicPlacementUnavailable: () => undefined, onRecoveryUnavailable: () => undefined, onKeptFiles: () => undefined },
+            { onCaptureOutcome: () => undefined, onAtomicPlacementUnavailable: () => undefined, onRecoveryUnavailable: () => undefined, onKeptFiles: () => undefined, onHeldFiles: () => undefined },
             requireEngineSessions(),
           );
           if (!capture) return false;
@@ -3255,6 +3265,7 @@ async function closeDispatchRunActivity(
       }), options);
       if (closing === null) return;
       await closing;
+      forgetWorkspacePresentation(current.workspaceId);
       if (!joined) lease.assertCurrent();
     },
   );
@@ -4552,7 +4563,12 @@ const chatWrites = createChatWrites({
 
 let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
+const shareCopyReader = createShareCopyReader<RegistryEntry>({
+  remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
+  relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
+});
 const { startDesktopCliServer } = createDesktopCliServer({
+  shareCopy: shareCopyReader,
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
   dataset: (input, agent) => {
@@ -5873,6 +5889,11 @@ function registerIpcHandlers(): void {
       };
     },
     automationAuthor, notifyRenderer,
+    recordHeldFiles: (workspace, files) => withWorkspaceActivityState(workspace.workspaceId, lease => {
+      const current = canonicalWorkspaceFor(lease);
+      if (current.attachmentId !== workspace.attachmentId) return;
+      workspaceActivity.recordHeldFiles(current, lease.state.activity, files);
+    }),
     // A shared view keeps no runs: its automations run on the owner's computer.
     signedInAccount: () => cachedCredentials?.userId ?? null,
     automationRunOnThisComputer: async (workspaceId, automationId, claimId) =>
@@ -5939,7 +5960,7 @@ function registerIpcHandlers(): void {
   registerCloudIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: handleIpc,
     assertTrustedSender, cloudLogin, clearCachedCredentials, refreshCredentialCache,
-    warmCredentialCache, currentCredentials: () => cachedCredentials,
+    warmCredentialCache, currentCredentials: () => cachedCredentials, localInstallationId,
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
     reconcileCloud: () => activity.reconcileCloud(),
     notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
@@ -6063,10 +6084,10 @@ function registerIpcHandlers(): void {
     flushSourceCapture: async (workspace: DesktopRendererWorkspaceOperation["workspace"], signal: AbortSignal) => {
       await openWorkspaceActivity(workspace);
       const captured = await withEngineAdapter(workspace, async adapter => {
-        await flushDatasetSourceCapture(adapter, signal);
-        return true;
+        return flushDatasetSourceCapture(adapter, signal);
       });
       if (!captured) throw new Error("The workspace engine is unavailable. Reopen the workspace.");
+      return captured;
     },
     withAdapter: async <T>(workspace: DesktopRendererWorkspaceOperation["workspace"], work: (adapter: import("@dohc/workspace-engine-client").VersionedLiveAdapter) => Promise<T>) => {
       const result = await withEngineAdapter(workspace, work);
@@ -6640,6 +6661,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace, warmCredentialCache, localUserId,
     localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
+    readWorkspace: findWorkspace,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, resolveEngineFiles,
     activity, desktopChatBookmarks, notifyRenderer,

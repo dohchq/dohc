@@ -37,7 +37,7 @@ test("named invitation signs in, edits the current Y.Doc, and preserves a stoppe
       }
       if (url.pathname.startsWith("/api/")) {
         if (!authenticated) {response.writeHead(404).end(); return;}
-        if (url.pathname === "/api/live/named-documents") {json({userId: "alice", workspaceId: "workspace", shareId: "share", grantId: "grant", limits, files: [{objectId: "document", path: binding.currentPath}]}); return;}
+        if (url.pathname === "/api/live/named-documents") {json({subjectName: "Trip", sharerName: "Ana (owner@dohc.test)", access: "edit", userId: "alice", workspaceId: "workspace", shareId: "share", grantId: "grant", limits, files: [{objectId: "document", path: binding.currentPath}]}); return;}
         if (url.pathname === "/api/live/named-session") {json({discriminator: "abcdefghijkl", expiresAtMs: Date.now() + 60000}); return;}
         if (url.pathname === "/api/live/named-ticket") {json({token: "ab".repeat(32), expiresAtMs: Date.now() + 60000}); return;}
         response.writeHead(404).end(); return;
