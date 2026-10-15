@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { mkdir, stat } from "node:fs/promises";
-import { basename, dirname, posix, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { composeArgs, describeWriters, readValidSettings, storageWriters } from "../../tools/self-host/config.mjs";
 import { archiveDeployment } from "./archive.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -26,12 +27,6 @@ function docker(args) {
   return result.stdout;
 }
 
-const normalizeDirectory = path => path ? posix.normalize(path).replace(/(.)\/+$/, "$1") : undefined;
-const bindDirectory = volume => volume.Options?.o?.split(",").some(option => option === "bind" || option === "rbind")
-  ? normalizeDirectory(volume.Options.device) : undefined;
-const inside = (path, folder) => path === folder || path.startsWith(folder.endsWith("/") ? folder : `${folder}/`);
-const overlapping = (a, b) => inside(a, b) || inside(b, a);
-
 export function parseRecoveryArguments(args) {
   const [action, directory, ...rest] = args;
   if (!["backup", "check-backup", "restore", "archive"].includes(action) || !directory || directory.startsWith("--")) throw new Error(usage);
@@ -47,8 +42,7 @@ export function parseRecoveryArguments(args) {
   return options;
 }
 
-export async function recoveryComposeArgs(options) {
-  const { composeArgs, readValidSettings } = await import("../../tools/self-host/config.mjs");
+export function recoveryComposeArgs(options) {
   return composeArgs(options.envFile, readValidSettings(options.envFile),
     ...options.composeFiles.flatMap(path => ["-f", path]), ...(options.project ? ["--project-name", options.project] : []));
 }
@@ -65,39 +59,25 @@ export async function runRecovery(options, run = docker, log = console.log, comp
     }
     await mkdir(parent, { recursive: true, mode: 0o700 });
   } else if (!(await stat(options.directory)).isDirectory()) throw new Error("The backup directory does not exist.");
-  const compose = composePrefix ?? await recoveryComposeArgs(options);
+  const compose = composePrefix ?? recoveryComposeArgs(options);
   const config = JSON.parse(run([...compose, "config", "--format", "json"]));
   const relay = config.services?.["sync-relay"];
   if (relay?.environment?.DOHC_RELAY_DEPLOYMENT_CONFIG !== "/continuity/deployment.json") {
     throw new Error("This command requires the supported self-host deployment layout.");
   }
-  const volumeNames = new Set(Object.values(config.volumes ?? {}).map(volume => volume.name));
-  // A writable mount of a deployment folder, or of a folder inside or above it, can change deployment data.
-  const storage = (volumeNames.size ? JSON.parse(run(["volume", "inspect", ...volumeNames])) : [])
-    .flatMap(volume => [bindDirectory(volume), normalizeDirectory(volume.Mountpoint)]).filter(Boolean);
-  // Returns each running container's writable mount that reaches deployment storage.
-  const writers = () => {
-    const ids = run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean);
-    if (!ids.length) return [];
-    const writable = JSON.parse(run(["inspect", ...ids]))
-      .flatMap(container => (container.Mounts ?? []).filter(mount => mount.RW).map(mount => ({ container, mount })));
-    const others = [...new Set(writable.filter(({ mount }) => mount.Type === "volume" && !volumeNames.has(mount.Name)).map(({ mount }) => mount.Name))];
-    const devices = new Map(others.length ? JSON.parse(run(["volume", "inspect", ...others])).map(volume => [volume.Name, bindDirectory(volume)]) : []);
-    return writable.filter(({ mount }) => mount.Type === "volume" && volumeNames.has(mount.Name) ||
-      [normalizeDirectory(mount.Source), devices.get(mount.Name)].some(path => path && storage.some(folder => overlapping(path, folder))));
-  };
-  const describe = matches => [...new Set(matches.map(({ container, mount }) =>
-    `${container.Name?.replace(/^\//, "") || container.Id} (${mount.Type === "volume" ? mount.Name : mount.Source})`))].join(", ");
+  // Every deployment volume must exist; a missing one fails here before anything stops.
+  const volumeNames = Object.values(config.volumes ?? {}).map(volume => volume.name);
+  const writers = storageWriters(config, volumeNames.length ? JSON.parse(run(["volume", "inspect", ...volumeNames])) : [], run);
   const current = run([...compose, "ps", "--services", "--filter", "status=running"]).trim().split(/\r?\n/).filter(Boolean);
   const foreign = writers().filter(({ container }) => container.Config?.Labels?.["com.docker.compose.project"] !== config.name);
   if (foreign.length) {
-    throw new Error(`Running containers outside ${config.name} can write its storage. Stop them before recovery: ${describe(foreign)}.`);
+    throw new Error(`Running containers outside ${config.name} can write its storage. Stop them before recovery: ${describeWriters(foreign)}.`);
   }
   log(`Stopping ${config.name} for ${options.action}.`);
   run([...compose, "stop"]);
   const remaining = writers();
   if (remaining.length) {
-    throw new Error(`Running containers can still write this deployment's storage. Services remain stopped; stop them before recovery: ${describe(remaining)}.`);
+    throw new Error(`Running containers can still write this deployment's storage. Services remain stopped; stop them before recovery: ${describeWriters(remaining)}.`);
   }
   const entrypoint = "/app/services/sync-relay/dist/relay-deployment.js";
   try {

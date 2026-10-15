@@ -260,7 +260,7 @@ After that, every start and upgrade refuses to run in these cases:
 
 The accounts check accepts any database that holds dohc accounts, including another deployment's, so check that `POSTGRES_DB` names this deployment's database.
 
-A first start refuses unless the disk folders are empty.
+A first start refuses unless all three disk folders are empty, and names each folder that holds data.
 With `DOHC_POSTGRES_HOST` set and no data disk, a first start refuses if the relay's Docker volumes already hold relay data.
 A start also refuses when Docker cannot complete these checks.
 

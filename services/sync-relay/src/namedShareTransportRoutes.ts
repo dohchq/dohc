@@ -1,10 +1,10 @@
 import { jsonResponse } from "@dohc/service-http";
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import type { DiscussionActivityHub } from "./discussionActivity";
+import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
 import { assertChatAuthorship, assertClientLogProvenance, namedShareOrigin, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
-import { assertSha256, parseCursor, parseLimit, parseString, readJsonObject } from "./requestInputs";
+import { assertSha256, parseCursor, parseLimit, parseLinkLogHold, parseString, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
   chatSideOf,
@@ -31,6 +31,7 @@ export function createNamedShareTransportRoutes(
     | "objectCurrentPath"
     | "objectIdAtPath"
     | "appendLogBatch"
+    | "appendBrowserChatBatch"
     | "putBlob"
   >,
   nowMs: () => number,
@@ -48,13 +49,14 @@ export function createNamedShareTransportRoutes(
   ) => () => void,
   filteredLogPage: ReturnType<typeof createShareReadQueries>["filteredLogPage"],
   historicalSharedBlob: ReturnType<typeof createShareReadQueries>["historicalSharedBlob"],
-  discussionActivity: Pick<DiscussionActivityHub, "wakeLog">,
+  discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
   lookupUserDisplayName?: LogAuthorNameLookup,
 ) {
   return async function respondToNamedShareTransport(
     request: Request,
     route: NamedShareTransportRoute,
     actor: { userId: string },
+    browserMessageId?: string,
   ): Promise<Response> {
     if (route.route === "share-log" && request.method === "GET") {
       let authorized: AuthorizedShareAction;
@@ -96,7 +98,7 @@ export function createNamedShareTransportRoutes(
         : undefined;
       // Both routes share selector filtering and cursor behavior. The
       // accountless route applies a narrower metadata boundary afterward.
-      const page = filteredLogPage(
+      let page = filteredLogPage(
         share.workspaceId,
         share.shareId,
         share.selector,
@@ -105,6 +107,37 @@ export function createNamedShareTransportRoutes(
         "authenticated",
         half,
       );
+      const hold = parseLinkLogHold(url.searchParams.get("hold"));
+      if (hold > 0 && page.ops.length === 0 && !page.hasMore && page.nextCursor === since) {
+        const deadline = Date.now() + hold;
+        let scanSince = since;
+        const readPage = () => {
+          const fresh = requireShareAction(route.shareId, actor.userId, "read");
+          if (fresh.share.workspaceId !== share.workspaceId ||
+              (channelWireId !== null && chatSideOf(fresh.effectiveSelector)?.channelWireId !== channelWireId)) throw notFound();
+          return filteredLogPage(share.workspaceId, share.shareId, fresh.effectiveSelector, scanSince, limit, "authenticated", half);
+        };
+        while (!request.signal.aborted && Date.now() < deadline) {
+          try {
+            await discussionActivity.wait(linkLogWaitGroup(share.workspaceId), `named:${actor.userId}`, {
+              holdMs: Math.max(1, deadline - Date.now()), signal: request.signal,
+              shouldPark: () => {
+                try {
+                  page = readPage();
+                  scanSince = page.nextCursor;
+                  return page.ops.length === 0 && !page.hasMore;
+                } catch { return false; }
+              },
+            });
+          } catch (error) {
+            if (error instanceof DiscussionActivityCapacityError) throw relayError("share_access_rate_limited");
+            throw error;
+          }
+          if (page.ops.length === 0 && !page.hasMore) page = readPage();
+          scanSince = page.nextCursor;
+          if (page.ops.length > 0 || page.hasMore) break;
+        }
+      }
       // Re-check revocation immediately before returning the body: a revoke
       // that raced with this in-flight read (after the entry check, while
       // the page was assembled) must abort the response, not leak a final
@@ -143,7 +176,7 @@ export function createNamedShareTransportRoutes(
     // share-namespaced appends are governed by the fail-closed share/channel
     // filter, so workspace epoch enforcement does not apply on this route.
     if (route.route === "share-log" && request.method === "POST") {
-      await claimPendingShares(actor.userId);
+      if (browserMessageId === undefined) await claimPendingShares(actor.userId);
       const authorized = requireShareAction(route.shareId, actor.userId, "append");
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
       const input = await readJsonObject(request);
@@ -154,6 +187,9 @@ export function createNamedShareTransportRoutes(
       // that claimed it could take sequence numbers out of an accept stream.
       if (originId.startsWith(PROPOSAL_ORIGIN_PREFIX)) {
         throw badRequest(`originId must not start with "${PROPOSAL_ORIGIN_PREFIX}"`);
+      }
+      if (originId === "browser-chat" && browserMessageId === undefined) {
+        throw badRequest('originId is reserved for browser chat');
       }
       if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
       if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
@@ -252,7 +288,7 @@ export function createNamedShareTransportRoutes(
           }
         }
       }
-      const result = storage.appendLogBatch({
+      const batch = {
         workspaceId: share.workspaceId,
         // Authentication, not the caller, selects the member sequence space.
         originId: namedShareOrigin(share.shareId, actor.userId, originId),
@@ -272,7 +308,9 @@ export function createNamedShareTransportRoutes(
           "append",
           share.workspaceId,
         ),
-      });
+      };
+      const result = browserMessageId === undefined ? storage.appendLogBatch(batch) :
+        storage.appendBrowserChatBatch({...batch, messageId: browserMessageId});
       if (result.inserted > 0) {
         discussionActivity.wakeLog(share.workspaceId);
       }

@@ -24,7 +24,7 @@ describe("useShellError", () => {
       observedAtMs: 1, attemptCount: 1, retryRequested: false,
     }] };
     const adapter = { reconcileCapture: async () => capture, flushCapture: async () => capture };
-    const failure = await flushDatasetSourceCapture(adapter, new AbortController().signal).catch(error => error as Error);
+    const failure = await flushDatasetSourceCapture(adapter, new AbortController().signal, ["sources/note.md"]).catch(error => error as Error);
     expect(failure).toBeInstanceOf(Error);
     if (!(failure instanceof Error)) throw Error("Expected a held source refusal");
     const retry = vi.fn();
@@ -32,7 +32,7 @@ describe("useShellError", () => {
     act(() => result.current.reportShellError("dohc could not prepare this Collection change.",
       new Error(`Error invoking remote method 'dataset': Error: ${failure.message}`), retry));
     const notice = result.current.shellErrors[0]!;
-    expect(notice.message).toBe("dohc could not prepare this Collection change. dohc cannot use the content in sources/note.md. The file is still on this computer. Edit it in another editor.");
+    expect(notice.message).toBe('dohc could not prepare this Collection change. dohc cannot use "sources/note.md" for this change. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.');
     expect(notice.seen).toBe(false);
     expect(notice.retry).toBe(retry);
     act(() => result.current.hideShellError(notice.id));
@@ -187,6 +187,22 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toHaveLength(1);
     rerender({workspace: "ws-b"});
     expect(result.current.shellErrors).toEqual([]);
+  });
+
+  it("opens the current file for a terminal binding refusal instead of retrying sync", () => {
+    const retry = vi.fn();
+    const open = vi.fn();
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const reason = "This file's name, location, or sharing changed before this save arrived. Open the file to continue.";
+    const notice = { noticeId: "renamed-save", kind: "sync-refusal", workspaceId: "ws-a", store: "local" as const,
+      recipientShareId: null, senderKind: null, senderLabel: null, title: "dohc skipped an earlier save",
+      body: reason, detail: reason, target: { path: "renamed.md" }, createdAtMs: 1, readAtMs: null, postedHere: true };
+    act(() => result.current.showSyncRefusals([notice], retry, open));
+    expect(result.current.shellErrors[0]).toMatchObject({ retry: null, action: { label: "Open" } });
+    act(() => result.current.runShellErrorAction(notice.noticeId));
+    expect(open).toHaveBeenCalledWith("renamed.md");
+    expect(retry).not.toHaveBeenCalled();
+    expect(result.current.shellErrors).toHaveLength(1);
   });
 
   it("runs a retry exactly once, even under Strict Mode, and drops the row", () => {

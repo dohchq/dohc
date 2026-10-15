@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { composeArgs, readSettings } from "../../tools/self-host/config.mjs";
+import { composeArgs, readSettings, relayDeploymentError } from "../../tools/self-host/config.mjs";
 import { runMove } from "./move.mjs";
 
 // Not in the root test list: it needs a Linux Docker host and the image named by DOHC_RECOVERY_TEST_IMAGE.
@@ -64,6 +64,12 @@ test("a killed deployment's data disk starts in a fresh Compose project and refu
     assert.equal(existsSync(disk), false);
     asRoot(`const fs=require('node:fs');for(const base of ['/scratch/disk/dohc','/scratch/empty'])for(const folder of ['sync-relay','continuity','host-data']){
       fs.mkdirSync(base+'/'+folder,{recursive:true});fs.chownSync(base+'/'+folder,1000,1000);}fs.mkdirSync('/scratch/old');`);
+    // A first start reads all three folders through Docker, and leftover host data alone refuses it.
+    const firstStart = target => relayDeploymentError(target.env, readSettings(target.env), args => docker(args, { allowFailure: true }), true);
+    assert.equal(firstStart(first), "");
+    asRoot("require('node:fs').writeFileSync('/scratch/disk/dohc/host-data/leftover','')");
+    assert.match(firstStart(first), /\/disk\/dohc\/host-data already holds data\. A first start needs empty disk folders/);
+    asRoot("require('node:fs').rmSync('/scratch/disk/dohc/host-data/leftover')");
     // Move builds its own Compose arguments. Each call gets the project's extra files, such as the Postgres override.
     const mover = (target, start = () => assert.fail("move started the deployment")) => (command, args) => {
       if (command !== "docker") return start();

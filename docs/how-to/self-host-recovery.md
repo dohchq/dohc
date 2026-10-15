@@ -246,6 +246,7 @@ node scripts/self-host/move.mjs
 
 The command refuses to start anything in these cases:
 
+- A running container on this host, such as an old server on the same host, can write the deployment's storage.
 - An existing deployment volume on this host keeps its data somewhere other than the disk.
 - The accounts volume is missing or holds no database.
 - With an external database, the database is unreachable or holds no dohc accounts.
