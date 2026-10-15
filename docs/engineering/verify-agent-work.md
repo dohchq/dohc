@@ -118,7 +118,7 @@ Each attempt has its own evidence folder, `C:\w\_verification\requests\<id>\atte
 Read the service's verdict from the request's `status.json`, or from the last line `pnpm verify:pr` prints.
 
 Run `pnpm verify:queue status` to see the service, the running requests, the line, and wait estimates.
-Run `pnpm verify:queue cancel <id>` to stop a request. A finished request keeps its verdict.
+Run `pnpm verify:queue cancel <id>` to stop one of your own requests. Never cancel a request another agent submitted. A finished request keeps its verdict.
 
 The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows what holds each verification lane, a queued request or an agent's inline gate, with its steps and its live output, then the requests ready and waiting for a lane, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Threads, Tests, and Nightly tabs show the whole line, every run this week, each thread's runs and results, the slowest and flaky tests, and the nightly runs.
 When T3 runs on the host, the dashboard names each request by the T3 thread that linked its branch's pull request, or whose worktree or branch it uses. It reads T3's local database read-only once a minute. Without T3 it names requests by their branch.
@@ -214,13 +214,15 @@ pnpm verify:queue move <id> --before <other-id> --reason "<why>" [--by "<name>"]
 ```
 
 `--first` puts the request at the front of the line. `--before` puts it just ahead of another waiting request.
-Only a waiting request can move, and only ahead of another waiting request. A move never stops or starts a run. It changes only which request starts next, and the nightly run still goes first.
+A move only brings a waiting request forward. `--before` needs another waiting request that is ahead of it now.
+A move never stops or starts a run. It changes only which request starts next, and the nightly run still goes first.
 The service applies the move within a few seconds, and the command prints the request's new place. If the service is not running, the move applies when it starts.
-The command refuses a request that is unknown, running, or finished, and says why.
+A service installed before this command existed applies no moves. After 30 seconds the command says so. Run `pnpm verify:queue upgrade` from a checkout of `origin/main` to install a service that applies them.
+The command refuses a request that is unknown, running, or finished, or one already ahead of the `--before` request, and says why.
 
-The service records each move in `history.jsonl` with its reason, the `--by` name, the OS user, and the checkout that asked.
-`pnpm verify:queue status` shows the last move beside the request, such as `moved first by Ice: fixes the grid test three branches fail`.
-The dashboard marks a moved request in the line. Point at the mark to see who moved it and why.
+The service records each move in `history.jsonl` with its reason, the `--by` name, the OS user, and the checkout that asked. It keeps the reason to one line of at most 300 characters.
+`pnpm verify:queue status` shows the last move beside the request, such as `moved first by Ice (C:\w\fix-grid): fixes the grid test three branches fail`. Every agent on the host runs as the same OS user, so the checkout always shows.
+The dashboard marks a moved request in the line and in its lane once it runs. Point at the mark, or move keyboard focus to it, to see who moved it and why.
 
 ### A failure stops the run
 

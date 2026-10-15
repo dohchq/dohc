@@ -24,7 +24,14 @@ const runKey = run => `${run.id}/${run.attempt}`;
 const ui = { data: null, load: { 1: null, 7: null }, loadRange: 1, tab: "now", range: 1, filter: "all", search: "", shown: 25, pinned: new Map(), logMeta: new Map(), drawer: null, failures: 0 };
 
 // Set an element's HTML only when it changed, so unchanged parts keep focus, hover, and scroll.
-function patch(el, html) { if (el && el._html !== html) { el.innerHTML = html; el._html = html; } }
+// A focused mark that carries data-focus-key keeps the focus when its part is redrawn.
+function patch(el, html) {
+  if (!el || el._html === html) return;
+  const key = el.contains(document.activeElement) ? document.activeElement.dataset.focusKey : undefined;
+  el.innerHTML = html;
+  el._html = html;
+  if (key) el.querySelector(`[data-focus-key="${CSS.escape(key)}"]`)?.focus();
+}
 // Run an async job one at a time. A call during a run asks for one more run after it, so the newest request always lands last.
 function singleFlight(job) {
   let running = null, again = false;
@@ -154,7 +161,7 @@ function laneShell(n) {
   el = document.createElement("article");
   el.id = `lane-${n}`;
   el.className = "lane";
-  el.innerHTML = `<div class="lane-no" aria-hidden="true">${n}</div><div class="lane-head"></div><div class="lane-track"></div><div class="lane-steps"></div>
+  el.innerHTML = `<div class="lane-no" aria-hidden="true">${n}</div><div class="lane-head"><div class="lane-who"></div><div class="lane-clock"></div></div><div class="lane-track"></div><div class="lane-steps"></div>
     <div class="terminal" hidden>
       <div class="term-head"><select class="term-select" aria-label="Log to show"></select>
         <div class="term-actions"><button class="term-follow" type="button" hidden>Follow the running step</button><button class="term-open" type="button">Run details</button></div></div>
@@ -213,7 +220,8 @@ function renderLanes(d) {
     el.dataset.key = view.run ? runKey(view.run) : "";
     if (!busy) {
       const next = data.queued[0];
-      patch($(".lane-head", el), `<div class="lane-who"><div class="lane-idle">Idle</div></div>`);
+      patch($(".lane-who", el), `<div class="lane-idle">Idle</div>`);
+      patch($(".lane-clock", el), "");
       patch($(".lane-track", el), "");
       patch($(".lane-steps", el), "");
       $(".terminal", el).hidden = true;
@@ -222,10 +230,10 @@ function renderLanes(d) {
     }
     const left = view.run && data.typicalMs ? data.typicalMs - (view.clockMs ?? 0) : null;
     const clockNote = view.inline ? "in its own checkout" : left == null ? "no typical time yet" : left >= 0 ? `≈ ${dur(left)} left of ${stopwatch(data.typicalMs)}` : `${dur(-left)} over typical`;
-    patch($(".lane-head", el), `
-      <div class="lane-who"><a class="lane-branch" href="${esc(prLink(view.branch ?? ""))}" target="_blank" rel="noreferrer" title="${esc(view.title)}">${esc(view.title)}</a>
-        <div class="lane-meta">${view.inline ? '<span class="tag inline">inline gate</span>' : ""}${view.sub ? `<span class="mono" title="${esc(view.sub)}">${esc(view.sub)}</span>` : ""}<span>Since ${esc(at(Date.parse(view.since)))}</span>${view.attempt > 1 ? `<span>Attempt ${view.attempt}</span>` : ""}<span class="mono">${esc(view.head ?? "")}</span>${view.scope && view.scope !== "all" ? `<span>${esc(view.scope)} only</span>` : ""}${view.phase && !["verifying", "tests"].includes(view.phase) ? `<span>${esc(view.phase)}</span>` : ""}</div></div>
-      <div class="lane-clock"><b>${esc(stopwatch(view.clockMs))}</b><span class="${late ? "warn" : ""}">${esc(clockNote)}</span></div>`);
+    // The name and the clock are patched apart, so the clock's tick never redraws the moved mark.
+    patch($(".lane-who", el), `<a class="lane-branch" href="${esc(prLink(view.branch ?? ""))}" target="_blank" rel="noreferrer" title="${esc(view.title)}">${esc(view.title)}</a>
+        <div class="lane-meta">${view.inline ? '<span class="tag inline">inline gate</span>' : ""}${view.sub ? `<span class="mono" title="${esc(view.sub)}">${esc(view.sub)}</span>` : ""}<span>Since ${esc(at(Date.parse(view.since)))}</span>${view.attempt > 1 ? `<span>Attempt ${view.attempt}</span>` : ""}<span class="mono">${esc(view.head ?? "")}</span>${view.scope && view.scope !== "all" ? `<span>${esc(view.scope)} only</span>` : ""}${view.phase && !["verifying", "tests"].includes(view.phase) ? `<span>${esc(view.phase)}</span>` : ""}${view.run ? movedTag(view.run) : ""}</div>`);
+    patch($(".lane-clock", el), `<b>${esc(stopwatch(view.clockMs))}</b><span class="${late ? "warn" : ""}">${esc(clockNote)}</span>`);
     // The step track: each finished or running step is as wide as its time; the mark is the typical gate.
     const steps = (view.steps ?? []).filter(step => step.verdict);
     const elapsed = step => step.seconds ?? (step.startedAt ? (data.now - Date.parse(step.startedAt)) / 1000 : 0);
@@ -355,8 +363,8 @@ function writeTerminal(pre, text, source, message = false) {
   if (following) pre.scrollTop = pre.scrollHeight;
 }
 
-// A request someone moved in line, with who moved it and why in its tooltip.
-const movedTag = entry => entry.moved ? `<span class="tag moved" data-tip="${esc(entry.moved)}">moved</span>` : "";
+// A request someone moved in line. Its tooltip, shown on hover and on keyboard focus, says who moved it and why.
+const movedTag = entry => entry.moved ? `<span class="tag moved" tabindex="0" role="note" data-focus-key="moved:${esc(entry.id)}" aria-label="${esc(entry.moved.replace("\n", ": "))}" data-tip="${esc(entry.moved)}">moved</span>` : "";
 
 function renderTower({ data, starts }) {
   const rows = data.queued.slice(0, 10).map((entry, i) => `<li>
@@ -674,8 +682,11 @@ function showTip(event) {
   tip.replaceChildren(Object.assign(document.createElement("b"), { textContent: head }), ...rest.flatMap((line, i) => [...(i ? [document.createElement("br")] : []), document.createTextNode(line)]));
   tip.hidden = false;
   const box = tip.getBoundingClientRect();
-  tip.style.left = `${Math.min(event.clientX + 14, innerWidth - box.width - 8)}px`;
-  tip.style.top = `${Math.min(event.clientY + 16, innerHeight - box.height - 8)}px`;
+  // A focused mark has no pointer, so its tip sits below the mark.
+  const anchor = event.type === "focusin" ? target.getBoundingClientRect() : null;
+  const [x, y] = anchor ? [anchor.left, anchor.bottom + 6] : [event.clientX + 14, event.clientY + 16];
+  tip.style.left = `${Math.max(8, Math.min(x, innerWidth - box.width - 8))}px`;
+  tip.style.top = `${Math.max(8, Math.min(y, innerHeight - box.height - 8))}px`;
 }
 
 /* Wiring */
@@ -740,6 +751,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (row && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); row.click(); }
   });
   document.addEventListener("mousemove", showTip);
+  document.addEventListener("focusin", showTip);
+  document.addEventListener("focusout", () => { $("#tip").hidden = true; });
   document.addEventListener("mouseleave", () => { $("#tip").hidden = true; });
   window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
   let resized;

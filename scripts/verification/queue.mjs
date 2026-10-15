@@ -128,32 +128,56 @@ export function placeSubmission(requests, submission) {
 }
 
 /** A request's place in line: the order a move gave it, else its sequence. A move changes no id or sequence. */
-const orderOf = entry => entry.status.order ?? entry.request.sequence;
-const lineOrder = (a, b) => orderOf(a) - orderOf(b) || a.id.localeCompare(b.id);
+export const orderOf = entry => entry.status.order ?? entry.request.sequence;
+export const lineOrder = (a, b) => orderOf(a) - orderOf(b) || a.id.localeCompare(b.id);
+
+// One line of text: whitespace and control characters become one space, so a field cannot fake a row in status.
+const oneLine = (value, length) => typeof value === "string" ? [...value.replace(/[\s\p{Cc}\p{Cf}]+/gu, " ").trim()].slice(0, length).join("") : null;
+
+/** A move as a client wrote it, checked and cleaned: `{ id, before, reason, by }`, or `{ rejected }`. */
+export function parseMove(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { rejected: "The move is not a JSON object." };
+  const by = raw.by ?? {};
+  const id = oneLine(raw.id, 64);
+  // An empty --before is a mistake, never --first.
+  const named = raw.before !== null && raw.before !== undefined;
+  const before = named ? oneLine(raw.before, 64) : null;
+  const reason = oneLine(raw.reason, 300);
+  if (!id) return { rejected: "The move names no request to move." };
+  if (named && !before) return { rejected: "The move's --before names no request. Use --first to move a request to the front." };
+  if (!reason) return { rejected: "A move needs a reason." };
+  if (typeof by !== "object" || Array.isArray(by) || ["name", "user", "cwd"].some(field => by[field] != null && typeof by[field] !== "string")) {
+    return { rejected: "The move's by field must hold name, user, and cwd, each text or null." };
+  }
+  return { id, before, reason, by: { name: oneLine(by.name, 200) || null, user: oneLine(by.user, 200) || null, cwd: oneLine(by.cwd, 200) || null } };
+}
 
 /**
- * Where a move puts a queued request: `{ order }`, first in line or just before
- * another queued request, or `{ rejected }` with the reason. `starting` names
- * requests the service has started that still read as queued.
+ * The line after a move: `{ orders }`, each queued request's order by id, or `{ rejected }` with the reason.
+ * A move only brings a queued request forward, to the front or just ahead of another queued request.
+ * `starting` names requests the service has started that still read as queued.
  */
-export function placeMove(requests, { id, before = null, reason }, starting = new Set()) {
+export function placeMove(requests, { id, before = null }, starting = new Set()) {
   const waiting = entry => entry.status.state === "queued" && !starting.has(entry.id);
   const why = entry => entry.status.state === "running" || starting.has(entry.id) ? "it is running"
     : entry.status.state === "superseded" ? `it was replaced by ${entry.status.supersededBy}, a newer commit on its branch`
     : `it has already finished: ${entry.status.state}`;
   const entry = requests.find(candidate => candidate.id === id);
   const target = before && requests.find(candidate => candidate.id === before);
-  if (typeof reason !== "string" || !reason.trim()) return { rejected: "A move needs a reason." };
   if (!entry) return { rejected: `No verification request ${id}.` };
   if (before && !target) return { rejected: `No verification request ${before}.` };
   if (!waiting(entry)) return { rejected: `Cannot move ${id}: ${why(entry)}. Only a queued request can move.` };
   if (target === entry) return { rejected: `Cannot move ${id} before itself.` };
   if (target && !waiting(target)) return { rejected: `Cannot move ${id} before ${before}: ${why(target)}. Move it before a queued request, or use --first.` };
-  // Halfway between its new neighbors, so no other request's order changes.
-  const line = requests.filter(candidate => waiting(candidate) && candidate !== entry).sort(lineOrder);
-  const at = target ? line.indexOf(target) : 0;
-  if (!line[at]) return { order: orderOf(entry) };
-  return { order: at > 0 ? (orderOf(line[at - 1]) + orderOf(line[at])) / 2 : Math.min(orderOf(entry), orderOf(line[0]) - 1) };
+  const line = requests.filter(waiting).sort(lineOrder);
+  if (target && line.indexOf(entry) < line.indexOf(target)) return { rejected: `Cannot move ${id} before ${before}: ${id} is already ahead of ${before}. A move only brings a request forward.` };
+  // The line hands its own order values out again in the new order. They stay whole numbers however many
+  // moves there are, and stay comparable with the sequence of a request running now, which comes back to
+  // its place if it is retried, and with every later submission, which goes behind.
+  const values = line.map(orderOf);
+  const next = line.filter(candidate => candidate !== entry);
+  next.splice(target ? next.indexOf(target) : 0, 0, entry);
+  return { orders: new Map(next.map((candidate, index) => [candidate.id, values[index]])) };
 }
 
 /**
@@ -244,9 +268,12 @@ export async function requestMove(root, { id, before = null, reason, by }) {
   return key;
 }
 
-/** How status and the dashboard describe a request's last move. Without a name, the mover is its user and checkout. */
+/**
+ * How status and the dashboard describe a request's last move. Every agent on the host runs as the same
+ * user, so the checkout that asked always shows, with the --by name or else the user.
+ */
 export const movedNote = ({ before, by, reason }, separator = ": ") =>
-  `moved ${before ? `before ${before}` : "first"} by ${by?.name || `${by?.user ?? "unknown"} in ${by?.cwd ?? "unknown"}`}${separator}${reason}`;
+  `moved ${before ? `before ${before}` : "first"} by ${by?.name ?? by?.user ?? "unknown"} (${by?.cwd ?? "unknown checkout"})${separator}${reason}`;
 
 /** The service's own record, and whether its heartbeat is current. */
 export function serviceState(root, now = Date.now()) {
@@ -500,18 +527,19 @@ function printStatus(root) {
 
 /** Ask the service to move a queued request, and report where it went once the service applies it. */
 async function move(root, args) {
-  const usage = 'Use move <id> --first, or move <id> --before <other-id>, with --reason "<why>" and optionally --by "<name>".';
+  const usage = 'Use move <id> --first, or move <id> --before <other-id>, with --reason "<why>" and optionally --by "<name>". Move a request only to unblock other work.';
   let parsed;
   try { parsed = parseArgs({ args, allowPositionals: true, options: { first: { type: "boolean" }, before: { type: "string" }, reason: { type: "string" }, by: { type: "string" } } }); }
   catch { throw new Error(usage); }
-  const { positionals: [id], values: { first = false, before = null } } = parsed;
-  const reason = parsed.values.reason?.trim();
-  if (!id || first === Boolean(before) || !reason) throw new Error(usage);
+  const { positionals: [id], values: { first = false, before = null, reason, by = null } } = parsed;
+  if (!id || first === Boolean(before) || !reason?.trim()) throw new Error(usage);
+  // The service makes the same checks when it applies the move; these answer at once, even while it is down.
+  const asked = parseMove({ id, before, reason, by: { name: by, user: userInfo().username, cwd: process.cwd() } });
+  if (asked.rejected) throw new Error(asked.rejected);
   const { record, alive } = serviceState(root);
-  // The service makes the same check when it applies the move; this one answers at once, even while it is down.
-  const check = placeMove(listRequests(root), { id, before, reason }, new Set(alive ? serviceRuns(record).runs.map(run => run.id) : []));
+  const check = placeMove(listRequests(root), asked, new Set(alive ? serviceRuns(record).runs.map(run => run.id) : []));
   if (check.rejected) throw new Error(check.rejected);
-  const key = await requestMove(root, { id, before, reason, by: { name: parsed.values.by?.trim() || null, user: userInfo().username, cwd: process.cwd() } });
+  const key = await requestMove(root, asked);
   if (!alive) return console.log(`The verification queue service is not running. The move of ${id} applies when the service starts.`);
   for (let waited = 0; waited < 30_000; waited += 500) {
     const answer = readJson(join(queuePaths(root).keys, key));

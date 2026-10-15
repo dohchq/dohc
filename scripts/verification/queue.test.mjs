@@ -4,12 +4,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
-import { attemptOutcome, cancel, lastNightlyPass, listRequests, movedNote, nextRequest, nightlyTaskDefinition, placeMove, placeSubmission, position, queuePaths, readJson, requestMove, serviceRuns, sharedFailures, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, cancel, lastNightlyPass, listRequests, movedNote, nextRequest, nightlyTaskDefinition, parseMove, placeMove, placeSubmission, position, queuePaths, readJson, requestMove, serviceRuns, sharedFailures, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
 import { laneTemp, runService, sweepContainers } from "./queue-service.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
 import { run } from "./process.mjs";
@@ -84,27 +84,50 @@ test("a move puts a queued request first or before another, the line follows it,
   const passed = entry("000000006-ffffff", { head: "h6" }, "passed");
   const superseded = entry("000000007-gggggg", { head: "h7" }, "superseded", { supersededBy: c.id });
   const health = { diskOk: true, dockerOk: true };
-  const moved = (target, fields) => ({ ...target, status: { ...target.status, ...placeMove(requests, { reason: "unblocks others", ...fields }) } });
-  let requests = [running, a, b, c, passed, superseded];
-  const first = moved(c, { id: c.id });
-  requests = [running, a, b, first, passed, superseded];
+  const apply = (requests, move) => {
+    const { orders, rejected } = placeMove(requests, move);
+    assert.equal(rejected, undefined);
+    return requests.map(row => orders.has(row.id) ? { ...row, status: { ...row.status, order: orders.get(row.id) } } : row);
+  };
+  let requests = apply([running, a, b, c, passed, superseded], { id: c.id });
   assert.equal(nextRequest(requests, health).id, c.id, "--first starts it next");
   assert.deepEqual([c, a, b].map(row => position(requests, row.id)), [2, 3, 4]);
-  assert.equal(first.request.sequence, 4, "a move changes no sequence");
-  requests = [running, a, moved(b, { id: b.id, before: a.id }), first, passed, superseded];
+  assert.deepEqual(requests.map(row => row.request.sequence), [1, 2, 3, 4, 6, 7], "a move changes no sequence");
+  assert.deepEqual(requests.map(row => row.status.order ?? null), [null, 3, 4, 2, null, null], "the queued requests share out their own values again");
+  requests = apply(requests, { id: b.id, before: a.id });
   assert.deepEqual([c, b, a].map(row => position(requests, row.id)), [2, 3, 4], "--before puts it just ahead of the other");
+  // The running request keeps its sequence, so a retry after a machine failure comes back ahead of the line it left.
+  const retried = requests.map(row => row.id === running.id ? { ...row, status: { ...row.status, state: "queued" } } : row);
+  assert.equal(nextRequest(retried, health).id, running.id);
   requests = [...requests, nightly];
   assert.equal(nextRequest(requests, health).id, nightly.id, "the nightly still goes first");
   assert.deepEqual([nightly, c, b, a].map(row => position(requests, row.id)), [2, 3, 4, 5]);
-  const refused = fields => placeMove(requests, { reason: "unblocks others", ...fields }).rejected;
+  const refused = move => placeMove(requests, move).rejected;
   assert.match(refused({ id: running.id }), /it is running\. Only a queued request can move\.$/u);
   assert.match(refused({ id: passed.id }), /it has already finished: passed/u);
   assert.match(refused({ id: superseded.id }), /replaced by 000000004-dddddd/u);
   assert.match(refused({ id: "000000009-zzzzzz" }), /^No verification request 000000009-zzzzzz\.$/u);
   assert.match(refused({ id: a.id, before: running.id }), /before 000000001-aaaaaa: it is running/u, "nothing goes ahead of a running request");
   assert.match(refused({ id: a.id, before: a.id }), /before itself/u);
-  assert.match(refused({ id: a.id, reason: " " }), /needs a reason/u);
-  assert.match(placeMove(requests, { id: a.id, reason: "x" }, new Set([a.id])).rejected, /it is running/u, "a request the service has started cannot move before its status says so");
+  assert.equal(refused({ id: c.id, before: a.id }), `Cannot move ${c.id} before ${a.id}: ${c.id} is already ahead of ${a.id}. A move only brings a request forward.`);
+  assert.match(placeMove(requests, { id: a.id }, new Set([a.id])).rejected, /it is running/u, "a request the service has started cannot move before its status says so");
+});
+
+test("a move is checked and cleaned before it is applied, and its note always names the checkout", () => {
+  const by = { name: "Ice", user: "ice", cwd: "C:\\w\\fix-grid" };
+  const move = fields => parseMove({ id: "000000002-bbbbbb", before: null, reason: "unblocks others", by, ...fields });
+  assert.deepEqual(move({}), { id: "000000002-bbbbbb", before: null, reason: "unblocks others", by });
+  assert.match(move({ before: "" }).rejected, /--before names no request/u, "an empty --before is never --first");
+  assert.match(move({ before: " \n" }).rejected, /--before names no request/u);
+  for (const fields of [{ id: "" }, { id: { toString: 1 } }, { reason: "\n\t" }, { reason: 7 }, { by: "Ice" }, { by: { name: 5 } }, { by: [] }]) {
+    assert.ok(move(fields).rejected, JSON.stringify(fields));
+  }
+  for (const raw of [null, [1], "move", 3]) assert.match(parseMove(raw).rejected, /not a JSON object/u);
+  const cleaned = move({ reason: `fixes main\n000000001-aaaaaa  #1  all\r\n\u001b[31mred\u202e ${"x".repeat(400)}`, by: { name: "Ice\nX", user: null, cwd: `C:\\w\\${"y".repeat(300)}` } });
+  assert.equal(cleaned.reason, `fixes main 000000001-aaaaaa #1 all [31mred ${"x".repeat(400)}`.slice(0, 300), "one line, no control characters, at most 300 characters");
+  assert.deepEqual([cleaned.by.name, cleaned.by.user, cleaned.by.cwd.length], ["Ice X", null, 200]);
+  assert.equal(movedNote({ before: null, by, reason: "unblocks others" }), "moved first by Ice (C:\\w\\fix-grid): unblocks others");
+  assert.equal(movedNote({ before: "000000001-aaaaaa", by: { ...by, name: null }, reason: "r" }), "moved before 000000001-aaaaaa by ice (C:\\w\\fix-grid): r");
 });
 
 test("the nightly submission verifies main's head in full, against the last nightly that passed", async t => {
@@ -809,7 +832,7 @@ test("pnpm verify:queue move changes what starts next, and the history and statu
   const b = await request("pass", { branch: "refs/heads/b" });
   const c = await request("pass", { branch: "refs/heads/c" });
   const nightly = await request("pass", { branch: "refs/heads/main", nightly: true });
-  const first = await queueCli(root, "move", c.id, "--first", "--reason", "fixes the test three branches fail", "--by", "Ice");
+  const first = await queueCli(root, "move", c.id, "--first", "--reason", "fixes the test\nthree branches fail", "--by", "Ice");
   assert.equal(first.code, 0, first.stderr);
   assert.match(first.stdout, /now #3 in line, was #5/u, "the running request and the nightly stay ahead");
   const before = await queueCli(root, "move", b.id, "--before", a.id, "--reason", "main is broken until it lands");
@@ -817,8 +840,9 @@ test("pnpm verify:queue move changes what starts next, and the history and statu
   assert.match(before.stdout, /now #4 in line, was #5/u);
   const status = await queueCli(root, "status");
   const line = id => status.stdout.split("\n").find(row => row.startsWith(id)) ?? "";
-  assert.ok(line(c.id).includes("#3") && line(c.id).endsWith("  (moved first by Ice: fixes the test three branches fail)"), status.stdout);
-  assert.ok(line(b.id).endsWith(`  (moved before ${a.id} by ${userInfo().username} in ${process.cwd()}: main is broken until it lands)`), status.stdout);
+  assert.ok(line(c.id).includes("#3") && line(c.id).endsWith(`  (moved first by Ice (${process.cwd()}): fixes the test three branches fail)`), status.stdout);
+  assert.ok(line(b.id).endsWith(`  (moved before ${a.id} by ${userInfo().username} (${process.cwd()}): main is broken until it lands)`), status.stdout);
+  assert.ok(!status.stdout.includes("\nthree branches fail"), "a reason never starts a row of its own");
   assert.equal(listRequests(root).find(candidate => candidate.id === hung.id).status.state, "running", "a move never touches a running request");
   await cancel(root, hung.id);
   for (const { id } of [a, b, c, nightly]) assert.equal((await settled(id)).status.verdict, "PASS");
@@ -827,7 +851,7 @@ test("pnpm verify:queue move changes what starts next, and the history and statu
   assert.deepEqual(moves.map(({ id, from, to, before, reason, by }) => ({ id, from, to, before, reason, name: by.name })), [
     { id: c.id, from: 5, to: 3, before: null, reason: "fixes the test three branches fail", name: "Ice" },
     { id: b.id, from: 5, to: 4, before: a.id, reason: "main is broken until it lands", name: null }]);
-  assert.deepEqual([moves[1].by.user, moves[1].by.cwd], [userInfo().username, process.cwd()], "an unnamed mover is known by its user and checkout");
+  assert.deepEqual(moves.map(({ by }) => [by.user, by.cwd]), [[userInfo().username, process.cwd()], [userInfo().username, process.cwd()]], "every mover is known by its user and checkout");
   const moved = listRequests(root).find(candidate => candidate.id === c.id);
   assert.equal(moved.request.sequence, Number(c.id.slice(0, 9)), "a move changes no id or sequence");
   assert.deepEqual([moved.status.moved.reason, moved.status.moved.by.name], ["fixes the test three branches fail", "Ice"], "the request keeps its last move");
@@ -839,12 +863,14 @@ test("a move of a running, finished, or unknown request is refused with a reason
   const hung = await request("hang");
   await waitFor(() => listRequests(root).find(candidate => candidate.id === hung.id)?.status.state === "running", "the hang must start");
   const waiting = await request("pass", { branch: "refs/heads/waiting" });
+  const behind = await request("pass", { branch: "refs/heads/behind" });
   // The command refuses at once.
   for (const [args, message] of [
     [[hung.id, "--first"], /^Cannot move \S+: it is running\. Only a queued request can move\.$/u],
     [[done.id, "--first"], /it has already finished: passed/u],
     [["000000099-ffffff", "--first"], /^No verification request 000000099-ffffff\.$/u],
     [[waiting.id, "--before", hung.id], /before \S+: it is running\. Move it before a queued request, or use --first\.$/u],
+    [[waiting.id, "--before", behind.id], /is already ahead of \S+\. A move only brings a request forward\.$/u],
   ]) {
     const result = await queueCli(root, "move", ...args, "--reason", "unblocks others");
     assert.equal(result.code, 1, result.stdout);
@@ -854,7 +880,7 @@ test("a move of a running, finished, or unknown request is refused with a reason
     assert.match((await queueCli(root, "move", ...args)).stderr, /^Use move <id> --first/u, args.join(" "));
   }
   // The service makes the same checks for a move written straight to it, and answers each one.
-  for (const [move, message] of [[{ id: hung.id }, /it is running/u], [{ id: done.id }, /already finished/u], [{ id: "000000099-ffffff" }, /No verification request/u], [{ id: waiting.id, reason: "" }, /needs a reason/u]]) {
+  for (const [move, message] of [[{ id: hung.id }, /it is running/u], [{ id: done.id }, /already finished/u], [{ id: "000000099-ffffff" }, /No verification request/u], [{ id: waiting.id, reason: "" }, /needs a reason/u], [{ id: waiting.id, before: behind.id }, /already ahead/u]]) {
     const key = await requestMove(root, { reason: "unblocks others", by: { name: "test" }, ...move });
     assert.match((await waitFor(() => readJson(join(queuePaths(root).keys, key)), "the service must answer the move")).rejected, message);
   }
@@ -863,6 +889,7 @@ test("a move of a running, finished, or unknown request is refused with a reason
   assert.ok(!existsSync(queuePaths(root).history) || historyEvents(root, "moved").length === 0, "a refused move records no move");
   await cancel(root, hung.id);
   assert.equal((await settled(waiting.id)).status.verdict, "PASS");
+  assert.equal((await settled(behind.id)).status.verdict, "PASS");
 });
 
 test("a newer commit that replaces a moved request keeps the moved place", async t => {
@@ -871,15 +898,102 @@ test("a newer commit that replaces a moved request keeps the moved place", async
   await waitFor(() => calls.find(call => call.id === hung.id), "the hang must start");
   const other = await request("pass", { branch: "refs/heads/other" });
   const old = await request("pass", { branch: "refs/heads/feature" });
-  const key = await requestMove(root, { id: old.id, reason: "fixes main", by: { name: "Ice" } });
+  const key = await requestMove(root, { id: old.id, reason: "fixes main", by: { name: "Ice", user: "ice", cwd: "C:\\w\\fix" } });
   assert.deepEqual(await waitFor(() => readJson(join(queuePaths(root).keys, key)), "the move must be applied"), { moved: old.id, from: 3, to: 2 });
   const newer = await request("pass", { branch: "refs/heads/feature" });
   assert.equal((await settled(old.id)).status.supersededBy, newer.id);
   const requests = listRequests(root);
   assert.equal(position(requests, newer.id), 2, "the newer commit keeps the moved place");
-  assert.equal(movedNote(requests.find(candidate => candidate.id === newer.id).status.moved), "moved first by Ice: fixes main", "and the record of the move");
+  assert.equal(movedNote(requests.find(candidate => candidate.id === newer.id).status.moved), "moved first by Ice (C:\\w\\fix): fixes main", "and the record of the move");
   await cancel(root, hung.id);
   await settled(other.id);
   await settled(newer.id);
   assert.deepEqual(calls.map(call => call.id), [hung.id, newer.id, other.id]);
+});
+
+test("a malformed move is answered and removed, and the rest of the tick still runs", async t => {
+  const { root, request, settled, calls } = harness(t);
+  const paths = queuePaths(root);
+  const hung = await request("hang");
+  await waitFor(() => calls.find(call => call.id === hung.id), "the hang must start");
+  const waiting = await request("pass", { branch: "refs/heads/waiting" });
+  const by = { name: "test", user: "ice", cwd: "C:\\w\\x" };
+  const bad = [
+    [{ id: { toString: 1 }, reason: "x", by }, /names no request to move/u],
+    [{ id: waiting.id, before: "", reason: "x", by }, /--before names no request/u],
+    [{ id: waiting.id, reason: "x", by: "Ice" }, /by field/u],
+    [{ id: waiting.id, reason: "x", by: { name: 5 } }, /by field/u],
+  ];
+  const keys = [];
+  for (const [move] of bad) keys.push(await requestMove(root, move));
+  const array = `move-${Date.now()}-array`;
+  await writeJson(join(paths.moves, `${array}.json`), [1]);
+  // A move the service can use, written as a client might: its text is cleaned to one short line.
+  const dirty = await requestMove(root, { id: waiting.id, reason: `fixes main\n000000001-aaaaaa  #1  all\u001b[31m ${"x".repeat(400)}`, by: { name: "Ice\nX", user: "ice", cwd: `C:\\w\\${"y".repeat(300)}` } });
+  // A cancel written with them still stops the run in the same pass.
+  await cancel(root, hung.id);
+  assert.equal((await settled(hung.id)).status.state, "cancelled");
+  for (const [index, [, message]] of bad.entries()) assert.match((await waitFor(() => readJson(join(paths.keys, keys[index])), "each malformed move must be answered")).rejected, message);
+  assert.match((await waitFor(() => readJson(join(paths.keys, array)), "a move that is not an object must be answered")).rejected, /not a JSON object/u);
+  assert.equal((await waitFor(() => readJson(join(paths.keys, dirty)), "the dirty move must be answered")).moved, waiting.id);
+  await waitFor(() => readdirSync(paths.moves).length === 0, "every answered move is removed");
+  const { moved } = (await settled(waiting.id)).status;
+  assert.equal(moved.reason, `fixes main 000000001-aaaaaa #1 all [31m ${"x".repeat(400)}`.slice(0, 300));
+  assert.deepEqual([moved.by.name, moved.by.cwd.length], ["Ice X", 200]);
+});
+
+test("a move file that stays unreadable is answered and removed after a minute", async t => {
+  const { root } = harness(t);
+  const paths = queuePaths(root);
+  mkdirSync(paths.moves, { recursive: true });
+  const torn = join(paths.moves, `move-${Date.now()}-torn.json`);
+  writeFileSync(torn, "{\"id\": \"0000");
+  // The service reads every move in each pass, so an answer to a later one means it has seen the torn one.
+  const later = await requestMove(root, { id: "000000099-ffffff", reason: "unblocks others", by: { name: "test" } });
+  await waitFor(() => readJson(join(paths.keys, later)), "the later move must be answered");
+  assert.ok(existsSync(torn), "a new unreadable move may still be being written");
+  assert.equal(readJson(join(paths.keys, basename(torn, ".json"))), null);
+  const old = new Date(Date.now() - 2 * 60_000);
+  utimesSync(torn, old, old);
+  assert.match((await waitFor(() => readJson(join(paths.keys, basename(torn, ".json"))), "the old unreadable move must be answered")).rejected, /could not read the move/u);
+  await waitFor(() => !existsSync(torn), "the old unreadable move must be removed");
+});
+
+test("sixty moves into the same gap keep the exact order", async t => {
+  const { root, request, calls } = harness(t);
+  const hung = await request("hang");
+  await waitFor(() => calls.find(call => call.id === hung.id), "the hang must start");
+  const a = await request("pass", { branch: "refs/heads/a" });
+  const b = await request("pass", { branch: "refs/heads/b" });
+  const c = await request("pass", { branch: "refs/heads/c" });
+  // Each move puts the last request just ahead of the one before it, into the gap behind the first.
+  let [second, third] = [b.id, c.id];
+  for (let n = 1; n <= 60; n += 1) {
+    const key = await requestMove(root, { id: third, before: second, reason: "unblocks others", by: { name: "test" } });
+    const answer = await waitFor(() => readJson(join(queuePaths(root).keys, key)), `move ${n} must be answered`);
+    assert.deepEqual([answer.rejected, answer.to], [undefined, 3], `move ${n} puts ${third} at #3, behind the running request and ${a.id}`);
+    [second, third] = [third, second];
+  }
+  const requests = listRequests(root);
+  assert.deepEqual([a.id, b.id, c.id].map(id => position(requests, id)), [2, 3, 4]);
+  assert.ok(requests.every(entry => Number.isInteger(entry.status.order ?? entry.request.sequence)), "every place is a whole number");
+});
+
+test("a newer commit that replaces two queued requests takes the place of the one furthest ahead", async t => {
+  const { root, fixture, request, settled, calls } = harness(t);
+  const paths = queuePaths(root);
+  const hung = await request("hang");
+  await waitFor(() => calls.find(call => call.id === hung.id), "the hang must start");
+  // Two queued requests on one branch, as after a run on it was retried behind a newer commit. The later one was moved ahead.
+  const moved = { at: new Date().toISOString(), before: null, reason: "fixes main", by: { name: "Ice", user: "ice", cwd: "C:\\w\\fix" } };
+  for (const [id, status] of [["000000101-aaaaaa", { order: 50 }], ["000000102-bbbbbb", { order: 40, moved }]]) {
+    await writeJson(join(paths.request(id), "request.json"), { id, sequence: Number(id.slice(0, 9)), head: fixture.head, base: fixture.base, scope: "all", gates: { rust: true, js: true }, checkout: "pass", branch: "refs/heads/feature" });
+    await writeJson(join(paths.request(id), "status.json"), { state: "queued", attempts: [], ...status });
+  }
+  const newer = await request("pass", { branch: "refs/heads/feature" });
+  for (const id of ["000000101-aaaaaa", "000000102-bbbbbb"]) assert.equal((await settled(id)).status.supersededBy, newer.id);
+  const { status } = listRequests(root).find(candidate => candidate.id === newer.id);
+  assert.deepEqual([status.order, status.moved], [40, moved]);
+  await cancel(root, hung.id);
+  assert.equal((await settled(newer.id)).status.verdict, "PASS");
 });

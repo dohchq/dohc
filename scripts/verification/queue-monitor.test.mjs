@@ -68,21 +68,27 @@ test("the snapshot shows the week's attempts with their lanes, the line in order
   assert.equal(state.lastNightlyPass, null);
 });
 
-test("the line is drawn in the order moves gave it, and a moved request says who moved it and why", async t => {
+test("the line is drawn in the order moves gave it, and a moved request says who moved it and why, in line and once it runs", async t => {
   const root = await queueRoot(t);
   const paths = queuePaths(root);
   const add = async (id, branch, status) => {
     await writeJson(join(paths.request(id), "request.json"), { head, base, scope: "all", checkout: "C:\\w\\y", branch, submittedAt: iso(20), sequence: Number(id.slice(0, 9)), id });
     await writeJson(join(paths.request(id), "status.json"), { state: "queued", attempts: [], ...status });
   };
-  await add("000000006-ffffff", "refs/heads/fix/grid", { order: 3.5,
+  await add("000000006-ffffff", "refs/heads/fix/grid", { order: 3,
     moved: { at: iso(5), before: "000000004-dddddd", reason: "fixes the grid test three branches fail", by: { name: null, user: "ice", cwd: "C:\\w\\fix-grid" } } });
   await add("000000007-gggggg", "refs/heads/later");
   assert.deepEqual(monitorState(root, { now }).queued.map(entry => [entry.branch, entry.moved]), [
     ["main (nightly)", null],
-    ["fix/grid", "moved before 000000004-dddddd by ice in C:\\w\\fix-grid\nfixes the grid test three branches fail"],
+    ["fix/grid", "moved before 000000004-dddddd by ice (C:\\w\\fix-grid)\nfixes the grid test three branches fail"],
     ["again", null],
     ["later", null]], "the nightly still goes first, the moved request is ahead of the one it was moved before, and its tooltip names who moved it and why");
+  // A moved request keeps its mark in its lane once it runs.
+  await writeJson(join(paths.request("000000003-cccccc"), "status.json"), { state: "running", attempts: [{ n: 1, startedAt: iso(10), lane: 2 }],
+    moved: { at: iso(30), before: null, reason: "unblocks the others", by: { name: "Ice", user: "ice", cwd: "C:\\w\\now" } } });
+  const runs = monitorState(root, { now }).runs;
+  assert.equal(runs.find(run => run.outcome === "running").moved, "moved first by Ice (C:\\w\\now)\nunblocks the others");
+  assert.ok(runs.filter(run => run.outcome !== "running").every(run => !("moved" in run)), "a finished run carries no mark");
 });
 
 test("a service that stopped beating is shown as not responding", async t => {
