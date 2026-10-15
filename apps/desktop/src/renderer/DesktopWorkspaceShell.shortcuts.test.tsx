@@ -41,12 +41,18 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     }
   });
 
-  it("pins empty-editor chips as known exceptions pending Correct macOS empty-editor shortcut text", async () => {
+  it("labels the empty-editor chips with each command's primary binding", async () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])), platform);
     renderShell(bridge);
     await screen.findByText("Select a file, or create one");
-    for (const text of ["Ctrl N · new file", "Ctrl K · commands", "Ctrl P · go to"]) {
-      expect(screen.getByRole("button", { name: text }).textContent?.trim()).toBe(text);
+    const chips = platform === "darwin"
+      ? ["⌘N · new file", "⇧⌘P · commands", "⌘P · go to"]
+      : ["Ctrl N · new file", "Ctrl Shift P · commands", "Ctrl P · go to"];
+    for (const text of chips) {
+      const chip = screen.getByRole("button", { name: text });
+      // A narrow group wraps whole chips instead of clipping or splitting one.
+      expect(chip.className).toContain("whitespace-nowrap");
+      expect(chip.parentElement!.className.split(" ")).toEqual(expect.arrayContaining(["flex-wrap", "max-w-full"]));
     }
   });
 
@@ -158,11 +164,17 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     await waitFor(() => expect(screen.queryByTestId("shortcut-confirm")).toBeNull());
   });
 
-  it.each(["menu", "shell", "chip"])("takes a changed registry binding through %s", async (consumer) => {
+  it.each(["menu", "shell", "chip", "empty-editor chip"])("takes a changed registry binding through %s", async (consumer) => {
     const accelerators = SHORTCUTS["quick-open"].accelerators;
     const original = accelerators[0];
     Reflect.set(accelerators, "0", "CommandOrControl+O");
     try {
+      if (consumer === "empty-editor chip") {
+        renderShell(makeBridge(Promise.resolve(storedStateWithTabs([])), platform));
+        await screen.findByText("Select a file, or create one");
+        expect(screen.getByRole("button", { name: `${platform === "darwin" ? "⌘O" : "Ctrl O"} · go to` })).toBeTruthy();
+        return;
+      }
       await ready(platform);
       if (consumer === "chip") {
         const trigger = screen.getByTestId("titlebar-quick-open");
@@ -170,7 +182,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
       } else if (consumer === "menu") {
         const menu = buildMenuTemplate({ isDev: false, platform, sendCommand: vi.fn(), stepZoom: vi.fn(), showAbout: vi.fn() });
         const view = menu.find((item) => item.label === "View")!.submenu as MenuItemConstructorOptions[];
-        expect(view.find((item) => item.label === "Go To")!.accelerator).toBe("CommandOrControl+O");
+        expect(view.find((item) => item.label === "Go to")!.accelerator).toBe("CommandOrControl+O");
       } else {
         const event = keyEvent("CommandOrControl+O", platform);
         fireEvent(window, event);

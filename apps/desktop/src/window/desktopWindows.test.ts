@@ -405,7 +405,7 @@ describe("desktop workspace windows", () => {
     const f = fixture(); const window = new Window(); window.minimized = true;
     f.windows.trackWorkspaceWindow(window.native); f.windows.refreshApplicationMenu();
     const manager = f.windows.showOrCreateManagerWindow();
-    const recent = submenu(item(f, "File", "Open Recent"))[1]!;
+    const recent = submenu(item(f, "File", "Open recent"))[1]!;
     click(recent, manager);
     await vi.waitFor(() => expect(window.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, workspace("b")));
     expect(f.all[0]!.webContents.send).not.toHaveBeenCalled();
@@ -535,9 +535,9 @@ describe("desktop native menus", () => {
       if (!handler) throw new Error(`Missing registered handler ${channel}`);
       return handler({ trusted: true, sender }, payload);
     };
-    const recentEntries = () => submenu(item(f, "File", "Open Recent"));
+    const recentEntries = () => submenu(item(f, "File", "Open recent"));
     f.windows.refreshNativeWorkspaceSurfaces();
-    expect(recentEntries()).toEqual([{ label: "No Recent Workspaces", enabled: false }]);
+    expect(recentEntries()).toEqual([{ label: "No recent workspaces", enabled: false }]);
     const root = await invoke(CHANNELS.getDefaultWorkspaceRoot) as string;
     const created = await invoke(CHANNELS.createLocalWorkspace, {
       rootPath: join(root, "Created Project"), kind: "personal",
@@ -583,9 +583,9 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.clearRecentDocuments).not.toHaveBeenCalled();
     expect(f.windows.applicationMenuCanInstallUpdate).toBeNull();
     f.setReady(true); f.windows.refreshApplicationMenu();
-    expect(item(f, "Help", "Update and Restart").enabled).toBe(false);
+    expect(item(f, "Help", "Update and restart").enabled).toBe(false);
     f.setCanInstall(true); f.windows.refreshApplicationMenu();
-    expect(item(f, "Help", "Update and Restart").enabled).toBe(true);
+    expect(item(f, "Help", "Update and restart").enabled).toBe(true);
     expect(f.windows.applicationMenuCanInstallUpdate).toBe(true);
   });
 
@@ -593,11 +593,11 @@ describe("desktop native menus", () => {
     const f = fixture(); const first = new Window(); const explicit = new Window();
     f.windows.trackWorkspaceWindow(first.native); f.windows.trackWorkspaceWindow(explicit.native);
     f.windows.refreshApplicationMenu();
-    click(item(f, "File", "New File"));
+    click(item(f, "File", "New file"));
     expect(first.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "new-file");
     click(item(f, "Go", "Settings"), explicit.native);
     expect(explicit.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
-    const recent = submenu(item(f, "File", "Open Recent"))[1]!;
+    const recent = submenu(item(f, "File", "Open recent"))[1]!;
     click(recent, explicit.native);
     expect(explicit.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, workspace("b"));
     expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], explicit.webContents.native)[0]!.workspaceId).toBe("b");
@@ -621,13 +621,13 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.clearRecentDocuments).not.toHaveBeenCalled();
     expect(f.dependencies.app.addRecentDocument).not.toHaveBeenCalled();
     expect(f.dependencies.app.setUserTasks).not.toHaveBeenCalled();
-    expect(submenu(item(f, "File", "Open Recent"))).toHaveLength(1);
+    expect(submenu(item(f, "File", "Open recent"))).toHaveLength(1);
   });
 
   it("reuses native recents for cloned roots while rebuilding current menus", () => {
     const f = fixture();
     f.windows.refreshNativeWorkspaceSurfaces();
-    expect(item(f, "Help", "Update and Restart").enabled).toBe(false);
+    expect(item(f, "Help", "Update and restart").enabled).toBe(false);
 
     const rows = [workspace("replacement", workspace("a").rootPath), workspace("b")];
     f.setRows(rows);
@@ -640,10 +640,10 @@ describe("desktop native menus", () => {
     expect(f.dependencies.app.addRecentDocument).toHaveBeenCalledTimes(2);
     expect(f.dependencies.app.setUserTasks).toHaveBeenCalledOnce();
     expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(3);
-    expect(item(f, "Help", "Update and Restart").enabled).toBe(true);
+    expect(item(f, "Help", "Update and restart").enabled).toBe(true);
     const target = new Window();
     f.windows.trackWorkspaceWindow(target.native);
-    click(submenu(item(f, "File", "Open Recent"))[0]!, target.native);
+    click(submenu(item(f, "File", "Open recent"))[0]!, target.native);
     expect(target.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, rows[0]);
     expect(f.dependencies.app.clearRecentDocuments).toHaveBeenCalledOnce();
   });
@@ -714,7 +714,7 @@ describe("desktop native menus", () => {
     expect(tasks).toHaveLength(10);
     expect(tasks[0]).toEqual({ program: "C:\\dohc\\dohc.exe", iconPath: "C:\\dohc\\dohc.exe", iconIndex: 0,
       arguments: '--open-workspace "C:\\say\\"hi\\\\"', title: 'Open say"hi', description: rows[0].rootPath });
-    expect(submenu(item(f, "File", "Open Recent"))).toHaveLength(10);
+    expect(submenu(item(f, "File", "Open recent"))).toHaveLength(10);
   });
 
   it("tolerates a malformed registry for native menus while leaving strict reads with their caller", () => {
@@ -722,7 +722,7 @@ describe("desktop native menus", () => {
     f.windows.refreshNativeWorkspaceSurfaces();
     expect(f.dependencies.app.addRecentDocument).not.toHaveBeenCalled();
     expect(f.dependencies.app.setUserTasks).toHaveBeenCalledWith([]);
-    expect(submenu(item(f, "File", "Open Recent"))).toEqual([{ label: "No Recent Workspaces", enabled: false }]);
+    expect(submenu(item(f, "File", "Open recent"))).toEqual([{ label: "No recent workspaces", enabled: false }]);
     expect(() => f.dependencies.workspaceSummaries()).toThrow("registry failed");
   });
 
@@ -738,7 +738,7 @@ describe("desktop native menus", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.mocked(f.dependencies.stepWindowZoom).mockRejectedValueOnce(error);
     vi.mocked(f.dependencies.dialog.showErrorBox).mockImplementation(() => { reported.resolve(); });
-    f.windows.refreshApplicationMenu(); click(item(f, "View", "Zoom In"));
+    f.windows.refreshApplicationMenu(); click(item(f, "View", "Zoom in"));
     await reported.promise;
     expect(f.dependencies.stepWindowZoom).toHaveBeenCalledExactlyOnceWith("in");
     // The refusal already names the file and the way out.

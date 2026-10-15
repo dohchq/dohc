@@ -58,7 +58,6 @@ import {
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
 } from "../workspaces/workspaceEngineCaptureLimits";
-import { DohcMark } from "@dohc/brand";
 import {
   hasUnacknowledgedShareSkips,
   shareSkipNoticeLines,
@@ -181,6 +180,7 @@ import { ActivityBar } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
+import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
@@ -5660,38 +5660,12 @@ export function DesktopWorkspaceShell(props: {
                   : { onSharePath })}
               />
             ) : (
-              <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
-                <DohcMark size={30} className="text-line" />
-                <span className="text-sm text-muted">
-                  Select a file, or create one
-                </span>
-                {/* Known exceptions to the shortcut registry, pinned in
-                    DesktopWorkspaceShell.shortcuts.test.tsx until macOS
-                    shows its own keys here. */}
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setNewFileOpen(true)}
-                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
-                  >
-                    Ctrl N · new file
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPaletteOpen(true)}
-                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
-                  >
-                    Ctrl K · commands
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setQuickOpenOpen(true)}
-                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
-                  >
-                    Ctrl P · go to
-                  </button>
-                </div>
-              </div>
+              <EmptyEditorGroup
+                platform={bridge().platform}
+                onNewFile={() => setNewFileOpen(true)}
+                onOpenPalette={() => setPaletteOpen(true)}
+                onOpenQuickOpen={() => setQuickOpenOpen(true)}
+              />
             );
               }
               const unhandled: never = groupTab;
