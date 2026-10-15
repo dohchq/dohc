@@ -36,7 +36,7 @@ function fixture(options: Parameters<typeof registered>[0] = {}) {
       body: JSON.stringify({release: {action, ...scope, releaseId, computerName: "Laptop", ...changes}})}));
     return {status: response.status, headers: response.headers, body: await response.json() as any};
   };
-  const replication = createWorkspaceReplicationRoutes(f.storage,() => 100,new DiscussionActivityHub());
+  const replication = createWorkspaceReplicationRoutes(f.storage,() => 100,new DiscussionActivityHub(),{watched: () => false});
   const push = async (ops: unknown[], originId = "ordinary") => {
     let response: Response;
     try {response = await replication.respondToWorkspaceReplication(new Request("https://relay.test/sync/workspace/log",{method:"POST",
