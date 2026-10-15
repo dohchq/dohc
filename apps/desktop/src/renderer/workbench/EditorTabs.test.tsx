@@ -403,8 +403,25 @@ describe("EditorTabs strip scrolling", () => {
     });
   });
 
-  // The mask in styles.css reads these: it fades an edge the strip can still
-  // scroll past, and no edge it has reached.
+  // styles.css shows each fade from the strip's attributes through a sibling
+  // selector, so the fades follow the strip in its frame. They draw over the
+  // other tabs and under the active one (z-10), and take no clicks.
+  it("draws the edge fades after the strip, under the active tab, taking no clicks", () => {
+    renderTabs("a.md");
+    const strip = screen.getByRole("tablist");
+    const fades = [...screen.getByTestId("editor-tabs").querySelectorAll<HTMLElement>("[data-strip-fade]")];
+    expect(fades.map((fade) => fade.dataset.stripFade)).toEqual(["left", "right"]);
+    for (const fade of fades) {
+      expect(fade.parentElement).toBe(strip.parentElement);
+      expect(strip.compareDocumentPosition(fade) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      const drawn = (fade.className.includes("absolute") ? fade : fade.firstElementChild) as HTMLElement;
+      expect(drawn.className.split(" ")).toEqual(expect.arrayContaining(["pointer-events-none", "z-[6]"]));
+    }
+    expect(screen.getByRole("tab", { selected: true }).className).toContain("z-10");
+  });
+
+  // The fades in styles.css read these: an edge the strip can still scroll
+  // past fades, and an edge it has reached does not.
   it("marks the edges the strip can still scroll past", () => {
     renderTabs("a.md");
     const strip = screen.getByRole("tablist");

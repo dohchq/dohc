@@ -85,11 +85,16 @@ const ACTIVE_GROUP_LINE =
   "border-t-2 border-accent forced-colors:border-[Highlight] [[data-split]_[data-editor-group-id][data-active]_&]:block";
 const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-muted";
 
-// An edge the strip can still scroll past fades over this width (the mask on
-// `.dohc-tab-strip` in styles.css). A revealed tab stops clear of the fade,
-// its joins included, where the strip has room for both.
+// An edge the strip can still scroll past fades over this width. A revealed
+// tab stops clear of the fade, its joins included, where the strip has room
+// for both.
 const EDGE_FADE = 24;
 const REVEAL_MARGIN = EDGE_FADE + CORNER_RADIUS + 1;
+// The fade is the chrome's own fill drawn over the tab names, w-6 being
+// EDGE_FADE. It starts under the strip's top band, where the split's accent
+// line runs, and stops above the hairline; it sits above the other tabs and
+// under the active one (z-10), and takes no clicks.
+const STRIP_FADE = "pointer-events-none absolute top-1 bottom-px z-[6] w-6 from-panel to-transparent";
 
 // Scrolls only the strip, and only when the tab is not already clear of the
 // fades: scrollIntoView would also scroll every scrolling ancestor, the
@@ -933,6 +938,13 @@ export const EditorTabs = memo(function EditorTabs(props: {
             tab interrupts it. */}
         <div aria-hidden className="min-w-4 flex-1 border-b border-line" />
       </div>
+      {/* The fades at the strip's edges, shown by styles.css at an edge it
+          can still scroll past. The strip starts at the frame's left edge;
+          the right fade hangs from a zero-width item at its right edge. */}
+      <span aria-hidden data-strip-fade="left" className={`${STRIP_FADE} left-0 bg-linear-to-r`} />
+      <span aria-hidden data-strip-fade="right" className="relative w-0 shrink-0">
+        <span className={`${STRIP_FADE} right-0 bg-linear-to-l`} />
+      </span>
       {/* The open document's actions, after the tabs in the keyboard order
           as they were after the tab row. Empty for a tab with none. When
           room runs out they give way before the tab names (a far higher

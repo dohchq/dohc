@@ -356,34 +356,25 @@ body {
   display: none;
 }
 
-/* An edge the strip can still scroll past fades its last 24px (EDGE_FADE in
- * EditorTabs, which sets the attributes), so a name cut there reads as
- * continuing. A mask takes no clicks and tints nothing. The bottom pixel
- * row stays whole: it is the strip's hairline, and the active tab's join to
- * the paper below. A dragged tab shows whole at the edge, corners included,
- * and forced colors keep text at full contrast, so neither fades. */
-.dohc-tab-strip[data-overflow-left] {
-  --tab-strip-fade-left: 24px;
-}
-
-.dohc-tab-strip[data-overflow-right] {
-  --tab-strip-fade-right: 24px;
+/* An edge the strip can still scroll past fades its last 24px, so a name
+ * cut there reads as continuing. EditorTabs sets the attributes and draws
+ * the fades (STRIP_FADE) after the strip. They are the chrome's fill drawn
+ * over the tabs, not a mask on the strip: a masked strip changed how
+ * Chromium antialiased text elsewhere on the page. A dragged tab shows whole
+ * at the edge, corners included, and forced colors keep text at full
+ * contrast, so neither fades. */
+[data-strip-fade] {
+  display: none;
 }
 
 @media (forced-colors: none) {
-  .dohc-tab-strip:is([data-overflow-left], [data-overflow-right]):not(:has([data-dragging])) {
-    mask-image:
-      linear-gradient(
-        to right,
-        transparent,
-        #000 var(--tab-strip-fade-left, 0px),
-        #000 calc(100% - var(--tab-strip-fade-right, 0px)),
-        transparent
-      ),
-      linear-gradient(#000 0 0);
-    mask-size: 100% 100%, 100% 1px;
-    mask-position: 0 0, 0 100%;
-    mask-repeat: no-repeat;
+  .dohc-tab-strip[data-overflow-left] ~ [data-strip-fade="left"],
+  .dohc-tab-strip[data-overflow-right] ~ [data-strip-fade="right"] {
+    display: block;
+  }
+
+  .dohc-tab-strip:has([data-dragging]) ~ [data-strip-fade] {
+    display: none;
   }
 }
 
