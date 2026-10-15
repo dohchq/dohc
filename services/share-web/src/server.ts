@@ -11,7 +11,7 @@ import { extname, join } from "node:path";
 import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { TokenBucketLimiter, readBoundedJson } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core";
-import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
+import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER, SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER, type ApiVersionRange } from "@dohc/workspace-contracts/relay-values";
 import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
 import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type NamedLiveBrowserSessionContext } from "./namedLiveBrowserClient";
@@ -23,7 +23,7 @@ import {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 export {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 import {serveRemoteMcp} from "./remoteMcp";
 import {COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES} from "./collectionWrites";
-import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError } from "./relayVersion";
+import { SHARE_WEB_API_VERSIONS, mcpApiVersions, shareWebApiVersionRefusal } from "./apiVersion";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 
@@ -112,6 +112,7 @@ interface RelayCall {
 }
 
 export interface CreateShareWebApplicationOptions {
+  apiVersions?: ApiVersionRange;
   appLaunch?: AppLaunchConfig;
   publicEditRelease?: PublicEditRelease;
   relayUrl: string;
@@ -398,6 +399,17 @@ async function discussionInput(request: Request): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+function logRelayPath(request: Request): string {
+  const incoming = new URL(request.url).searchParams;
+  const query = new URLSearchParams();
+  for (const key of ["since", "limit", "hold"]) {
+    const value = incoming.get(key);
+    if (value !== null) query.set(key, value);
+  }
+  const serialized = query.toString();
+  return `/sync/link/log${serialized ? `?${serialized}` : ""}`;
 }
 
 function discussionRelayPath(request: Request): string | null {
@@ -874,6 +886,7 @@ export function createShareWebApplication({
   linkLive: linkLiveConfig,
   publicEditRelease: releaseInput,
   appLaunch: appLaunchConfig,
+  apiVersions = SHARE_WEB_API_VERSIONS,
 }: CreateShareWebApplicationOptions): ShareWebApplication {
   // Every relay request names the relay API version this build speaks.
   const fetchRelay: RelayFetch = (request) => {
@@ -1196,12 +1209,21 @@ export function createShareWebApplication({
   }) : undefined;
   const appLaunch = appLaunchConfig ? createAppLaunchHandler({config: appLaunchConfig, relayUrl, fetchRelay, nowMs, resolveMaterial: resolveLinkBrowserMaterial, resolveNamedMaterial: resolveNamedAppMaterial}) : undefined;
   const discoverApps = createAppDiscovery({viewerOrigin: appLaunchConfig?.viewerOrigin, relayUrl, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial});
+  const viewerHost = appLaunchConfig ? new URL(appLaunchConfig.viewerOrigin).host : undefined;
   const handle = async (request: Request): Promise<Response> => {
-    if (appLaunch?.matches(request)) return appLaunch.handle(request);
-    if (!publicHosts.has((request.headers.get("host") ?? "").toLowerCase())) return refused();
     const { pathname, search } = new URL(request.url);
+    const host = (request.headers.get("host") ?? "").toLowerCase();
+    const appRequest = appLaunch?.matches(request) ?? false;
+    if (!appRequest && !publicHosts.has(host)) return refused();
+    const viewerAppRoute = pathname === "/api/apps/launch" || pathname === "/api/apps/summary";
+    if (viewerAppRoute ? request.headers.get("host") === viewerHost : !appRequest) {
+      const refusal = shareWebApiVersionRefusal(request, apiVersions);
+      if (refusal) return refusal;
+    }
+    if (appRequest) return appLaunch!.handle(request);
     const agentOrigin = linkLiveConfig?.publicOrigin ?? `https://${request.headers.get("host")}`;
     if (pathname === "/api/mcp" && request.method === "GET" && !search) return jsonResponse({
+      api: "share-web", apiVersions, versionHeader: SHARE_WEB_API_VERSION_HEADER, defaultVersion: 1, mcpApiVersions: mcpApiVersions(apiVersions),
       endpoint: "/mcp", transport: "streamable-http", exchange: {path: "/api/mcp/exchange", method: "POST", body: {secret: "The secret after # in the share link"}},
       authentication: "Send the returned bearer in the Authorization header as Bearer <bearer>. Each exchange creates a separate agent identity. Keep and reuse the bearer.",
     });
@@ -1234,17 +1256,15 @@ export function createShareWebApplication({
             const internal = new Request(new URL(path, agentOrigin), {
               ...init, signal: init.signal ? AbortSignal.any([signal, init.signal]) : signal,
               headers: {host: new URL(agentOrigin).host, origin: agentOrigin, cookie, [LINK_SESSION_HEADER]: discriminator,
-                "content-type": "application/json"},
+                "content-type": "application/json", [SHARE_WEB_API_VERSION_HEADER]: String(SHARE_WEB_API_VERSION)},
             });
             if (holdsLargeBody) writesInsideAdmittedRequests.add(internal);
             return handle(internal);
           },
         });
         return response(result.body, {status: result.status, headers: result.headers});
-      } catch (error) {
-        return error instanceof RelayVersionRefusalError
-          ? jsonResponse(error.refusal, {status: RELAY_VERSION_REFUSAL_STATUS})
-          : refused();
+      } catch {
+        return refused();
       }
       finally {mcpRequests--; release();}
     }
@@ -1559,7 +1579,7 @@ export function createShareWebApplication({
           return refused();
         }
         return await callRelay(request, authenticated, {
-          path: `/sync/link/log${search}`,
+          path: logRelayPath(request),
           holdMs: Number(hold),
           limiter: activityHoldLimiter,
           ifSessionChanged: true,

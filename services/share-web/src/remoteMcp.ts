@@ -6,7 +6,7 @@ import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refu
 import {relayLinkRefusal} from "./linkRefusal";
 import { asRecord } from "@dohc/workspace-core/records";
 import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
-import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError, relayVersionRefusal } from "./relayVersion";
+import { readShareWebApiVersionRefusal } from "./apiVersion";
 import { remoteLiveDocument } from "./remoteLiveDocument";
 import { shareLinkSummary } from "./shareSummary";
 import type { createLinkLiveClient } from "./linkLiveClient";
@@ -109,11 +109,7 @@ const error = (message: string): CallToolResult => ({ isError: true, content: [{
 const json = async (response: Response, signal: AbortSignal): Promise<unknown> => {
   if (!response.ok) {
     const value = await readBoundedJson(response, 4096, signal).catch(() => null);
-    const refusal = response.status === RELAY_VERSION_REFUSAL_STATUS
-      ? relayVersionRefusal(value)
-      : null;
     await response.body?.cancel().catch(() => undefined);
-    if (refusal) throw new RelayVersionRefusalError(refusal);
     const code = parseLinkRefusal(value, response.status);
     throw new Error(code ? LINK_REFUSALS[code].error : "not found");
   }
@@ -228,7 +224,7 @@ function buildServer(options: RemoteOptions, metadata: Record<string, unknown>):
 export async function serveRemoteMcp(request: Request, options: RemoteOptions): Promise<{ body: BodyInit | null; status: number; headers: Headers }> {
   const metadataResponse = await options.request("/api/view/meta");
   if (!metadataResponse.ok) {
-    const result = await relayLinkRefusal(metadataResponse, options.signal);
+    const result = await readShareWebApiVersionRefusal(metadataResponse, options.signal) ?? await relayLinkRefusal(metadataResponse, options.signal);
     await metadataResponse.body?.cancel().catch(() => {});
     return {body: result.body, status: result.status, headers: result.headers};
   }

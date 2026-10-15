@@ -1,3 +1,4 @@
+import {fetchShareWeb} from "./apiVersion";
 import { useEffect, useRef, useState } from "react";
 
 export type AppLaunch = {discriminator: string; publicationId: string} | {workspaceId: string; publicationId: string};
@@ -6,7 +7,7 @@ export class AppLaunchError extends Error {constructor(readonly status: number) 
 
 /** Issues a launch for `launch` and hands the browser to the approved app origin. Resolves after the form submits. */
 export async function launchSharedApp(launch: AppLaunch, signal: AbortSignal): Promise<void> {
-  const response = await fetch("/api/apps/launch", {method: "POST", credentials: "same-origin", signal,
+  const response = await fetchShareWeb("/api/apps/launch", {method: "POST", credentials: "same-origin", signal,
     headers: {"content-type": "application/json"}, body: JSON.stringify(launch)});
   if (!response.ok) throw new AppLaunchError(response.status);
   const value: unknown = await response.json();

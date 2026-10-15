@@ -1,3 +1,4 @@
+import {fetchShareWeb} from "./apiVersion";
 import { useEffect, useRef, useState } from "react";
 import { OpenSharedApp } from "./OpenSharedApp";
 import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
@@ -24,7 +25,7 @@ function PublicationList({session}: {session: string}) {
   async function load(after: string | null) {
     active.current?.abort();const controller = new AbortController();active.current = controller;setStatus("loading");
     try {
-      const response = await fetch(`/api/apps?session=${encodeURIComponent(session)}${after ? `&cursor=${after}` : ""}`, {
+      const response = await fetchShareWeb(`/api/apps?session=${encodeURIComponent(session)}${after ? `&cursor=${after}` : ""}`, {
         credentials: "same-origin", signal: controller.signal,
       });
       if (!response.ok) {
