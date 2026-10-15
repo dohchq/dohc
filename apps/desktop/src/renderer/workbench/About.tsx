@@ -297,17 +297,18 @@ export type HistoryView =
 const HISTORY_ROWS = 5;
 const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 
+// One author looks as chats draw them. Several authors keep the file mark.
 function MomentAuthor(props: { moment: EngineMomentRecord }) {
   const { moment } = props;
+  const presentation = moment.authorPresentations?.[0] ?? neutralPresentation;
   if (moment.agentAuthorName !== undefined) {
-    return <ChatAvatar presentation={neutralPresentation} name={moment.agentAuthorName} kind="agent" size="strip" />;
+    return <ChatAvatar presentation={presentation} name={moment.agentAuthorName} kind="agent" size="strip" />;
   }
-  if (moment.automationAuthor) return <ChatAvatar presentation={neutralPresentation} name={moment.automationAuthor.name} kind="automation" size="strip" />;
-  if (moment.namedAuthor) return <ChatAvatar presentation={neutralPresentation} name={moment.namedAuthor.label} kind="human" size="strip" />;
-  if (moment.personAuthorName !== undefined) {
-    return <ChatAvatar presentation={ownPresentation} name={moment.personAuthorName} kind="human" size="strip" />;
-  }
-  if (moment.publicAuthor || moment.linkAuthor) return <LinkMark />;
+  if (moment.automationAuthor) return <ChatAvatar presentation={presentation} name={moment.automationAuthor.name} kind="automation" size="strip" />;
+  const person = moment.namedAuthor?.label ?? moment.personAuthorName
+    ?? (moment.authors?.[0]?.kind === "human" ? moment.liveAuthorName : undefined);
+  if (person !== undefined) return <ChatAvatar presentation={presentation} name={person} kind="human" size="strip" />;
+  if (moment.publicAuthor || moment.linkAuthor || moment.liveAuthorName !== undefined) return <LinkMark />;
   return <FileText size={14} aria-hidden className="shrink-0 text-subtle" />;
 }
 

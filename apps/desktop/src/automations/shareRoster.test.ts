@@ -1,4 +1,4 @@
-import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
+import { historyCursor, historyPageFields, neutralHistoryPresentations } from "../testing/historyPageFixture";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
@@ -193,7 +193,7 @@ describe("roster from the relay's listings", () => {
         operation: "write", metadata: { origin: "sync" }, momentOrder: 0, protected: false,
         authors: [{ kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 }] }],
       nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
-    }), { agent: () => undefined, person: () => undefined, automation: () => null,
+    }), { agent: () => undefined, person: () => undefined, automation: () => null, presentations: neutralHistoryPresentations,
       prepare: authors => names.prepare(WORKSPACE, authors.filter(author => author.kind === "named")), named: author => names.author(WORKSPACE, author) });
     const immediate = await readHistory();
     expect(immediate).toMatchObject({ moments: [{ namedAuthor: { label: "Someone you shared with" } }] });
@@ -218,7 +218,7 @@ describe("roster from the relay's listings", () => {
           { kind: "named", userId: "u-ben", grantId: "g-dep", grantGeneration: 1 },
         ] }],
       nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
-    }), { agent: () => undefined, person: () => undefined, automation: () => null,
+    }), { agent: () => undefined, person: () => undefined, automation: () => null, presentations: neutralHistoryPresentations,
       prepare: authors => names.prepare(WORKSPACE, authors.filter(author => author.kind === "named")), named: author => names.author(WORKSPACE, author) });
     expect(await readHistory()).toMatchObject({ moments: [{ authorLabels: ["ana@dohc.test (Edit)", "Agent", "Someone you shared with"] }] });
     await new Promise<void>(resolve => setImmediate(resolve));
@@ -1037,7 +1037,8 @@ describe("a direct write's author in History", () => {
         authors: [{ kind: "named", userId: "ana", grantId: "g-1", grantGeneration: 1 }],
       }],
       nextCursor: null, latestMomentOrder: 0, activeVersionId: "main", ...historyPageFields,
-    }), { agent: () => undefined, person: () => undefined, automation: () => null, named: (author) => labelFrom(saved, author) });
+    }), { agent: () => undefined, person: () => undefined, automation: () => null, named: (author) => labelFrom(saved, author),
+      presentations: neutralHistoryPresentations });
     expect(history).toMatchObject({ moments: [{ namedAuthor: { userId: "ana", label: "Someone you shared with" } }] });
   });
 

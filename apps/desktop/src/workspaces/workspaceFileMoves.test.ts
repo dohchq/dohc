@@ -18,6 +18,7 @@ import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, prepareMoveWor
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { desktopRecordEditContext } from "./desktopRecordEdits";
 import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
+import { neutralHistoryPresentations } from "../testing/historyPageFixture";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 
 // Filesystem refusals a test switches on for chosen paths.
@@ -952,7 +953,7 @@ describe("a person's delete", () => {
       ]);
       // History shows it as the person's own file edit.
       const history = await listEngineMomentsForIpc(() => f.engine().listMoments(),
-        { agent: () => undefined, person: () => "Ice", automation: () => null, named: () => "" });
+        { agent: () => undefined, person: () => "Ice", automation: () => null, named: () => "", presentations: neutralHistoryPresentations });
       if (!("moments" in history)) throw new Error("History was updating.");
       const shown = history.moments.find(moment => moment.operation === "delete" && moment.path === "tasks/hand.md");
       expect(shown).toMatchObject({ origin: "local-file", authors: [person] });

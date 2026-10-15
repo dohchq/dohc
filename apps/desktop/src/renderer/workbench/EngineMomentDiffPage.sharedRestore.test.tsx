@@ -5,6 +5,7 @@ import {engineMomentDetailForIpc} from "../../ipc/engineHistoryIpc";
 import type {WorkspaceEngineMomentDetail} from "../../workspaces/workspaceEngineCapture";
 import {EngineMomentDiffPage} from "./EngineMomentDiffPage";
 import {momentDiffTabPath} from "./workbenchState";
+import {neutralHistoryPresentations} from "../../testing/historyPageFixture";
 
 afterEach(() => {cleanup(); vi.unstubAllGlobals();});
 const noop = () => {};
@@ -20,6 +21,7 @@ async function open(detail: WorkspaceEngineMomentDetail) {
     agent: () => "Owner",
     person: () => undefined,
     automation: (automationId) => ({ name: automationId, collection: "Tasks" }),
+    presentations: neutralHistoryPresentations,
   });
   const ownerRestore = vi.fn().mockResolvedValue({document: {workspaceId: "workspace"}, grants: [], points: [], authors: [], pendingOperation: null,
     nextGrantCursor: null, nextBeforeCursor: null});

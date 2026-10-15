@@ -24,6 +24,9 @@ import { createEngineYDocSessionIpc, type EngineYDocIpcSender } from "../workspa
 import type { WorkspaceEngineCapture, WorkspaceEngineYDocProviderSession, probeEngineStoreRefusal } from "../workspaces/workspaceEngineCapture";
 import { EngineStoreRecoveryFailedError } from "../workspaces/engineStoreRebuild";
 import type { RegistryEntry } from "../workspaces/registryStore";
+import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
+import { ownActorPresentation } from "../workspaces/actorPresentation";
+import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import { deferred } from "../testing/deferred";
 import { createServerRuns, type ServerAnswer, type ServerRequest } from "../automations/serverRuns";
 
@@ -195,10 +198,14 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const recordHistoryPersonName = vi.fn((_workspaceId: string, userId: string, _sender: Sender): string | null => userId === "person-local" ? null : userId);
   const prepareRecordHistoryPeople = vi.fn<(_workspaceId: string, userIds: readonly string[], _sender: Sender) => void>();
   const prepareNamed = vi.fn<NonNullable<EngineMomentAuthorNames["prepare"]>>();
+  const identity: { credentials: CloudCredentials | null } = { credentials: null };
+  const warmCredentialCache = vi.fn(async () => undefined);
   const registrations = createWorkspaceEngineIpc({
     readWorkspaceEnginePolicy: readPolicy,
     localPersonId: () => "person-local",
     localPersonName: () => "Ice",
+    localInstallationId: () => "install-local",
+    warmCredentialCache, currentCredentials: () => identity.credentials,
     // Read from main's own account, as the sign-in stands when the request arrives.
     localPerson: async () => ({ kind: "human", humanId: session.account ?? "install-local" }),
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
@@ -237,7 +244,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
-    storeWorkspaces, readPolicy,
+    storeWorkspaces, readPolicy, identity, warmCredentialCache,
     sent, recordHistoryPersonName, prepareRecordHistoryPeople,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
     /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
@@ -883,6 +890,70 @@ describe("workspace engine IPC registrations", () => {
       "Owner Account, writer", "Owner Account, Trip helper", "Owner Account", "Link holder Anonymous",
     ]);
     expect(listed.moments.map((moment) => moment.authors?.length)).toEqual([2, 2, 1, 1]);
+  });
+
+  describe("History author presentation", () => {
+    type Authors = NonNullable<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"][number]["authors"]>;
+    const account: CloudCredentials = { serverUrl: "https://account.test", email: "ice@example.test", userId: "person-local", token: "token", relayUrl: "https://relay.test" };
+    const sam = { kind: "named" as const, userId: "sam", grantId: "grant-sam", grantGeneration: 1 };
+    const page = (...authors: Authors[]) => ({
+      moments: authors.map((each, index) => ({ ...historyDetail().moment, id: `m-${index}`, protected: false as const, momentOrder: index, authors: each })),
+      nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields,
+    });
+    const tokens = async (h: Awaited<ReturnType<typeof harness>>) =>
+      ((await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] }).moments.map(moment => moment.authorPresentations);
+
+    it("draws own-store authors as chats do, for list and detail", async () => {
+      const h = await harness();
+      h.workspace.remote = { serverUrl: "https://account.test/", ownerUserId: "person-local" };
+      h.identity.credentials = account;
+      h.capture.listMoments.mockResolvedValue(page(
+        [{ kind: "human", humanId: "person-local" }], [{ kind: "human", humanId: "install-local" }], [sam],
+        [sam, { kind: "agent", agentId: "writer", onBehalfOf: "person-local" }],
+      ));
+      const [mine, signedOut, named, both] = await tokens(h);
+      expect(h.warmCredentialCache).toHaveBeenCalledOnce();
+      expect(mine).toEqual([{ ...ownActorPresentation("install-local", account), group: expect.any(String) }]);
+      expect(signedOut).toEqual([{ ...ownActorPresentation("install-local", null), group: expect.any(String) }]);
+      expect(mine![0]!.group).not.toBe(signedOut![0]!.group);
+      expect(named).toEqual([{ group: expect.any(String), hue: ACTOR_HUES[actorHueSlot("sam")], self: false }]);
+      expect(both).toEqual([named![0], { group: expect.any(String), hue: null, self: true }]);
+      h.capture.readMoment.mockResolvedValue({ ...historyDetail(), moment: { ...historyDetail().moment, authors: [sam] } });
+      await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toMatchObject({
+        moment: { namedAuthor: { userId: "sam" }, authorPresentations: named },
+      });
+    });
+
+    it("loads with named authors neutral when the workspace server is invalid", async () => {
+      const h = await harness();
+      h.workspace.remote = { serverUrl: "not a server", ownerUserId: "person-local" };
+      h.identity.credentials = account;
+      h.capture.listMoments.mockResolvedValue(page([sam], [{ kind: "human", humanId: "person-local" }]));
+      const [named, mine] = await tokens(h);
+      expect(named).toEqual([{ group: expect.stringMatching(/^unknown:/), hue: null, self: false }]);
+      expect(mine![0]!.self).toBe(true);
+    });
+
+    it("keeps received authors issuerless and never self, whatever this computer is signed in as", async () => {
+      const listHistoryPage = vi.fn(async () => ({ activeVersion: { id: "main" }, protectedMoments: [],
+        ...page([sam], [{ kind: "human", humanId: "person-local" }], [{ kind: "human", humanId: "install-local" }]) }));
+      const h = await harness({ listHistoryPage, getMoment: vi.fn(async () => null) } as unknown as SharedHistoryStore);
+      h.workspace.remote = { serverUrl: "https://account.test", ownerUserId: "person-local" };
+      h.identity.credentials = account;
+      const [named, person, installation] = await tokens(h);
+      expect(named).toEqual([{ group: expect.stringMatching(/^unknown:/), hue: null, self: false }]);
+      expect(person![0]!.self).toBe(false);
+      expect(installation![0]!.self).toBe(false);
+    });
+
+    it("refuses to draw tokens for a workspace that closed during the read", async () => {
+      const h = await harness();
+      h.capture.listMoments.mockImplementation(async () => {
+        h.requireWorkspace.mockImplementation(() => { throw new Error("Unknown workspace: workspace"); });
+        return page([sam]);
+      });
+      await expect(h.invoke(CHANNELS.listEngineMoments)).rejects.toThrow("Unknown workspace");
+    });
   });
 
   it("notifies after a restore and before parsing its result", async () => {

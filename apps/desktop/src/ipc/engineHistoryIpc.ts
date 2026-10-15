@@ -10,6 +10,7 @@ import type {
   WorkspaceEngineMomentSummary,
 } from "../workspaces/workspaceEngineCapture";
 import type {
+  ActorPresentation,
   EngineMomentDetailRecord,
   EngineMomentRecord,
   ListEngineMomentsResponse,
@@ -23,18 +24,19 @@ import type { CollectionAutomations } from "@dohc/automation-executor/collection
 
 type MomentAuthor = NonNullable<VersionedTextMomentSummary["authors"]>[number];
 
-// Main supplies how an author reads. An agent working for this computer's
+// Main supplies how an author reads and looks. An agent working for this computer's
 // person reads as the configured agent name, and any other agent as
 // "Agent". This computer's person reads as their name; any other person is
 // left unnamed. A Collection automation
 // reads as its name and the Collection it belongs to; null leaves any other
-// automation on the moment's origin label.
+// automation on the moment's origin label. Each author looks as chats draw them.
 export interface EngineMomentAuthorNames {
   prepare?(authors: readonly MomentAuthor[]): void;
   agent(author: Extract<MomentAuthor, {kind: "agent"}>): string | undefined;
   person(author: Extract<MomentAuthor, {kind: "human"}>): string | undefined;
   automation(automationId: string): { name: string; collection?: string } | null;
   named(author: Extract<MomentAuthor, {kind: "named"}>): string;
+  presentations(authors: readonly MomentAuthor[]): ActorPresentation[];
 }
 
 // A Collection automation that wrote a moment, as History shows it: its
@@ -127,7 +129,9 @@ function engineMomentBaseForIpc(
     recordedAtMs: moment.recordedAtMs,
     operation: moment.operation,
     origin: moment.metadata.origin,
-    ...(moment.authors !== undefined ? { authors: moment.authors } : {}),
+    ...(moment.authors !== undefined
+      ? { authors: moment.authors, authorPresentations: names.presentations(moment.authors) }
+      : {}),
     ...(agentAuthorName !== undefined
       ? { agentAuthorName }
       : {}),

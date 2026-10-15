@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
-import type { ChatMessage } from "@dohc/workspace-contracts/engine";
+import type { ChatMessage, MomentAuthor } from "@dohc/workspace-contracts/engine";
 import type { RegistryEntry } from "./registryStore";
 import type { CloudCredentials } from "./cloudCredentialStore";
-import { chatActorForPresentation, createActorPresentationRequest, forgetWorkspacePresentation, ownActorPresentation } from "./actorPresentation";
+import { chatActorForPresentation, createActorPresentationRequest, createHistoryPresentationRequest, forgetWorkspacePresentation, ownActorPresentation } from "./actorPresentation";
+
+// Count issuer construction while keeping its behavior.
+vi.mock("@dohc/workspace-contracts/actor-identity", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@dohc/workspace-contracts/actor-identity")>();
+  return { ...actual, createActorIssuer: vi.fn(actual.createActorIssuer) };
+});
 
 const issuer = createActorIssuer("https://account.test");
 const credentials: CloudCredentials = { serverUrl: issuer, email: "alice@example.test", userId: "alice", token: "token", relayUrl: "https://relay.test" };
@@ -131,5 +137,89 @@ describe("chat presentation admission", () => {
   it("rejects a retired operation rather than retrying it", async () => {
     const r = request(); r.assertCurrent.mockImplementation(() => { throw new Error("retired"); });
     await expect(r.present(message(), "t")).rejects.toThrow("retired");
+  });
+});
+
+describe("History presentation", () => {
+  const history = (serverUrl: string | undefined = issuer) => createHistoryPresentationRequest({
+    source: "own-store", workspaceId: "w", assertCurrent: () => undefined, serverUrl, installationId: "device", credentials,
+  });
+  const received = () => createHistoryPresentationRequest({ source: "received", workspaceId: "w", assertCurrent: () => undefined });
+  const named = (userId: string): MomentAuthor => ({ kind: "named", userId, grantId: "grant", grantGeneration: 1 });
+  const agent = (agentId: string, onBehalfOf = "alice"): MomentAuthor => ({ kind: "agent", agentId, onBehalfOf });
+
+  it("matches chat's token for the same account, the same installation, and a person you shared with", async () => {
+    const chat = request();
+    const [account, installation, sam] = history()([{ kind: "human", humanId: "alice" }, { kind: "human", humanId: "device" }, named("sam")]);
+    expect(account).toEqual(await chat.present(local("human"), "t"));
+    expect(installation).toEqual(await chat.present(local("human", "renderer", null), "t"));
+    expect(sam).toEqual(await chat.present(message({ authorUserId: "sam", author: { kind: "human", displayName: "Sam" } }), "t"));
+    // Installation and account self stay apart.
+    expect(account!.group).not.toBe(installation!.group);
+    expect([account!.self, installation!.self, sam!.self]).toEqual([true, true, false]);
+    expect(sam!.hue).toBe(ACTOR_HUES[actorHueSlot("sam")]);
+  });
+
+  it("gives a local agent its chat group only when the claimed name matches", async () => {
+    const chat = await request().present(local("agent"), "t");
+    const [same, renamed, signedOut] = history()([agent("handshake"), agent("dohc-chat-runner"), agent("handshake", "device")]);
+    expect(same).toEqual(chat);
+    expect(renamed!.group).not.toBe(chat.group);
+    expect(signedOut).toEqual(await request().present(local("agent", "renderer", null), "t"));
+    for (const token of [same, renamed, signedOut]) expect(token).toMatchObject({ hue: null, self: true });
+  });
+
+  it("keeps one token per author, in order, with hues for people only", () => {
+    const tokens = history()([
+      named("sam"), agent("handshake"), { kind: "human", humanId: "alice" }, { kind: "human", humanId: "someone-else" },
+      { kind: "automation", automationId: "collection:Tasks#stamp", onBehalfOf: "alice", depth: 1 },
+      { kind: "link", grantId: "grant", grantGeneration: 1, principalId: "holder" },
+      { kind: "link", publicPrincipalId: "public_1", label: "Anonymous" },
+      { kind: "public", principalId: "public_x", grantId: "grant" },
+      { kind: "unattributed" }, agent("Pat", "someone-else"),
+    ]);
+    expect(tokens.map(token => token.hue)).toEqual([
+      ACTOR_HUES[actorHueSlot("sam")], null, "rose", ACTOR_HUES[actorHueSlot("someone-else")], null, null, null, null, null, null,
+    ]);
+    expect(tokens.map(token => token.self)).toEqual([false, true, true, false, false, false, false, false, false, false]);
+    expect(tokens[8]!.group).toMatch(/^unknown:/);
+    // The token names nobody.
+    expect(JSON.stringify(tokens)).not.toMatch(/alice|device|sam|someone|grant|holder|public|Pat/);
+  });
+
+  it.each([["no server"], ["invalid"], ["https://account.test?query=1"]])("leaves named authors neutral for %s", (serverUrl) => {
+    const [sam, mine] = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
+      serverUrl: serverUrl === "no server" ? undefined : serverUrl, installationId: "device", credentials })([named("sam"), { kind: "human", humanId: "alice" }]);
+    expect(sam).toMatchObject({ hue: null, self: false });
+    expect(sam!.group).toMatch(/^unknown:/);
+    expect(mine).toMatchObject({ hue: "rose", self: true });
+  });
+
+  it("makes the named-author issuer once per request", () => {
+    vi.mocked(createActorIssuer).mockClear();
+    const present = history("https://named.test/");
+    present(Array.from({ length: 50 }, (_, index) => named(`u${index}`)));
+    present([named("sam")]);
+    expect(vi.mocked(createActorIssuer).mock.calls.filter(([url]) => url === "https://named.test/")).toHaveLength(1);
+    // The other construction is the current account's.
+    expect(createActorIssuer).toHaveBeenCalledTimes(2);
+  });
+
+  it("never resolves an issuer or self for received History", () => {
+    vi.mocked(createActorIssuer).mockClear();
+    const tokens = received()([
+      named("alice"), { kind: "human", humanId: "alice" }, { kind: "human", humanId: "device" },
+      { kind: "human", humanId: "local:device" }, agent("handshake"),
+    ]);
+    expect(createActorIssuer).not.toHaveBeenCalled();
+    expect(tokens.map(token => token.self)).toEqual([false, false, false, false, false]);
+    expect(tokens.map(token => token.hue)).toEqual([null, "rose", ACTOR_HUES[actorHueSlot("device")], null, null]);
+    expect(tokens[0]!.group).toMatch(/^unknown:/);
+    expect(tokens[3]!.group).toMatch(/^unknown:/);
+  });
+
+  it("checks the workspace before drawing a group", () => {
+    const present = createHistoryPresentationRequest({ source: "received", workspaceId: "closing", assertCurrent: () => { throw new Error("closed"); } });
+    expect(() => present([named("sam")])).toThrow("closed");
   });
 });

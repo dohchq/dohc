@@ -34,6 +34,8 @@ import { collectionListSources, collectionReadSource, mountedCollectionSchema, r
 import { resolveRegisteredShareViewFilesTarget } from "../workspaces/shareViewFilesTarget";
 import { resolveOwnedWorkspaceSharePath } from "../workspaces/ownedWorkspaceFileReader";
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
+import { createHistoryPresentationRequest } from "../workspaces/actorPresentation";
+import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 
 type EngineStoreAuthorityState = {
   operationLanes: Map<string, Promise<void>>;
@@ -70,6 +72,9 @@ export function createWorkspaceEngineIpc<
   prepareRecordHistoryPeople(workspaceId: string, userIds: readonly string[], sender: Sender): void;
   /** The person a request is made by, read from main's own account when it arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
+  localInstallationId(): string;
+  warmCredentialCache(): Promise<void>;
+  currentCredentials(): CloudCredentials | null;
   /** An automation author as History shows it, in one workspace. */
   automationAuthor(workspaceId: string, automationId: string): ReturnType<EngineMomentAuthorNames["automation"]>;
   /** A person the owner shared with, as History names their direct write. */
@@ -108,7 +113,7 @@ export function createWorkspaceEngineIpc<
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
     receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, localPersonName, localPerson,
-    automationAuthor, namedAuthorLabels, readWorkspaceEnginePolicy,
+    localInstallationId, warmCredentialCache, currentCredentials, automationAuthor, namedAuthorLabels, readWorkspaceEnginePolicy,
     automationRunOnThisComputer, serverRuns, signedInAccount,
     notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
@@ -273,11 +278,12 @@ export function createWorkspaceEngineIpc<
     // timeline from engine moments; every handler resolves the workspace via
     // requireWorkspace and rejects when the engine capture is not attached.
     // Runs dohc started use the Settings name. Other agents use their handshake label.
-    function authorNames(workspaceId: string, sender: Sender): EngineMomentAuthorNames {
+    function authorNames(workspaceId: string, sender: Sender, presentations: EngineMomentAuthorNames["presentations"]): EngineMomentAuthorNames {
       return {
         agent: (author) => author.agentRunId ? (author.onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent") : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
         person: (author) => author.humanId === localPersonId() ? localPersonName() : undefined,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
+        presentations,
         ...namedAuthorLabels(workspaceId, sender),
       };
     }
@@ -286,13 +292,24 @@ export function createWorkspaceEngineIpc<
     // registered attachment. It keeps no capture, so restore stays refused.
     // The read never reaches the relay: a share whose access ended keeps the
     // history it already imported, as it keeps its files, and gains nothing new.
+    // Its authors are what the owner recorded, so they get no issuer and no self.
     async function readHistory<Result>(
       event: Event, workspaceId: string,
-      read: (history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> & Partial<Pick<WorkspaceEngineCapture, "filePathForObjectId">>, rootPath: string | null) => Promise<Result>,
+      read: (
+        history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> & Partial<Pick<WorkspaceEngineCapture, "filePathForObjectId">>,
+        rootPath: string | null,
+        presentations: EngineMomentAuthorNames["presentations"],
+      ) => Promise<Result>,
     ): Promise<Result> {
+      const assertCurrent = () => { requireWorkspace(workspaceId); };
       if (!shareViewIsPresent(requireWorkspace(workspaceId).shareView)) {
         const { capture } = await requireEngineCapture(workspaceId, "Engine history");
-        return read(capture, requireWorkspace(workspaceId).rootPath);
+        await warmCredentialCache();
+        const workspace = requireWorkspace(workspaceId);
+        return read(capture, workspace.rootPath, createHistoryPresentationRequest({
+          source: "own-store", workspaceId, assertCurrent, serverUrl: workspace.remote?.serverUrl,
+          installationId: localInstallationId(), credentials: currentCredentials(),
+        }));
       }
       return withRendererWorkspaceOperation(event.sender, workspaceId,
         "History stopped loading because this window changed workspaces.", async (operation) => {
@@ -301,7 +318,8 @@ export function createWorkspaceEngineIpc<
           const store = receivedShareEngine.storeFor({
             engineWorkspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: workspace.attachmentId,
           });
-          return read(sharedViewHistory(store, workspace.workspaceId), null);
+          return read(sharedViewHistory(store, workspace.workspaceId), null,
+            createHistoryPresentationRequest({ source: "received", workspaceId, assertCurrent }));
         });
     }
 
@@ -312,7 +330,7 @@ export function createWorkspaceEngineIpc<
     registerHandler(CHANNELS.listEngineMoments, async (event, payload) => {
       assertTrustedSender(event);
       const input = ListEngineMomentsPayload.parse(payload);
-      return readHistory(event, input.workspaceId, async (history, rootPath) => {
+      return readHistory(event, input.workspaceId, async (history, rootPath, presentations) => {
         const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
         if (policy?.errors.length) return policyUnreadable(policy);
         const admitted = policy ? historyPathAdmission(policy) : null;
@@ -344,7 +362,7 @@ export function createWorkspaceEngineIpc<
               cursor = page.nextCursor;
             }
           },
-          authorNames(input.workspaceId, event.sender),
+          authorNames(input.workspaceId, event.sender, presentations),
         );
       });
     });
@@ -352,14 +370,14 @@ export function createWorkspaceEngineIpc<
     registerHandler(CHANNELS.readEngineMoment, async (event, payload) => {
       assertTrustedSender(event);
       const input = ReadEngineMomentPayload.parse(payload);
-      return readHistory(event, input.workspaceId, async (history, rootPath) => {
+      return readHistory(event, input.workspaceId, async (history, rootPath, presentations) => {
         const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
         if (policy?.errors.length) return ReadEngineMomentResult.parse({ ...policyUnreadable(policy), moment: null });
         const moment = await history.readMoment(input.momentId);
         if (moment && !moment.protected && policy && !historyMomentPathsAdmitted(historyPathAdmission(policy), moment.moment)) {
           return ReadEngineMomentResult.parse({ status: "untracked", moment: null });
         }
-        const names = authorNames(input.workspaceId, event.sender);
+        const names = authorNames(input.workspaceId, event.sender, presentations);
         if (moment && !moment.protected && moment.moment.authors) names.prepare?.(moment.moment.authors);
         return ReadEngineMomentResult.parse({
           moment: moment ? engineMomentDetailForIpc(moment, names) : null,
