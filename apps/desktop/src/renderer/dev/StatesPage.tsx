@@ -115,43 +115,15 @@ const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-su
 // padding; the menus get the same room from their taller boxes.
 const SHADOW_ROOM = "p-10";
 
-// A part's pixels depend on where in a pixel it starts, and Chromium lays
-// out in 1/64 px, so a section whose content ends on a fraction would move
-// every section below it off the pixel grid and change their captures. Each
-// section takes the next whole pixel above its content's height; with whole
-// gaps and padding around them, every part then starts on one. The content
-// is measured, not the section: the section's own height is what is set,
-// so measuring it would never let it shrink and would resize inside its own
-// observer's callback.
-function useWholePixelHeight() {
-  const section = useRef<HTMLElement>(null);
-  const content = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const measured = content.current;
-    const sized = section.current;
-    if (!measured || !sized) return;
-    const observer = new ResizeObserver(([entry]) => {
-      const size = entry?.borderBoxSize[0];
-      if (size) sized.style.height = `${Math.ceil(size.blockSize)}px`;
-    });
-    observer.observe(measured, { box: "border-box" });
-    return () => observer.disconnect();
-  }, []);
-  return { section, content };
-}
-
 // A part whose subject is not a menu but which holds one, such as a header
 // with its document menu, is captured with its menus closed (`menusAtRest`).
 function Section(props: { part: string; title: string; children: ReactNode; menusAtRest?: boolean }) {
-  const { section, content } = useWholePixelHeight();
   return (
-    <section ref={section} data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined}>
-      <div ref={content} className="flex flex-col gap-3">
-        <SectionLabel as="h3" className="m-0">
-          {props.title}
-        </SectionLabel>
-        <div className="flex flex-wrap items-start gap-x-6 gap-y-4">{props.children}</div>
-      </div>
+    <section data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined} className="flex flex-col gap-3">
+      <SectionLabel as="h3" className="m-0">
+        {props.title}
+      </SectionLabel>
+      <div className="flex flex-wrap items-start gap-x-6 gap-y-4">{props.children}</div>
     </section>
   );
 }
@@ -1353,8 +1325,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <DialogSpecimen theme={theme} />
       </Section>
 
-      {/* The shell's menus, one part each, after the dialog so the parts
-          above keep their places. */}
+      {/* The shell's menus, one part each. */}
       <Section part="menu-radio" title="Menu with radio rows">
         <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled">
           <div
@@ -1406,8 +1377,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the menus, so the parts above keep their places. The capture
-          opens each part's tab list. */}
+      {/* The capture opens each part's tab list. */}
       <Section part="editor-groups" title="Editor groups">
         <Specimen label="split: the active group with tabs, then an empty one">
           <EditorGroupsSpecimen activeHasTabs />
@@ -1420,7 +1390,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the editor groups, so the parts above keep their places. */}
       <Section part="kind-glyph" title="Kind glyph">
         <Specimen label="kind">
           <ul className="m-0 list-none border border-transparent py-1 font-mono text-[11px] text-subtle">
@@ -1439,9 +1408,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The editor's menus, after the shell's so the parts above keep their
-          places. Their active row is the one Enter acts on, keyboard or
-          pointer, and always draws the outline. */}
+      {/* The editor's menus. Their active row is the one Enter acts on,
+          keyboard or pointer, and always draws the outline. */}
       <Section part="block-menu" title="Block menu">
         <Specimen label="sections; first row active; destructive with Del">
           <div className={`${EDITOR_MENU_BOX} h-[410px] w-[270px]`}>
@@ -1475,7 +1443,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the history part, so the parts above keep their places. */}
       <Section part="tab-row-actions" title="Document actions in the tab row" menusAtRest>
         {/* One document loading, saved, saving, pending share, held,
             failed, and changed on disk in a narrow pane: Share, the toggle
@@ -1597,9 +1564,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the file header, so the parts above keep their places. The
-          group a keyboard close leaves empty takes focus, and its ring shows
-          on all four edges above its tab strip. */}
+      {/* The group a keyboard close leaves empty takes focus, and its ring
+          shows on all four edges above its tab strip. */}
       <Section part="editor-group-focus" title="Editor group, focused" menusAtRest>
         <Specimen label="split: the focused active group, empty, then one with tabs">
           <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
@@ -1608,7 +1574,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the parts above, so they keep their places. */}
       <Section part="frontmatter-as-written" title="Frontmatter as written">
         <Specimen label="rename saved">
           <AsWrittenSpecimen name="cost" />
@@ -1618,8 +1583,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the others, so they keep their places. On the title bar's
-          own fill. */}
+      {/* On the title bar's own fill. */}
       <Section part="title-bar-status" title="Title bar status">
         {/* The saved dot alone while nothing needs the person, and its words
             once something does. */}
@@ -1632,7 +1596,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="capture-recovery" title="Typing kept in History">
         <Specimen label="toast">
           <div className={SHADOW_ROOM}>
@@ -1656,7 +1619,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="about" title="About">
         <Specimen label="a document: chats, history, access checked">
           <AboutPanelSpecimen>
@@ -1723,8 +1685,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After About, so the parts above keep their places. Its rows' menus
-          rest; the menu part draws an open one. */}
+      {/* Its rows' menus rest; the menu part draws an open one. */}
       <Section part="sharing" title="Sharing" menusAtRest>
         <Specimen label="both lists, a conflict, and changes waiting">
           <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready(SHARING_RECEIVED)} conflictCount={2} />
@@ -1773,7 +1734,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After Sharing, so the parts above keep their places. */}
       <Section part="usage-record" title="Usage record">
         <Specimen label="counts, with a row and a door this version does not count">
           <UsageRecordSpecimen view={USAGE_RECORD} />
@@ -1811,7 +1771,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After Usage record, so the parts above keep their places. */}
       <Section part="word-diff" title="Word diff">
         {WORD_DIFFS.map((specimen) => (
           <Specimen key={specimen.label} label={specimen.label}>
@@ -1826,8 +1785,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
       </Section>
 
-      {/* After Word diff, so the parts above keep their places. Its empty and loading
-          states are the shared ones above, in Empty ("create") and Loading. */}
+      {/* Its empty and loading states are the shared ones above, in Empty
+          ("create") and Loading. */}
       <Section part="apps-shelf" title="Apps shelf">
         <Specimen label="pinned; selected, with a warning; shared, hovered; low confidence">
           <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover" data-force-target="li:nth-child(3)">
@@ -1870,7 +1829,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After Chat rows, so the parts above keep their places. */}
       <Section part="settings-frame" title="Settings frame">
         <Specimen label="General chosen, Appearance hovered, keyboard focus on Files; a changed row">
           <div
@@ -1946,7 +1904,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="rails" title="Rails">
         <Specimen label="activity bar: Chats beside Files, selected; Search hovered; Graph focused">
           <div className="flex h-[400px] overflow-hidden rounded-lg border border-line">
@@ -1969,8 +1926,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. A send shows only once it
-          has taken a second, so the capture waits for the ring. */}
+      {/* A send shows only once it has taken a second, so the capture waits
+          for the ring. */}
       <Section part="composer-sending" title="Composer sending">
         <Specimen label="at rest">
           <div className="w-[400px] rounded-lg border border-line bg-panel">
@@ -2009,7 +1966,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="about-conversation" title="About a conversation">
         <Specimen label="a Group: who is here, and its access checked">
           <AboutPanelSpecimen>
@@ -2042,9 +1998,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. A CSV and a text file
-          draw their save state, Share and controls in the tab row, as a
-          document does: a calm save state says so only to screen readers. */}
+      {/* A CSV and a text file draw their save state, Share and controls in
+          the tab row, as a document does: a calm save state says so only to
+          screen readers. */}
       <Section part="file-view-actions" title="File view actions" menusAtRest>
         {FILE_VIEW_CSV_STATES.map((specimen) => (
           <Specimen key={specimen.label} label={`CSV ${specimen.label}`} className="w-full">
@@ -2071,9 +2027,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. Offers sit in space
-          already there: a folder row's glyph, the tab row's end, and a row
-          floating under a pasted line. */}
+      {/* Offers sit in space already there: a folder row's glyph, the tab
+          row's end, and a row floating under a pasted line. */}
       <Section part="offers" title="Offers" menusAtRest>
         <Specimen label="an app folder in Files: at rest, selected, focused">
           <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
@@ -2097,8 +2052,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. The body's H1 is the
-          editor's, so the folded specimens show the row above it alone. */}
+      {/* The body's H1 is the editor's, so the folded specimens show the
+          row above it alone. */}
       <Section part="page-identity" title="Page identity">
         <Specimen label="an H1 opens the body: the title folds, at rest">
           <TopmatterSpecimen>
@@ -2195,7 +2150,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="settings-sync" title="Settings: Sync and sharing">
         <Specimen label="signed in, syncing, on a private server; keyboard focus on Disconnect">
           <div className="w-[640px]" data-force-state="focus focus-visible" data-force-target='[data-testid="cloud-disconnect"]'>
@@ -2248,9 +2202,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. A CSV's rows and
-          columns: numbers at the right in mono, row numbers in the gutter,
-          and each row's and column's actions only on hover or focus. */}
+      {/* A CSV's rows and columns: numbers at the right in mono, row numbers
+          in the gutter, and each row's and column's actions only on hover or
+          focus. */}
       <Section part="data-grid" title="Data grid">
         <Specimen label="CSV at rest: numbers, Add row and Add column">
           <CsvGridSpecimen />

@@ -20,7 +20,7 @@ describe("states page", () => {
 
   it("renders both themes side by side and holds the document light while open", () => {
     vi.stubGlobal("dohcDesktop", {});
-    // jsdom has no ResizeObserver; the page measures its sections.
+    // jsdom has no ResizeObserver; parts such as the tab rows measure themselves.
     vi.stubGlobal("ResizeObserver", ObserverStub);
     try {
     document.documentElement.dataset.theme = "dark";

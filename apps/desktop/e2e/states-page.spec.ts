@@ -9,9 +9,8 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 // beside dark. Each section of the page is one part, named by its
 // `data-part`, and has one baseline per theme in states-page.spec.ts-snapshots,
 // `<part>-<theme>-<platform>.png`. A change to a shared part shows up as a
-// pixel difference in that part's pair, and in no other unless the part's
-// section changes height (see the known exceptions below). Update a pair
-// with `--update-snapshots` when the change is the point of the PR.
+// pixel difference in that part's pair and in no other. Update a pair with
+// `--update-snapshots` when the change is the point of the PR.
 //
 // Every pixel must equal its baseline, compared here from the decoded
 // images: Playwright's comparator skips pixels it takes for antialiasing
@@ -20,17 +19,12 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 // software rendering, no animations or backdrop filters, a viewport as tall
 // as the page so nothing scrolls, a pinned color scheme, states forced
 // through the browser instead of pointer events, a paused clock so
-// acknowledged copies hold, fonts checked, and a whole-page capture
-// repeated until two in a row are equal. So the baselines do not cover a
-// backdrop blur, an animation's end state, anything only the GPU draws, or
-// how a part looks at a display scale other than 100%. Every section is
-// held to a whole-pixel height so a height change in one section moves the
-// sections below it by whole pixels, which leaves their captures mostly
-// alone: a move still changes a few antialiased edge pixels in some parts
-// below it, such as the first step's circle in steps and the toasts. Expect
-// those parts' pairs to change when a section above them changes height,
-// and check that only edge pixels differ. The baselines were
-// taken on Windows; Playwright names them per platform.
+// acknowledged copies hold, fonts checked, each part captured alone at the
+// top of its pane, and each capture repeated until two in a row are equal.
+// So the baselines do not cover a backdrop blur, an animation's end state,
+// anything only the GPU draws, or how a part looks at a display scale other
+// than 100%. The baselines were taken on Windows; Playwright names them per
+// platform.
 
 const STATES_PAGE_HASH = "#/dev/states";
 const WIDTH = 1440;
@@ -112,18 +106,33 @@ function mismatch(expected: Pixels, actual: Pixels): string | null {
 const CSS_PIXELS = { scale: "css" } as const;
 const STILL_CAPTURES = 20;
 
-// Captures the whole page until two captures in a row are equal, so no part
-// is compared while the page is still settling.
-async function waitForStillPage(page: Page): Promise<void> {
-  let previous = decode(await page.screenshot(CSS_PIXELS));
+// Captures `clip` until two captures in a row are equal, so no part is
+// compared while it is still settling.
+async function captureStill(page: Page, clip: Box): Promise<Buffer> {
+  let previous = await page.screenshot({ ...CSS_PIXELS, clip });
   let difference: string | null = null;
   for (let captures = 1; captures < STILL_CAPTURES; captures += 1) {
-    const next = decode(await page.screenshot(CSS_PIXELS));
-    difference = mismatch(previous, next);
-    if (difference === null) return;
+    const next = await page.screenshot({ ...CSS_PIXELS, clip });
+    difference = mismatch(decode(previous), decode(next));
+    if (difference === null) return next;
     previous = next;
   }
-  throw new Error(`the page did not settle in ${STILL_CAPTURES} captures; the last one ${difference}`);
+  throw new Error(`the capture did not settle in ${STILL_CAPTURES} tries; the last one ${difference}`);
+}
+
+// Shows one part in each pane and hides the rest, or every part for `null`.
+// Chromium rasterizes the page in tiles, and a rounded corner or an icon
+// that a tile's edge crosses antialiases a little differently, so a part
+// captured in place changed whenever a part above it changed height. Alone,
+// a part sits at the top of its pane wherever it is on the page, and no
+// neighbor's shadow reaches into its capture.
+async function showOnly(page: Page, name: string | null): Promise<void> {
+  await page.evaluate((name) => {
+    const style =
+      document.getElementById("states-only") ??
+      document.head.appendChild(Object.assign(document.createElement("style"), { id: "states-only" }));
+    style.textContent = name === null ? "" : `[data-part]:not([data-part="${name}"]) { display: none; }`;
+  }, name);
 }
 
 // Compares a capture with its baseline and honors --update-snapshots the
@@ -312,50 +321,54 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     // marked after it opens its menu. A part marked data-menus="rest" holds
     // menus without being about them, and is captured with them closed.
     await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:is([data-menus="rest"], :not(:has([aria-haspopup="menu"])))`);
-    await waitForStillPage(page);
 
     const seen = new Set<string>();
     const failures: string[] = [];
-    const capture = async (name: string, theme: string, box: Box) => {
-      const pixels = await page.screenshot({
-        ...CSS_PIXELS,
-        clip: { x: box.x - BLEED, y: box.y - BLEED, width: box.width + 2 * BLEED, height: box.height + 2 * BLEED },
+    // Captures a part shown alone, with its height rounded up to a whole pixel.
+    const capture = async (name: string, theme: string, part: Locator) => {
+      const box = await part.boundingBox();
+      if (!box) throw new Error(`${name} (${theme}) has no box on the page`);
+      const pixels = await captureStill(page, {
+        x: box.x - BLEED,
+        y: box.y - BLEED,
+        width: box.width + 2 * BLEED,
+        height: Math.ceil(box.height) + 2 * BLEED,
       });
       const failure = await compareWithBaseline(`${name}-${theme}`, pixels);
       if (failure) failures.push(failure);
     };
-    const menuParts: { name: string; theme: string; part: Locator; box: Box }[] = [];
+    const menuParts: { name: string; theme: string; part: Locator }[] = [];
     for (const theme of THEMES) {
       const pane = page.getByTestId(`states-${theme}`);
       for (const part of await pane.locator("[data-part]").all()) {
         const name = await part.getAttribute("data-part");
-        const box = await part.boundingBox();
-        if (!name || !box) throw new Error("every part needs a data-part name and a box on the page");
-        // A part's pixels depend on where in a pixel it starts, so a
-        // fractional offset in one section would change every part below it.
-        if (!Number.isInteger(box.x) || !Number.isInteger(box.y)) {
-          throw new Error(`${name} (${theme}) starts at a fractional pixel: ${box.x}, ${box.y}`);
-        }
+        if (!name) throw new Error("every part needs a data-part name");
         if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
         seen.add(`${name}-${theme}`);
         const menus = (await part.getAttribute("data-menus")) === "rest" ? 0 : await part.locator("[aria-haspopup='menu']").count();
         if (menus > 1) throw new Error(`${name} (${theme}) has ${menus} menus; a part opens one`);
-        if (menus === 1) menuParts.push({ name, theme, part, box });
-        else await capture(name, theme, box);
+        if (menus === 1) {
+          menuParts.push({ name, theme, part });
+          continue;
+        }
+        await showOnly(page, name);
+        await capture(name, theme, part);
       }
     }
     // Each marking pass starts from a fresh DOM.getDocument, which clears the
     // states forced before it, so the menu parts are captured last. One menu is open at a time: opening
     // another moves focus and closes the first.
-    for (const { name, theme, part, box } of menuParts) {
+    for (const { name, theme, part } of menuParts) {
       const trigger = part.locator("[aria-haspopup='menu']");
       const menu = part.getByRole("menu");
+      await showOnly(page, name);
       await openMenu(page, trigger, menu);
       await forceMarkedStates(cdp, `[data-testid="states-${theme}"] [data-part="${name}"]`);
-      await waitForStillPage(page);
-      await capture(name, theme, box);
+      await capture(name, theme, part);
       await closeMenu(page, trigger, menu);
     }
+    // The tab rows are measured below with every part shown.
+    await showOnly(page, null);
     // A tab row keeps Share and the document's controls inside itself at any
     // width, and its save state gives way before the tab's file name: the
     // name is cut only once the save state shows no more than one character
