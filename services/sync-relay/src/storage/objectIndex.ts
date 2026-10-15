@@ -351,16 +351,12 @@ export function threadCreateRows(
     workspaceId: string,
     threadId: string,
   ): IterableIterator<Record<string, unknown>> {
-    const needle = `"threadId":${JSON.stringify(threadId)}`
-      .replaceAll("\\", "\\\\")
-      .replaceAll("%", "\\%")
-      .replaceAll("_", "\\_");
     return storage.db
       .prepare(
         `SELECT payload_json FROM sync_relay_log
          WHERE workspace_id = ? AND op_kind = 'chat.thread.create'
-           AND payload_json LIKE ? ESCAPE '\\'
+           AND json_valid(payload_json) AND json_extract(payload_json, '$.threadId') = ?
          ORDER BY relay_seq`,
       )
-      .iterate(workspaceId, `%${needle}%`);
+      .iterate(workspaceId, threadId);
   }

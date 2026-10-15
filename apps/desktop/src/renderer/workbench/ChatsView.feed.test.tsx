@@ -823,7 +823,7 @@ describe("ChatsView hybrid feed", () => {
       id: "thread-agent",
       title: "Pipeline review complete",
       messageCount: 1,
-      openingMessage: openingPreview({
+      openingMessage: openingPreview({ presentation: { group: "fixture", hue: null, self: false },
         id: "message-agent",
         authorKind: "agent",
         authorDisplayName: "You",
@@ -839,7 +839,7 @@ describe("ChatsView hybrid feed", () => {
         Promise.resolve({
           messages: [
             threadId === "thread-agent"
-              ? message({
+              ? message({ presentation: { group: "fixture", hue: null, self: false },
                   id: "message-agent",
                   threadId,
                   authorKind: "agent",

@@ -4,6 +4,7 @@ import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
+import { SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
 import { reportsNoticeText } from "./useReportsNotice";
@@ -35,6 +36,7 @@ export type ShellErrorKind =
   | "typing-checkpoint"
   | "typing-import"
   | "capture-recovery"
+  | "capture-held"
   | "live-edit-refused"
   | "chat-no-runner"
   | "chat-budget-paused"
@@ -120,6 +122,7 @@ export function useShellError(workspaceId: string) {
   const shownKeptCopiesMore = useRef(false);
   // Listed kept typing already shown in this workspace.
   const shownCaptureRecoveries = useRef(new Set<string>());
+  const shownCaptureHolds = useRef(new Set<string>());
 
   // A new error replaces an older one that says the same thing, or one of
   // the same kind, so a read that keeps failing is one row, not a pile.
@@ -245,6 +248,7 @@ export function useShellError(workspaceId: string) {
     shownKeptCopies.current = new Set();
     shownKeptCopiesMore.current = false;
     shownCaptureRecoveries.current = new Set();
+    shownCaptureHolds.current = new Set();
     filedShareCapture.current = null;
   }, [workspaceId]);
 
@@ -290,6 +294,7 @@ export function useShellError(workspaceId: string) {
   const reportShellFailure = useCallback(
     (failure: {
       title?: string;
+      tone?: ShellError["tone"];
       repeat?: boolean;
       quiet?: boolean;
       message: string;
@@ -309,6 +314,7 @@ export function useShellError(workspaceId: string) {
       ];
       push({
         ...(failure.title ? { title: failure.title } : {}),
+        ...(failure.tone ? { tone: failure.tone } : {}),
         message: shown.words ?? UNKNOWN_ERROR_WORDS,
         retry: failure.retry ?? null,
         ...(details.length ? { details } : {}),
@@ -348,13 +354,18 @@ export function useShellError(workspaceId: string) {
     [push],
   );
   const clearSyncFailure = useCallback(() => clearKind("cloud-sync"), [clearKind]);
-  const showSyncRefusals = useCallback((notices: readonly import("../../ipc/bridgeContract").NoticeRow[], retry: () => void) => {
+  const showSyncRefusals = useCallback((notices: readonly import("../../ipc/bridgeContract").NoticeRow[], retry: () => void, openFile?: (path: string) => void) => {
     setShellErrors(current => [
       ...current.filter(error => error.kind !== "sync-refusal"),
       ...notices.map(notice => {
         const prior = current.find(error => error.id === notice.noticeId);
+        const bindingChanged = notice.detail?.split("\n")[0] === SETTLEMENT_BINDING_CHANGED;
+        const path = notice.target?.path;
         return { id: notice.noticeId, kind: "sync-refusal" as const, message: notice.body.slice(0, SHELL_ERROR_MAX_CHARS),
-          details: [["Detail", notice.detail ?? notice.body]] as const, atMs: notice.createdAtMs, seen: prior?.seen ?? notice.readAtMs !== null, retry };
+          title: bindingChanged ? notice.title : undefined,
+          details: [["Detail", notice.detail ?? notice.body]] as const, atMs: notice.createdAtMs, seen: prior?.seen ?? notice.readAtMs !== null,
+          retry: bindingChanged ? null : retry,
+          ...(bindingChanged && path && openFile ? { action: { label: "Open", run: () => openFile(path) } } : {}) };
       }),
     ]);
   }, []);
@@ -609,12 +620,30 @@ export function useShellError(workspaceId: string) {
     shellErrorsRef.current.find((error) => error.id === id)?.onDismiss?.();
     setShellErrors((current) => current.filter((error) => error.id !== id));
   }, []);
+  const showCaptureHolds = useCallback((files: readonly { path: string; message: string; retry: () => void }[]) => {
+    const listed = new Set(files.map(file => file.path));
+    for (const path of shownCaptureHolds.current) {
+      if (!listed.has(path)) shownCaptureHolds.current.delete(path);
+    }
+    const arrived = files.filter(file => !shownCaptureHolds.current.has(file.path));
+    for (const file of arrived) shownCaptureHolds.current.add(file.path);
+    const fresh = arrived.map((file): ShellError => ({
+      id: `shell-error-${++nextId.current}`, identity: `capture-held:${file.path}`, kind: "capture-held", tone: "warning",
+      title: "Outside edit not recorded", message: file.message,
+      details: [["File", file.path, file.path.length]], retry: file.retry, atMs: Date.now(), seen: false,
+    }));
+    setShellErrors(current => {
+      const stays = current.filter(row => row.kind !== "capture-held" || listed.has(row.identity!.slice("capture-held:".length)));
+      return fresh.length === 0 && stays.length === current.length ? current : [...stays, ...fresh];
+    });
+  }, []);
+
   const retryShellError = useCallback((id: string) => {
     const target = shellErrorsRef.current.find((error) => error.id === id);
     // Clearing first is what shows the control took: the read is on its
     // way, and a failure that is being retried is no longer the newest
     // thing this surface knows. The retry runs once, outside the updater.
-    setShellErrors(current => target?.kind === "sync-refusal"
+    setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held"
       ? current
       : current.filter(error => error.id !== id));
     target?.retry?.();
@@ -648,6 +677,7 @@ export function useShellError(workspaceId: string) {
     showKeptCopies,
     showKeptCopySaved,
     showCaptureRecoveries,
+    showCaptureHolds,
     hideShellError,
     dismissShellError,
     retryShellError,

@@ -65,7 +65,7 @@ describe("ChatsView My agent", () => {
 
   it("attributes a runner failure to dohc without an agent badge", async () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
-    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), message({
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), message({ presentation: { group: "fixture", hue: null, self: false },
       id: "failure", authorKind: "agent", authorDisplayName: "You",
       body: "⚠ Agent run failed (exit 3). Open the run chip for details.",
     })] });
@@ -192,7 +192,7 @@ describe("ChatsView My agent", () => {
       items: [
         {
           ...personalFeedItem("Rebuilt the index.", "message-their-agent"),
-          message: message({
+          message: message({ presentation: { group: "fixture", hue: null, self: false },
             id: "message-their-agent",
             authorKind: "agent",
             authorDisplayName: "Owner",
@@ -203,7 +203,7 @@ describe("ChatsView My agent", () => {
         // The user's own agent in their own channel is not someone else's.
         {
           ...personalFeedItem("Checked the exports.", "message-my-agent"),
-          message: message({
+          message: message({ presentation: { group: "fixture", hue: null, self: false },
             id: "message-my-agent",
             authorKind: "agent",
             authorDisplayName: "You",
@@ -361,7 +361,7 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
         message(),
-        message({
+        message({ presentation: { group: "fixture", hue: null, self: false },
           id: "message-2",
           authorKind: "agent",
           authorDisplayName: "ice@dohc.ai",
@@ -412,7 +412,7 @@ describe("ChatsView document thread", () => {
       authorDisplayName: "Ben",
       body: "Immediately follows its parent",
     });
-    const nonAdjacentReply = message({
+    const nonAdjacentReply = message({ presentation: { group: "fixture", hue: null, self: false },
       id: "comment-3",
       parentMessageId: opening.id,
       authorKind: "agent",
@@ -502,9 +502,9 @@ describe("ChatsView document thread", () => {
     const opening = message({ body: "The full opening post body." });
     const failure = "⚠ Agent run failed: exit 1";
     const comments = [
-      message({ id: "agent-1", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: "Starting" }),
-      message({ id: "agent-failed", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: failure, createdAtMs: NOW + 1 }),
-      message({ id: "agent-2", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: "Retrying", createdAtMs: NOW + 2 }),
+      message({ presentation: { group: "fixture", hue: null, self: false }, id: "agent-1", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: "Starting" }),
+      message({ presentation: { group: "fixture", hue: null, self: false }, id: "agent-failed", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: failure, createdAtMs: NOW + 1 }),
+      message({ presentation: { group: "fixture", hue: null, self: false }, id: "agent-2", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: "Retrying", createdAtMs: NOW + 2 }),
       message({ id: "ana-1", parentMessageId: opening.id, authorDisplayName: "Ana", body: failure, createdAtMs: NOW + 3 }),
       message({ id: "ana-2", parentMessageId: opening.id, authorDisplayName: "Ana", body: "That was me quoting it", createdAtMs: NOW + 4 }),
     ];
@@ -577,7 +577,7 @@ describe("ChatsView mentions", () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        message({
+        message({ presentation: { group: "fixture", hue: null, self: false },
           id: "m-ask",
           authorKind: "agent",
           authorDisplayName: "ice@dohc.ai",
@@ -599,7 +599,7 @@ describe("ChatsView mentions", () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        message({
+        message({ presentation: { group: "fixture", hue: null, self: false },
           id: "m-code",
           authorKind: "agent",
           authorDisplayName: "ice@dohc.ai",

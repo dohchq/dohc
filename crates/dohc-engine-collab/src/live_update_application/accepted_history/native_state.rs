@@ -621,7 +621,7 @@ pub(super) fn metadata(
 ) -> Result<NativeMetadata, ApplicationError> {
     let p = parameters(held);
     let previous = if count == 1 {
-        initial_digest(held)?
+        initial_digest(&held.namespace, &held.binding)?
     } else {
         conn.query_row(&format!("SELECT evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6 AND length(CAST(evidence_digest AS BLOB))=64"),params![p[0],p[1],p[2],p[3],p[4],count-1],|r|r.get::<_,String>(0)).map_err(read_sql)?
     };
@@ -713,7 +713,7 @@ pub(super) fn restore_metadata(
 ) -> Result<(), ApplicationError> {
     let p = parameters(held);
     let previous = if count == 1 {
-        initial_digest(held)?
+        initial_digest(&held.namespace, &held.binding)?
     } else {
         conn.query_row(&format!("SELECT evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6 AND length(CAST(evidence_digest AS BLOB))=64"),params![p[0],p[1],p[2],p[3],p[4],count-1],|r|r.get(0)).map_err(read_sql)?
     };
@@ -852,7 +852,7 @@ pub(super) fn read(
         // metadata() also hashes against the preceding retained row. Bind it to
         // this replay's validated checkpoint/suffix chain explicitly.
         let previous: String = if ordinal == 1 {
-            initial_digest(held)?
+            initial_digest(&held.namespace, &held.binding)?
         } else {
             conn.query_row(&format!("SELECT evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6 AND length(CAST(evidence_digest AS BLOB))=64"),params![p[0],p[1],p[2],p[3],p[4],ordinal-1],|r|r.get(0)).map_err(read_sql)?
         };
