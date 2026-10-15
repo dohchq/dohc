@@ -39,6 +39,7 @@ pub mod limits;
 pub mod links;
 pub mod materialize;
 pub mod remote_changes;
+pub mod replica;
 pub mod store;
 
 mod checkpoint;

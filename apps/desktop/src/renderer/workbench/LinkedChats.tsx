@@ -139,6 +139,10 @@ export function LinkedChatsPanel(props: {
   const [activeThread, setActiveThread] = useState<ChatThreadRecord | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
+  const [scrollTarget, setScrollTarget] = useState<{
+    token: number;
+    focusMessageId?: string;
+  } | null>(null);
   const [creating, setCreating] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sending, setSending] = useState(false);
@@ -255,16 +259,7 @@ export function LinkedChatsPanel(props: {
               // next refresh if the cursor write did not land.
             },
           );
-        requestAnimationFrame(() => {
-          // Rendering is deferred one frame so the freshly loaded messages
-          // exist in the DOM. Re-check the same request token inside that
-          // deferred callback: another thread/file/workspace may have opened
-          // after the response committed but before this frame ran.
-          if (token !== liveToken.current) return;
-          if (!focusMessageId || !listRef.current?.scrollToMessage(focusMessageId)) {
-            listRef.current?.scrollToEnd();
-          }
-        });
+        setScrollTarget({ token, focusMessageId });
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not load this chat."), error);
@@ -274,6 +269,20 @@ export function LinkedChatsPanel(props: {
     },
     [props.onError, props.onThreadRead, reactions, workspaceId],
   );
+
+  // A loaded response is not a React commit. Wait until the message list has
+  // mounted before asking it to reveal an offscreen row.
+  useEffect(() => {
+    if (!scrollTarget || messagesLoading) return;
+    const frame = requestAnimationFrame(() => {
+      if (scrollTarget.token !== liveToken.current) return;
+      if (!scrollTarget.focusMessageId ||
+          !listRef.current?.scrollToMessage(scrollTarget.focusMessageId)) {
+        listRef.current?.scrollToEnd();
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [messagesLoading, scrollTarget]);
 
   // The thread initialThread opened, while it is the one shown. When it stops
   // showing (Back, a switch, or this panel unmounting), the parent hears so.
