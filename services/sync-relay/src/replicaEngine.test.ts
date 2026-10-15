@@ -31,6 +31,7 @@ class Child extends EventEmitter {
         else {
           this.requests.push(row);
           const result = row.method === "workspace.open" ? { workspace: "private-handle" } :
+            row.method === "replica.frontiers" ? {revision: 1, logCursor: 3, journalCursor: 0} :
             row.method === "sync.pull" ? this.pages.shift() : { adopted: true, committed: true };
           this.stdout.write(frame({ type: "response", id: row.id, result }));
         }
@@ -40,9 +41,10 @@ class Child extends EventEmitter {
   finish() { this.stdout.end(); this.stderr.end(); this.emit("close", 0, "SIGKILL"); }
 }
 const input = () => ({ storeDir: process.cwd(), lease: { workspaceId: "w", ownerUserId: "owner", replicationEpoch: "epoch",
-  streamIdentity: "stream", logSeq: 3, shareGrantBindings: '[["grant",1]]', incarnation: "private", bearer: "dohc-replica-read-v1.test" } });
+  streamIdentity: "stream", epochLogFloor: 0, logSeq: 3, journalCursor: 0, shareGrantBindings: '[["grant",1]]', incarnation: "private", bearer: "dohc-replica-read-v1.test" } });
 async function fixture(child = new Child()) {
   mocks.spawn.mockReturnValue(child);
+  vi.stubGlobal("fetch", vi.fn(async () => ({ok: true, json: async () => ({rows: [], nextCursor: 0, hasMore: false})})));
   const start = createReplicaEngineStarter({ engineExecutable: process.execPath, baseUrl: "https://relay.test", allowUnisolatedDevelopment: true });
   return { child, replica: await start(input()) };
 }
@@ -51,14 +53,14 @@ it("gives the child only its private directory, fresh RPC token, and GET lease",
   const { child, replica } = await fixture();
   try {
     await replica.pull();
-    expect(child.requests.map(row => row.method)).toEqual(["workspace.open", "sync.adoptJoinIdentity", "sync.pull", "sync.commitCursor", "sync.pull", "sync.commitCursor"]);
+    expect(child.requests.map(row => row.method)).toEqual(["workspace.open", "sync.adoptJoinIdentity", "sync.pull", "sync.commitCursor", "sync.pull", "sync.commitCursor", "replica.frontiers"]);
     expect(child.requests[0]!.params).toMatchObject({ rootDir: input().storeDir, storeMode: "passive", captureMode: "none",
       relay: { baseUrl: "https://relay.test", bearerToken: input().lease.bearer } });
     expect(child.requests.slice(1).every(row => row.workspace === "private-handle")).toBe(true);
     expect(child.requests[3]!.params.pendingCursor).toEqual({ kind: "relay", token: "issued-2" });
     expect(child.requests[5]!.params.pendingCursor).toEqual({ kind: "relay", token: "issued-3" });
     const [command, args, options] = mocks.spawn.mock.calls[0]!;
-    expect(command).toBe(process.execPath); expect(args).toEqual([]); expect(options.cwd).toBe(input().storeDir);
+    expect(command).toBe(process.execPath); expect(args).toEqual(["--store-role", "passive"]); expect(options.cwd).toBe(input().storeDir);
     expect(Object.keys(options.env).sort()).toEqual(process.platform === "win32" ? ["DOHC_ENGINE_AUTH_TOKEN", "SystemRoot"] : ["DOHC_ENGINE_AUTH_TOKEN"]);
     expect(options.env.DOHC_ENGINE_AUTH_TOKEN).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(child.requests)).not.toContain("serviceHost"); expect(JSON.stringify(child.requests)).not.toContain("ownerSecret");

@@ -564,8 +564,11 @@ mod tests {
         let zero = AppliedPosition {
             event_count: 0,
             journal_cursor: 0,
-            evidence_digest: accepted_history::initial_digest(&handle.registration.lock().unwrap())
-                .unwrap(),
+            evidence_digest: {
+                let held = handle.registration.lock().unwrap();
+                accepted_history::initial_digest(&held.namespace, &held.binding)
+            }
+            .unwrap(),
         };
         for cursor in 0..=1 {
             if cursor == 1 {

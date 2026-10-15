@@ -1,4 +1,5 @@
 import {
+  chatOperations,
   systemMotionOperations,
   chatDispatchNoticeOperations,
   crashReportOperations,
@@ -26,6 +27,7 @@ import { workspaceFileOperations } from "./workspaceFileOperations";
 // Add each migrated table here when B5 replaces its manual registrations.
 export const OPERATION_TABLES = [
   workspaceFileOperations,
+  chatOperations,
   shareCopyOperations,
   systemMotionOperations,
   accessOperations,
