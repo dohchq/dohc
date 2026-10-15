@@ -114,6 +114,7 @@ const COMPARED_TABLES: &[&str] = &[
     "ydoc_recovery_decisions",
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
+    "owner_live_stops",
     "replication_log",
     "replication_refused_moment_blobs",
     "replication_refused_ydoc_blobs",

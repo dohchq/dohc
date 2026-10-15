@@ -1,6 +1,6 @@
 import { asRecord, RESERVED_WORKSPACE_IDS } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
-import { MAX_LOG_PAGE_SIZE, MAX_SHARE_ID_CHARS } from "./wireLimits";
+import { MAX_LOG_PAGE_SIZE, MAX_SHARE_ID_CHARS, MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
 import { badRequest, notFound } from "./errors";
 
 export { RESERVED_WORKSPACE_IDS };
@@ -146,4 +146,22 @@ export function parseShareId(value: string | undefined): string {
     throw notFound();
   }
   return value;
+}
+
+export function parseLinkLogHold(value: string | null): number {
+  if (value === null) return 0;
+  if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
+    throw badRequest("hold must be a non-negative integer");
+  }
+  const hold = Number(value);
+  if (
+    !Number.isSafeInteger(hold) ||
+    hold < 0 ||
+    hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS
+  ) {
+    throw badRequest(
+      `hold must be a non-negative integer no greater than ${String(MAX_DISCUSSION_ACTIVITY_HOLD_MS)}`,
+    );
+  }
+  return hold;
 }

@@ -4,6 +4,7 @@ use dohc_test_scratch::ScratchDir;
 use std::sync::atomic::{AtomicUsize, Ordering};
 fn options(now_ms: i64, replacer: &dyn AtomicReplacer) -> MaterializeOptions<'_> {
     MaterializeOptions {
+        holds: None,
         policy: DurabilityPolicy::none(),
         replacer,
         backoff: &NoBackoff,

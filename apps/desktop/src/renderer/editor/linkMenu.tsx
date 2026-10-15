@@ -1,3 +1,4 @@
+import { shortcutText } from "../../shortcuts/shortcutRegistry";
 import { isEditableEditor } from "./pmHelpers";
 // Link editing UI: the StarterKit Link mark + autolink are already active in
 // the schema (round-trips as `[text](url)` via @tiptap/markdown) — this file
@@ -436,7 +437,7 @@ export function LinkBubbleButton({
     <button
       type="button"
       aria-label="Link"
-      title="Link (Cmd+K)"
+      title={`Link (${shortcutText("editor-link", window.dohcDesktop?.platform)})`}
       className={`dohc-bubble-menu__button${active ? " is-active" : ""}`}
       onClick={() => onOpen(computeLinkMenuState(editor.view))}
     >
