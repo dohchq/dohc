@@ -168,6 +168,7 @@
     "document read": "document.read",
     "document edit": "document.edit",
     "document create": "document.create",
+    "document chats": "file.chats.list",
     "document comment": "file.chat.start",
     "chat groups": "group.list",
     "chat threads": "chat.threads.list",

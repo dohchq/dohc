@@ -20,7 +20,7 @@ type ExportScope =
 type CliCommandBody =
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
-  | { verb: "documentRead"; path: string }
+  | { verb: "documentRead" | "fileChats"; path: string }
   | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
@@ -264,6 +264,18 @@ const DOCUMENT_VERBS = {
     notes: [stdinNote, "Use --text instead to supply Markdown. With neither, create an empty document.",
       "The path must end in .md or .markdown. Frontmatter is refused."],
     parse: (input) => documentWrite(input, "documentCreate"),
+  },
+  chats: {
+    capabilityId: "file.chats.list",
+    summary: "List chats linked to a workspace file.",
+    operands: "<path>",
+    notes: ["Use chat show --peek with a thread ID to read it without marking it read."],
+    parse: ({ operands }) => {
+      const [path, ...extra] = operands;
+      if (!path) fail("document chats requires a path");
+      noExtraArgs(extra, "document chats");
+      return { verb: "fileChats", path };
+    },
   },
   comment: {
     capabilityId: "file.chat.start",

@@ -575,6 +575,18 @@ Use - as the body to read it from stdin. Use --text instead to supply Markdown. 
 
 With `--json`, prints `{ schemaVersion, ok: true, path }`.
 
+#### `dohc document chats`
+
+```sh
+dohc document chats <path> [options]
+```
+
+List chats linked to a workspace file.
+
+Use chat show --peek with a thread ID to read it without marking it read.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, fileObjectId, threads: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }[] }`.
+
 #### `dohc document comment`
 
 ```sh
