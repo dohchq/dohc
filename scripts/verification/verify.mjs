@@ -17,7 +17,7 @@ import { admissionPreflight, installedDependenciesMatch } from "./admission.mjs"
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 import { clippy, fmtCheck, nextest } from "../../tools/rust-engine-program/gate-commands.mjs";
 import { finishRustEvidence, refreshRustReuse, rustIdentity } from "./rust-reuse.mjs";
-import { queueRoot, sharedFailures, verifyThroughQueue } from "./queue.mjs";
+import { pauseHold, queueRoot, sharedFailures, verifyThroughQueue } from "./queue.mjs";
 
 // Windows reports a console program that could not start as STATUS_DLL_INIT_FAILED. The job relay
 // (windows-job.ps1 and windows-command.mjs) exits with 0xD0C5 when its command never started.
@@ -326,7 +326,8 @@ export async function verify(args) {
         await step("pre-queue-clippy", "cargo", clippy, env);
         await step("pre-queue-test-build", "cargo", [...nextest, "--no-run"], env);
       });
-      const queue = grant || inline ? null : queueRoot();
+      const hostQueue = grant ? null : queueRoot();
+      const queue = inline ? null : hostQueue;
       if (queue && reuseRust) throw new Error("The queue cannot reuse Rust evidence yet. Add --inline to reuse it in this checkout.");
       if (queue && keepGoing && !full) throw new Error("The queue keeps going only with --full. Add --full, or --inline to keep going in this checkout.");
       if (queue) {
@@ -357,6 +358,8 @@ export async function verify(args) {
         lane = await measure("queue", () => acquireVerificationSlot(process.env, {
           metadata: {purpose: "PR verification", checkout: repoRoot, commit: report.commit, phase: "admission"},
           observeTicket: tickets?.observe,
+          // An inline run takes no lane while the host's queue is paused.
+          hold: hostQueue && pauseHold(hostQueue),
         }));
       } finally {
         ticketCleanup = tickets?.settle();

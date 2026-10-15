@@ -117,7 +117,7 @@ Each attempt records the load it verified under in `status.json` and `C:\w\_veri
 Each attempt has its own evidence folder, `C:\w\_verification\requests\<id>\attempts\<n>`, and its `result.json` names the request and attempt.
 Read the service's verdict from the request's `status.json`, or from the last line `pnpm verify:pr` prints.
 
-Run `pnpm verify:queue status` to see the service, the running requests, the line, and wait estimates.
+Run `pnpm verify:queue status` to see the service, a pause, the running requests, the line, and wait estimates.
 Run `pnpm verify:queue cancel <id>` to stop one of your own requests. Never cancel a request another agent submitted. A finished request keeps its verdict.
 
 The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows what holds each verification lane, a queued request or an agent's inline gate, with its steps and its live output, then the requests ready and waiting for a lane, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Threads, Tests, and Nightly tabs show the whole line, every run this week, each thread's runs and results, the slowest and flaky tests, and the nightly runs.
@@ -183,6 +183,23 @@ Record other host builds and gates during the comparison; a separate outer queue
 Compare elapsed time, queue time, failures, and peak host memory under matching work and cache conditions.
 Do not change the live queue root or remove another run's tickets to conduct a trial.
 Remove the two verification trial environment variables from the shell before returning to ordinary verification.
+
+### Restart the computer without losing a run
+
+A computer restart stops every run in progress, and each one later starts again from the beginning. Pause the queue first:
+
+1. Run `pnpm verify:queue pause --reason "<why>"`.
+2. Run `pnpm verify:queue status` until it prints `paused and idle: safe to restart`.
+3. Restart the computer.
+4. Run `pnpm verify:queue resume`.
+
+While the queue is paused, runs in progress finish and no new run starts, the nightly run included. The line keeps its order.
+An inline run that holds a verification lane counts as running. An inline run without a lane waits, says once that the queue is paused, and starts after the resume.
+The pause lasts until you resume it, through service and computer restarts.
+
+If the computer restarts while the queue is not paused, the service pauses it when it starts, with the reason `the computer restarted`.
+No run starts until you run `pnpm verify:queue resume`, and `pnpm verify:queue status` shows the reason. A service restart within one boot, such as an upgrade, does not pause the queue.
+Windows fast startup hibernates the system at shutdown, so the next start continues the same boot and the service sees no restart. Pause the queue before you shut down.
 
 ### Flaky tests
 

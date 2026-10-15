@@ -12,6 +12,8 @@
 //   requests/<id>/attempts/<n>/  one worker's evidence (worker)
 //   service.json                 service identity, heartbeat, and health (service)
 //   monitor-load.json            the dashboard's minute samples of host load (service)
+//   control/restart              exit once the runs in flight end (client)
+//   control/pause                start no run until resume (client, or the service after the computer restarts)
 //   lane/                        the checkout the service verifies in
 //   service/<commit>/, current   installed service checkouts, and the active one
 
@@ -23,7 +25,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
-import { resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
+import { buildQueueStatus, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { git } from "./process.mjs";
 
 export const protocol = 1;
@@ -51,6 +53,7 @@ export const queuePaths = root => ({
   installs: join(root, "service"),
   current: join(root, "current"),
   control: join(root, "control"),
+  pause: join(root, "control", "pause"),
   request: id => join(root, "requests", id),
   attempt: (id, n) => join(root, "requests", id, "attempts", String(n)),
 });
@@ -283,6 +286,61 @@ export function serviceState(root, now = Date.now()) {
   return { record, alive: Boolean(record && now - Date.parse(record.heartbeatAt) < 60_000) };
 }
 
+/** The queue's pause, `{ at, reason }`, or null when the line moves. */
+export function readPause(root) {
+  const path = queuePaths(root).pause;
+  // A marker that antivirus holds for a moment still pauses the queue.
+  return readJson(path) ?? (existsSync(path) ? { at: null, reason: null } : null);
+}
+
+/**
+ * Hold the line: runs in flight finish, and no run starts until resumeQueue, even after the
+ * service or the computer restarts. Pausing a paused queue keeps its first record.
+ */
+export async function pauseQueue(root, { reason = null } = {}) {
+  const current = readPause(root);
+  if (current) return { pause: current, changed: false };
+  const pause = { at: new Date().toISOString(), reason };
+  await writeJson(queuePaths(root).pause, pause);
+  return { pause, changed: true };
+}
+
+/** Let the line move again. Returns the pause it ended, or null. */
+export async function resumeQueue(root) {
+  const pause = readPause(root);
+  if (pause) await withFileRetry(() => rmSync(queuePaths(root).pause, { force: true }));
+  return pause;
+}
+
+const pausedSince = pause => `paused${pause.at ? ` since ${pause.at}` : ""}${pause.reason ? ` (${pause.reason})` : ""}`;
+
+/** For an inline gate's lane wait: why it must not take a lane now, or null. */
+export const pauseHold = root => () => {
+  const pause = readPause(root);
+  return pause && `waiting: the verification queue is ${pausedSince(pause)}; this gate starts after pnpm verify:queue resume`;
+};
+
+// The service holds a lane under this purpose for each of its runs. Every other holder is an inline gate.
+export const queueLanePurpose = "PR verification (queue)";
+
+/** Inline gates holding one of the host's verification lanes, in either lane whatever the lane setting. */
+export function inlineRuns(env = process.env) {
+  const root = env.DOHC_VERIFICATION_SLOT_ROOT ?? resolveBuildBudget(env)?.root;
+  return root ? buildQueueStatus({ root, slots: 2, kind: "verification-slot" }).owners.filter(owner => owner.purpose !== queueLanePurpose).length : 0;
+}
+
+/**
+ * The pause as status shows it, or null when the queue is not paused. Only a heartbeat that
+ * shows this pause can say idle: the service records the pause and its runs together.
+ */
+export function pauseStatus(root, { record, alive } = serviceState(root), inline = inlineRuns()) {
+  const pause = readPause(root);
+  if (!pause) return null;
+  const running = (alive ? serviceRuns(record).runs.length : 0) + inline;
+  const seen = !alive || record.paused?.at === pause.at;
+  return running || !seen ? `${pausedSince(pause)}: ${running} running, no new runs start` : "paused and idle: safe to restart";
+}
+
 export const taskName = "dohc-verification-queue";
 // The service serves its read-only monitor page here, on this host only.
 export const monitorPort = 4250;
@@ -508,6 +566,8 @@ function printStatus(root) {
   const { lanes, runs } = serviceRuns(record);
   console.log(`service: ${alive ? `running ${record.commit?.slice(0, 12) ?? ""} (pid ${record.pid})` : record ? `not responding since ${record.heartbeatAt}` : "never started"}`);
   if (alive) console.log(`monitor: http://127.0.0.1:${monitorPort}`);
+  const pause = pauseStatus(root, { record, alive });
+  if (pause) console.log(pause);
   if (record?.health?.reason) console.log(`health: ${record.health.reason}`);
   if (record?.health?.diskFreeGb != null) console.log(`free disk: ${record.health.diskFreeGb.toFixed(1)} GB`);
   if (record) console.log(`host: ${lanes} lane(s), ${record.health?.cpuBusyPercent ?? "unknown"}% CPU, ${record.health?.freeMemGb ?? "unknown"} GB free memory`);
@@ -558,6 +618,17 @@ async function main([command, ...args]) {
   const ref = args.includes("--ref") ? args[args.indexOf("--ref") + 1] : "origin/main";
   if (command === "status" || !command) return printStatus(root);
   if (command === "cancel") { await cancel(root, args[0]); return console.log(`asked the service to stop ${args[0]}`); }
+  if (command === "pause") {
+    const reason = args.includes("--reason") ? args[args.indexOf("--reason") + 1] : null;
+    if (args.includes("--reason") && !reason) throw new Error("Use pause [--reason <text>].");
+    const { changed } = await pauseQueue(root, { reason });
+    console.log(changed ? "paused the verification queue. Runs in progress finish, and no run starts until pnpm verify:queue resume." : "the verification queue was already paused.");
+    return console.log(pauseStatus(root));
+  }
+  if (command === "resume") {
+    const ended = await resumeQueue(root);
+    return console.log(ended ? `resumed the verification queue, which was ${pausedSince(ended)}.` : "the verification queue was not paused.");
+  }
   if (command === "install" || command === "upgrade") return install(root, ref);
   if (command === "nightly") {
     const here = fileURLToPath(new URL("../..", import.meta.url));
@@ -602,7 +673,7 @@ async function main([command, ...args]) {
     }
     return console.log("asked Task Scheduler to restart the verification queue service; it starts within five minutes");
   }
-  throw new Error("Use status, cancel <id>, move <id> --first|--before <id> --reason <text>, install [--ref <ref>], upgrade [--ref <ref>], restart [--now], or nightly.");
+  throw new Error("Use status, pause [--reason <text>], resume, cancel <id>, move <id> --first|--before <id> --reason <text>, install [--ref <ref>], upgrade [--ref <ref>], restart [--now], or nightly.");
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
