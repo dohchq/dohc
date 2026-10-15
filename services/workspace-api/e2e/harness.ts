@@ -1,7 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { build } from "esbuild";
+import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -10,7 +8,7 @@ import { startSmtpCapture } from "./smtpCapture";
 
 export const ACCOUNT_TEST_SECRET = "disposable-account-browser-acceptance-secret-0123456789";
 
-export async function startAccountServer(options: { relayUrl?: string; shareUrl?: string; port?: number; publicOrigin?: string } = {}) {
+export async function startAccountServer(options: { relayUrl?: string; shareUrl?: string; port?: number; publicOrigin?: string; signal?: AbortSignal } = {}) {
   const connectionString = process.env.POSTGRES_URL;
   if (!connectionString || process.env.DOHC_REQUIRE_POSTGRES !== "1") {
     throw new Error("Account browser acceptance requires an explicit disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.");
@@ -23,22 +21,7 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
   const listenOrigin = `http://127.0.0.1:${port}`;
   const origin = options.publicOrigin ?? listenOrigin;
   const mail = await startSmtpCapture();
-  // Compile before the startup wait, rather than making every module load use tsx.
-  const artifacts = fileURLToPath(new URL("../.agent-artifacts/", import.meta.url));
-  await mkdir(artifacts, { recursive: true });
-  const directory = await mkdtemp(join(artifacts, "account-server-"));
-  const entry = join(directory, "main.mjs");
-  try {
-    await build({ entryPoints: [fileURLToPath(new URL("../src/main.ts", import.meta.url))], outfile: entry,
-      bundle: true, platform: "node", format: "esm", target: "node24",
-      external: ["better-auth", "better-auth/*", "pg", "nodemailer"], logLevel: "silent" });
-  } catch (error) {
-    await rm(directory, { recursive: true, force: true });
-    await mail.close();
-    await pool.end();
-    throw error;
-  }
-  const child = spawn(process.execPath, [entry], {
+  const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
     cwd: fileURLToPath(new URL("../", import.meta.url)),
     env: {
       ...process.env,
@@ -66,34 +49,35 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
   let exited = false;
   const exit = new Promise<void>(resolve => child.once("close", () => { exited = true; resolve(); }));
   const controller = new AbortController();
-  const abort = setTimeout(() => controller.abort(new Error("Account server was not ready within 20 seconds.")), 20_000);
+  const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+  let lastReadyBody = "No HTTP response.";
   const onError = (error: Error) => controller.abort(error);
-  const onExit = (code: number | null) => controller.abort(new Error(`Account server exited before readiness (${code}).`));
-  child.once("error", onError);
+  const onExit = (code: number | null, signal: NodeJS.Signals | null) => controller.abort(new Error(`Account server exited before readiness (code ${code}, signal ${signal}).`));
+  child.on("error", onError);
   child.once("exit", onExit);
   try {
     while (true) {
-      controller.signal.throwIfAborted();
+      signal.throwIfAborted();
       try {
-        const response = await fetch(`${listenOrigin}/ready`, { signal: controller.signal });
-        const report = await response.json();
-        controller.signal.throwIfAborted();
-        if (response.ok && report.ok === true) break;
+        const response = await fetch(`${listenOrigin}/ready`, { signal });
+        lastReadyBody = await response.text();
+        const report: { ok?: unknown } | null = JSON.parse(lastReadyBody);
+        signal.throwIfAborted();
+        if (response.ok && report?.ok === true) break;
       } catch {
-        controller.signal.throwIfAborted();
+        signal.throwIfAborted();
       }
-      await delay(100, undefined, { signal: controller.signal });
+      await delay(100, undefined, { signal });
     }
   } catch (error) {
     if (!exited) child.kill();
     await exit;
     await mail.close();
     await pool.end();
-    await rm(directory, { recursive: true, force: true });
-    throw new Error(`Account server startup failed. ${logs}`, { cause: error });
+    const failure = signal.aborted ? signal.reason : error;
+    const reason = failure instanceof Error ? failure.message : String(failure);
+    throw new Error(`Account server startup failed: ${reason}\nLast /ready body: ${lastReadyBody}\nLogs:\n${logs}`, { cause: failure });
   } finally {
-    clearTimeout(abort);
-    child.off("error", onError);
     child.off("exit", onExit);
   }
   return {
@@ -104,7 +88,6 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
       await exit;
       await mail.close();
       await pool.end();
-      await rm(directory, { recursive: true, force: true });
     },
   };
 }
