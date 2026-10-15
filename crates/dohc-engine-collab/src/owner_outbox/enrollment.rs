@@ -43,14 +43,17 @@ fn native_state(
         .validate_canonical()
         .map_err(OwnerOutboxError::InvalidInput)?;
     let key = key(binding)?;
-    let configured: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
-        params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0),
+    let (configured,stopped):(bool,bool) = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3) OR EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3), CASE WHEN ?4 THEN 0 ELSE EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3) END",
+        params![key.workspace_id,key.version_id,key.object_id,successor], |r| Ok((r.get(0)?,r.get(1)?)),
     ).map_err(read_sql)?;
-    if configured || super::has_adopted_owner_in(conn, &key).map_err(collab)? {
+    if configured {
         return Err(OwnerOutboxError::ParentMismatch);
     }
     if !successor {
+        if stopped {
+            return Err(OwnerOutboxError::Frozen);
+        }
         super::draft::require_ordinary_write(conn, &key).map_err(collab)?;
     }
     crate::live_update_application::require_restore_open(conn, &key).map_err(collab)?;
