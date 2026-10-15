@@ -166,10 +166,10 @@ type GoToGroup = Pick<ChatChannelRecord, "id" | "name" | "kind">;
 export interface GoToListing {
   files: readonly GoToFile[];
   folders: readonly string[];
-    // Main parses the rules. Search and Go to share the same rule evaluator.
+  // Main parses the rules. Search and Go to share the same rule evaluator.
   visibility: {
     status: "ready" | "degraded" | "unavailable";
-      rules: readonly VisibilityPolicyRule[];
+    rules: readonly VisibilityPolicyRule[];
   };
   // The listing has already applied each share's selector and canonical overlay.
   receivedRoots: readonly { path: string; ended: boolean; damaged: boolean }[];
@@ -244,6 +244,11 @@ function samePathVerdicts(a: GoToListing | undefined, b: GoToListing | undefined
   if (a === b) return true;
   if (!a || !b || a.visibility.status !== b.visibility.status) return false;
   if (!sameVisibilityPolicy(a.visibility.rules, b.visibility.rules)) return false;
+  return sameEntries(a.receivedRoots, b.receivedRoots, (x, y) => x.path === y.path && x.ended === y.ended && x.damaged === y.damaged);
+}
+function sameVisibilityVerdicts(a: GoToListing | undefined, b: GoToListing | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b || !sameVisibilityPolicy(a.visibility.rules, b.visibility.rules)) return false;
   return sameEntries(a.receivedRoots, b.receivedRoots, (x, y) => x.path === y.path && x.ended === y.ended && x.damaged === y.damaged);
 }
 function sameEntries<T>(a: readonly T[] | undefined, b: readonly T[] | undefined, equal: (a: T, b: T) => boolean): boolean {
@@ -359,6 +364,7 @@ export class GoToIndex {
   private context: QuickOpenContext = EMPTY_CONTEXT;
   private requestedContext: QuickOpenContext = EMPTY_CONTEXT;
   private visibilityForPath = prepareVisibilityPolicy([]);
+  private verdictListing: GoToListing | undefined;
   private active: GoToPreparation | null = null;
   private interrupted = false;
   private matches: { query: string; revision: number; indices: Int32Array; count: number } | null = null;
@@ -453,7 +459,12 @@ export class GoToIndex {
       }
     }
     let changed = false;
-    if (sources.listing) this.visibilityForPath = prepareVisibilityPolicy(sources.listing.visibility.rules);
+    const priorVerdictListing = this.verdictListing;
+    const verdictListing = sources.listing?.visibility.status === "unavailable" && priorVerdictListing
+      ? { ...sources.listing, visibility: priorVerdictListing.visibility }
+      : sources.listing;
+    const visibilityForPath = verdictListing && !sameVisibilityPolicy(verdictListing.visibility.rules, priorVerdictListing?.visibility.rules ?? [])
+      ? prepareVisibilityPolicy(verdictListing.visibility.rules) : this.visibilityForPath;
     const pinned = new Set<string>();
     const recent = new Map<string, number>();
     for (const path of context.pinned) { pinned.add(path); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
@@ -533,7 +544,7 @@ export class GoToIndex {
           if (isNew || verdictsChanged) {
             if (sources.listing) {
               index.lastVisibilityCheckCount += 1;
-              row = yield* applyGoToPathState(row, sources.listing, work, index.visibilityForPath);
+              row = yield* applyGoToPathState(row, sources.listing, work, visibilityForPath);
             }
             else if (row.visible) row = { ...row, visible: false, includedRevision: -1 };
           }
@@ -560,10 +571,10 @@ export class GoToIndex {
       index.subsets.set(kind, next);
       changed = true;
     }
+    const visibilityVerdictsChanged = forceVerdicts || !sameVisibilityVerdicts(verdictListing, priorVerdictListing);
     if (sources.listing && (force || sources.listing !== this.sources.listing)) {
       const snapshot = sources.listing;
-      const verdictsChanged = forceVerdicts || !samePathVerdicts(snapshot, this.sources.listing);
-      if (force || snapshot.files !== this.sources.listing?.files || verdictsChanged) yield* replace("file", (function* () {
+      if (force || snapshot.files !== this.sources.listing?.files || visibilityVerdictsChanged) yield* replace("file", (function* () {
         const previous = index.subsets.get("file");
         let entry: { key: string; path: string; label: string; record: GoToFile; glyphId: PreparedGoToRow["glyphId"]; previous?: PreparedGoToRow } | undefined;
         for (const file of snapshot.files) {
@@ -577,8 +588,8 @@ export class GoToIndex {
           }
           yield entry;
         }
-      })(), verdictsChanged);
-      if (force || snapshot.folders !== this.sources.listing?.folders || verdictsChanged) yield* replace("folder", (function* () {
+      })(), visibilityVerdictsChanged);
+      if (force || snapshot.folders !== this.sources.listing?.folders || visibilityVerdictsChanged) yield* replace("folder", (function* () {
         for (const path of snapshot.folders) yield { key: path, path, label: basenameOf(path), record: path, glyphId: "folder" as const };
       })());
       changed = true;
@@ -586,12 +597,12 @@ export class GoToIndex {
     if (sources.collections && (force || sources.collections !== this.sources.collections)) {
       yield* replace("collection", (function* () {
         for (const record of sources.collections!) yield { key: record.path, path: record.path, label: basenameOf(record.path), record, glyphId: "table" as const };
-      })());
+      })(), visibilityVerdictsChanged);
     }
     if (sources.apps && (force || sources.apps !== this.sources.apps)) {
       yield* replace("app", (function* () {
         for (const record of sources.apps!) yield { key: record.root, path: record.root, label: record.title, record, glyphId: "box" as const };
-      })());
+      })(), visibilityVerdictsChanged);
     }
     if (sources.versions && (force || sources.versions !== this.sources.versions)) {
       yield* replace("version", (function* () {
@@ -616,17 +627,17 @@ export class GoToIndex {
       for (const previous of kind === "file" ? this.files : subset.values()) {
         let row = previous;
         if (contextChanged) row = withGoToRanks(row, pinned, recent);
-        if (kind === "folder" || kind === "collection" || kind === "app") {
+        if (visibilityVerdictsChanged && (kind === "folder" || kind === "collection" || kind === "app")) {
           if (sources.listing) {
             index.lastVisibilityCheckCount += 1;
-            row = yield* applyGoToPathState(row, sources.listing, work, index.visibilityForPath);
+            row = yield* applyGoToPathState(row, sources.listing, work, visibilityForPath);
           }
           else if (row.visible) row = { ...row, visible: false, includedRevision: -1 };
         }
         if (row !== previous) subset.set(goToRowKey(row), row);
         if (kind === "file") this.files[fileIndex++] = row;
         const pathBacked = kind === "file" || kind === "folder" || kind === "collection" || kind === "app";
-        const mounted = sources.listing?.receivedRoots.some(root => root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/"));
+        const mounted = sources.listing?.visibility.status !== "ready" && sources.listing?.receivedRoots.some(root => root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/"));
         const withheldHostPath = pathBacked && sources.listing?.visibility.status !== "ready" && !mounted;
         if (row.visible && !withheldHostPath && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) {
           if (forceVerdicts || row.includedRevision !== this.revision || row.sourceIndex < previousKeptIndex) {
@@ -695,6 +706,8 @@ export class GoToIndex {
     this.orderedRows = ordered;
     this.queryMetadata = metadata;
     this.sources = sources;
+    this.visibilityForPath = visibilityForPath;
+    if (verdictListing) this.verdictListing = verdictListing;
     this.context = context;
     this.interrupted = false;
     this.completeRows = rows;

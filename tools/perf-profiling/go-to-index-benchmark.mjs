@@ -211,10 +211,10 @@ try {
       visibility: { ...longSources.listing.visibility, rules: longSources.listing.visibility.rules.map(rule => ({ ...rule })) },
       receivedRoots: longSources.listing.receivedRoots.map(root => ({ ...root })),
     };
-    await prepare(longIndex, { listing }, [], undefined);
-    const preparedAt = performance.now();
+    const slices = [];
+    const measurement = await prepare(longIndex, { listing }, slices, undefined);
     longIndex.query("z");
-    renameSamples.push({ preparationMs: preparedAt - updateStart, updateAndQueryMs: performance.now() - updateStart, preparedRows: longIndex.lastPreparationCount });
+    renameSamples.push({ preparationMs: measurement.workMs, workMs: measurement.workMs, slices, updateAndQueryMs: performance.now() - updateStart, preparedRows: longIndex.lastPreparationCount });
   }
   receipt.worstFirstKeystroke = { files: 30000, query: "z", pathLength: { min: lengths[0], median: lengths[Math.floor(lengths.length / 2)], max: lengths.at(-1) },
     firstScans, renameSamples, scope: "pure module, realistic long paths, first single-letter query matches nothing; renderer paint remains separate" };
