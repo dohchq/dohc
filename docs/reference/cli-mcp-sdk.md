@@ -25,6 +25,17 @@ Partial form creation returns `{ kind: "partial", created, failedStage, reason, 
 
 ## Desktop MCP tools
 
+### `dohc_read_share_copy`
+
+Read one owned grant's share code and named-account invite link. Requires the original workspace and its signed-in owner account. Ended grants return only status; unknown and link grants are refused.
+
+The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.
+
+- `shareId`: `string`. Required.
+- `grantId`: `string`. Required.
+
+Returns `{ status: "active", shareCode, browserInvitationUrl? } | { status: "ended" }`.
+
 ### `dohc_list_automations`
 
 Read automation definitions and on/off file state in a Collection, including shares. Shared run history and host runtime are unavailable.
@@ -554,6 +565,22 @@ Page this workspace's granted shares or this account's received shares.
 - `--cursor <cursor>`: Continue the previous answer.
 
 With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, unknownReason, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessSharing`.
+
+### `dohc share`
+
+Read copy details for an owned share grant.
+
+Requires the original workspace and its signed-in owner account.
+
+#### `dohc share copy`
+
+```sh
+dohc share copy <shareId> <grantId> [options]
+```
+
+Read a grant's share code and named-account invite link.
+
+With `--json`, prints `{ schemaVersion, status: "active", shareCode, browserInvitationUrl? }` or `{ schemaVersion, status: "ended" }`.
 
 ### `dohc document`
 

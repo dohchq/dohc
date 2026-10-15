@@ -61,6 +61,7 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 
 interface DesktopCliServerDependencies<State> {
   stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
+  shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
@@ -228,6 +229,11 @@ export function createDesktopCliServer<State>(
           throw error;
         }
       } } : {}),
+      ...(dependencies.shareCopy ? { shareCopy: (input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput) =>
+        withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+          return dependencies.shareCopy!(operation, input);
+        }) } : {}),
       ...(dependencies.access ? { access: dependencies.access(workspace.workspaceId) } : {}),
       ...(dependencies.dataset ? { dataset: (request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {

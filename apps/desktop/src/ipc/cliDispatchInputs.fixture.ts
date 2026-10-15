@@ -31,6 +31,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "sync stop": [],
   "access object": ['{"kind":"path","path":"Notes/a.md"}'],
   "access sharing": ["received"],
+  "share copy": ["share", "grant"],
   "document read": ["Notes/a.md"],
   "document edit": ["Notes/a.md", "--text", "Updated"],
   "document create": ["Notes/new.md"],

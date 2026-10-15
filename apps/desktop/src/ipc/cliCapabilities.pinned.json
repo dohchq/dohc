@@ -163,6 +163,9 @@
     ],
     "stopSync": [
       "workspace.sync.stop"
+    ],
+    "shareCopy": [
+      "share.copy.read"
     ]
   },
   "public": {
@@ -237,6 +240,7 @@
     "automation run": "automation.run.read",
     "automation retry": "automation.run.retry",
     "automation press": "automation.button.press",
-    "sync stop": "workspace.sync.stop"
+    "sync stop": "workspace.sync.stop",
+    "share copy": "share.copy.read"
   }
 }

@@ -110,6 +110,7 @@ export const HISTORY_RESULTS: Record<string, CliSocketVerb> = {
 };
 
 export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
+const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy" };
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {
   object: "accessObject",
@@ -163,6 +164,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 // What each MCP tool returns. A CLI verb means the tool passes on that
 // verb's result schema; a string is written from the tool in tools.ts.
 export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
+  dohc_read_share_copy: { cli: "shareCopy" },
   dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
   dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
   dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
@@ -366,6 +368,7 @@ export async function mcpToolNames(shareAccess?: ShareAccess): Promise<string[]>
 // Why a shared view does not offer a tool that reads. Every other tool it
 // does not offer changes the workspace.
 const NOT_SHARED_READS: Record<string, string> = {
+  dohc_read_share_copy: "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
   dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",
   dohc_read_automation_run: "A shared view keeps no automation runs, so it does not offer this tool.",
 };
@@ -434,7 +437,7 @@ function verbReturns(command: string, name: string): string {
         ? DOCUMENT_RESULTS[name]
         : command === "automation" ? AUTOMATION_RESULTS[name]
           : command === "access" ? ACCESS_RESULTS[name]
-            : command === "sync" ? SYNC_RESULTS[name] : undefined;
+            : command === "sync" ? SYNC_RESULTS[name] : command === "share" ? SHARE_RESULTS[name] : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb)) throw new Error(`dohc ${command} ${name} has no result schema.`);
     const result = jsonSchema(cliResultSchemas[socketVerb as CliSocketVerb], "output");
@@ -481,6 +484,7 @@ function commandSection(name: string, command: CliCommandSpec): string {
   if (name === "document") checkCovered(name, Object.keys(command.verbs), Object.keys(DOCUMENT_RESULTS));
   if (name === "automation") checkCovered(name, Object.keys(command.verbs), Object.keys(AUTOMATION_RESULTS));
   if (name === "sync") checkCovered(name, Object.keys(command.verbs), Object.keys(SYNC_RESULTS));
+  if (name === "share") checkCovered(name, Object.keys(command.verbs), Object.keys(SHARE_RESULTS));
   if (name === "access") checkCovered(name, Object.keys(command.verbs), Object.keys(ACCESS_RESULTS));
   const jsonOperands = [...new Set(verbs.filter(([, verb]) => verb.fields).map(([, verb]) => verb.operands))];
   return [

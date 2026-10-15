@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { advertisedCapabilityTools } from "./capabilityExposure.fixture";
 import syncStopTools from "./toolsList.syncStop.json";
+import shareCopyTools from "./toolsList.shareCopy.json";
 import mainTools from "./toolsList.main.json";
 import publicationTools from "./toolsList.pr1659.json";
 import chatBodyTools from "./toolsList.pr1705.json";
@@ -19,10 +20,10 @@ it.each(["owner", "view", "comment", "edit"] as const)("preserves main tools/lis
       for (const name of Object.keys(properties)) expect(schema.properties).not.toHaveProperty(name);
       Object.assign(schema.properties, properties);
     }
-    for (const tool of publicationTools.ownerToolAdditions) {
+    for (const tool of [...publicationTools.ownerToolAdditions, ...shareCopyTools.ownerToolAdditions]) {
       expect(expected.some(existing => existing.name === tool.name)).toBe(false);
     }
-    expected.push(...publicationTools.ownerToolAdditions, ...syncStopTools.ownerToolAdditions);
+    expected.push(...publicationTools.ownerToolAdditions, ...shareCopyTools.ownerToolAdditions, ...syncStopTools.ownerToolAdditions);
     expected.sort((a, b) => a.name.localeCompare(b.name));
   }
   // Hand-reviewed #1705 removals: desktop admission counts normalized UTF-8 bytes.

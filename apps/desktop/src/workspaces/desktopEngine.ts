@@ -1,3 +1,4 @@
+import {reconcileOwnerLiveStops, type OwnerStopRetirementTarget} from "./ownerLiveStop";
 import { waitForEnginePublicationGate } from "./testEnginePublicationGate";
 import type { App, Dialog } from "electron";
 import {
@@ -36,6 +37,7 @@ export interface ServerOwnerDelivery {
     assertCurrent(): void;
     refusals(attempt: AbortSignal): Promise<void>;
     documents(signal: AbortSignal): Promise<unknown>;
+    retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<number | null>;
   } | null>;
 }
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
@@ -120,6 +122,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const failedOwnerDocuments = new Map<string, Set<string>>();
   const frozenOwnerDocuments = new Map<string, Set<string>>();
   const ownerDeliveryReason = new Map<string, OwnerLiveDeliveryReason>();
+  const ownerStopFailures = new Map<string, Map<string,{path:string;detail:string}>>();
   const setOwnerDeliveryStatus = (workspaceId: string, status: OwnerLiveDeliveryStatus | undefined, reason?: OwnerLiveDeliveryReason) => {
     if (ownerDeliveryStatus.get(workspaceId) === status && ownerDeliveryReason.get(workspaceId) === reason) return;
     if (status) ownerDeliveryStatus.set(workspaceId, status); else ownerDeliveryStatus.delete(workspaceId);
@@ -131,6 +134,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     for (const id of ownerDeliveryStatus.keys()) setOwnerDeliveryStatus(id, undefined);
     failedOwnerDocuments.clear();
     frozenOwnerDocuments.clear();
+    ownerStopFailures.clear();
     const previous = ownerDelivery;
     ownerDelivery = undefined;
     if (previous) ownerDeliverySettled = Promise.all([ownerDeliverySettled, previous.stop()]).then(() => undefined);
@@ -161,6 +165,20 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               try {
               try {await session.refusals(signal);}
               catch (error) {check(); console.error("[desktop] owner live refusal discovery failed:", error);}
+              try {await sessions.run(operation.workspace,async binding => {
+                const client=daemon.currentClient();
+                if (!(client instanceof EngineClient)) throw new Error("Owner Stop requires the desktop daemon client.");
+                await reconcileOwnerLiveStops({client,workspaceHandle:binding.workspace,workspaceId,signal,
+                  onError:(row,error) => {
+                    const failures=ownerStopFailures.get(workspaceId) ?? new Map();
+                    const detail=error instanceof Error ? error.message : String(error);
+                    failures.set(row.document.objectId,{path:row.document.currentPath,detail});
+                    ownerStopFailures.set(workspaceId,failures);notifyRenderer({workspaceId});
+                  },
+                  onComplete:row => {if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId)) notifyRenderer({workspaceId});},
+                  retire:session.retire,assertCurrent:() => {check();sessions.assertCurrentBinding(operation.workspace,binding);}});
+              });
+              } catch (error) {check();console.error("[desktop] owner Stop discovery failed:",error);}
               const response = await session.documents(signal);
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
@@ -564,6 +582,15 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     },
     ownerLiveDeliveryStatus(workspaceId: string): OwnerLiveDeliveryStatus | undefined {
       return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "retrying" : ownerDeliveryStatus.get(workspaceId) : undefined;
+    },
+    ownerLiveStopFailures(workspaceId:string) {return [...(ownerStopFailures.get(workspaceId)?.values() ?? [])];},
+    clearOwnerLiveStopFailure(workspaceId:string,target:{objectId:string}|{path:string}) {
+      const failures=ownerStopFailures.get(workspaceId);if (!failures) return;
+      let changed=false;
+      for (const [key,failure] of failures) {
+        if ("objectId" in target ? key===target.objectId : failure.path===target.path) {failures.delete(key);changed=true;}
+      }
+      if (changed) notifyRenderer({workspaceId});
     },
     ownerLiveDeliveryReason(workspaceId: string): OwnerLiveDeliveryReason | undefined {
       return dependencies.serverOwnerDelivery?.workspaceIds().includes(workspaceId) ? serverOwnerUnavailable ? "restart-required" : ownerDeliveryReason.get(workspaceId) : undefined;

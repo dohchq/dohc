@@ -26,6 +26,7 @@ import reportsIpc from "./ipcExposure.reports.json";
 import saveRetryIpc from "./ipcExposure.saveRetry.json";
 import fileObservationIpc from "./ipcExposure.fileObservation.json";
 import usageRecordIpc from "./ipcExposure.usageRecord.json";
+import shareCopyCli from "./cliExposure.shareCopy.json";
 import mainCli from "./cliExposure.main.json";
 import pinnedCliCapabilities from "./cliCapabilities.pinned.json";
 import { CLI_DISPATCH_ARGUMENTS } from "./cliDispatchInputs.fixture";
@@ -37,6 +38,7 @@ import shareCopyExposure from "./ipcExposure.shareCopy.json";
 import offersIpc from "./ipcExposure.offers.json";
 import sharedWriteFeedback from "./ipcExposure.sharedWriteFeedback.json";
 import systemMotionIpc from "./ipcExposure.systemMotion.json";
+import captureHoldsIpc from "./ipcExposure.captureHolds.json";
 
 const rows: OperationDefinition[] = OPERATION_TABLES.flatMap(table => Object.values(table));
 const publicVerbs = Object.entries(CLI_COMMANDS).flatMap(([group, command]) => Object.keys(command.verbs).map(verb => `${group} ${verb}`));
@@ -76,7 +78,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions, ...offersIpc.nameAdditions, ...systemMotionIpc.nameAdditions, ...syncStopExposure.nameAdditions]) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions, ...offersIpc.nameAdditions, ...systemMotionIpc.nameAdditions, ...captureHoldsIpc.nameAdditions, ...syncStopExposure.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }
@@ -86,11 +88,17 @@ describe("B1 main inventories (a4be19d5b)", () => {
     expect(Object.fromEntries(Object.keys(mainIpc.guards).map(channel => [channel, guards[channel]]))).toEqual(mainIpc.guards);
   });
   it("preserves socket verbs, public verbs, and all public help", () => {
-    expect(socketVerbs).toEqual([...mainCli.socketVerbs, ...accessExposure.socketVerbAdditions, ...syncStopExposure.socketVerbAdditions].sort());
-    expect(Object.keys(CLI_COMMANDS)).toEqual([...syncStopExposure.publicGroupAdditions, ...accessExposure.publicGroupAdditions, ...mainCli.publicGroups]);
+    expect(socketVerbs).toEqual([...mainCli.socketVerbs, ...accessExposure.socketVerbAdditions, ...shareCopyCli.socketVerbAdditions, ...syncStopExposure.socketVerbAdditions].sort());
+    const expectedGroups = [...syncStopExposure.publicGroupAdditions, ...accessExposure.publicGroupAdditions, ...mainCli.publicGroups];
+    for (const { group, before } of shareCopyCli.publicGroupAdditions) {
+      expect(expectedGroups).not.toContain(group);
+      expect(expectedGroups).toContain(before);
+      expectedGroups.splice(expectedGroups.indexOf(before), 0, group);
+    }
+    expect(Object.keys(CLI_COMMANDS)).toEqual(expectedGroups);
     // Hand-reviewed #1659 additions, separate from the hashed main baseline.
     const expectedPublicVerbs = [...syncStopExposure.publicVerbAdditions, ...accessExposure.publicVerbAdditions, ...mainCli.publicVerbs];
-    for (const { verb, before } of [...publicationCli.publicVerbAdditions, ...commentsCli.publicVerbAdditions]) {
+    for (const { verb, before } of [...publicationCli.publicVerbAdditions, ...commentsCli.publicVerbAdditions, ...shareCopyCli.publicVerbAdditions]) {
       expect(expectedPublicVerbs).not.toContain(verb);
       expect(expectedPublicVerbs).toContain(before);
       expectedPublicVerbs.splice(expectedPublicVerbs.indexOf(before), 0, verb);
@@ -101,7 +109,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       help[group] = renderCliHelp({ help: [group] });
       for (const verb of Object.keys(command.verbs)) help[`${group} ${verb}`] = renderCliHelp({ help: [group, verb] });
     }
-    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help, ...commentsCli.help, ...accessExposure.help, ...syncStopExposure.help });
+    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help, ...commentsCli.help, ...accessExposure.help, ...shareCopyCli.help, ...syncStopExposure.help });
   });
   it("pins each row's guard, scope, and handler check to the hand-edited admission record", () => {
     expect(Object.fromEntries(rows.map(row => [row.channel, {
@@ -198,7 +206,7 @@ describe("capability identities and exposure", () => {
   });
 
   it("pins every internal-only socket verb in the main CLI inventory", () => {
-    const publicSocketVerbs = new Set([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions, ...syncStopExposure.socketVerbAdditions]);
+    const publicSocketVerbs = new Set([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions, ...shareCopyCli.socketVerbAdditions, ...syncStopExposure.socketVerbAdditions]);
     const internalVerbs = socketVerbs.filter(verb => !publicSocketVerbs.has(verb));
     expect(internalVerbs).toEqual(mainCli.internalVerbs.filter(verb => !commentsCli.publicSocketPromotions.includes(verb)));
   });

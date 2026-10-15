@@ -1,7 +1,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
+import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import { createOwnedSiteCatalog } from "./ownedSiteCatalog";
 import { createTestScratch } from "./testTemp";
 
@@ -15,7 +15,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function catalogWith(listing: ListWorkspaceFilesResult) {
+function catalogWith(listing: WorkspacePathListing) {
   const listFiles = vi.fn(async () => ({ files: [], folders: [] }));
   return createOwnedSiteCatalog({
     reads: vi.fn(() => ({

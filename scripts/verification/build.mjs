@@ -73,9 +73,11 @@ export function repairOwnedEngineExecutable(path) {
   accessSync(path, constants.X_OK);
 }
 
-export function sourceFingerprint(kind, root = repoRoot, selectedPaths, contents = new Map()) {
-  const paths = selectedPaths ?? git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...inputPaths[kind]], root).split("\0").filter(Boolean);
-  paths.push(...configFiles[kind]);
+const listFiles = root => git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], root).split("\0").filter(Boolean);
+const kindInputs = (kind, files) => files.filter(path => inputPaths[kind].some(input => path === input || path.startsWith(input + "/")));
+
+export function sourceFingerprint(kind, root = repoRoot, selectedPaths = kindInputs(kind, listFiles(root)), contents = new Map()) {
+  const paths = [...selectedPaths, ...configFiles[kind]];
   const hash = createHash("sha256");
   hash.update(JSON.stringify({ platform: process.platform, arch: process.arch, node: process.version }));
   const environmentKeys = new Set();
@@ -114,9 +116,12 @@ export function sourceFingerprint(kind, root = repoRoot, selectedPaths, contents
   }
   for (const path of [...new Set(paths)].sort()) {
     hash.update(path + "\0");
-    const absolute = join(root, path);
-    try { hash.update(contents.get(path) ?? readFileSync(absolute)); }
-    catch (error) { if (error.code !== "ENOENT") throw error; hash.update("<deleted>"); }
+    let bytes = contents.get(path);
+    if (bytes === undefined) {
+      try { bytes = readFileSync(join(root, path)); contents.set(path, bytes); }
+      catch (error) { if (error.code !== "ENOENT") throw error; bytes = "<deleted>"; }
+    }
+    hash.update(bytes);
     hash.update("\0");
   }
   return hash.digest("hex");
@@ -124,9 +129,7 @@ export function sourceFingerprint(kind, root = repoRoot, selectedPaths, contents
 
 const testInput = path => /(?:^|\/)(?:tests|__tests__|testing|e2e)\/|\.(?:test|spec|testSupport|fixture|integration-helper)\.[^/]+$|[Tt]estFixture\.[^/]+$/u.test(path);
 
-export function artifactSourceFingerprint(kind, root = repoRoot) {
-  const files = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], root).split("\0").filter(Boolean);
-  const contents = new Map();
+export function artifactSourceFingerprint(kind, root = repoRoot, files = listFiles(root), contents = new Map()) {
   const read = path => {
     if (!contents.has(path)) contents.set(path, readFileSync(join(root, path)));
     return contents.get(path);
@@ -222,6 +225,15 @@ export function artifactSourceFingerprint(kind, root = repoRoot) {
   }
   // Runtime bundles use the desktop's Node/esbuild environment, not Cargo.
   return sourceFingerprint(kind === "runtime" ? "desktop" : kind, root, [...selected], contents);
+}
+
+// One listing and one read of each file serve every fingerprint of a checkout state.
+function inputFingerprints(kinds, root = repoRoot) {
+  const files = listFiles(root), contents = new Map();
+  return Object.fromEntries(kinds.map(kind => [kind, {
+    source: sourceFingerprint(kind, root, kindInputs(kind, files), contents),
+    production: artifactSourceFingerprint(kind, root, files, contents),
+  }]));
 }
 
 export function directoryFingerprint(path) {
@@ -322,20 +334,20 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
   await cancellation.checkpoint();
   const receipt = readJson(receiptPath) ?? { version: 1 };
   const kinds = engineOnly ? ["engine"] : ["engine", "desktop"];
-  const pending = [], start = {};
+  if (existsSync(enginePath)) repairOwnedEngineExecutable(enginePath);
+  const start = inputFingerprints(kinds), pending = [];
   for (const kind of kinds) {
-    if (kind === "engine" && existsSync(enginePath)) repairOwnedEngineExecutable(enginePath);
-    start[kind] = { source: sourceFingerprint(kind), production: artifactSourceFingerprint(kind) };
     const prepared = preparedStatus(kind, receipt, enginePath, start[kind].production);
     await cancellation.checkpoint();
     if (prepared) { console.log(`[prepare] reuse ${kind} ${receipt[kind].artifact.slice(0, 12)}`); continue; }
-    pending.push({kind, ...start[kind], commit: git(["rev-parse", "HEAD"])});
+    pending.push({kind, ...start[kind]});
   }
+  const commit = pending.length ? git(["rev-parse", "HEAD"]) : undefined;
   // A build records its source and production inputs only if both held from
   // start to finish.
-  const changed = (kind) => sourceFingerprint(kind) !== start[kind].source
-    || artifactSourceFingerprint(kind) !== start[kind].production;
-  async function prepareKind({kind, source, production, commit}, env) {
+  const changed = (kind, now = inputFingerprints([kind])) => now[kind].source !== start[kind].source
+    || now[kind].production !== start[kind].production;
+  async function prepareKind({kind, source, production}, env) {
     await cancellation.checkpoint();
     if (kind === "engine") {
       const result = await run("cargo", ["build", "--locked", "--target-dir", join(repoRoot, "target"), "--message-format=json-render-diagnostics", "-p", "dohc-workspace-engine", "--bin", "dohc-workspace-engine"], { env, log: join(output, "engine-build.log"), quietStdout: true });
@@ -362,8 +374,9 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
   if (pending.some(({kind}) => kind === "engine")) await withBuildBudget(buildPending);
   else await buildPending();
   // A completed or reused build can become stale while its sibling is still running.
+  const end = inputFingerprints(kinds);
   for (const kind of kinds) {
-    if (changed(kind)) throw new Error(`${kind} inputs changed during preparation. Run preparation again.`);
+    if (changed(kind, end)) throw new Error(`${kind} inputs changed during preparation. Run preparation again.`);
   }
   requireE2eEngine({ override: enginePath });
   await cancellation.checkpoint();

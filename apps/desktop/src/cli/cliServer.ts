@@ -276,6 +276,7 @@ function historyPolicyUnreadable(refusal: HistoryPolicyRefusal) {
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   stopSync?(author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
+  shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   access?: {
     object(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").ObjectAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
     sharing(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").SharingAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
@@ -2274,6 +2275,9 @@ async function dispatchWorkspace(
       return context.stopSync(writeActor(request.args.actor, context, options) === "agent"
         ? { kind: "agent", agentId: request.args.agent ?? "dohc-mcp", onBehalfOf: options.localPersonId(), depth: options.agentRunDepth(context.workspaceId) }
         : undefined);
+    case "shareCopy":
+      if (context.readOnly || !context.shareCopy) throw new CliCommandError("Share copy details require the owning workspace.");
+      return context.shareCopy({ shareId: request.args.shareId, grantId: request.args.grantId });
     case "accessObject":
       if (!context.access) throw new CliCommandError("Access observations are unavailable.");
       return context.access.object(request.args);

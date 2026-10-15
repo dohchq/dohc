@@ -1,3 +1,8 @@
+import { getShareCopyDetails } from "@dohc/mcp/tools";
+import { createShareCopyReader } from "../ipc/shareCopyHandler";
+import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
+import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
+import { closeTestStorages, testStorage, testHandler, request as relayRequest, inspectDatabase, storagePath, SHARE_WEB_ORIGIN, RELAY_EXCHANGE_KEY } from "@dohc/sync-relay/testing";
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { createHash } from "node:crypto";
 import { AuthoredTextChangedError } from "../workspaces/workspaceEngineCapture";
@@ -71,7 +76,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         throw new VersionedTextStoreError("target-path-exists", "File already exists");
       }
-      return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied" };
+      return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied", objectId: "object", momentId: "moment", deduped: false };
     }),
     // Runs the move or delete as the capture does, with no live documents to
     // settle: the policy is read once the change runs, History holds every
@@ -804,4 +809,118 @@ it("keeps the saved pause result when the physical attachment retires before the
   const author = { kind: "agent" as const, agentId: "Claude", onBehalfOf: "person-local", depth: 0 };
   await expect(context.stopSync!(author)).resolves.toMatchObject({ ok: true, workspaceId: "workspace", workspaceSynced: false });
   await drained;
+});
+
+// Exercise both agent doors through desktop attachment admission and the real relay copy route.
+afterEach(closeTestStorages);
+async function shareCopyFixture() {
+  const root = await createTestScratch("dohc-cli-share-copy-");
+  const f = fixture(root);
+  const storage = await testStorage();
+  storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1 });
+  storage.claimWorkspace({ workspaceId: "other-workspace", ownerUserId: "owner", createdAtMs: 1 });
+  const share = { shareId: "share", workspaceId: "workspace", granterUserId: "owner",
+    selectorJson: JSON.stringify({ paths: ["docs"], versionId: null }), createdAtMs: 1 };
+  const grant = { grantId: "grant", shareId: "share", principalKind: "user" as const, principalUserId: "friend",
+    principalEmail: null, access: "edit", generation: 1, status: "active" as const, createdAtMs: 1, revokedAtMs: null, parentGrantId: null };
+  storage.createShare({ share, grant });
+  storage.createShare({ share: { ...share, shareId: "foreign", workspaceId: "other-workspace" },
+    grant: { ...grant, shareId: "foreign", grantId: "foreign-grant" } });
+  const handler = testHandler(storage, { relayExchangeKey: RELAY_EXCHANGE_KEY, namedBrowserSessionLimits: {
+    maxSessions: 8, retentionMs: 30000, maxPendingRequests: 4, maxRequestBytes: 16384, maxResponseBytes: 16384, timeoutMs: 1000,
+  } });
+  let credentials: CloudCredentials = { serverUrl: "https://cloud.test", relayUrl: "https://relay.test",
+    userId: "owner", email: "owner@test", token: "secret" };
+  let generation = 1;
+  const remote = vi.fn(async (workspace: RegistryEntry) => {
+    if (!workspaceRemoteMatchesCredentials(workspace.remote!, credentials)) throw Error("Sign in to the account that synced this workspace.");
+    return { credentials, credentialGeneration: generation };
+  });
+  const relay = vi.fn(async (account: CloudCredentials, path: string) => {
+    const response = await handler(relayRequest(account.userId, path));
+    if (!response.ok) throw Error(response.status === 404 ? "Share not found." : "Relay failure: " + response.status);
+    return response.json();
+  });
+  f.dependencies.shareCopy = createShareCopyReader({ remoteForWorkspace: remote, currentCredentialGeneration: () => generation, relayJson: relay });
+  await f.create().startDesktopCliServer();
+  const transport = async (input: CliRequestWithoutToken) => {
+    const line = await handleCliRequestLine(JSON.stringify({ ...input, token: "a".repeat(64) }), "a".repeat(64), f.options());
+    const response = cliTransportResponseSchema.parse(JSON.parse(line));
+    if (!response.ok) throw Error(response.error);
+    return response.result;
+  };
+  const copy = async (door: "cli" | "mcp", shareId = "share", grantId = "grant") => {
+    if (door === "mcp") return getShareCopyDetails({ root, home: "state", request: transport }, { shareId, grantId });
+    const result = await executeCli({ argv: ["share", "copy", shareId, grantId, "--json"], cwd: root, env: {}, request: transport });
+    if (result.exitCode !== 0) return { ok: false, reason: result.stderr };
+    const { schemaVersion: _schemaVersion, ...details } = JSON.parse(result.stdout);
+    return details;
+  };
+  return { ...f, copy, remote, relay, storage, rotate: () => { generation++; },
+    otherAccount: () => { credentials = { ...credentials, userId: "stranger" }; } };
+}
+
+describe.each(["cli", "mcp"] as const)("share copy through %s", door => {
+  it("returns the owner's exact details without credentials", async () => {
+    const f = await shareCopyFixture();
+    expect(await f.copy(door)).toEqual({ status: "active", shareCode: "dohc-share:share:https://relay.test",
+      browserInvitationUrl: SHARE_WEB_ORIGIN + "/s/edit/grant" });
+    expect(f.relay.mock.lastCall?.[1]).toBe("/sync/workspace/shares/share/grants/grant/copy");
+  });
+  it("refuses another account before contacting the relay", async () => {
+    const f = await shareCopyFixture(); f.otherAccount();
+    expect(await f.copy(door)).toMatchObject({ ok: false, reason: expect.stringContaining("Sign in") });
+    expect(f.relay).not.toHaveBeenCalled();
+  });
+  it("refuses when the relay workspace belongs to another account", async () => {
+    const f = await shareCopyFixture();
+    const db = inspectDatabase(storagePath(f.storage));
+    try {
+      db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = 'stranger' WHERE workspace_id = 'workspace'").run();
+    } finally { db.close(); }
+    expect(await f.copy(door)).toMatchObject({ ok: false, reason: expect.stringContaining("not found") });
+    expect(f.remote).toHaveBeenCalledOnce();
+    expect(f.relay).toHaveBeenCalledOnce();
+  });
+  it("refuses a received workspace at socket per-verb admission", async () => {
+    const f = await shareCopyFixture(); vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+    expect(await f.copy(door)).toMatchObject({ ok: false, reason: expect.stringContaining("owning workspace") });
+    expect(f.remote).not.toHaveBeenCalled();
+  });
+  it("refuses a received marker before reading credentials", async () => {
+    const f = await shareCopyFixture(); f.workspace.shareView = {} as RegistryEntry["shareView"];
+    expect(await f.copy(door)).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
+    expect(f.remote).not.toHaveBeenCalled();
+  });
+  it.each(["unknown", "link", "damaged", "foreign-workspace", "foreign-grant"])("refuses an %s grant", async kind => {
+    const f = await shareCopyFixture();
+    const db = inspectDatabase(storagePath(f.storage));
+    try {
+      if (kind === "link") db.prepare("UPDATE sync_relay_share_grants SET principal_kind = 'link', principal_user_id = NULL WHERE grant_id = 'grant'").run();
+      if (kind === "damaged") db.prepare("UPDATE sync_relay_shares SET selector_json = '{}' WHERE share_id = 'share'").run();
+    } finally { db.close(); }
+    const result = await f.copy(door, kind === "foreign-workspace" ? "foreign" : "share",
+      kind === "unknown" ? "unknown" : kind.startsWith("foreign") ? "foreign-grant" : "grant");
+    expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("not found") });
+  });
+  it("returns only ended after revocation", async () => {
+    const f = await shareCopyFixture(); f.storage.revokeShare("share", 2);
+    expect(await f.copy(door)).toEqual({ status: "ended" });
+  });
+  it.each(["workspaceId", "shareId", "grantId"])("refuses mismatched %s in the relay reply", async key => {
+    const f = await shareCopyFixture();
+    f.relay.mockResolvedValue({ workspaceId: "workspace", shareId: "share", grantId: "grant", status: "active", [key]: "other" });
+    expect(await f.copy(door)).toMatchObject({ ok: false, reason: expect.stringContaining("share changed") });
+  });
+  it("discards a reply after the credential generation changes", async () => {
+    const f = await shareCopyFixture();
+    f.relay.mockImplementation(async () => { f.rotate(); return { workspaceId: "workspace", shareId: "share", grantId: "grant", status: "active" }; });
+    expect(await f.copy(door)).toMatchObject({ ok: false });
+  });
+  it("refuses a retired desktop attachment before reading credentials", async () => {
+    const f = await shareCopyFixture(); const context = await f.create().openCliWorkspace(f.workspace);
+    await f.authorities.invalidate("workspace");
+    await expect(context.shareCopy!({ shareId: "share", grantId: "grant" })).rejects.toThrow("attachment changed");
+    expect(f.remote).not.toHaveBeenCalled();
+  });
 });

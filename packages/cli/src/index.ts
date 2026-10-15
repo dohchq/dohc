@@ -77,6 +77,8 @@ function buildCliRequest(
   switch (command.verb) {
     case "stopSync":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, ...(command.agent ? { agent: command.agent } : {}) } };
+    case "shareCopy":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, shareId: command.shareId, grantId: command.grantId } };
     case "accessObject":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ref: command.ref, cursor: command.cursor } };
     case "accessSharing":

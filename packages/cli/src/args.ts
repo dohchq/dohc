@@ -19,6 +19,7 @@ type ExportScope =
 
 type CliCommandBody =
   | { verb: "stopSync"; agent?: string }
+  | { verb: "shareCopy"; shareId: string; grantId: string }
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead"; path: string }
@@ -988,6 +989,20 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
           if (lane !== "granted" && lane !== "received") return fail("Choose granted or received.");
           const cursor = lastValue(input, "--cursor");
           return { verb: "accessSharing", lane, ...(cursor ? { cursor } : {}) };
+        },
+      },
+    },
+  },
+  share: {
+    summary: "Read copy details for an owned share grant.",
+    notes: ["Requires the original workspace and its signed-in owner account."],
+    verbs: {
+      copy: {
+        capabilityId: "share.copy.read", summary: "Read a grant's share code and named-account invite link.", operands: "<shareId> <grantId>",
+        parse: input => {
+          const [shareId, grantId, ...extra] = input.operands; noExtraArgs(extra, "share copy");
+          if (!shareId || !grantId) return fail("Provide a share id and grant id.");
+          return { verb: "shareCopy", shareId, grantId };
         },
       },
     },
