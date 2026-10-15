@@ -676,7 +676,7 @@ it("reads only the current scope with the workspace's one credential as document
   expect((await f.request("GET", "log?replicationEpoch=epoch-2&streamIdentity=stream-2")).status).toBe(404);
 });
 
-it("cuts a paused or stopped document's reads at once and keeps its writes until the session host releases it", async () => {
+it("cuts a paused document's reads at once and keeps its writes until the session host releases it, and drops a stopped one at once", async () => {
   const f = await fixture();
   f.enroll("docs/b.md");
   const set = (path: string, enabled: boolean, retire = false) =>
@@ -684,27 +684,31 @@ it("cuts a paused or stopped document's reads at once and keeps its writes until
   const release = (objectId: string) => f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId, nowMs: 31});
   const documents = async () => (await f.read()).scope.documents.map(row => row.objectId);
   for (const sha256 of [A.sha256, Y.sha256, B.sha256]) expect(await f.blobStatus(sha256)).toBe(200);
-  // A pending Pause or Stop takes the document's rows and blobs out of reach now.
+  // A pending Pause takes the document's rows and blobs out of reach now.
   set("docs/a.md", false);
+  // Stop fences new acceptance at once; the relay's live journal already holds what the host accepted.
   set("docs/b.md", false, true);
   const paused = await f.read();
   expect(paused.scope.documents).toEqual([]);
   expect(f.objects(paused)).toEqual(["workspace"]);
   for (const sha256 of [A.sha256, Y.sha256, B.sha256]) expect(await f.blobStatus(sha256)).toBe(404);
   expect((await f.request("GET", `log?${identity}&scope=${paused.scope.token}&since=0&object=object-b`)).status).toBe(400);
-  // It keeps its binding, so the host's accepted work still lands while it settles.
-  expect([...f.storage.readServiceHostFeedScope(ws)!.hosted.keys()]).toEqual([binding.objectId, "object-b"]);
+  // The paused document keeps its binding, so the host's accepted work still lands while it settles.
+  expect([...f.storage.readServiceHostFeedScope(ws)!.hosted.keys()]).toEqual([binding.objectId]);
   const settling = blob("settling edit");
   await f.upload(settling);
   expect(await (await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", settling)]])).json())
     .toMatchObject({inserted: 1, currentMaxOriginSeq: 0});
   expect(f.hostCoordinate(0)).toMatchObject({opKind: "ydoc.update"});
+  // The stopped one takes no more writes.
+  expect(await (await f.push([["ydoc.update", ydoc("object-b", "docs/b.md", settling)]], 1)).json())
+    .toMatchObject({refusals: [{originSeq: 1, reason: "outside-hosted-documents"}]});
+  expect(release("object-b")).toBeNull();
   // Resuming before the release cancels the Pause and brings the document back.
   set("docs/a.md", true);
   expect(await documents()).toEqual([binding.objectId]);
   for (const sha256 of [A.sha256, Y.sha256]) expect(await f.blobStatus(sha256)).toBe(200);
   expect(release(binding.objectId)).toBeNull();
-  expect(release("object-b")).toMatchObject({enabled: false, retired: true});
   expect(await documents()).toEqual([binding.objectId]);
   expect(await f.blobStatus(B.sha256)).toBe(404);
   // Revocation cuts reads at once; writes stay open until the release retires the document.

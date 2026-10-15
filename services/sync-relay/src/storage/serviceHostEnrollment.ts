@@ -7,6 +7,7 @@ import {validateUserWritePath} from "@dohc/workspace-core";
 import {effectiveShareSelector, isLiveEditShareSelector, parseStoredAnyShareSelectorJson} from "../shareFilter";
 import {parseWorkspaceId} from "../requestInputs";
 import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAuthority";
+import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
 import {assertWorkspaceQuota} from "./workspaces";
 import {forgetServiceHostUploads} from "./serviceHostUploads";
 import {badRequest, notFound, relayError} from "../errors";
@@ -15,10 +16,10 @@ export const SERVICE_HOST_ENROLLMENTS = "sync_relay_service_host_enrollments";
 export const SERVICE_HOST_MAX_DOCUMENTS = 64;
 export const SERVICE_HOST_MAX_WORKSPACES = 16;
 const MIGRATION = "service-host-enrollments-v2";
-// `owner_stop` is the owner's Pause or Stop. It cuts the service host's reads
-// at once and applies in full once the host no longer holds the document;
-// until then the enrollment stays enabled, so the document keeps its binding
-// and its writes while unsettled work settles.
+// `owner_stop` is the owner's Pause or Stop. Stop applies at once. Pause cuts
+// the service host's reads at once and applies in full once the host no
+// longer holds the document; until then the enrollment stays enabled, so the
+// document keeps its binding and its writes while unsettled work settles.
 const SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   workspace_id TEXT NOT NULL,
   object_id TEXT NOT NULL,
@@ -81,12 +82,13 @@ export interface ServiceHostEnrollment {
   readonly retired: boolean;
   readonly createdAtMs: number;
   readonly updatedAtMs: number;
+  readonly acceptedCursor?: number;
 }
 export interface EnrollServiceHostDocumentInput {
   workspaceId: string; path: string; shareId: string; ownerUserId: string; nowMs: number; guard(): void;
 }
 export interface SetServiceHostEnrollmentEnabledInput {
-  workspaceId: string; path: string; ownerUserId: string; enabled: boolean; retire?: boolean; nowMs: number; guard(): void;
+  workspaceId: string; path: string; objectId?: string; ownerUserId: string; enabled: boolean; retire?: boolean; restoreFenceGeneration?: number; nowMs: number; guard(): void;
 }
 export interface ServiceHostCandidateCursor {workspaceId: string; shareId: string}
 export interface ServiceHostCandidatePage {shares: readonly SyncRelayShareRow[]; nextCursor: ServiceHostCandidateCursor | null}
@@ -314,6 +316,10 @@ export function currentServiceHostEnrollments(storage: StorageContext, workspace
   if (values.length > SERVICE_HOST_MAX_DOCUMENTS) throw new Error("Service host enrollment capacity is damaged.");
   return values.map(row);
 }
+export class ServiceHostRetirementConflict extends Error {
+  constructor(readonly restoreFenceGeneration: number) {super("The document's restore generation changed.");}
+}
+
 export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: SetServiceHostEnrollmentEnabledInput): ServiceHostEnrollment | null {
   const workspaceId = parseWorkspaceId(input.workspaceId), path = canonicalPath(input.path), nowMs = timestamp(input.nowMs);
   if (typeof input.enabled !== "boolean" || (input.retire !== undefined && typeof input.retire !== "boolean") || (input.retire && input.enabled)) {
@@ -322,20 +328,34 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
   const standing = storage.captureStanding();
   return storage.tx(() => {
     standing(); input.guard();
-    const current = read(storage, workspaceId, path);
+    const value = input.objectId === undefined ? undefined : storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`).get(workspaceId,parseLiveUpdateIdentifier(input.objectId,"object ID"));
+    const current = input.objectId === undefined ? read(storage, workspaceId, path) : value ? row(value) : null;
     if (!current || current.ownerUserId !== input.ownerUserId || !storage.workspaceIsOwnedBy(workspaceId, input.ownerUserId)) return null;
+    let acceptedCursor: number | undefined;
+    if (input.retire) {
+      if (storage.db.prepare(`SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND phase<>'resumed'`)
+        .get(workspaceId, current.objectId)) throw relayError("restore-in-progress", "Stop live editing is waiting. You can keep editing.");
+      if (input.restoreFenceGeneration !== undefined && (!Number.isSafeInteger(input.restoreFenceGeneration) || input.restoreFenceGeneration < 0)) throw badRequest("Invalid restore generation.");
+      const document=storage.db.prepare("SELECT restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id=? AND object_id=? AND main_version_id='main' AND lineage_state='current'").get(workspaceId,current.objectId);
+      const generation=document?.restore_fence_generation ?? 0;
+      if (typeof generation !== "number" || !Number.isSafeInteger(generation)) throw new Error("Invalid document restore generation.");
+      if (input.restoreFenceGeneration !== undefined && generation !== input.restoreFenceGeneration) throw new ServiceHostRetirementConflict(generation);
+      const high = storage.db.prepare("SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_claim_id=(SELECT lineage_claim_id FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id='main' AND object_id=? AND lineage_state='current')")
+        .get(workspaceId,current.objectId,workspaceId,current.objectId);
+      acceptedCursor = timestamp(high?.cursor ?? 0);
+    }
     if (input.enabled) {
       assertCurrent(storage, current, input.ownerUserId);
       if (assertOwnedEditableDocument(storage, current) !== current.objectId) throw new Error("Service host enrollment path belongs to another document.");
       if (current.retired) assertCapacity(storage, workspaceId);
     }
     const ownerStop = input.enabled ? null : input.retire === true || current.ownerStop === "retire" ? "retire" : "pause";
-    // A Pause or Stop of an enabled document leaves the host's reads now and waits for its release, so the document keeps its binding until it unloads.
-    const enabled = input.enabled || current.enabled;
+    // Pause leaves the host's reads now and keeps the binding until host unload. Stop fences new acceptance in this transaction.
+    const enabled = input.retire ? false : input.enabled || current.enabled;
     const retired = !enabled && (current.retired || ownerStop === "retire");
     storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,enabled=?,retired=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
       .run(ownerStop, Number(enabled), Number(retired), Math.max(nowMs, current.updatedAtMs), workspaceId, current.objectId);
-    return read(storage, workspaceId, path);
+    return {...read(storage, workspaceId, current.path)!, ...(acceptedCursor === undefined ? {} : {acceptedCursor})};
   });
 }
 
@@ -357,7 +377,7 @@ export function serviceHostEnrollmentHasEditGrant(storage: StorageContext, enrol
 }
 /**
  * Called once the service host no longer holds the document. Applies the
- * owner's pending Pause or Stop, and retires an enrollment no active Edit
+ * owner's pending Pause, and retires an enrollment no active Edit
  * grant covers. Returns null when neither applies.
  */
 export function releaseServiceHostEnrollment(storage: StorageContext, input: {workspaceId: string; objectId: string; nowMs: number}): ServiceHostEnrollment | null {

@@ -368,6 +368,7 @@ export const CHANNELS = {
   holdQuit: "desktop:hold-quit",
   resumeQuit: "desktop:resume-quit",
   workspaceActivity: "desktop:workspace-activity",
+  captureHolds: "desktop:capture-holds",
   cloudSessionChanged: "desktop:cloud-session-changed",
   firstPaint: "desktop:first-paint",
   // Dev tools (DOHC_DEV_TOOLS=1, unpackaged only): the debug panel's
