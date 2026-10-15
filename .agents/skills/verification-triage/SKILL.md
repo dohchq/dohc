@@ -26,22 +26,25 @@ If the `dohc-verification-nightly` task is missing, run `pnpm verify:queue insta
 ## Triage the nightly run
 
 1. Find the newest nightly request. It is the newest folder under `C:\w\_verification\requests` whose `request.json` has `"nightly": true`.
-2. Read its `status.json`. Its `result` field names the last attempt's `result.json`.
+2. Read its `status.json`. When it passed or failed, its `result` field names the last attempt's `result.json`.
    `pnpm verify:queue status` also shows the line and the last passing nightly.
 3. If no nightly exists, or its state is `queued` or `running`, report that in one line and stop. Do not submit another.
-4. If its state is `error`, the host failed it after retries. Report the `reason` from `status.json` and stop. Do not change code.
-5. If its state is `passed`, report its commit, run time, `flaky` list, and `slowest` list.
+4. If its state is `cancelled` or `superseded`, submit a fresh nightly with `pnpm verify:queue nightly`. Report that and stop.
+5. If its state is `error`, the host failed it after retries. Report the `reason` from `status.json` and stop. Do not change code.
+6. If its state is `passed`, report its commit, run time, `flaky` list, and `slowest` list.
    Name a flaky test as recurring when it is also flaky in another finished run in the last 7 days of `C:\w\_verification\history.jsonl`. Stop.
-6. If its state is `failed`, find the merge that broke main:
+7. If its state is `failed`, find the merge that broke main:
    1. List the failing tests from `result.json` and the failing step's log.
    2. Run only those tests at `head` from `request.json` to confirm the failure.
-   3. Run `git bisect run` over `base..head` with those tests alone. Do not run the full gate to bisect.
-7. Open one PR on its own branch. Revert the culprit with `git revert <sha>`, or make a small, obvious fix.
+   3. Run `git bisect start <head> <base>` with `head` and `base` from `request.json`.
+   4. Run `git bisect run <command>`, where the command runs only those tests. Do not run the full gate to bisect.
+   5. Record the first bad commit, then run `git bisect reset`.
+8. Open one PR on its own branch. Revert the culprit with `git revert <sha>`, or make a small, obvious fix.
    Main uses squash merges, so the culprit is one commit. In the PR body, explain the failure and link the culprit PR.
-8. Verify the PR. A pure revert is routine. A fix needs the independent review that `AGENTS.md` requires. Merge the PR when it passes.
-9. Comment on the culprit PR. Say what failed and link your PR.
-10. Submit a fresh nightly with `pnpm verify:queue nightly`.
-11. Report the nightly's commit and verdict, your PR links, and anything that needs a human.
+9. Verify the PR. A pure revert is routine. A fix needs the independent review that `AGENTS.md` requires. Merge the PR when it passes.
+10. Comment on the culprit PR. Say what failed and link your PR.
+11. Submit a fresh nightly with `pnpm verify:queue nightly`.
+12. Report the nightly's commit and verdict, your PR links, and anything that needs a human.
 
 ## Fix the week's flaky and slow tests
 
