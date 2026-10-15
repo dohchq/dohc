@@ -95,7 +95,7 @@ async function fileText(temp: TempWorkspace, path: string): Promise<string> {
   return await readFile(join(temp.rootPath, path), "utf8").catch(() => "");
 }
 
-test("a document remains editable by its person and agent after restart", async ({}, testInfo) => {
+test("@restart-durability-person-agent a document remains editable by its person and agent after restart", async ({}, testInfo) => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const path = "notes/lifecycle.md";
