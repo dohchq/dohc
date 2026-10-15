@@ -185,6 +185,17 @@ fn native_prefix_unchanged_projection_records_credit_once() {
         .unwrap();
     assert_eq!(credit.len(), 1);
     assert!(credit[0].contains("noop-agent"));
+    assert_eq!(
+        store
+            .read_with(|c| c.query_row(
+                "SELECT COUNT(*) FROM replication_log WHERE op_kind='moment.append'",
+                [],
+                |r| r.get::<_, i64>(0),
+            ))
+            .unwrap(),
+        1,
+        "a deduped prefix moment must be journaled once"
+    );
 }
 
 #[test]
@@ -327,7 +338,8 @@ fn native_prefix_reuses_an_existing_base_and_waits_for_its_history_frontier() {
     assert_eq!(marker.base_origin_seq, Some(0));
     assert_eq!(
         store.table_row_count("ydoc_base_relay_candidates").unwrap(),
-        1
+        1,
+        "a reused base without a marker coordinate still needs a relay candidate"
     );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&bases[0]).unwrap(),

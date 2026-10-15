@@ -3250,7 +3250,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
         ordinal: 55,
         id: "v2-owner-prefix-consumed",
-        sql: "CREATE TABLE owner_prefix_consumed (workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, object_id TEXT NOT NULL, outbox_id TEXT NOT NULL, append_key TEXT NOT NULL, update_digest TEXT NOT NULL CHECK(length(update_digest)=64), native_sequence INTEGER NOT NULL CHECK(native_sequence>0), PRIMARY KEY(workspace_id,version_id,object_id,outbox_id,append_key)) STRICT; CREATE INDEX owner_prefix_pending ON owner_ydoc_outboxes(workspace_id,main_version_id,object_id,lineage_claim_id,restore_fence_generation,created_at_ms,outbox_id) WHERE pending_entry_count>0;",
+        sql: "CREATE TABLE owner_prefix_consumed (workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, object_id TEXT NOT NULL, outbox_id TEXT NOT NULL, append_key TEXT NOT NULL, update_digest TEXT NOT NULL CHECK(length(update_digest)=64), native_sequence INTEGER NOT NULL CHECK(native_sequence>0), delivery_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>=1), result_pending_bytes INTEGER NOT NULL CHECK(result_pending_bytes>0), result_oldest_entry_at_ms INTEGER NOT NULL CHECK(result_oldest_entry_at_ms>=0), result_state TEXT NOT NULL CHECK(result_state IN ('active','sealed')), PRIMARY KEY(workspace_id,version_id,object_id,outbox_id,append_key)) STRICT; CREATE INDEX owner_prefix_pending ON owner_ydoc_outboxes(workspace_id,main_version_id,object_id,lineage_claim_id,restore_fence_generation,created_at_ms,outbox_id) WHERE pending_entry_count>0;",
         sets_user_version: None,
     },
 ];
@@ -4078,7 +4078,7 @@ mod tests {
             ),
             (
                 "v2-owner-prefix-consumed",
-                "977735a54c36793cdea48c21c9b4114eec3b3002017178a017fc68d3e9a3ba82",
+                "9ef0986300d67aa6a9c9d76bf365ea034fff4a277662c6466f14a58b25c17337",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

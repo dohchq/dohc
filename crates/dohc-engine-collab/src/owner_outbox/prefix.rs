@@ -46,7 +46,6 @@ pub struct PrefixProgress {
     pub consumed_entries: i64,
     pub settlement_owed: bool,
     pub publication_frontier: std::collections::BTreeMap<String, i64>,
-    #[serde(default)]
     pub closed_sessions: BTreeSet<String>,
 }
 
@@ -159,6 +158,28 @@ pub fn publication_acked_in(conn: &Connection, key: &DocKey) -> Result<bool, Own
     Ok(true)
 }
 
+fn require_publication_tag_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+    release_digest: &str,
+    origin: &str,
+    seq: i64,
+) -> Result<(), OwnerOutboxError> {
+    let payload: String = tx
+        .query_row(
+            "SELECT payload_json FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND op_kind IN ('ydoc.update','moment.append')",
+            params![binding.workspace_id, origin, seq],
+            |r| r.get(0),
+        )
+        .map_err(read_sql)?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&payload).map_err(|_| OwnerOutboxError::Corrupt)?;
+    if payload.get("release") != Some(&publication_tag(binding, release_digest)) {
+        return Err(OwnerOutboxError::Corrupt);
+    }
+    Ok(())
+}
+
 /// Record only coordinates journaled with this release's immutable tag.
 pub fn record_publication_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -173,13 +194,7 @@ pub fn record_publication_in_tx(
         return Err(OwnerOutboxError::StopConflict);
     }
     let p = stop.prefix.as_mut().ok_or(OwnerOutboxError::StopConflict)?;
-    let tag = publication_tag(binding, &p.release_digest);
-    let payload: String = tx.query_row("SELECT payload_json FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND op_kind IN ('ydoc.update','moment.append')",params![key.workspace_id,origin,seq],|r|r.get(0)).map_err(read_sql)?;
-    let payload: serde_json::Value =
-        serde_json::from_str(&payload).map_err(|_| OwnerOutboxError::Corrupt)?;
-    if payload.get("release") != Some(&tag) {
-        return Err(OwnerOutboxError::Corrupt);
-    }
+    require_publication_tag_in_tx(tx, binding, &p.release_digest, origin, seq)?;
     p.publication_frontier
         .entry(origin.into())
         .and_modify(|head| *head = (*head).max(seq))
@@ -362,6 +377,8 @@ type Entry = (
     Option<i64>,
 );
 
+type FoldEntry = (Entry, String, i64, i64, i64, String);
+
 fn credit(
     conn: &Connection,
     entry: &Entry,
@@ -443,15 +460,15 @@ pub fn commit_prefix(
         let mut stop = super::release::read_in(tx, &key)?.ok_or(OwnerOutboxError::StopConflict)?;
         let progress = stop.prefix.as_mut().ok_or(OwnerOutboxError::StopConflict)?;
         if progress.release_digest != release_digest || progress.settlement_owed { return Err(OwnerOutboxError::Stopping); }
-        let entries = {
-            let mut stmt = tx.prepare("SELECT o.outbox_id,e.sequence,e.append_key,e.update_digest,e.byte_length,e.native_source_json,e.agent_declaration_json,e.automation_declaration_json,e.person_edit FROM owner_ydoc_outboxes o JOIN owner_ydoc_outbox_entries e ON e.outbox_id=o.outbox_id WHERE o.outbox_id=(SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND pending_entry_count>0 ORDER BY created_at_ms,outbox_id LIMIT 1) AND e.pending=1 ORDER BY e.sequence LIMIT ?6").map_err(read_sql)?;
-            let rows = stmt.query_map(params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation,super::release::MAX_RELEASE_ENTRIES], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?))).map_err(read_sql)?;
-            rows.collect::<Result<Vec<Entry>,_>>().map_err(read_sql)?
+        let entries: Vec<FoldEntry> = {
+            let mut stmt = tx.prepare("SELECT o.outbox_id,e.sequence,e.append_key,e.update_digest,e.byte_length,e.native_source_json,e.agent_declaration_json,e.automation_declaration_json,e.person_edit,e.delivery_id,e.sequence,e.result_pending_bytes,e.result_oldest_entry_at_ms,e.result_state FROM owner_ydoc_outboxes o JOIN owner_ydoc_outbox_entries e ON e.outbox_id=o.outbox_id WHERE o.outbox_id=(SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND pending_entry_count>0 ORDER BY created_at_ms,outbox_id LIMIT 1) AND e.pending=1 ORDER BY e.sequence LIMIT ?6").map_err(read_sql)?;
+            let rows = stmt.query_map(params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation,super::release::MAX_RELEASE_ENTRIES], |r| Ok(((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?),r.get(9)?,r.get(10)?,r.get(11)?,r.get(12)?,r.get(13)?))).map_err(read_sql)?;
+            rows.collect::<Result<Vec<FoldEntry>,_>>().map_err(read_sql)?
         };
         let mut warm = cache.take_prefix(tx, &key).map_err(collab)?;
         let mut used = 0;
         let mut touched = std::collections::BTreeMap::new();
-        for entry in entries {
+        for (entry, delivery_id, sequence, result_pending_bytes, result_oldest_entry_at_ms, result_state) in entries {
             if entry.4 < 1 { return Err(OwnerOutboxError::Corrupt); }
             if used > 0 && used + entry.4 > super::release::MAX_RELEASE_BYTES { break; }
             let (actor, attribution) = credit(tx, &entry, binding)?;
@@ -467,9 +484,10 @@ pub fn commit_prefix(
             let seq = crate::durable::append_row(tx,&key,&entry.3,actor.as_deref(),attribution.as_ref(),true,now_ms).map_err(collab)?;
             if actor.is_none() { crate::author_coverage::retain_pending_in(tx,&key,&[author]).map_err(collab)?; }
             if let Some((origin, seq)) = journal(tx,&bytes,actor.as_deref(),attribution.as_ref()).map_err(collab)? {
+                require_publication_tag_in_tx(tx, binding, &progress.release_digest, &origin, seq)?;
                 progress.publication_frontier.entry(origin).and_modify(|head| *head = (*head).max(seq)).or_insert(seq);
             }
-            tx.execute("INSERT INTO owner_prefix_consumed VALUES(?1,?2,?3,?4,?5,?6,?7)",params![key.workspace_id,key.version_id,key.object_id,entry.0,entry.2,entry.3,seq]).map_err(write_sql)?;
+            tx.execute("INSERT INTO owner_prefix_consumed (workspace_id,version_id,object_id,outbox_id,append_key,update_digest,native_sequence,delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![key.workspace_id,key.version_id,key.object_id,entry.0,entry.2,entry.3,seq,delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state]).map_err(write_sql)?;
             tx.execute("DELETE FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2 AND pending=1",params![entry.0,entry.1]).map_err(write_sql)?;
             *touched.entry(entry.0).or_insert(0) += entry.4;
             used += entry.4;
@@ -593,7 +611,7 @@ pub fn append_old_session_in_tx(
         )
         .map_err(collab)?;
         tx.execute(
-            "INSERT INTO owner_prefix_consumed VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            "INSERT INTO owner_prefix_consumed (workspace_id,version_id,object_id,outbox_id,append_key,update_digest,native_sequence,delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?7,1,0,'active')",
             params![
                 key.workspace_id,
                 key.version_id,
@@ -601,7 +619,8 @@ pub fn append_old_session_in_tx(
                 outbox,
                 input.append_key,
                 digest,
-                seq
+                seq,
+                super::delivery_id(outbox, seq, &digest),
             ],
         )
         .map_err(write_sql)?;

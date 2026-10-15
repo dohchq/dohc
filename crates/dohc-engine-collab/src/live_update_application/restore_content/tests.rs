@@ -92,7 +92,7 @@ fn prefix_restore_refusal(resumed: bool) {
             })
             .unwrap();
         f.store.write_with(&NoFaults, |tx| {
-            tx.execute("INSERT INTO owner_prefix_consumed VALUES('workspace','main','object',?1,?2,?3,?4)",params![append.outbox_id,input.append_key,hex_sha256(&input.update),f.sequence]).map_err(write_sql)
+            tx.execute("INSERT INTO owner_prefix_consumed (workspace_id,version_id,object_id,outbox_id,append_key,update_digest,native_sequence,delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state) VALUES('workspace','main','object',?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![append.outbox_id,input.append_key,hex_sha256(&input.update),f.sequence,append.delivery_id,append.sequence,append.pending_bytes,append.oldest_entry_at_ms,append.state.as_str()]).map_err(write_sql)
         }).unwrap();
         let warm = f.store.read_with(|c| cache.take_prefix(c, &key)).unwrap();
         let tuple = f
@@ -114,6 +114,37 @@ fn prefix_restore_refusal(resumed: bool) {
                 f.binding.clone(),
             )
             .unwrap();
+        // The refusal assertions below must exercise the restore fence, not a
+        // fixture that was already invalid. Each seam succeeds before the
+        // restore starts on this same prepared fixture.
+        assert!(f.store.read_with(|c| capability.verify_in(c)).is_ok());
+        assert!(f
+            .store
+            .read_with(|c| draft::open_draft_in(c, &observed.binding, 1))
+            .is_ok());
+        assert!(
+            prefix::compact_prefix(&mut f.store, &mut cache, &observed.binding, &NoFaults, 90)
+                .is_ok()
+        );
+        assert!(f
+            .store
+            .write_with(&NoFaults, |tx| prefix::append_old_session_in_tx(
+                tx,
+                &append.outbox_id,
+                &input,
+                |_, _, _, _, _| panic!("positive control must use the consumed result")
+            ))
+            .is_ok());
+        assert!(prefix::commit_prefix(
+            &mut f.store,
+            &mut cache,
+            &observed.binding,
+            &"c".repeat(64),
+            95,
+            &NoFaults,
+            |_, _, _, _| Ok(None)
+        )
+        .is_ok());
         if resumed {
             restore_and_resume(&mut f);
         } else {

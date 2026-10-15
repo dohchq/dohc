@@ -34,6 +34,101 @@ fn prefix_folded_append_retry_keeps_the_tail_moving() {
 }
 
 #[test]
+fn prefix_folded_retry_keeps_the_saved_reply_after_the_whole_outbox_is_removed() {
+    let (_dir, mut store, observed, _, inputs, outbox) = prefix_queue(1);
+    prefix_turn(&mut store, &mut Default::default(), &observed);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM ydoc_owner_bindings", [])
+                .map_err(write_sql)?;
+            tx.execute("UPDATE owner_live_stops SET state='released'", [])
+                .map_err(write_sql)?;
+            prefix::cleanup_session_page_in_tx(tx, &observed.binding)
+        })
+        .unwrap();
+    assert_eq!(store.table_row_count("owner_ydoc_outboxes").unwrap(), 0);
+    let result = match store
+        .write_with(&NoFaults, |tx| {
+            super::super::append_with_retained_base(
+                tx,
+                "workspace",
+                super::super::OwnerOutboxAppendInput {
+                    binding: observed.binding.clone(),
+                    base_update: Vec::new(),
+                    append_key: inputs[0].append_key.clone(),
+                    update: inputs[0].update.clone(),
+                    limits: observed.limits.clone(),
+                    created_at_ms: 20,
+                },
+                Some((observed.binding.lineage_claim_id.clone(), 1)),
+                Some(observed.revision),
+                None,
+                None,
+                inputs[0].person_edit,
+            )
+        })
+        .unwrap()
+    {
+        TxnOutcome::Committed(result) => result,
+        _ => panic!("unexpected crash"),
+    };
+    assert_eq!(result.outbox_id, outbox);
+    assert!(result.pending_bytes > 0);
+    assert!(matches!(result.state, OwnerOutboxState::Active | OwnerOutboxState::Sealed));
+    assert!(!result.delivery_id.is_empty());
+    assert_eq!(
+        store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
+        0,
+        "a folded retry must not reinsert a new entry"
+    );
+}
+
+#[test]
+fn prefix_folded_retry_keeps_the_saved_reply_for_a_quarantined_outbox() {
+    let (_dir, mut store, observed, _, inputs, outbox) = prefix_queue(1);
+    super::super::quarantine(
+        &mut store,
+        "workspace",
+        super::super::OwnerOutboxQuarantineInput {
+            outbox_id: outbox.clone(),
+            reason: "binding-changed".into(),
+            observed_binding: None,
+        },
+        8,
+    )
+    .unwrap();
+    prefix_turn(&mut store, &mut Default::default(), &observed);
+    let result = match store
+        .write_with(&NoFaults, |tx| {
+            super::super::append_with_retained_base(
+                tx,
+                "workspace",
+                super::super::OwnerOutboxAppendInput {
+                    binding: observed.binding.clone(),
+                    base_update: Vec::new(),
+                    append_key: inputs[0].append_key.clone(),
+                    update: inputs[0].update.clone(),
+                    limits: observed.limits.clone(),
+                    created_at_ms: 20,
+                },
+                Some((observed.binding.lineage_claim_id.clone(), 1)),
+                Some(observed.revision),
+                None,
+                None,
+                inputs[0].person_edit,
+            )
+        })
+        .unwrap()
+    {
+        TxnOutcome::Committed(result) => result,
+        _ => panic!("unexpected crash"),
+    };
+    assert!(result.pending_bytes > 0);
+    assert!(matches!(result.state, OwnerOutboxState::Active | OwnerOutboxState::Sealed));
+    assert!(!result.delivery_id.is_empty());
+}
+
+#[test]
 fn prefix_retry_between_consumed_cleanup_pages_cannot_append_twice() {
     let (_dir, mut store, observed, _, inputs, outbox) = prefix_queue(130);
     let key = key(&observed.binding).unwrap();
