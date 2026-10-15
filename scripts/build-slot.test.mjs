@@ -1075,6 +1075,25 @@ test("a waiting ticket's heartbeat restores its freshness", async () => {
   }
 });
 
+test("a waiter's own sweep keeps its ticket when a busy host delays the heartbeat", () => {
+  const root = slotRoot();
+  try {
+    queueProbe(root, `
+      // Block the event loop past three 20 ms ticket heartbeats before the sweep.
+      const mkdir = fs.mkdirSync;
+      fs.mkdirSync = (path, ...args) => {
+        if (path === join(root, "reclaim.lock")) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        return mkdir(path, ...args);
+      };
+      syncBuiltinESMExports();
+      const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 0, heartbeatMs: 20 });
+      slot.release();
+    `);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a dead waiter's fresh ticket is removed before the next waiter acquires", async (t) => {
   const { root, start, message } = queueHarness(t);
   const holder = await acquireBuildSlot({ root, slots: 1, waitMs: 0 });

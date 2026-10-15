@@ -53,6 +53,7 @@ interface WatchedWorkspace {
   atomicPlacementUnavailable: boolean;
   recoveryUnavailable: boolean;
   keptFiles: readonly (readonly [string, string])[];
+  heldFiles: NonNullable<SyncStatusResult["heldFiles"]>;
   // The agent run whose writes this workspace's settled batches attribute to
   // right now; null when the local user is editing. AgentIntegration sets it.
   agentRun: ActiveAgentRun | null;
@@ -73,6 +74,7 @@ export class WorkspaceActivityState {
 }
 
 export interface WorkspaceActivityOptions {
+  onHeldFiles?: (workspaceId: string, files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
   observationFor: (workspace: ActivityWorkspace, callbacks: WorkspaceObservationCallbacks) => WorkspaceObservationHandle;
   onObservationResync?: (workspace: ActivityWorkspace) => Promise<void>;
   // Live facts main owns: whether this workspace has cloud sync enabled
@@ -127,6 +129,7 @@ export interface WorkspaceCaptureHooks {
   onAtomicPlacementUnavailable: () => void;
   onRecoveryUnavailable: (unavailable: boolean) => void;
   onKeptFiles: (paths: readonly (readonly [string, string])[]) => void;
+  onHeldFiles: (files: NonNullable<SyncStatusResult["heldFiles"]>) => void;
 }
 
 export async function closeWorkspaceActivityAndRelay(options: {
@@ -207,6 +210,7 @@ export function createWorkspaceActivity(
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
       keptFiles: (w?.keptFiles ?? []).map(([original, copy]): [string, string] => [original, copy]),
+      heldFiles: w?.heldFiles ?? [],
       sharingDeclined: snap?.sharingDeclined ?? [],
       ownerAdmissionPending: snap?.ownerAdmissionPending ?? [],
       ...(snap?.syncFailure ? { syncFailure: snap.syncFailure } : {}),
@@ -299,6 +303,7 @@ export function createWorkspaceActivity(
         atomicPlacementUnavailable: false,
         recoveryUnavailable: false,
         keptFiles: [],
+        heldFiles: [],
         agentRun: null,
       };
       state.entry = entry;
@@ -322,6 +327,10 @@ export function createWorkspaceActivity(
                 if (state.entry !== entry || JSON.stringify(paths) === JSON.stringify(entry.keptFiles)) return;
                 entry.keptFiles = [...paths];
                 notify({ workspaceId: workspace.workspaceId });
+              },
+              onHeldFiles: (files) => {
+                if (state.entry !== entry) return;
+                recordHeldFiles(workspace, state, files);
               },
             });
           // stopAll may have raced the capture build; stop the capture no
@@ -547,6 +556,13 @@ export function createWorkspaceActivity(
     return statusFor(workspace, state);
   }
 
+  function recordHeldFiles(workspace: ActivityWorkspace, state: WorkspaceActivityState, files: NonNullable<SyncStatusResult["heldFiles"]>): void {
+    const entry = state.entry;
+    if (!entry || entry.workspace.attachmentId !== workspace.attachmentId || JSON.stringify(files) === JSON.stringify(entry.heldFiles)) return;
+    entry.heldFiles = files;
+    options.onHeldFiles?.(workspace.workspaceId, files);
+  }
+
   function isOpen(state: WorkspaceActivityState): boolean {
     return state.entry !== null;
   }
@@ -751,6 +767,7 @@ export function createWorkspaceActivity(
     reconcileCloud,
     stopEngine,
     getStatus,
+    recordHeldFiles,
     recordShareViewStoreRefusal,
     recordAtomicPlacementUnavailable,
     isOpen,

@@ -382,6 +382,7 @@ mod tests {
                     scratch.path(),
                     &job,
                     &dohc_engine_files::MaterializeOptions {
+                        holds: None,
                         policy: dohc_engine_files::DurabilityPolicy::per_os(),
                         replacer: &dohc_engine_files::StdReplacer,
                         backoff: &dohc_engine_files::NoBackoff,
