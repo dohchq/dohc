@@ -12,6 +12,7 @@ export function useAgentSetup(
   workspaceId: string,
   userSettings: DesktopUserSettingsResult | null,
   settingsSection: SettingsSectionId | null,
+  workspaceIsReady: boolean,
 ) {
   // Each answer keeps the workspace it was read for, so the render between a
   // switch and its reset never pairs one workspace's run with another.
@@ -20,7 +21,7 @@ export function useAgentSetup(
   const bootstrapAgentStatusRead = useRef<Promise<AgentRunStatusResult> | null>(null);
 
   const agentSetup = useMemo<AgentSetupSummary | null>(() => {
-    if (!userSettings || agentRunStatus?.workspaceId !== workspaceId) return null;
+    if (!workspaceIsReady || !userSettings || agentRunStatus?.workspaceId !== workspaceId) return null;
     return {
       workspaceId,
       preferredName: userSettings.settings.profile.preferredName,
@@ -30,7 +31,7 @@ export function useAgentSetup(
       runnerEnabled: userSettings.settings.runner.enabled,
       agentRunActive: agentRunStatus.run.activeRun !== null,
     };
-  }, [agentRunStatus, userSettings, workspaceId]);
+  }, [agentRunStatus, userSettings, workspaceId, workspaceIsReady]);
 
   // The workspace-scoped half of the setup snapshot is also the initial
   // agent-status answer for the history lane. Both consumers share this promise.
@@ -38,6 +39,8 @@ export function useAgentSetup(
     const version = agentSetupRequestRef.current + 1;
     agentSetupRequestRef.current = version;
     setAgentRunStatus(null);
+    bootstrapAgentStatusRead.current = null;
+    if (!workspaceIsReady) return;
     const read = bridge().getAgentRunStatus({
       workspaceId,
     });
@@ -53,13 +56,13 @@ export function useAgentSetup(
     return () => {
       if (agentSetupRequestRef.current === version) agentSetupRequestRef.current += 1;
     };
-  }, [workspaceId]);
+  }, [workspaceId, workspaceIsReady]);
 
   const previousSettingsSection = useRef<SettingsSectionId | null>(null);
   useEffect(() => {
     const wasOpen = previousSettingsSection.current !== null;
     previousSettingsSection.current = settingsSection;
-    if (!wasOpen || settingsSection !== null) return;
+    if (!workspaceIsReady || !wasOpen || settingsSection !== null) return;
     bootstrapAgentStatusRead.current = null;
     const version = agentSetupRequestRef.current + 1;
     agentSetupRequestRef.current = version;
@@ -71,7 +74,7 @@ export function useAgentSetup(
       .catch(() => {
         if (agentSetupRequestRef.current === version) setAgentRunStatus(null);
       });
-  }, [workspaceId, settingsSection]);
+  }, [workspaceId, settingsSection, workspaceIsReady]);
 
   const readAgentStatusForHistory = useCallback(() => {
     const bootstrapRead = bootstrapAgentStatusRead.current;

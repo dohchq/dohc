@@ -120,6 +120,18 @@ Read the service's verdict from the request's `status.json`, or from the last li
 Run `pnpm verify:queue status` to see the service, the running requests, the line, and wait estimates.
 Run `pnpm verify:queue cancel <id>` to stop a request. A finished request keeps its verdict.
 
+The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows what holds each verification lane, a queued request or an agent's inline gate, with its steps and its live output, then the requests ready and waiting for a lane, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Threads, Tests, and Nightly tabs show the whole line, every run this week, each thread's runs and results, the slowest and flaky tests, and the nightly runs.
+When T3 runs on the host, the dashboard names each request by the T3 thread that linked its branch's pull request, or whose worktree or branch it uses. It reads T3's local database read-only once a minute. Without T3 it names requests by their branch.
+Select a run to see its failing step's test summary, its steps on a timeline, and any of its logs. The dashboard refreshes every few seconds and cannot change the queue. It records the host's CPU and free memory once a minute in `monitor-load.json` in the queue root.
+To open it from another device, serve it on the tailnet only:
+
+```powershell
+tailscale serve --bg --https=8446 http://127.0.0.1:4250
+```
+
+Then open `https://<host>.<tailnet>.ts.net:8446`. Do not use Tailscale Funnel: the page shows branch names and test output.
+The page answers only to the host's own names and to tailnet names.
+
 The `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
 A supervisor runs the service in a Windows job object. When the service exits or its heartbeat stops for two minutes, the supervisor stops it and everything it started, then starts it again.
 A request that was running when the service stopped runs again as a new attempt. A request whose receipt already finished keeps that result.
@@ -179,6 +191,18 @@ nextest, vitest, and Playwright retry the failing test itself. The repository an
 A test that passes only on that retry does not fail the gate. `result.json` lists it under `flaky`, the verifier prints it, and the queue history records it.
 A flaky test is a defect. Fix the condition it races, or report it to whoever owns it. A test that fails twice still fails the gate.
 A repository or desktop script step reruns as a whole, after its first attempt's ignored outputs. A test that fails on a clean tree but passes beside those outputs is recorded as flaky like any other, so treat every entry as a real failure until you have read it.
+
+### Failures other branches share
+
+`result.json` lists each test that failed on its last try under `failed`, with the same step and test names as `flaky`. The queue records both lists for each attempt in `status.json` and the queue history.
+The list covers package tests, the repository and desktop script tests, the account and desktop browser proofs, and the Rust tests. A step that fails outside a test, such as typecheck, lists none.
+Before you resubmit a failed run, run each command that it prints and records under `rerun` until its failed tests pass.
+
+When a run fails on the shared host, the verifier looks for its failed tests in the last day of queue history. It prints each test that another branch's run also failed, with those branches, and records them in `result.json` under `shared`. Runs of your own branch do not count.
+A failure that other branches share often comes from main or from a flaky test, not from your change.
+
+When the gate prints that list, check the test on `origin/main` and in the [last nightly](#nightly-run). Do this before you change your branch for that test.
+Do not add a workaround for that failure to your PR. Fix main or the flaky test in its own PR, or wait for that fix and rebase.
 
 ### A failure stops the run
 
