@@ -23,11 +23,16 @@ const runId = process.env.DOHC_RUN_ID;
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
 const prompt = Buffer.concat(chunks).toString("utf8");
+// A runner self-test ends its prompt with the one command to run. Its first
+// run has no thread yet: that command starts one.
+const selfTestCommand = prompt.includes("This is a dohc runner self-test.")
+  ? prompt.trim().split("\n").at(-1)
+  : null;
 
-if (!threadId || !runId || prompt.trim().length === 0) {
+if (!runId || prompt.trim().length === 0 || (!threadId && !selfTestCommand)) {
   console.error(
     "fake chat runner: expected a non-empty prompt on stdin, plus " +
-      "DOHC_CHAT_THREAD and DOHC_RUN_ID in the environment. Got " +
+      "DOHC_RUN_ID and, outside a self-test, DOHC_CHAT_THREAD in the environment. Got " +
       `${prompt.length} prompt bytes on stdin, ` +
       `DOHC_CHAT_THREAD=${threadId ?? "unset"}, ` +
       `DOHC_RUN_ID=${runId ?? "unset"}.`,
@@ -47,16 +52,16 @@ if (profileTool) {
     console.error("Unexpected profile arguments", process.argv.slice(3));
     process.exit(2);
   }
-  const report = prompt.includes("This is a dohc runner self-test.")
-    ? `dohc-runner-self-test:${runId}` : "done: checked the exports";
-  if (!/^[\w-]+$/u.test(threadId) || !/^[\w-]+$/u.test(runId)) process.exit(2);
-  // Resolve dohc from the runner's PATH, as installed tools must do.
-  const windows = process.platform === "win32";
-  const child = spawn(windows ? (process.env.ComSpec ?? "cmd.exe") : "dohc", windows
-    ? ["/d", "/s", "/c", `"dohc chat reply ${threadId} --as-agent "${report}""`]
-    : ["chat", "reply", threadId, "--as-agent", report], {
-    cwd: process.cwd(), env: process.env, stdio: ["ignore", "inherit", "inherit"], windowsHide: true,
-    ...(windows ? { windowsVerbatimArguments: true } : {}),
+  // Do what the prompt asks, as an installed tool would: run the self-test's
+  // command, or reply in the thread. The shell resolves dohc from the
+  // runner's PATH, as installed tools must do.
+  const command = selfTestCommand ?? `dohc chat reply ${threadId} --as-agent "done: checked the exports"`;
+  if (!/^dohc chat (?:post|reply) [\w-]+ --as-agent [^\r\n]*$/u.test(command)) {
+    console.error("Unexpected runner command", command);
+    process.exit(2);
+  }
+  const child = spawn(command, {
+    cwd: process.cwd(), env: process.env, stdio: ["ignore", "inherit", "inherit"], windowsHide: true, shell: true,
   });
   child.on("error", (error) => { console.error(error); process.exit(1); });
   child.on("exit", (code) => process.exit(code ?? 1));
