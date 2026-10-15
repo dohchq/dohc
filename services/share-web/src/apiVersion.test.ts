@@ -10,6 +10,7 @@ afterEach(() => {compiledVersion.value = 1;});
 
 const host = "share.example.com", origin = "https://" + host;
 const header = "x-dohc-share-web-api-version";
+const versionHeader = (version: string | undefined): Record<string, string> => version === undefined ? {} : {[header]: version};
 const secret = "A".repeat(43), capability = "B".repeat(43);
 const routes = [
   ["POST", "/api/exchange"], ["POST", "/api/handoff"],
@@ -38,7 +39,7 @@ function fixture(extra: Partial<CreateShareWebApplicationOptions> = {}) {
     fetchRelay: relay, appLaunch: {viewerOrigin: origin, appDomain: "example.net"}, ...extra});
   const send = (path: string, init: RequestInit = {}) => app.handle(new Request(origin + path, {...init, headers: {host, ...init.headers}}));
   const exchange = (version?: string, agent = false) => send(agent ? "/api/mcp/exchange" : "/api/exchange", {method: "POST",
-    headers: {"content-type": "application/json", ...(version === undefined ? {} : {[header]: version})}, body: JSON.stringify({secret})});
+    headers: {"content-type": "application/json", ...versionHeader(version)}, body: JSON.stringify({secret})});
   return {app, send, exchange, relay, calls, revoke() {revoked = true;}};
 }
 
@@ -104,7 +105,7 @@ it("passes an internal MCP version refusal unchanged rather than relabeling requ
 
 it.each([undefined, "1", "2"])("keeps authorization, revocation and body/rate bounds under every accepted version %s", async version => {
   const f = fixture({apiVersions: {min: 1, max: 2}});
-  const headers: Record<string, string> = version ? {[header]: version} : {};
+  const headers = versionHeader(version);
   expect((await f.send("/api/view/meta", {headers})).status).toBe(404);
   const exchanged = await f.exchange(version);
   const {session} = await exchanged.json();
