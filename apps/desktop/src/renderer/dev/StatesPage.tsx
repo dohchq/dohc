@@ -111,8 +111,11 @@ const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), 
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
 // A floating part draws a shadow up to 41px below and 31px beside itself in
-// the dark theme, and its whole shadow must stay in its own capture. The toasts get this
-// padding; the menus get the same room from their taller boxes.
+// the dark theme, and its whole shadow must stay in its own capture, which
+// takes 16px around its part. So a part needs at least 25px of its own room
+// below a floating box and 15px beside it. The toasts get this 40px padding;
+// the shell's menus get the room from their taller boxes, and the editor's
+// menus from EDITOR_MENU_BOX's margin and their boxes' heights.
 const SHADOW_ROOM = "p-10";
 
 // A part whose subject is not a menu but which holds one, such as a header
@@ -872,8 +875,8 @@ const dangerMenuItems: MenuEntry[] = [
 
 // The editor's menus draw themselves at fixed places. Laid out inside a box
 // with `contain: layout`, which is the containing block for fixed children,
-// they land in their part. The box's margin and height leave room for the
-// shadow beside and below.
+// they land in their part. The box's 24px margin leaves room for the shadow
+// beside; each box's height leaves room below.
 const EDITOR_MENU_BOX = "relative ml-6 [contain:layout]";
 
 const BLOCK_MENU_OPEN = {
@@ -1553,9 +1556,9 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       {/* The editor's listboxes share these rows. The editor keeps focus,
-          and the option Enter acts on draws the outline. The page link and emoji pickers are not here:
-          an open picker takes Enter from the whole window, which would take
-          it from this page's other parts. */}
+          and the option Enter acts on draws the outline. The page link and
+          emoji pickers are not here: an open picker takes Enter from the
+          whole window, which would take it from this page's other parts. */}
       <Section part="slash-menu" title="Slash menu">
         <Specimen label="third option active; the list scrolls">
           <div className={`${EDITOR_MENU_BOX} h-[290px] w-[330px]`}>

@@ -25,12 +25,17 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 // anything only the GPU draws, or how a part looks at a display scale other
 // than 100%. The baselines were taken on Windows; Playwright names them per
 // platform.
+//
+// A second pass captures each part among all the others and holds it to the
+// same baseline, roughly (IN_CONTEXT_LEVELS): it catches a part whose styles
+// change how other parts paint, which no part alone can show.
 
 const STATES_PAGE_HASH = "#/dev/states";
 const WIDTH = 1440;
 // The parts sit 32px apart. Each capture takes half of that around its
-// part, so a shadow or a focus ring at the edge is in the picture and the
-// neighbors are not.
+// part, room for a shadow or a focus ring at its edge. A part's whole
+// shadow stays in that room (SHADOW_ROOM in StatesPage.tsx), so among the
+// others no neighbor reaches into its capture.
 const BLEED = 16;
 const THEMES = ["light", "dark"] as const;
 // Every part the page has, so a section dropped by mistake fails here
@@ -100,6 +105,39 @@ function mismatch(expected: Pixels, actual: Pixels): string | null {
     if (expected.data.compare(actual.data, offset, offset + 4, offset, offset + 4) !== 0) differing += 1;
   }
   return differing === 0 ? null : `differs in ${differing} pixels`;
+}
+
+// Among the others, a part sits elsewhere on the raster's tiles than alone,
+// and the rounded corners and icons a tile's edge crosses antialias a little
+// differently. Across four page positions, at most 21 pixels of a capture
+// (in buttons, with its many rounded corners) moved by more than 16 levels
+// in a channel, and none by more than 62. A part whose styles change how
+// others paint moves far more: #1983's mask on a tab strip dropped subpixel
+// text across the page, and moved 1,328 pixels of buttons by more than 16.
+// The limit is three times the worst noise and a twentieth of that.
+const IN_CONTEXT_LEVELS = 16;
+const IN_CONTEXT_PIXELS = 64;
+
+// What differs between a part captured among the others and its baseline,
+// or null when no more than IN_CONTEXT_PIXELS pixels differ by more than
+// IN_CONTEXT_LEVELS in a channel.
+function farFrom(expected: Pixels, actual: Pixels): string | null {
+  if (expected.width !== actual.width || expected.height !== actual.height) return mismatch(expected, actual);
+  let far = 0;
+  for (let offset = 0; offset < expected.data.length; offset += 4) {
+    for (let channel = offset; channel < offset + 4; channel += 1) {
+      if (Math.abs(expected.data[channel]! - actual.data[channel]!) > IN_CONTEXT_LEVELS) {
+        far += 1;
+        break;
+      }
+    }
+  }
+  return far <= IN_CONTEXT_PIXELS ? null : `differs by more than ${IN_CONTEXT_LEVELS} levels in ${far} pixels`;
+}
+
+// A part's box with BLEED around it, its height rounded up to a whole pixel.
+function around(box: Box): Box {
+  return { x: box.x - BLEED, y: box.y - BLEED, width: box.width + 2 * BLEED, height: Math.ceil(box.height) + 2 * BLEED };
 }
 
 // The baselines are in CSS pixels, whatever the display's scale.
@@ -240,9 +278,10 @@ async function press(page: Page, button: Locator): Promise<void> {
 test("@states-page @states-baselines every shared part matches its baseline in both themes", async () => {
   test.skip(process.platform !== "win32", "the baselines were taken on Windows");
   // About 110s unloaded (1.8 min in gate logs) and 140s in a slower gate
-  // run. The limit is about twice the slower run: a loaded host still
-  // passes, and a hang fails within five minutes.
-  test.setTimeout(300_000);
+  // run before the pass among the others, which took 50-70s more in a
+  // harness run. The limit is about twice the slower run with it: a loaded
+  // host still passes, and a hang fails within seven minutes.
+  test.setTimeout(420_000);
   await withDesktop({ DOHC_DEV_TOOLS: "1" }, async (page) => {
     expect(await page.evaluate(() => window.devicePixelRatio), "the baselines are one device pixel per CSS pixel").toBe(1);
     await page.setViewportSize({ width: WIDTH, height: 900 });
@@ -363,10 +402,6 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     const cdp = await page.context().newCDPSession(page);
     await cdp.send("DOM.enable");
     await cdp.send("CSS.enable");
-    // A menu's rows exist only while it is open, so a part with a menu is
-    // marked after it opens its menu. A part marked data-menus="rest" holds
-    // menus without being about them, and is captured with them closed.
-    await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:is([data-menus="rest"], :not(:has([aria-haspopup="menu"])))`);
 
     const seen = new Set<string>();
     const plainParts = new Set<string>();
@@ -382,19 +417,43 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         (menus === 1 ? menuParts : plainParts).add(name);
       }
     }
+    // Before any capture, so a part missing from a pane fails here instead
+    // of waiting out the timeout for its box.
+    expect([...seen].sort()).toEqual(PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort());
+
     const partIn = (theme: string, name: string) => page.getByTestId(`states-${theme}`).locator(`[data-part="${name}"]`);
-    // Captures a part shown alone, with its height rounded up to a whole
-    // pixel. It must keep its box while it settles, or the capture would
-    // be cut to the box it had before.
-    const capture = async (name: string, theme: string) => {
+    // Runs `check` on every part in both themes, alone or among the others.
+    // A menu's rows exist only while it is open, so a part with a menu is
+    // marked after it opens its menu. A part marked data-menus="rest" holds
+    // menus without being about them, and is captured with them closed.
+    // Each marking pass starts from a fresh DOM.getDocument, which clears the
+    // states forced before it, so the menu parts come last. One menu is open
+    // at a time: opening another moves focus and closes the first.
+    const checkEvery = async (alone: boolean, check: (name: string, theme: string) => Promise<void>) => {
+      await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:is([data-menus="rest"], :not(:has([aria-haspopup="menu"])))`);
+      for (const name of plainParts) {
+        if (alone) await showOnly(page, name);
+        for (const theme of THEMES) await check(name, theme);
+      }
+      for (const name of menuParts) {
+        if (alone) await showOnly(page, name);
+        for (const theme of THEMES) {
+          const trigger = partIn(theme, name).locator("[aria-haspopup='menu']");
+          const menu = partIn(theme, name).getByRole("menu");
+          await openMenu(page, trigger, menu);
+          await forceMarkedStates(cdp, `[data-testid="states-${theme}"] [data-part="${name}"]`);
+          await check(name, theme);
+          await closeMenu(page, trigger, menu);
+        }
+      }
+    };
+
+    // A part shown alone must equal its baseline. It must keep its box while
+    // it settles, or the capture would be cut to the box it had before.
+    await checkEvery(true, async (name, theme) => {
       const box = await partIn(theme, name).boundingBox();
       if (!box) throw new Error(`${name} (${theme}) has no box on the page`);
-      const { pixels, unsettled } = await captureStill(page, {
-        x: box.x - BLEED,
-        y: box.y - BLEED,
-        width: box.width + 2 * BLEED,
-        height: Math.ceil(box.height) + 2 * BLEED,
-      });
+      const { pixels, unsettled } = await captureStill(page, around(box));
       if (unsettled !== null) {
         failures.push(`${name}-${theme} did not settle in ${STILL_CAPTURES} captures; the last one ${unsettled}`);
         return;
@@ -406,27 +465,40 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       }
       const failure = await compareWithBaseline(`${name}-${theme}`, pixels);
       if (failure) failures.push(failure);
-    };
-    for (const name of plainParts) {
-      await showOnly(page, name);
-      for (const theme of THEMES) await capture(name, theme);
-    }
-    // Each marking pass starts from a fresh DOM.getDocument, which clears the
-    // states forced before it, so the menu parts are captured last. One menu is open at a time: opening
-    // another moves focus and closes the first.
-    for (const name of menuParts) {
-      await showOnly(page, name);
-      for (const theme of THEMES) {
-        const trigger = partIn(theme, name).locator("[aria-haspopup='menu']");
-        const menu = partIn(theme, name).getByRole("menu");
-        await openMenu(page, trigger, menu);
-        await forceMarkedStates(cdp, `[data-testid="states-${theme}"] [data-part="${name}"]`);
-        await capture(name, theme);
-        await closeMenu(page, trigger, menu);
+    });
+
+    // Then every part among the others, held roughly to the baseline the
+    // pass above compared or wrote. A part that starts on a fraction of a
+    // pixel antialiases every edge differently, so each part's height is
+    // rounded up first, and every part starts on a whole pixel.
+    await page.evaluate(() => {
+      document.getElementById("states-only")?.remove();
+      const parts = [...document.querySelectorAll<HTMLElement>("[data-part]")];
+      const heights = parts.map((part) => Math.ceil(part.getBoundingClientRect().height));
+      for (const [index, part] of parts.entries()) part.style.height = `${heights[index]}px`;
+    });
+    await checkEvery(false, async (name, theme) => {
+      const path = test.info().snapshotPath(`${name}-${theme}.png`);
+      if (!existsSync(path)) return;
+      const expected = decode(readFileSync(path));
+      const box = await partIn(theme, name).boundingBox();
+      if (!box) throw new Error(`${name} (${theme}) has no box on the page`);
+      // One capture is enough when it is near. One that is not is retaken
+      // until it holds still, so a page still settling cannot fail it.
+      let actual = await page.screenshot({ ...CSS_PIXELS, clip: around(box) });
+      let far = farFrom(expected, decode(actual));
+      if (far !== null) {
+        const { pixels, unsettled } = await captureStill(page, around(box));
+        actual = pixels;
+        far = unsettled === null ? farFrom(expected, decode(pixels)) : `did not settle; the last capture ${unsettled}`;
       }
-    }
+      if (far === null) return;
+      const actualPath = test.info().outputPath(`${name}-${theme}-among-others-actual.png`);
+      writeFileSync(actualPath, actual);
+      await test.info().attach(`${name}-${theme}-among-others-actual`, { path: actualPath, contentType: "image/png" });
+      failures.push(`${name}-${theme} among the other parts ${far}; the capture is at ${actualPath}`);
+    });
     expect(failures, "every part must equal its baseline").toEqual([]);
-    expect([...seen].sort()).toEqual(PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort());
   });
 });
 
