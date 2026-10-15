@@ -39,14 +39,15 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
 });
 
-test("desktop proofs require smoke and onboarding everywhere and the pixel baseline on Windows", () => {
+test("desktop proofs require each restart proof, smoke and onboarding everywhere and the pixel baseline on Windows", () => {
+  const restart = ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"];
   assert.deepEqual(desktopProofTags({platform: "win32"}), {
-    selected: ["@verification-smoke", "@self-host-onboarding", "@states-page"],
-    required: ["@verification-smoke", "@self-host-onboarding", "@states-baselines"],
+    selected: ["@verification-smoke", ...restart, "@self-host-onboarding", "@states-page"],
+    required: ["@verification-smoke", ...restart, "@self-host-onboarding", "@states-baselines"],
   });
   for (const platform of ["linux", "darwin"]) {
     assert.deepEqual(desktopProofTags({platform}), {
-      selected: ["@verification-smoke", "@self-host-onboarding"], required: ["@verification-smoke", "@self-host-onboarding"],
+      selected: ["@verification-smoke", ...restart, "@self-host-onboarding"], required: ["@verification-smoke", ...restart, "@self-host-onboarding"],
     });
   }
 });
@@ -1031,7 +1032,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   ], { cwd: root, encoding: "utf8" }).trim();
   try {
     for (const file of [
-      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
+      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/timing.mjs", "scripts/verification/flaky.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
       "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
       "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",

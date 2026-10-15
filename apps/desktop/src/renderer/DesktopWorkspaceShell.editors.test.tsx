@@ -3147,7 +3147,7 @@ describe("ui-state merge-on-load", () => {
       listPersonalChatFeed: vi.fn(async () => ({
         items: [
           {
-            message: {
+            message: { presentation: { group: "fixture", hue: null, self: false },
               id: "message-feed",
               threadId: "thread-team",
               authorKind: "human" as const,
@@ -3178,7 +3178,7 @@ describe("ui-state merge-on-load", () => {
       })),
       listChatMessages: vi.fn(async () => ({
         messages: [
-          {
+          { presentation: { group: "fixture", hue: null, self: false },
             id: "message-feed",
             threadId: "thread-team",
             authorKind: "human" as const,
@@ -3441,7 +3441,7 @@ describe("ui-state merge-on-load", () => {
     // a comment on it, and a reply to that comment.
     bridge.listChatMessages = vi.fn(async () => ({
       messages: [
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-feed",
           threadId: "thread-team",
           authorKind: "human" as const,
@@ -3449,7 +3449,7 @@ describe("ui-state merge-on-load", () => {
           body: "Feed update worth revisiting",
           createdAtMs: 1,
         },
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-comment",
           threadId: "thread-team",
           parentMessageId: "message-feed",
@@ -3458,7 +3458,7 @@ describe("ui-state merge-on-load", () => {
           body: "A comment on it",
           createdAtMs: 2,
         },
-        {
+        { presentation: { group: "fixture", hue: null, self: false },
           id: "message-reply",
           threadId: "thread-team",
           parentMessageId: "message-comment",

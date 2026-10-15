@@ -5,6 +5,7 @@ import {
   type DiscussionActivityHub,
 } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
+import type { ReplicaWatches } from "./replicaWatches";
 import { assertChatAuthorship, assertClientLogProvenance, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { EnforceWorkspaceIdentityResult, SyncRelayLogRow, SyncRelayStorage } from "./storage";
@@ -35,6 +36,7 @@ export function createWorkspaceReplicationRoutes(
   >,
   nowMs: () => number,
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
+  replicaWatches: Pick<ReplicaWatches, "watched">,
   lookupUserDisplayName?: LogAuthorNameLookup,
   onLogRead?: (request: Request, workspaceId: string, rows: readonly SyncRelayLogRow[]) => void,
 ) {
@@ -177,6 +179,7 @@ export function createWorkspaceReplicationRoutes(
           identity,
           requestedSince,
           since,
+          reportedWatched: url.searchParams.get("watched") === "1",
           ...(reauthenticate === undefined
             ? { holdMs: 0, reauthenticate: async () => {} }
             : { holdMs, reauthenticate }),
@@ -252,7 +255,7 @@ export function createWorkspaceReplicationRoutes(
 
   // A held read tells a device when its log has an op past `since`, so an
   // idle device can pull only when there is something to pull. It answers
-  // only `hasMore` and never serves an op. `hold` is an
+  // `hasMore` and the current watch boolean, and never serves an op. `hold` is an
   // upper bound. The relay answers at once when the log already has an op,
   // and also when its parked reads are at capacity, so a device must not
   // read an early empty answer as a promise to hold the next one.
@@ -265,6 +268,7 @@ export function createWorkspaceReplicationRoutes(
       requestedSince: number;
       since: number;
       holdMs: number;
+      reportedWatched: boolean;
       guard: () => void;
       reauthenticate: () => Promise<void>;
     },
@@ -272,18 +276,19 @@ export function createWorkspaceReplicationRoutes(
     let since = input.since;
     const hasMore = () =>
       storage.fetchLogPage({ workspaceId, sinceRelaySeq: since, limit: 0 }).hasMore;
+    const changed = () => hasMore() || replicaWatches.watched(workspaceId) !== input.reportedWatched;
     const deadlineAtMs = Date.now() + input.holdMs;
     // A wake can leave nothing past `since`, for example a retried link
     // submission that appended nothing. The read then parks again until its
     // deadline, so it answers early only with a change.
-    while (!hasMore() && !request.signal.aborted) {
+    while (!changed() && !request.signal.aborted) {
       const holdMs = deadlineAtMs - Date.now();
       if (holdMs <= 0) break;
       try {
         await discussionActivity.wait(ownerLogWaitGroup(workspaceId), `owner:${userId}`, {
           holdMs,
           signal: request.signal,
-          shouldPark: () => !hasMore(),
+          shouldPark: () => !changed(),
         });
       } catch (error) {
         if (!(error instanceof DiscussionActivityCapacityError)) throw error;
@@ -305,6 +310,7 @@ export function createWorkspaceReplicationRoutes(
       ops: [],
       nextCursor: input.requestedSince,
       hasMore: hasMore(),
+      ...(replicaWatches.watched(workspaceId) ? { watched: true } : {}),
     });
   }
 
