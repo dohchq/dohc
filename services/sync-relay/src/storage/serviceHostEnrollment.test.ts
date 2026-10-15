@@ -293,7 +293,7 @@ it("retirement frees capacity beyond 64 lifetime documents while preserving ever
   expect(() => f.setEnabled(true)).toThrow("capacity");
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
   retire("docs/sixty-fifth.md");
-  expect(f.enroll()).toEqual({...first, updatedAtMs: 25});
+  expect(f.enroll()).toEqual({...first, updatedAtMs: 20});
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
   expect(f.storage.listServiceHostEnrollments()).toHaveLength(64);
 });
@@ -304,10 +304,10 @@ it("retired rows stay hidden until an explicit reactivation and still reject for
   expect(f.storage.hasKeptServiceHostEnrollment(scope.workspaceId, "docs/absent.md")).toBe(false);
   expect(() => f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: true, retire: true})).toThrow("Invalid");
   expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true, ownerUserId: "other"})).toBeNull();
-  // A Stop waits for its release, like a Pause.
-  expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true})).toMatchObject({enabled: true, retired: false, ownerStop: "retire"});
-  expect(f.storage.listServiceHostEnrollments()).toHaveLength(1);
-  f.release();
+  // Stop fences acceptance immediately.
+  expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true})).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
+  expect(f.storage.listServiceHostEnrollments()).toHaveLength(0);
+  expect(f.release()).toBeNull();
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, first.path)).toMatchObject({shareId: first.shareId, retired: true, enabled: false});
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/absent.md")).toBeNull();
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
@@ -376,20 +376,21 @@ it("retires an enrollment only once no active Edit grant on the owner's shares c
   expect(retire()).toBeNull();
 });
 
-it("applies an owner's Pause or Stop only when the host releases the document", async () => {
+it("applies Pause after host release and fences Stop immediately", async () => {
   const f = await fixture(), enrolled = f.enroll();
   f.seed(scope.workspaceId, "stopped-object", "docs/stopped.md", "stopped-share");
   f.enroll({path: "docs/stopped.md", shareId: "stopped-share"});
   expect(f.release()).toBeNull();
   expect(f.setEnabled(false)).toMatchObject({enabled: true, retired: false, ownerStop: "pause"});
   expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, path: "docs/stopped.md", enabled: false, retire: true, nowMs: 20}))
-    .toMatchObject({enabled: true, retired: false, ownerStop: "retire"});
+    .toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
   // Resuming before the release cancels it.
   expect(f.setEnabled(true)).toMatchObject({enabled: true, ownerStop: null});
   expect(f.release()).toBeNull();
   f.setEnabled(false);
   expect(f.release()).toMatchObject({...enrolled, enabled: false, retired: false, ownerStop: "pause", updatedAtMs: 25});
-  expect(f.release("stopped-object")).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
+  expect(f.release("stopped-object")).toBeNull();
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/stopped.md")).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
   // Revocation retires a paused document too, and it stays paused.
   f.raw.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=30 WHERE share_id=?").run(scope.shareId);
   expect(f.release()).toMatchObject({enabled: false, retired: true, ownerStop: "pause"});
