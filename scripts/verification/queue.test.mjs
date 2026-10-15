@@ -301,6 +301,8 @@ test("two lanes run two requests at once, each in its own checkout, and the next
   await cancel(root, first.id);
   assert.equal((await settled(first.id)).status.state, "cancelled");
   assert.equal(state(second.id), "running", "a stop reaches only its own run");
+  const laneOf = id => listRequests(root).find(candidate => candidate.id === id).status.attempts[0].lane;
+  assert.deepEqual([laneOf(first.id), laneOf(second.id)], [one, two].map(call => call.lane.endsWith("-2") ? 2 : 1), "each attempt names the lane it ran in");
   // Each attempt records the load it verified under, in its status and in the history.
   const load = listRequests(root).find(candidate => candidate.id === first.id).status.attempts[0].load;
   assert.equal(load.lanes, 2);

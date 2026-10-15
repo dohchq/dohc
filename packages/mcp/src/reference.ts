@@ -126,7 +126,7 @@ const ACCESS_NOTES = [
 ].join("\n\n");
 
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
-  read: "documentRead", edit: "documentEdit", create: "documentCreate", comment: "fileChatStart",
+  read: "documentRead", edit: "documentEdit", create: "documentCreate", chats: "fileChats", comment: "fileChatStart",
 };
 
 // The socket verb whose result each `dohc automation` verb prints.

@@ -584,7 +584,7 @@ With `--json`, prints `{ schemaVersion, status: "active", shareCode, browserInvi
 
 ### `dohc document`
 
-Read, edit, and create live Markdown documents, and comment on tracked text files.
+Read, edit, and create live Markdown documents. List and start chats on tracked files.
 
 Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
 
@@ -631,6 +631,18 @@ Use - as the body to read it from stdin. Use --text instead to supply Markdown. 
 - `--agent <name>`: Record this agent name with the change.
 
 With `--json`, prints `{ schemaVersion, ok: true, path }`.
+
+#### `dohc document chats`
+
+```sh
+dohc document chats <path> [options]
+```
+
+List chats linked to a workspace file.
+
+Chats follow the file across renames. Use chat show --peek with a thread ID to read it without marking it read.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, fileObjectId, threads: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }[] }`.
 
 #### `dohc document comment`
 
