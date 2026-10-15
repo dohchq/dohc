@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { isDeepStrictEqual, parseEnv } from 'node:util';
-import { resolve } from 'node:path';
+import { posix, resolve } from 'node:path';
 
 export function supportedComposeVersion(value) {
   const match = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value.trim());
@@ -88,12 +88,14 @@ export function composeArgs(envFile, settings, ...args) {
     ...(settings.DOHC_BEHIND_CLOUDFLARE === '1' ? ['-f', 'tools/self-host/compose.cloudflare.yml'] : []), ...args];
 }
 
-// Reads through the relay's own volumes, so it checks the folders Docker mounts. Any other exit status means the check failed.
-const relayDeployment = { found: 0, missingFile: 3, empty: 4 };
+// Reads through relay-initialize's volumes, so it checks the folders Docker mounts. It prints whether the deployment's
+// record and database exist and which disk folders hold data. Any other result means the check failed.
+const diskFolders = { '/data': 'sync-relay', '/continuity': 'continuity', '/host-data': 'host-data' };
 export const relayDeploymentCheck = "const fs=require('node:fs');const exists=path=>fs.statSync(path,{throwIfNoEntry:false})!==undefined;" +
   "const missing=['/continuity/deployment.json','/data/sync-relay.sqlite'].filter(path=>!exists(path));" +
-  "if(missing.length){console.error('Missing '+missing.join(', '));" +
-  `process.exitCode=['/continuity','/data'].every(folder=>fs.readdirSync(folder).length===0)?${relayDeployment.empty}:${relayDeployment.missingFile};}`;
+  "if(missing.length)console.error('Missing '+missing.join(', '));" +
+  `const holding=Object.entries(${JSON.stringify(diskFolders)}).filter(([path])=>fs.readdirSync(path).length).map(([,folder])=>folder);` +
+  "console.log(JSON.stringify({deployment:!missing.length,holding}));";
 
 /** `docker(args)` returns `{status, stdout, stderr}`. */
 export function composeConfig(envFile, settings, docker) {
@@ -104,7 +106,7 @@ export function composeConfig(envFile, settings, docker) {
 }
 
 /** Returns undefined only when Docker reports that the volume does not exist. */
-function inspectVolume(name, docker) {
+export function inspectVolume(name, docker) {
   const result = docker(['volume', 'inspect', name]);
   if (result.status === 0) return JSON.parse(result.stdout)[0];
   if (/no such volume/i.test(result.stderr ?? '')) return undefined;
@@ -121,24 +123,35 @@ export function dataDiskVolumeErrors(config, docker) {
   });
 }
 
-/** A first start needs empty relay storage. Every later start needs the deployment on the data disk. */
+/**
+ * A first start needs empty relay storage: with a data disk, all three disk folders. Every later start needs the relay deployment on the disk.
+ * An empty host-data starts: documents rebuild from the relay, but claims in progress are lost (#2016).
+ * Without a data disk, relay-initialize reads the image's empty /host-data, so only the relay's own volumes count.
+ */
 export function relayDeploymentError(envFile, settings, docker, firstStart) {
-  const { status } = docker(composeArgs(envFile, settings, 'run', '--rm', '--no-deps', '-T',
+  const { status, stdout } = docker(composeArgs(envFile, settings, 'run', '--rm', '--no-deps', '-T',
     '--entrypoint', 'node', 'relay-initialize', '-e', relayDeploymentCheck));
   const directory = settings.DOHC_DATA_DIRECTORY;
-  if (![relayDeployment.found, relayDeployment.missingFile, relayDeployment.empty].includes(status)) {
+  let result;
+  try { result = status === 0 ? JSON.parse(stdout.trim().split('\n').at(-1)) : undefined; } catch { result = undefined; }
+  if (typeof result?.deployment !== 'boolean' || !Array.isArray(result.holding) ||
+    !result.holding.every(folder => Object.values(diskFolders).includes(folder))) {
     return directory ? `Could not check the data disk in ${directory}. Check that the disk is mounted there and Docker is running, then try again.`
       : "Could not check the relay's Docker volumes. Check that Docker is running, then try again.";
   }
+  const relayData = result.holding.some(folder => folder !== 'host-data');
   if (firstStart) {
-    if (status === relayDeployment.empty) return '';
-    return `${directory ? `${directory} already holds` : "The relay's Docker volumes already hold"} relay data. Start without --first-start.`;
+    if (!result.holding.length) return '';
+    if (!directory) return "The relay's Docker volumes already hold relay data. Start without --first-start.";
+    const folders = result.holding.map(folder => `${directory}/${folder}`).join(', ');
+    return `${folders} already ${result.holding.length === 1 ? 'holds' : 'hold'} data. A first start needs empty disk folders. ` +
+      (relayData ? 'Start without --first-start.' : 'Check that DOHC_DATA_DIRECTORY names a new deployment folder.');
   }
-  if (status === relayDeployment.empty) {
+  if (!relayData) {
     return `No relay deployment found in ${directory}. Mount the data disk there and try again. ` +
       'Never recreate its folders: setup would create a new deployment.';
   }
-  if (status === relayDeployment.missingFile) {
+  if (!result.deployment) {
     return `The relay deployment in ${directory} is missing its record or its database. Keep the disk unchanged and check that it is this deployment's disk.`;
   }
   return '';
@@ -194,3 +207,34 @@ export function deploymentChecks(envFile, settings, docker, { start, firstStart 
   }
   return checks;
 }
+
+const normalizeDirectory = path => path ? posix.normalize(path).replace(/(.)\/+$/, '$1') : undefined;
+const bindDirectory = options => options?.o?.split(',').some(option => option === 'bind' || option === 'rbind')
+  ? normalizeDirectory(options.device) : undefined;
+const inside = (path, folder) => path === folder || path.startsWith(folder.endsWith('/') ? folder : `${folder}/`);
+const overlapping = (a, b) => inside(a, b) || inside(b, a);
+
+/**
+ * Returns a function that lists each running container's writable mount that reaches the deployment's storage.
+ * `volumes` are the deployment's existing volumes as Docker inspects them. `run(args)` returns Docker's output and throws when Docker fails.
+ */
+export function storageWriters(config, volumes, run) {
+  const volumeNames = new Set(Object.values(config.volumes ?? {}).map(volume => volume.name));
+  // A writable mount of a deployment folder, or of a folder inside or above it, can change deployment data.
+  // A bound volume that Docker has not created yet still names its folder.
+  const storage = [...volumes.flatMap(volume => [bindDirectory(volume.Options), normalizeDirectory(volume.Mountpoint)]),
+    ...Object.values(config.volumes ?? {}).map(volume => bindDirectory(volume.driver_opts))].filter(Boolean);
+  return () => {
+    const ids = run(['ps', '--quiet']).trim().split(/\r?\n/).filter(Boolean);
+    if (!ids.length) return [];
+    const writable = JSON.parse(run(['inspect', ...ids]))
+      .flatMap(container => (container.Mounts ?? []).filter(mount => mount.RW).map(mount => ({ container, mount })));
+    const others = [...new Set(writable.filter(({ mount }) => mount.Type === 'volume' && !volumeNames.has(mount.Name)).map(({ mount }) => mount.Name))];
+    const devices = new Map(others.length ? JSON.parse(run(['volume', 'inspect', ...others])).map(volume => [volume.Name, bindDirectory(volume.Options)]) : []);
+    return writable.filter(({ mount }) => mount.Type === 'volume' && volumeNames.has(mount.Name) ||
+      [normalizeDirectory(mount.Source), devices.get(mount.Name)].some(path => path && storage.some(folder => overlapping(path, folder))));
+  };
+}
+
+export const describeWriters = matches => [...new Set(matches.map(({ container, mount }) =>
+  `${container.Name?.replace(/^\//, '') || container.Id} (${mount.Type === 'volume' ? mount.Name : mount.Source})`))].join(', ');

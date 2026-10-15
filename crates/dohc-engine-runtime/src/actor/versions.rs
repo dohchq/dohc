@@ -13,7 +13,7 @@ use dohc_engine_domain::{
     VersionedTextStore, list_secret_files_keyless,
 };
 use dohc_engine_files::{
-    ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
+    PlacementHolds, ProjectionTargetKind, ProjectionTargetState, probe_projection_target,
     remove_empty_directory_target,
 };
 use dohc_engine_storage::{
@@ -323,11 +323,16 @@ fn relay_delete_precedes_write(
 /// Enqueue one batch of a sync page in one transaction and materialize it in
 /// one replay. Clears `projections` and adds the batch's deletes to
 /// `deleted`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "relay pages reuse one hold snapshot across dependent batches"
+)]
 fn run_relay_batch(
     store: &mut EngineStore,
     root_dir: &std::path::Path,
     workspace_id: &str,
     self_writes: &dyn SelfWriteRecorder,
+    holds: &PlacementHolds,
     projections: &mut Vec<SwitchProjection>,
     deleted: &mut Vec<String>,
     now_ms: i64,
@@ -336,7 +341,18 @@ fn run_relay_batch(
         return Ok(());
     }
     let batch = std::mem::take(projections);
+    let targets: HashSet<String> = if holds.is_empty() {
+        HashSet::new()
+    } else {
+        batch
+            .iter()
+            .map(|projection| projection.spec.target_path.to_lowercase())
+            .collect()
+    };
     let outcome = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+        complete_held_switch_jobs(tx, workspace_id, holds, now_ms, |_, path| {
+            targets.contains(&path.to_lowercase())
+        })?;
         for projection in &batch {
             if let Some(bytes) = projection.inline_content.as_deref()
                 && put_binary_blob(tx, bytes)? != projection.spec.content_sha256
@@ -363,6 +379,7 @@ fn run_relay_batch(
         store,
         root_dir,
         MaterializationReplayScope {
+            holds: Some(holds),
             workspace_id,
             self_writes: Some(self_writes),
             progress: None,
@@ -419,6 +436,55 @@ fn planned_projection(
     }
 }
 
+fn complete_held_switch_jobs(
+    tx: &rusqlite::Transaction<'_>,
+    workspace: &str,
+    holds: &PlacementHolds,
+    now_ms: i64,
+    selected: impl Fn(&str, &str) -> bool,
+) -> Result<(), StorageError> {
+    if holds.is_empty() {
+        return Ok(());
+    }
+    let jobs = dohc_engine_storage::pending_switch_jobs_in(tx, workspace)?;
+    for (id, path) in jobs {
+        if holds.blocks(&path) && selected(&id, &path) {
+            tx.execute("UPDATE materialization_jobs SET status='complete',completed_at_ms=?2 WHERE job_id=?1",params![id,now_ms]).map_err(StorageError::persist_public)?;
+        }
+    }
+    Ok(())
+}
+
+fn projection_target_contains<'a>(
+    root: &std::path::Path,
+    path: &str,
+    targets: &HashSet<&'a str>,
+    case_paths: &mut Option<HashMap<String, Vec<&'a str>>>,
+) -> bool {
+    if targets.contains(path) {
+        return true;
+    }
+    let aliases = case_paths.get_or_insert_with(|| {
+        let mut aliases: HashMap<String, Vec<&str>> = HashMap::new();
+        for target in targets {
+            aliases
+                .entry(target.to_lowercase())
+                .or_default()
+                .push(target);
+        }
+        aliases
+    });
+    let Some(candidates) = aliases.get(&path.to_lowercase()) else {
+        return false;
+    };
+    let Ok(previous) = std::fs::canonicalize(root.join(path)) else {
+        return false;
+    };
+    candidates.iter().any(|target| {
+        std::fs::canonicalize(root.join(target)).is_ok_and(|target| target == previous)
+    })
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "projection coordinates and rollback-only pre-state paths are independent"
@@ -432,6 +498,7 @@ fn plan_plaintext_switch(
     root_dir: &std::path::Path,
     now_ms: i64,
     token: &CancellationToken,
+    holds: &PlacementHolds,
 ) -> Result<Vec<SwitchProjection>, RuntimeError> {
     let target = VersionedTextStore::new(store)
         .list_snapshots(workspace_id, target_version_id)
@@ -439,6 +506,11 @@ fn plan_plaintext_switch(
     let target_paths: HashSet<&str> = target
         .iter()
         .map(|snapshot| snapshot.path.as_str())
+        .collect();
+    let mut target_case_paths = None;
+    let target_holds: HashSet<&str> = target_paths
+        .iter()
+        .filter_map(|path| holds.get(path).map(|(path, _)| path))
         .collect();
     let policy = read_engine_search_policy(root_dir);
     if policy.is_degraded() {
@@ -462,9 +534,19 @@ fn plan_plaintext_switch(
             {
                 continue;
             }
-            let state =
-                probe_projection_target(root_dir, &snapshot.path, ProjectionTargetKind::Plaintext);
-            let Some(preimage) = projection_preimage(&state) else {
+            let held = holds.get(&snapshot.path);
+            if held.is_some_and(|(_, hold)| hold.source_version_id == target_version_id) {
+                continue;
+            }
+            let state = if held.is_some() {
+                ProjectionTargetState::UntrackedContent
+            } else {
+                probe_projection_target(root_dir, &snapshot.path, ProjectionTargetKind::Plaintext)
+            };
+            let Some(preimage) = held
+                .map(|(_, hold)| hold.preimage.clone())
+                .or_else(|| projection_preimage(&state))
+            else {
                 continue;
             };
             let (desired_sha256, inline_content) = match &snapshot.content {
@@ -505,13 +587,26 @@ fn plan_plaintext_switch(
             previous_paths.push(((*path).to_owned(), *target_generation));
         }
     }
+    for (path, _) in holds.entries() {
+        if !previous_paths.iter().any(|(previous, _)| previous == path) {
+            previous_paths.push((path.to_owned(), now_ms));
+        }
+    }
     if !policy.is_degraded() {
         let empty_sha = hex_sha256(&[]);
         for (path, target_generation) in previous_paths {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
             }
-            if target_paths.contains(path.as_str())
+            if holds
+                .get(&path)
+                .is_some_and(|(path, _)| target_holds.contains(path))
+                || projection_target_contains(
+                    root_dir,
+                    &path,
+                    &target_paths,
+                    &mut target_case_paths,
+                )
                 || !resolve_effective_policy(
                     &path,
                     policy.files_policy.as_deref(),
@@ -521,10 +616,24 @@ fn plan_plaintext_switch(
             {
                 continue;
             }
-            let state = probe_projection_target(root_dir, &path, ProjectionTargetKind::Plaintext);
-            let Some(preimage @ Preimage::Present(_)) = projection_preimage(&state) else {
+            let held = holds.get(&path);
+            if held.is_some_and(|(_, hold)| hold.source_version_id == target_version_id) {
+                continue;
+            }
+            let state = if held.is_some() {
+                ProjectionTargetState::UntrackedContent
+            } else {
+                probe_projection_target(root_dir, &path, ProjectionTargetKind::Plaintext)
+            };
+            let Some(preimage) = held
+                .map(|(_, hold)| hold.preimage.clone())
+                .or_else(|| projection_preimage(&state))
+            else {
                 continue;
             };
+            if held.is_none() && matches!(preimage, Preimage::Absent) {
+                continue;
+            }
             projections.push(planned_projection(
                 workspace_id,
                 target_version_id,
@@ -589,16 +698,33 @@ fn plan_secret_switch(
     now_ms: i64,
     token: &CancellationToken,
     secret_key: &mut Option<SecretDataKey>,
+    holds: &PlacementHolds,
 ) -> Result<Vec<SwitchProjection>, RuntimeError> {
     let target = list_secret_files_keyless(store, workspace_id, target_version_id)?;
     let target_paths: HashSet<&str> = target.iter().map(|stat| stat.path.as_str()).collect();
+    let mut target_case_paths = None;
+    let target_holds: HashSet<&str> = target_paths
+        .iter()
+        .filter_map(|path| holds.get(path).map(|(path, _)| path))
+        .collect();
     let mut projections = Vec::new();
     for stat in &target {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        let state = probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret);
-        let Some(preimage) = projection_preimage(&state) else {
+        let held = holds.get(&stat.path);
+        if held.is_some_and(|(_, hold)| hold.source_version_id == target_version_id) {
+            continue;
+        }
+        let state = if held.is_some() {
+            ProjectionTargetState::UntrackedContent
+        } else {
+            probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret)
+        };
+        let Some(preimage) = held
+            .map(|(_, hold)| hold.preimage.clone())
+            .or_else(|| projection_preimage(&state))
+        else {
             continue;
         };
         if secret_key.is_none() {
@@ -640,13 +766,36 @@ fn plan_secret_switch(
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        if target_paths.contains(stat.path.as_str()) {
+        if holds
+            .get(&stat.path)
+            .is_some_and(|(path, _)| target_holds.contains(path))
+            || projection_target_contains(
+                root_dir,
+                &stat.path,
+                &target_paths,
+                &mut target_case_paths,
+            )
+        {
             continue;
         }
-        let state = probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret);
-        let Some(preimage @ Preimage::Present(_)) = projection_preimage(&state) else {
+        let held = holds.get(&stat.path);
+        if held.is_some_and(|(_, hold)| hold.source_version_id == target_version_id) {
+            continue;
+        }
+        let state = if held.is_some() {
+            ProjectionTargetState::UntrackedContent
+        } else {
+            probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret)
+        };
+        let Some(preimage) = held
+            .map(|(_, hold)| hold.preimage.clone())
+            .or_else(|| projection_preimage(&state))
+        else {
             continue;
         };
+        if held.is_none() && matches!(preimage, Preimage::Absent) {
+            continue;
+        }
         projections.push(planned_projection(
             workspace_id,
             target_version_id,
@@ -679,7 +828,8 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<(), RuntimeError> {
-    let projections = plan_plaintext_switch(
+    let holds = PlacementHolds::load(store, workspace_id)?;
+    let mut projections = plan_plaintext_switch(
         store,
         workspace_id,
         active_version_id,
@@ -688,11 +838,26 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
         root_dir,
         now_ms,
         token,
+        &holds,
     )?;
-    if projections.is_empty() {
+    if projections.is_empty() && holds.is_empty() {
         return Ok(());
     }
+    for projection in &mut projections {
+        if rollback_paths
+            .iter()
+            .any(|(path, _)| path.to_lowercase() == projection.spec.target_path.to_lowercase())
+            && let Some(job) = store.load_materialization_job(&projection.spec.job_id)?
+            && job.status == dohc_engine_storage::JobStatus::Pending
+        {
+            projection.spec.preimage = job.preimage;
+        }
+    }
+
     let outcome = store.write_with(faults, |tx| {
+        complete_held_switch_jobs(tx, workspace_id, &holds, now_ms, |id, _| {
+            id.starts_with("version-switch-mat_")
+        })?;
         for projection in &projections {
             if let Some(content) = projection.inline_content.as_deref() {
                 let stored_sha = put_binary_blob(tx, content)?;
@@ -715,6 +880,7 @@ pub(super) fn reconcile_active_plaintext_projection_on_store(
         store,
         root_dir,
         MaterializationReplayScope {
+            holds: Some(&holds),
             workspace_id,
             self_writes: Some(self_writes),
             progress: None,
@@ -759,11 +925,7 @@ pub(super) fn switch_active_version_on_store(
     if previous.version_id == version_id {
         return Ok(target);
     }
-    if let Some(path) = store.read_with(|conn| {
-        dohc_engine_storage::capture_file_holds::first_path_in(conn, workspace_id)
-    })? {
-        return Err(RuntimeError::CaptureFileHeld { path });
-    }
+    let holds = PlacementHolds::load(store, workspace_id)?;
     let mut secret_key = None;
     let mut projections = plan_plaintext_switch(
         store,
@@ -774,6 +936,7 @@ pub(super) fn switch_active_version_on_store(
         root_dir,
         now_ms,
         token,
+        &holds,
     )?;
     projections.extend(plan_secret_switch(
         store,
@@ -784,6 +947,7 @@ pub(super) fn switch_active_version_on_store(
         now_ms,
         token,
         &mut secret_key,
+        &holds,
     )?);
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -795,6 +959,7 @@ pub(super) fn switch_active_version_on_store(
             params![workspace_id, version_id],
         )
         .map_err(StorageError::persist_public)?;
+        complete_held_switch_jobs(tx, workspace_id, &holds, now_ms, |_, _| true)?;
         for projection in &projections {
             if let Some(content) = projection.inline_content.as_deref() {
                 let stored_sha = put_binary_blob(tx, content)?;
@@ -818,6 +983,7 @@ pub(super) fn switch_active_version_on_store(
         store,
         root_dir,
         MaterializationReplayScope {
+            holds: Some(&holds),
             workspace_id,
             self_writes: Some(self_writes),
             progress: None,
@@ -854,6 +1020,7 @@ pub(super) fn switch_active_version_on_store(
             store,
             root_dir,
             MaterializationReplayScope {
+                holds: Some(&holds),
                 workspace_id,
                 self_writes: Some(self_writes),
                 progress: None,
@@ -913,6 +1080,7 @@ impl ActorHandle {
             if policy.is_degraded() {
                 return Err(DomainError::StateCorrupt { reason: "ordinary materialization policy unavailable" }.into());
             }
+            let holds = PlacementHolds::load(store, &workspace_id)?;
             let mut secret_key = None;
             // A change can depend on another in the same page: a file becomes a
             // directory (delete `notes`, write `notes/work.md`) or the reverse
@@ -954,7 +1122,7 @@ impl ActorHandle {
                 if batch_aliases.iter().any(|planned: &Vec<String>| {
                     planned.starts_with(&key) || key.starts_with(planned)
                 }) {
-                    run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &mut projections, &mut deleted, now_ms)?;
+                    run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &holds, &mut projections, &mut deleted, now_ms)?;
                     batch_aliases.clear();
                 }
                 // A file replacing a directory whose tracked files this page
@@ -973,9 +1141,12 @@ impl ActorHandle {
                 if !secret && !resolve_effective_policy(&change.path, policy.files_policy.as_deref(), policy.visibility_policy.as_deref()).tracked {
                     return Err(DomainError::InvalidPath { reason: "ordinary materialization path is not tracked" }.into());
                 }
-                let state = probe_projection_target(&root_dir, &change.path,
-                    if secret { ProjectionTargetKind::Secret } else { ProjectionTargetKind::Plaintext });
-                let preimage = projection_preimage(&state).ok_or(DomainError::InvalidPath {
+                let held = holds.get(&change.path);
+                let state = if held.is_some() { ProjectionTargetState::UntrackedContent } else {
+                    probe_projection_target(&root_dir, &change.path,
+                        if secret { ProjectionTargetKind::Secret } else { ProjectionTargetKind::Plaintext })
+                };
+                let preimage = held.map(|(_, hold)| hold.preimage.clone()).or_else(|| projection_preimage(&state)).ok_or(DomainError::InvalidPath {
                     reason: "ordinary materialization target is unsafe or unreadable",
                 })?;
                 let desired = if secret {
@@ -1011,7 +1182,7 @@ impl ActorHandle {
                     preimage, now_ms, now_ms, secret, inline));
             }
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-            run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &mut projections, &mut deleted, now_ms)?;
+            run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &holds, &mut projections, &mut deleted, now_ms)?;
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
             Ok(())
         }).await

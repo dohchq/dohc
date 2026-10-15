@@ -85,7 +85,7 @@ fn empty_bootstrap_outbox_does_not_require_owner_adoption() {
     let outbox =
         crate::owner_outbox::outbox_id(b, &b.lineage_claim_id, &serde_json::to_string(b).unwrap());
     f.store.write_with(&NoFaults,|tx| -> Result<(),ApplicationError> {
-        tx.execute("INSERT INTO owner_ydoc_outboxes VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?5,?5,?9,'active',0,NULL,1,NULL,NULL,0)",
+        tx.execute("INSERT INTO owner_ydoc_outboxes (outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?5,?5,?9,'active',0,NULL,1,NULL,NULL,0)",
             params![outbox,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).unwrap(),b.restore_fence_generation,f.doc.encode_full_state().len() as i64]).map_err(write_sql)?;
         Ok(())
     }).unwrap();
@@ -133,7 +133,7 @@ fn append_history_copies(f: &mut Fixture, copies: i64, bytes: Vec<u8>) -> Vec<Li
                     update_bytes: bytes.clone(),
                 };
                 event.validate()?;
-                accepted_history::append(tx, &held, &event, 100_000_000)?;
+                accepted_history::append_native(tx, &held, &event, 100_000_000)?;
                 if f.sequence > 0 {
                     insert_application(tx, &held, &event, f.sequence)?;
                 }
@@ -430,7 +430,7 @@ fn ordinary_checkpoint_streams_cumulative_metadata_above_working_reserve() {
                     },
                     update_bytes: bytes.clone(),
                 };
-                accepted_history::append(tx, &held, &event, 8 * 1024 * 1024)?;
+                accepted_history::append_native(tx, &held, &event, 8 * 1024 * 1024)?;
                 last = Some(event.metadata.accepted.receipt);
             }
             Ok(last.unwrap())
@@ -725,7 +725,7 @@ fn append_after_restore_avoids_historical_json_and_checkpoint_document_reads() {
                 _ => Authorization::Allow,
             }))
             .map_err(read_sql)?;
-            let appended = accepted_history::append(tx, &held, &event, 8 * 1024 * 1024);
+            let appended = accepted_history::append_native(tx, &held, &event, 8 * 1024 * 1024);
             tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
                 .map_err(read_sql)?;
             appended

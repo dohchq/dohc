@@ -106,7 +106,7 @@ export function createNamedDesktopLive(options: {
             if (!session) return refuse();
             created = session.discriminator;
             if (storage.objectIdAtPathInVersion({workspaceId: share.workspaceId, versionId: "main", path: path.normalized}) !== objectId) return refuse();
-            const body = JSON.stringify({ ...context, objectId, path: path.normalized, ...session, ticket, editorLimits });
+            const body = JSON.stringify({ ...context, workspaceId: `named:${context.grantId}`, objectId, path: path.normalized, ...session, ticket, editorLimits });
             if (Buffer.byteLength(body) > limits.maxResponseBytes) return refuse();
             signal.throwIfAborted(); check();
             created = undefined;

@@ -150,6 +150,7 @@ type EngineDocOpenOutcome =
       flushPendingLocalUpdates: EngineYDocBinding["flushPendingLocalUpdates"];
     }
   | { kind: "unavailable" }
+  | { kind: "capture-held" }
   // Their own kinds, not flags on "unavailable": only the unqualified outcome
   // means "fall back to the plain editor". Collapsing these outcomes would put
   // distinct user states and retry rules behind one flag.
@@ -206,6 +207,7 @@ function makeTransport(
         ...(result.liveHostUnavailable ? { liveHostUnavailable: true } : {}),
         ...(result.sharedWaiting ? { sharedWaiting: result.sharedWaiting } : {}),
         ...(result.documentUnavailable ? { documentUnavailable: true } : {}),
+        ...(result.captureHeld ? { captureHeld: true } : {}),
         ...(result.engineMayHoldDocument ? { engineMayHoldDocument: true } : {}),
         ...(result.artifactAssetsInvalid ? { artifactAssetsInvalid: true } : {}),
         ...(result.removalInProgress
@@ -339,6 +341,7 @@ export type EngineDocLease = Omit<EngineDocSession, "start"> & {
   release: () => void;
   disposeIfReleased: () => void;
   reopenForRetry: (input: EngineDocInput, requestKey: string) => void;
+  withClosedSession: (work: () => Promise<void>) => Promise<void>;
 };
 
 const engineDocLeases = new Map<string, EngineDocLease>();
@@ -1271,7 +1274,9 @@ function createEngineDocSession(
             // would write the phantom the engine just refused, and
             // when the engine may still hold the document, where a plain
             // autosave would race the session it still binds.
-            if (bound.notInVersion) {
+            if (bound.captureHeld) {
+              setOutcome({ kind: "capture-held" });
+            } else if (bound.notInVersion) {
               setOutcome({ kind: "not-in-version" });
             } else if (bound.sharedWaiting) {
               setOutcome({ kind: "shared-waiting", waiting: bound.sharedWaiting });
@@ -1435,6 +1440,26 @@ function createEngineDocLease(
 
   lease = {
     documentKey: stableDocumentKey,
+    withClosedSession(work) {
+      const generation = ++transitionGeneration;
+      const previous = activeSession;
+      activeSession = null;
+      unsubscribeSession?.();
+      unsubscribeSession = null;
+      publish(emptyLeaseSnapshot(requestKey));
+      const operation = transition.then(async () => {
+        try {
+          await previous?.dispose();
+          await previous?.whenClosed();
+          if (disposed || generation !== transitionGeneration) throw new Error("dohc could not stop live editing. Try again.");
+          await work();
+        } finally {
+          if (!disposed && generation === transitionGeneration) attach(createEngineDocSession(input, requestKey));
+        }
+      });
+      transition = operation.catch(() => undefined);
+      return operation;
+    },
     retain() {
       refCount += 1;
       releaseToken += 1;
@@ -1457,6 +1482,8 @@ function createEngineDocLease(
     reopenForRetry(nextInput, nextRequestKey) {
       if (disposed) return;
       if (snapshot.key === nextRequestKey && snapshot.outcome === null) return;
+      input = nextInput;
+      requestKey = nextRequestKey;
 
       const generation = ++transitionGeneration;
       const previous = activeSession;
@@ -1545,6 +1572,13 @@ export async function disposeEngineDocLeasesForTests(): Promise<void> {
   // the session disposed so a late answer closes instead of binding.
   engineDocDisposalBarriers.clear();
   await Promise.all(leases.map((lease) => lease.dispose()));
+}
+
+/** Flush and close every pane for this document before changing its live mode. */
+export async function withClosedEngineDocSession(workspaceId: string, path: string, work: () => Promise<void>): Promise<void> {
+  const leases = [...engineDocLeases.values()].filter(lease => lease.documentKey === documentKey(workspaceId, path));
+  const close = (index: number): Promise<void> => index === leases.length ? work() : leases[index]!.withClosedSession(() => close(index + 1));
+  await close(0);
 }
 
 export function retainEngineDocLease(

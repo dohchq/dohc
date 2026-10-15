@@ -5,6 +5,8 @@ import { createDatasetSources, type SourceCreationProgress } from "../workspaces
 import { invalidateDatasetAddresses } from "../workspaces/datasetAddress";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
 import { expect, it, vi } from "vitest";
+import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { flushDatasetSourceCapture } from "../workspaces/datasetSourceCapture";
 import { createDatasetHandler } from "./datasetIpc";
 import type { LocalDatasetHost } from "../workspaces/localDatasetHost";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
@@ -31,7 +33,7 @@ function fixture(remote?: OwnerDatasetData, named?: Pick<OwnerDatasetData, "list
     for (const [path, source] of Object.entries(files)) sources.set(path, source);
     invalidateDatasetAddresses({ workspaceId: "workspace" });
   });
-  const flushSourceCapture = vi.fn(async (_workspace: typeof workspace, _signal: AbortSignal) => {});
+  const flushSourceCapture = vi.fn(async (_workspace: typeof workspace, _signal: AbortSignal): Promise<readonly { path: string }[]> => []);
   const sources = new Map([["data/dataset.json", JSON.stringify(definition)]]);
   const sourceRequests: Array<{ method: string; params: Record<string, unknown> }> = [];
   const adapter = sourceCaptureAdapter(sources, { workspaceId: "workspace", onRequest(method, params) { sourceRequests.push({ method, params }); } });
@@ -295,7 +297,7 @@ it("waits for source capture before preparing authored Collection changes", asyn
   for (const action of ["prepare", "prepareMigration"] as const) {
     const f = fixture();
     let finish!: () => void;
-    f.flushSourceCapture.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+    f.flushSourceCapture.mockImplementation(() => new Promise<readonly { path: string }[]>(resolve => { finish = () => resolve([]); }));
     f.withAdapter.mockRejectedValue(new Error("source capture reached"));
     const request = action === "prepare" ? { workspaceId: "workspace", action, descriptorPath: "data/dataset.json" }
       : { workspaceId: "workspace", action, datasetPath: "data/dataset.json", migrationPath: "data/change.sql" };
@@ -309,6 +311,30 @@ it("waits for source capture before preparing authored Collection changes", asyn
   }
 });
 
+it.each(["data/dataset.json", "data/schema.sql", "data/operations.js"])("refuses source review when its read of %s is held", async path => {
+  const f = fixture();
+  f.flushSourceCapture.mockResolvedValue([{ path }]);
+  Object.assign(f.host, { prepare: async ({ adapter }: { adapter: VersionedLiveAdapter }) => {
+    await adapter.captureSourceMetadata({ workspaceId: "workspace", versionId: "main", paths: ["data/dataset.json", "data/schema.sql", "data/operations.js"], bounds: { maxInputFiles: 3, maxInputBytes: 4096 }, signal: f.abort.signal });
+    throw Error("review read held source");
+  } });
+  await expect(f.handler("window", { workspaceId: "workspace", action: "prepare", descriptorPath: "data/dataset.json" })).rejects.toThrow(`dohc cannot use "${path}" for this change. dohc cannot represent part of the file`);
+  expect(f.sourceRequests.filter(request => request.method === "versionedText.captureSources")).toHaveLength(0);
+});
+
+it("reviews source when the only held file is unrelated", async () => {
+  const f = fixture();
+  const result = { settled: true, running: true, degraded: false, heldFiles: [{ workspaceId: "workspace", sourceVersionId: "main", objectId: "object", path: "unrelated.md", observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const, observedAtMs: 1, attemptCount: 1, retryRequested: false }] };
+  f.flushSourceCapture.mockImplementation((_workspace, signal) => flushDatasetSourceCapture({ reconcileCapture: async () => result, flushCapture: async () => result }, signal));
+  const reached = vi.fn(async ({ adapter }: { adapter: VersionedLiveAdapter }) => {
+    await adapter.captureSourceMetadata({ workspaceId: "workspace", versionId: "main", paths: ["data/dataset.json"], bounds: { maxInputFiles: 3, maxInputBytes: 4096 }, signal: f.abort.signal });
+    throw Error("review reached source");
+  });
+  Object.assign(f.host, { prepare: reached });
+  await expect(f.handler("window", { workspaceId: "workspace", action: "prepare", descriptorPath: "data/dataset.json" })).rejects.toThrow("review reached source");
+  expect(reached).toHaveBeenCalledOnce();
+});
+
 it("refuses source review after failed settlement or changed workspace authority", async () => {
   const request = { workspaceId: "workspace", action: "prepareMigration", datasetPath: "data/dataset.json", migrationPath: "data/change.sql" };
   const failed = fixture();
@@ -316,11 +342,11 @@ it("refuses source review after failed settlement or changed workspace authority
   await expect(failed.handler("window", request)).rejects.toThrow("capture not settled");
   expect(failed.withAdapter).not.toHaveBeenCalled();
   const stale = fixture();
-  stale.flushSourceCapture.mockImplementation(async () => { stale.stale(); });
+  stale.flushSourceCapture.mockImplementation(async () => { stale.stale(); return []; });
   await expect(stale.handler("window", request)).rejects.toThrow("stale workspace");
   expect(stale.withAdapter).not.toHaveBeenCalled();
   const aborted = fixture();
-  aborted.flushSourceCapture.mockImplementation(async () => { aborted.abort.abort(new Error("review cancelled")); });
+  aborted.flushSourceCapture.mockImplementation(async () => { aborted.abort.abort(new Error("review cancelled")); return []; });
   await expect(aborted.handler("window", request)).rejects.toThrow("review cancelled");
   expect(aborted.withAdapter).not.toHaveBeenCalled();
 });
@@ -395,6 +421,7 @@ it("flushes and retries a missing address once after an agent moves its folder",
   f.flushSourceCapture.mockImplementationOnce(async () => {
     f.sources.set("moved/dataset.json", f.sources.get("data/dataset.json")!);
     f.sources.delete("data/dataset.json");
+    return [];
   });
   await f.handler("agent", { ...request, datasetPath: "moved/dataset.json" });
   expect(f.flushSourceCapture).toHaveBeenCalledTimes(1);

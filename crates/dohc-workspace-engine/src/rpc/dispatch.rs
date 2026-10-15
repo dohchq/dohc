@@ -20,6 +20,7 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || method.starts_with("collections.")
         || method.starts_with("liveApplication.")
         || method.starts_with("ydoc.ownerDelivery.")
+        || method.starts_with("ydoc.ownerStop.")
         || (method.starts_with("versions.") && method != "versions.ensureMain")
         || method.starts_with("conflicts.")
         || (method.starts_with("secrets.") && method != "secrets.write")
@@ -144,6 +145,9 @@ impl EngineService {
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         match input {
+            crate::LiveApplicationInput::Replica(input) => {
+                self.replica_apply(ctx, request, *input).await
+            }
             crate::LiveApplicationInput::Admitted(input) => {
                 self.live_application_apply(ctx, request, *input).await
             }
@@ -167,6 +171,34 @@ impl EngineService {
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
+        if let Some(action) = request.method.strip_prefix("ydoc.ownerStop.") {
+            if !matches!(action, "request" | "release" | "clear" | "list" | "retired") {
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "invalid-owner-stop-method",
+                ));
+            }
+            let result = self
+                .owner_ydoc_stop(&ctx, request.workspace, request.params, action)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress: None,
+                output_guard: None,
+            });
+        }
+        if request.method == "replica.frontiers" {
+            if request.params != serde_json::json!({}) {
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "invalid frontier request",
+                ));
+            }
+            return Ok(ServiceResponse::response(Response {
+                id,
+                result: self.replica_frontiers(request.workspace).await?,
+            }));
+        }
         if request.method == "ydoc.ownerDelivery.prepareEnrollment" {
             return self.owner_delivery_prepare_enrollment(ctx, request).await;
         }
@@ -1025,6 +1057,8 @@ impl EngineService {
             && !matches!(
                 method,
                 "workspace.close"
+                    | "replica.frontiers"
+                    | "replica.applyJournalPage"
                     | "sync.adoptJoinIdentity"
                     | "sync.pull"
                     | "sync.commitCursor"
@@ -1038,6 +1072,12 @@ impl EngineService {
             ));
         }
         if projects_collections {
+            if method.starts_with("ydoc.ownerStop.") {
+                return Err(WireError::new(
+                    ErrorCode::Forbidden,
+                    "received shares do not stop owner documents",
+                ));
+            }
             if method.starts_with("automations.") {
                 return Err(WireError::new(
                     ErrorCode::Forbidden,
@@ -1266,6 +1306,10 @@ mod tests {
         ));
         for method in [
             "files.resolve",
+            "ydoc.ownerStop.request",
+            "ydoc.ownerStop.release",
+            "ydoc.ownerStop.clear",
+            "ydoc.ownerStop.retired",
             "versions.active",
             "versions.list",
             "versions.createNamed",

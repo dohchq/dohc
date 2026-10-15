@@ -1,10 +1,10 @@
 import { useSyncExternalStore } from "react";
 import { Sparkles, Zap } from "lucide-react";
-import { IDENTITY_HUES, type IdentityHue } from "../tokens";
-import { chosenHue, subscribeChosenColors } from "./chosenColors";
+import type { ActorPresentation } from "../../ipc/bridgeContract";
+import { presentationClasses, subscribePresentation } from "./actorPresentation";
 
 // One avatar for every chat surface: a person's initials on a tint of their
-// own hue, the agent's sparkle in the olive voice, or an automation's bare
+// admitted hue, the agent's sparkle in the agent voice, or an automation's bare
 // lightning mark, the same mark as the Automations button. Sized by the
 // caller; 36px in the composer, 32px on a feed row or an opening post, 28px
 // on a comment, 18px in a strip.
@@ -17,41 +17,6 @@ const SIZES = {
 } as const;
 
 const ICON = { post: 16, row: 14, comment: 12, strip: 10 } as const;
-
-// Spelled out so Tailwind sees every class.
-const HUE_CLASSES: Record<IdentityHue, string> = {
-  rust: "bg-hue-rust/15 text-hue-rust",
-  amber: "bg-hue-amber/15 text-hue-amber",
-  olive: "bg-hue-olive/15 text-hue-olive",
-  teal: "bg-hue-teal/15 text-hue-teal",
-  blue: "bg-hue-blue/15 text-hue-blue",
-  indigo: "bg-hue-indigo/15 text-hue-indigo",
-  plum: "bg-hue-plum/15 text-hue-plum",
-  rose: "bg-hue-rose/15 text-hue-rose",
-};
-
-// Your agent in the color you chose for it, drawn like the agent token.
-const AGENT_HUE_CLASSES: Record<IdentityHue, string> = {
-  rust: "border-hue-rust/50 bg-bg text-hue-rust",
-  amber: "border-hue-amber/50 bg-bg text-hue-amber",
-  olive: "border-hue-olive/50 bg-bg text-hue-olive",
-  teal: "border-hue-teal/50 bg-bg text-hue-teal",
-  blue: "border-hue-blue/50 bg-bg text-hue-blue",
-  indigo: "border-hue-indigo/50 bg-bg text-hue-indigo",
-  plum: "border-hue-plum/50 bg-bg text-hue-plum",
-  rose: "border-hue-rose/50 bg-bg text-hue-rose",
-};
-
-// FNV-1a over the display name, the one key every surface has, so a person
-// keeps one hue from the rail to their posts.
-export function identityHue(key: string): IdentityHue {
-  let hash = 0x811c9dc5;
-  for (const char of key) {
-    hash ^= char.codePointAt(0) ?? 0;
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return IDENTITY_HUES[(hash >>> 0) % IDENTITY_HUES.length];
-}
 
 const segmenter = typeof Intl.Segmenter === "function"
   ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
@@ -72,15 +37,14 @@ function initials(name: string): string {
 export function ChatAvatar(props: {
   name: string;
   kind: "human" | "agent" | "automation";
-  // You or your agent, drawn in the color the settings file chose.
-  own?: boolean;
+  presentation: ActorPresentation;
   size?: keyof typeof SIZES;
   className?: string;
 }) {
   const size = props.size ?? "post";
   const kind = props.kind;
-  const chosen = useSyncExternalStore(subscribeChosenColors, () =>
-    props.own && kind !== "automation" ? chosenHue(kind) : null);
+  const classes = useSyncExternalStore(subscribePresentation, () =>
+    presentationClasses(props.presentation, kind === "agent" ? "agent" : "human"));
   if (kind === "automation") {
     // No border, fill, or identity color: an automation is not a person or an agent.
     return (
@@ -102,8 +66,8 @@ export function ChatAvatar(props: {
         SIZES[size]
       } ${
         agent
-          ? chosen ? AGENT_HUE_CLASSES[chosen] : "border-agent/50 bg-bg text-agent"
-          : `border-line ${HUE_CLASSES[chosen ?? identityHue(props.name)]}`
+          ? classes
+          : `border-line ${classes}`
       } ${props.className ?? ""}`}
     >
       {agent ? <Sparkles size={ICON[size]} strokeWidth={1.9} aria-hidden /> : initials(props.name)}
