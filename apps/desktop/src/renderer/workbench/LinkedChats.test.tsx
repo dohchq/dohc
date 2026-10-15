@@ -575,6 +575,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
   it("reveals a historical file message after a deferred reload commits", async () => {
     const messages = Array.from({ length: 300 }, (_, index) => ({
       id: `message-${index}`, threadId: searchThread.id,
+      presentation: { group: "fixture", hue: null, self: false },
       authorKind: "human" as const, authorDisplayName: "Reader",
       body: `File message ${index}`, createdAtMs: index + 1,
     }));
@@ -705,6 +706,7 @@ describe("LinkedChatsPanel initialThread consumption", () => {
   it("cancels a pending reveal when the panel unmounts", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [{
       id: "message-1", threadId: searchThread.id, authorKind: "human",
+      presentation: { group: "fixture", hue: null, self: false },
       authorDisplayName: "Reader", body: "Pending reveal", createdAtMs: 1,
     }] });
     const frames = stubAnimationFrames();
