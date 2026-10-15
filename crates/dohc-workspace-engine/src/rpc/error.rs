@@ -37,18 +37,16 @@ pub(super) fn map_switch_reconcile_error(
         capture_driver::SwitchReconcileError::ApplyFailed => {
             WireError::new(ErrorCode::Internal, "pre-version-reconcile-failed")
         }
-        capture_driver::SwitchReconcileError::HeldFiles(paths) => WireError::new(
-            ErrorCode::Conflict,
-            format!(
-                "dohc did not record the outside edit in \"{}\". Try again before switching versions.",
-                paths.join("\", \"")
-            ),
-        ),
     }
 }
 
 pub(super) fn map_owner_outbox(error: OwnerOutboxError) -> WireError {
     let message = match error {
+        OwnerOutboxError::DesktopHost => "owner-stop-desktop-host",
+        OwnerOutboxError::RestorePending => {
+            return WireError::new(ErrorCode::Overloaded, "owner-stop-restore-pending");
+        }
+        OwnerOutboxError::StopConflict => "owner-stop-conflict",
         OwnerOutboxError::InvalidInput(_) => "invalid-owner-outbox-input",
         OwnerOutboxError::WorkspaceMismatch => "owner-outbox-workspace-mismatch",
         OwnerOutboxError::MainVersionMismatch => "owner-outbox-main-version-mismatch",
