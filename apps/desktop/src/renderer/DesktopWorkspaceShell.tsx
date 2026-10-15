@@ -22,6 +22,7 @@ import {
   useState,
 } from "react";
 import type {
+  CaptureFileHold,
   ResolveAutomationControlsResult,
   ChatFileMentionRecord,
   ChatThreadRecord,
@@ -96,6 +97,7 @@ import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { useCaptureRecoveryNotices } from "./shell/useCaptureRecoveryNotices";
+import { useCaptureHoldNotices } from "./shell/useCaptureHoldNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useDocumentSaveNotices } from "./shell/useDocumentSaveNotices";
 import { useReportsNotice } from "./shell/useReportsNotice";
@@ -812,6 +814,7 @@ export function DesktopWorkspaceShell(props: {
     showKeptCopies,
     showKeptCopySaved,
     showCaptureRecoveries,
+    showCaptureHolds,
     showDirectWriteNotice,
     dismissShellError,
     retryShellError,
@@ -2693,6 +2696,16 @@ export function DesktopWorkspaceShell(props: {
     reportShellError,
     openRecovery: openCaptureRecovery,
   });
+  const [heldEvent, setHeldEvent] = useState<{ admission: typeof workspaceAdmission; files: CaptureFileHold[] } | null>(null);
+  useCaptureHoldNotices({ workspaceId,
+    heldFiles: heldEvent?.admission === workspaceAdmission ? heldEvent.files : syncStatus?.heldFiles,
+    show: showCaptureHolds, reportShellError, reportShellFailure });
+  useEffect(() => {
+    return bridge().onCaptureHolds(event => {
+      if (event.workspaceId !== workspaceId || workspaceAdmission.superseded) return;
+      setHeldEvent(current => workspaceAdmission.superseded ? current : { admission: workspaceAdmission, files: event.heldFiles });
+    });
+  }, [workspaceId, workspaceAdmission]);
   // Restore resolves this change's notice, including a Copy fallback that
   // the engine no longer lists.
   const onHistoryRestored = useCallback((momentId?: string) => {

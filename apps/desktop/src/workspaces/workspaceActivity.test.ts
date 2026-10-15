@@ -56,6 +56,34 @@ function workspace(): ActivityWorkspace {
 }
 
 describe("workspaceActivity capture hooks", () => {
+  it("pushes held status changes without generic activity and discards a retired capture's update", async () => {
+    let hooks!: WorkspaceCaptureHooks;
+    const notify = vi.fn();
+    const onHeldFiles = vi.fn();
+    const activity = createWorkspaceActivity(notify, {
+      onHeldFiles,
+      captureFor: (_workspace, value) => {
+        hooks = value;
+        return { shareView: false, capture: { start: vi.fn(), stop: vi.fn(async () => {}), settleAndCloseAllLiveSessions: vi.fn(async () => {}) } as never };
+      },
+    });
+    const held = { workspaceId: "activity-test", sourceVersionId: "main", objectId: "held", path: "held.md",
+      observedSha256: "digest", observedSize: 4, reason: "ydoc-resolution-not-representable" as const,
+      observedAtMs: 1, attemptCount: 1, retryRequested: false };
+    await activity.open(workspace());
+    notify.mockClear();
+    hooks.onHeldFiles([held]);
+    expect(activity.getStatus("activity-test").heldFiles).toEqual([held]);
+    expect(onHeldFiles).toHaveBeenCalledExactlyOnceWith("activity-test", [held]);
+    expect(notify).not.toHaveBeenCalled();
+    hooks.onHeldFiles([held]);
+    expect(onHeldFiles).toHaveBeenCalledOnce();
+    hooks.onHeldFiles([]);
+    expect(onHeldFiles).toHaveBeenLastCalledWith("activity-test", []);
+    await activity.stopAll();
+    hooks.onHeldFiles([held]);
+    expect(onHeldFiles).toHaveBeenCalledTimes(2);
+  });
   it("attaches observation after capture fails and queues sync only for capture announcements", async () => {
     let observation!: WorkspaceObservationCallbacks;
     const queueSync = vi.fn();
