@@ -211,7 +211,7 @@ try {
       visibility: { ...longSources.listing.visibility, rules: longSources.listing.visibility.rules.map(rule => ({ ...rule })) },
       receivedRoots: longSources.listing.receivedRoots.map(root => ({ ...root })),
     };
-    await prepare(longIndex, { listing }, [], undefined, "z");
+    await prepare(longIndex, { listing }, [], undefined);
     const preparedAt = performance.now();
     longIndex.query("z");
     renameSamples.push({ preparationMs: preparedAt - updateStart, updateAndQueryMs: performance.now() - updateStart, preparedRows: longIndex.lastPreparationCount });
