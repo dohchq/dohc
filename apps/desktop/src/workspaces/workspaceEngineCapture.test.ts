@@ -3216,6 +3216,37 @@ describe("createDefaultDiskWriter symlink containment", () => {
 // daemon stamps its captures with that author; an authored write carries its
 // own author instead.
 describe("workspaceEngineCapture agent attribution", () => {
+  it("returns stable object and moment ids from authored text and binary retries", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const engine = liveCapture(root, new VersionedLoopbackEngine());
+    const author = { kind: "agent", agentId: "local-app", onBehalfOf: "local" } as const;
+    try {
+      for (const [name, content] of [["record.md", "record\n"], ["record.bin", new Uint8Array([0, 255])]] as const) {
+        const options = { createOnly: true, requestId: 'request-' + name, momentId: 'moment-' + name, versionId: "main" };
+        const first = await engine.writeAuthoredFile(join(root, name), content, author, options);
+        expect(first).toMatchObject({ objectId: expect.any(String), momentId: options.momentId, deduped: false });
+        const retry = await engine.writeAuthoredFile(join(root, name), content, author, options);
+        expect(retry).toMatchObject({ objectId: first.objectId, momentId: first.momentId, deduped: true });
+      }
+    } finally { await engine.stop(); }
+  });
+
+  it("refuses a saved-version authored retry instead of writing into a newly active version", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const engine = liveCapture(root, loopback, { requests });
+    const author = { kind: "agent", agentId: "local-app", onBehalfOf: "local" } as const;
+    try {
+      const draft = await engine.createVersion("Draft");
+      await expect(engine.writeAuthoredFile(join(root, "pending.md"), "pending\n", author,
+        { createOnly: true, requestId: "saved-request", momentId: "saved-moment", versionId: "main" })).rejects.toMatchObject({ code: "invalid-version" });
+      expect(requests.findLast(request => request.method === VERSIONED_METHOD.textWrite)).toMatchObject({ params: { versionId: "main" } });
+      expect(draft.activeVersionId).not.toBe("main");
+      expect(await readFile(join(root, "pending.md"), "utf8").catch(() => null)).toBeNull();
+    } finally { await engine.stop(); }
+  });
+
   const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1", depth: 0 };
 
   it("publishes large authored text through the engine and replays a create", async () => {
@@ -3433,14 +3464,14 @@ describe("workspaceEngineCapture agent attribution", () => {
         "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES),
         author,
       ),
-    ).resolves.toEqual({ resolvedAbsolutePath: join(root, "at-limit.txt"), materializeOutcome: "applied" });
+    ).resolves.toMatchObject({ resolvedAbsolutePath: join(root, "at-limit.txt"), materializeOutcome: "applied", objectId: expect.any(String), momentId: expect.any(String), deduped: false });
     await expect(
       engine.writeAuthoredFile(
         join(root, "over-limit.txt"),
         "x".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1),
         author,
       ),
-    ).resolves.toEqual({ resolvedAbsolutePath: join(root, "over-limit.txt"), materializeOutcome: "applied" });
+    ).resolves.toMatchObject({ resolvedAbsolutePath: join(root, "over-limit.txt"), materializeOutcome: "applied", objectId: expect.any(String), momentId: expect.any(String), deduped: false });
     await engine.stop();
   });
 

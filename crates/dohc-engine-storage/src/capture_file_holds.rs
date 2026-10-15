@@ -97,13 +97,36 @@ impl EngineStore {
     /// Empty workspace is the legacy placement sentinel. It must also park.
     pub fn placement_is_held(&self, workspace: &str, path: &str) -> Result<bool, StorageError> {
         self.read_with(|conn| {
-            if workspace.is_empty() {
-                conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM capture_file_holds WHERE path=?1)")
-                    .map_err(StorageError::corrupt_public)?.query_row([path], |r| r.get(0))
+            let sql = if workspace.is_empty() {
+                "SELECT path FROM capture_file_holds"
             } else {
-                conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM capture_file_holds WHERE workspace_id=?1 AND path=?2)")
-                    .map_err(StorageError::corrupt_public)?.query_row([workspace,path], |r| r.get(0))
-            }.map_err(StorageError::corrupt_public)
+                "SELECT path FROM capture_file_holds WHERE workspace_id=?1"
+            };
+            let mut statement = conn
+                .prepare_cached(sql)
+                .map_err(StorageError::corrupt_public)?;
+            let arguments = if workspace.is_empty() {
+                Vec::new()
+            } else {
+                vec![workspace]
+            };
+            let rows = statement
+                .query_map(rusqlite::params_from_iter(arguments), |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(StorageError::corrupt_public)?;
+            let path = path.to_lowercase();
+            for held in rows {
+                let held = held.map_err(StorageError::corrupt_public)?.to_lowercase();
+                if path == held
+                    || path
+                        .strip_prefix(&held)
+                        .is_some_and(|tail| tail.starts_with('/'))
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         })
     }
 }
@@ -140,12 +163,25 @@ pub fn pin_in(
     }
 }
 
-pub fn first_path_in(conn: &Connection, workspace: &str) -> Result<Option<String>, StorageError> {
-    conn.prepare_cached(
-        "SELECT path FROM capture_file_holds WHERE workspace_id=?1 ORDER BY path LIMIT 1",
-    )
-    .map_err(StorageError::corrupt_public)?
-    .query_row([workspace], |r| r.get(0))
-    .optional()
-    .map_err(StorageError::corrupt_public)
+/// Capture has recorded this observation or its absence in the source version.
+/// Only that commit can re-authorize selected-version placement against it.
+pub fn rebase_switch_jobs_in(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    path: &str,
+    preimage: &crate::Preimage,
+) -> Result<(), StorageError> {
+    let jobs = crate::pending_switch_jobs_in(tx, workspace)?;
+    let path = path.to_lowercase();
+    let (present, sha) = match preimage {
+        crate::Preimage::Absent => (0, None),
+        crate::Preimage::Present(sha) => (1, Some(sha.as_str())),
+    };
+    for (id, target) in jobs {
+        if target.to_lowercase() == path {
+            tx.execute("UPDATE materialization_jobs SET preimage_present=?2,preimage_sha256=?3 WHERE job_id=?1",
+                params![id,present,sha]).map_err(StorageError::persist_public)?;
+        }
+    }
+    Ok(())
 }

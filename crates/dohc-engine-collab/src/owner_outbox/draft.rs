@@ -1241,7 +1241,7 @@ mod tests {
                         )
                         .map_err(write_sql)?;
                         tx.execute(
-                            "INSERT INTO owner_ydoc_outboxes SELECT 'retry-outbox',workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation+1,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+                            "INSERT INTO owner_ydoc_outboxes (outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms) SELECT 'retry-outbox',workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation+1,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,quarantine_reason,observed_binding_json,created_at_ms FROM owner_ydoc_outboxes WHERE outbox_id=?1",
                             params![append.outbox_id],
                         )
                         .map_err(write_sql)?;

@@ -173,6 +173,7 @@ fn supersede_job(db: &std::path::Path, root: &std::path::Path, id: &str) {
             root,
             &job,
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &StdBackoff,
