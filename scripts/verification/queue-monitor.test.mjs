@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSampler, monitorState, runDetails, runLog, slotLog, startMonitor, threadDirectory, waitingIntervals } from "./queue-monitor.mjs";
@@ -108,6 +108,15 @@ test("a log is read from its end, only by a log name inside the attempt", async 
   for (const file of ["../../secret.log", "js-tests/../../../secret.log", "..\\..\\secret.log", "status.json", "/etc/passwd"]) assert.equal(runLog(root, "000000002-bbbbbb", "2", file), null, file);
   assert.equal(runLog(root, "000000002-bbbbbb", "9", "js-tests/_dohc_desktop.log"), null);
   assert.deepEqual(runDetails(root, "000000002-bbbbbb", "2").logs.map(item => item.file), ["js-tests/_dohc_desktop.log"]);
+  // A link inside the attempt that leads out of it reads nothing. A junction needs no privilege on Windows.
+  mkdirSync(join(root, "outside"));
+  writeFileSync(join(root, "outside", "secret.log"), "secret");
+  mkdirSync(queuePaths(root).attempt("000000002-bbbbbb", 3), { recursive: true });
+  symlinkSync(join(root, "outside"), join(queuePaths(root).attempt("000000002-bbbbbb", 3), "js-tests"), "junction");
+  assert.equal(runLog(root, "000000002-bbbbbb", "3", "js-tests/secret.log"), null);
+  try { symlinkSync(join(root, "secret.log"), join(folder, "linked.log"), "file"); }
+  catch (error) { if (error.code === "EPERM") return; throw error; }
+  assert.equal(runLog(root, "000000002-bbbbbb", "2", "linked.log"), null);
 });
 
 test("the waiting count is rebuilt from the requests: until each first attempt, and between a machine failure and its retry", async t => {
@@ -117,6 +126,7 @@ test("the waiting count is rebuilt from the requests: until each first attempt, 
   assert.equal(waiting(Date.parse(iso(185))), 4, "the retry of a machine failure waits again");
   assert.equal(waiting(Date.parse(iso(100))), 3);
   assert.equal(waiting(Date.parse(iso(30))), 3, "a request that failed for the machine waits for its retry");
+  writeFileSync(join(root, "monitor-load.json"), JSON.stringify({ samples: { at: "not a list" } }));
   const buckets = loadSampler(root, () => ({ runs: [], queued: [] }), { everyMs: 3_600_000 }).read(1, 120, requests, now);
   assert.equal(buckets.length, 120);
   assert.equal(buckets.at(-1).queued, 2, "six minutes ago: the nightly run and the retry wait");
@@ -173,11 +183,12 @@ test("a request is named by the T3 thread whose worktree, linked pull request, o
   add("t3", "Make sync faster", { createdBy: "user", pullRequests: [{ number: 7, snapshot: { headBranch: "feat/sync" } }] });
   add("t4", "Old thread", { branch: "feat/gone" }, new Date().toISOString());
   add("t5", "Tidy styles", { branch: "fix/styles" });
+  add("t6", "A later shape", { worktreePath: 5, pullRequests: 3 });
   db.close();
   const threadOf = threadDirectory({ path });
   assert.deepEqual(threadOf("anything", "c:/w/share-page"), { id: "t1", title: "Fix the share page" }, "by the thread's own worktree, whatever the case");
   assert.deepEqual(threadOf("feat/sync", "C:/w/elsewhere"), { id: "t3", title: "Make sync faster", pr: 7 }, "by a linked pull request, preferring the thread a person started");
-  assert.deepEqual(threadOf("fix/styles", null), { id: "t5", title: "Tidy styles" });
+  assert.deepEqual(threadOf("fix/styles", null), { id: "t5", title: "Tidy styles" }, "a row in a shape this reader does not know costs only its own name");
   assert.equal(threadOf("feat/gone", null), null, "a deleted thread names nothing");
   assert.equal(threadDirectory({ path: join(dir, "missing.sqlite") })("feat/sync", null), null, "without T3 every lookup is null");
 });

@@ -4,7 +4,7 @@
 // reads the queue's own files and writes only its load samples, so a fault here can
 // never stop a run.
 
-import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -105,12 +105,13 @@ export function threadDirectory({ path = join(process.env.T3CODE_HOME ?? join(ho
       // A thread a person started names the work better than an agent's child thread on the same branch.
       const put = (map, key, thread) => { const old = map.get(key); if (!old || (old.child && !thread.child)) map.set(key, thread); };
       for (const row of rows) {
-        let payload;
-        try { payload = JSON.parse(row.payload_json); } catch { continue; }
-        const thread = { id: row.thread_id, title: row.title, child: payload.createdBy === "agent" };
-        if (payload.worktreePath) put(next.paths, resolve(payload.worktreePath).toLowerCase(), thread);
-        for (const pr of payload.pullRequests ?? []) if (pr?.snapshot?.headBranch) put(next.heads, pr.snapshot.headBranch, { ...thread, pr: pr.number });
-        if (payload.branch && !["main", "master"].includes(payload.branch)) put(next.branches, payload.branch, thread);
+        try {
+          const payload = JSON.parse(row.payload_json);
+          const thread = { id: row.thread_id, title: row.title, child: payload.createdBy === "agent" };
+          if (payload.worktreePath) put(next.paths, resolve(payload.worktreePath).toLowerCase(), thread);
+          for (const pr of payload.pullRequests ?? []) if (pr?.snapshot?.headBranch) put(next.heads, pr.snapshot.headBranch, { ...thread, pr: pr.number });
+          if (payload.branch && !["main", "master"].includes(payload.branch)) put(next.branches, payload.branch, thread);
+        } catch { /* A row in a shape this reader does not know names nothing. */ }
       }
       maps = next;
     } catch { /* T3 may be migrating its database; the next refresh tries again. */ }
@@ -269,12 +270,14 @@ export function monitorState(root, { now = Date.now(), days = 7, finished = new 
 // Where a test runner's own failure summary starts: node:test, vitest, Playwright, and nextest.
 const failureSummary = /^(✖ failing tests:|\s*⎯+ Failed Tests? \d+ ⎯+|\s*\d+ failed$|\s*Summary \[.*\].*failed)/mu;
 
-/** The resolved path of a log inside `folder`, or null for any path outside it. */
+/** The real path of a log inside `folder`, or null for any path outside it, including through a link. */
 function inside(folder, path) {
   if (typeof path !== "string") return null;
-  const full = resolve(folder, path);
-  const within = relative(folder, full);
-  return !within || within.startsWith("..") || isAbsolute(within) ? null : full;
+  try {
+    const full = realpathSync(resolve(folder, path));
+    const within = relative(realpathSync(folder), full);
+    return !within || within.startsWith("..") || isAbsolute(within) ? null : full;
+  } catch { return null; }
 }
 
 /** The end of a file: its last `bytes`, without the partial first line when it was cut. Reads only that end, however large the file. */
@@ -376,7 +379,8 @@ export function waitingIntervals(requests, now = Date.now()) {
  */
 export function loadSampler(root, snapshot, { everyMs = 60_000, keepMs = 7 * dayMs } = {}) {
   const path = join(root, "monitor-load.json");
-  const samples = (readJson(path)?.samples ?? []).filter(sample => Date.parse(sample.at) > Date.now() - keepMs);
+  const stored = readJson(path)?.samples;
+  const samples = (Array.isArray(stored) ? stored : []).filter(sample => Date.parse(sample?.at) > Date.now() - keepMs);
   let saved = Date.now();
   const sample = () => {
     try {
