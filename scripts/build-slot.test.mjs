@@ -71,7 +71,7 @@ test("exclusive local ownership recovers a dead PID but protects incomplete clai
   assert.equal(existsSync(dir), false);
 });
 
-function queueProbe(root, script) {
+function queueProbe(root, script, timeout = 5000) {
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
     import assert from "node:assert/strict";
     import fs from "node:fs";
@@ -81,7 +81,7 @@ function queueProbe(root, script) {
     import { acquireBuildSlot } from ${JSON.stringify(new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).href)};
     const root = process.argv[1];
     ${script}
-  `, root], { encoding: "utf8", timeout: 5000 });
+  `, root], { encoding: "utf8", timeout });
   assert.equal(result.error, undefined, result.stderr);
   assert.equal(result.status, 0, result.stderr);
 }
@@ -89,33 +89,37 @@ function queueProbe(root, script) {
 test("transient sweep and ticket-read errors retry without ending the wait", () => {
   const root = slotRoot();
   try {
-    for (const code of ["EPERM", "EBUSY", "EACCES", "ENOENT"]) {
-      for (const operation of ["lock", "queue", "ticket"]) {
-        queueProbe(root, `
+    // One process runs every case, since each new process started Node and a
+    // PowerShell identity lookup. The 20 s waits and the 120 s process bound only
+    // stop a hang: a busy host can spend over a second on the file work before a retry.
+    queueProbe(root, `
+      for (const code of ["EPERM", "EBUSY", "EACCES", "ENOENT"]) {
+        for (const operation of ["lock", "queue", "ticket"]) {
           // Antivirus can fail a first claim for a moment, so the holder retries too.
-          const holder = await acquireBuildSlot({ root, slots: 1, waitMs: 1000, pollMs: 1 });
-          const method = ${JSON.stringify(operation)} === "lock" ? "mkdirSync"
-            : ${JSON.stringify(operation)} === "queue" ? "readdirSync" : "readFileSync";
+          const holder = await acquireBuildSlot({ root, slots: 1, waitMs: 20_000, pollMs: 1 });
+          const method = operation === "lock" ? "mkdirSync" : operation === "queue" ? "readdirSync" : "readFileSync";
           const original = fs[method];
           let failed = false;
           fs[method] = (path, ...args) => {
-            const target = ${JSON.stringify(operation)} === "lock" ? path === join(root, "reclaim.lock")
-              : ${JSON.stringify(operation)} === "queue" ? path === join(root, "build-slot-queue")
+            const target = operation === "lock" ? path === join(root, "reclaim.lock")
+              : operation === "queue" ? path === join(root, "build-slot-queue")
               : path.includes("build-slot-queue") && path.endsWith(".json");
             if (!failed && target) {
               failed = true;
               holder.release();
-              throw Object.assign(new Error("busy file"), { code: ${JSON.stringify(code)} });
+              throw Object.assign(new Error("busy file"), { code });
             }
             return original(path, ...args);
           };
           syncBuiltinESMExports();
-          const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 1000, pollMs: 1 });
-          assert.equal(failed, true);
+          const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 20_000, pollMs: 1 });
+          assert.equal(failed, true, code + " " + operation);
           slot.release();
-        `);
+          fs[method] = original;
+          syncBuiltinESMExports();
+        }
       }
-    }
+    `, 120_000);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
