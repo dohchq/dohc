@@ -61,7 +61,7 @@ export function createNamedRecipientDocuments(options: {storage: SyncRelayStorag
           return refuse();
         }
         controller.signal.throwIfAborted();
-        const body = JSON.stringify({ userId: context.userId, workspaceId: context.workspaceId,
+        const body = JSON.stringify({ userId: context.userId, workspaceId: `named:${context.grantId}`,
           shareId: context.shareId, grantId: context.grantId, files, access: current.grant.access,
           ...storage.getShareLabels(context.shareId), sharerName });
         if (Buffer.byteLength(body) > limits.maxResponseBytes) return refuse();

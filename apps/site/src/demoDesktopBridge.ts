@@ -385,7 +385,7 @@ function thread(channelId = "channel-general", body = "What needs attention next
     lastReadSequence: 1,
     unreadCount: channelId === "channel-agent" ? 1 : 0,
     openDecisionCount: 0,
-    openingMessage: {
+    openingMessage: { presentation: { group: "demo-you", hue: null, self: true },
       id: `message-${channelId}-1`,
       authorKind: "human" as const,
       authorDisplayName: "You",
@@ -405,7 +405,7 @@ function demoThreadBody(channelId: string): string {
 }
 
 function message(threadId: string, id: string, body: string, agent = false) {
-  return {
+  return { presentation: { group: agent ? "demo-agent" : "demo-you", hue: null, self: true },
     id,
     threadId,
     authorKind: agent ? ("agent" as const) : ("human" as const),
