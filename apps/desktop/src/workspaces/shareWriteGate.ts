@@ -64,7 +64,7 @@ export function workspaceCreateOffers(shareView: ShareViewWriteScope | null): {
     // Nowhere in a share view, at any level: the engine has no folder object,
     // so an empty folder is nothing the recipient could send.
     // `ShareViewFiles` therefore exposes no empty-folder operation.
-    folder: write && shareView === null,
+    folder: shareView === null,
     // A document Collection is a folder with a schema file. A share view that
     // takes writes can make one: the schema file is the Collection's first
     // file, and the folder comes with it (ADR 0013).

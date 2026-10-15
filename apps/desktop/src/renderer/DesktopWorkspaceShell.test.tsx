@@ -16,6 +16,7 @@ import { OPEN_EDITORS_DEFAULT_HEIGHT, OPEN_EDITORS_MIN_HEIGHT } from "./workbenc
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
 import { deferred } from "../testing/deferred";
+import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
 
 // Count inspector and explorer work when the shell renders again.
@@ -569,7 +570,7 @@ describe("collection folders", () => {
   it("offers no create or import command from a read-only shared view", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
-    renderShell(bridge, SHARE_VIEW);
+    const view = renderShell(bridge, SHARE_VIEW);
 
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
@@ -586,8 +587,36 @@ describe("collection folders", () => {
     }
     await act(async () => {});
     expect(screen.queryByRole("heading", { name: "New file" })).toBeNull();
+    expect(screen.queryByLabelText("New folder name")).toBeNull();
     expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
     expect(bridge.importWorkspaceFiles).not.toHaveBeenCalled();
+    // The Collection dialog stays hidden without Edit, so a New collection the
+    // menu let through would open only once a registry update grants Edit.
+    const editShare: Workspace = { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } };
+    view.rerender(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell workspace={editShare} workspaces={[editShare]} {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+      </>,
+    );
+    await act(async () => {});
+    expect(screen.queryByTestId("new-collection-dialog")).toBeNull();
+  });
+
+  it.each<[string, NonNullable<Workspace["shareView"]>]>([
+    ["a damaged", { ...SHARE_VIEW.shareView!, access: "edit", damaged: true }],
+    ["an ended", { ...SHARE_VIEW.shareView!, access: "edit", ended: true }],
+  ])("offers no create or import command from %s Edit share view", async (_name, shareView) => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge, { ...SHARE_VIEW, shareView });
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    await within(palette).findByText("New editor group right");
+    for (const label of ["New file", "New drawing", "New folder", "New collection", "Import files"]) {
+      expect(within(palette).queryByText(label)).toBeNull();
+    }
   });
 
   it("offers an Edit share view's creates and imports, but not New folder", async () => {
