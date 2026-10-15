@@ -1,9 +1,10 @@
-import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
+import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { Bookmark, CircleHelp, FileText, MessageSquare } from "lucide-react";
 import type { ChannelThreadRecord, ChatBookmarkRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
 import { formatChatTime, formatShortTime } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
+import { neutralPresentation } from "./actorPresentation";
 import { chatAuthorLabel, MessageReactions, RowToolbar, TOOLBAR_BUTTON, type ChatReactionControls } from "./chatMessages";
 import { UnreadPill } from "./ChatsControls";
 
@@ -185,7 +186,6 @@ export function PostCard(props: {
   onOpenBookmark?: () => void;
   onOpenPath?: (path: string) => void;
 }) {
-  const isOwn = useIsOwnAuthor();
   const message = props.data.openingMessage;
   const isAgent = message?.authorKind === "agent";
   const createdAtMs = message?.createdAtMs ?? props.thread.createdAtMs;
@@ -245,10 +245,9 @@ export function PostCard(props: {
       {/* Compatibility target retained for existing navigation and e2e
           drivers. The row itself is the semantic button. */}
       <div data-testid="chats-thread" data-thread-id={props.thread.id} className="flex items-start gap-3">
-        <ChatAvatar
+        <ChatAvatar presentation={message?.presentation ?? neutralPresentation}
           name={message?.authorDisplayName ?? "?"}
           kind={message?.authorKind ?? "human"}
-          own={message ? isOwn(message.authorKind, message, props.data.viewerAuthorId) : false}
           size="row"
         />
         <div className="min-w-0 flex-1">

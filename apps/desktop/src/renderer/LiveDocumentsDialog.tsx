@@ -11,6 +11,7 @@ export type LiveDocumentRow = {
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
   reason?: "document-unavailable" | "workspace-changed";
   canResume: boolean;
+  deferredStop?: {unsentEdits: number; editable: boolean};
 };
 
 /** One read: the latest active documents, then the next page of stopped ones. */
@@ -157,14 +158,12 @@ function statusTone(row: LiveDocumentRow): string {
   return "text-muted";
 }
 
-/** A stopped document is already stopped; everything else can be stopped. */
 function canStop(row: LiveDocumentRow): boolean {
-  return row.status !== "retired";
+  return row.status !== "retired" && !row.deferredStop;
 }
 
-/** Resuming needs a document dohc can still open in this workspace. */
 function canResume(row: LiveDocumentRow): boolean {
-  return (row.status === "retired" || row.status === "paused") && row.canResume && !row.reason;
+  return row.canResume;
 }
 
 function busyLabel(work: Work): string {
@@ -324,7 +323,8 @@ export function LiveDocumentsDialog({
           perform(overtaken || mutated ? { kind: "reload" } : work);
           return true;
         };
-        onError(failureMessage(work, mutated), error, retry);
+        const waiting = work.kind === "stop" && String(error).includes("Stop live editing is waiting.");
+        onError(waiting ? `Stop live editing for ${work.path} is waiting for a connection or restore.` : failureMessage(work, mutated), error, retry);
       } finally {
         if (isCurrent()) {
           running.current = false;
@@ -536,6 +536,13 @@ export function LiveDocumentsDialog({
                   >
                     Stop live editing
                   </SecondaryButton>
+                ) : null}
+                {row.deferredStop ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    {row.status==="ready" ? "Live editing resumed. " : "Live editing stopped. "}
+                    {row.deferredStop.unsentEdits===0 ? "Resume live editing to finish syncing. " : `${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits===1 ? "edit remains" : "edits remain"} on this computer. Resume live editing to try sending ${row.deferredStop.unsentEdits===1 ? "it" : "them"}. `}
+                    {row.deferredStop.editable ? "You can keep editing." : "Editing is paused."}
+                  </p>
                 ) : null}
               </li>
             ))}
