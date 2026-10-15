@@ -1,3 +1,4 @@
+import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
@@ -11,6 +12,7 @@ import type {
   ChatMessageRecord,
   ChatThreadRecord,
   CloudStatusResult,
+  DatabaseSnapshotResult,
   EngineMomentRecord,
   HistoryPolicyUnreadableResult,
   SitePackageInfo,
@@ -20,6 +22,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
+import { DatabaseGrid, DatabaseViewActions, editOf } from "../DatabaseStudioView";
 import { DocumentMenu } from "../DocumentMenu";
 import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
 import { PageIdentity } from "../PageIdentity";
@@ -2279,8 +2282,9 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* A CSV's rows and columns: numbers at the right in mono, row
           numbers in the gutter, and each row's and column's actions only on
-          hover or focus. */}
-      <Section part="data-grid" title="Data grid">
+          hover or focus. A database table: each column's type as an icon,
+          the active cell, the editing cell, a sort, and the read-only mark. */}
+      <Section part="data-grid" title="Data grid" menusAtRest>
         <Specimen label="CSV at rest: numbers, Add row and Add column">
           <CsvGridSpecimen />
         </Specimen>
@@ -2317,6 +2321,33 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="CSV the preview's bound">
           <CsvPreviewBound rowCount={1240} />
+        </Specimen>
+        <Specimen label="database at rest: text, numbers, bytes and an untyped column">
+          <DatabaseGridSpecimen />
+        </Specimen>
+        <Specimen label="database sorted by count, descending">
+          <DatabaseGridSpecimen sort={{ column: "count", direction: "desc" }} />
+        </Specimen>
+        {/* The cell holds focus itself, as an arrow key or a click leaves it. */}
+        <Specimen label="database the active cell">
+          <div data-force-state="focus focus-visible focus-within" data-force-target="tbody tr:nth-child(2) td:nth-child(2)">
+            <DatabaseGridSpecimen />
+          </div>
+        </Specimen>
+        <Specimen label="database the editing cell">
+          <div data-force-state="focus-within" data-force-target="tbody tr:nth-child(2) td:nth-child(2)">
+            <div data-force-state="focus focus-visible" data-force-target="tbody tr:nth-child(2) td:nth-child(2) input">
+              <DatabaseGridSpecimen editing />
+            </div>
+          </div>
+        </Specimen>
+        <Specimen label="database read-only, shared with you to read" className="w-full">
+          <TabRowActionsSpecimen width="w-full" path="data/funnel.sqlite">
+            <DatabaseViewActions onShare={noop} readOnlyReason="This database is shared with you to read." />
+            <div className="bg-bg px-4 pt-3">
+              <DatabaseGridSpecimen readOnly />
+            </div>
+          </TabRowActionsSpecimen>
         </Specimen>
       </Section>
 
@@ -2376,6 +2407,47 @@ function CsvGridSpecimen(props: { rows?: string[][]; locked?: boolean }) {
   );
 }
 
+const GRID_DATABASE: DatabaseSnapshotResult["tables"][number] = {
+  name: "funnel",
+  columns: [
+    { name: "stage", type: "TEXT" },
+    { name: "count", type: "INTEGER", nullable: false },
+    { name: "conversion", type: "REAL" },
+    { name: "export", type: "BLOB" },
+    { name: "note", type: "" },
+  ],
+  rows: [
+    { __dohc_rowid: 1, stage: "Visited", count: 4820, conversion: 1, export: "<blob 16 bytes>", note: null },
+    { __dohc_rowid: 2, stage: "Signed up", count: 1290, conversion: 0.27, export: "<blob 16 bytes>", note: "trial" },
+    { __dohc_rowid: 3, stage: "Created doc", count: 860, conversion: 0.18, export: null, note: null },
+    { __dohc_rowid: 4, stage: "Invited agent", count: 340, conversion: 0.07, export: null, note: "team" },
+  ],
+  nextOffset: null,
+};
+const GRID_DATABASE_ROWS = GRID_DATABASE.rows.map((row, sourceIndex) => ({ row, sourceIndex }));
+
+function DatabaseGridSpecimen(props: {
+  sort?: ComponentProps<typeof DatabaseGrid>["sort"];
+  editing?: boolean;
+  readOnly?: boolean;
+}) {
+  // The rows are already in descending count, as the sort specimen shows them.
+  return (
+    <DatabaseGrid
+      table={GRID_DATABASE}
+      rows={GRID_DATABASE_ROWS}
+      readOnly={props.readOnly ?? false}
+      editing={props.editing ? editOf(GRID_DATABASE, GRID_DATABASE.rows[1]!, "stage") : null}
+      draftRef={{ current: "Signed in" }}
+      sort={props.sort ?? null}
+      onSort={noop}
+      onBeginEdit={noop}
+      onCommit={noop}
+      onCancel={noop}
+    />
+  );
+}
+
 const FILE_VIEW_FAILED = saveProblem("error", "dohc couldn't write the file.");
 
 const FILE_VIEW_CSV_STATES: {
@@ -2417,15 +2489,15 @@ const EDITOR_FONT_OPTIONS = [
   { value: "mono", label: "Mono" },
 ];
 
-// Appearance's zoom stepper, with the keys this platform shows.
+// Appearance's zoom stepper keeps its existing Windows specimen text on every host.
 function ZoomSpecimen(props: { percent: number; atMost?: boolean }) {
   return (
     <StepperControl
       setting="zoom"
       value={`${props.percent}%`}
-      decrease={{ label: "Zoom out", keys: ["Ctrl", "-"], onClick: noop }}
-      reset={{ label: "Reset to 100%", to: "100%", keys: ["Ctrl", "0"], onClick: noop }}
-      increase={{ label: "Zoom in", keys: ["Ctrl", "="], disabled: props.atMost, onClick: noop }}
+      decrease={{ label: "Zoom out", keys: shortcutKeys("zoom-out", "win32"), onClick: noop }}
+      reset={{ label: "Reset to 100%", to: "100%", keys: shortcutKeys("zoom-reset", "win32"), onClick: noop }}
+      increase={{ label: "Zoom in", keys: shortcutKeys("zoom-in", "win32"), disabled: props.atMost, onClick: noop }}
     />
   );
 }
