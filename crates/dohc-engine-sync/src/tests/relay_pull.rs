@@ -3046,6 +3046,100 @@ fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
 }
 
 #[test]
+fn relay_pull_rejects_a_tampered_own_ydoc_echo() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_peers (workspace_id, origin_id, acked_seq) \
+                 VALUES ('ws','local',0) \
+                 ON CONFLICT(workspace_id,origin_id) DO UPDATE SET acked_seq=0",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed local frontier");
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','own-echo-tamper',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+
+    let local_doc = dohc_engine_collab::Ydoc::wire();
+    local_doc.plaintext_insert(0, "local");
+    let local_bytes = local_doc.encode_full_state();
+    let local_sha = engine.put_binary_blob(&local_bytes).expect("local blob");
+    let local = envelope(
+        "local",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "own-echo-tamper",
+            "path": "notes/own-echo-tamper.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": local_sha,
+            "lineageClaimId": local_sha,
+            "isBaseState": true
+        }),
+    );
+    apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &local,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("seed durable local coordinate");
+
+    let tampered_doc = dohc_engine_collab::Ydoc::wire();
+    tampered_doc.plaintext_insert(0, "tampered");
+    let tampered_bytes = tampered_doc.encode_full_state();
+    let tampered_sha = engine
+        .put_binary_blob(&tampered_bytes)
+        .expect("tampered blob");
+    let mut tampered = local.clone();
+    tampered.payload["updateBlobSha256"] = json!(tampered_sha.clone());
+    tampered.payload["lineageClaimId"] = json!(tampered_sha.clone());
+    tampered.relay_seq = Some(2);
+
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![tampered],
+            next_cursor: 2,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(tampered_sha, tampered_bytes);
+    let result = RelaySyncClient::new(relay).pull_chat_workspace(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        "ws",
+        &NoFaults,
+        &NoLiveLeases,
+        2_000,
+    );
+    assert!(matches!(result, Err(RelayError::OriginDiverged)));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "local").expect("local ack"),
+        1,
+        "a changed payload at the acknowledged coordinate must not advance it"
+    );
+}
+
+#[test]
 fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compatibly() {
     for kind in crate::router::owned_op_kinds() {
         let (_scratch, _path, mut engine) = open_store();

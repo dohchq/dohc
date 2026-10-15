@@ -4215,6 +4215,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
+    const REDELIVERY_PROBE: &str = "ydoc-redelivery-probe";
     if envelope.op_kind != "ydoc.update" {
         return Err(SyncError::UnsupportedOperation);
     }
@@ -4288,12 +4289,41 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         // Invalidate before any transaction so a committed crash stays safe.
         cache.remove(&key);
     }
-    // The blob is validated before any ack path — including the live-lease
-    // defer. A defer acks the coordinate with the imported log as the durable
-    // queue; if the referenced blob were missing or tampered, the peer cursor
-    // would already be past a row the drain can never apply, and the bad
-    // coordinate cannot be re-fetched. Missing/corrupt blob leaves the
-    // coordinate unacked instead.
+    let Some(relay_seq) = envelope.relay_seq else {
+        return Err(SyncError::RetryableState {
+            reason: "pulled ydoc.update is missing its relay sequence",
+        });
+    };
+    if crate::apply::is_acknowledged_envelope(store, envelope)? {
+        let probe = crate::apply::apply_envelope_with_mutation_outcome::<()>(
+            store,
+            envelope,
+            faults,
+            |_tx, _op| {
+                Err(SyncError::RetryableState {
+                    reason: REDELIVERY_PROBE,
+                })
+            },
+        );
+        match probe {
+            Ok(outcome) => {
+                return Ok(outcome.map(|_| YdocApplyResult {
+                    deferred: false,
+                    reason: Some("ydoc-durable-echo"),
+                    conflicts_opened: 0,
+                    lineage_replacement: None,
+                    record_facts: Vec::new(),
+                }));
+            }
+            Err(SyncError::RetryableState { reason }) if reason == REDELIVERY_PROBE => {}
+            Err(error) => return Err(error),
+        }
+    }
+    // A non-acknowledged or divergent row takes the full integrity path.
+    // Normal blob writes verify their claimed digest, so a changed payload
+    // cannot enter the cheap exact-envelope path.
+    // Missing or corrupt blobs, and all divergent envelopes, remain on the
+    // full path so their coordinate stays retryable.
     let bytes: Vec<u8> = store.read_with(|conn| {
         conn.query_row(
             "SELECT bytes FROM binary_blobs WHERE sha256=?1",
@@ -4315,11 +4345,6 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             hard => Err(hard),
         };
     }
-    let Some(relay_seq) = envelope.relay_seq else {
-        return Err(SyncError::RetryableState {
-            reason: "pulled ydoc.update is missing its relay sequence",
-        });
-    };
     if let Some(echo) =
         store.read_with(|conn| live_ordinary_classification(conn, &key, &payload, &bytes))?
     {

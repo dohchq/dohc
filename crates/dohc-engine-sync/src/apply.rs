@@ -226,6 +226,47 @@ pub(crate) enum MutationOutcome<T> {
     RefusedRetainingMutation { reason: String },
 }
 
+/// Return whether the imported coordinate is already acknowledged with the
+/// same durable envelope. The caller still runs `apply_envelope_with_*` for a
+/// transactional skip, which refreshes refusal and audit state and detects a
+/// coordinate divergence without invoking the mutation path.
+pub(crate) fn is_acknowledged_envelope(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<bool, SyncError> {
+    let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
+    store.read_with(|conn| {
+        let acked: i64 = conn
+            .query_row(
+                "SELECT COALESCE((SELECT acked_seq FROM replication_peers \
+                 WHERE workspace_id=?1 AND origin_id=?2), -1)",
+                params![envelope.workspace_id, envelope.origin_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if envelope.origin_seq > acked {
+            return Ok(false);
+        }
+        let existing: Option<(String, String, i64)> = conn
+            .query_row(
+                "SELECT op_kind, payload_json, recorded_at_ms FROM replication_log \
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                params![
+                    envelope.workspace_id,
+                    envelope.origin_id,
+                    envelope.origin_seq
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        match existing {
+            Some(row) => coordinate_matches(&row, envelope, &canonical_payload),
+            None => Ok(true),
+        }
+    })
+}
+
 /// Validate and atomically handle one imported coordinate. Ordinary
 /// mutation-level invalid input is rolled back to a savepoint, then journaled
 /// and acked as a refusal. `RefusedRetainingMutation` is the deliberate

@@ -172,12 +172,40 @@ async fn append_push_append_keeps_writer_cache() {
 }
 
 #[tokio::test]
-async fn pull_still_clears_writer_cache() {
+async fn pull_of_own_echo_keeps_writer_cache_warm() {
     let (_scratch, path, producer) = document_fixture(true, true, 100);
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 1000).unwrap().actor;
     let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    push(&actor).await;
     actor
+        .run(move |store, _| {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT INTO replication_peers (workspace_id,origin_id,acked_seq) VALUES (?1,?2,1) ON CONFLICT(workspace_id,origin_id) DO UPDATE SET acked_seq=1",
+                        rusqlite::params![WORKSPACE, ORIGIN],
+                    )
+                    .map_err(StorageError::persist_public)?;
+                    Ok::<_, StorageError>(())
+                })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let own_echo = actor
+        .run(|store, _| {
+            dohc_engine_sync::list_replication_ops(store, WORKSPACE, ORIGIN, 0, 1)
+                .map(|mut ops| {
+                    let mut op = ops.remove(0);
+                    op.relay_seq = Some(1);
+                    op
+                })
+                .map_err(RuntimeError::Sync)
+        })
+        .await
+        .unwrap();
+    let outcome = actor
         .relay_with_io(
             false,
             RelayOperation::Pull {
@@ -187,20 +215,147 @@ async fn pull_still_clears_writer_cache() {
             LeaseRegistry::default(),
             CancellationToken::new(),
             None,
-            |request, _| async move {
-                match request {
-                    RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
-                        ops: Vec::new(),
-                        next_cursor: 0,
-                        has_more: false,
-                    })),
-                    other => panic!("unexpected pull request: {other:?}"),
+            |request, _| {
+                let own_echo = own_echo.clone();
+                async move {
+                    match request {
+                        RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
+                            ops: vec![own_echo],
+                            next_cursor: 1,
+                            has_more: false,
+                        })),
+                        other => panic!("unexpected pull request: {other:?}"),
+                    }
                 }
             },
         )
         .await
         .unwrap();
+    assert!(matches!(
+        outcome,
+        RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+            applied: 0,
+            skipped: 1,
+            ..
+        })
+    ));
     let after = append(&actor, producer.plaintext_insert(101, "c")).await;
+    assert_eq!(
+        after.misses, before.misses,
+        "before={before:?} after={after:?}"
+    );
+    assert_eq!(
+        after.hits,
+        before.hits + 1,
+        "before={before:?} after={after:?}"
+    );
+    supervisor.close(&path).unwrap();
+}
+
+#[tokio::test]
+async fn pull_mixing_own_echo_and_foreign_edit_invalidates_writer_cache() {
+    let (_scratch, path, producer) = document_fixture(true, true, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1000).unwrap().actor;
+    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    push(&actor).await;
+    actor
+        .run(|store, _| {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT INTO replication_peers (workspace_id,origin_id,acked_seq) VALUES (?1,?2,1) ON CONFLICT(workspace_id,origin_id) DO UPDATE SET acked_seq=1",
+                        rusqlite::params![WORKSPACE, ORIGIN],
+                    )
+                    .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+                })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let foreign_bytes = producer.plaintext_insert(101, "remote");
+    let (own_echo, foreign) = actor
+        .run(move |store, _| {
+            let own_echo = dohc_engine_sync::list_replication_ops(store, WORKSPACE, ORIGIN, 0, 1)
+                .map(|mut ops| {
+                    let mut op = ops.remove(0);
+                    op.relay_seq = Some(1);
+                    op
+                })
+                .map_err(RuntimeError::Sync)?;
+            let sha = store
+                .put_binary_blob(&foreign_bytes)
+                .map_err(RuntimeError::Storage)?;
+            let claim: String = store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT lineage_claim_id FROM ydoc_docs WHERE workspace_id=?1 AND version_id='main' AND object_id='doc'",
+                        [WORKSPACE],
+                        |row| row.get(0),
+                    )
+                })
+                .map_err(|error| RuntimeError::Storage(StorageError::corrupt_public(error)))?;
+            let foreign = dohc_engine_sync::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
+                workspace_id: WORKSPACE.into(),
+                origin_id: "peer".into(),
+                origin_seq: 0,
+                op_kind: "ydoc.update".into(),
+                payload: dohc_engine_sync::ydoc_update_payload(
+                    &key(),
+                    "doc.md",
+                    ContentKind::Plaintext,
+                    &sha,
+                    &claim,
+                    None,
+                    None,
+                    false,
+                ),
+                recorded_at_ms: 1200,
+                relay_seq: Some(2),
+            };
+            Ok::<_, RuntimeError>((own_echo, foreign))
+        })
+        .await
+        .unwrap();
+    let outcome = actor
+        .relay_with_io(
+            false,
+            RelayOperation::Pull {
+                workspace_id: WORKSPACE.into(),
+                now_ms: 1200,
+            },
+            LeaseRegistry::default(),
+            CancellationToken::new(),
+            None,
+            move |request, _| {
+                let own_echo = own_echo.clone();
+                let foreign = foreign.clone();
+                async move {
+                    match request {
+                        RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
+                            ops: vec![own_echo, foreign],
+                            next_cursor: 2,
+                            has_more: false,
+                        })),
+                        other => panic!("unexpected pull request: {other:?}"),
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+            applied: 1,
+            skipped: 1,
+            ..
+        })
+    ));
+    let after = append(&actor, producer.plaintext_insert(107, "c")).await;
     assert_eq!(after.misses, before.misses + 1);
     supervisor.close(&path).unwrap();
 }

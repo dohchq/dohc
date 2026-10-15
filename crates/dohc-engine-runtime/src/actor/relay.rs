@@ -1788,9 +1788,30 @@ impl ActorHandle {
                             &queued_claims,
                         )
                     };
-                    // Push handles enrollment resets below. Every other
-                    // operation clears by default.
-                    if !is_push {
+                    // Push handles enrollment resets below. A pull that only
+                    // redelivers durable echoes leaves the writer cache valid;
+                    // applied or materialized work still invalidates it.
+                    let pull_changed = match &outcome {
+                        Ok(RelayOperationOutcome::Sync(
+                            SyncPassOutcome::Complete {
+                                applied,
+                                changed_paths,
+                                ..
+                            }
+                            | SyncPassOutcome::CrashedAfterApply {
+                                applied,
+                                changed_paths,
+                                ..
+                            },
+                        )) => *applied > 0 || !changed_paths.is_empty(),
+                        Err(RuntimeError::Relay(RelayError::Local(reason)))
+                            if reason == RELAY_IO_PENDING =>
+                        {
+                            false
+                        }
+                        _ => true,
+                    };
+                    if !is_push && pull_changed {
                         cache.clear();
                     }
                     outcome

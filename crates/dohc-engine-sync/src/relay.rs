@@ -1869,9 +1869,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(local(error));
             }
         };
-        if settlements.report_id.is_some() {
-            cache.clear();
-        }
         let replay_more = crate::deferred::claim_report(
             store,
             workspace_id,
