@@ -605,7 +605,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   discardReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.discardReplicaCurrentView>[1]) { return replicaCurrentViews.discardReplicaCurrentView(this,lease); }
-  releaseReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.releaseReplicaCurrentView>[1]) { return replicaCurrentViews.releaseReplicaCurrentView(this,lease); }
+  releaseReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.releaseReplicaCurrentView>[1]) {
+    replicaCurrentViews.releaseReplicaCurrentView(this,lease);
+    replicaCurrentViewReads.forgetReplicaCurrentViewReadCache(this,lease.workspaceId);
+  }
   bindReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.bindReplicaCurrentView>[1]) { return replicaCurrentViews.bindReplicaCurrentView(this,lease); }
   replicaCurrentViewSelectors(workspaceId: string) { return replicaCurrentViews.replicaCurrentViewSelectors(this,workspaceId); }
   stageReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2]) { return replicaCurrentViews.stageReplicaCurrentView(this,lease,view); }

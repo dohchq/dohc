@@ -3,9 +3,11 @@ import type {ReplicaCurrentView} from "@dohc/workspace-engine-client/daemon";
 import {AGENT_CHANNEL_WIRE_ID} from "@dohc/security-contract/chat-wire-ids";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 import {createReplicaSupervisor} from "./replicaSupervisor";
-import {closeTestStorages, inspectDatabase, seedDependentGrant, seedLinkGrant, sha256, storagePath, tempRoot, testStorage} from "./testing";
+import {closeTestStorage, closeTestStorages, inspectDatabase, seedDependentGrant, seedLinkGrant, sha256, storagePath, tempRoot, testStorage} from "./testing";
 import {registered, cleanupLiveDeliveryFixtures} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import type {StorageContext} from "./storage/context";
+import {replicaCurrentViewReadCacheSize} from "./replicaCurrentViewReads";
+import {replicaCurrentViewStoredCacheSize} from "./storage/replicaCurrentViews";
 
 afterEach(async () => {cleanupLiveDeliveryFixtures(); await closeTestStorages();});
 
@@ -134,6 +136,12 @@ it.each(["sha", "duplicate-path", "duplicate-object", "cursor", "missing-text", 
   expect(f.storage.readReplicaCurrentViewFile({...f.input,path:"docs/a.md"},source)).toEqual({status:"updating"});
 });
 
+it("rejects a previous snapshot from another workspace", async () => {
+  const f = await fixture();
+  const view = f.view(), previous = {...f.view(), workspaceId:"other"};
+  expect(f.storage.readReplicaCurrentViewFile({...f.input,path:"docs/a.md"},{currentReadView:()=>({view,previous})})).toEqual({status:"updating"});
+});
+
 it("file and inventory ETags change with content and visible path", async () => {
   const f = await fixture(); f.save();
   const first = f.list();
@@ -198,6 +206,42 @@ it("a pending restore without a saved row reads as updating", () => {
     ready.files[0]!.restoreGeneration=3; f.storage.storeReplicaCurrentView(lease,ready);
     const after = f.storage.readReplicaCurrentViewFile({...input,path:f.input.evidence.currentPath});
     expect(after).toMatchObject({status:"ready",text:"old"}); expect(after).not.toEqual(before);
+  } finally {f.close();}
+});
+
+it("a landed restore does not leave a deleted path updating", () => {
+  const f = registered({deployment:true});
+  try {
+    f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"e",streamIdentity:"s"});
+    const lease = createReplicaReadPrincipal(f.storage).issue("workspace", "restore-landed"); f.storage.bindReplicaCurrentView(lease);
+    f.write(db => db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2"));
+    f.storage.appendLogBatch({workspaceId:"workspace",originId:"owner",ops:[{originSeq:0,opKind:"workspace.restore",payloadJson:"{}",recordedAtMs:1}]});
+    const input = {grantId:"grant", generation:4, principal:{kind:"user" as const,userId:"reader"}};
+    const ready = {workspaceId:"workspace",revision:1,logCursor:1,journalCursor:0,omitted:[],texts:[{sha256:sha256("restored"),text:"restored"}],
+      files:[{versionId:"main",objectId:"object",path:f.input.evidence.currentPath,contentKind:"text" as const,sha256:sha256("restored"),byteLength:8,lineageClaimId:f.input.evidence.document.lineageClaimId,restoreGeneration:2}]};
+    f.storage.storeReplicaCurrentView(lease,ready);
+    expect(f.storage.readReplicaCurrentViewFile({...input,path:f.input.evidence.currentPath})).toMatchObject({status:"ready",text:"restored"});
+    f.storage.storeReplicaCurrentView(lease,{...ready,revision:2,files:[],texts:[]});
+    expect(f.storage.listReplicaCurrentViewFiles(input)).toMatchObject({status:"ready",files:[]});
+    expect(f.storage.readReplicaCurrentViewFile({...input,path:f.input.evidence.currentPath})).toEqual({status:"not-found"});
+  } finally {f.close();}
+});
+
+it("a landed restore that renamed its file does not leave the old path updating", () => {
+  const f = registered({deployment:true});
+  try {
+    f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"e",streamIdentity:"s"});
+    const lease = createReplicaReadPrincipal(f.storage).issue("workspace", "restore-rename"); f.storage.bindReplicaCurrentView(lease);
+    f.write(db => db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2"));
+    f.storage.appendLogBatch({workspaceId:"workspace",originId:"owner",ops:[{originSeq:0,opKind:"workspace.restore",payloadJson:"{}",recordedAtMs:1}]});
+    const input = {grantId:"grant", generation:4, principal:{kind:"user" as const,userId:"reader"}};
+    const path = f.input.evidence.currentPath, renamed = "docs/renamed.md";
+    const ready = {workspaceId:"workspace",revision:1,logCursor:1,journalCursor:0,omitted:[],texts:[{sha256:sha256("restored"),text:"restored"}],
+      files:[{versionId:"main",objectId:"object",path,contentKind:"text" as const,sha256:sha256("restored"),byteLength:8,lineageClaimId:f.input.evidence.document.lineageClaimId,restoreGeneration:2}]};
+    f.storage.storeReplicaCurrentView(lease,ready);
+    f.storage.storeReplicaCurrentView(lease,{...ready,revision:2,files:[{...ready.files[0]!,path:renamed}],texts:ready.texts});
+    expect(f.storage.readReplicaCurrentViewFile({...input,path})).toEqual({status:"not-found"});
+    expect(f.storage.readReplicaCurrentViewFile({...input,path:renamed})).toMatchObject({status:"ready",text:"restored"});
   } finally {f.close();}
 });
 
@@ -331,6 +375,32 @@ it("round1: a cached manifest stays attached to its SQLite read snapshot", async
   }};
   expect(f.storage.readReplicaCurrentViewFile({...f.input,path:"docs/a.md"},source)).toMatchObject({text:"current"});
   expect(f.read()).toEqual({status:"not-found"}); expect(f.read("docs/new.md")).toMatchObject({text:"current"});
+});
+
+it("bounds per-storage read caches and clears a revoked workspace", async () => {
+  const storage = await testStorage();
+  const context = storage as StorageContext;
+  const leases = [] as Array<import("./replicaReadPrincipal").ReplicaReadLease>;
+  try {
+    for (let i = 0; i < 5; i++) {
+      const workspaceId = `cache-${i}`, shareId = `cache-share-${i}`, grantId = `cache-grant-${i}`;
+      storage.claimWorkspace({workspaceId,ownerUserId:"owner",createdAtMs:1});
+      storage.claimWorkspaceIdentity({workspaceId,replicationEpoch:"epoch",streamIdentity:"stream"});
+      storage.createShare({share:{shareId,workspaceId,granterUserId:"owner",selectorJson:'{"paths":["docs"],"versionId":null}',createdAtMs:1},
+        grant:{grantId,shareId,principalKind:"user",principalUserId:"reader",principalEmail:null,access:"edit",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
+      const lease = createReplicaReadPrincipal(storage).issue(workspaceId,`cache-${i}`); storage.bindReplicaCurrentView(lease); leases.push(lease);
+      const text = `cached-${i}`, file = {versionId:"main",objectId:`object-${i}`,path:"docs/a.md",contentKind:"text" as const,
+        sha256:sha256(text),byteLength:Buffer.byteLength(text),lineageClaimId:null,restoreGeneration:null};
+      storage.storeReplicaCurrentView(lease,{workspaceId,revision:1,logCursor:0,journalCursor:0,files:[file],omitted:[],texts:[{sha256:file.sha256,text}]});
+      expect(storage.readReplicaCurrentViewFile({grantId,generation:1,principal:{kind:"user",userId:"reader"},path:file.path})).toMatchObject({status:"ready",text});
+    }
+    expect(replicaCurrentViewReadCacheSize(context)).toBe(4);
+    expect(replicaCurrentViewStoredCacheSize(context)).toBe(4);
+    context.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',generation=2,revoked_at_ms=2 WHERE grant_id=?").run("cache-grant-4");
+    storage.releaseReplicaCurrentView(leases[4]!);
+    expect(replicaCurrentViewReadCacheSize(context)).toBe(3);
+    expect(replicaCurrentViewStoredCacheSize(context)).toBe(3);
+  } finally { closeTestStorage(storage); }
 });
 
 it("round1: retired fences use the same default generation and carried path as 6a", () => {

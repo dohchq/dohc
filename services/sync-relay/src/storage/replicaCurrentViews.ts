@@ -11,6 +11,7 @@ import {readReplicaStanding} from "./replicaReads";
 const STAGE_BYTES = 8 * 1024 * 1024;
 const incarnations = new WeakMap<StorageContext, Map<string, ReplicaReadLease>>();
 const readCaches = new WeakMap<StorageContext, Map<string, {key: string; view: ReplicaCurrentView}>>();
+const MAX_READ_CACHE_WORKSPACES = 4;
 const readStatements = new WeakMap<StorageContext, Map<string, ReturnType<StorageContext["db"]["prepare"]>>>();
 function statement(storage: StorageContext, sql: string) {
   let statements = readStatements.get(storage);
@@ -41,6 +42,7 @@ export function bindReplicaCurrentView(storage: StorageContext, lease: ReplicaRe
 export function releaseReplicaCurrentView(storage: StorageContext, lease: ReplicaReadLease) {
   const bindings = incarnations.get(storage);
   if (bindings?.get(lease.workspaceId)?.incarnation === lease.incarnation) bindings.delete(lease.workspaceId);
+  forgetReplicaCurrentViewStoredCache(storage,lease.workspaceId);
 }
 export function replicaCurrentViewSelectors(storage: StorageContext, workspace: string): ReplicaCurrentViewSelector[] {
   return storage.db.prepare(`SELECT DISTINCT s.selector_json FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
@@ -204,18 +206,29 @@ export function readReplicaCurrentView(storage: StorageContext, workspace: strin
   let cache = readCaches.get(storage);
   if (!cache) readCaches.set(storage, cache = new Map());
   if (!standing || !header || header.replication_epoch !== standing.replicationEpoch || header.stream_identity !== standing.streamIdentity) {
-    cache.delete(workspace); return null;
+    forgetReplicaCurrentViewStoredCache(storage,workspace); return null;
   }
   // data_version detects flips/deletions by other connections, within this read snapshot.
   const key = JSON.stringify([header, statement(storage, "PRAGMA data_version").get()]);
   const saved = cache.get(workspace);
-  if (saved?.key === key) return saved.view;
+  if (saved?.key === key) { cache.delete(workspace); cache.set(workspace,saved); return saved.view; }
   const omitted = statement(storage,"SELECT omitted_json FROM sync_relay_replica_cuts WHERE workspace_id=?").get(workspace)!;
   const view = {workspaceId: workspace, revision: Number(header.revision), logCursor: Number(header.log_cursor), journalCursor: Number(header.journal_cursor), files: storedFiles(storage, workspace), texts: [], omitted: JSON.parse(String(omitted.omitted_json))};
   for (const file of [...view.files, ...view.omitted]) Object.freeze(file);
   Object.freeze(view.files); Object.freeze(view.texts); Object.freeze(view.omitted); Object.freeze(view);
-  cache.set(workspace, {key, view});
+  cache.delete(workspace); cache.set(workspace, {key, view});
+  while (cache.size > MAX_READ_CACHE_WORKSPACES) cache.delete(cache.keys().next().value!);
   return view;
+}
+
+/** Drop a stored snapshot without changing the replica lease. */
+export function forgetReplicaCurrentViewStoredCache(storage: StorageContext, workspace: string) {
+  readCaches.get(storage)?.delete(workspace);
+}
+
+/** @internal Test-only cache accounting. */
+export function replicaCurrentViewStoredCacheSize(storage: StorageContext) {
+  return readCaches.get(storage)?.size ?? 0;
 }
 
 /** Internal only: the reader has authorized this exact row in the same read transaction. */

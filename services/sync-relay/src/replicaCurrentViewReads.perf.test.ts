@@ -19,20 +19,30 @@ it.skipIf(process.env.DOHC_REPLICA_READ_PERF !== "1")("measures authorized curre
     grant:{grantId:"named",shareId:"s",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"view",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
   seedLinkGrant(storage,{grantId:"link",shareId:"s",secretHash:"hash"});
   const input = {grantId:"link",generation:1,principal:{kind:"link" as const}};
-  const contents = ["", "a".repeat(50_000), "b".repeat(1_000_000)];
-  for (const content of contents) storage.putBlob({workspaceId:"w",sha256:sha256(content),content:Buffer.from(content),createdAtMs:1});
+  const distinctTexts = Array.from({length:1_000},(_,i)=>`distinct-${i}-${"x".repeat(32)}`);
+  const textFor = (i: number) => i === 0 ? "a".repeat(50_000) : i === 1 ? "b".repeat(1_000_000) : i >= 2 && i < 1_002 ? distinctTexts[i - 2]! : "";
+  const uniqueTexts = [textFor(0),textFor(1),...distinctTexts,""];
+  for (const content of uniqueTexts) storage.putBlob({workspaceId:"w",sha256:sha256(content),content:Buffer.from(content),createdAtMs:1});
   const files = Array.from({length:20_000},(_,i) => {
-    const text = contents[i === 0 ? 1 : i === 1 ? 2 : 0]!;
+    const text = textFor(i), lineageClaimId = i >= 2 && i < 1_002 ? sha256(`lineage-${i}`) : null;
     return {versionId:"main",objectId:`o-${i}`,path:`private/docs/${String(i).padStart(6,"0")}.md`,contentKind:"text" as const,
-      sha256:sha256(text),byteLength:Buffer.byteLength(text),lineageClaimId:null,restoreGeneration:null};
+      sha256:sha256(text),byteLength:Buffer.byteLength(text),lineageClaimId,restoreGeneration:lineageClaimId ? 1 : null};
   });
   for (let start=0;start<files.length;start+=500) storage.appendLogBatch({workspaceId:"w",originId:"o",ops:files.slice(start,start+500).map((f,i)=>{
-    const op = moment(f.path,contents[start+i === 0 ? 1 : start+i === 1 ? 2 : 0]!,{originSeq:start+i,objectId:f.objectId});
+    const op = moment(f.path,textFor(start+i),{originSeq:start+i,objectId:f.objectId});
     return {originSeq:op.originSeq,opKind:op.opKind,payloadJson:JSON.stringify(op.payload),recordedAtMs:op.recordedAtMs};
   })});
+  const insertLive = context.db.prepare(`INSERT INTO sync_relay_live_documents
+    (workspace_id,main_version_id,object_id,lineage_claim_id,replaces_lineage_claim_id,current_path,baseline_moment_relay_seq,
+     baseline_projected_sha256,baseline_projected_byte_length,baseline_digest,lineage_state,admission_state,restore_fence_generation,registered_at_ms,retired_at_ms,baseline_bytes)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  for (let i=2;i<1_002;i++) {
+    const file = files[i]!, lineage = file.lineageClaimId!;
+    insertLive.run("w","main",file.objectId,lineage,null,file.path,1,file.sha256,file.byteLength,lineage,"current","open",1,1,null,Buffer.from("x"));
+  }
   const lease = createReplicaReadPrincipal(storage).issue("w","perf"); storage.bindReplicaCurrentView(lease);
   const view = {workspaceId:"w",revision:1,logCursor:storage.readReplicaStanding("w")!.logSeq,journalCursor:0,files,
-    texts:contents.map(text=>({sha256:sha256(text),text})),omitted:[]};
+    texts:uniqueTexts.map(text=>({sha256:sha256(text),text})),omitted:[]};
   storage.storeReplicaCurrentView(lease,view);
   const supervisor = createReplicaSupervisor({storage,storeRoot:await tempRoot("read-perf"),startChild:async()=>({
     pull:async()=>{},close:async()=>{},currentView:async()=>({...view,moved:false,nextCursor:null,refusedFiles:[]})})});
@@ -88,20 +98,21 @@ it.skipIf(process.env.DOHC_REPLICA_READ_PERF !== "1")("measures authorized curre
     for(const index of [0,1]) {
       const path=`docs/${String(index).padStart(6,"0")}.md`;
       pair(`stored-text-${files[index]!.byteLength}`,()=>existingText(index),()=>storage.readReplicaCurrentViewFile({...input,path}),
-        value=>{expect(value.status).toBe("ready");expect(value.text).toBe(contents[index+1]);});
+        value=>{expect(value.status).toBe("ready");expect(value.text).toBe(textFor(index));});
     }
+    context.db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2 WHERE workspace_id='w'");
     await supervisor.activate("w");
     const coldSamples: number[] = [];
     for(let i=0;i<8;i++) {
       await supervisor.activate("w"); const start=performance.now();
       const result=storage.readReplicaCurrentViewFile({...input,path:"docs/000000.md"},supervisor);
-      coldSamples.push(performance.now()-start);expect(result).toMatchObject({status:"ready",text:contents[1]});
+      coldSamples.push(performance.now()-start);expect(result).toMatchObject({status:"ready",text:textFor(0)});
     }
     results["live-first-open-after-view-50000"]=summarize(coldSamples);
     pair("live-list-20000",existingList,()=>storage.listReplicaCurrentViewFiles(input,supervisor),validateList);
     for(const index of [0,1]) pair(`live-text-${files[index]!.byteLength}`,()=>existingText(index),
       ()=>storage.readReplicaCurrentViewFile({...input,path:`docs/${String(index).padStart(6,"0")}.md`},supervisor),
-      value=>{expect(value.status).toBe("ready");expect(value.text).toBe(contents[index+1]);});
+      value=>{expect(value.status).toBe("ready");expect(value.text).toBe(textFor(index));});
     if (process.env.DOHC_REPLICA_READ_PERF_OUT) writeFileSync(process.env.DOHC_REPLICA_READ_PERF_OUT,JSON.stringify({node:process.version,pairs:31,alternating:true,warmups:5,files:20_000,results},null,2));
     } finally {await supervisor.close();}
 },300_000);

@@ -6,7 +6,7 @@ import {authorizeShareGrantAction} from "./shareAuthorization";
 import {fileSideOf, targetVersionId} from "./shareFilter";
 import type {StorageContext} from "./storage/context";
 import type {CurrentShareGrantPrincipal} from "./storage/currentShareGrant";
-import {currentViewFileAtFence, readReplicaCurrentViewRowText} from "./storage/replicaCurrentViews";
+import {currentViewFileAtFence, forgetReplicaCurrentViewStoredCache, readReplicaCurrentViewRowText} from "./storage/replicaCurrentViews";
 
 export interface ReplicaCurrentViewReadInput {
   readonly grantId: string;
@@ -36,11 +36,13 @@ type ViewFile = ReplicaCurrentView["files"][number];
 type ReadyFile = Extract<ReplicaCurrentViewFile,{status:"ready"}>;
 type IndexedFile = {row: ViewFile; lineage: string; path: NonNullable<ReturnType<typeof prepareSharePath>>; projected: Map<string, ReadyFile>};
 type ViewIndex = {files: Map<string, Map<string, IndexedFile>>; texts: Map<string, string>;
+  textChecks: Map<string, boolean>;
   lineages: Map<string,IndexedFile>; omittedPaths: Map<string,string>;
   inventories: Array<{files: ReplicaCurrentViewFile[]; etag: string}>;
-  decoded: Map<string,string>; decodedBytes: number; omitted: Array<{row: ReplicaCurrentView["omitted"][number]; path: NonNullable<ReturnType<typeof prepareSharePath>>}>};
+  decoded: Map<string,{text:string; bytes:number}>; decodedBytes: number; omitted: Array<{row: ReplicaCurrentView["omitted"][number]; path: NonNullable<ReturnType<typeof prepareSharePath>>}>};
 const indexes = new WeakMap<ReplicaCurrentView, ViewIndex | null>();
 const latestIndexes = new WeakMap<StorageContext, Map<string, ViewIndex["files"]>>();
+const MAX_INDEX_WORKSPACES = 4;
 const DECODED_TEXT_BYTES = 4 * 1024 * 1024;
 const inventoryTags = new WeakMap<ReadyFile,string>();
 const pathKey = (version: string, path: string) => JSON.stringify([version,path]);
@@ -51,7 +53,7 @@ function readFences(storage: StorageContext, where: string, args: unknown[]) {
   if (!statements) fenceStatements.set(storage,statements=new Map());
   let statement = statements.get(where);
   if (!statement) {
-    statement=storage.db.prepare(`SELECT main_version_id,object_id,lineage_claim_id,current_path,restore_fence_generation
+    statement=storage.db.prepare(`SELECT main_version_id,object_id,lineage_claim_id,current_path,restore_fence_generation,baseline_moment_relay_seq
       FROM sync_relay_live_documents WHERE lineage_state='current' AND ${where}`);
     statements.set(where,statement);
   }
@@ -92,13 +94,13 @@ function indexView(view: ReplicaCurrentView, previous?: ViewIndex["files"]): Vie
     }
   }
   for (const text of view.texts) {
-    if (texts.has(text.sha256) || !shaPattern.test(text.sha256) || digest(text.text) !== text.sha256 ||
+    if (texts.has(text.sha256) || !shaPattern.test(text.sha256) ||
       byteLengths.has(text.sha256) && byteLengths.get(text.sha256) !== Buffer.byteLength(text.text)) return null;
     texts.set(text.sha256,text.text); Object.freeze(text);
   }
   // Metadata and verified text only. No grant or selector decision is cached.
   Object.freeze(view.files); Object.freeze(view.omitted); Object.freeze(view.texts); Object.freeze(view);
-  const index: ViewIndex = {files,texts,lineages,omittedPaths,inventories:[],decoded:new Map<string,string>(),decodedBytes:0,omitted}; indexes.set(view,index);
+  const index: ViewIndex = {files,texts,textChecks:new Map<string,boolean>(),lineages,omittedPaths,inventories:[],decoded:new Map<string,{text:string; bytes:number}>(),decodedBytes:0,omitted}; indexes.set(view,index);
   return index;
 }
 
@@ -125,6 +127,24 @@ function inventoryEtag(index: ViewIndex, files: ReplicaCurrentViewFile[]) {
   return tag;
 }
 
+function touchLatestIndex(storage: StorageContext, workspace: string, files?: ViewIndex["files"]) {
+  let latest = latestIndexes.get(storage);
+  if (!latest) latestIndexes.set(storage,latest = new Map());
+  if (files) { latest.delete(workspace); latest.set(workspace,files); }
+  while (latest.size > MAX_INDEX_WORKSPACES) latest.delete(latest.keys().next().value!);
+  return latest;
+}
+
+/** Release the per-workspace read index when replica retirement ends its lease. */
+export function forgetReplicaCurrentViewReadCache(storage: StorageContext, workspace: string) {
+  latestIndexes.get(storage)?.delete(workspace);
+}
+
+/** @internal Test-only cache accounting. */
+export function replicaCurrentViewReadCacheSize(storage: StorageContext) {
+  return latestIndexes.get(storage)?.size ?? 0;
+}
+
 // The accessor, grant and text never leave this synchronous read transaction.
 function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewReadInput,
   source: ReplicaCurrentViewSource | undefined,
@@ -143,26 +163,30 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
     if (!selector) return {status:"denied"};
     const workspace = authorized.share.workspaceId;
     const standing = storage.readReplicaStanding(workspace);
-    if (!standing) return {status:"not-ready"};
+    if (!standing) { forgetReplicaCurrentViewReadCache(storage,workspace); forgetReplicaCurrentViewStoredCache(storage,workspace); return {status:"not-ready"}; }
     if (standing.ownerUserId !== authorized.share.granterUserId) return {status:"denied"};
     const projection = input.principal.kind === "link" ? createAccountlessPathProjection(selector) : null;
     const realPath = requestedPath === undefined ? undefined : projection ? projection.resolvePath(requestedPath) ?? "" : requestedPath;
     const stored = source ? null : storage.readReplicaCurrentView(workspace);
     const snapshot = source ? source.currentReadView(workspace) : stored && {view:stored,previous:stored};
-    if (!snapshot) return {status:"not-ready"};
+    if (!snapshot) { forgetReplicaCurrentViewReadCache(storage,workspace); forgetReplicaCurrentViewStoredCache(storage,workspace); return {status:"not-ready"}; }
     const {view} = snapshot;
     if (view.workspaceId !== workspace || [view.revision, view.logCursor, view.journalCursor].some(n => !Number.isSafeInteger(n) || n < 0) ||
       view.logCursor > standing.logSeq || view.journalCursor > standing.journalCursor) return {status:"updating"};
-    let latest = latestIndexes.get(storage);
-    if (!latest) latestIndexes.set(storage,latest = new Map());
+    const latest = touchLatestIndex(storage,workspace);
     const index = indexView(view,latest.get(workspace));
     if (!index) return {status:"updating"};
     // Keep only metadata for reuse, so retired live texts can be collected.
-    latest.set(workspace,index.files);
+    touchLatestIndex(storage,workspace,index.files);
     const version = targetVersionId(selector);
-    const visible = (v: string, path: string | NonNullable<ReturnType<typeof prepareSharePath>>) => v === version && visibleSharePath(selector, path) !== null;
+    const visible = (v: string, path: string | NonNullable<ReturnType<typeof prepareSharePath>>) => {
+      if (v !== version) return false;
+      const canonical = visibleSharePath(selector, path);
+      return canonical !== null && canonical === (typeof path === "string" ? path : path.path);
+    };
     const project = (path: string) => projection ? projection.projectPath(path) : path;
     const files = new Map<string, ReplicaCurrentViewFile>(), rows = new Map<string, ViewFile>();
+    if (snapshot.previous && snapshot.previous.workspaceId !== workspace) return {status:"updating"};
     const previous = snapshot.previous && indexView(snapshot.previous,index.files);
     if (snapshot.previous && !previous) return {status:"updating"};
     // An open needs only the incoming row and a row that can carry the saved path.
@@ -178,7 +202,7 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
       const occupant = old && index.files.get(version)?.get(old.path)?.row;
       if (occupant?.lineageClaimId != null) objects.add(occupant.objectId);
     }
-    let fences = realPath === undefined ? readFences(storage,"workspace_id=?",[workspace]) : objects.size ?
+    let fences = realPath === undefined ? readFences(storage,"workspace_id=? AND main_version_id=?",[workspace,version]) : objects.size ?
       readFences(storage,"workspace_id=? AND main_version_id=? AND object_id IN (SELECT value FROM json_each(?))",[workspace,version,JSON.stringify([...objects])]) : [];
     const generations = new Map(fences.map(f=>[lineageKey(String(f.main_version_id),String(f.object_id),String(f.lineage_claim_id)),Number(f.restore_fence_generation)]));
     const current = (f: IndexedFile) => f.row.lineageClaimId === null || f.row.restoreGeneration === (generations.get(f.lineage) ?? 1);
@@ -206,24 +230,34 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
       "workspace_id=? AND main_version_id=? AND current_path=? AND restore_fence_generation>1",[workspace,version,realPath]);
     // A restore can remove an unfenced row before its replacement reaches the view.
     for (const fence of fences) {
-      if (Number(fence.restore_fence_generation) <= 1 || !visible(String(fence.main_version_id), String(fence.current_path))) continue;
+      const fenceLineage = lineageKey(String(fence.main_version_id),String(fence.object_id),String(fence.lineage_claim_id));
+      if (index.lineages.has(fenceLineage) || Number(fence.restore_fence_generation) <= 1 ||
+        Number(fence.baseline_moment_relay_seq) <= view.logCursor ||
+        !visible(String(fence.main_version_id), String(fence.current_path))) continue;
       const path = project(String(fence.current_path));
       if (path !== null && (requestedPath === undefined || path === requestedPath) && !files.has(path)) files.set(path, {path, status:"updating"});
     }
     const sorted = [...files.values()].sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
     return read({files:sorted, rows, inventoryEtag:()=>inventoryEtag(index,sorted), readText:row => {
       const text = index.texts.get(row.sha256);
-      if (text !== undefined) return text;
+      if (text !== undefined) {
+        let checked = index.textChecks.get(row.sha256);
+        if (checked === undefined) {
+          checked = digest(text) === row.sha256 && Buffer.byteLength(text) === row.byteLength;
+          index.textChecks.set(row.sha256,checked);
+        }
+        return checked ? text : null;
+      }
       const cached = index.decoded.get(row.sha256);
-      if (cached !== undefined) return cached;
+      if (cached !== undefined) return cached.text;
       const decoded = readReplicaCurrentViewRowText(storage,workspace,row);
       // Cache only opened stored texts, with a fixed per-view byte budget.
       if (decoded !== null && row.byteLength <= DECODED_TEXT_BYTES) {
         while (index.decodedBytes + row.byteLength > DECODED_TEXT_BYTES) {
           const oldest = index.decoded.keys().next().value!;
-          index.decodedBytes -= Buffer.byteLength(index.decoded.get(oldest)!); index.decoded.delete(oldest);
+          index.decodedBytes -= index.decoded.get(oldest)!.bytes; index.decoded.delete(oldest);
         }
-        index.decoded.set(row.sha256,decoded); index.decodedBytes += row.byteLength;
+        index.decoded.set(row.sha256,{text:decoded,bytes:row.byteLength}); index.decodedBytes += row.byteLength;
       }
       return decoded;
     }});

@@ -11,6 +11,10 @@ it("prepared paths preserve validation and recheck each selector", () => {
   }
 });
 
+it("rejects a forged prepared-path object", () => {
+  expect(visibleSharePath({paths:["Trip"],versionId:null},{path:"Trip/Plans/day.md"} as never)).toBeNull();
+});
+
 it("matches exact paths and slash ancestors, including overlapping scopes", () => {
   const scope = { paths: ["Trip", "Trip/Plans"], versionId: null };
   for (const path of ["Trip", "Trip/Plans", "Trip/Plans/day.md"]) expect(visibleSharePath(scope, path)).toBe(path);
