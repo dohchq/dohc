@@ -549,6 +549,7 @@ fn merge_materialization_is_gated_to_the_active_target_version_across_reopen() {
             &store,
             scratch.path(),
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::per_os(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -1432,6 +1433,7 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -1450,6 +1452,7 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,

@@ -553,7 +553,6 @@ pub(crate) enum SwitchReconcileError {
     Unavailable,
     Degraded(Vec<String>),
     ApplyFailed,
-    HeldFiles(Vec<String>),
 }
 
 /// How often the driver polls the dirty flag. Cheap when converged (one
@@ -2472,13 +2471,7 @@ pub(crate) async fn reconcile_full_for_switch(
                 // Undo checks every affected hold atomically with its inverse commit.
                 Ok(manifest_changed)
             } else {
-                match actor.capture_file_holds(workspace_id.to_owned()).await {
-                    Ok(holds) if holds.is_empty() => Ok(manifest_changed),
-                    Ok(holds) => Err(SwitchReconcileError::HeldFiles(
-                        holds.into_iter().map(|hold| hold.path).collect(),
-                    )),
-                    Err(_) => Err(SwitchReconcileError::Unavailable),
-                }
+                Ok(manifest_changed)
             }
         }
     };

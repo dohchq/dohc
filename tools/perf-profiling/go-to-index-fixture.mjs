@@ -16,7 +16,7 @@ export function goToIndexFixture(fileCount = GO_TO_COUNTS.files) {
     path: fileFolders[n % fileFolders.length] + "/fixture-" + String(n).padStart(6, "0") + (n % 3 === 0 && n !== 4242 ? ".ts" : ".txt"), kind: "file",
   });
   return {
-    listing: { files, folders, visibility: { status: "ready", hiddenHostPaths: new Set() },
+    listing: { files, folders, visibility: { status: "ready", rules: [] },
       receivedRoots: [{ path: "shared-with-me/team", ended: false, damaged: false }] },
     collections: folders.slice(0, 20).map((path, i) => ({ path, objectId: "collection-" + i })),
     apps: folders.slice(20, 40).map((root, i) => ({ root, title: "Fixture app " + i })),

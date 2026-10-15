@@ -1648,6 +1648,10 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return this.workspaceRequest(WORKSPACE_METHOD.captureReconcile, {});
   }
 
+  async retryHeldCapture(path: string) {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureRetryHeld, { path });
+  }
+
   async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {
     await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author });
   }

@@ -37,6 +37,7 @@ export const WORKSPACE_METHOD = {
   keptCopiesSave: "keptCopies.save",
   captureFlush: "capture.flush",
   captureReconcile: "capture.reconcile",
+  captureRetryHeld: "capture.retryHeld",
   captureSetAuthor: "capture.setAuthor",
   captureHold: "capture.hold",
   captureRenew: "capture.renew",
@@ -458,6 +459,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.keptCopiesSave]: WorkspaceJsonObject & { id: number };
   [WORKSPACE_METHOD.captureFlush]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureRetryHeld]: WorkspaceJsonObject & { path: string };
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
   [WORKSPACE_METHOD.captureHold]: WorkspaceJsonObject & { operationId?: string };
   [WORKSPACE_METHOD.captureRenew]: WorkspaceJsonObject & { holdId: string };
@@ -1323,6 +1325,10 @@ const WorkspaceResultSchemas = {
   ]),
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResultSchema,
+  [WORKSPACE_METHOD.captureRetryHeld]: mutableStruct({
+    ...CaptureFlushResultSchema.fields,
+    retried: Schema.Boolean,
+  }),
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({
     updated: Schema.Literal(true),
   }),

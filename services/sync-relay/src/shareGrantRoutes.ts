@@ -662,7 +662,7 @@ export function createShareGrantRoutes(
           selector,
           access,
           grantId,
-          ...namedBrowserInvitation(grantId, selector, access),
+          ...namedBrowserInvitation(route.workspaceId, grantId, selector, access),
           generation: 1,
           createdAtMs,
         });
@@ -718,7 +718,7 @@ export function createShareGrantRoutes(
         selector,
         access,
         grantId,
-        ...namedBrowserInvitation(grantId, selector, access),
+        ...namedBrowserInvitation(route.workspaceId, grantId, selector, access),
         generation: 1,
         createdAtMs,
       });
