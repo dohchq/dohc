@@ -12,7 +12,7 @@ pub fn journal_prefix_moment_in_tx(
 ) -> Result<(), SyncError> {
     let (payload, _) =
         crate::outbound::moment_append_payload_in_tx(tx, &binding.workspace_id, moment)?;
-    let (origin, seq) = journal_prefix_op_in_tx(tx, binding, "moment.append", &payload, now_ms)?;
+    let (origin, seq, _) = journal_prefix_op_in_tx(tx, binding, "moment.append", &payload, now_ms)?;
     prefix::record_publication_in_tx(tx, binding, &origin, seq, now_ms)
         .map_err(SyncError::corrupt)?;
     Ok(())
@@ -24,7 +24,7 @@ pub fn journal_prefix_op_in_tx(
     kind: &str,
     payload: &serde_json::Value,
     now_ms: i64,
-) -> Result<(String, i64), SyncError> {
+) -> Result<(String, i64, bool), SyncError> {
     let key = DocKey::new(
         &binding.workspace_id,
         &binding.main_version_id,
@@ -46,7 +46,7 @@ pub fn journal_prefix_op_in_tx(
             |r| r.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    Ok((origin, seq))
+    Ok((origin, seq, true))
 }
 
 pub fn journal_prefix_update_in_tx(
@@ -56,7 +56,7 @@ pub fn journal_prefix_update_in_tx(
     actor: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     now_ms: i64,
-) -> Result<Option<(String, i64)>, SyncError> {
+) -> Result<Option<(String, i64, bool)>, SyncError> {
     let key = DocKey::new(
         &binding.workspace_id,
         &binding.main_version_id,
@@ -102,7 +102,7 @@ pub fn journal_prefix_update_in_tx(
                 ),
                 now_ms,
             )
-            .map(|(origin, seq)| (origin, seq, true))?,
+            .map(|(origin, seq, _)| (origin, seq, true))?,
         };
         dohc_engine_collab::record_base_coordinate_in_tx(
             tx,

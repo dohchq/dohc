@@ -36,6 +36,16 @@ fn prefix_folded_append_retry_keeps_the_tail_moving() {
 #[test]
 fn prefix_folded_retry_keeps_the_saved_reply_after_the_whole_outbox_is_removed() {
     let (_dir, mut store, observed, _, inputs, outbox) = prefix_queue(1);
+    let expected = store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND append_key=?2",
+                params![outbox, inputs[0].append_key],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?)),
+            )
+            .map_err(read_sql)
+        })
+        .unwrap();
     prefix_turn(&mut store, &mut Default::default(), &observed);
     store
         .write_with(&NoFaults, |tx| {
@@ -73,9 +83,11 @@ fn prefix_folded_retry_keeps_the_saved_reply_after_the_whole_outbox_is_removed()
         _ => panic!("unexpected crash"),
     };
     assert_eq!(result.outbox_id, outbox);
-    assert!(result.pending_bytes > 0);
-    assert!(matches!(result.state, OwnerOutboxState::Active | OwnerOutboxState::Sealed));
-    assert!(!result.delivery_id.is_empty());
+    assert_eq!(result.delivery_id, expected.0);
+    assert_eq!(result.sequence, expected.1);
+    assert_eq!(result.pending_bytes, expected.2);
+    assert_eq!(result.oldest_entry_at_ms, expected.3);
+    assert_eq!(result.state.as_str(), expected.4);
     assert_eq!(
         store.table_row_count("owner_ydoc_outbox_entries").unwrap(),
         0,
@@ -86,6 +98,16 @@ fn prefix_folded_retry_keeps_the_saved_reply_after_the_whole_outbox_is_removed()
 #[test]
 fn prefix_folded_retry_keeps_the_saved_reply_for_a_quarantined_outbox() {
     let (_dir, mut store, observed, _, inputs, outbox) = prefix_queue(1);
+    let expected = store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND append_key=?2",
+                params![outbox, inputs[0].append_key],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?)),
+            )
+            .map_err(read_sql)
+        })
+        .unwrap();
     super::super::quarantine(
         &mut store,
         "workspace",
@@ -123,9 +145,12 @@ fn prefix_folded_retry_keeps_the_saved_reply_for_a_quarantined_outbox() {
         TxnOutcome::Committed(result) => result,
         _ => panic!("unexpected crash"),
     };
-    assert!(result.pending_bytes > 0);
-    assert!(matches!(result.state, OwnerOutboxState::Active | OwnerOutboxState::Sealed));
-    assert!(!result.delivery_id.is_empty());
+    assert_eq!(result.outbox_id, outbox);
+    assert_eq!(result.delivery_id, expected.0);
+    assert_eq!(result.sequence, expected.1);
+    assert_eq!(result.pending_bytes, expected.2);
+    assert_eq!(result.oldest_entry_at_ms, expected.3);
+    assert_eq!(result.state.as_str(), expected.4);
 }
 
 #[test]

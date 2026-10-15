@@ -174,8 +174,30 @@ fn native_prefix_unchanged_projection_records_credit_once() {
     prepare_native_prefix(&mut store, &observed);
     commit_native_prefix(&mut store, &mut cache, &observed, &NoFaults).unwrap();
     settle_native_prefix(&mut store, &mut cache, &root, &observed, &NoFaults).unwrap();
+
+    // Reopen the same projected moment through the write path. This models a
+    // replay after the durable frontier marker was cleared: the moment ID is
+    // unchanged, so the projected write is deduped and the prefix journal
+    // guard is the only thing keeping replication at one row.
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE snapshots SET latest_moment_id='original' WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "UPDATE ydoc_docs SET settled_update_seq=0 WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute("DELETE FROM materialization_jobs WHERE job_id LIKE 'ydoc-mat_%'", [])
+                .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
     settle_native_prefix(&mut store, &mut cache, &root, &observed, &NoFaults).unwrap();
-    let credit: Vec<String> = store
+    let credit: Vec<Option<String>> = store
         .read_with(|c| {
             let mut stmt =
                 c.prepare("SELECT author_json FROM moments WHERE metadata_origin='ydoc'")?;
@@ -184,7 +206,7 @@ fn native_prefix_unchanged_projection_records_credit_once() {
         })
         .unwrap();
     assert_eq!(credit.len(), 1);
-    assert!(credit[0].contains("noop-agent"));
+    assert!(credit.iter().flatten().any(|author| author.contains("noop-agent")));
     assert_eq!(
         store
             .read_with(|c| c.query_row(
@@ -196,6 +218,137 @@ fn native_prefix_unchanged_projection_records_credit_once() {
         1,
         "a deduped prefix moment must be journaled once"
     );
+}
+
+#[test]
+fn native_prefix_refuses_an_external_coordinate_without_this_release_tag() {
+    let (_root, _path, mut store, observed, doc) = native_prefix_fixture();
+    let mut cache = WriterDocCache::new();
+    draft::append_draft_cached(
+        &mut store,
+        &mut cache,
+        "workspace",
+        draft::OwnerDraftAppendInput {
+            person_edit: true,
+            binding: observed.binding.clone(),
+            expected_revision: 1,
+            append_key: "foreign-coordinate".into(),
+            update: doc.richdoc_append_paragraph("foreign coordinate"),
+            now_ms: 3,
+            agent_declaration: None,
+            automation_declaration: None,
+        },
+        &NoFaults,
+    )
+    .unwrap();
+    prepare_native_prefix(&mut store, &observed);
+    let foreign_payload = serde_json::json!({
+        "release": prefix::publication_tag(&observed.binding, &"d".repeat(64))
+    });
+    let foreign_seq = match store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_sync::journal_local_op_in_tx(
+                tx,
+                "workspace",
+                "ydoc.update",
+                &foreign_payload,
+                4,
+            )
+            .map_err(StorageError::persist_public)
+        })
+        .unwrap()
+    {
+        TxnOutcome::Committed(seq) => seq,
+        _ => panic!("unexpected journal crash"),
+    };
+    let result = prefix::commit_prefix(
+        &mut store,
+        &mut cache,
+        &observed.binding,
+        &"c".repeat(64),
+        6,
+        &NoFaults,
+        |_, _, _, _| Ok(Some(("local".into(), foreign_seq, false))),
+    );
+    assert!(matches!(result, Err(OwnerOutboxError::Corrupt)));
+    assert_eq!(
+        store
+            .read_with(|c| prefix::progress_in(
+                c,
+                &DocKey::new("workspace", "main", "object").unwrap()
+            ))
+            .unwrap()
+            .unwrap()
+            .consumed_entries,
+        0
+    );
+}
+
+#[test]
+fn native_prefix_fresh_journal_coordinate_is_tagged_before_the_check_is_skipped() {
+    let (_root, _path, mut store, observed, doc) = native_prefix_fixture();
+    let mut cache = WriterDocCache::new();
+    draft::append_draft_cached(
+        &mut store,
+        &mut cache,
+        "workspace",
+        draft::OwnerDraftAppendInput {
+            person_edit: true,
+            binding: observed.binding.clone(),
+            expected_revision: 1,
+            append_key: "fresh-coordinate".into(),
+            update: doc.richdoc_append_paragraph("fresh coordinate"),
+            now_ms: 3,
+            agent_declaration: None,
+            automation_declaration: None,
+        },
+        &NoFaults,
+    )
+    .unwrap();
+    prepare_native_prefix(&mut store, &observed);
+    prefix::reset_tag_check_metrics_for_test();
+    let mut callback_result = None;
+    let result = prefix::commit_prefix(
+        &mut store,
+        &mut cache,
+        &observed.binding,
+        &"c".repeat(64),
+        6,
+        &NoFaults,
+        |tx, bytes, actor, attribution| {
+            let result = dohc_engine_sync::journal_prefix_update_in_tx(
+                tx,
+                &observed.binding,
+                bytes,
+                actor,
+                attribution,
+                6,
+            )
+            .map_err(|e| CollabError::Storage(StorageError::persist_public(e)))?;
+            if let Some((origin, seq, wrote)) = &result {
+                assert!(*wrote);
+                let payload: String = tx
+                    .query_row(
+                        "SELECT payload_json FROM replication_log WHERE workspace_id='workspace' AND origin_id=?1 AND origin_seq=?2",
+                        rusqlite::params![origin, seq],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| CollabError::Storage(StorageError::persist_public(e)))?;
+                let payload: serde_json::Value = serde_json::from_str(&payload)
+                    .map_err(|e| CollabError::Storage(StorageError::persist_public(e)))?;
+                assert_eq!(payload.get("release"), Some(&prefix::publication_tag(
+                    &observed.binding,
+                    &"c".repeat(64),
+                )));
+            }
+            callback_result = result.clone();
+            Ok(result)
+        },
+    )
+    .unwrap();
+    assert!(matches!(result, TxnOutcome::Committed(p) if p.consumed_entries == 1));
+    assert!(callback_result.is_some());
+    assert_eq!(prefix::tag_check_metrics_for_test().0, 0);
 }
 
 #[test]

@@ -101,10 +101,6 @@ fn prefix_restore_refusal(resumed: bool) {
             .unwrap()
             .unwrap();
         cache.finish_prefix(&key, warm, tuple, None);
-        let capability = f
-            .store
-            .read_with(|c| prefix::PrefixSettlement::prepare_in(c, &observed.binding))
-            .unwrap();
         f.handle = f
             .owner
             .register(
@@ -117,7 +113,6 @@ fn prefix_restore_refusal(resumed: bool) {
         // The refusal assertions below must exercise the restore fence, not a
         // fixture that was already invalid. Each seam succeeds before the
         // restore starts on this same prepared fixture.
-        assert!(f.store.read_with(|c| capability.verify_in(c)).is_ok());
         assert!(f
             .store
             .read_with(|c| draft::open_draft_in(c, &observed.binding, 1))
@@ -145,6 +140,24 @@ fn prefix_restore_refusal(resumed: bool) {
             |_, _, _, _| Ok(None)
         )
         .is_ok());
+
+        // Leave a real pending row so the post-restore commit refusal reaches
+        // its publication callback instead of passing with an empty fold.
+        let mut tail = input.clone();
+        tail.append_key = "after-positive-fold".into();
+        tail.update = if resumed {
+            checkpoint.clone()
+        } else {
+            draft_doc.richdoc_append_paragraph("After positive fold")
+        };
+        tail.now_ms = 6;
+        draft::append_draft_cached(&mut f.store, &mut cache, "workspace", tail, &NoFaults).unwrap();
+
+        let capability = f
+            .store
+            .read_with(|c| prefix::PrefixSettlement::prepare_in(c, &observed.binding))
+            .unwrap();
+        assert!(f.store.read_with(|c| capability.verify_in(c)).is_ok());
         if resumed {
             restore_and_resume(&mut f);
         } else {
