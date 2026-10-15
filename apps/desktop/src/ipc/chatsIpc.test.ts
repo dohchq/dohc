@@ -231,8 +231,8 @@ describe("chat sender binding", () => {
       h.chatRelayIdentityFor, h.ensureGroupFolder, ...Object.values(h.storeMethods),
       ...Object.values(h.captureMethods), ...Object.values(h.desktopChatBookmarks)];
     services.forEach(service => service.mockClear());
-    // Operation-table rows refuse with their own inactive message; wrapped handlers say the workspace is no longer active.
-    await expect(h.invoke(channel, { ...payload, workspaceId: "other" })).rejects.toThrow(/no longer active|changed workspaces/);
+    const row = Object.values(chatOperations).find(operation => operation.channel === channel);
+    await expect(h.invoke(channel, { ...payload, workspaceId: "other" })).rejects.toThrow(row?.inactiveMessage ?? "no longer active");
     services.forEach(service => expect(service).not.toHaveBeenCalled());
   });
 });
