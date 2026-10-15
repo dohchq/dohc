@@ -383,19 +383,31 @@ export async function runRelayCase(options) {
         )
           result.checkpoints.push(row);
       };
-      // Real production validation and commits seed the long suffix. No measured samples
-      // or occupancy are mixed with this unpaced preparation.
+      // Real production validation and commits seed the long suffix, each document in order and the
+      // documents across both workers. No measured samples or occupancy are mixed with this unpaced
+      // preparation; its wall time calibrates the run estimate.
       const seedCount = options.seedUpdates ?? 0;
       if (seedCount) {
-        for (let index = 0; index < seedCount; index++)
-          for (let session = 0; session < options.sessions; session++) {
-            await update(docs[options.topology === 'shared' ? 0 : session], session, index);
-          }
+        const seedStarted = performance.now();
+        let seedFailure;
+        await Promise.all(
+          docs.map(async (entry, session) => {
+            for (let index = 0; index < seedCount && !seedFailure; index++)
+              await update(entry, session, index).catch((error) => {
+                seedFailure ??= error;
+              });
+          }),
+        );
+        if (seedFailure) throw seedFailure;
         result.seed = {
-          updatesPerSession: seedCount,
-          suffixCount: storage.readLiveUpdateJournalCut({ document: docs[0].document }).cut.suffixCount,
+          updatesPerDocument: seedCount,
+          validations: seedCount * docs.length,
+          elapsedMs: performance.now() - seedStarted,
+          suffixCounts: docs.map(
+            (entry) => storage.readLiveUpdateJournalCut({ document: entry.document }).cut.suffixCount,
+          ),
+          checkpointCount: result.checkpoints.length,
         };
-        result.seedCheckpointCount = result.checkpoints.length;
         result.updates = [];
         result.checkpoints = [];
       }
@@ -433,19 +445,6 @@ export async function runRelayCase(options) {
         await sampling;
         await samplePrivate();
         result.privateSamples = privateSamples;
-      }
-      result.achievedUpdatesPerSecondPerSession = (updates * 1000) / result.elapsedMs;
-      if (options.checkpointProbe) {
-        const timedUpdates = result.updates;
-        result.updates = [];
-        result.checkpointProof = [];
-        const entry = docs[0];
-        while (storage.readLiveUpdateJournalCut({ document: entry.document }).cut.suffixCount !== 0) {
-          await update(entry, 0, result.updates.length);
-          if (result.updates.length > updates * options.sessions + 4096) throw Error('Checkpoint did not occur');
-        }
-        result.checkpointProof = result.checkpoints.splice(0);
-        result.updates = timedUpdates;
       }
       result.updatePayloadBytesPerEdit =
         result.updates.reduce((n, row) => n + row.updateBytes, 0) / result.updates.length;

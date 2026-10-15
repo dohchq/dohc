@@ -6,12 +6,12 @@ import { DEFAULT_LIMITS } from './packaged-collection-automations.mjs';
 export const SCENARIOS = ['full', 'startup', 'switches', 'small-switch', 'small-tab', 'go-to', 'go-to-mixed', 'command-palette', 'search', 'chat-history', 'collection', 'soak', 'document-size'];
 export const SWITCHING_SCENARIOS = ['full', 'switches', 'small-switch', 'small-tab', 'soak'];
 export const usage = `node tools/perf-profiling/packaged-benchmark.mjs --binary <dohc.exe> --package-commit <40-digit SHA> --output <new directory> --label <baseline|candidate> [--runs <count>] [--idle-seconds 60] [--keystrokes 30] [--switches 10] [--files 2] [--scenario ${SCENARIOS.join('|')}] [--soak-minutes 10] [--heap-snapshot-minutes 10,60] [--chat-messages 200] [--records 500] [--find-cap 50] [--write-cap 200] [--profile-renderer true|false] [--profile-main true|false] [--engine-commit <40-digit SHA>]
-Document size: [--document-mib 2,5,8,10] [--relay-sessions 1,2,4] [--updates-per-second 8] [--churn-edits 100000] [--relay-checkout <matching checkout>] [--document-mode gate|pilot|dry-run]. Gate mode uses 10/20 worst-shape pairs, 3-pair shape proofs and one adaptive 60-minute soak, within a six-hour deadline. Dry-run needs no binary on disk and launches nothing.\nRuns default to 20 for document-size, 5 for collection and 3 for other scenarios.
+Document size: [--document-mib 2,5,8,10] [--relay-sessions 1,2,4] [--updates-per-second 8] [--churn-edits 100000] [--relay-checkout <matching checkout>] [--document-mode gate|pilot|dry-run] [--baseline <completed baseline output directory>]. Gate mode uses 10/20 worst-shape pairs, 3-pair shape proofs, at most one extension per size and one adaptive 60-minute soak, within a six-hour deadline. A gated candidate needs --baseline: its 2 MiB decisions use that receipt, as the comparison does. Dry-run needs no binary on disk and launches nothing.\nRuns default to 20 for document-size, 5 for collection and 3 for other scenarios.
 Heap snapshot minutes are distinct positive integers within the soak duration. Capture is opt-in and diagnostic.`;
 
 export function parseOptions(argv) {
   if (argv.length === 1 && argv[0] === '--help') return { help: true };
-  const names = new Set(['binary', 'package-dir', 'package-commit', 'engine-commit', 'output', 'label', 'runs', 'idle-seconds', 'keystrokes', 'switches', 'files', 'scenario', 'soak-minutes', 'heap-snapshot-minutes', 'chat-messages', 'records', 'find-cap', 'write-cap', 'profile-renderer', 'profile-main', 'document-mib', 'relay-sessions', 'updates-per-second', 'churn-edits', 'relay-checkout', 'document-mode']);
+  const names = new Set(['binary', 'package-dir', 'package-commit', 'engine-commit', 'output', 'label', 'runs', 'idle-seconds', 'keystrokes', 'switches', 'files', 'scenario', 'soak-minutes', 'heap-snapshot-minutes', 'chat-messages', 'records', 'find-cap', 'write-cap', 'profile-renderer', 'profile-main', 'document-mib', 'relay-sessions', 'updates-per-second', 'churn-edits', 'relay-checkout', 'document-mode', 'baseline']);
   const args = new Map();
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].slice(2), value = argv[i + 1];
@@ -61,9 +61,11 @@ export function parseOptions(argv) {
     options.churnEdits = integer('churn-edits', 100000);
     options.relayCheckout = resolve(args.get('relay-checkout') ?? '.');
     options.documentMode = choice('document-mode', ['gate','pilot','dry-run'], 'gate');
+    options.baseline = args.has('baseline') ? resolve(args.get('baseline')) : null;
     if (options.documentMode === 'gate' && (options.runCount !== 20 || options.keystrokes < 60 || options.churnEdits < 100000 || options.soakMinutes < 60 || options.updatesPerSecond !== 8 || options.relaySessions.join(',') !== '1,2,4' || options.documentMiB.join(',') !== '2,5,8,10')) throw Error('Document-size gating requires the complete reduced matrix, 60 keys, 100000 edits, 60-minute soaks and 1/2/4 sessions at 8 updates/s');
+    if (options.label === 'baseline' ? options.baseline : options.documentMode === 'gate' && !options.baseline) throw Error('A gated document-size candidate needs --baseline, and a baseline takes none');
   } else {
-    for (const key of ['document-mib','relay-sessions','updates-per-second','churn-edits','relay-checkout','document-mode']) if (args.has(key)) throw Error('--' + key + ' requires --scenario document-size');
+    for (const key of ['document-mib','relay-sessions','updates-per-second','churn-edits','relay-checkout','document-mode','baseline']) if (args.has(key)) throw Error('--' + key + ' requires --scenario document-size');
   }
   for (const [key, requiredScenario] of [['soak-minutes', 'soak'], ['chat-messages', 'chat-history'], ['records', 'collection'], ['find-cap', 'collection'], ['write-cap', 'collection']]) {
     if (args.has(key) && options.scenario !== requiredScenario && !(key === 'soak-minutes' && scenario === 'document-size')) throw Error(`--${key} requires --scenario ${requiredScenario}`);

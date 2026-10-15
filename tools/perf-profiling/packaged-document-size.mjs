@@ -129,15 +129,33 @@ export function observeDocumentReplacement({ timeoutMs = 30000 } = {}) {
   });
 }
 
-async function poll(read, signal, timeoutMs = 120000) {
+async function poll(read, signal, timeoutMs = 120000, intervalMs = 50) {
   const start = performance.now();
   while (performance.now() - start < timeoutMs) {
     signal.throwIfAborted();
     const value = await read();
     if (value) return value;
-    await delay(50, undefined, { signal });
+    await delay(intervalMs, undefined, { signal });
   }
   throw Error('Document did not settle within ' + timeoutMs + 'ms');
+}
+
+// The engine folds a document's log once 64 updates are pending past its snapshot
+// (DEFAULT_COMPACTION_THRESHOLD in crates/dohc-engine-collab/src/limits.rs).
+const COMPACTION_UPDATES = 64;
+const pendingUpdates = (head) => head.head_update_seq - head.head_snapshot_seq;
+
+export function engineHead(workspace, objectId) {
+  const require = createRequire(import.meta.url),
+    { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(join(workspace.rootPath, '.dohc/engine/engine.db'), { readOnly: true });
+  try {
+    return db
+      .prepare('SELECT object_id,head_update_seq,head_snapshot_seq FROM ydoc_docs WHERE object_id=?')
+      .get(objectId);
+  } finally {
+    db.close();
+  }
 }
 
 export async function engineHistoryBytes(workspace) {
@@ -244,8 +262,11 @@ export async function measurePackagedDocument({
     const memory = [],
       history = [],
       compactions = [];
-    let previousSnapshot = beforeHistory.heads.map((h) => h.head_snapshot_seq).join(','),
-      boundaryAt = null;
+    let previousSnapshot = beforeHistory.heads.map((h) => h.head_snapshot_seq).join(',');
+    // The measured document is the one whose update sequence moves once typing starts.
+    const startSeq = new Map(beforeHistory.heads.map((h) => [h.object_id, h.head_update_seq]));
+    const compactionTimings = [];
+    let target = null;
     let memorySampling, historySampling, probeError;
     const sampleMemory = () =>
       (memorySampling ??= snapshot(instance.child.pid)
@@ -265,13 +286,8 @@ export async function measurePackagedDocument({
           history.push({ elapsedMs, ...current });
           const head = current.heads.map((h) => h.head_snapshot_seq).join(',');
           if (head !== previousSnapshot) {
-            compactions.push({
-              elapsedMs,
-              observedUpperBoundMs: boundaryAt === null ? null : performance.now() - boundaryAt,
-              ...current,
-            });
+            compactions.push({ elapsedMs, ...current });
             previousSnapshot = head;
-            boundaryAt = null;
           }
         })
         .catch((error) => {
@@ -299,16 +315,50 @@ export async function measurePackagedDocument({
         await page.evaluate(
           () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
         );
-        const latest = history.at(-1) ?? beforeHistory;
-        if (latest.heads.some((h) => (h.head_update_seq + 1) % 64 === 0)) boundaryAt ??= performance.now();
+        target ??= history.at(-1)?.heads.find((h) => h.head_update_seq !== startSeq.get(h.object_id))?.object_id ?? null;
+        const latest = target && (history.at(-1) ?? beforeHistory).heads.find((h) => h.object_id === target);
+        // Near the boundary each key waits for its own append before the next key, so the key whose
+        // append reaches 64 pending is known and its compaction is timed from that key's dispatch.
+        const prior =
+          latest && pendingUpdates(latest) >= COMPACTION_UPDATES - 8 ? engineHead(workspace, target) : null;
         const dispatch = performance.now();
         await page.keyboard.press(index % 2 ? 'q' : 'x');
         const sample = await observation;
         if (!sample.triggerTrusted) throw Error('Untrusted document replacement');
+        const waitStarted = performance.now();
+        if (prior && pendingUpdates(prior) < COMPACTION_UPDATES) {
+          const landed = await poll(
+            () => {
+              const head = engineHead(workspace, target);
+              return head.head_update_seq > prior.head_update_seq ? head : null;
+            },
+            signal,
+            30000,
+            5,
+          );
+          if (
+            landed.head_snapshot_seq !== prior.head_snapshot_seq ||
+            pendingUpdates(landed) >= COMPACTION_UPDATES
+          ) {
+            // A compaction still missing after 30 s is recorded at 30 s, which fails its budget.
+            while (
+              engineHead(workspace, target).head_snapshot_seq === prior.head_snapshot_seq &&
+              performance.now() - dispatch < 30000
+            )
+              await delay(5, undefined, { signal });
+            compactionTimings.push({ index, observedUpperBoundMs: performance.now() - dispatch });
+          }
+        }
+        const boundaryWaitMs = performance.now() - waitStarted;
         await page.evaluate(
           () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
         );
-        row.samples.push({ ...sample, index, dispatchToTwoRafMs: performance.now() - dispatch });
+        row.samples.push({
+          ...sample,
+          index,
+          boundaryWaitMs,
+          dispatchToTwoRafMs: performance.now() - dispatch - boundaryWaitMs,
+        });
         editCount++;
         if (probeError) throw probeError;
         // Workload pacing, never an assertion delay.
@@ -348,6 +398,7 @@ export async function measurePackagedDocument({
     row.memory = memory;
     row.history = history;
     row.compactions = compactions;
+    row.compactionTimings = compactionTimings;
     row.status = row.durableBytes < fixture.bytes - 1 || row.durableBytes > fixture.bytes ? 'failed' : 'complete';
     if (row.status === 'failed') row.error = 'Constant-size replacements changed the complete document byte length';
     if (peer) {

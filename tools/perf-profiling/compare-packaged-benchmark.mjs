@@ -1,4 +1,5 @@
 import { compareDocumentSize } from './document-size-summary.mjs';
+import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -103,7 +104,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   if (directories.length !== 2 || directories.some(value => value.startsWith('--'))) {
     throw Error('Usage: node compare-packaged-benchmark.mjs <baseline-directory> <candidate-directory> [--margin-percent 10] [--automation-margin-percent 25] [--floor-ms 17]');
   }
-  const [baseline, candidate] = await Promise.all(directories.map(async directory => summarize(JSON.parse(await readFile(join(resolve(directory), 'result.json'), 'utf8')))));
+  // A document-size candidate records the hash of the baseline receipt its extensions used.
+  const [baseline, candidate] = await Promise.all(directories.map(async directory => {
+    const text = await readFile(join(resolve(directory), 'result.json'));
+    return { ...(await summarize(JSON.parse(text))), resultSha256: createHash('sha256').update(text).digest('hex') };
+  }));
   const comparison = { baseline: resolve(directories[0]), candidate: resolve(directories[1]), ...compareSummaries(baseline, candidate, margin) };
   await writeFile(join(resolve(directories[1]), 'comparison.json'), JSON.stringify(comparison, null, 2));
   console.log(JSON.stringify(comparison, null, 2));

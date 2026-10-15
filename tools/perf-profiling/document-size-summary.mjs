@@ -1,8 +1,10 @@
 import {
   DOCUMENT_SHAPES,
   DOCUMENT_SIZES,
+  JOURNAL_CHECKPOINT_ENTRIES,
   MiB,
   OPEN_BUDGETS,
+  RELAY_CPU_BUDGET_MS,
   STATE_MAX_BYTES,
   restoreReservation,
   pairsForCase,
@@ -36,9 +38,16 @@ const engineWrites = (row) => {
   if (!matches.length || matches.some((p) => !was.has(p.pid + ':' + p.createdAt))) return null;
   return matches.reduce((n, p) => n + p.writeBytes - was.get(p.pid + ':' + p.createdAt).writeBytes, 0);
 };
+const openAndTyping = (arms) => ({
+  firstContentMs: documentStats(arms.map((row) => row.firstContentMs)),
+  editReadyMs: documentStats(arms.map((row) => row.editReadyMs)),
+  firstKeyMs: documentStats(arms.map((row) => row.samples[0]?.keyToFrameMs)),
+  typingMs: documentStats(arms.flatMap((row) => row.samples.slice(1).map((sample) => sample.keyToFrameMs))),
+});
 export function summarizeDocumentSize(data) {
   if (data.settings?.scenario !== 'document-size') return null;
   const rows = data.runs.flatMap((run) => (run.documentSize ? [run.documentSize] : []));
+  const relays = Object.values(data.documentRelays ?? {});
   const result = {
     cases: {},
     mode: data.settings.documentMode,
@@ -48,6 +57,19 @@ export function summarizeDocumentSize(data) {
     ),
     soakAttempts: data.documentSoaks ?? [],
     missingPairs: data.runs.filter((run) => !run.documentSize).length,
+    baseline: data.documentBaseline ?? null,
+    extensions: data.documentExtensions ?? [],
+    stopped: data.documentStopped ?? null,
+    // Pilot calibration: wall time per GUI pair, per relay case and per seed validation.
+    timing: {
+      pairMs: documentStats(data.runs.map((run) => run.wallMs)),
+      relayCaseMs: documentStats(relays.map((row) => row.elapsedMs)),
+      seedMsPerValidation: documentStats(
+        relays.flatMap((row) =>
+          (row.cases ?? []).filter((arm) => arm.seed).map((arm) => arm.seed.elapsedMs / arm.seed.validations),
+        ),
+      ),
+    },
   };
   for (const mib of data.settings.documentMiB ?? [])
     for (const shape of DOCUMENT_SHAPES) {
@@ -66,16 +88,24 @@ export function summarizeDocumentSize(data) {
         churn: relayInput?.churn ?? [],
         soaks: (data.documentSoaks ?? []).filter((row) => row.mib === mib && row.shape === shape),
       };
+      // Extension decisions read only the planned pairs, so the comparator repeats the runner's decision.
+      item.basePhases = Object.fromEntries(
+        ['fresh', 'restart'].map((phase) => [
+          phase,
+          openAndTyping(
+            matching
+              .filter((row) => row.repetition <= item.requiredPairs)
+              .flatMap((row) => row.phases.filter((value) => value.phase === phase)),
+          ),
+        ]),
+      );
       for (const phase of ['fresh', 'restart']) {
         const arms = matching.flatMap((row) => row.phases.filter((value) => value.phase === phase));
         item.phases[phase] = {
           runs: arms.length,
           failures: arms.filter((row) => row.status !== 'complete').length,
           refusals: arms.filter((row) => row.status === 'refused').map((row) => row.refusal),
-          firstContentMs: documentStats(arms.map((row) => row.firstContentMs)),
-          editReadyMs: documentStats(arms.map((row) => row.editReadyMs)),
-          firstKeyMs: documentStats(arms.map((row) => row.samples[0]?.keyToFrameMs)),
-          typingMs: documentStats(arms.flatMap((row) => row.samples.slice(1).map((sample) => sample.keyToFrameMs))),
+          ...openAndTyping(arms),
           dispatchToTwoRafMs: documentStats(
             arms.flatMap((row) => row.samples.map((sample) => sample.dispatchToTwoRafMs)),
           ),
@@ -106,10 +136,7 @@ export function summarizeDocumentSize(data) {
               runs: arms.length,
               verified: arms.filter((row) => row.peer?.verified && (mode !== 'churn' || row.peer.churnEdits >= 100000))
                 .length,
-              firstContentMs: documentStats(arms.map((row) => row.firstContentMs)),
-              editReadyMs: documentStats(arms.map((row) => row.editReadyMs)),
-              firstKeyMs: documentStats(arms.map((row) => row.samples[0]?.keyToFrameMs)),
-              typingMs: documentStats(arms.flatMap((row) => row.samples.slice(1).map((sample) => sample.keyToFrameMs))),
+              ...openAndTyping(arms),
               rate: documentStats(arms.map((row) => row.editsPerMinute)),
             },
           ];
@@ -140,7 +167,8 @@ export function summarizeDocumentSize(data) {
             failures: arms.filter((row) => row.status !== 'complete').length,
             fixtureSha256: unique(arms.map((row) => row.fixtureSha256)),
             rate: documentStats(arms.map((row) => row.achievedUpdatesPerSecondPerSession)),
-            longSuffixUpdates: updates.filter((row) => row.suffixCount >= 3800).length,
+            longSuffixUpdates: updates.filter((row) => row.suffixCount >= JOURNAL_CHECKPOINT_ENTRIES - 240).length,
+            maximumSuffixCount: max(updates.map((row) => row.suffixCount)),
             databaseBytes: documentStats(arms.map((row) => row.databaseBytes)),
             databaseAndWalBytes: documentStats(
               arms.map((row) => row.databaseFilesBytes?.reduce((n, value) => n + value, 0)),
@@ -159,9 +187,7 @@ export function summarizeDocumentSize(data) {
             updateBytes: documentStats(updates.map((row) => row.updateBytes)),
             stateBytes: documentStats(updates.map((row) => row.stateBytes)),
             snapshotBytes: documentStats(
-              arms.flatMap((row) =>
-                [...row.checkpoints, ...(row.checkpointProof ?? [])].map((checkpoint) => checkpoint.stateBytes),
-              ),
+              arms.flatMap((row) => row.checkpoints.map((checkpoint) => checkpoint.stateBytes)),
             ),
             largestStateBytes: requiredState,
             reservation,
@@ -193,10 +219,7 @@ export function summarizeDocumentSize(data) {
               link: arms.reduce((n, row) => n + (row.doorAdmissions?.link ?? 0), 0),
             },
             recoveryVerified: arms.filter((row) => row.journalRecoveryVerified).length,
-            checkpointCount: arms.reduce(
-              (n, row) => n + row.checkpoints.length + (row.checkpointProof?.length ?? 0),
-              0,
-            ),
+            checkpointCount: arms.reduce((n, row) => n + row.checkpoints.length, 0),
             backlogGrowthMs: documentStats(
               arms.map((row) =>
                 row.updates.length
@@ -222,7 +245,7 @@ export function summarizeDocumentSize(data) {
       );
       item.soakMinutes = documentStats(soaks.map((row) => row.elapsedMs / 60000));
       item.compactionMs = documentStats(
-        soaks.flatMap((row) => row.compactions?.map((value) => value.observedUpperBoundMs) ?? []),
+        soaks.flatMap((row) => row.compactionTimings?.map((value) => value.observedUpperBoundMs) ?? []),
       );
       item.retainedTrendBytesPerMinute = documentStats(
         soaks.map((row) => {
@@ -276,19 +299,14 @@ export function soakChecks(row) {
     compactions = row.compactions ?? [];
   const bytes = (minute) => memory.find((sample) => sample.elapsedMs >= minute * 60000)?.kinds?.renderer?.privateBytes;
   const retained = compactions.map((sample) => sample.retainedBytes);
+  const timed = (row.compactionTimings ?? []).map((sample) => sample.observedUpperBoundMs).filter(Number.isFinite);
   return {
     rate: row.editsPerMinute,
     memory10: bytes(10),
     memory60: bytes(60),
     peak: memory.length ? Math.max(...memory.map((sample) => sample.kinds?.renderer?.privateBytes ?? Infinity)) : null,
-    compaction:
-      compactions.length >= 2
-        ? Math.max(
-            ...compactions
-              .filter((sample) => Number.isFinite(sample.observedUpperBoundMs))
-              .map((sample) => sample.observedUpperBoundMs),
-          )
-        : null,
+    // Most observed compactions need a timing from their crossing key; otherwise the check is missing.
+    compaction: compactions.length >= 2 && timed.length * 2 >= compactions.length ? Math.max(...timed) : null,
     retained:
       retained.length >= 2 && retained.every(Number.isFinite)
         ? Math.max(...retained.map((value) => value - retained[0]))
@@ -315,6 +333,9 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
     candidate.settings?.updatesPerSecond !== 8
   )
     problems.push('60 keys, 100000 churn edits and 8 edits/s are required');
+  // The runner decided 2 MiB extensions against one baseline receipt; only that receipt can check them.
+  if (candidate.documentSize?.baseline?.resultSha256 !== baseline.resultSha256)
+    problems.push('The candidate decided its extensions against another baseline receipt');
   const add = (key, metric, value, limit, present = Number.isFinite(value), detail = {}) => {
     const row = {
       key,
@@ -338,6 +359,10 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
     const budget = relativeBudget(control, stats, p, margin);
     add(key, label + ' ' + p, stats?.[p], budget.limit, stats?.count >= min && control?.count >= min, budget);
   };
+  // A 60-key arm spends most of each 125 ms key on CDP round trips and frame waits, so its rate
+  // measures the harness, and a longer arm keeps the same per-key cost. The soak gates sustained rate.
+  const reportRate = (key, label, arm) =>
+    checks.push({ key, metric: label + ' achieved edits/min', value: arm?.rate?.min ?? null, verdict: 'reported' });
   for (const phase of ['fresh', 'restart'])
     relative(
       'control',
@@ -367,6 +392,7 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
   }
   for (const mib of DOCUMENT_SIZES) {
     const start = checks.length;
+    let extended = false;
     for (const shape of DOCUMENT_SHAPES) {
       const key = mib + '/' + shape,
         item = cases[key],
@@ -386,8 +412,11 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
       if (before[key] && JSON.stringify(before[key].fixtureSha256) !== JSON.stringify(item.fixtureSha256))
         add(key, 'matching fixture', null, 0, false);
       const control = (mib === 2 ? before : cases)['2/' + shape];
-      if (item.pairs < 40 && needsDocumentExtension(item, control))
-        add(key, 'near-budget extension to forty pairs', null, 0, false);
+      const target = extended ? 0 : documentExtensionTarget(item, control);
+      if (target) {
+        extended = true;
+        add(key, 'near-budget extension to ' + target + ' pairs', item.pairs, Infinity, item.pairs >= target);
+      }
       for (const phase of ['fresh', 'restart']) {
         const arm = item.phases?.[phase],
           base = control?.phases?.[phase];
@@ -405,13 +434,7 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
             relative(key, phase + ' ' + metric, arm?.[metric], base?.[metric], p, metric === 'typingMs' ? 3 * 59 : 3);
         stat(key, phase + ' settle', arm?.settleMs, 'p95', 1000, n);
         stat(key, phase + ' normalized engine cores', arm?.engineCores, 'p95', 1, n);
-        add(
-          key,
-          phase + ' achieved rate shortfall',
-          Math.max(0, 480 - (arm?.rate?.min ?? 0)),
-          24,
-          arm?.rate?.count >= n,
-        );
+        reportRate(key, phase, arm);
       }
       for (const mode of ['peer', 'churn']) {
         const arm = item.peerPhases?.[mode],
@@ -425,27 +448,28 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
             ['editReadyMs', OPEN_BUDGETS[mib].editReady],
           ])
             stat(key, 'churn ' + metric, arm?.[metric], 'p95', budget[1], 3);
-        add(
-          key,
-          mode + ' achieved rate shortfall',
-          Math.max(0, 480 - (arm?.rate?.min ?? 0)),
-          24,
-          arm?.rate?.count >= 3,
-        );
+        reportRate(key, mode, arm);
       }
       const churn = item.churn?.find((row) => !row.structural);
       add(key, '100000-edit churn and 5 MiB headroom', churn?.pass ? 0 : 1, 0, !!churn);
       add(key, 'structural admission recorded', 0, 0, !!item.churn?.find((row) => row.structural)?.admission?.status);
       const full = shape === 'formatted-retained',
-        primary = item.relay?.['separate/1'];
+        primary = item.relay?.['separate/1'],
+        seeded = item.relay?.['separate/4'];
       const arms = full ? ['separate/1', 'separate/2', 'separate/4', 'shared/4'] : ['separate/4'];
       for (const label of arms) {
         const relay = item.relay?.[label],
           shared = label.startsWith('shared'),
           from = checks.length;
         add(key, label + ' failures', relay?.failures, 0, relay?.runs >= 1);
-        if (full)
-          add(key, label + ' long suffix samples', relay?.longSuffixUpdates, Infinity, relay?.longSuffixUpdates >= 100);
+        if (full && label === 'separate/4')
+          add(
+            key,
+            label + ' longest timed suffix',
+            relay?.maximumSuffixCount,
+            JOURNAL_CHECKPOINT_ENTRIES - 1,
+            relay?.maximumSuffixCount === JOURNAL_CHECKPOINT_ENTRIES - 1,
+          );
         add(
           key,
           label + ' recovered journal',
@@ -455,8 +479,8 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
         );
         const count = 240 * Number(label.split('/')[1]);
         for (const [metric, p, limit, min] of [
-          ['cpuMs', 'p50', 50, count],
-          ['cpuMs', 'p95', 100, count],
+          ['cpuMs', 'p50', RELAY_CPU_BUDGET_MS.p50, count],
+          ['cpuMs', 'p95', RELAY_CPU_BUDGET_MS.p95, count],
           ['waitMs', 'p95', 100, count],
           ['slotMs', 'p95', 100, count],
           ['occupancy', 'max', 0.8, 1],
@@ -515,8 +539,8 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
         );
         add(key, 'native restore reservation', primary?.reservation?.nativeBytes, 512 * MiB);
         if (full) {
-          add(key, 'checkpoint proof', primary?.checkpointCount, Infinity, primary?.checkpointCount >= 1);
-          stat(key, 'checkpoint state', primary?.snapshotBytes, 'max', STATE_MAX_BYTES);
+          add(key, 'checkpoint proof', seeded?.checkpointCount, Infinity, seeded?.checkpointCount >= 1);
+          stat(key, 'checkpoint state', seeded?.snapshotBytes, 'max', STATE_MAX_BYTES);
         }
       }
       for (const row of item.churnedRelay ?? []) {
@@ -538,7 +562,7 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
         );
         if (row.topology === 'separate')
           for (const [metric, limit] of [
-            ['cpuMs', 100],
+            ['cpuMs', RELAY_CPU_BUDGET_MS.p95],
             ['waitMs', 100],
             ['slotMs', 100],
           ])
@@ -607,15 +631,29 @@ export function compareDocumentSize(baseline, candidate, margin, { includeSoak =
   };
 }
 
-export function needsDocumentExtension(item, control = item, margin = { percent: 10, floorMs: 17 }) {
-  if (!item || item.pairs >= 40) return false;
-  return ['fresh', 'restart'].some((phase) =>
+// One rule for the runner and the comparator, with the default margin. An arm whose planned-pair open,
+// first-key or typing p95 sits within 10% of its limit gets more pairs: three-pair shapes to twenty,
+// the worst shape to forty. Each size extends at most one arm, the first in run order.
+const EXTENSION_MARGIN = { percent: 10, floorMs: 17 };
+export function documentExtensionTarget(item, control) {
+  if (!item) return 0;
+  const near = ['fresh', 'restart'].some((phase) =>
     ['firstContentMs', 'editReadyMs', 'firstKeyMs', 'typingMs'].some((metric) => {
-      const budget = ['firstKeyMs', 'typingMs'].includes(metric)
-          ? relativeBudget(control.phases?.[phase]?.[metric], item.phases?.[phase]?.[metric], 'p95', margin).limit
-          : OPEN_BUDGETS[item.mib][metric === 'firstContentMs' ? 'firstContent' : 'editReady'][1],
-        value = item.phases?.[phase]?.[metric]?.p95;
-      return Number.isFinite(value) && value >= budget * 0.9 && value <= budget * 1.25;
+      const limit = ['firstKeyMs', 'typingMs'].includes(metric)
+          ? relativeBudget(control?.phases?.[phase]?.[metric], null, 'p95', EXTENSION_MARGIN).limit
+          : OPEN_BUDGETS[item.mib]?.[metric === 'firstContentMs' ? 'firstContent' : 'editReady']?.[1],
+        value = item.basePhases?.[phase]?.[metric]?.p95;
+      return (
+        Number.isFinite(value) &&
+        Number.isFinite(limit) &&
+        Math.abs(value - limit) <= (limit * EXTENSION_MARGIN.percent) / 100
+      );
     }),
   );
+  return near ? (item.shape === 'formatted-retained' ? 40 : 20) : 0;
+}
+
+// A size can no longer be chosen once one of its cases has a check that is neither passing nor reported.
+export function documentCaseBlocked(comparison, key) {
+  return comparison.checks.some((row) => row.key === key && !['pass', 'reported'].includes(row.verdict));
 }

@@ -7,17 +7,20 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
 import { observeDocumentReplacement, engineHistoryBytes } from './packaged-document-size.mjs';
-import { relativeBudget, soakChecks } from './document-size-summary.mjs';
+import { documentExtensionTarget, relativeBudget, soakChecks } from './document-size-summary.mjs';
 import { startGenerator } from './document-size-generator.mjs';
+import { relayArms } from './document-size-runner.mjs';
 import { spawnSync } from 'node:child_process';
 import {
   DOCUMENT_SIZES,
   DOCUMENT_SHAPES,
+  JOURNAL_CHECKPOINT_ENTRIES,
   documentFixture,
   documentControlFiles,
   documentMatrix,
   MiB,
   restoreReservation,
+  runtimeEstimate,
 } from './document-size-fixtures.mjs';
 import { parseOptions } from './packaged-benchmark-options.mjs';
 import { documentStats, summarizeDocumentSize } from './document-size-summary.mjs';
@@ -36,7 +39,12 @@ const args = [
   'candidate',
   '--scenario',
   'document-size',
+  '--baseline',
+  'unused-baseline',
 ];
+const baselineArgs = args
+  .filter((value, index, all) => value !== '--baseline' && all[index - 1] !== '--baseline')
+  .map((value, index, all) => (all[index - 1] === '--label' ? 'baseline' : value));
 const bounds = {
   maxEvents: 64,
   headerBytes: 643576,
@@ -53,10 +61,8 @@ const soak = (mib) => ({
     { elapsedMs: 600000, kinds: { renderer: { privateBytes: 300000000 } } },
     { elapsedMs: 3600000, kinds: { renderer: { privateBytes: 350000000 } } },
   ],
-  compactions: [
-    { retainedBytes: 100000, observedUpperBoundMs: 100 },
-    { retainedBytes: 200000, observedUpperBoundMs: 100 },
-  ],
+  compactions: [{ retainedBytes: 100000 }, { retainedBytes: 200000 }],
+  compactionTimings: [{ observedUpperBoundMs: 100 }, { observedUpperBoundMs: 100 }],
 });
 export function passingDocumentSummary() {
   const settings = {
@@ -74,11 +80,13 @@ export function passingDocumentSummary() {
     status: 'complete',
     settings,
     diagnostic: false,
+    resultSha256: 'baseline-receipt',
     freshEditableObservedMs: stats(500),
     restartEditableObservedMs: stats(500),
     documentSize: {
       metricsVersion: 2,
       missingPairs: 0,
+      baseline: { resultSha256: 'baseline-receipt' },
       controls: { legacyOpenMs: stats(100, 40), linksOpenMs: stats(100, 40) },
       soakAttempts: [10, 8, 5, 2].map(soak),
       cases: {},
@@ -104,7 +112,8 @@ export function passingDocumentSummary() {
         runs: 1,
         failures: 0,
         recoveryVerified: 1,
-        longSuffixUpdates: 2000,
+        longSuffixUpdates: 960,
+        maximumSuffixCount: JOURNAL_CHECKPOINT_ENTRIES - 1,
         rate: stats(8, 1),
         fixtureSha256: ['fixture-' + mib + shape],
         socketProbesVerified: 1,
@@ -139,6 +148,7 @@ export function passingDocumentSummary() {
         repetitions: Array.from({ length: 40 }, (_, i) => i + 1),
         fixtureSha256: ['fixture-' + mib + shape],
         phases: { fresh: phase(), restart: phase() },
+        basePhases: { fresh: phase(), restart: phase() },
         peerPhases: Object.fromEntries(['peer', 'churn'].map((mode) => [mode, { ...phase(), verified: 40 }])),
         relay: Object.fromEntries(
           ['separate/1', 'separate/2', 'separate/4', 'shared/4'].map((label) => [label, relay()]),
@@ -187,6 +197,10 @@ test('document-size gate uses bounded pair counts while refusing reduced workloa
   ])
     assert.throws(() => parseOptions([...args, ...flags]));
   assert.equal(parseOptions([...args, '--runs', '5', '--document-mode', 'pilot']).documentMode, 'pilot');
+  // The candidate's 2 MiB decisions need the baseline receipt the comparison will use.
+  assert.throws(() => parseOptions(args.slice(0, -2)), /needs --baseline/);
+  assert.throws(() => parseOptions([...baselineArgs, '--baseline', 'other']), /needs --baseline/);
+  assert.equal(parseOptions([...args.slice(0, -2), '--document-mode', 'pilot']).baseline, null);
 });
 
 test('all fixtures have exact UTF-8 sizes, stable hashes, multilingual text and node headroom', () => {
@@ -255,10 +269,10 @@ test('required measurements fail closed; relative gates have spread and frame ma
       v.documentSize.cases['2/plain'].peerPhases.peer.verified = 0;
     },
     (v) => {
-      v.documentSize.cases['2/plain'].phases.fresh.rate.min = 400;
+      for (const row of v.documentSize.soakAttempts) row.editsPerMinute = 400;
     },
     (v) => {
-      v.documentSize.cases['2/formatted-retained'].relay['separate/2'].longSuffixUpdates = 0;
+      v.documentSize.cases['2/formatted-retained'].relay['separate/4'].maximumSuffixCount = 4080;
     },
   ]) {
     const value = passingDocumentSummary();
@@ -526,11 +540,92 @@ test('document-size campaign has 106 candidate pairs and 65 baseline/refusal pai
     documentMatrix(options).reduce((n, row) => n + row.plannedPairs, 0),
     106,
   );
-  const baseline = parseOptions(args.map((value, index, all) => (all[index - 1] === '--label' ? 'baseline' : value)));
+  const baseline = parseOptions(baselineArgs);
   assert.equal(
     documentMatrix(baseline).reduce((n, row) => n + row.plannedPairs, 0),
     65,
   );
+  // Every size runs its worst shape first; the per-size extension cap follows this order.
+  assert.deepEqual(
+    documentMatrix(options)
+      .slice(0, 4)
+      .map((row) => row.shape),
+    DOCUMENT_SHAPES,
+  );
+  assert.equal(DOCUMENT_SHAPES[0], 'formatted-retained');
+  // 4 sizes x 4 documents x 3,855 seeds over two workers, at the 50 ms CPU budget.
+  assert.equal(runtimeEstimate().minutes.relaySeeding, 26);
+});
+test('one near-budget arm per size extends, decided on planned pairs against the comparator control', () => {
+  const baseline = passingDocumentSummary(),
+    candidate = passingDocumentSummary();
+  // Typing p95 32 ms sits within 10% of the 33 ms limit over a 16 ms control.
+  for (const key of ['5/plain', '5/formatted']) {
+    Object.assign(candidate.documentSize.cases[key], { pairs: 3, repetitions: [1, 2, 3] });
+    candidate.documentSize.cases[key].basePhases.fresh.typingMs = stats(32, 177);
+  }
+  const short = compareSummaries(baseline, candidate);
+  assert.ok(
+    short.checks.some(
+      (row) => row.key === '5/plain' && row.metric === 'near-budget extension to 20 pairs' && row.verdict === 'missing',
+    ),
+  );
+  assert.ok(!short.checks.some((row) => row.key === '5/formatted' && /extension/.test(row.metric)));
+  assert.equal(short.selectedMiB, 2);
+  Object.assign(candidate.documentSize.cases['5/plain'], {
+    pairs: 20,
+    repetitions: Array.from({ length: 20 }, (_, i) => i + 1),
+  });
+  assert.equal(compareSummaries(baseline, candidate).selectedMiB, 10);
+  // A clear failure is not extended.
+  candidate.documentSize.cases['5/plain'].basePhases.fresh.typingMs = stats(60, 177);
+  assert.equal(documentExtensionTarget(candidate.documentSize.cases['5/plain'], candidate.documentSize.cases['2/plain']), 0);
+  // At 2 MiB the baseline package is the control, so the candidate's own 2 MiB data cannot decide.
+  baseline.documentSize.cases['2/plain'].phases.fresh.typingMs = stats(40, 177);
+  candidate.documentSize.cases['2/plain'].basePhases.fresh.typingMs = stats(32, 177);
+  const item = candidate.documentSize.cases['2/plain'];
+  assert.equal(documentExtensionTarget(item, candidate.documentSize.cases['2/plain']), 20);
+  assert.equal(documentExtensionTarget(item, baseline.documentSize.cases['2/plain']), 0);
+  assert.ok(!compareSummaries(baseline, candidate).checks.some((row) => row.key === '2/plain' && /extension/.test(row.metric)));
+});
+test('extensions decided against another baseline receipt are inconclusive', () => {
+  const candidate = passingDocumentSummary();
+  candidate.documentSize.baseline.resultSha256 = 'another';
+  const result = compareSummaries(passingDocumentSummary(), candidate);
+  assert.equal(result.pass, false);
+  assert.ok(result.problems.some((problem) => /another baseline receipt/.test(problem)));
+});
+test('60-key arm rates are reported while the soak gates the sustained rate', () => {
+  const candidate = passingDocumentSummary();
+  candidate.documentSize.cases['2/plain'].phases.fresh.rate = stats(400, 40);
+  candidate.documentSize.cases['2/plain'].peerPhases.churn.rate = stats(400, 40);
+  const result = compareSummaries(passingDocumentSummary(), candidate);
+  assert.equal(result.selectedMiB, 10);
+  assert.ok(result.checks.some((row) => row.metric === 'fresh achieved edits/min' && row.value === 400 && row.verdict === 'reported'));
+});
+test('compaction timing needs most observed compactions measured from their crossing key', () => {
+  const row = soak(2);
+  row.compactions.push({ retainedBytes: 200000 }, { retainedBytes: 200000 });
+  assert.equal(soakChecks(row).compaction, 100);
+  row.compactions.push({ retainedBytes: 200000 });
+  assert.equal(soakChecks(row).compaction, null);
+});
+test('separate/4 seeds every document so its timed window ends at the checkpoint', () => {
+  const arms = relayArms({ fullRelay: true, updates: 240 });
+  assert.deepEqual(
+    arms.map((arm) => [arm.topology, arm.sessions, arm.seedUpdates]),
+    [
+      ['separate', 1, 0],
+      ['separate', 2, 0],
+      ['separate', 4, 3855],
+      ['shared', 4, 0],
+    ],
+  );
+  // The last timed update sees 4,094 entries and commits the 4,095th, the checkpoint.
+  assert.equal(arms[2].seedUpdates + 239, JOURNAL_CHECKPOINT_ENTRIES - 1);
+  assert.ok(relayArms({ fullRelay: false, updates: 240 }).every((arm) => arm.seedUpdates === 0));
+  assert.ok(relayArms({ smoke: true, updates: 3 }).every((arm) => arm.seedUpdates === 0));
+  assert.equal(relayArms({ fullRelay: true, updates: 60, pilot: true })[2].seedUpdates, 452);
 });
 test('existing soak receipts can still compare different durations', () => {
   const before = { status: 'complete', settings: { scenario: 'soak', soakMinutes: 10 } },

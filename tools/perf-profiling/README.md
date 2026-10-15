@@ -166,23 +166,42 @@ Run pnpm --filter @dohc/app-backend-runtime build in that checkout.
 Keep any diagnostic content/SQL/state raise in a disposable checkout; preserve its patch and build receipt.
 Native ingress, worker and process memory budgets stay unchanged.
 
-Run from the harness checkout on an admitted idle Windows host:
+Calibrate the estimate with a packaged pilot first. It runs one size, four pairs per shape, the relay and a one-minute soak:
 
 ~~~powershell
-node tools/perf-profiling/packaged-benchmark.mjs --binary <release.exe> --package-commit <SHA> --output <new-directory> --label candidate --scenario document-size --document-mib 2,5,8,10 --runs 20 --keystrokes 60 --relay-sessions 1,2,4 --updates-per-second 8 --churn-edits 100000 --soak-minutes 60
+node tools/perf-profiling/packaged-benchmark.mjs --binary <release.exe> --package-commit <SHA> --output <pilot-directory> --label candidate --scenario document-size --document-mode pilot --document-mib 2 --runs 4 --keystrokes 60 --soak-minutes 1
+node tools/perf-profiling/summarize-packaged-benchmark.mjs <pilot-directory>
+~~~
+
+Read `documentSize.timing` in the summary. `pairMs` covers pairs 1 to 3 with peer and churn arms and lean pair 4.
+`relayCaseMs` is the relay work per case, and `seedMsPerValidation` is the seeding wall time per validation across both workers.
+Relay and seed costs grow with document size, so 2 MiB values understate larger sizes.
+Also read each phase's `rate` and the soak's `compactionTimings` against its `compactions`.
+The pilot seeds 452 entries, not 3,855, and reaches no checkpoint. Pilots cannot choose a limit.
+
+Run the full benchmark from the harness checkout on an admitted idle Windows host.
+Run the baseline first. The candidate's `--baseline` names the baseline's output directory:
+
+~~~powershell
+node tools/perf-profiling/packaged-benchmark.mjs --binary <baseline.exe> --package-commit <SHA> --output <baseline-directory> --label baseline --scenario document-size --document-mib 2,5,8,10 --runs 20 --keystrokes 60 --relay-sessions 1,2,4 --updates-per-second 8 --churn-edits 100000 --soak-minutes 60
+node tools/perf-profiling/packaged-benchmark.mjs --binary <release.exe> --package-commit <SHA> --output <candidate-directory> --label candidate --baseline <baseline-directory> --scenario document-size --document-mib 2,5,8,10 --runs 20 --keystrokes 60 --relay-sessions 1,2,4 --updates-per-second 8 --churn-edits 100000 --soak-minutes 60
 ~~~
 
 Use --relay-checkout <path> or --engine-commit <SHA> when those inputs differ.
-Use --label baseline and another output directory for the baseline package.
+The candidate decides its 2 MiB extensions and early stops against the baseline receipt, and records that receipt's hash.
 Summarize each result.json, then run compare-packaged-benchmark.mjs <baseline-directory> <candidate-directory>.
+The comparison is inconclusive when the candidate recorded another baseline receipt.
 The receipt hashes sources, packages, engine, schema, fixtures and harness, and saves the relay patch.
 Full and soak remain separate release requirements; other scenarios keep their settings comparison rules.
 
-Book **six hours per package**. The uncalibrated estimate is **4.75 hours normally, 5.75 with a fallback soak**.
+Book **six hours per package**. The uncalibrated normal estimate is **5.1 hours**:
+115 minutes for 106 lean GUI pairs at 65 seconds, 5 for controls, 26 for seeding,
+90 for the other relay and fixture work, 60 for one soak and 10 for setup.
+Seeding is 61,680 validations, 30,840 per worker, at the 50 ms CPU budget.
+A size whose fresh separate arms exceed that budget stops before it seeds.
+An extension adds 18 to 33 minutes, at most one per size.
+A fallback soak adds 60 minutes. It fits only when the calibrated normal run is under five hours.
 The six-hour deadline aborts owned work and marks unfinished evidence inconclusive. It never grants a size.
-Allow 115 minutes for 106 lean GUI pairs at 65 seconds, five for controls, 90 for fixtures/relay,
-60 for a soak and 15 for extensions/setup. A fallback soak adds 60 minutes.
-Slow validation, extra promoted shapes or extensions can exhaust the booking. Calibrate with a pilot first.
 Baseline runs only the 2 MiB relay/churn/soak arms, plus three GUI refusal pairs per larger shape,
 about three hours. This saves baseline work without treating a refusal as performance evidence.
 
@@ -190,13 +209,14 @@ about three hours. This saves baseline work without treating a refusal as perfor
 | --- | --- | --- |
 | Sizes | All 2, 5, 8 and 10 MiB, exact UTF-8 including frontmatter. | No size interpolation. |
 | Shapes/pairs | Formatted-retained: ten 2 MiB control pairs, twenty at each larger size. Other shapes: three pairs each. | Twenty-pair p95 is second-slowest; ten-pair p95 is slowest. Shape proofs have weak tail power. |
-| Extension | Extend a near-budget open/first-key/typing arm to forty pairs once. Promote a pilot whose maximum exceeds the worst shape's p95 to twenty. | More work can make the deadline inconclusive. Forty-pair p95 is third-slowest, still not a distribution-free confidence bound. |
+| Extension | An arm whose planned-pair open, first-key or typing p95 is within 10% of its limit gets more pairs right away: shapes to twenty, the worst shape to forty. At most one arm per size, the first in run order. The comparator repeats the decision with the same control. | 17 to 30 more pairs. Twenty-pair p95 is second-slowest and forty-pair third-slowest, not distribution-free bounds. |
+| Stops | After each case, a candidate checks it as the comparator does. A failed or missing check ends the run, because no larger size can be chosen. In the relay, a failed separate arm or separate CPU over budget skips the case's later arms and churn. | Larger sizes stay unmeasured once a smaller size fails. |
 | Correctness | Export/history in the first three fresh/restart pairs; full durable hash every pair. Three peer/churn renderer arms per shape. | Rare correctness failures have less repetition. |
 | Controls | Forty 5,000-paragraph opens and forty with 500 distinct local links, pooled once across fresh launches. Startup pools all launches. | One pooled control across forty fresh launches; no per-size control gate or variance estimate. |
 | Relay | Independent of GUI pairs: 240 updates/session for separate 1/2/4 and shared 4, on the worst shape at every size. Other shapes get separate/4 and native separate/1 proofs. | One independent worker/storage launch per arm; update percentiles do not estimate run-to-run GC/JIT variance. |
-| Long suffix | Worst-shape arms seed 3,840 production-validated commits per document before timing. Shared seeds 3,840 total. | Seeding is unpaced and excluded from latency statistics. Shared latency remains diagnostic. |
-| Checkpoints | Continue separate/1 unpaced through the real 4,095th-update checkpoint. Unit-test both count and 20 MiB suffix-byte triggers. | Byte-trigger timing is not measured: a large artificial update would change the workload. |
-| Churn | Exactly 100,000 edits, eight client IDs; exact state-ceiling crossing search capped at one million, then censored. Replay churned separate 1/4 and shared 4; other shapes separate 1/4. | No decision loss from censoring beyond required headroom. Churned relay samples have short suffixes; fresh long-suffix arms cover replay cost. |
+| Long suffix | Worst-shape separate/4 seeds 3,855 production-validated commits into each document, across both workers. Its timed updates see suffixes of 3,855 to 4,094 entries, the longest the journal allows. Separate 1/2 and shared 4 start fresh; separate/4 bounds their CPU, wait and slot at that suffix. | Seeding is unpaced and excluded from latency statistics. CPU p50 is a long-suffix median, an upper bound on the steady state; mid-suffix updates are not sampled. Shared latency remains diagnostic. |
+| Checkpoints | Each separate/4 document's last timed update commits the real 4,095th entry and its checkpoint. Unit-test both count and 20 MiB suffix-byte triggers. | Byte-trigger timing is not measured: a large artificial update would change the workload. |
+| Churn | Exactly 100,000 edits, eight client IDs; exact state-ceiling crossing search capped at one million, then censored. Replay churned separate 1/4 and shared 4; other shapes separate 1/4. | No decision loss from censoring beyond required headroom. Churned relay samples have short suffixes; the seeded separate/4 arm covers long-suffix replay cost. |
 | Joins | Separate/1: worst shape has twenty native and twenty named/link socket joins across fresh/restart; other shapes have six native and twelve socket proofs. Real restore once per shape. | Join tail has twenty samples. Restore/ACK/native-drain latency is diagnostic, not an unapproved gate. |
 | Soak | One sixty-minute formatted-retained soak starting at 100,000 edits at the largest otherwise-passing size; next size down if it fails. At most two hours. | Smaller sizes and other shapes rely on rising memory cost; there is no independent sixty-minute sample for them. Two failures leave no qualified raise. |
 
@@ -219,7 +239,13 @@ Native draining happens after the measured admission loop; it cannot throttle of
 The scheduler offers eight updates/s/session and records achieved rate, queue lag, worker CPU, wait, slot and occupancy.
 Boundary/25 ms worker heap samples can miss brief peaks. Exclude final heap sampling from occupied time.
 A five-second asynchronous process sampler replaces one-second pwsh launches; its cost is recorded.
-GUI memory and history probes run independently of typing. A compaction upper bound starts at the key crossing the 64-update boundary and ends at the observed new snapshot, including probe uncertainty.
+GUI memory and history probes run independently of typing.
+The engine compacts a document once 64 updates are pending past its snapshot.
+Within eight updates of that threshold, each key waits for its own append before the next key.
+Compaction timing starts at the key whose append reaches 64 pending updates and ends when the new snapshot is visible, polled every 5 ms.
+The soak's compaction check needs a timing for at least half of the observed compactions.
+A 60-key arm spends most of each 125 ms key on CDP round trips and frame waits, so its rate measures the harness.
+A longer arm keeps the same per-key cost, so 60-key arms report their rate and the soak gates it. Latency samples do not depend on the rate.
 
 | Gate | Budget |
 | --- | --- |
@@ -231,7 +257,7 @@ GUI memory and history probes run independently of typing. A compaction upper bo
 | 5 MiB first content; edit-ready | 750/1000 ms; 1250/1500 ms. |
 | 8 MiB first content; edit-ready | 1000/1250 ms; 1750/2000 ms. |
 | 10 MiB first content; edit-ready | 1250/1500 ms; 2250/2500 ms. |
-| Achieved edit rate | >=456 edits/min GUI and >=7.6 updates/s per separate relay session. CPU and recorded writes normalize to 480 edits/min. |
+| Achieved edit rate | >=456 edits/min over the soak and >=7.6 updates/s per separate relay session. 60-key arms report their rate. CPU and recorded writes normalize to 480 edits/min. |
 | Renderer private bytes | <=435 MB at ten minutes; <=477 MB at sixty minutes and sampled peak. |
 | Relay update | CPU p50/p95 <=50/100 ms; wait/slot/backlog <=100 ms; two-worker occupancy <=80%. Shared latency is reported. |
 | Relay memory | Worker sampled heap <=384 MiB; 512 MiB hard limit. Relay PID private plus restore reservation <=1 GiB. |
@@ -250,8 +276,7 @@ Choose the largest contiguous otherwise-passing size, then require its full soak
 No passing 2 MiB means no raise. Always measure 8 MiB before choosing between 5 and 10.
 
 For a launch-free plan, add --document-mib 2 --document-mode dry-run; the binary may be absent.
-For a packaged pilot use --document-mode pilot --document-mib 2 --runs 1 --keystrokes 3 --soak-minutes 1.
-Pilots cannot choose a limit. No full packaged run is part of harness verification.
+No pilot or full packaged run is part of harness verification.
 For the bounded relay smoke, write settings.json with absolute checkout/directory paths and updatesPerSecond: 8, then run:
 
 ~~~powershell

@@ -1,5 +1,6 @@
 import { summarize } from './summarize-packaged-benchmark.mjs';
-import { compareDocumentSize, needsDocumentExtension } from './document-size-summary.mjs';
+import { DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
+import { compareDocumentSize, documentCaseBlocked, documentExtensionTarget } from './document-size-summary.mjs';
 import { documentFixture, documentMatrix, runtimeEstimate, pairsForCase, documentControlFiles } from './document-size-fixtures.mjs';
 import { measurePackagedDocument } from './packaged-document-size.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
@@ -84,6 +85,15 @@ if (scenario === 'document-size') {
   receipt.relayCheckout = options.relayCheckout;
   receipt.relayCommit = execFileSync('git', ['-C', options.relayCheckout, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   receipt.relayPatchSha256 = createHash('sha256').update(patch).digest('hex');
+}
+// Candidate extensions and early stops decide 2 MiB against this baseline, as the comparator does.
+let documentBaseline = null;
+if (scenario === 'document-size' && options.baseline) {
+  const text = await readFile(join(options.baseline, 'result.json'));
+  documentBaseline = { ...(await summarize(JSON.parse(text))), resultSha256: createHash('sha256').update(text).digest('hex') };
+  if (documentBaseline.status !== 'complete' || documentBaseline.label !== 'baseline' || documentBaseline.settings?.scenario !== 'document-size' || documentBaseline.settings.documentMode !== options.documentMode)
+    throw Error('--baseline must name a complete document-size baseline receipt in the same mode');
+  receipt.documentBaseline = { directory: options.baseline, resultSha256: documentBaseline.resultSha256 };
 }
 Object.assign(receipt, {
   label, binary, binarySha256: await sha256(binary), asar, asarSha256: await sha256(asar),
@@ -821,13 +831,25 @@ async function soak(instance, data, runDir) {
   return result;
 }
 
+async function documentRelay(runDir, documentCase, deadline) {
+  const relayDir=join(runDir,'relay');await mkdir(relayDir);
+  const relaySettings={...documentCase,directory:relayDir,checkout:options.relayCheckout,engineBinary,
+    fullRelay:documentCase.shape==='formatted-retained',relaySessions:options.relaySessions,updates:options.documentMode==='pilot'?Math.max(3,keystrokes):240,
+    pilot:options.documentMode==='pilot',updatesPerSecond:options.updatesPerSecond,churnEdits:options.churnEdits,churn:true,timeoutMs:Math.max(1,deadline-performance.now())};
+  const settingsPath=join(relayDir,'settings.json');await json(settingsPath,relaySettings);
+  const relayRequire=createRequire(join(root,'services/sync-relay/package.json'));
+  await runOwnedCommand(process.execPath,['--import',relayRequire.resolve('tsx'),join(root,'tools/perf-profiling/document-size-runner.mjs'),'run',settingsPath],
+    {cwd:root,env,signal:cancellation.signal,timeoutMs:Math.max(1,deadline-performance.now()),log:join(relayDir,'runner.log')});
+  (receipt.documentRelays ??= {})[documentCase.key]=JSON.parse(await readFile(join(relayDir,'relay.json'),'utf8'));
+}
+
   await cancellation.run(() => (workload = (async () => {
   const helperStarted = performance.now();
   helperStartup = startWindowController({ signal: cancellation.signal, onSpawn(child) { receipt.windowHelper = { pid: child.pid }; } });
   windowController = await helperStartup;
   receipt.windowHelper = { pid: windowController.pid, prewarmMs: performance.now() - helperStarted };
   await json(join(output, 'result.json'), receipt);
-  const documentCases = scenario === 'document-size' ? documentMatrix(options).sort((a,b)=>a.mib-b.mib || Number(b.shape==='formatted-retained')-Number(a.shape==='formatted-retained')) : [null];
+  const documentCases = scenario === 'document-size' ? documentMatrix(options) : [null];
   const tasks = documentCases.flatMap(item=>Array.from({length:item?pairsForCase(options,item):runCount},(_,n)=>({item,repetition:n+1})));
   const deadline = performance.now()+6*60*60*1000;
   let deadlineTimer;
@@ -839,6 +861,7 @@ async function soak(instance, data, runDir) {
     const runDir = join(output, 'run-'+(index+1));
     const data = { index:index+1 }; receipt.runs.push(data); await mkdir(runDir,{recursive:true});
     const {item:documentCase,repetition}=tasks[index];
+    const pairStarted = performance.now();
     const f = await fixture(runDir, documentCase);
     let fresh = await launch(runDir, f, 'fresh');
     data.freshStartup = fresh.startup;
@@ -867,23 +890,26 @@ async function soak(instance, data, runDir) {
       const restart=await launch(runDir,f,'restart');data.restartStartup=restart.startup;
       data.documentSize.phases.push(await phase(restart,'restart'));
       await shutdown(runDir,restart);
-      if(repetition===1 && (label!=='baseline' || documentCase.mib===2)) {
-        const relayDir=join(runDir,'relay');await mkdir(relayDir);
-        const relaySettings={...documentCase,directory:relayDir,checkout:options.relayCheckout,engineBinary,
-          fullRelay:documentCase.shape==='formatted-retained',relaySessions:options.relaySessions,updates:options.documentMode==='pilot'?Math.max(3,keystrokes):240,
-          updatesPerSecond:options.updatesPerSecond,churnEdits:options.churnEdits,churn:true,timeoutMs:Math.max(1,deadline-performance.now())};
-        const settingsPath=join(relayDir,'settings.json');await json(settingsPath,relaySettings);
-        const relayRequire=createRequire(join(root,'services/sync-relay/package.json'));
-        await runOwnedCommand(process.execPath,['--import',relayRequire.resolve('tsx'),join(root,'tools/perf-profiling/document-size-runner.mjs'),'run',settingsPath],
-          {cwd:root,env,signal:cancellation.signal,timeoutMs:Math.max(1,deadline-performance.now()),log:join(relayDir,'runner.log')});
-        (receipt.documentRelays ??= {})[documentCase.key]=JSON.parse(await readFile(join(relayDir,'relay.json'),'utf8'));
-      }
-      // Extend a near-budget worst-shape arm once; promote a pilot that is slower.
-      if(options.documentMode==='gate' && repetition===Math.max(...tasks.filter(task=>task.item?.key===documentCase.key).map(task=>task.repetition)) && label==='candidate') {
-        const summary=await summarize(receipt), item=summary.documentSize.cases[documentCase.key], worst=summary.documentSize.cases[documentCase.mib+'/formatted-retained'];
-        const promote=documentCase.shape!=='formatted-retained' && ['fresh','restart'].some(p=>['firstContentMs','editReadyMs','firstKeyMs','typingMs'].some(m=>item.phases[p][m].max>worst.phases[p][m].p95));
-        const target=needsDocumentExtension(item,summary.documentSize.cases['2/'+documentCase.shape])?40:promote?20:0;
-        if(target>item.pairs){(receipt.documentExtensions ??= []).push({key:documentCase.key,from:item.pairs,to:target,reason:promote?'pilot slower than worst-shape p95':'within 10% of budget'});for(let n=item.pairs;n<target;n++)tasks.push({item:documentCase,repetition:n+1});}
+      data.wallMs=performance.now()-pairStarted;
+      await json(join(output,'result.json'),receipt);
+      // A case ends after its planned pairs. One near-budget arm per size gets more pairs right away,
+      // decided as the comparator decides it, so larger sizes see a final 2 MiB control.
+      if(tasks[index+1]?.item?.key!==documentCase.key) {
+        const gateCandidate=options.documentMode==='gate' && label==='candidate';
+        const summary=await summarize(receipt);
+        const target=gateCandidate && !receipt.documentExtensions?.some(row=>row.mib===documentCase.mib)
+          ? documentExtensionTarget(summary.documentSize.cases[documentCase.key],(documentCase.mib===2?documentBaseline:summary).documentSize.cases['2/'+documentCase.shape]) : 0;
+        if(target>repetition) {
+          (receipt.documentExtensions ??= []).push({key:documentCase.key,mib:documentCase.mib,from:repetition,to:target});
+          tasks.splice(index+1,0,...Array.from({length:target-repetition},(_,n)=>({item:documentCase,repetition:repetition+n+1})));
+        } else {
+          if(label!=='baseline' || documentCase.mib===2) await documentRelay(runDir,documentCase,deadline);
+          // A failed case means no larger size can be chosen, so the rest of the run is skipped.
+          if(gateCandidate && documentCaseBlocked(compareDocumentSize(documentBaseline,await summarize(receipt),DEFAULT_MARGIN,{includeSoak:false}),documentCase.key)) {
+            receipt.documentStopped={key:documentCase.key,skippedPairs:tasks.length-index-1};
+            tasks.splice(index+1);
+          }
+        }
       }
       await json(join(output,'result.json'),receipt);continue;
     }
@@ -1056,10 +1082,10 @@ async function soak(instance, data, runDir) {
     console.log(JSON.stringify({ label, run: index + 1, phase: 'complete', restartMs: data.restartStartup.editablePaintObservedMs }));
   }
   if(scenario==='document-size') {
-    const summary=await summarize(receipt), provisional=compareDocumentSize(summary,summary,{percent:10,floorMs:17},{includeSoak:false});
+    const summary=await summarize(receipt), provisional=compareDocumentSize(documentBaseline ?? summary,summary,DEFAULT_MARGIN,{includeSoak:false});
     receipt.provisionalDocumentDecision=provisional;
-    // Refusals above 2 MiB on the baseline never prevent its control soak.
-    const eligible=label==='baseline'?2:provisional.selectedMiB;
+    // Refusals above 2 MiB on the baseline never prevent its control soak. A pilot soaks its size once.
+    const eligible=label==='baseline'?2:options.documentMode==='pilot'?Math.max(...options.documentMiB):provisional.selectedMiB;
     receipt.documentSoaks=[];
     for(const mib of [...options.documentMiB].filter(n=>n<=eligible).reverse()) {
       const runDir=join(output,'soak-'+mib);await mkdir(runDir);
@@ -1067,7 +1093,7 @@ async function soak(instance, data, runDir) {
       const row=await measurePackagedDocument({instance,fixture:f.sizeDocument,options,signal:cancellation.signal,snapshot,phase:'soak',soak:true,proof:false,peerMode:'churn'});
       receipt.documentSoaks.push(row);await shutdown(runDir,instance);await json(join(output,'result.json'),receipt);
       const value=(await summarize(receipt));
-      if(compareDocumentSize(value,value,{percent:10,floorMs:17}).selectedMiB===mib || label==='baseline')break;
+      if(compareDocumentSize(documentBaseline ?? value,value,DEFAULT_MARGIN).selectedMiB===mib || label==='baseline' || options.documentMode==='pilot')break;
       if(receipt.documentSoaks.length>=2) {receipt.documentSoakIncomplete=true;break;}
     }
   }

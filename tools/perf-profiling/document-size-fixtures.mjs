@@ -2,8 +2,12 @@ import { createHash } from 'node:crypto';
 
 export const MiB = 1024 * 1024;
 export const DOCUMENT_SIZES = [2, 5, 8, 10];
-export const DOCUMENT_SHAPES = ['plain', 'formatted', 'plain-retained', 'formatted-retained'];
+// Run order within a size: the worst shape first. The per-size extension cap follows this order.
+export const DOCUMENT_SHAPES = ['formatted-retained', 'plain', 'formatted', 'plain-retained'];
 export const STATE_MAX_BYTES = 20 * MiB;
+// The relay journal checkpoints when its 4,095th entry commits, so a validation sees at most 4,094.
+export const JOURNAL_CHECKPOINT_ENTRIES = 4095;
+export const RELAY_CPU_BUDGET_MS = { p50: 50, p95: 100 };
 export const PILOT_PAIRS = 3;
 export function pairsForCase(options, item) {
   if (options.documentMode === 'pilot') return options.runCount;
@@ -96,12 +100,28 @@ export function restoreReservation(
   };
 }
 
+// Uncalibrated. The pilot's pair, seed and relay times replace these rates.
 export function runtimeEstimate() {
+  // Separate/4 seeds four documents across two workers so its 240 timed updates end at the checkpoint.
+  const seedValidations = (DOCUMENT_SIZES.length * 4 * (JOURNAL_CHECKPOINT_ENTRIES - 240)) / 2;
+  const minutes = {
+    guiPairs: 115,
+    controls: 5,
+    relaySeeding: Math.ceil((seedValidations * RELAY_CPU_BUDGET_MS.p50) / 60000),
+    relayArms: 90,
+    soak: 60,
+    setup: 10,
+  };
+  const normal = Object.values(minutes).reduce((n, value) => n + value, 0);
   return {
-    minimumHours: 4.75,
+    minutes,
+    normalHours: Math.round((normal / 60) * 100) / 100,
+    extensionMinutes: [18, 33],
+    fallbackSoakMinutes: 60,
     bookedHours: 6,
-    fallbackHours: 5.75,
     basis:
-      '106 lean GUI pairs at 65 s (115 min), one control block (5 min), independent relay/fixture work (90 min), one 60 min soak, 15 min extensions/setup = 285 min. A fallback soak adds 60 min. Baseline: 65 lean/refusal pairs plus 2 MiB relay and soak, about 3 h. Hard deadline 360 min; unfinished receipts are inconclusive.',
+      '106 lean GUI pairs at 65 s; ' +
+      seedValidations +
+      ' sequential seed validations at the 50 ms CPU budget (a slower size stops before it seeds); 90 min for timed relay arms, native/socket proofs, churn and churned arms; one 60 min soak. At most one extension per size adds 17-30 pairs. A fallback soak adds 60 min and fits only when the calibrated normal run is under five hours. Baseline: 65 pairs plus 2 MiB relay and soak, about 3 h. Hard deadline 360 min; unfinished receipts are inconclusive.',
   };
 }
