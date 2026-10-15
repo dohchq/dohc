@@ -40,7 +40,13 @@ _Avoid_: usage record (that stays on the computer)
 
 **Offer**:
 A suggestion for a person at a relevant point in their work. Detection changes nothing; the person chooses whether to act.
-_Avoid_: Offering (what dohc sells), moment (a History term)
+_Avoid_: Offering (what dohc sells), Moment (see History)
+
+### History
+
+**Moment**:
+A recorded file change within a workspace version. Writes, renames, and deletions create moments, including saved live edits and restores. History shows moments as rows and groups related file changes.
+_Avoid_: version, revision, snapshot, checkpoint
 
 ### Collections
 
