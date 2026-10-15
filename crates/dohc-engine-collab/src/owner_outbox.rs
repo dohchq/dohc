@@ -20,6 +20,7 @@ pub mod draft;
 pub mod enrollment;
 mod native_source;
 pub mod publication;
+pub mod release;
 pub(crate) use native_source::retain_native_source;
 pub use native_source::{
     OwnerOutboxDraftOrigin, OwnerOutboxDraftSource, OwnerOutboxNativeOrigin,
@@ -157,6 +158,12 @@ pub fn require_ordinary_settlement(
 
 #[derive(Debug, thiserror::Error)]
 pub enum OwnerOutboxError {
+    #[error("this computer hosts the document")]
+    DesktopHost,
+    #[error("the document restore is not complete")]
+    RestorePending,
+    #[error("the Stop request changed")]
+    StopConflict,
     #[error("owner Y.Doc outbox input is invalid: {0}")]
     InvalidInput(&'static str),
     #[error("owner Y.Doc outbox workspace does not match the engine handle")]

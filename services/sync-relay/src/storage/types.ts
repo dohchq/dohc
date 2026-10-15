@@ -619,6 +619,7 @@ export interface SyncRelayStorage {
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   serviceHostEnrollmentHasEditGrant(enrollment: Pick<import("./serviceHostEnrollment").ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean;
+  serviceHostDocumentEnabled(document: {workspaceId: string; objectId: string}): boolean;
   releaseServiceHostEnrollment(input: {workspaceId: string; objectId: string; nowMs: number}): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   postNotice(input: import("./notices").PostNoticeInput): void;
   postAutomationWake(input: import("./notices").PostAutomationWakeInput): import("./notices").PostedAutomationWake;

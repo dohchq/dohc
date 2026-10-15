@@ -186,6 +186,7 @@ Every night at 03:07, the `dohc-verification-nightly` scheduled task submits a f
 It covers everything merged since the last nightly that passed, and it runs before the rest of the line. A head that already passed is not verified again.
 `pnpm verify:queue status` shows the last passing nightly. Submit one by hand with `pnpm verify:queue nightly`.
 A failed nightly means a merged change broke main or an affected-package selection missed something. Find the change that broke it and revert or fix it the same day.
+The [`verification-triage` skill](../../.agents/skills/verification-triage/SKILL.md) has the procedure.
 
 ### Affected packages
 
@@ -199,7 +200,7 @@ Pass `--full` to run every package. The nightly run on main always does.
 
 Each gate keeps its 20 slowest tests in `result.json` under `slowest`, and prints the five slowest. The queue history keeps each run's step times and ten slowest tests.
 A test that takes more than a second is a scenario test. Keep it, but make it earn its time: the per-PR gate should take 15 minutes or less on an idle lane.
-A weekly review reads the history, then fixes, splits, or speeds up the tests and suites that cost the most.
+A weekly review reads the history, then fixes, splits, or speeds up the tests and suites that cost the most. The [`verification-triage` skill](../../.agents/skills/verification-triage/SKILL.md) has its procedure.
 
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
 Each report states its scope. Every selected job needs passing evidence that covers the change.
