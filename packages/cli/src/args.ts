@@ -212,6 +212,13 @@ const documentTextFlags: readonly CliFlag[] = [
   { name: "--agent", value: "name", text: "Record this agent name with the change." },
 ];
 
+function parsePath({ operands }: VerbInput, name: string): string {
+  const [path, ...extra] = operands;
+  if (!path) fail(`${name} requires a path`);
+  noExtraArgs(extra, name);
+  return path;
+}
+
 function documentWrite(input: VerbInput, verb: "documentEdit" | "documentCreate"): CliCommandBody {
   const [path, body, ...extra] = input.operands;
   if (!path) fail("document requires a path");
@@ -236,12 +243,7 @@ const DOCUMENT_VERBS = {
     summary: "Read the current Markdown, including edits in an open editor.",
     operands: "<path>",
     notes: ["Read before editing. Without --json, prints the Markdown byte for byte."],
-    parse: ({ operands }) => {
-      const [path, ...extra] = operands;
-      if (!path) fail("document read requires a path");
-      noExtraArgs(extra, "document read");
-      return { verb: "documentRead", path };
-    },
+    parse: input => ({ verb: "documentRead", path: parsePath(input, "document read") }),
   },
   edit: {
     capabilityId: "document.edit",
@@ -269,13 +271,8 @@ const DOCUMENT_VERBS = {
     capabilityId: "file.chats.list",
     summary: "List chats linked to a workspace file.",
     operands: "<path>",
-    notes: ["Use chat show --peek with a thread ID to read it without marking it read."],
-    parse: ({ operands }) => {
-      const [path, ...extra] = operands;
-      if (!path) fail("document chats requires a path");
-      noExtraArgs(extra, "document chats");
-      return { verb: "fileChats", path };
-    },
+    notes: ["Chats follow the file across renames.", "Use chat show --peek with a thread ID to read it without marking it read."],
+    parse: input => ({ verb: "fileChats", path: parsePath(input, "document chats") }),
   },
   comment: {
     capabilityId: "file.chat.start",
@@ -986,7 +983,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     },
   },
   document: {
-    summary: "Read, edit, and create live Markdown documents, and comment on tracked text files.",
+    summary: "Read, edit, and create live Markdown documents. List and start chats on tracked files.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
       "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
     verbs: DOCUMENT_VERBS,

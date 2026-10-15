@@ -30,7 +30,7 @@ import pinnedCliCapabilities from "./cliCapabilities.pinned.json";
 import { CLI_DISPATCH_ARGUMENTS } from "./cliDispatchInputs.fixture";
 import publicationCli from "./cliExposure.pr1659.json";
 import commentsCli from "./cliExposure.pr1700.json";
-import fileChatsCli from "./cliExposure.fileChats.json";
+import fileChatsCli from "./cliExposure.pr2000.json";
 import admission from "./operationAdmission.json";
 import accessExposure from "./accessExposure.delta.json";
 import shareCopyExposure from "./ipcExposure.shareCopy.json";
