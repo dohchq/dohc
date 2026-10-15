@@ -3071,6 +3071,138 @@ fn a_departed_document_keeps_its_head_until_its_work_settles() {
     assert!(!has_blob(&store, &update));
 }
 
+/// Part 5's lifecycle fact: the host releases a document only once it is
+/// gone. Retirement removes its rows before its file, so the retired file
+/// keeps it departed, across a restart, until the file is forgotten.
+#[test]
+fn a_departed_document_is_reported_until_its_file_is_forgotten() {
+    let (_scratch, path, mut store, client) = departing_b();
+    let departed = |store: &EngineStore| departed_hosted_object_ids(store, "ws").unwrap();
+    assert!(departed(&store).is_empty());
+    client.transport().unshare("doc-b");
+    sync(&client, &mut store);
+    assert_eq!(departed(&store), ["doc-b"]);
+
+    assert_eq!(
+        retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
+        TxnOutcome::Committed(true)
+    );
+    assert_eq!(holding(&store, "doc-b"), ["hosted_retired_files"]);
+    assert_eq!(departed(&store), ["doc-b"], "its file is still to go");
+    drop(store);
+    let mut store = EngineStore::open(&path, 3_000).unwrap();
+    assert_eq!(departed(&store), ["doc-b"]);
+
+    forget_retired_hosted_file(&mut store, "ws", "a.md", &NoFaults).unwrap();
+    assert!(departed(&store).is_empty());
+}
+
+/// Serve a Y.Doc delta of `object_id` at `path` on a lineage the feed never
+/// sends a base for, so the replica defers it. Answers its blob.
+fn baseless_ydoc_delta(feed: &HostedFeed, object_id: &str, path: &str) -> String {
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.plaintext_insert(0, "waits for a base");
+    let update = ydoc.encode_full_state();
+    let sha = dohc_engine_storage::hex_sha256(&update);
+    feed.blobs.lock().unwrap().insert(sha.clone(), update);
+    feed.append(envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": path,
+            "contentKind": "plaintext",
+            "updateBlobSha256": sha,
+            "lineageClaimId": "1".repeat(64),
+            "isBaseState": false
+        }),
+    ));
+    sha
+}
+
+/// Outbox bytes of `object_id` the host accepted and has not delivered.
+fn pending_outbox(store: &mut EngineStore, object_id: &str) {
+    store
+        .write_with(&NoFaults, |tx| {
+            let base = dohc_engine_storage::put_binary_blob(tx, b"outbox base")
+                .map_err(SyncError::Storage)?;
+            tx.execute(
+                "INSERT INTO owner_ydoc_outboxes (outbox_id,workspace_id,main_version_id,object_id, \
+                   lineage_claim_id,current_path,selector_paths_json,restore_fence_generation, \
+                   base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes, \
+                   oldest_entry_at_ms,next_sequence,created_at_ms) \
+                 VALUES ('outbox','ws','main',?1,'lineage','a.md','[]',0,?2,?2,11,'active',5,1,2,0)",
+                params![object_id, base],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+/// Part 5's retirement deadlock: a departed document with a deferred update
+/// waited for rows the feed no longer serves. Retirement drops the update,
+/// which the relay still holds, and still waits for the host's own undelivered
+/// outbox bytes.
+#[test]
+fn retirement_drops_the_relays_deferred_updates_and_waits_for_accepted_work() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    let update = baseless_ydoc_delta(feed, "doc-b", "a.md");
+    sync(&client, &mut store);
+    let deferred = "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE object_id='doc-b'";
+    assert_eq!(count(&store, deferred), 1);
+    pending_outbox(&mut store, "doc-b");
+
+    feed.unshare("doc-b");
+    sync_retiring(&client, &mut store);
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-b", "hosted b")]),
+        "its outbox bytes hold it"
+    );
+    assert!(!hosted_document_retirable(&store, "ws", "doc-b").unwrap());
+    assert_eq!(departed_hosted_object_ids(&store, "ws").unwrap(), ["doc-b"]);
+    assert_eq!(count(&store, deferred), 1);
+
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE owner_ydoc_outboxes SET pending_bytes=0,oldest_entry_at_ms=NULL",
+                [],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    sync_retiring(&client, &mut store);
+    assert!(holding(&store, "doc-b").is_empty());
+    assert!(!has_blob(&store, &update));
+    assert!(departed_hosted_object_ids(&store, "ws").unwrap().is_empty());
+}
+
+/// Main's capture holds: a held file's row referenced the document's object,
+/// so retiring it failed. The hold goes with the document.
+#[test]
+fn a_capture_hold_does_not_keep_a_departed_document() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO capture_file_holds VALUES ('ws','main','doc-b','a.md',?1,4, \
+                 'ydoc-resolution-not-representable',3,1,0)",
+                [text_sha("held")],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    client.transport().unshare("doc-b");
+    sync_retiring(&client, &mut store);
+    assert!(holding(&store, "doc-b").is_empty());
+    assert!(departed_hosted_object_ids(&store, "ws").unwrap().is_empty());
+}
+
 #[test]
 fn retirement_is_all_or_nothing_and_idempotent() {
     let (_scratch, path, mut store, client) = departing_b();
@@ -3104,7 +3236,7 @@ fn retirement_is_all_or_nothing_and_idempotent() {
         retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
         TxnOutcome::Committed(true)
     );
-    assert!(holding(&store, "doc-b").is_empty());
+    assert_eq!(holding(&store, "doc-b"), ["hosted_retired_files"]);
     assert_eq!(
         retired_hosted_files(&store, "ws").unwrap(),
         [RetiredFile {

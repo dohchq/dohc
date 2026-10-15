@@ -676,20 +676,33 @@ it("reads only the current scope with the workspace's one credential as document
   expect((await f.request("GET", "log?replicationEpoch=epoch-2&streamIdentity=stream-2")).status).toBe(404);
 });
 
-it("keeps a paused or stopped document in scope until the session host releases it", async () => {
+it("cuts a paused or stopped document's reads at once and keeps its writes until the session host releases it", async () => {
   const f = await fixture();
   f.enroll("docs/b.md");
   const set = (path: string, enabled: boolean, retire = false) =>
     f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path, ownerUserId: "owner-1", enabled, retire, nowMs: 30, guard() {}});
   const release = (objectId: string) => f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId, nowMs: 31});
   const documents = async () => (await f.read()).scope.documents.map(row => row.objectId);
-  // A pending Pause or Stop keeps the binding, and so the scope, while unsettled work settles.
+  for (const sha256 of [A.sha256, Y.sha256, B.sha256]) expect(await f.blobStatus(sha256)).toBe(200);
+  // A pending Pause or Stop takes the document's rows and blobs out of reach now.
   set("docs/a.md", false);
   set("docs/b.md", false, true);
-  expect(await documents()).toEqual([binding.objectId, "object-b"]);
-  expect((await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]])).status).toBe(200);
-  // Resuming before the release cancels the Pause.
+  const paused = await f.read();
+  expect(paused.scope.documents).toEqual([]);
+  expect(f.objects(paused)).toEqual(["workspace"]);
+  for (const sha256 of [A.sha256, Y.sha256, B.sha256]) expect(await f.blobStatus(sha256)).toBe(404);
+  expect((await f.request("GET", `log?${identity}&scope=${paused.scope.token}&since=0&object=object-b`)).status).toBe(400);
+  // It keeps its binding, so the host's accepted work still lands while it settles.
+  expect([...f.storage.readServiceHostFeedScope(ws)!.hosted.keys()]).toEqual([binding.objectId, "object-b"]);
+  const settling = blob("settling edit");
+  await f.upload(settling);
+  expect(await (await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", settling)]])).json())
+    .toMatchObject({inserted: 1, currentMaxOriginSeq: 0});
+  expect(f.hostCoordinate(0)).toMatchObject({opKind: "ydoc.update"});
+  // Resuming before the release cancels the Pause and brings the document back.
   set("docs/a.md", true);
+  expect(await documents()).toEqual([binding.objectId]);
+  for (const sha256 of [A.sha256, Y.sha256]) expect(await f.blobStatus(sha256)).toBe(200);
   expect(release(binding.objectId)).toBeNull();
   expect(release("object-b")).toMatchObject({enabled: false, retired: true});
   expect(await documents()).toEqual([binding.objectId]);

@@ -93,8 +93,13 @@ const HostedHold = Schema.Union([
 ]);
 const RetirementError = mutableStruct({ code: Text, message: Text, retry: Text });
 
+// The documents that left the scope and are not gone from the replica: their
+// rows or their file remain.
+const Departed = Schema.mutable(Schema.Array(Text));
+
 // A session host's hosted replica. A pass that adopted a new scope has no
-// cursor; a commit can stand while the retirement after it failed.
+// cursor; a commit can stand while the retirement after it failed, and while
+// its departed documents could not be read (null).
 const HostedSyncResultSchemas = {
   "sync.createHostedReplica": mutableStruct({ hosted: Schema.Literal(true) }),
   "sync.pullHosted": mutableStruct({
@@ -109,12 +114,14 @@ const HostedSyncResultSchemas = {
     refusals: Schema.mutable(Schema.Array(Refusal)),
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
     held: Schema.mutable(Schema.Array(HostedHold)),
+    departed: Departed,
   }),
   "sync.materializePendingCursor": OrdinarySyncResultSchemas["sync.materializePendingCursor"],
   "sync.commitCursor": mutableStruct({
     committed: Schema.Boolean,
     hasMore: Schema.Boolean,
     retirement: Schema.NullOr(RetirementError),
+    departed: Schema.NullOr(Departed),
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
   }),
   "sync.push": OrdinarySyncResultSchemas["sync.push"],

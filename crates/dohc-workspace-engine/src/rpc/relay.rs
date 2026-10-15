@@ -300,7 +300,8 @@ fn refusals_json(refusals: Vec<dohc_engine_sync::ReplicationRefusal>) -> Vec<Val
 }
 
 /// A hosted pass, without its cursor: the caller issues that as a token.
-fn hosted_pass_json(pass: HostedPassOutcome) -> Value {
+/// `departed` names each document that left the scope and is not gone yet.
+fn hosted_pass_json(pass: HostedPassOutcome, departed: Vec<String>) -> Value {
     let held = pass
         .held
         .iter()
@@ -317,6 +318,7 @@ fn hosted_pass_json(pass: HostedPassOutcome) -> Value {
         "refusals": refusals_json(pass.refusals),
         "sharingDeclined": sharing_declined_json(pass.sharing_declined),
         "held": held,
+        "departed": departed,
         "pendingCursor": null,
     })
 }
@@ -510,21 +512,26 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "morePending": outcome.more_pending,
         }),
         RelayOperationOutcome::HostedReplicaCreated => json!({ "hosted": true }),
-        RelayOperationOutcome::HostedPass { pass, .. } => hosted_pass_json(pass),
+        RelayOperationOutcome::HostedPass { pass, departed, .. } => {
+            hosted_pass_json(pass, departed)
+        }
         // A pass fetched under a scope that has since moved commits nothing.
         // A commit that retired a departed document has more to pull: work
         // that waited for its path. A retirement that failed is reported as
         // the error it would have been, beside the commit that stands. A
-        // commit that could not read what it left unready has more to pull,
-        // whose pass releases them or reports why it cannot.
+        // commit that could not read what it left unready, or what departed
+        // documents remain, has more to pull, whose pass releases or reports
+        // them, or says why it cannot. `departed` is null when unread.
         RelayOperationOutcome::HostedCursorCommitted {
             committed,
             retirement,
             unready,
+            departed,
         } => json!({
             "committed": committed,
-            "hasMore": matches!(retirement, Ok(true)) || unready.is_err(),
+            "hasMore": matches!(retirement, Ok(true)) || unready.is_err() || departed.is_err(),
             "retirement": retirement.err().map(map_runtime),
+            "departed": departed.ok(),
             "sharingDeclined": [],
         }),
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({
@@ -1372,7 +1379,10 @@ impl EngineService {
                 "sync.pullHosted",
             )
             .await?;
-        let RelayOperationOutcome::HostedPass { mut pass, .. } = outcome else {
+        let RelayOperationOutcome::HostedPass {
+            mut pass, departed, ..
+        } = outcome
+        else {
             return Err(WireError::new(
                 ErrorCode::Internal,
                 "unexpected hosted pass outcome",
@@ -1386,7 +1396,7 @@ impl EngineService {
         }
         let pending = pass.pending_cursor.take();
         let materialization_paths = pass.changed_paths.clone();
-        let mut result = hosted_pass_json(pass);
+        let mut result = hosted_pass_json(pass, departed);
         if let Some(cursor) = pending {
             let issued = self.issue_pending_cursor(
                 bound_handle,
@@ -2095,11 +2105,39 @@ mod tests {
             committed: true,
             retirement: Ok(false),
             unready: Err(dohc_engine_runtime::RuntimeError::ActorUnavailable),
+            departed: Ok(vec!["doc-b".to_owned()]),
         })
         .expect("commit JSON");
         assert_eq!(
-            (&value["committed"], &value["hasMore"], &value["retirement"]),
-            (&json!(true), &json!(true), &Value::Null)
+            (
+                &value["committed"],
+                &value["hasMore"],
+                &value["retirement"],
+                &value["departed"]
+            ),
+            (&json!(true), &json!(true), &Value::Null, &json!(["doc-b"]))
+        );
+    }
+
+    /// Slice 3: a commit that could not read its departed documents does not
+    /// answer an empty list, which would let the host release them.
+    #[test]
+    fn a_hosted_commit_that_could_not_read_its_departed_documents_says_so_and_pulls_again() {
+        let value = relay_outcome_json(RelayOperationOutcome::HostedCursorCommitted {
+            committed: true,
+            retirement: Ok(false),
+            unready: Ok(Vec::new()),
+            departed: Err(dohc_engine_runtime::RuntimeError::ActorUnavailable),
+        })
+        .expect("commit JSON");
+        assert_eq!(
+            (
+                &value["committed"],
+                &value["hasMore"],
+                &value["retirement"],
+                &value["departed"]
+            ),
+            (&json!(true), &json!(true), &Value::Null, &Value::Null)
         );
     }
 

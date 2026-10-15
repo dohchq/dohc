@@ -80,6 +80,26 @@ pub fn departed_hosted_documents(
     })
 }
 
+/// The hosted documents outside the current scope that this replica has not
+/// finished removing, by object id: its rows remain, or its retired file
+/// does. A document is gone only once neither does.
+pub fn departed_hosted_object_ids(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<Vec<String>, SyncError> {
+    store.read_with(|conn| {
+        strings(
+            conn,
+            "SELECT d.object_id FROM hosted_documents d \
+             JOIN hosted_replicas h ON h.workspace_id=d.workspace_id \
+             WHERE d.workspace_id=?1 AND d.scope_generation<>h.scope_generation \
+             UNION SELECT object_id FROM hosted_retired_files WHERE workspace_id=?1 \
+             ORDER BY 1",
+            &[&workspace_id],
+        )
+    })
+}
+
 /// Retire `object_id`, a hosted document that left the scope. Answers
 /// `false`, removing nothing, while it is not
 /// [retirable](hosted_document_retirable). The caller first proves that its
@@ -98,8 +118,8 @@ pub fn retire_hosted_document(
             return Ok(false);
         }
         tx.execute(
-            "INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
-             SELECT workspace_id,path,COALESCE(blob_sha256,binary_sha256) FROM snapshots \
+            "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+             SELECT workspace_id,path,object_id,COALESCE(blob_sha256,binary_sha256) FROM snapshots \
              WHERE workspace_id=?1 AND object_id=?2 AND version_id=?3",
             params![workspace_id, object_id, version_id],
         )
@@ -161,7 +181,21 @@ pub fn retire_hosted_document(
                 .map_err(SyncError::persist)?;
         }
 
-        let mut blobs = BTreeSet::new();
+        // Only its journal row names a deferred update's bytes, so no foreign
+        // key keeps them; another document's deferred update still may.
+        let mut blobs = strings(
+            tx,
+            "SELECT json_extract(l.payload_json,'$.updateBlobSha256') FROM ydoc_deferred_updates d \
+             JOIN replication_log l USING (workspace_id,origin_id,origin_seq) \
+             WHERE d.workspace_id=?1 AND d.object_id=?2 \
+               AND json_extract(l.payload_json,'$.updateBlobSha256') IS NOT NULL \
+             EXCEPT SELECT json_extract(l.payload_json,'$.updateBlobSha256') \
+             FROM ydoc_deferred_updates d JOIN replication_log l USING (workspace_id,origin_id,origin_seq) \
+             WHERE d.object_id<>?2",
+            &bound,
+        )?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
         for (table, rows) in retired_rows() {
             let referenced = strings(
                 tx,
@@ -212,7 +246,9 @@ pub fn retire_hosted_document(
 
 /// Whether [`retire_hosted_document`] would retire `object_id` now: it is
 /// out of the scope, the relay has acknowledged every row this replica wrote
-/// for it, and nothing of its live state is pending.
+/// for it, and nothing it accepted is pending: outbox bytes, applied updates
+/// past their settlement, or a restore fence. Deferred updates from the relay
+/// do not count; retirement drops them, and the relay keeps them.
 pub fn hosted_document_retirable(
     store: &EngineStore,
     workspace_id: &str,
@@ -290,7 +326,7 @@ fn retirable(conn: &Connection, workspace_id: &str, object_id: &str) -> Result<b
         )
         .map_err(SyncError::corrupt)?;
     Ok(quiet
-        && dohc_engine_collab::live_update_application::unload_pending(
+        && dohc_engine_collab::live_update_application::retirement_pending(
             conn,
             workspace_id,
             object_id,
@@ -458,6 +494,7 @@ fn retired_rows() -> Vec<(&'static str, String)> {
         journal("replication_refused_ydoc_blobs"),
         journal("replication_pending_refusals"),
         journal("replication_log"),
+        object("capture_file_holds"),
         object("file_objects"),
         object("hosted_documents"),
     ]

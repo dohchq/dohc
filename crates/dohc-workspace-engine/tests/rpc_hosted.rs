@@ -659,8 +659,12 @@ async fn a_hosted_replica_pulls_its_documents_and_pushes_live_writes_to_the_host
     // The first pass learns the scope and applies nothing.
     let learned = host.pull().await;
     assert_eq!(
-        (&learned["pendingCursor"], &learned["hasMore"]),
-        (&Value::Null, &json!(true))
+        (
+            &learned["pendingCursor"],
+            &learned["hasMore"],
+            &learned["departed"]
+        ),
+        (&Value::Null, &json!(true), &json!([]))
     );
     host.sync().await;
     assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
@@ -874,8 +878,10 @@ async fn a_departed_document_retires_and_frees_its_file_for_its_replacement() {
     let before = commits();
     for _ in 0..2 {
         let pass = host.pull().await;
+        assert_eq!(pass["departed"], json!(["doc-b"]));
         let commit = host.commit_answer(&pass["pendingCursor"]).await;
         assert_eq!(commit["committed"], true, "{commit}");
+        assert_eq!(commit["departed"], json!(["doc-b"]));
         assert_eq!(commit["retirement"]["code"], json!(ErrorCode::Internal));
         assert!(
             commit["retirement"]["message"]
@@ -892,6 +898,7 @@ async fn a_departed_document_retires_and_frees_its_file_for_its_replacement() {
     host.sync().await;
     assert_eq!(std::fs::read_to_string(&file).expect("a.md"), "hosted a");
     assert_eq!(document_state(&scratch, "doc-b"), None);
+    assert_eq!(host.pull().await["departed"], json!([]));
     assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
     let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
     let (objects, conflicts): (i64, i64) = conn
@@ -909,7 +916,8 @@ async fn a_departed_document_retires_and_frees_its_file_for_its_replacement() {
 /// retired stayed forever. `a.md` is locked when `doc-b` retires, and the
 /// host restarts. `doc-b`'s file keeps `a.md` held, so `doc-a`'s write
 /// waits; once the lock goes, a later pass removes the file and `doc-a`
-/// takes the path.
+/// takes the path. Until then, every reply reports `doc-b` as departed, so
+/// the host does not release it while its file remains.
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
@@ -967,9 +975,11 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
         id: 1,
     };
     let pass = host.pull().await;
+    assert_eq!(pass["departed"], json!(["doc-b"]), "its rows are gone");
     let commit = host.commit_answer(&pass["pendingCursor"]).await;
     assert_eq!(commit["committed"], true);
     assert!(commit["retirement"].is_object(), "{commit}");
+    assert_eq!(commit["departed"], json!(["doc-b"]));
     assert_eq!(std::fs::read_to_string(&file).expect("a.md"), "hosted b");
     let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
     let (heads, retired): (i64, i64) = conn
@@ -990,6 +1000,7 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
         })
         .expect("count");
     assert_eq!(retired, 0);
+    assert_eq!(host.pull().await["departed"], json!([]));
 }
 
 /// The retirement round's open case, on disk: `doc-b` left the scope at

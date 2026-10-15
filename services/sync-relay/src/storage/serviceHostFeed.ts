@@ -22,11 +22,14 @@ export interface ServiceHostFeedScope {
   readonly workspaceId: string;
   readonly replicationEpoch: string;
   readonly streamIdentity: string;
-  /** Enrolled documents, object to enrolled path. The host may settle these at that path. */
+  /** Enrolled documents, object to enrolled path. The host may settle these at that path until their release. */
   readonly hosted: ReadonlyMap<string, string>;
   /** The hosted documents no longer at their enrolled path. Their publications project nowhere. */
   readonly departed: ReadonlySet<string>;
-  /** The hosted documents at their path that an active Edit grant covers now. The host may read only these. */
+  /**
+   * The hosted documents at their path that an active Edit grant covers now
+   * and that their owner has not paused or stopped. The host may read only these.
+   */
   readonly shared: ReadonlyMap<string, string>;
   /** Changes whenever `shared` or the workspace identity changes. */
   readonly token: string;
@@ -51,7 +54,8 @@ export function readServiceHostFeedScope(storage: StorageContext, workspaceId: s
   for (const row of enrollments) {
     hosted.set(row.objectId, row.path);
     if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) departed.add(row.objectId);
-    else if (selectors.some(selector => pathVisibleThroughShare(selector, row.path))) shared.set(row.objectId, row.path);
+    // A Pause or Stop cuts reads at once, like a revoked grant; writes land until the release.
+    else if (row.ownerStop === null && selectors.some(selector => pathVisibleThroughShare(selector, row.path))) shared.set(row.objectId, row.path);
   }
   const token = createHash("sha256").update(JSON.stringify(["dohc-hosted-scope-v1", workspaceId, replicationEpoch, streamIdentity, [...shared]])).digest("hex");
   return Object.freeze({workspaceId, replicationEpoch, streamIdentity, hosted, departed, shared, token});

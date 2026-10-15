@@ -1712,6 +1712,9 @@ pub enum RelayOperationOutcome {
         /// Each document of the scope that is not ready after the pass. Its
         /// live registrations were released before the pass replied.
         unready: Vec<String>,
+        /// Each document that left the scope and is not gone from the
+        /// replica yet: its rows or its file remain.
+        departed: Vec<String>,
     },
     HostedCursorCommitted {
         /// `false` when the scope moved since the pass fetched; nothing
@@ -1725,6 +1728,9 @@ pub enum RelayOperationOutcome {
         /// them released nothing and leaves the commit standing; the next
         /// pass releases them.
         unready: Result<Vec<String>, RuntimeError>,
+        /// As for [`Self::HostedPass`], after the retirement. A failure to
+        /// read them leaves the commit standing; the next pass reports them.
+        departed: Result<Vec<String>, RuntimeError>,
     },
 }
 
@@ -2620,6 +2626,7 @@ fn run_relay_operation(
             Ok(RelayOperationOutcome::HostedPass {
                 pass,
                 unready: release_unready_hosted(store, registrations, &workspace_id)?,
+                departed: dohc_engine_sync::departed_hosted_object_ids(store, &workspace_id)?,
             })
         }
         RelayOperation::CommitHostedCursor {
@@ -2635,6 +2642,8 @@ fn run_relay_operation(
                     committed,
                     retirement,
                     unready: release_unready_hosted(store, registrations, &workspace_id),
+                    departed: dohc_engine_sync::departed_hosted_object_ids(store, &workspace_id)
+                        .map_err(RuntimeError::from),
                 })
             }
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),

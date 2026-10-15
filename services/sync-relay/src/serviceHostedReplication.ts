@@ -53,6 +53,7 @@ export class ServiceHostedReplication {
   #created = false;
   #running = false;
   #diverged = false;
+  #departed: ReadonlySet<string> | null = null;
   constructor(readonly connection: {
     client: Pick<EngineClient, "sendRequest">; workspace: string; workspaceId: string;
     nextRequestId(): number; deadlineMs: number; signal: AbortSignal; assertCurrent(): void;
@@ -61,6 +62,12 @@ export class ServiceHostedReplication {
   }
   /** Whether the replica's origin diverged from the relay's. Its store must be rebuilt. */
   get diverged(): boolean { return this.#diverged; }
+  /**
+   * The documents that left the scope and are not gone from the replica, as
+   * the last reply that read them said; null before one did. A document
+   * leaves this set only once retirement removed its rows and its file.
+   */
+  get departed(): ReadonlySet<string> | null { return this.#departed; }
   #check(signal: AbortSignal): void { signal.throwIfAborted(); this.connection.assertCurrent(); }
   async #request(method: string, params: Record<string, string | {kind: string; token: string}>, signal: AbortSignal) {
     this.#check(signal);
@@ -103,6 +110,7 @@ export class ServiceHostedReplication {
       const pages: ServiceHostedPullPage[] = [];
       for (let index = 0; index < this.#config.maxPagesPerPull; index++) {
         const pass = decodeHostedSyncResult("sync.pullHosted", await this.#request("sync.pullHosted", {}, signal));
+        this.#departed = new Set(pass.departed);
         const sharingDeclined = [...pass.sharingDeclined];
         // A pass that adopted a scope, or whose scope moved, applied nothing: pull again.
         let committed = false, hasMore = true, retirement: HostedSyncMethodResultMap["sync.commitCursor"]["retirement"] = null;
@@ -113,6 +121,8 @@ export class ServiceHostedReplication {
           this.#check(signal);
           const commit = decodeHostedSyncResult("sync.commitCursor", await this.#request("sync.commitCursor", {pendingCursor}, signal));
           ({committed, retirement} = commit);
+          // Unread, it keeps the pass's set: only a retirement removes a document from it.
+          if (commit.departed) this.#departed = new Set(commit.departed);
           hasMore = !committed || pass.hasMore || commit.hasMore;
           sharingDeclined.push(...commit.sharingDeclined);
         }

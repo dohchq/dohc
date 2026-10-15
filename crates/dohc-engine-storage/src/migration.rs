@@ -3296,6 +3296,7 @@ CREATE INDEX hosted_deferred_ops_by_document ON hosted_deferred_ops(workspace_id
 CREATE TABLE hosted_retired_files (
     workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
     path TEXT NOT NULL CHECK (length(path) > 0),
+    object_id TEXT NOT NULL CHECK (length(object_id) > 0),
     sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
     PRIMARY KEY (workspace_id, path)
 ) STRICT;
@@ -3984,7 +3985,7 @@ mod tests {
             ),
             (
                 "v2-hosted-replica",
-                "332fbe3728b51bdb26a1cc9cc0d8d1da4decd311aa991687be899f4def7c7468",
+                "d23fb4dcb78d913599d006e93f03a18d52dd1a020973fccaadab12ea1c14c497",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4023,8 +4024,8 @@ mod tests {
                  INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('hosted',1); \
                  INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
                  VALUES ('hosted','doc','doc.md','backfilling',0); \
-                 INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
-                 VALUES ('hosted','gone.md',printf('%064d',0));",
+                 INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                 VALUES ('hosted','gone.md','gone',printf('%064d',0));",
             )
             .unwrap();
             let state: (Option<String>, i64, i64, i64, i64, i64) = conn
@@ -4065,9 +4066,14 @@ mod tests {
                 "INSERT INTO hosted_withheld_befores (workspace_id,moment_id,before_object_id,\
                  before_path,before_sha256,before_content_kind) \
                  VALUES ('hosted','no-moment','private','a.md','sha','text')",
-                "INSERT INTO hosted_retired_files (workspace_id,path,sha256) VALUES ('hosted','a.md','sha')",
+                "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                 VALUES ('hosted','a.md','a','sha')",
+                "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                 VALUES ('ordinary','a.md','a',printf('%064d',0))",
                 "INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
-                 VALUES ('ordinary','a.md',printf('%064d',0))",
+                 VALUES ('hosted','a.md',printf('%064d',0))",
+                "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                 VALUES ('hosted','a.md','',printf('%064d',0))",
             ] {
                 assert!(conn.execute(invalid, []).is_err(), "{invalid}");
             }

@@ -87,6 +87,7 @@ const COMPARED_TABLES: &[&str] = &[
     "versions",
     "active_versions",
     "file_objects",
+    "capture_file_holds",
     "blobs",
     "binary_blobs",
     "path_aliases",
@@ -529,6 +530,8 @@ mod tests {
             let source=crate::hex_sha256(b"");
             tx.execute("INSERT INTO blobs(sha256,text,byte_length) VALUES (?1,'',0)",[&source]).unwrap();
             tx.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES ('workspace','owner',0)",[]).unwrap();
+            tx.execute("INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('workspace','main','main','Main',0)",[]).unwrap();
+            tx.execute("INSERT INTO capture_file_holds VALUES ('workspace','main','owner','held.md',?1,1,'ydoc-resolution-not-representable',0,1,0)",[&sha]).unwrap();
             tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,updated_at_ms) VALUES ('workspace','main','owner',0)",[]).unwrap();
             tx.execute("INSERT INTO ydoc_owner_base_sources VALUES ('workspace','main','owner',?1,'owner.md','source',?2,0)",rusqlite::params![sha,source]).unwrap();
             tx.execute("INSERT INTO ydoc_owner_activation_sources VALUES ('activation','relay','workspace','main','owner',?1,'source',?2,?1,'{}')",rusqlite::params![sha,source]).unwrap();
@@ -581,6 +584,7 @@ mod tests {
             "replication_log",
             "replication_refused_moment_blobs",
             "replication_refused_ydoc_blobs",
+            "capture_file_holds",
         ]
         .into_iter()
         .enumerate()

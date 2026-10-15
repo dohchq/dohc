@@ -1065,11 +1065,12 @@ pub enum UnloadPending {
 }
 
 /// The settlement clause reads only the binding's current lineage: a restore
-/// replaces the lineage, and the replaced one never settles again.
+/// replaces the lineage, and the replaced one never settles again. `?3` counts
+/// deferred updates.
 const UNLOAD_PENDING: &str = "SELECT
     EXISTS(SELECT 1 FROM live_restore_fences
         WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL),
-    EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2)
+    (?3 AND EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2))
         OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes
             WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0 AND state<>'quarantined'),
     EXISTS(SELECT 1 FROM live_device_update_applications a
@@ -1094,10 +1095,33 @@ pub fn unload_pending(
     workspace_id: &str,
     object_id: &str,
 ) -> Result<Option<UnloadPending>, ApplicationError> {
+    pending(conn, workspace_id, object_id, true)
+}
+
+/// [`unload_pending`] for retiring a hosted document that left the scope.
+/// Only work the host accepted counts. A deferred update is a pulled row,
+/// which the relay still holds, waiting for rows the feed no longer serves;
+/// retirement drops it.
+pub fn retirement_pending(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Option<UnloadPending>, ApplicationError> {
+    pending(conn, workspace_id, object_id, false)
+}
+
+fn pending(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+    deferred: bool,
+) -> Result<Option<UnloadPending>, ApplicationError> {
     let (restore, delivery, settlement): (bool, bool, bool) = conn
-        .query_row(UNLOAD_PENDING, params![workspace_id, object_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
+        .query_row(
+            UNLOAD_PENDING,
+            params![workspace_id, object_id, deferred],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
         .map_err(read_sql)?;
     Ok(if restore {
         Some(UnloadPending::Restore)

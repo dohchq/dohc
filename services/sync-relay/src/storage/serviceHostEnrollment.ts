@@ -15,9 +15,10 @@ export const SERVICE_HOST_ENROLLMENTS = "sync_relay_service_host_enrollments";
 export const SERVICE_HOST_MAX_DOCUMENTS = 64;
 export const SERVICE_HOST_MAX_WORKSPACES = 16;
 const MIGRATION = "service-host-enrollments-v2";
-// `owner_stop` is the owner's Pause or Stop. It applies once the service host
-// no longer holds the document; until then the enrollment stays enabled, so
-// the document keeps its binding while unsettled work settles.
+// `owner_stop` is the owner's Pause or Stop. It cuts the service host's reads
+// at once and applies in full once the host no longer holds the document;
+// until then the enrollment stays enabled, so the document keeps its binding
+// and its writes while unsettled work settles.
 const SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   workspace_id TEXT NOT NULL,
   object_id TEXT NOT NULL,
@@ -329,7 +330,7 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
       if (current.retired) assertCapacity(storage, workspaceId);
     }
     const ownerStop = input.enabled ? null : input.retire === true || current.ownerStop === "retire" ? "retire" : "pause";
-    // A Pause or Stop of an enabled document waits for its release, so the document keeps its binding until it unloads.
+    // A Pause or Stop of an enabled document leaves the host's reads now and waits for its release, so the document keeps its binding until it unloads.
     const enabled = input.enabled || current.enabled;
     const retired = !enabled && (current.retired || ownerStop === "retire");
     storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,enabled=?,retired=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)

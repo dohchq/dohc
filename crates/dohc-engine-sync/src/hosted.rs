@@ -27,8 +27,8 @@ use crate::{ReplicationEnvelope, SyncError};
 
 pub use retirement::{
     DepartedDocument, DepartedHead, RetiredFile, departed_hosted_documents,
-    forget_retired_hosted_file, hosted_document_retirable, retire_hosted_document,
-    retired_hosted_files,
+    departed_hosted_object_ids, forget_retired_hosted_file, hosted_document_retirable,
+    retire_hosted_document, retired_hosted_files,
 };
 
 /// The origin prefix the relay reserves for a service host's writes.
