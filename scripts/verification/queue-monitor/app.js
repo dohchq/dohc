@@ -733,8 +733,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (event.key === "Escape" && ui.drawer) return closeRun();
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName);
     if (!typing && !ui.drawer && !event.ctrlKey && !event.metaKey && !event.altKey && /^[1-6]$/.test(event.key)) return showTab(TABS[Number(event.key) - 1]);
-    const row = event.target.closest?.("tr[data-id]");
-    if (row && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openRun(row.dataset.id, row.dataset.attempt, row); }
+    const row = event.target.closest?.("tr[data-id], tr[data-thread]");
+    if (row && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); row.click(); }
   });
   document.addEventListener("mousemove", showTip);
   document.addEventListener("mouseleave", () => { $("#tip").hidden = true; });
