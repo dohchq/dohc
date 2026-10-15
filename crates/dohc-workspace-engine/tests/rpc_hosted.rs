@@ -1057,6 +1057,21 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_retired_file_holds_its_path_while_its_empty_folder_cannot_go() {
+    retired_file_holds_its_path_while_a_folder_is_locked("a.md/x").await;
+}
+
+/// The next durability review: with `a.md` locked instead, the first pass
+/// removed `a.md/x`, and the next one stopped at the missing folder and
+/// forgot the file while `a.md` stayed. A later pass walks past the folders
+/// already gone, so the file keeps `a.md` held across passes.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retired_file_holds_its_path_while_an_upper_empty_folder_cannot_go() {
+    retired_file_holds_its_path_while_a_folder_is_locked("a.md").await;
+}
+
+#[cfg(windows)]
+async fn retired_file_holds_its_path_while_a_folder_is_locked(locked: &str) {
     use std::os::windows::fs::OpenOptionsExt;
     let mut relay = HostedRelay::default();
     relay.log.push(json!({
@@ -1086,34 +1101,37 @@ async fn a_retired_file_holds_its_path_while_its_empty_folder_cannot_go() {
         .read(true)
         .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS, to open a folder
         .share_mode(0x1 | 0x2) // read | write, no delete
-        .open(scratch.path().join("a.md/x"))
-        .expect("lock a.md/x");
+        .open(scratch.path().join(locked))
+        .expect("lock folder");
 
-    // doc-b retires; its file goes, but its folder cannot.
-    host.sync().await;
-    assert_eq!(document_state(&scratch, "doc-b"), None);
-    assert!(!scratch.path().join("a.md/x/c.md").exists());
-    let pass = host.pull().await;
-    assert_eq!(pass["departed"], json!(["doc-b"]));
-    if pass["pendingCursor"].is_object() {
-        let commit = host.commit_answer(&pass["pendingCursor"]).await;
-        assert_eq!(commit["committed"], true, "{commit}");
-    }
+    // doc-b retires; its file goes, but the locked folder cannot, across
+    // passes.
     let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
-    let (heads, retired): (i64, i64) = conn
-        .query_row(
-            "SELECT (SELECT COUNT(*) FROM snapshots WHERE object_id='doc-a'), \
-                    (SELECT COUNT(*) FROM hosted_retired_files)",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("count");
-    assert_eq!(
-        (heads, retired),
-        (0, 1),
-        "doc-a's write waits for the folder"
-    );
-    assert!(scratch.path().join("a.md/x").is_dir());
+    for _ in 0..2 {
+        host.sync().await;
+        assert_eq!(document_state(&scratch, "doc-b"), None);
+        assert!(!scratch.path().join("a.md/x/c.md").exists());
+        let pass = host.pull().await;
+        assert_eq!(pass["departed"], json!(["doc-b"]));
+        if pass["pendingCursor"].is_object() {
+            let commit = host.commit_answer(&pass["pendingCursor"]).await;
+            assert_eq!(commit["committed"], true, "{commit}");
+        }
+        let (heads, retired): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM snapshots WHERE object_id='doc-a'), \
+                        (SELECT COUNT(*) FROM hosted_retired_files)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("count");
+        assert_eq!(
+            (heads, retired),
+            (0, 1),
+            "doc-a's write waits for the folder"
+        );
+        assert!(scratch.path().join(locked).is_dir());
+    }
 
     drop(lock);
     host.sync().await;

@@ -2776,7 +2776,8 @@ fn retire_departed_hosted(
 /// for the pass to name. A removal that fails also keeps the path held for
 /// the next pass. The folders a removed file leaves empty go too, so a file
 /// can take their name; an empty one that cannot go keeps the path held, and
-/// with it each folder above, until a later pass removes it. Answers whether
+/// with it each folder above, until a later pass removes it; that pass walks
+/// past the folders already gone. Answers whether
 /// any path came free.
 fn remove_retired_files(
     store: &mut EngineStore,
@@ -2793,12 +2794,15 @@ fn remove_retired_files(
         let mut stuck = false;
         let mut parent = file.path.as_str();
         while let Some((folder, _)) = parent.rsplit_once('/') {
-            if !matches!(
-                dohc_engine_files::remove_empty_directory_target(root, folder),
-                Ok(true)
-            ) {
-                stuck = std::fs::read_dir(root.join(folder)).is_ok_and(|mut d| d.next().is_none());
-                break;
+            match dohc_engine_files::remove_empty_directory_target(root, folder) {
+                Ok(true) => {}
+                // An earlier pass removed it; an empty folder above may remain.
+                _ if std::fs::symlink_metadata(root.join(folder)).is_err() => {}
+                _ => {
+                    stuck =
+                        std::fs::read_dir(root.join(folder)).is_ok_and(|mut d| d.next().is_none());
+                    break;
+                }
             }
             parent = folder;
         }
