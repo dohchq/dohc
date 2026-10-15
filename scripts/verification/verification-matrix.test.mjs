@@ -72,6 +72,8 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
     ["pr", null, null, null, true], ["pr", "js", null, null, true], ["pr", "rust", null, null, true],
     ["pr", "js", null, null],
     ["pr", null, "warm"], ["pr", null, "pre-typecheck"], ["pr", "rust", "pre-clippy"],
+    // A package test that another branch also failed in the last day, run inline beside a queue history.
+    ["pr", "js", "shared"],
     // A failure stops the other job unless the run keeps going.
     ["pr", null, "js", undefined, false, true],
   ]) cases.push(t.test([mode, job, fault, changed ?? "empty diff", full ? "full" : "", keepGoing ? "keep-going" : ""].filter(Boolean).join(" "), async (context) => {
@@ -270,6 +272,10 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
             assert.ok(${JSON.stringify(packages)}.includes(args[1]),'Unknown package executed: '+args[1]);
             assert.equal(options.env.POSTGRES_URL,'postgres://dohc:dohc@127.0.0.1:1234/dohc');
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
+            if(process.env.FIXTURE_FAULT==='shared' && args[1]==='@dohc/fixture') {
+              appendFileSync(options.env.DOHC_TEST_RECORD,JSON.stringify({test:'src/index.test.ts › keeps its value',flaky:false,failed:true,seconds:0.1})+'\\n');
+              throw Object.assign(Error('fixture package test failed'),{commandExitFailure:true});
+            }
             return {stdout:''};
           }
           if(command==='pnpm' && args[0]==='exec') {
@@ -329,7 +335,15 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         put(changed, changed === "pnpm-lock.yaml" ? "gate-lock" : "export const value = 2;\n");
         git(["add", "."]); git(["commit", "-m", "Change fixture input"]);
       }
-      const args = mode === "pr" ? [mode, "--base", base, ...(job ? ["--job", job] : []), ...(full ? ["--full"] : []), ...(keepGoing ? ["--keep-going"] : [])]
+      const queue = join(root, ".dohc-dev/queue");
+      if (fault === "shared") {
+        const branch = git(["symbolic-ref", "HEAD"]);
+        const hourAgo = new Date(Date.now() - 60 * 60_000).toISOString();
+        const failed = [{ step: "@dohc/fixture", test: "src/index.test.ts › keeps its value" }];
+        for (const [id, line] of [["000000001-aaaaaa", "refs/heads/feat/a"], ["000000002-bbbbbb", branch]]) put(`.dohc-dev/queue/requests/${id}/request.json`, JSON.stringify({ id, branch: line, checkout: "C:\\w\\other" }));
+        put(".dohc-dev/queue/history.jsonl", ["000000001-aaaaaa", "000000002-bbbbbb"].map(id => JSON.stringify({ at: hourAgo, event: "finished", id, failed, outcome: "failed" })).join("\n") + "\n");
+      }
+      const args = mode === "pr" ? [mode, "--base", base, ...(job ? ["--job", job] : []), ...(full ? ["--full"] : []), ...(keepGoing ? ["--keep-going"] : []), ...(fault === "shared" ? ["--inline"] : [])]
         : mode === "e2e" ? [mode, "--", "--project", "fixture"] : [mode];
       const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
       const result = await runFixture(process.execPath, ["--input-type=module", "-e", `
@@ -359,7 +373,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         }
       `, ...args], { cwd: root, timeout: 120_000, signal: context.signal, env: { ...process.env,
         NODE_PATH: join(dirname(require.resolve("js-yaml/package.json")), ".."), FIXTURE_MODE: mode, FIXTURE_FAULT: fault ?? "",
-        CARGO_INCREMENTAL: previousIncremental,
+        CARGO_INCREMENTAL: previousIncremental, ...(fault === "shared" ? { DOHC_VERIFICATION_QUEUE_ROOT: queue } : {}),
         POSTGRES_URL:"postgres://must-not-use-inherited-database/foreign" } });
       assert.equal(result.error, undefined, result.stderr);
       assert.deepEqual(JSON.parse(readFileSync(join(root, ".dohc-dev/incremental.json"), "utf8")),
@@ -415,8 +429,17 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
           "restart-one-missing": /did not pass every required proof: .*@restart-durability-person-agent/,
           "restart-skipped": /A mandatory desktop smoke test was skipped/,
           "gallery-missing": /did not pass every required proof: .*@states-baselines/,
+          shared: /fixture package test failed/,
         };
         assert.match(result.stderr, messages[fault]);
+        if (fault === "shared") {
+          const row = { step: "@dohc/fixture", test: "src/index.test.ts › keeps its value" };
+          // The lookup only reports. The package test's failure decides the verdict, as it would without a queue.
+          assert.deepEqual(report.failure, { kind: "check", cause: "tests" });
+          assert.deepEqual(report.failed, [row]);
+          assert.deepEqual(report.shared, [{ ...row, branches: ["feat/a"] }], "this branch's own run does not count");
+          assert.match(result.stdout, /\[verification\] 1 failed test also failed on other branches in the last day\. [^\n]*:\n {2}@dohc\/fixture: src\/index\.test\.ts › keeps its value \(also feat\/a\)\n/u);
+        } else assert.equal(report.shared, undefined, "a failure without failed tests looks nothing up");
         if (fault === "restart-one-missing") {
           for (const tag of ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen"]) {
             assert.ok(report.desktopProofs.some(title => title.split(/\s+/u).includes(tag)), `${tag} passed`);
