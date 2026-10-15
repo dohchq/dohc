@@ -357,7 +357,7 @@ export function currentServiceHostWorkspace(storage: StorageContext, workspaceId
     replicationEpoch: parseLiveUpdateIdentifier(value.replication_epoch, "replication_epoch"),
     streamIdentity: parseLiveUpdateIdentifier(value.stream_identity, "stream_identity")}) : null;
 }
-/** The current identity's undrained enrollments, in one SQL snapshot. */
+/** The current identity's enabled enrollments, in one SQL snapshot. */
 export function currentServiceHostEnrollments(storage: StorageContext, workspaceId: string): readonly ServiceHostEnrollment[] {
   storage.captureStanding();
   const values = storage.db.prepare(`SELECT e.* ${CURRENT} ORDER BY e.path LIMIT ?`).all(parseWorkspaceId(workspaceId), SERVICE_HOST_MAX_DOCUMENTS + 1);

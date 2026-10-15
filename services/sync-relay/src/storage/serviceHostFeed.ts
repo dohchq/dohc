@@ -62,7 +62,6 @@ export function readServiceHostFeedScope(storage: StorageContext, workspaceId: s
     });
   const hosted = new Map<string, string>(), departed = new Set<string>(), shared = new Map<string, string>();
   for (const row of enrollments) {
-    if (!row.enabled) continue;
     hosted.set(row.objectId, row.path);
     if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) departed.add(row.objectId);
     // A Pause cuts reads at once, like a revoked grant, while the enabled
