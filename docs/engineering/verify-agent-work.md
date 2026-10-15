@@ -196,6 +196,7 @@ A repository or desktop script step reruns as a whole, after its first attempt's
 
 `result.json` lists each test that failed on its last try under `failed`, with the same step and test names as `flaky`. The queue records both lists for each attempt in `status.json` and the queue history.
 The list covers package tests, the repository and desktop script tests, the account and desktop browser proofs, and the Rust tests. A step that fails outside a test, such as typecheck, lists none.
+Before you resubmit a failed run, run each command that it prints and records under `rerun` until its failed tests pass.
 
 When a run fails on the shared host, the verifier looks for its failed tests in the last day of queue history. It prints each test that another branch's run also failed, with those branches, and records them in `result.json` under `shared`. Runs of your own branch do not count.
 A failure that other branches share often comes from main or from a flaky test, not from your change.
