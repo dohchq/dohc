@@ -137,19 +137,12 @@ main { padding: 16px 20px 40px; }
 .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--run); }
 .terminal { margin-top: 12px; border-radius: 8px; background: var(--term); border: 1px solid var(--term-rule); overflow: hidden; }
 .term-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--term-rule); }
-.term-head { align-items: center; }
 .term-select { min-width: 0; max-width: 100%; flex: 1 1 auto; background: var(--term-rule); color: var(--term-ink); border: 1px solid var(--term-rule); border-radius: 6px; font: 12px var(--mono); padding: 4px 8px; }
 .term-select:focus-visible { outline: 2px solid var(--focus); }
 .pkgtrack { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 8px; align-items: center; margin: 4px 0 6px; }
 .pkg-label { font: 12px var(--mono); color: var(--muted); }
 .steptrack.thin { height: 8px; margin: 0; }
 .term-actions { display: flex; gap: 6px; flex: none; }
-.ctab { display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; background: none; color: var(--term-muted); font: 12px var(--mono); padding: 2px 8px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
-.ctab:hover:not([disabled]) { color: var(--term-ink); border-color: var(--term-rule); }
-.ctab[aria-pressed="true"] { background: var(--term-rule); color: var(--term-ink); border-color: var(--term-rule); }
-.ctab[disabled] { cursor: default; opacity: .6; }
-.ctab i { width: 7px; height: 7px; border-radius: 50%; background: var(--term-muted); flex: none; }
-.ctab.passed i { background: var(--pass); } .ctab.failed i { background: var(--fail); } .ctab.running i { background: var(--run); box-shadow: 0 0 0 3px rgba(91, 157, 255, .25); }
 .term-follow { border: 1px solid var(--run); background: none; color: var(--term-ink); border-radius: 6px; font-size: 12px; padding: 3px 10px; cursor: pointer; white-space: nowrap; }
 .term-status { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; padding: 6px 12px; border-bottom: 1px solid var(--term-rule); font-size: 12px; color: var(--term-muted); }
 .term-status .mode { color: var(--run); font-weight: 600; }
