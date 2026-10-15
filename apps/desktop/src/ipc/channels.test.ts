@@ -7,6 +7,7 @@ import restartCaptureIpc from "./ipcExposure.pr1719.json";
 import historyNamesIpc from "./ipcExposure.pr1785.json";
 import offersIpc from "./ipcExposure.offers.json";
 import usageRecordIpc from "./ipcExposure.usageRecord.json";
+import agentRunStateIpc from "./ipcExposure.agentRunState.json";
 
 describe("editor-group menu command channels", () => {
   it("routes split through the application menu and both group actions through tab menus", () => {
@@ -42,7 +43,7 @@ describe("IPC channel names", () => {
     // An operation table carries renderer requests only, so a new event from
     // main needs a key here and a reviewed record.
     const additions = [...launchOpenIpc.channelKeyAdditions, ...restartCaptureIpc.channelKeyAdditions, ...historyNamesIpc.channelKeyAdditions, ...offersIpc.channelKeyAdditions,
-      ...usageRecordIpc.channelKeyAdditions];
+      ...usageRecordIpc.channelKeyAdditions, ...agentRunStateIpc.channelKeyAdditions];
     for (const key of additions) expect(mainKeys).not.toContain(key);
     const reviewed = [...mainKeys, ...additions];
     expect(Object.keys(CHANNELS).filter(key => !reviewed.includes(key))).toEqual([]);

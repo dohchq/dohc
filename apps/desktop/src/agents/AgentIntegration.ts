@@ -17,7 +17,12 @@ export interface AgentRunRecord {
   endedAt?: number;
   agentId: string;
   onBehalfOf: string;
-  status: "running" | "complete" | "failed";
+  status: "running" | "complete" | "failed" | "interrupted";
+  // The app process and the installation that started the run. A process
+  // that quits mid-run leaves "running" behind; the next one marks it
+  // interrupted. Another installation's runs are its own to settle.
+  incarnation?: string;
+  installId?: string;
 }
 
 interface AgentRunStatus {
@@ -28,6 +33,8 @@ interface AgentRunStatus {
 export class AgentIntegrationState {
   activeRun: AgentRunRecord | null = null;
   chain: Promise<unknown> = Promise.resolve();
+  // True once this process has settled the runs an earlier process left open.
+  swept = false;
 }
 
 interface AgentIntegrationAuthority {
@@ -46,6 +53,11 @@ export interface AgentIntegrationOptions {
   agentId?: string;
   // The person this computer's agent runs work for, read when a run starts.
   localPersonId(): string;
+  // This installation's stable id, stamped on each run it starts.
+  installId(): string;
+  // This process's id. Omitted ⇒ a new randomUUID per integration, which main
+  // creates once per process.
+  incarnation?: string;
   now?: () => number;
   // Injectable id seam (oracle/tests) for the AgentRunRecord id. Omitted ⇒ a
   // real randomUUID, identical to today's behavior.
@@ -78,7 +90,10 @@ function isAgentRunRecord(value: unknown): value is AgentRunRecord {
     record.agentId.length > 0 &&
     typeof record.onBehalfOf === "string" &&
     record.onBehalfOf.length > 0 &&
-    (record.status === "running" || record.status === "complete" || record.status === "failed")
+    (record.status === "running" || record.status === "complete" || record.status === "failed" ||
+      record.status === "interrupted") &&
+    (record.incarnation === undefined || (typeof record.incarnation === "string" && record.incarnation.length > 0)) &&
+    (record.installId === undefined || (typeof record.installId === "string" && record.installId.length > 0))
   );
 }
 
@@ -128,6 +143,7 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
   const now = options.now ?? (() => Date.now());
   const createId = options.createId ?? (() => randomUUID());
   const agentId = options.agentId ?? DEFAULT_AGENT_ID;
+  const incarnation = options.incarnation ?? randomUUID();
 
   function serialize<T>(
     state: AgentIntegrationState,
@@ -141,6 +157,31 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
     return run;
   }
 
+  // On a workspace's first use in this process, marks the runs an earlier
+  // process of this installation left running as interrupted. Unreadable
+  // history is left as it is and swept on a later use.
+  async function sweepInterrupted(state: AgentIntegrationState, root: string): Promise<void> {
+    if (state.swept) return;
+    await serialize(state, async () => {
+      if (state.swept) return;
+      const runs = await readRuns(root);
+      const installId = options.installId();
+      const endedAt = now();
+      let changed = false;
+      for (const run of runs) {
+        if (run.status !== "running" || run.incarnation === incarnation) continue;
+        if (run.installId !== undefined && run.installId !== installId) continue;
+        run.status = "interrupted";
+        run.endedAt = endedAt;
+        changed = true;
+      }
+      if (changed) await writeRuns(root, runs);
+      state.swept = true;
+    }).catch((error: unknown) => {
+      console.error("[desktop] Could not settle interrupted agent runs", error);
+    });
+  }
+
   // Records the run. The active-run slot is set so the watcher attributes the
   // run's writes to the agent until endAgentRun clears it.
   async function startAgentRun(workspaceId: string): Promise<AgentRunRecord> {
@@ -148,12 +189,15 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
     const root = authority.rootPath;
     const state = authority.state;
     try {
+      await sweepInterrupted(state, root);
       const record: AgentRunRecord = {
         id: createId(),
         startedAt: now(),
         agentId,
         onBehalfOf: options.localPersonId(),
         status: "running",
+        incarnation,
+        installId: options.installId(),
       };
       await serialize(state, async () => {
         const runs = await readRuns(root);
@@ -216,6 +260,7 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
         // A newer run may have installed while the clear was pending.
         if (state.activeRun?.id === runId) state.activeRun = null;
       }
+      await sweepInterrupted(state, root);
       const recorded = await serialize(state, async () => {
         const runs = await readRuns(root);
         const record = runs.find((r) => r.id === runId);
@@ -250,6 +295,7 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
     try {
       // Unreadable history still has a live answer: the run this attachment
       // owns, or none after a stop. Mutations keep refusing until it is repaired.
+      await sweepInterrupted(state, root);
       let runs: AgentRunRecord[];
       try {
         runs = await readRuns(root);

@@ -1,5 +1,5 @@
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentRunStatusResult,
   DesktopUserSettingsResult,
@@ -15,7 +15,6 @@ export function useAgentSetup(
 ) {
   const [agentRunStatus, setAgentRunStatus] = useState<AgentRunStatusResult | null>(null);
   const agentSetupRequestRef = useRef(0);
-  const bootstrapAgentStatusRead = useRef<Promise<AgentRunStatusResult> | null>(null);
 
   const agentSetup = useMemo<AgentSetupSummary | null>(() => {
     if (!userSettings || !agentRunStatus) return null;
@@ -29,17 +28,13 @@ export function useAgentSetup(
     };
   }, [agentRunStatus, userSettings]);
 
-  // The workspace-scoped half of the setup snapshot is also the initial
-  // agent-status answer for the history lane. Both consumers share this promise.
+  // The workspace-scoped half of the setup snapshot.
   useEffect(() => {
     const version = agentSetupRequestRef.current + 1;
     agentSetupRequestRef.current = version;
     setAgentRunStatus(null);
-    const read = bridge().getAgentRunStatus({
-      workspaceId,
-    });
-    bootstrapAgentStatusRead.current = read;
-    void read
+    void bridge()
+      .getAgentRunStatus({ workspaceId })
       .then((run) => {
         if (agentSetupRequestRef.current !== version) return;
         setAgentRunStatus(run);
@@ -57,7 +52,6 @@ export function useAgentSetup(
     const wasOpen = previousSettingsSection.current !== null;
     previousSettingsSection.current = settingsSection;
     if (!wasOpen || settingsSection !== null) return;
-    bootstrapAgentStatusRead.current = null;
     const version = agentSetupRequestRef.current + 1;
     agentSetupRequestRef.current = version;
     void bridge()
@@ -70,14 +64,5 @@ export function useAgentSetup(
       });
   }, [workspaceId, settingsSection]);
 
-  const readAgentStatusForHistory = useCallback(() => {
-    const bootstrapRead = bootstrapAgentStatusRead.current;
-    if (bootstrapRead) {
-      bootstrapAgentStatusRead.current = null;
-      return bootstrapRead;
-    }
-    return bridge().getAgentRunStatus({ workspaceId });
-  }, [workspaceId]);
-
-  return { agentSetup, readAgentStatusForHistory };
+  return { agentSetup };
 }

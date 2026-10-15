@@ -63,9 +63,11 @@ import {
   stopAndRestoreRecoveryOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
+  agentRunStateOperations,
   sharedViewAccessOperations,
   ScheduleHostChangedEvent,
   ChatDispatchNoticesEvent,
+  AgentRunStateEvent,
   workspaceSearchOperations,
   folderAppOfferOperations,
   workspaceVersionOperations,
@@ -675,6 +677,9 @@ const bridge: DohcDesktopBridge = {
     onEvent(CHANNELS.scheduleHostChanged, ScheduleHostChangedEvent, listener),
   onChatDispatchNotices: (listener) =>
     onEvent(CHANNELS.chatDispatchNotices, ChatDispatchNoticesEvent, listener),
+  ...operationBridge(agentRunStateOperations, invoke),
+  onAgentRunState: (listener) =>
+    onEvent(CHANNELS.agentRunState, AgentRunStateEvent, listener),
   // Engine Y.Doc editor binding.
   // Updates cross as raw Uint8Array (structured clone); the sessionId
   // round-trips so the renderer applies forwarded deltas only for the bound

@@ -150,6 +150,7 @@ import {
   noticeOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
+  agentRunStateOperations,
   type ScheduleHostResult,
   type NoticeRef,
   type NoticeRow,
@@ -2357,6 +2358,7 @@ function recoverOutageTyping(workspace: CreatedWorkspace & {attachmentId: symbol
 }
 
 const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
+  onAgentRunState: (event) => sendToWorkspaceWindows(CHANNELS.agentRunState, event),
   cloudStateFor: (workspaceId) => {
     const remote = findWorkspace(workspaceId)?.remote;
     return {
@@ -2647,6 +2649,7 @@ const activity = {
 const agentIntegration = createAgentIntegration({
   workspaceIds: () => workspaceAuthorities.workspaceIds(),
   localPersonId: localUserId,
+  installId: localInstallationId,
   acquire: (workspaceId) => {
     const lease = requireWorkspaceAuthority(workspaceId);
     const workspace = canonicalWorkspaceFor(lease);
@@ -3372,12 +3375,17 @@ function rememberPendingCliRunMessageLink(
   lease.release();
 }
 
-const chatDispatchNotices = createChatDispatchNotices((event) => {
+// Sends a workspace's event only to windows showing that workspace.
+function sendToWorkspaceWindows(channel: string, event: { workspaceId: string }): void {
   for (const window of BrowserWindow.getAllWindows()) {
     if (window.webContents.isDestroyed()) continue;
     if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId !== event.workspaceId) continue;
-    window.webContents.send(CHANNELS.chatDispatchNotices, event);
+    window.webContents.send(channel, event);
   }
+}
+
+const chatDispatchNotices = createChatDispatchNotices((event) => {
+  sendToWorkspaceWindows(CHANNELS.chatDispatchNotices, event);
 });
 
 const chatDispatchService = createChatDispatchService({
@@ -6791,6 +6799,11 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, chatDispatchNoticeOperations, {
     registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),
     dismissChatDispatchNotice: (input) => chatDispatchNotices.dismiss(input.workspaceId, input.id),
+  });
+
+  registerOperations(operationBoundary, agentRunStateOperations, {
+    readAgentRunState: (_input, { operation }) =>
+      workspaceActivity.agentRunState(operation.workspace, operation.state.activity),
   });
 
   registerOperations(operationBoundary, noticeOperations, {

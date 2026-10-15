@@ -16,6 +16,8 @@ import type { CloudSyncFailure } from "./relaySyncEngine";
 import { captureForWorkspace } from "./engineCaptureGate";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "./testTemp";
+import { RUNNER_SELF_TEST_AGENT_ID, type ActiveAgentRun } from "../agents/activeAgentRun";
+import type { AgentRunStateEvent } from "../ipc/bridgeContract";
 
 // The shared-view pin drives the real gate, which never reaches the engine
 // for a shared view — these sessions prove it by throwing on any use.
@@ -328,6 +330,119 @@ describe("workspaceActivity capture hooks", () => {
     expect(setActiveAgentRun).toHaveBeenLastCalledWith(null);
     expect(activity.hasAgentRun("activity-test")).toBe(false);
     expect(await activity.claimAgentRun("activity-test", second)).toBe(true);
+    await activity.stopAll();
+  });
+});
+
+describe("workspaceActivity agent run state", () => {
+  function heldCapture() {
+    const held: Array<() => void> = [];
+    let holdNext = false;
+    const setActiveAgentRun = vi.fn(async (_run: ActiveAgentRun | null) => {
+      if (!holdNext) return;
+      holdNext = false;
+      await new Promise<void>((release) => held.push(release));
+    });
+    return {
+      setActiveAgentRun,
+      holdNext: () => { holdNext = true; },
+      release: () => held.shift()?.(),
+      decision: () => ({
+        shareView: false,
+        capture: {
+          start: vi.fn(),
+          setActiveAgentRun,
+          settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+          stop: vi.fn(async () => undefined),
+        } as never,
+      }),
+    };
+  }
+  const run = (agentRunId: string, agentId = "dohc-mcp"): ActiveAgentRun =>
+    ({ agentId, onBehalfOf: "local", agentRunId, depth: 0 });
+  const id = "activity-test";
+
+  async function opened() {
+    const capture = heldCapture();
+    const pushed: AgentRunStateEvent[] = [];
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: capture.decision,
+      onAgentRunState: (event) => pushed.push(event),
+    });
+    await activity.open(workspace());
+    return { activity, capture, pushed };
+  }
+
+  it("pushes once when a run starts and once when it ends, read from the slot", async () => {
+    const { activity, pushed } = await opened();
+    expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 0, active: false });
+    await activity.setAgentRun(id, run("run-1"));
+    // One run replacing another is no change in whether the agent works.
+    await activity.setAgentRun(id, run("run-2"));
+    expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 1, active: true });
+    await activity.setAgentRun(id, null);
+    expect(pushed).toEqual([
+      { workspaceId: id, revision: 1, active: true },
+      { workspaceId: id, revision: 2, active: false },
+    ]);
+    expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 2, active: false });
+    await activity.stopAll();
+  });
+
+  it("shows a chat dispatch run and leaves the runner self-test out", async () => {
+    const { activity, pushed } = await opened();
+    expect(await activity.claimAgentRun(id, run("dispatch-1", "dohc-chat-runner"))).toBe(true);
+    expect(activity.agentRunState(id).active).toBe(true);
+    await activity.clearAgentRun(id, "dispatch-1");
+    expect(await activity.claimAgentRun(id, run("self-test", RUNNER_SELF_TEST_AGENT_ID))).toBe(true);
+    expect(activity.agentRunState(id).active).toBe(false);
+    await activity.clearAgentRun(id, "self-test");
+    expect(pushed.map((event) => event.active)).toEqual([true, false]);
+    await activity.stopAll();
+  });
+
+  it("pushes nothing for a refused claim and returns to idle after a failed one", async () => {
+    const { activity, capture, pushed } = await opened();
+    expect(await activity.claimAgentRun(id, run("run-1"))).toBe(true);
+    expect(await activity.claimAgentRun(id, run("run-2"))).toBe(false);
+    expect(pushed).toHaveLength(1);
+    await activity.clearAgentRun(id, "run-1");
+    capture.setActiveAgentRun.mockRejectedValueOnce(new Error("capture refused the run"));
+    await expect(activity.claimAgentRun(id, run("run-3"))).rejects.toThrow("capture refused the run");
+    expect(activity.agentRunState(id).active).toBe(false);
+    expect(pushed.at(-1)).toMatchObject({ active: false });
+    await activity.stopAll();
+  });
+
+  it("keeps a newer run when an older run's clear settles after it", async () => {
+    const { activity, capture, pushed } = await opened();
+    expect(await activity.claimAgentRun(id, run("run-1"))).toBe(true);
+    capture.holdNext();
+    const ending = activity.clearAgentRun(id, "run-1");
+    await activity.setAgentRun(id, run("run-2"));
+    capture.release();
+    await ending;
+    expect(activity.agentRunState(id).active).toBe(true);
+    // Ending an older run does nothing for a run it does not hold.
+    await activity.clearAgentRun(id, "run-1");
+    expect(activity.agentRunState(id).active).toBe(true);
+    expect(pushed).toEqual([{ workspaceId: id, revision: 1, active: true }]);
+    await activity.stopAll();
+  });
+
+  it("pushes idle when the workspace closes during a run, and nothing for a write that lands after", async () => {
+    const { activity, capture, pushed } = await opened();
+    await activity.setAgentRun(id, run("run-1"));
+    await activity.clearAgentRun(id, "run-1");
+    capture.holdNext();
+    const starting = activity.setAgentRun(id, run("run-2"));
+    await vi.waitFor(() => expect(capture.setActiveAgentRun).toHaveBeenLastCalledWith(run("run-2")));
+    await activity.setAgentRun(id, run("run-3"));
+    await activity.close(id);
+    capture.release();
+    await starting;
+    expect(pushed.map((event) => event.active)).toEqual([true, false, true, false]);
+    expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 4, active: false });
     await activity.stopAll();
   });
 });

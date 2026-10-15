@@ -5527,7 +5527,7 @@ const AgentRunRecordSchema = z.object({
   endedAt: z.number().optional(),
   agentId: z.string(),
   onBehalfOf: z.string(),
-  status: z.enum(["running", "complete", "failed"]),
+  status: z.enum(["running", "complete", "failed", "interrupted"]),
 });
 
 export const StartAgentRunResult = AgentRunRecordSchema;
@@ -6322,6 +6322,24 @@ export const chatDispatchNoticeOperations = {
   },
 } as const satisfies OperationTable;
 
+// Whether this computer's agent holds the workspace's run slot. The revision
+// rises on every change in any workspace, so a reader keeps the newest answer.
+export const AgentRunStateEvent = z.object({
+  workspaceId: z.string().min(1),
+  revision: z.number().int().nonnegative(),
+  active: z.boolean(),
+});
+export type AgentRunStateEvent = z.infer<typeof AgentRunStateEvent>;
+export const agentRunStateOperations = {
+  readAgentRunState: {
+    capabilityId: "agent.run.state.read",
+    scope: "workspace",
+    channel: "desktop:read-agent-run-state",
+    payload: WorkspaceIdPayload, result: AgentRunStateEvent,
+    guard: "active-workspace", inactiveMessage: "Open this workspace to read whether your agent is running.",
+  },
+} as const satisfies OperationTable;
+
 export const scheduleHostOperations = {
   readScheduleHost: {
     capabilityId: "automation.host.read",
@@ -6799,6 +6817,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof noticeOperations>,
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
+    OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof sharedViewAccessOperations>,
     OperationBridge<typeof shareDirectWriteDeliveryOperations>,
     OperationBridge<typeof engineYDocAdmissionOperations>,
@@ -7241,6 +7260,9 @@ export interface DohcDesktopBridge
   // finished in the background.
   onScheduleHostChanged(listener: (workspaceId: string) => void): () => void;
   onChatDispatchNotices(listener: (event: ChatDispatchNoticesEvent) => void): () => void;
+  // Live push: this computer's agent started or stopped in a workspace this
+  // window shows.
+  onAgentRunState(listener: (event: AgentRunStateEvent) => void): () => void;
   // A step started or stopped waiting for a current editor, or a share
   // stopped a step: re-list holds and stops.
   onAutomationHoldsChanged(

@@ -180,6 +180,10 @@ export function createInMemoryWorkspaceActivity(
         expectedRootPath,
       );
     },
+    agentRunState: (workspaceId: string) => {
+      const authority = requireAuthority(workspaceId);
+      return service.agentRunState(authority.workspace, authority.state);
+    },
     hasAgentRun: (workspaceId: string, expectedRootPath?: string): boolean => {
       const authority = authorities.get(workspaceId);
       return authority

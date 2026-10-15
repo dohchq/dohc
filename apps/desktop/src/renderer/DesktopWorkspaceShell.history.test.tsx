@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { SetWorkspaceUiStatePayload } from "../ipc/bridgeContract";
-import type { AgentRunStatusResult, EngineMomentRecord, ListEngineMomentsResponse, ListEngineMomentsResult, McpConfigResult, ReadEngineMomentResult, WorkspaceUiState } from "../ipc/bridgeContract";
+import type { EngineMomentRecord, ListEngineMomentsResponse, ListEngineMomentsResult, ReadEngineMomentResult, WorkspaceUiState } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS, type WorkspaceSettingsResult } from "../workspaces/workspaceSettings";
 import { rendererMarks } from "../performance/rendererMarks";
 import { momentDiffTabPath, versionCompareTabPath } from "./workbench/workbenchState";
@@ -2590,117 +2590,41 @@ describe("history page", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // Starting or ending a run is the user acting. Merely observing that the run
-  // changed under the rendered label is not: that reading came from its own
-  // request, which can be older than a refresh the shell is still waiting on.
-  // Superseding on it threw the newer answer away, and a run seen alive just
-  // before it ended left the indicator running with nothing to correct it.
-  it("keeps an observed agent state from rejecting a newer refresh", async () => {
-    const first = deferred<ListEngineMomentsResult>();
-    const afterTheRun = deferred<ListEngineMomentsResult>();
-    const responses: Promise<ListEngineMomentsResult>[] = [
-      first.promise,
-      afterTheRun.promise,
-    ];
-    let issued = 0;
+  // Main pushes each change of the run slot, so the dot needs no read on
+  // refresh: a run seen by Settings or by chat dispatch shows the same way.
+  it("follows main's run state pushes and never reads agent runs on refresh", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
-    let activeRunId: string | null = null;
-    bridge.getAgentRunStatus = vi.fn(async () => ({
-      activeRun: activeRunId
-        ? {
-            id: activeRunId,
-            startedAt: 1,
-            agentId: "agent-1",
-            onBehalfOf: "ice",
-            status: "running" as const,
-          }
-        : null,
-      lastRun: null,
-    }));
-    // The panel's reread is held open through getMcpConfig, which only the
-    // settings panel calls — so the shell's own requests run unimpeded.
-    const heldPanelReads: Array<() => void> = [];
-    let panelReads = 0;
-    const mcpConfig: McpConfigResult = {
-      command: "dohc-mcp",
-      args: [],
-      workspacePath: WORKSPACE.rootPath,
-      home: "/tmp/dohc-home",
-    };
-    bridge.getMcpConfig = vi.fn(() => {
-      panelReads += 1;
-      if (panelReads === 1) return Promise.resolve(mcpConfig);
-      return new Promise<McpConfigResult>((resolveRead) => {
-        heldPanelReads.push(() => resolveRead(mcpConfig));
-      });
-    });
-    const user = userEvent.setup();
     renderShell(bridge);
+    await waitFor(() => expect(bridge.readAgentRunState).toHaveBeenCalledOnce());
+    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
+    const setupReads = bridge.getAgentRunStatus.mock.calls.length;
+    const statusReads = bridge.getSyncStatus.mock.calls.length;
 
-    await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
-    await act(async () => {
-      first.resolve(historyPage([historyMoment("m-first", "Added the launch checklist")]));
-      await first.promise;
-    });
-    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
-
-    // Settings opens while no run is going, so the panel renders "no run".
-    await user.keyboard("{Control>}k{/Control}");
-    await user.click(
-      await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents (MCP)",
-      ),
-    );
-    await screen.findByTestId("mcp-enable-toggle");
-
-    // Wait for the panel's initial read to commit before starting the run.
-    // "Stopped" cannot show it: the panel renders that before any read lands.
-    // The config snippet commits in the same render as the status it read.
-    await waitFor(() =>
-      expect(screen.getByTestId("mcp-config-snippet").textContent).toContain(
-        '"command": "dohc-mcp"',
-      ),
-    );
-    expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped");
-    expect(bridge.getMcpConfig).toHaveBeenCalledTimes(1);
-
-    // A run starts, and the toggle's reread catches it alive — but the reread
-    // is still in flight.
-    activeRunId = "run-1";
-    await user.click(screen.getByTestId("mcp-enable-toggle"));
-    await waitFor(() => expect(heldPanelReads.length).toBe(1));
-
-    // The run ends, and the refresh that captured the END is waiting on its
-    // history page.
-    activeRunId = null;
     act(() => {
       bridge.emitWorkspaceActivity();
     });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
-
-    // The reread answers first, reporting the run it saw alive.
-    await act(async () => {
-      for (const answerRead of heldPanelReads) answerRead();
-      await Promise.resolve();
-    });
-    // The panel committed the run it saw, so the shell was handed an observation.
     await waitFor(() =>
-      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
+      expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(statusReads),
     );
-    expect(bridge.startAgentRun).not.toHaveBeenCalled();
-    expect(bridge.endAgentRun).not.toHaveBeenCalled();
+    expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(setupReads);
+    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
 
-    // Then the refresh lands, and it knows the run is over.
-    await act(async () => {
-      afterTheRun.resolve(historyPage([historyMoment("m-after", "Rewrote the plan")]));
-      await afterTheRun.promise;
+    act(() => {
+      bridge.emitAgentRunState({ workspaceId: WORKSPACE.workspaceId, revision: 1, active: true });
     });
-
-    await waitFor(() =>
-      expect(screen.queryByTestId("agent-run-indicator")).toBeNull(),
-    );
+    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
+    // Another workspace's run, and an answer older than the one shown, change nothing.
+    act(() => {
+      bridge.emitAgentRunState({ workspaceId: "ws-other", revision: 2, active: false });
+      bridge.emitAgentRunState({ workspaceId: WORKSPACE.workspaceId, revision: 1, active: false });
+    });
+    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
+    act(() => {
+      bridge.emitAgentRunState({ workspaceId: WORKSPACE.workspaceId, revision: 3, active: false });
+    });
+    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
+    expect(bridge.readAgentRunState).toHaveBeenCalledOnce();
+    expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(setupReads);
   });
 
   // A failure reports, and it takes nothing. The lane's watermark is what an
@@ -2932,120 +2856,9 @@ describe("history page", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  // The twin of the test above, on the other way a read settles. The lane's
-  // own reader answers the observation, and that read can fail — after a newer
-  // refresh already committed the lane. A failure judged without the token
-  // then raises a banner about a reading nothing is showing: the newer answer
-  // is on screen, correct, and the user is told it could not be read.
-  it("keeps a failed agent-lane read from reporting over a newer refresh", async () => {
-    const first = deferred<ListEngineMomentsResult>();
-    const afterTheRun = deferred<ListEngineMomentsResult>();
-    const responses: Promise<ListEngineMomentsResult>[] = [
-      first.promise,
-      afterTheRun.promise,
-    ];
-    let issued = 0;
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
-    // The observation's own read is the one that fails, and it is the first
-    // agent read issued after the held panel read is released — nothing else
-    // asks in between, because every shell refresh here is driven by the test.
-    let failNextAgentRead = false;
-    let failObservationRead!: (error: Error) => void;
-    let runIsAlive = false;
-    bridge.getAgentRunStatus = vi.fn(() => {
-      if (failNextAgentRead) {
-        failNextAgentRead = false;
-        return new Promise<never>((_resolve, reject) => {
-          failObservationRead = reject;
-        });
-      }
-      return Promise.resolve({
-        activeRun: runIsAlive
-          ? {
-              id: "run-1",
-              startedAt: 1,
-              agentId: "agent-1",
-              onBehalfOf: "ice",
-              status: "running" as const,
-            }
-          : null,
-        lastRun: null,
-      });
-    });
-    const heldPanelReads: Array<() => void> = [];
-    let panelReads = 0;
-    const mcpConfig: McpConfigResult = {
-      command: "dohc-mcp",
-      args: [],
-      workspacePath: WORKSPACE.rootPath,
-      home: "/tmp/dohc-home",
-    };
-    bridge.getMcpConfig = vi.fn(() => {
-      panelReads += 1;
-      if (panelReads === 1) return Promise.resolve(mcpConfig);
-      return new Promise<McpConfigResult>((resolveRead) => {
-        heldPanelReads.push(() => resolveRead(mcpConfig));
-      });
-    });
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-history"));
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(1));
-    await act(async () => {
-      first.resolve(historyPage([historyMoment("m-first", "Added the launch checklist")]));
-      await first.promise;
-    });
-
-    await user.keyboard("{Control>}k{/Control}");
-    await user.click(
-      await within(await screen.findByTestId("command-palette")).findByText(
-        "Settings: Open Agents (MCP)",
-      ),
-    );
-    await screen.findByTestId("mcp-enable-toggle");
-
-    // A run starts under the rendered label, so the toggle's reread reports it
-    // rather than starting or ending anything.
-    runIsAlive = true;
-    await user.click(screen.getByTestId("mcp-enable-toggle"));
-    await waitFor(() => expect(heldPanelReads.length).toBe(1));
-
-    // Release the reread. The observation lands and asks the lane's own
-    // reader, whose read is the one that will fail.
-    failNextAgentRead = true;
-    await act(async () => {
-      for (const answerRead of heldPanelReads) answerRead();
-      await Promise.resolve();
-    });
-    await waitFor(() => expect(failObservationRead).toBeTruthy());
-
-    // A newer refresh answers the same lane first, and it says the run is
-    // alive. That is what the user is looking at.
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledTimes(2));
-    await act(async () => {
-      afterTheRun.resolve(historyPage([historyMoment("m-after", "Rewrote the plan")]));
-      await afterTheRun.promise;
-    });
-    expect(await screen.findByTestId("agent-run-indicator")).toBeTruthy();
-
-    // Only now does the older read fail. It has nothing to report: the lane
-    // already holds a newer answer, and it is on screen.
-    await act(async () => {
-      failObservationRead(new Error("agent status failed"));
-      await Promise.resolve();
-    });
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
-    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
-  });
-
   // Supersession is per LANE. The user dismissed a review; that says nothing
-  // about sync or agent state, and the dismiss emits no activity event, so
-  // rejecting those lanes too would strand the workspace status with no other source.
+  // about sync state, and the dismiss emits no activity event, so rejecting
+  // that lane too would strand the workspace status with no other source.
   it("suppresses only the lane the user wrote when a refresh answers late", async () => {
     const first = deferred<ListEngineMomentsResult>();
     const refreshed = deferred<ListEngineMomentsResult>();
@@ -3058,23 +2871,11 @@ describe("history page", () => {
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     // The workspace moves on before the second refresh is issued, so that
-    // refresh carries fresh news on the two lanes the user did not write.
+    // refresh carries fresh news on the lane the user did not write.
     let movedOn = false;
     bridge.getSyncStatus = vi.fn(async () =>
       movedOn ? { ...SYNC_STATUS, state: "syncing" as const } : SYNC_STATUS,
     );
-    bridge.getAgentRunStatus = vi.fn(async () => ({
-      activeRun: movedOn
-        ? {
-            id: "run-1",
-            startedAt: 1,
-            agentId: "agent-1",
-            onBehalfOf: "ice",
-            status: "running" as const,
-          }
-        : null,
-      lastRun: null,
-    }));
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -3086,7 +2887,6 @@ describe("history page", () => {
     });
     expect(await screen.findByTestId("try-review-card")).toBeTruthy();
     expect(screen.getByTestId("sync-status").dataset.state).toBe("synced");
-    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
 
     // A refresh is in flight when the user dismisses the review.
     movedOn = true;
@@ -3102,124 +2902,19 @@ describe("history page", () => {
       await refreshed.promise;
     });
 
-    // The lane the user wrote stays written; the lanes they did not, update.
+    // The lane the user wrote stays written; the lane they did not, updates.
     expect(screen.queryByTestId("try-review-card")).toBeNull();
     await waitFor(() =>
       expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
     );
-    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
   });
 
-  // The no-history refresh wrote both of its lanes with no request token
-  // at all. Nothing else in the shell writes a lane untimed, so the rule read
-  // as held everywhere — but these two lanes are shared, and an untimed write
-  // is ranked by ARRIVAL. A refresh issued before the run started could land
-  // after the refresh that saw it and turn the indicator back off, with
-  // nothing to correct it: the write moved no watermark, so the lane still
-  // believed nothing had answered.
-  it("keeps an older no-history refresh from undoing a newer agent answer", async () => {
-    const idle: AgentRunStatusResult = {
-      activeRun: null,
-      lastRun: null,
-    };
-    const running: AgentRunStatusResult = {
-      activeRun: {
-        id: "run-1",
-        startedAt: 1,
-        agentId: "agent-1",
-        onBehalfOf: "ice",
-        status: "running",
-      },
-      lastRun: null,
-    };
-    const heldRead = deferred<AgentRunStatusResult>();
-    // Which read gets what is set by this test, not by a call count: activity
-    // refreshes keep reading after bootstrap has shared its first answer.
-    let holdNextRead = false;
-    let runIsActive = false;
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getAgentRunStatus = vi.fn(() => {
-      if (holdNextRead) {
-        holdNextRead = false;
-        return heldRead.promise;
-      }
-      return Promise.resolve(runIsActive ? running : idle);
-    });
-    renderShell(bridge);
-
-    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
-    expect(screen.queryByTestId("agent-run-indicator")).toBeNull();
-
-    // One agent read from a refresh is still in flight.
-    holdNextRead = true;
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-    await waitFor(() => expect(holdNextRead).toBe(false));
-
-    // The run starts, and a newer refresh answers it.
-    runIsActive = true;
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-    await waitFor(() => expect(screen.getByTestId("agent-run-indicator")).toBeTruthy());
-
-    // The older read answers last, from before the run existed.
-    await act(async () => {
-      heldRead.resolve(idle);
-      await heldRead.promise;
-    });
-    expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
-  });
-
-  it("commits sync status when the sibling agent read fails", async () => {
-    const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
-    let failNextAgentRead = false;
-    let statusChanged = false;
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getSyncStatus = vi.fn(async () =>
-      statusChanged ? syncingStatus : SYNC_STATUS,
-    );
-    bridge.getAgentRunStatus = vi.fn(async () => {
-      if (failNextAgentRead) {
-        failNextAgentRead = false;
-        throw new Error("agent status failed");
-      }
-      return {
-        activeRun: null,
-        lastRun: null,
-      };
-    });
-    renderShell(bridge);
-
-    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
-    expect(screen.getByTestId("sync-status").dataset.state).toBe("synced");
-
-    statusChanged = true;
-    failNextAgentRead = true;
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-
-    await waitFor(() =>
-      expect(screen.getByTestId("sync-status").dataset.state).toBe("syncing"),
-    );
-    const error = await screen.findByTestId("workspace-shell-error");
-    expect(error.textContent).toContain("dohc could not refresh agent runs.");
-    expect(error.textContent).not.toContain("Could not refresh history.");
-  });
-
-  it("marks history ready when one status lane succeeds", async () => {
+  it("marks history ready when the status read succeeds", async () => {
     const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.getAgentRunStatus = vi.fn(async () => {
-      throw new Error("agent status failed");
-    });
     renderShell(bridge);
 
     await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1));
-    await screen.findByTestId("workspace-shell-error");
     await waitFor(() => {
       const timeline = rendererMarks
         .readSwitchTimeline()

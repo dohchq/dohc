@@ -23,7 +23,7 @@ vi.mock("./documentVersionKey", { spy: true });
 vi.mock("./path", { spy: true });
 
 describe("workspace switch performance timeline", () => {
-  it("reuses the bootstrap agent-status read for initial history", async () => {
+  it("reads agent setup once and run state once when a workspace opens", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);
 
@@ -32,6 +32,7 @@ describe("workspace switch performance timeline", () => {
     );
     await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalled());
     expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1);
+    expect(bridge.readAgentRunState).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId });
   });
 
   it("records the existing shell readiness commits for a restored file", async () => {
@@ -1717,7 +1718,9 @@ describe("workbench render cost", () => {
       // may be absent from the current tree and still change these surfaces.
       expect(bridge.listEngineMoments).toHaveBeenCalledTimes(moments + 1);
       expect(bridge.getSyncStatus).toHaveBeenCalledTimes(statuses + 1);
-      expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(agents + 1);
+      // Run state arrives from main's pushes, so a refresh does not read it.
+      expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(agents);
+      expect(bridge.readAgentRunState).toHaveBeenCalledTimes(1);
       expect(bridge.getTryInVersionState).toHaveBeenCalledTimes(tryStates + 1);
     } finally {
       vi.useRealTimers();

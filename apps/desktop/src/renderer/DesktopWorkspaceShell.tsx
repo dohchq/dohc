@@ -78,6 +78,7 @@ import {
   versionCompareOffCopy,
 } from "./shell/capabilityOffCopy";
 import { useAgentSetup } from "./shell/useAgentSetup";
+import { useAgentRunActive } from "./shell/agentRunState";
 import {
   DEFAULT_SIDEBAR_SETTINGS,
   type DesktopUserSettings,
@@ -627,7 +628,7 @@ export function DesktopWorkspaceShell(props: {
   }, []);
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
 
-  const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
+  const { agentSetup } = useAgentSetup(
     props.workspace.workspaceId,
     props.userSettings,
     settingsSection,
@@ -1633,12 +1634,12 @@ export function DesktopWorkspaceShell(props: {
     loadMore: loadMoreEngineHistory,
     observeVersion: observeEngineVersion,
   } = useHistoryPage(engineHistoryToken, workspaceId, markHistoryReady);
-  // The sync, agent, and try snapshots ride the refresh response but are not
-  // the timeline: no pagination competes for them, so they apply as soon as
-  // they arrive. Each is its own lane with its own watermark, because a local
+  // The sync and try snapshots ride the refresh response but are not the
+  // timeline: no pagination competes for them, so they apply as soon as they
+  // arrive. Each is its own lane with its own watermark, because a local
   // write only ever knows about the lane it wrote — dismissing a review says
-  // nothing about sync state, and rejecting all three would strand a status
-  // bar that has no other source (the dismiss emits no activity event).
+  // nothing about sync state, and rejecting both would strand a status bar
+  // that has no other source (the dismiss emits no activity event).
   //
   // Each lane owns its state, so a write that names no request cannot be
   // written at all. The history page is not one of these: it carries
@@ -1696,7 +1697,10 @@ export function DesktopWorkspaceShell(props: {
       setVersionEpoch((epoch) => epoch + 1);
     }
   }, [captureDecidedFor, syncStatus, workspaceId]);
-  const [agentActive, agentActiveLane] = useSnapshotLane(engineHistoryToken, false);
+  // The title bar dot and the Agent running notice follow main's run slot.
+  const agentActive = useAgentRunActive(workspaceId, (error, retry) =>
+    reportLaneFailure("dohc could not refresh agent runs.", error, retry),
+  );
   // "Try it in a version" (PR 0N-2): the workspace's live try session —
   // running banner or the run's review card. Refreshed with history (the
   // manager pings the same workspace-activity channel on every transition).
@@ -1720,60 +1724,21 @@ export function DesktopWorkspaceShell(props: {
   const onSearchHitClosed = useCallback(() => {
     setSearchChatTarget((target) => (target?.read ? null : target));
   }, []);
-  // The local writers on these lanes. Dismissing the review card clears it
+  // The local writer on the try lane. Dismissing the review card clears it
   // here, and that IS the user acting: it supersedes whatever a request issued
   // earlier will eventually say.
   const onTryReviewDismissed = useCallback(() => {
     tryStateLane.set(null);
   }, [tryStateLane]);
-  // Settings reports the agent lane two different ways, and only one of them
-  // is the user acting. Starting or ending a run is a local write, newer than
-  // every request in flight. Merely observing that the run changed under the
-  // rendered label is not: that reading came from its own request, which may
-  // have been issued before a refresh the shell is still waiting on — and
-  // superseding on it would throw away the newer answer. A run observed alive
-  // just before it ended would then leave the indicator running forever.
-  //
-  // So an observation is not written at all. It carries no request token, and
-  // arrival order is not ordering: once each lane commits when its own read
-  // lands, a refresh answer can commit before the observation arrives, and an
-  // untimed write would then paint over an answer that is newer than it. The
-  // observation asks this lane's own reader instead — one tokened read, judged
-  // by the same rule as every other answer, and issued after the observation,
-  // so it is the freshest thing available.
-  const refreshAgentLane = useCallback(() => {
-    const token = ++engineHistoryToken.current;
-    agentActiveLane.settle(
-      token,
-      bridge().getAgentRunStatus({ workspaceId }),
-      (agent) => agent.activeRun !== null,
-      (error) =>
-        reportLaneFailure("dohc could not refresh agent runs.", error, () =>
-          refreshAgentLane(),
-        ),
-    );
-  }, [agentActiveLane, reportLaneFailure, workspaceId]);
-  const onSettingsAgentActiveChange = useCallback(
-    ({ active, mutated }: { active: boolean; mutated: boolean }) => {
-      if (!mutated) {
-        refreshAgentLane();
-        return;
-      }
-      agentActiveLane.set(active);
-    },
-    [agentActiveLane, refreshAgentLane],
-  );
   const reportSettingsFailure = useCallback(
     (message: string, cause?: unknown, retry?: () => Promise<void>) => {
       if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
       reportShellFailure({ message, cause, retry: retry ? () => {
         if (workspaceAdmission.superseded || workspaceIdRef.current !== workspaceId) return;
-        void retry().then(() => {
-          if (!workspaceAdmission.superseded && workspaceIdRef.current === workspaceId) refreshAgentLane();
-        });
+        void retry();
       } : null });
     },
-    [workspaceAdmission, workspaceId, reportShellFailure, refreshAgentLane],
+    [workspaceAdmission, workspaceId, reportShellFailure],
   );
   useUsageRecordStops(reportSettingsFailure);
 
@@ -1793,7 +1758,7 @@ export function DesktopWorkspaceShell(props: {
     // says engine-on, and every listEngineMoments call would error.
     const token = ++engineHistoryToken.current;
     if (historyReadable(syncStatusLane.latest())) {
-      // Four reads ride one refresh, and they answer four different
+      // Three reads ride one refresh, and they answer three different
       // questions. One batch made every answer hostage to the worst of them:
       // a try-state failure discarded a history page the engine had already
       // served, and the timeline then said it could not load. An
@@ -1810,7 +1775,7 @@ export function DesktopWorkspaceShell(props: {
       // Each is handed whole to the lane rule, which judges both ways it can
       // settle.
       const pageRead = refreshHistoryPage(token);
-      // Asking again IS this refresh: it re-reads all four, so the lane that
+      // Asking again IS this refresh: it re-reads all three, so the lane that
       // failed is read again. Same control the History surface offers for its
       // own read, and the same one the caller runs on any activity.
       const askAgain = () => {
@@ -1824,13 +1789,6 @@ export function DesktopWorkspaceShell(props: {
         (status) => status,
         (error) =>
           reportLaneFailure("dohc could not refresh sync status.", error, askAgain),
-      );
-      agentActiveLane.settle(
-        token,
-        readAgentStatusForHistory(),
-        (agent) => agent.activeRun !== null,
-        (error) =>
-          reportLaneFailure("dohc could not refresh agent runs.", error, askAgain),
       );
       // A shared view has no versions, so it has no try run to read.
       if (!shareView) tryStateLane.settle(
@@ -1846,15 +1804,13 @@ export function DesktopWorkspaceShell(props: {
       );
       return pageRead;
     }
-    // No history source exists: only status and agent state refresh. They ride the same issue order as
-    // the engine branch's reads: this refresh answers the very lanes the
-    // settings panel and a second refresh also write, and an untimed write
-    // ranked by arrival undid both — a run the user had just started, and a
-    // newer status. The page reads this refresh supersedes still learn of it,
-    // so their failures stay quiet and their retries stop.
+    // No history source exists: only status refreshes. It rides the same
+    // issue order as the engine branch's reads: a second refresh also writes
+    // this lane, and an untimed write ranked by arrival undid a newer status.
+    // The page reads this refresh supersedes still learn of it, so their
+    // failures stay quiet and their retries stop.
     supersedeHistoryPage(token);
     const statusRead = bridge().getSyncStatus({ workspaceId });
-    const agentRead = readAgentStatusForHistory();
     const askAgain = () => {
       void refreshHistory().catch((error) =>
         reportShellError("Could not refresh history.", error),
@@ -1867,22 +1823,10 @@ export function DesktopWorkspaceShell(props: {
       (error) =>
         reportLaneFailure("dohc could not refresh sync status.", error, askAgain),
     );
-    agentActiveLane.settle(
-      token,
-      agentRead,
-      (agent) => agent.activeRun !== null,
-      (error) =>
-        reportLaneFailure("dohc could not refresh agent runs.", error, askAgain),
-    );
-    const settled = await Promise.allSettled([statusRead, agentRead]);
-    if (settled.some((lane) => lane.status === "fulfilled")) {
-      markHistoryReady();
-    }
+    await statusRead.then(() => markHistoryReady(), () => undefined);
   }, [
-    agentActiveLane,
     !!shareView,
     markHistoryReady,
-    readAgentStatusForHistory,
     refreshHistoryPage,
     reportLaneFailure,
     reportShellError,
@@ -6237,7 +6181,6 @@ export function DesktopWorkspaceShell(props: {
             {...(settingsFocus ? { focus: CUSTOMIZE_TARGETS[settingsFocus] } : {})}
             {...(askAgent ? { askAgent } : {})}
             onClose={closeSettings}
-            onAgentActiveChange={onSettingsAgentActiveChange}
             cloud={cloudSettings}
             onOpenSharing={(target) => {
               closeSettings();

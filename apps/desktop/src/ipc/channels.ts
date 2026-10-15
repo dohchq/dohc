@@ -230,6 +230,7 @@ export const CHANNELS = {
   // Which of the owner's computers runs a workspace's schedules changed.
   scheduleHostChanged: "desktop:schedule-host-changed",
   chatDispatchNotices: "desktop:chat-dispatch-notices",
+  agentRunState: "desktop:agent-run-state",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
   switchCollectionAutomation: "desktop:switch-collection-automation",

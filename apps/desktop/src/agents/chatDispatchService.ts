@@ -23,6 +23,7 @@ import {
   type AwaitableAgentDispatchStore,
 } from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
+import { RUNNER_SELF_TEST_AGENT_ID } from "./activeAgentRun";
 
 // How a run ended, as its notice says it.
 type RunOutcome =
@@ -1459,7 +1460,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           };
         }
         await options.setRunAttribution(workspace, {
-          agentId: "dohc-chat-runner-self-test",
+          agentId: RUNNER_SELF_TEST_AGENT_ID,
           agentRunId: runId,
           depth: 0,
         });
