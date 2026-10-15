@@ -9,6 +9,8 @@ use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_storage::{NoFaults, put_binary_blob};
 use dohc_engine_testkit::{ScratchDir, open_store};
 use serde_json::json;
+mod apply_performance;
+mod passive;
 
 // Fields drop in order, so the scratch directory comes last: its guard
 // removes the directory only after the store has closed the database.
@@ -28,6 +30,14 @@ fn fixture(replicates: bool) -> Fixture {
 }
 
 fn fixture_with_markdown(replicates: bool, source: Option<&str>) -> Fixture {
+    fixture_with_binding_generation(replicates, source, 0)
+}
+
+fn fixture_with_binding_generation(
+    replicates: bool,
+    source: Option<&str>,
+    generation: i64,
+) -> Fixture {
     let (scratch, path, mut store) = open_store();
     VersionedTextStore::new(&mut store)
         .ensure_main_version("ws", "main", 0, &NoFaults)
@@ -73,7 +83,7 @@ fn fixture_with_markdown(replicates: bool, source: Option<&str>) -> Fixture {
         lineage_claim_id: hex_sha256(&bytes),
         current_path: "note.md".into(),
         selector_paths: vec!["note.md".into()],
-        restore_fence_generation: 0,
+        restore_fence_generation: generation,
     };
     let mut owner = ApplicationOwner::new("ws".into()).unwrap();
     let handle = owner

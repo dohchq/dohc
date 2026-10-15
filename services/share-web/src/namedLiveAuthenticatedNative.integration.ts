@@ -241,7 +241,7 @@ it("authenticates two accounts through the production browser transport and pres
           socket.once("unexpected-response", (_request, response) => { response.resume(); socket.terminate(); });
           return socket as unknown as BrowserSocket;
         } });
-      const provider = manager.select({ accountId, workspaceId: document.workspaceId, grantId, objectId: document.objectId });
+      const provider = manager.select({ accountId, workspaceId: `named:${grantId}`, grantId, objectId: document.objectId });
       providers.push(provider);
       return { provider, manager };
     }

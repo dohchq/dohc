@@ -1151,3 +1151,49 @@ it("opens an owner 4 MiB sync while the non-owner workspace byte portion is full
   } finally {release(); own.ws.terminate();}
   await vi.waitFor(() => expect(budget.usage()).toBe(0));
 });
+
+function setNamedGrantKind(f: Awaited<ReturnType<typeof fixture>>, kind: "direct" | "claimed-email" | "link-dependent") {
+  if (kind === "claimed-email") {
+    f.raw.prepare("UPDATE sync_relay_share_grants SET principal_kind='email', principal_user_id=NULL, principal_email='reader@example.test' WHERE grant_id=?").run(scope.grantId);
+    expect(f.storage.claimPendingSharesForEmail("reader@example.test", scope.userId)).toBe(1);
+  } else if (kind === "link-dependent") {
+    f.raw.prepare(`INSERT INTO sync_relay_share_grants
+      (grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+      VALUES ('parent-link',?,'link',NULL,NULL,'edit',1,'active',1,NULL,NULL)`).run(scope.shareId);
+    f.raw.prepare("UPDATE sync_relay_share_grants SET parent_grant_id='parent-link' WHERE grant_id=?").run(scope.grantId);
+  }
+}
+
+it.each(["direct", "claimed-email", "link-dependent"] as const)("returns only the named grant binding from desktop admission for %s", async kind => {
+  const f = await fixture(limits, false, undefined, false, true);
+  setNamedGrantKind(f, kind);
+  const response = await f.post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath});
+  expect(response.status).toBe(200);
+  const body = await response.json();
+  expect(body).toMatchObject({workspaceId: `named:${scope.grantId}`, grantId: scope.grantId, objectId: binding.objectId, path: binding.currentPath});
+  expect(JSON.stringify(body)).not.toContain(scope.workspaceId);
+  expect(f.native.binding.workspaceId).toBe(scope.workspaceId);
+});
+
+it.each((["direct", "claimed-email", "link-dependent"] as const).flatMap(kind => [false, true].map(desktop => ({kind, desktop}))))
+  ("returns only the named grant binding in live frames for $kind; desktop=$desktop", async ({kind, desktop}) => {
+    const f = await fixture(limits, false, undefined, false, desktop);
+    setNamedGrantKind(f, kind);
+    const minted = await f.mint(), socket = f.connect(minted.token);
+    expect(await socket.status).toBe(101);
+    const {provider, until} = await startProvider(socket);
+    await until(() => provider.state().status === "live");
+    expect(provider.state().binding).toMatchObject({...binding, workspaceId: `named:${scope.grantId}`});
+    expect(JSON.stringify(provider.state().binding)).not.toContain(scope.workspaceId);
+    expect(f.native.binding.workspaceId).toBe(scope.workspaceId);
+});
+
+it.each(["view", "comment"] as const)("keeps %s recipients out of desktop admission and named live frames", async access => {
+  const f = await fixture(limits, false, undefined, false, true), minted = await f.mint();
+  f.raw.prepare("UPDATE sync_relay_share_grants SET access=?").run(access);
+  const response = await f.post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath});
+  expect(response.status).toBe(404);
+  expect(await response.json()).toEqual({ok: false});
+  expect(await f.connect(minted.token).status).not.toBe(101);
+  expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
+});

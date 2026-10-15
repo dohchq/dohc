@@ -130,7 +130,8 @@ function captureLiveFrameHost(options: {
   const projection = actor.kind === "link"
     ? createAccountlessPathProjection({ paths: [...binding.selectorPaths], versionId: null, access: "edit" }) : null;
   const wireBinding = projection && actor.kind === "link" ? parseLiveObjectBinding({ ...binding, workspaceId: `link:${actor.grantId}`,
-    currentPath: projection.projectPath(binding.currentPath), selectorPaths: projection.selector.paths }) : binding;
+    currentPath: projection.projectPath(binding.currentPath), selectorPaths: projection.selector.paths })
+    : actor.kind === "named" ? parseLiveObjectBinding({ ...binding, workspaceId: `named:${actor.grantId}` }) : binding;
   const standing = storage.captureStanding();
   const lifetime = new AbortController();
   let opened = false, submitting = false;

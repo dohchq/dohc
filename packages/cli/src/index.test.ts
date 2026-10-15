@@ -59,7 +59,7 @@ describe("executeCli", () => {
     expect(result).toEqual({
       exitCode: 0,
       stderr: "",
-      stdout: `${JSON.stringify({ schemaVersion: 2, groups: [group] }, null, 2)}\n`,
+      stdout: `${JSON.stringify({ schemaVersion: 3, groups: [group] }, null, 2)}\n`,
     });
   });
 
@@ -74,7 +74,7 @@ describe("executeCli", () => {
       exitCode: 0,
       stderr: "",
       stdout: `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         threadIds: ["th_one", "th_two"],
       }, null, 2)}\n`,
     });
@@ -400,7 +400,7 @@ describe("executeCli", () => {
       "",
     ].join("\n"));
     expect(JSON.parse((await executeCli({ argv: ["automation", "run", "tasks", "stamp", "atc_1", "--json"], env: {}, request: show })).stdout))
-      .toEqual({ schemaVersion: 2, ok: true, run: { ...run, steps, failedStep: 3, startsOver: false } });
+      .toEqual({ schemaVersion: 3, ok: true, run: { ...run, steps, failedStep: 3, startsOver: false } });
     // A changed automation's run does not resume; Try again starts over.
     const changed = async () => ({ ok: true, run: { ...run, definitionChanged: true, steps, failedStep: 3, startsOver: true } });
     const changedText = (await executeCli({ argv: ["automation", "run", "tasks", "stamp", "atc_1"], env: {}, request: changed })).stdout;
@@ -539,4 +539,16 @@ describe("executeCli", () => {
       stderr: "dohc: desktop app returned an invalid response\n",
     });
   });
+});
+
+it.each([
+  ["accessObject", ["access", "object", JSON.stringify({ kind: "path", path: "Notes/a.md", versionId: null }), "--json"]],
+  ["accessSharing", ["access", "sharing", "received", "--json"]],
+] as const)("prints the unknown reason for %s", async (verb, argv) => {
+  const request = vi.fn(async () => ({ ref: null, rows: [], visibility: "unknown", freshness: "unknown", checkedAtMs: null,
+    unknownReason: "other-account", nextCursor: null, coverage: { kind: "unavailable", complete: false, observation: "interval" } }));
+  const result = await executeCli({ argv: [...argv], env: {}, request });
+  expect(result.exitCode).toBe(0);
+  expect(JSON.parse(result.stdout)).toHaveProperty("unknownReason", "other-account");
+  expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb }));
 });

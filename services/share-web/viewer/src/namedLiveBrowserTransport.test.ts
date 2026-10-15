@@ -8,8 +8,8 @@ import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { createNamedLiveBrowserTransport, type NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 
-const selection = { accountId: "reader", workspaceId: "workspace", grantId: "grant", objectId: "document" };
-const binding: LiveObjectBinding = { workspaceId: "workspace", mainVersionId: "main", objectId: "document",
+const selection = { accountId: "reader", workspaceId: "named:grant", grantId: "grant", objectId: "document" };
+const binding: LiveObjectBinding = { workspaceId: "named:grant", mainVersionId: "main", objectId: "document",
   lineageClaimId: "lineage", currentPath: "document.md", selectorPaths: ["document.md"], restoreFenceGeneration: 0 };
 const limits = (): NamedLiveBrowserLimits => ({ provider: {
   frames: { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384 },
@@ -384,4 +384,12 @@ it("reconnects a live route once without tearing down the replacement", async ()
   expect(f.requests).toHaveLength(6);
   expect(socket.closed).toBe(0);
   expect(f.value.state().status).toBe("live");
+});
+
+it("refuses an initial frame bound to another named grant before applying content", async () => {
+  const f = fixture(), connecting = f.value.reconnect(), socket = await f.socketAt(0), peer = host(socket, f.value);
+  socket.open(); await connecting; await peer.greet();
+  await peer.initial(document("OTHER GRANT CONTENT"), {...binding, workspaceId: "named:other-grant"});
+  expect(f.value.state()).toMatchObject({status: "quarantined", reason: "binding-changed", binding: null});
+  expect(f.value.body.length).toBe(0);
 });

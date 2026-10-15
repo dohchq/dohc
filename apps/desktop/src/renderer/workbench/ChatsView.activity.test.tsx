@@ -183,7 +183,7 @@ describe("ChatsView live activity refresh", () => {
   it("reloads an open thread's messages, decisions, and run records in place", async () => {
     const user = userEvent.setup();
     const opening = message();
-    const agentReport = message({
+    const agentReport = message({ presentation: { group: "fixture", hue: null, self: false },
       id: "agent-live-report",
       parentMessageId: opening.id,
       authorKind: "agent",
@@ -259,14 +259,14 @@ describe("ChatsView live activity refresh", () => {
 
   it("names the automation that asked for a run, and nobody for a person's request", async () => {
     const user = userEvent.setup();
-    const wake = message({
+    const wake = message({ presentation: { group: "fixture", hue: null, self: false },
       authorKind: "automation",
       authorDisplayName: "Stamp the finish date",
       authorOwnerDisplayName: "Ice",
       automation: { automationId: "collection:Tasks#stamp", collectionPath: "Tasks" },
       body: "Stamp today's tasks.",
     });
-    const reply = (id: string, createdAtMs: number) => message({
+    const reply = (id: string, createdAtMs: number) => message({ presentation: { group: "fixture", hue: null, self: false },
       id,
       parentMessageId: wake.id,
       authorKind: "agent",

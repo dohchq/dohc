@@ -19,7 +19,7 @@ describe("targeted chat navigation", () => {
         pathHint: "docs/plan.md",
         createdAtMs: 10,
       },
-      message: {
+      message: { presentation: { group: "fixture", hue: null, self: false },
         id: "message-1",
         threadId: thread.id,
         authorKind: "human",
@@ -77,7 +77,7 @@ describe("targeted chat navigation", () => {
         targetKind: "file",
         createdAtMs: 0,
       },
-      message: {
+      message: { presentation: { group: "fixture", hue: null, self: false },
         id: "message-channel",
         threadId: "thread-channel",
         authorKind: "agent",

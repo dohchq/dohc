@@ -41,8 +41,10 @@ export function createNamedDesktopLiveCapture(options: {
         !row.ticket || typeof row.ticket !== "object" || Array.isArray(row.ticket)) throw new Error("Invalid live admission.");
       const ticket = row.ticket as Record<string, unknown>;
       if (typeof ticket.token !== "string" || typeof ticket.expiresAtMs !== "number" || ticket.expiresAtMs <= Date.now()) throw new Error("Invalid live ticket.");
-      return { selection: { accountId: credentials.userId, workspaceId: parseLiveUpdateIdentifier(row.workspaceId),
-        grantId: parseLiveUpdateIdentifier(row.grantId), objectId: parseLiveUpdateIdentifier(row.objectId) },
+      const grantId = parseLiveUpdateIdentifier(row.grantId), workspaceId = `named:${grantId}`;
+      if (row.workspaceId !== workspaceId) throw new Error("Invalid live admission.");
+      return { selection: { accountId: credentials.userId, workspaceId,
+        grantId, objectId: parseLiveUpdateIdentifier(row.objectId) },
         discriminator: row.discriminator, token: ticket.token, limits: parseNamedLiveBrowserLimits(row.editorLimits) };
     } finally { await response.body?.cancel().catch(() => {}); }
   }

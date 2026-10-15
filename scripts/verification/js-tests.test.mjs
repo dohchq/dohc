@@ -4,7 +4,9 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { runBounded, testPlan, testWorkspace } from "./js-tests.mjs";
+import { affectedPackages, packageReferences, readWorkspacePackages } from "./selection.mjs";
 
 test("a malformed proof continuation cannot silently omit proofs", async () => {
   await assert.rejects(testWorkspace({runProofs: true}), /runProofs must be a function/);
@@ -56,6 +58,123 @@ test("a failed package stops admission and waits for its running sibling", async
   assert.deepEqual(started, ["fail", "sibling"]);
 });
 
+test("a node:test step that failed only in its tests runs once more and records them as flaky", t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-js-rerun-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "scripts/verification"), { recursive: true });
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  mkdirSync(join(root, "packages/tail"), { recursive: true });
+  writeFileSync(join(root, "packages/tail/package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+  // The fake repository step fails in a test the first time and passes the second; a check failure always fails.
+  writeFileSync(join(root, "scripts/verification/process.mjs", ), `
+    import {appendFileSync,existsSync,writeFileSync} from 'node:fs';
+    import {resolve} from 'node:path';
+    export const repoRoot=resolve(import.meta.dirname,'../..');
+    export const pnpm=args=>['pnpm',args];
+    export const calls=[];
+    export async function run(_command,args,{log}){
+      calls.push(args.join(' '));
+      if(args.includes('list'))return {stdout:JSON.stringify([{name:'@dohc/tail',path:resolve('packages/tail')}])};
+      if(args.includes('test:repo')&&process.env.SCENARIO==='check'){writeFileSync(log,'check-brand: 2 files use the old name');throw Object.assign(Error('check failed'),{commandExitFailure:true});}
+      if(args.includes('test:repo')&&!existsSync('ran')){writeFileSync('ran','');writeFileSync(log,'✖ failing tests:\\n\\n✖ times out under load (30231ms)\\n');throw Object.assign(Error('tests failed'),{commandExitFailure:true});}
+      writeFileSync(log,'ok');return {stdout:''};
+    }
+  `);
+  writeFileSync(join(root, "driver.mjs"), `
+    import {readFileSync} from 'node:fs';
+    import {testWorkspace} from './scripts/verification/js-tests.mjs';
+    import {calls} from './scripts/verification/process.mjs';
+    await testWorkspace({prepared:true,output:'evidence'}).catch(error=>console.log('ERROR',error.message));
+    const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
+    console.log(JSON.stringify({repo:calls.filter(call=>call.includes('test:repo')).length,flaky:report.flaky}));
+  `);
+  const drive = scenario => {
+    rmSync(join(root, "ran"), { force: true });
+    rmSync(join(root, "evidence"), { recursive: true, force: true });
+    const result = spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, SCENARIO: scenario } });
+    return JSON.parse(result.stdout.trim().split("\n").at(-1));
+  };
+  assert.deepEqual(drive("flaky"), { repo: 2, flaky: [{ step: "repository", test: "times out under load" }] });
+  assert.deepEqual(drive("check"), { repo: 1, flaky: [] });
+});
+
+test("a change affects its own packages and every package that depends on them", () => {
+  const pkg = (name, path, dependencies = {}, devDependencies = {}) => ({ name, path, manifest: { dependencies, devDependencies } });
+  const packages = [pkg("@dohc/runtime", "packages/runtime"), pkg("@dohc/relay", "services/relay", { "@dohc/runtime": "workspace:*" }),
+    pkg("@dohc/desktop", "apps/desktop", {}, { "@dohc/relay": "workspace:*", react: "^19" }), pkg("@dohc/site", "apps/site"),
+    pkg("@dohc/runtime-tools", "packages/runtime/tools")];
+  assert.deepEqual(affectedPackages(["apps/site/src/index.ts", "docs/notes.md"], packages), ["@dohc/site"]);
+  assert.deepEqual(affectedPackages(["packages/runtime/src/a.ts"], packages), ["@dohc/desktop", "@dohc/relay", "@dohc/runtime"], "dependents, through a dev dependency too");
+  assert.deepEqual(affectedPackages(["packages/runtime/tools/build.mjs"], packages), ["@dohc/runtime-tools"], "the nested package owns its files");
+  assert.deepEqual(affectedPackages(["README.md", "docs/a.md"], packages), [], "documentation affects no package");
+  assert.equal(affectedPackages(["docs/reference/cli-mcp-sdk.md"], packages), null, "a generated reference that tests compare against is not documentation");
+  assert.equal(affectedPackages([], packages), null, "with nothing to attribute, every package runs");
+  const aliased = [...packages, pkg("@dohc/consumer", "packages/consumer", { renamed: "workspace:@dohc/site@*" })];
+  assert.deepEqual(affectedPackages(["apps/site/src/index.ts"], aliased), ["@dohc/consumer", "@dohc/site"], "a workspace alias is a dependency");
+  assert.deepEqual(affectedPackages(["apps/site/src/index.ts"], packages, [["@dohc/site", "@dohc/runtime"]]), ["@dohc/desktop", "@dohc/relay", "@dohc/runtime", "@dohc/site"],
+    "a package another package's tests import affects it, and its dependents in turn");
+});
+
+test("undeclared relative imports between packages count as dependencies", t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-references-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const put = (path, text) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), text); };
+  put("apps/desktop/src/ipc/channels.ts", "export const channel = 'a';\n");
+  put("services/relay/src/edits.test.ts", "import { channel } from '../../../apps/desktop/src/ipc/channels';\nimport { local } from './local';\n");
+  put("services/relay/dist/bundle.js", "require('../../../apps/site/index.js');\n");
+  put("packages/x/src/a.ts", "const fixture = new URL(\x60../../../services/relay/src/edits.test.ts\x60, import.meta.url);\n");
+  const packages = [{ name: "@dohc/desktop", path: "apps/desktop" }, { name: "@dohc/relay", path: "services/relay" },
+    { name: "@dohc/site", path: "apps/site" }, { name: "@dohc/x", path: "packages/x" }];
+  assert.deepEqual(packageReferences(root, packages), [["@dohc/desktop", "@dohc/relay"], ["@dohc/relay", "@dohc/x"]], "build output is not read");
+});
+
+test("the real tree's undeclared test imports select their importers", () => {
+  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const packages = readWorkspacePackages(root);
+  const references = packageReferences(root, packages);
+  // sync-relay's tests import desktop source, and ydoc-projection's tests import sync-relay's.
+  assert.ok(affectedPackages(["apps/desktop/src/ipc/stopAndRestoreIpc.ts"], packages, references).includes("@dohc/sync-relay"));
+  assert.ok(affectedPackages(["services/sync-relay/src/liveTickets.ts"], packages, references).includes("@dohc/ydoc-projection"));
+  for (const outside of ["pnpm-lock.yaml", "crates/engine/src/lib.rs", "scripts/verification/close-electron.mjs"]) {
+    assert.equal(affectedPackages(["apps/site/src/index.ts", outside], packages), null, `${outside} can affect any package`);
+  }
+});
+
+test("a narrowed run tests only the affected packages, and records the rest as skipped", t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-js-only-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "scripts/verification"), { recursive: true });
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  for (const name of ["tail", "head"]) {
+    mkdirSync(join(root, "packages", name), { recursive: true });
+    writeFileSync(join(root, "packages", name, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+  }
+  writeFileSync(join(root, "scripts/verification/process.mjs"), `
+    import {resolve} from 'node:path';
+    export const repoRoot=resolve(import.meta.dirname,'../..');
+    export const pnpm=args=>['pnpm',args];
+    export const calls=[];
+    export async function run(_command,args){
+      calls.push(args.join(' '));
+      if(args.includes('list'))return {stdout:JSON.stringify(['tail','head'].map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
+      return {stdout:''};
+    }
+  `);
+  writeFileSync(join(root, "driver.mjs"), `
+    import {readFileSync} from 'node:fs';
+    import {testWorkspace} from './scripts/verification/js-tests.mjs';
+    import {calls} from './scripts/verification/process.mjs';
+    await testWorkspace({prepared:true,output:'evidence',changed:JSON.parse(process.env.CHANGED)});
+    const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
+    console.log(JSON.stringify({ran:calls.filter(call=>call.startsWith('--filter')).map(call=>call.split(' ')[1]),skipped:report.skippedPackages??null,verdict:report.verdict}));
+  `);
+  const drive = changed => JSON.parse(spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, CHANGED: JSON.stringify(changed) } }).stdout.trim().split("\n").at(-1));
+  assert.deepEqual(drive(["packages/head/src/a.ts"]), { ran: ["@dohc/head"], skipped: ["@dohc/tail"], verdict: "PASS" });
+  assert.deepEqual(drive(["docs/a.md"]), { ran: [], skipped: ["@dohc/head", "@dohc/tail"], verdict: "PASS" }, "a documentation change runs no package tests");
+  assert.deepEqual(drive(["pnpm-lock.yaml", "packages/head/src/a.ts"]), { ran: ["@dohc/head", "@dohc/tail"], skipped: null, verdict: "PASS" });
+  assert.deepEqual(drive(null), { ran: ["@dohc/head", "@dohc/tail"], skipped: null, verdict: "PASS" }, "--full runs every package");
+});
+
 test("the plan retains every package test and preserves stricter worker caps", () => {
   const pkg = (name, scripts = {test: "vitest run"}) => ({name: `@dohc/${name}`, manifest: {scripts}});
   const tasks = testPlan([pkg("future-package"), pkg("workspace-auth"), pkg("workspace-postgres"), pkg("share-web"), pkg("workspace-api"),
@@ -64,7 +183,10 @@ test("the plan retains every package test and preserves stricter worker caps", (
   assert.equal(tasks.length, 8);
   assert.equal(tasks[0].name, "@dohc/ydoc-projection");
   assert.equal(tasks[1].name, "@dohc/desktop");
-  assert.equal(tasks.find(task => task.name === "@dohc/app-backend-runtime").args.at(-1), "--maxWorkers=1");
+  const runtime = tasks.find(task => task.name === "@dohc/app-backend-runtime").args;
+  assert.ok(runtime.includes("--maxWorkers=1"), runtime.join(" "));
+  // Every vitest package retries a failing test once and records the tests that needed it.
+  assert.ok(runtime.includes("--retry=1") && runtime.some(arg => arg.endsWith("test-record-reporter.mjs")), runtime.join(" "));
   assert.equal(tasks.find(task => task.name === "@dohc/future-package").script, "test");
   assert.equal(tasks.filter(task => task.resource === "postgres").length, 4);
   assert.throws(() => testPlan([pkg("desktop")]), /Missing test:unit/);
@@ -84,7 +206,7 @@ for (const scenario of ["success", "proof-failure", "package-failure", "reposito
           test: "vitest run", ...(name === "desktop" ? {"test:unit": "vitest run"} : {}),
         }}));
       }
-      for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs"]) {
+      for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) {
         put(`scripts/verification/${file}`, readFileSync(new URL(file, import.meta.url)));
       }
       put("scripts/verification/process.mjs", `
@@ -199,7 +321,7 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
   const put = (path, data) => { mkdirSync(dirname(join(root, path)), {recursive:true}); writeFileSync(join(root, path), data); };
   try {
     put("package.json", '{"type":"module","scripts":{"test":"node scripts/verification/js-tests.mjs"}}');
-    for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs"]) {
+    for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) {
       mkdirSync(join(root, "scripts/verification"), {recursive:true});
       copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
     }

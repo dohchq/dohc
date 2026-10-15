@@ -29,14 +29,15 @@ function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnl
   const session = {doc, state, subscribe(fn: (value: ReturnType<typeof state>) => void) {listeners.add(fn); return () => listeners.delete(fn);},
     async reconnect() {status = "live"; notify();}, disconnect() {status = "disconnected"; notify();},
     edit(change: () => void) {pendingUpdates++; doc.transact(change); notify(); return true;}, close: closed};
-  transport.factory.mockImplementation(() => ({select: () => session, close: closed}));
+  const select = vi.fn(() => session);
+  transport.factory.mockImplementation(() => ({select, close: closed}));
   const frames = {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
     maxQueuedBytes: 4096, maxQueuedFrames: 16, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096};
   const request = vi.fn<typeof fetch>(async (_url, options) => {
     expect(new Headers(options?.headers).get("authorization")).toBe("Bearer real-account-token");
     expect(new Headers(options?.headers).has("cookie")).toBe(false);
     expect(JSON.parse(String(options?.body))).toEqual({shareId: "share", path: "docs/a.md"});
-    return Response.json({kind: "named", userId: "reader", workspaceId: "remote-workspace", shareId: "share", grantId: "grant",
+    return Response.json({kind: "named", userId: "reader", workspaceId: "named:grant", shareId: "share", grantId: "grant",
       path: "docs/a.md", objectId: "object", discriminator: "abcdefghijkl", expiresAtMs: Date.now() + 60000,
       ticket: {token: "a".repeat(64), expiresAtMs: Date.now() + 60000},
       editorLimits: {provider: {frames, maxPendingUpdateBytes: 4096, maxPendingUpdates: 4, maxDeliveryAttempts: 2},
@@ -47,7 +48,7 @@ function fixture(recordDelivery?: () => Promise<ShareRecordStatus | null>, isOnl
     credentials: {relayUrl: "https://relay.test", token: "real-account-token", userId: "reader", signal: new AbortController().signal},
     accessEnded: () => ended,
     assertCurrent() {if (!current) throw new Error("switched");}, fetch: request, preserveDraft, recordDelivery, isOnline: () => isOnline});
-  return {refuse(code: string) { reason = code; status = "disconnected"; notify(); }, stop(accessEnded: boolean) { ended = accessEnded; session.disconnect(); }, capture, request, closed, preserveDraft, session, switchWorkspace() {current = false;},
+  return {refuse(code: string) { reason = code; status = "disconnected"; notify(); }, select, stop(accessEnded: boolean) { ended = accessEnded; session.disconnect(); }, capture, request, closed, preserveDraft, session, switchWorkspace() {current = false;},
     quarantineEdit(change: () => void) {doc.transact(change); status = "quarantined"; notify(); return false;},
     retry() {status = "live"; reason = "admission-unavailable"; notify();},
     terminal() {status = "quarantined"; reason = "authority-refused"; notify();},
@@ -101,7 +102,7 @@ it("preserves exact pending state before close and retains the provider if stora
   expect(f.closed).not.toHaveBeenCalled();
   expect(Y.encodeStateAsUpdate(provider.doc)).toEqual(exact);
   await provider.close();
-  expect(f.preserveDraft).toHaveBeenLastCalledWith({path: "docs/a.md", objectId: "object", remoteWorkspaceId: "remote-workspace", update: exact});
+  expect(f.preserveDraft).toHaveBeenLastCalledWith({path: "docs/a.md", objectId: "object", remoteWorkspaceId: "named:grant", update: exact});
   expect(f.closed).toHaveBeenCalledOnce();
 });
 
@@ -130,7 +131,7 @@ it("retains an edit quarantined before queue admission across failed recovery an
   expect(f.closed).not.toHaveBeenCalled();
   expect(Y.encodeStateAsUpdate(provider.doc)).toEqual(exact);
   await provider.close();
-  expect(f.preserveDraft).toHaveBeenLastCalledWith({path: "docs/a.md", objectId: "object", remoteWorkspaceId: "remote-workspace", update: exact});
+  expect(f.preserveDraft).toHaveBeenLastCalledWith({path: "docs/a.md", objectId: "object", remoteWorkspaceId: "named:grant", update: exact});
   expect(f.closed).toHaveBeenCalledOnce();
 });
 
@@ -250,7 +251,7 @@ it.each([401, 403, 404])("retries desktop admission status %s while access is ac
   const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()});
   const actual = await vi.importActual<typeof import("@dohc/ydoc-projection/named-live-browser-transport")>("@dohc/ydoc-projection/named-live-browser-transport");
   const options = transport.factory.mock.calls[0]![0] as Parameters<typeof actual.createNamedLiveBrowserTransport<NamedLiveSelection>>[0];
-  const selected = {accountId: "reader", workspaceId: "remote-workspace", grantId: "grant", objectId: "object"};
+  const selected = {accountId: "reader", workspaceId: "named:grant", grantId: "grant", objectId: "object"};
   await options.authorize!(selected, new AbortController().signal);
   f.request.mockResolvedValue(new Response(null, {status}));
   vi.useFakeTimers();
@@ -279,7 +280,7 @@ it("stops desktop admission retries when access ends", async () => {
   const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()});
   const actual = await vi.importActual<typeof import("@dohc/ydoc-projection/named-live-browser-transport")>("@dohc/ydoc-projection/named-live-browser-transport");
   const options = transport.factory.mock.calls[0]![0] as Parameters<typeof actual.createNamedLiveBrowserTransport<NamedLiveSelection>>[0];
-  const selected = {accountId: "reader", workspaceId: "remote-workspace", grantId: "grant", objectId: "object"};
+  const selected = {accountId: "reader", workspaceId: "named:grant", grantId: "grant", objectId: "object"};
   await options.authorize!(selected, new AbortController().signal);
   f.stop(true);
   await expect(options.authorize!(selected, new AbortController().signal)).rejects.toBeInstanceOf(LiveAuthorityUnavailableError);
@@ -295,4 +296,31 @@ it("stops desktop admission retries when access ends", async () => {
   expect(openSocket).not.toHaveBeenCalled();
   expect(vi.getTimerCount()).toBe(0);
   await provider.close();
+});
+
+it("selects the named binding from its own desktop admission and fences a changed reconnect grant", async () => {
+  const f = fixture();
+  const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()});
+  const selection = {accountId: "reader", workspaceId: "named:grant", grantId: "grant", objectId: "object"};
+  expect(f.select).toHaveBeenCalledExactlyOnceWith(selection);
+  const {authorize} = transport.factory.mock.calls[0]![0];
+  const first = await authorize(selection, new AbortController().signal);
+  expect(first.ticketToken).toBe("a".repeat(64));
+  const original = f.request.getMockImplementation()!;
+  f.request.mockImplementation(async (...args) => {
+    const body = await (await original(...args)).json();
+    return Response.json({...body, grantId: "other-grant", workspaceId: "named:other-grant"});
+  });
+  await expect(authorize(selection, new AbortController().signal)).rejects.toThrow("The shared file changed");
+  await provider.close();
+});
+
+it.each(["owner-workspace", "named:other-grant"])("refuses a desktop admission binding %s before opening a live transport", async workspaceId => {
+  const f = fixture(), original = f.request.getMockImplementation()!;
+  f.request.mockImplementation(async (...args) => {
+    const body = await (await original(...args)).json();
+    return Response.json({...body, workspaceId});
+  });
+  await expect(f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn()})).rejects.toThrow();
+  expect(transport.factory).not.toHaveBeenCalled();
 });

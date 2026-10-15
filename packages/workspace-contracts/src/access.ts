@@ -40,8 +40,10 @@ export const AccessAnswer = z.object({
   visibility: z.enum(["visible", "missing", "hidden", "unknown"]),
   coverage: z.object({ kind: z.enum(["granted", "received-own-grant", "received-account", "collection", "unavailable"]),
     complete: z.boolean(), observation: z.literal("interval") }),
+  unknownReason: z.enum(["signed-out", "not-synced", "other-account", "other-server", "not-listed-yet", "changed", "unreadable"]).nullable(),
   checkedAtMs: Timestamp, freshness: z.enum(["fresh", "stale", "unknown"]), nextCursor: z.string().max(2048).nullable(),
-});
+}).refine(answer => (answer.coverage.kind === "unavailable" && answer.visibility !== "hidden" && answer.visibility !== "missing") === (answer.unknownReason !== null),
+  { path: ["unknownReason"], message: "A reason is required for unavailable Access unless visibility is hidden or missing." });
 export type AccessAnswer = z.infer<typeof AccessAnswer>;
 const AccessPageInput = z.object({ cursor: z.string().min(1).max(2048).optional() });
 export const ObjectAccessInput = AccessPageInput.extend({ ref: AccessObjectRef });
