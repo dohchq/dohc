@@ -5859,7 +5859,7 @@ function registerIpcHandlers(): void {
     withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
     localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
-    recordHistoryPersonName:(workspaceId, userId, sender) => {
+    recordHistoryPersonName: (workspaceId, userId, sender) => {
       const workspace = findWorkspace(workspaceId);
       if (!recordHistoryPersonIsNamed(userId, workspace?.remote?.ownerUserId ?? localUserId())) return null;
       return historyLabelsFor(sender).person(workspaceId, userId);

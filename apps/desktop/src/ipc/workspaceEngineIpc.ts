@@ -301,18 +301,24 @@ export function createWorkspaceEngineIpc<
         presentations: EngineMomentAuthorNames["presentations"],
       ) => Promise<Result>,
     ): Promise<Result> {
-      const assertCurrent = () => { requireWorkspace(workspaceId); };
-      if (!shareViewIsPresent(requireWorkspace(workspaceId).shareView)) {
+      // A replaced registry entry may name another server, so the read stops.
+      const entry = requireWorkspace(workspaceId);
+      const assertCurrent = () => {
+        if (requireWorkspace(workspaceId) !== entry) throw new Error("History stopped loading because the workspace changed.");
+      };
+      if (!shareViewIsPresent(entry.shareView)) {
         const { capture } = await requireEngineCapture(workspaceId, "Engine history");
+        assertCurrent();
         await warmCredentialCache();
-        const workspace = requireWorkspace(workspaceId);
-        return read(capture, workspace.rootPath, createHistoryPresentationRequest({
-          source: "own-store", workspaceId, assertCurrent, serverUrl: workspace.remote?.serverUrl,
+        assertCurrent();
+        return read(capture, entry.rootPath, createHistoryPresentationRequest({
+          source: "own-store", workspaceId, assertCurrent, serverUrl: entry.remote?.serverUrl,
           installationId: localInstallationId(), credentials: currentCredentials(),
         }));
       }
       return withRendererWorkspaceOperation(event.sender, workspaceId,
         "History stopped loading because this window changed workspaces.", async (operation) => {
+          assertCurrent();
           const { workspace } = operation;
           if (!shareViewIsPresent(workspace.shareView)) throw new Error("This workspace is no longer a shared view.");
           const store = receivedShareEngine.storeFor({

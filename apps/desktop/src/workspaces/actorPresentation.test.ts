@@ -187,12 +187,25 @@ describe("History presentation", () => {
     expect(JSON.stringify(tokens)).not.toMatch(/alice|device|sam|someone|grant|holder|public|Pat/);
   });
 
-  it.each([["no server"], ["invalid"], ["https://account.test?query=1"]])("leaves named authors neutral for %s", (serverUrl) => {
-    const [sam, mine] = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
+  it.each([["no server", true], ["invalid", false], ["https://account.test?query=1", false]] as const)("leaves named authors neutral for %s", (serverUrl, mine) => {
+    const [sam, person] = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
       serverUrl: serverUrl === "no server" ? undefined : serverUrl, installationId: "device", credentials })([named("sam"), { kind: "human", humanId: "alice" }]);
     expect(sam).toMatchObject({ hue: null, self: false });
     expect(sam!.group).toMatch(/^unknown:/);
-    expect(mine).toMatchObject({ hue: "rose", self: true });
+    // An unsynced store has no other server's ids; a server it can't read can't confirm yours.
+    expect(person).toMatchObject({ hue: "rose", self: mine });
+  });
+
+  it("does not take a person on the workspace's server for you because your account elsewhere has their user id", () => {
+    const [person, agentOf, installation, sam] = history("https://other.test")([
+      { kind: "human", humanId: "alice" }, agent("handshake"), { kind: "human", humanId: "device" }, named("alice"),
+    ]);
+    expect(person).toMatchObject({ hue: "rose", self: false });
+    expect(agentOf).toMatchObject({ hue: null, self: false });
+    expect(installation!.self).toBe(true);
+    expect(sam).toMatchObject({ hue: "rose", self: false });
+    // The same id on your own server is you.
+    expect(history("https://account.test/")([{ kind: "human", humanId: "alice" }])[0]!.self).toBe(true);
   });
 
   it("makes the named-author issuer once per request", () => {

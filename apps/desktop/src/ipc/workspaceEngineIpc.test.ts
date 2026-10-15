@@ -931,7 +931,18 @@ describe("workspace engine IPC registrations", () => {
       h.capture.listMoments.mockResolvedValue(page([sam], [{ kind: "human", humanId: "person-local" }]));
       const [named, mine] = await tokens(h);
       expect(named).toEqual([{ group: expect.stringMatching(/^unknown:/), hue: null, self: false }]);
-      expect(mine![0]!.self).toBe(true);
+      // A server History can't read can't confirm the account is yours.
+      expect(mine![0]!.self).toBe(false);
+    });
+
+    it("keeps an account on another server from being you in a store synced to this one", async () => {
+      const h = await harness();
+      h.workspace.remote = { serverUrl: "https://other.test", ownerUserId: "owner-other" };
+      h.identity.credentials = account;
+      h.capture.listMoments.mockResolvedValue(page([{ kind: "human", humanId: "person-local" }], [{ kind: "human", humanId: "install-local" }]));
+      const [sameId, installation] = await tokens(h);
+      expect(sameId).toEqual([{ group: expect.any(String), hue: ownActorPresentation("install-local", account).hue, self: false }]);
+      expect(installation![0]!.self).toBe(true);
     });
 
     it("keeps received authors issuerless and never self, whatever this computer is signed in as", async () => {
@@ -953,6 +964,24 @@ describe("workspace engine IPC registrations", () => {
         return page([sam]);
       });
       await expect(h.invoke(CHANNELS.listEngineMoments)).rejects.toThrow("Unknown workspace");
+    });
+
+    it("stops a read whose registry entry was replaced, after each wait", async () => {
+      const replace = (h: Awaited<ReturnType<typeof harness>>) => {
+        const replacement = { ...h.workspace, remote: { serverUrl: "https://other.test", ownerUserId: "owner-other" } };
+        h.requireWorkspace.mockImplementation(() => replacement);
+      };
+      const during = await harness();
+      during.capture.listMoments.mockImplementation(async () => { replace(during); return page([sam]); });
+      await expect(during.invoke(CHANNELS.listEngineMoments)).rejects.toThrow("the workspace changed");
+      const warming = await harness();
+      warming.warmCredentialCache.mockImplementation(async () => { replace(warming); });
+      await expect(warming.invoke(CHANNELS.listEngineMoments)).rejects.toThrow("the workspace changed");
+      expect(warming.capture.listMoments).not.toHaveBeenCalled();
+      const capturing = await harness();
+      capturing.requireEngineCapture.mockImplementation(async () => { replace(capturing); return { capture: capturing.capture }; });
+      await expect(capturing.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).rejects.toThrow("the workspace changed");
+      expect(capturing.warmCredentialCache).not.toHaveBeenCalled();
     });
   });
 

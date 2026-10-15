@@ -98,7 +98,7 @@ export function createActorPresentationRequest(input: Omit<Parameters<typeof res
 
 /**
  * One History read's tokens, one per author in order. Own-store reads match this installation
- * and the current account, and make the named-author issuer from the workspace's server once.
+ * and the current account on the workspace's server, and make the named-author issuer from that server once.
  * Received authors get no issuer and never borrow credentials, so they stay owner-asserted and never self.
  */
 export function createHistoryPresentationRequest(input: { workspaceId: string; assertCurrent(): void } & (
@@ -108,10 +108,13 @@ export function createHistoryPresentationRequest(input: { workspaceId: string; a
   let context: Parameters<typeof deriveMomentActor>[1] = { source: "received" };
   let own: string[] = [];
   if (input.source === "own-store") {
-    const account = localAccount(input.credentials);
     let relayIssuer: ActorIssuer | undefined;
     try { relayIssuer = input.serverUrl === undefined ? undefined : createActorIssuer(input.serverUrl); }
     catch { /* An invalid server leaves named authors neutral. */ }
+    // Moments name people by user id alone. A synced store's ids belong to its server, so an
+    // account on another server, or beside a server that can't be read, is not you here.
+    const signedIn = localAccount(input.credentials);
+    const account = signedIn && (input.serverUrl === undefined || signedIn.issuer === relayIssuer) ? signedIn : null;
     context = { source: "own-store", identity: { installationId: input.installationId, account },
       workspaceId: input.workspaceId, ...(relayIssuer ? { relayIssuer } : {}) };
     own = localPersonKeys(input.installationId, account);
