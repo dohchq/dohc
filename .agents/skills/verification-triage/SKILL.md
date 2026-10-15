@@ -51,6 +51,7 @@ If the `dohc-verification-nightly` task is missing, run `pnpm verify:queue insta
 The queue appends one line with `"event": "finished"` to `C:\w\_verification\history.jsonl` for each run. Each line has these fields:
 
 - `flaky`: the tests that passed only on retry.
+- `failed`: the tests that failed on their last try.
 - `slowest`: the run's ten slowest tests, with seconds.
 - `steps`: each step's seconds.
 - `load`: the lanes, peak concurrent runs, lowest free memory, and mean CPU.

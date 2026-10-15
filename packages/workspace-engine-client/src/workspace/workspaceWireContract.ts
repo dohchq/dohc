@@ -20,6 +20,7 @@ import type { JsonValue } from "../protocol";
 export const WORKSPACE_METHOD = {
   open: "workspace.open",
   close: "workspace.close",
+  replicaCut: "replica.cut",
   conflictsList: "conflicts.list",
   conflictsOpen: "conflicts.open",
   conflictsResolve: "conflicts.resolve",
@@ -440,6 +441,7 @@ type CaptureSetAuthorParams = WorkspaceJsonObject & {
 };
 
 export type WorkspaceMethodParamsMap = {
+  [WORKSPACE_METHOD.replicaCut]: WorkspaceJsonObject & { selectors: Array<{versionId: string | null; paths: string[]}>; knownTextShas?: string; position?: {revision:number;logCursor:number;journalCursor:number} | null; cursor?: {path:string;objectId:string;versionId:string} | null };
   [WORKSPACE_METHOD.open]: WorkspaceOpenParams;
   [WORKSPACE_METHOD.close]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.conflictsList]: ConflictListParams;
@@ -1250,6 +1252,16 @@ const AutomationScheduleMarkSchema = mutableStruct({
 });
 
 const WorkspaceResultSchemas = {
+  [WORKSPACE_METHOD.replicaCut]: mutableStruct({
+    workspaceId: Schema.String, revision: Schema.Int, logCursor: Schema.Int, journalCursor: Schema.Int,
+    files: Schema.mutable(Schema.Array(mutableStruct({versionId: Schema.String, objectId: Schema.String, path: Schema.String,
+      contentKind: Schema.Literals(["text", "binary"]), sha256: Schema.String, byteLength: Schema.Int,
+      lineageClaimId: NullableString, restoreGeneration: NullableInt}))),
+    texts: Schema.mutable(Schema.Array(mutableStruct({sha256: Schema.String, text: Schema.String}))),
+    moved: Schema.Boolean,
+    nextCursor: Schema.NullOr(mutableStruct({path: Schema.String, objectId: Schema.String, versionId: Schema.String})),
+    refusedFiles: Schema.mutable(Schema.Array(mutableStruct({path: Schema.String, objectId: Schema.String, versionId: Schema.String, sha256: Schema.String, reason: Schema.Literal("text-frame-limit")}))),
+  }),
   [WORKSPACE_METHOD.open]: mutableStruct({ workspace: Schema.String }),
   [WORKSPACE_METHOD.close]: mutableStruct({ closed: Schema.Boolean }),
   [WORKSPACE_METHOD.conflictsList]: mutableStruct({
@@ -1569,4 +1581,14 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
     ) as WorkspaceMethodResultMap[M];
   }
   return decoded;
+}
+
+export type ReplicaCurrentViewPage = WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.replicaCut];
+export type ReplicaCurrentView = Omit<ReplicaCurrentViewPage, "moved" | "nextCursor" | "refusedFiles"> & {omitted: ReplicaCurrentViewPage["refusedFiles"]};
+export type ReplicaCurrentViewPosition = Pick<ReplicaCurrentView, "revision" | "logCursor" | "journalCursor">;
+export type ReplicaCurrentViewCursor = NonNullable<ReplicaCurrentViewPage["nextCursor"]>;
+export type ReplicaCurrentViewSelector = WorkspaceMethodParamsMap[typeof WORKSPACE_METHOD.replicaCut]["selectors"][number];
+
+export function decodeReplicaCurrentView(value: unknown): ReplicaCurrentViewPage {
+  return decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut,value as JsonValue);
 }
