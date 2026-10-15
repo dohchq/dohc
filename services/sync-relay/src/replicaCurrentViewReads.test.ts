@@ -217,7 +217,16 @@ it("a fenced restore without a view row stays updating until admission resumes",
     f.write(db => db.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2,admission_state='closed'"));
     f.storage.appendLogBatch({workspaceId:"workspace",originId:"owner",ops:[{originSeq:0,opKind:"workspace.restore",payloadJson:"{}",recordedAtMs:1}]});
     const input = {grantId:"grant", generation:4, principal:{kind:"user" as const,userId:"reader"}};
+    f.write(db => {
+      db.prepare(`INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms)
+        VALUES ('other-share','workspace','owner',?,0)`).run('{"paths":["other"],"versionId":null}');
+      db.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+        VALUES ('other-grant','other-share','user','reader',NULL,'edit',4,'active',0,NULL,NULL)`).run();
+    });
+    const otherInput = {grantId:"other-grant",generation:4,principal:{kind:"user" as const,userId:"reader"}};
     f.storage.storeReplicaCurrentView(lease,{workspaceId:"workspace",revision:1,logCursor:1,journalCursor:0,omitted:[],texts:[],files:[]});
+    expect(f.storage.listReplicaCurrentViewFiles(otherInput)).toMatchObject({status:"ready",files:[]});
+    expect(f.storage.readReplicaCurrentViewFile({...otherInput,path:f.input.evidence.currentPath})).toEqual({status:"not-found"});
     expect(f.storage.listReplicaCurrentViewFiles(input)).toMatchObject({files:[{path:f.input.evidence.currentPath,status:"updating"}]});
     expect(f.storage.readReplicaCurrentViewFile({...input,path:f.input.evidence.currentPath})).toEqual({status:"updating"});
     f.write(db => db.exec("UPDATE sync_relay_live_documents SET admission_state='open'"));

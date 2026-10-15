@@ -168,13 +168,13 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
     if (!selector) return {status:"denied"};
     const workspace = authorized.share.workspaceId;
     const standing = storage.readReplicaStanding(workspace);
-    if (!standing) { forgetReplicaCurrentViewReadCache(storage,workspace); forgetReplicaCurrentViewStoredCache(storage,workspace); return {status:"not-ready"}; }
+    if (!standing) { forgetReplicaCurrentViewCaches(storage,workspace); return {status:"not-ready"}; }
     if (standing.ownerUserId !== authorized.share.granterUserId) return {status:"denied"};
     const projection = input.principal.kind === "link" ? createAccountlessPathProjection(selector) : null;
     const realPath = requestedPath === undefined ? undefined : projection ? projection.resolvePath(requestedPath) ?? "" : requestedPath;
     const stored = source ? null : storage.readReplicaCurrentView(workspace);
     const snapshot = source ? source.currentReadView(workspace) : stored && {view:stored,previous:stored};
-    if (!snapshot) { forgetReplicaCurrentViewReadCache(storage,workspace); forgetReplicaCurrentViewStoredCache(storage,workspace); return {status:"not-ready"}; }
+    if (!snapshot) { forgetReplicaCurrentViewCaches(storage,workspace); return {status:"not-ready"}; }
     const {view} = snapshot;
     if (view.workspaceId !== workspace || [view.revision, view.logCursor, view.journalCursor].some(n => !Number.isSafeInteger(n) || n < 0) ||
       view.logCursor > standing.logSeq || view.journalCursor > standing.journalCursor) return {status:"updating"};
@@ -251,17 +251,17 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
     }
     const sorted = [...files.values()].sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
     return read({files:sorted, rows, inventoryEtag:()=>inventoryEtag(index,sorted), readText:row => {
+      const textKey = JSON.stringify([row.sha256,row.byteLength]);
       const text = index.texts.get(row.sha256);
       if (text !== undefined) {
-        const checkKey = JSON.stringify([row.sha256,row.byteLength]);
-        let checked = index.textChecks.get(checkKey);
+        let checked = index.textChecks.get(textKey);
         if (checked === undefined) {
           checked = digest(text) === row.sha256 && Buffer.byteLength(text) === row.byteLength;
-          index.textChecks.set(checkKey,checked);
+          index.textChecks.set(textKey,checked);
         }
         return checked ? text : null;
       }
-      const cached = index.decoded.get(row.sha256);
+      const cached = index.decoded.get(textKey);
       if (cached !== undefined) return cached.text;
       const decoded = readReplicaCurrentViewRowText(storage,workspace,row);
       // Cache only opened stored texts, with a fixed per-view byte budget.
@@ -270,7 +270,7 @@ function withCurrentView<T>(storage: StorageContext, input: ReplicaCurrentViewRe
           const oldest = index.decoded.keys().next().value!;
           index.decodedBytes -= index.decoded.get(oldest)!.bytes; index.decoded.delete(oldest);
         }
-        index.decoded.set(row.sha256,{text:decoded,bytes:row.byteLength}); index.decodedBytes += row.byteLength;
+        index.decoded.set(textKey,{text:decoded,bytes:row.byteLength}); index.decodedBytes += row.byteLength;
       }
       return decoded;
     }});

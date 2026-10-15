@@ -597,9 +597,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     streamIdentity: string;
     rotatedAtMs: number;
   }): RotateWorkspaceIdentityResult {
-    const result = workspacesStorage.rotateWorkspaceIdentity(this, input);
-    if (result === "rotated") replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,input.workspaceId);
-    return result;
+    return workspacesStorage.rotateWorkspaceIdentity(this, input);
   }
 
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
@@ -988,9 +986,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     guard: () => void;
     mintCredential?: () => SyncRelayLinkCredentialMint;
   }): LinkGrantTransitionResult {
-    const workspaceId = this.getShare(input.shareId)?.workspaceId;
     const result = sharesStorage.retuneShareGrant(this, input);
-    if (result.ok && workspaceId) replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,workspaceId);
     if (result.ok) notifyDesktopReadiness(this, {shareId: result.grant.shareId});
     return result;
   }
@@ -1002,9 +998,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     expectedDependentGrantIds?: readonly string[];
     guard?: () => void;
   }): LinkGrantTransitionResult {
-    const workspaceId = this.getShare(input.shareId)?.workspaceId;
     const result = sharesStorage.revokeShareGrant(this, input);
-    if (result.ok && workspaceId) replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,workspaceId);
     if (result.ok) notifyDesktopReadiness(this, {shareId: result.grant.shareId});
     return result;
   }
@@ -1207,9 +1201,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   removeShareAccess(input: shareRemovalStorage.ShareRemovalInput) {
-    const workspaceId = this.getShare(input.shareId)?.workspaceId;
     const result = shareRemovalStorage.removeShareAccess(this, input);
-    if (result.ok && workspaceId) replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,workspaceId);
     if (result.ok) notifyDesktopReadiness(this, {shareId: result.grant?.shareId ?? input.shareId});
     return result;
   }
@@ -1219,10 +1211,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   undoShareRemoval(input: Parameters<typeof shareRemovalStorage.undoShareRemoval>[1]) {
-    const workspaceId = this.getShare(input.shareId)?.workspaceId;
-    const result = shareRemovalStorage.undoShareRemoval(this, input);
-    if (workspaceId) replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,workspaceId);
-    return result;
+    return shareRemovalStorage.undoShareRemoval(this, input);
   }
 
   listRemovedSharesForRecipient(userId: string, shareId?: string) {
@@ -1230,10 +1219,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   revokeShare(shareId: string, revokedAtMs: number): boolean {
-    const workspaceId = this.getShare(shareId)?.workspaceId;
     try { return sharesStorage.revokeShare(this, shareId, revokedAtMs); }
     finally {
-      if (workspaceId) replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,workspaceId);
       notifyDesktopReadiness(this, {shareId});
     }
   }

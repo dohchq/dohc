@@ -244,7 +244,6 @@ export function rotateLinkGrant(storage: StorageContext, input: {
         .run(grant.grantId);
       pruneRetiredLinkCredentials(storage, grant.grantId);
       incrementActiveDependentGenerations(storage, grant.grantId);
-      forgetReplicaCurrentViewCaches(storage,storage.getShare(input.shareId)!.workspaceId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
     });
   }
@@ -340,7 +339,6 @@ export function retuneShareGrant(storage: StorageContext, input: {
         }
         incrementActiveDependentGenerations(storage, grant.grantId);
       }
-      forgetReplicaCurrentViewCaches(storage,storage.getShare(input.shareId)!.workspaceId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
     });
   }
@@ -444,7 +442,6 @@ export function promoteShareGrant(storage: StorageContext, input: {
            WHERE grant_id = ?`,
         )
         .run(grant.grantId);
-      forgetReplicaCurrentViewCaches(storage,storage.getShare(input.shareId)!.workspaceId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
     });
   }
