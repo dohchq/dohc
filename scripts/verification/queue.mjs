@@ -620,7 +620,7 @@ async function main([command, ...args]) {
   if (command === "cancel") { await cancel(root, args[0]); return console.log(`asked the service to stop ${args[0]}`); }
   if (command === "pause") {
     const reason = args.includes("--reason") ? args[args.indexOf("--reason") + 1] : null;
-    if (args.includes("--reason") && !reason) throw new Error("Use pause [--reason <text>].");
+    if (args.includes("--reason") && (!reason || reason.startsWith("--"))) throw new Error("Use pause [--reason <text>].");
     const { changed } = await pauseQueue(root, { reason });
     console.log(changed ? "paused the verification queue. Runs in progress finish, and no run starts until pnpm verify:queue resume." : "the verification queue was already paused.");
     return console.log(pauseStatus(root));
