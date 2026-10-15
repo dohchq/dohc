@@ -230,6 +230,10 @@ export interface ReadError {
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
+  if (name === "DaemonRefusalError" && message.startsWith("capture-file-held: ")) {
+    const path = message.slice("capture-file-held: ".length);
+    return { words: captureHeldLiveMessage(path), mapped: false, cause: text };
+  }
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
   }
@@ -286,6 +290,15 @@ export function isShareReadOnlyRefusal(error: unknown): boolean {
 /** The engine refuses to move, delete or restore a shared live file this way. */
 export function isSharedLiveFileRefusal(error: unknown): boolean {
   return parse(error).name === "LiveDocumentMutationError";
+}
+
+export function isCaptureFileHeldRefusal(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  return name === "DaemonRefusalError" && code === "CONFLICT" && message.startsWith("capture-file-held: ");
+}
+
+export function captureHeldLiveMessage(path: string): string {
+  return `dohc cannot open "${path}" for live editing. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`;
 }
 
 /** Access and connection failures can hide a changed grant behind an IPC error. */

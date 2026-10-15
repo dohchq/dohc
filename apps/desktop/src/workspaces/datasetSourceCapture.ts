@@ -5,7 +5,7 @@ export async function flushDatasetSourceCapture(
   adapter: Pick<VersionedLiveAdapter, "reconcileCapture" | "flushCapture">,
   signal: AbortSignal,
   paths?: readonly string[],
-): Promise<void> {
+): Promise<Awaited<ReturnType<VersionedLiveAdapter["flushCapture"]>>["heldFiles"]> {
   signal.throwIfAborted();
   let capture = await adapter.reconcileCapture();
   for (let attempt = 0; !capture.settled && !capture.degraded && attempt < 8; attempt++) {
@@ -14,10 +14,15 @@ export async function flushDatasetSourceCapture(
   }
   signal.throwIfAborted();
   if (!capture.settled || !capture.running || capture.degraded) {
-    throw new Error("dohc could not capture these files. Reopen the workspace and try again.");
+    throw new Error("dohc could not capture these files. Reopen the workspace.");
   }
-  const held = capture.heldFiles.find(file => !paths || paths.includes(file.path));
+  assertSourcePathsNotHeld(capture.heldFiles, paths ?? []);
+  return capture.heldFiles;
+}
+
+export function assertSourcePathsNotHeld(files: readonly { path: string }[], paths: readonly string[]): void {
+  const held = files.find(file => paths.includes(file.path));
   if (held) {
-    throw new Error(`dohc cannot use the content in ${held.path}. The file is still on this computer. Edit it in another editor.`);
+    throw new Error(`dohc cannot use "${held.path}" for this change. dohc cannot represent part of the file, such as a very deeply nested quote. The file is unchanged on this computer. Change that part in another editor.`);
   }
 }

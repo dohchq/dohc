@@ -807,7 +807,11 @@ impl Ydoc {
 
     /// The normalized deleted clock ranges, ordered by client and clock.
     pub fn encode_delete_set(&self) -> Vec<u8> {
-        self.doc.transact().snapshot().delete_set.encode_v1()
+        self.delete_set().encode_v1()
+    }
+
+    pub(crate) fn delete_set(&self) -> IdSet {
+        self.doc.transact().snapshot().delete_set
     }
 
     /// The v1 update carrying everything this doc has that `remote_sv` lacks

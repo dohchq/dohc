@@ -16,6 +16,7 @@ import { generateDatasetHistoryRestore } from "../workspaces/datasetHistoryResto
 import { generateDatasetSchemaChange } from "../workspaces/datasetSchemaChanges";
 import { generateDatasetRelationChoices } from "../workspaces/datasetRelationChoices";
 import { DatasetAddressUnavailableError, addressDatasets, resolveDatasetAddress, invalidateDatasetAddresses, type ResolvedDatasetRequest } from "../workspaces/datasetAddress";
+import { assertSourcePathsNotHeld } from "../workspaces/datasetSourceCapture";
 
 
 type Workspace = { workspaceId: string; shareView?: unknown };
@@ -39,7 +40,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
   chooseRecoveryFile?(workspace: W, signal: AbortSignal): Promise<string | null>;
   exportArchive?(workspace: W, request: Extract<ResolvedDatasetRequest, { action: "export" }>, signal: AbortSignal, authorize: () => void): Promise<string | null>;
   /** Reconciles disk edits before capturing immutable source for review. */
-  flushSourceCapture(workspace: W, signal: AbortSignal): Promise<void>;
+  flushSourceCapture(workspace: W, signal: AbortSignal): Promise<readonly { path: string }[]>;
   withAdapter<T>(workspace: W, work: (adapter: SourceAdapter) => Promise<T>): Promise<T>;
   /** Creates absent files through the workspace engine and settles their source capture. */
   createSources(workspace: W, files: Record<string, string>, signal: AbortSignal, progress?: SourceCreationProgress): Promise<void>;
@@ -64,18 +65,34 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         catch (error) { throw new DatasetScopeError(error); }
       };
       current();
+      let heldFiles: readonly { path: string }[] = [];
+      const flushSourceCapture = async () => {
+        heldFiles = await dependencies.flushSourceCapture(operation.workspace, operation.signal);
+        current();
+      };
+      const withSourceAdapter = <T,>(work: (adapter: SourceAdapter) => Promise<T>) => dependencies.withAdapter(operation.workspace, adapter => work({
+        workspace: adapter.workspace,
+        listTextFileMetadata: adapter.listTextFileMetadata.bind(adapter),
+        resolveFiles: adapter.resolveFiles.bind(adapter),
+        hydrateCapturedSources: adapter.hydrateCapturedSources.bind(adapter),
+        captureSourceMetadata: input => {
+          current();
+          assertSourcePathsNotHeld(heldFiles, input.paths);
+          return adapter.captureSourceMetadata(input);
+        },
+      }));
       let input: ResolvedDatasetRequest;
       if ("datasetPath" in request) {
         if (request.action === "prepareMigration") {
-          await dependencies.flushSourceCapture(operation.workspace, operation.signal);
+          await flushSourceCapture();
           current();
           invalidateDatasetAddresses({ workspaceId: request.workspaceId });
         }
-        const resolve = () => dependencies.withAdapter(operation.workspace, adapter => resolveDatasetAddress(adapter, request.workspaceId, request.datasetPath, operation.signal));
+        const resolve = () => withSourceAdapter(adapter => resolveDatasetAddress(adapter, request.workspaceId, request.datasetPath, operation.signal));
         const datasetId = await resolve().catch(async error => {
           current();
           if (!(error instanceof DatasetAddressUnavailableError) || request.action === "prepareMigration" || shareViewIsPresent(operation.workspace.shareView)) throw error;
-          await dependencies.flushSourceCapture(operation.workspace, operation.signal);
+          await flushSourceCapture();
           current();
           invalidateDatasetAddresses({ workspaceId: request.workspaceId });
           return resolve();
@@ -92,7 +109,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         input = { ...fields, datasetId };
       } else input = request;
       const addressPage = async (page: { datasets: import("@dohc/security-contract/dataset").DatasetDescription[]; nextCursor: string | null }) => {
-        const datasets = await dependencies.withAdapter(operation.workspace, adapter => addressDatasets(adapter, request.workspaceId, page.datasets, operation.signal));
+        const datasets = await withSourceAdapter(adapter => addressDatasets(adapter, request.workspaceId, page.datasets, operation.signal));
         current();
         return { ...page, datasets };
       };
@@ -136,12 +153,12 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         let datasetPath: string | null = null;
         let sourceError: string | undefined;
         try {
-          await dependencies.flushSourceCapture(operation.workspace, operation.signal); current();
+          await flushSourceCapture(); current();
           invalidateDatasetAddresses({ workspaceId: input.workspaceId });
           const approved = await host.approvedArtifacts(receipt.targetCursor.datasetId); current();
           const description = { datasetId: approved.revision.datasetId, name: approved.revision.definition.name,
             revision: approved.revision.revision, revisionSha256: approved.revision.revisionSha256, tables: [], operations: [] };
-          datasetPath = await dependencies.withAdapter(operation.workspace, async adapter => {
+          datasetPath = await withSourceAdapter(async adapter => {
             const [address] = await addressDatasets(adapter, input.workspaceId, [description], operation.signal);
             current();
             return address?.datasetPath ?? null;
@@ -154,7 +171,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
             const files = { [definition.schemaPath]: approved.schemaSql, [definition.operationsPath]: approved.operationSource,
               [datasetPath]: JSON.stringify(definition, null, 2) + "\n" };
             const paths = Object.keys(files);
-            const existing = await dependencies.withAdapter(operation.workspace, adapter => adapter.resolveFiles({ workspaceId: input.workspaceId, versionId: "main", targets: paths.map(path => ({ path })), signal: operation.signal }));
+            const existing = await withSourceAdapter(adapter => adapter.resolveFiles({ workspaceId: input.workspaceId, versionId: "main", targets: paths.map(path => ({ path })), signal: operation.signal }));
             current();
             if (existing.results.some(file => file.status === "invalid")) throw new Error("Collection recovery has an invalid source path.");
             const present = new Set(paths.filter((_path, index) => existing.results[index]?.status === "found"));
@@ -220,8 +237,8 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         preparingMigrations++;
         const review = createLocalDatasetMigrations(migrationAuthority);
         try {
-          if (request.action !== "prepareMigration") { await dependencies.flushSourceCapture(operation.workspace, operation.signal); current(); }
-          const prepared = await dependencies.withAdapter(operation.workspace, adapter => review.prepareMigration({ ...selection, adapter, signal: operation.signal }));
+          if (request.action !== "prepareMigration") { await flushSourceCapture(); current(); }
+          const prepared = await withSourceAdapter(adapter => review.prepareMigration({ ...selection, adapter, signal: operation.signal }));
           migrationAuthority.assertCurrent();
           const { signal } = operation;
           const preparationId = prepared.preparationId;
@@ -418,9 +435,9 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
         current();
       } else {
         descriptorPath = input.descriptorPath;
-        await dependencies.flushSourceCapture(operation.workspace, operation.signal); current();
+        await flushSourceCapture(); current();
       }
-      const prepared = await dependencies.withAdapter(operation.workspace, adapter => host.prepare({ descriptorPath, adapter, signal: operation.signal }));
+      const prepared = await withSourceAdapter(adapter => host.prepare({ descriptorPath, adapter, signal: operation.signal }));
       current();
       if (input.action === "prepare") return { kind: "prepared" as const, ...DatasetPreparation.parse(prepared) };
       if (prepared.revision.revisionSha256 !== expectedRevision) {

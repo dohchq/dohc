@@ -1409,6 +1409,7 @@ define_server_error_codes! {
     "blob_not_found" => |_| RelayError::BlobMissing,
     "collection_write_rate_limited" => |_| RelayError::HttpStatus(429),
     "conflict" => |_| RelayError::Conflict,
+    "restore-in-progress" => |_| RelayError::Conflict,
     "dependents_changed" => |_| RelayError::Conflict,
     "discussion_limit_reached" => |_| RelayError::QuotaExceeded,
     "discussion_rate_limited" => |_| RelayError::DiscussionRateLimited,

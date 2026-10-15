@@ -17,7 +17,7 @@ try {
   const { GoToIndex } = await import(pathToFileURL(entry));
   const receipt = { head: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
     node: process.version, scope: "pure module; includes source records and one full matching-index set; excludes packaged paint, renderer private bytes, and 10/60-minute retention",
-    renameInputs: "fresh file records, visibility object and Set, and mount array and records, as supplied to the hook; metadata construction is timed",
+    renameInputs: "fresh file records, visibility object and rules, and mount array and records, as supplied to the hook; metadata construction is timed",
     budgetsMs: { listingUpdateMedian: 8, firstKeystroke: 4, typingDuringRename: 16 }, measurements: [] };
   for (const count of [5000, 30000]) {
     global.gc();
@@ -41,7 +41,7 @@ try {
       const files = sources.listing.files.map((file, i) => i === 4242 ? { ...file, path: "src/module-0/renamed-" + n + ".ts" } : { ...file });
       const updateStart = performance.now();
       sources = { ...sources, listing: { ...sources.listing, files,
-        visibility: { ...sources.listing.visibility, hiddenHostPaths: new Set(sources.listing.visibility.hiddenHostPaths) },
+        visibility: { ...sources.listing.visibility, rules: sources.listing.visibility.rules.map(rule => ({ ...rule })) },
         receivedRoots: sources.listing.receivedRoots.map(root => ({ ...root })),
       } };
       index.update({ listing: sources.listing });
@@ -79,7 +79,7 @@ try {
     const files = longSources.listing.files.map((file, i) => i === 4242 ? { ...file, path: file.path.replace("004242", "renamed-" + n) } : { ...file });
     const updateStart = performance.now();
     const listing = { ...longSources.listing, files,
-      visibility: { ...longSources.listing.visibility, hiddenHostPaths: new Set(longSources.listing.visibility.hiddenHostPaths) },
+      visibility: { ...longSources.listing.visibility, rules: longSources.listing.visibility.rules.map(rule => ({ ...rule })) },
       receivedRoots: longSources.listing.receivedRoots.map(root => ({ ...root })),
     };
     longIndex.update({ listing });
