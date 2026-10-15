@@ -560,6 +560,7 @@ describe("the automation run store", () => {
     let asked = 0;
     await expect(store.expire(NOW, async () => { asked += 1; return "open"; }, null)).resolves.not.toBeNull();
     expect(asked).toBe(EXPIRE_BATCH_RUNS);
+    for (const expireBatchRuns of [0, -1, 1.5]) expect(() => createAutomationRunStore(root, testMetadataDir, undefined, { expireBatchRuns })).toThrow(RangeError);
   });
 
   it("lists the claims whose Undo is unfinished until each of their runs is undone", async () => {

@@ -112,11 +112,15 @@ test("transient sweep and ticket-read errors retry without ending the wait", () 
             return original(path, ...args);
           };
           syncBuiltinESMExports();
-          const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 20_000, pollMs: 1 });
-          assert.equal(failed, true, code + " " + operation);
-          slot.release();
-          fs[method] = original;
-          syncBuiltinESMExports();
+          try {
+            const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 20_000, pollMs: 1 });
+            assert.equal(failed, true, code + " " + operation);
+            slot.release();
+          } finally {
+            // A failed case must not leave its stand-in for the next one.
+            fs[method] = original;
+            syncBuiltinESMExports();
+          }
         }
       }
     `, 120_000);

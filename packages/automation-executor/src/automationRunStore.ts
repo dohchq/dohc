@@ -904,6 +904,7 @@ export function createAutomationRunStore(
   assertCurrent: () => void = () => {},
   { expireBatchRuns = EXPIRE_BATCH_RUNS }: { expireBatchRuns?: number } = {},
 ): AutomationRunStore {
+  if (!Number.isInteger(expireBatchRuns) || expireBatchRuns < 1) throw new RangeError(`An expiry batch must read at least one plan file, not ${expireBatchRuns}.`);
   const writeCurrentUnlocked = (path: string, text: string) => {
     assertCurrent();
     return writeDurablyUnlocked(path, text, assertCurrent);
