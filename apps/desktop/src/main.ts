@@ -47,7 +47,7 @@ import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
-import { createLocalDatasetHost, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { createLocalDatasetHost, localDatasetStoreExists, reconcileExistingLocalCollectionApps, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
 import { localCollectionEngine } from "./workspaces/localCollectionEngine";
 import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
@@ -3567,8 +3567,7 @@ async function openWorkspaceActivityForOperation(
 // Responses a local Collection app admitted before a quit, crash, or engine
 // restart settle once the engine is back. Only an existing store opens.
 function reconcileLocalCollectionApps(workspace: { workspaceId: string; rootPath: string }): void {
-  if (!existsSync(join(workspace.rootPath, ".dohc", "datasets", "state.sqlite"))) return;
-  void localDatasetHostFor(workspace, new AbortController().signal).then(host => host.apps.reconcile())
+  void reconcileExistingLocalCollectionApps(workspace.rootPath, () => localDatasetHostFor(workspace, new AbortController().signal))
     .catch(error => console.warn("[desktop] local Collection app reconciliation:", error));
 }
 
@@ -4464,7 +4463,7 @@ function createCollectionAutomationsFor(
       return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
         if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
         // A workspace that never approved a dataset has no dataset store to open.
-        if (!(await lstat(join(rootPath, ".dohc", "datasets", "state.sqlite")).then(() => true, () => false))) return null;
+        if (!(await localDatasetStoreExists(rootPath))) return null;
         const host = await localDatasetHostFor(operation.workspace, operation.signal);
         return await work(host.automations);
       });

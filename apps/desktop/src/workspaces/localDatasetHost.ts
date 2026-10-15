@@ -180,6 +180,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   function signal(input?: AbortSignal) { assertCurrent(); return input ? AbortSignal.any([input, lifetime.signal]) : lifetime.signal; }
   function transaction<T>(work: () => T): T {
     assertCurrent();
+    return commit(work);
+  }
+  /** Without the session check: admitted Collection creates still record their outcomes while the host closes. */
+  function commit<T>(work: () => T): T {
     const nested = db.isTransaction, savepoint = `local_dataset_${++transactionSequence}`;
     db.exec(nested ? `SAVEPOINT ${savepoint}` : "BEGIN IMMEDIATE");
     try { const result = work(); db.exec(nested ? `RELEASE ${savepoint}` : "COMMIT"); return result; }
@@ -610,10 +614,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       },
       close(): Promise<void> {
         return closePromise ??= (async () => {
-          pending.clear(); migrations.clear(); lifetime.abort();
-          // Collection responses settle within their own deadline while the store still accepts their outcomes.
+          closed = true; pending.clear(); migrations.clear(); lifetime.abort();
+          // Admitted Collection responses settle within their own deadline and still record their outcomes.
           await localApps.close();
-          closed = true;
           await Promise.allSettled([...active]);
           await recovery.close();
           try { await supervisor!.close(); } finally { db.close(); }
@@ -622,7 +625,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     };
     appStore = createLocalAppStore({ db, sources: [localDatasetAppStorage(db), localCollectionAppStorage(db)], assertCurrent, transaction,
       charge: (kind, resourceId, bytes) => charge(kind === "dataset" ? resourceId : null, bytes) });
-    const collections = createLocalCollectionApps({ db, store: appStore, workspaceId, assertCurrent, transaction, charge: bytes => charge(null, bytes),
+    const collections = createLocalCollectionApps({ db, store: appStore, workspaceId, assertCurrent, transaction: commit, charge: bytes => charge(null, bytes),
       engine() {
         if (!options.collectionEngine) throw new Error("Document Collection apps are unavailable here.");
         return options.collectionEngine();
@@ -660,3 +663,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   }
 }
 export type LocalDatasetHost = Awaited<ReturnType<typeof createLocalDatasetHost>>;
+
+/** Whether the workspace already has its local store. Checking never creates one. */
+export const localDatasetStoreExists = (workspaceRoot: string) => lstat(join(workspaceRoot, ".dohc", "datasets", "state.sqlite")).then(() => true, () => false);
+/** After attachment or engine reconnection, settles admitted Collection app responses in an existing store. */
+export async function reconcileExistingLocalCollectionApps(workspaceRoot: string, open: () => Promise<Pick<LocalDatasetHost, "apps">>): Promise<void> {
+  if (await localDatasetStoreExists(workspaceRoot)) (await open()).apps.reconcile();
+}

@@ -32,7 +32,7 @@ export interface LocalCollectionEngine {
 
 export type Envelope = { path: string; text: string; versionId: string; author: MomentWriteAuthor; requestId: string; momentId: string };
 type Outcome = { kind: "accepted"; receipt: AppCollectionReceipt } | { kind: "notWritten"; reason: string };
-type Create = { publication_id: string; idempotency_key: string; payload_sha256: string; created_at_ms: number; envelope: string | null; outcome: string | null; storage_bytes: number };
+type Create = { publication_id: string; idempotency_key: string; payload_sha256: string; created_at_ms: number; envelope: string | null; outcome: string | null; storage_bytes: number; submitted: number };
 
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const contained = (path: string) => isShareablePath(path) && !isSharedWithMePath(path);
@@ -58,7 +58,7 @@ export function localCollectionAppStorage(db: JournalDb): LocalAppStorage {
         path TEXT NOT NULL, content BLOB NOT NULL, PRIMARY KEY(publication_id,path)) STRICT;
         CREATE TABLE IF NOT EXISTS local_collection_creates(
         publication_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, payload_sha256 TEXT NOT NULL, created_at_ms INTEGER NOT NULL,
-        envelope TEXT, outcome TEXT, storage_bytes INTEGER NOT NULL, PRIMARY KEY(publication_id,idempotency_key),
+        envelope TEXT, outcome TEXT, storage_bytes INTEGER NOT NULL, submitted INTEGER NOT NULL, PRIMARY KEY(publication_id,idempotency_key),
         CHECK((envelope IS NULL)<>(outcome IS NULL))) STRICT;`);
     },
     assertRetirable(publicationId) {
@@ -72,6 +72,7 @@ export function localCollectionAppStorage(db: JournalDb): LocalAppStorage {
 export function createLocalCollectionApps(options: {
   db: JournalDb; store: LocalAppStore; workspaceId: string;
   assertCurrent(): void;
+  /** Commits while the host closes, so admitted creates record their outcomes. Admission checks the session through the store. */
   transaction<T>(work: () => T): T;
   /** Charges the host byte budget's Collection ledger in the caller's transaction. */
   charge(bytes: number): void;
@@ -110,6 +111,13 @@ export function createLocalCollectionApps(options: {
     if (!checked.ok) throw new Error(checked.message);
     return checked.value;
   }
+  /** The capability a publication was approved with, whether or not it is still active. */
+  function approvedCapability(publicationId: string): AppCollectionCapability {
+    const value = db.prepare("SELECT candidate FROM local_collection_apps WHERE publication_id=?").get(publicationId) as { candidate: string } | undefined;
+    const capability = value && parseAppPublicationCandidate(JSON.parse(value.candidate), APP_PUBLICATION_LIMITS).capabilities[0];
+    if (capability?.kind !== "collection-create") throw new Error("This app approval no longer exists.");
+    return capability;
+  }
   const stored = (publicationId: string, key: string) =>
     db.prepare("SELECT * FROM local_collection_creates WHERE publication_id=? AND idempotency_key=?").get(publicationId, key) as Create | undefined;
   const pendingKeys = (publicationId?: string) => (publicationId === undefined
@@ -127,8 +135,8 @@ export function createLocalCollectionApps(options: {
       db.prepare("UPDATE local_collection_creates SET envelope=NULL,outcome=?,storage_bytes=? WHERE publication_id=? AND idempotency_key=?").run(next.outcome, bytes, publicationId, key);
     });
   }
-  /** A first submission passes `precheck`; a retry looks for its committed moment instead. */
-  async function attempt(publicationId: string, key: string, precheck?: () => Promise<unknown>) {
+  /** Until a create is submitted it rechecks the pinned approved schema; once submitted, it looks for its committed moment instead. */
+  async function attempt(publicationId: string, key: string) {
     if (closed()) return;
     const row = stored(publicationId, key);
     if (!row?.envelope) return;
@@ -141,19 +149,22 @@ export function createLocalCollectionApps(options: {
       return moment.workspaceId === options.workspaceId && moment.versionId === envelope.versionId && moment.path === envelope.path && moment.operation === "write" && moment.text === envelope.text
         ? accepted(moment.objectId) : { kind: "notWritten", reason: "Another change already used this response's identity." } satisfies Outcome;
     };
-    if (precheck) {
-      try { await precheck(); }
+    if (row.submitted) {
+      // A committed write completes the original receipt.
+      const found = await committed();
+      if (found) return finish(publicationId, key, () => found);
+    } else {
+      // The schema may change after admission. A later edit does not cancel submitted work.
+      try { await schema(approvedCapability(publicationId), envelope.versionId); }
       catch (error) {
         if (error instanceof LocalAppUnavailableError) throw error;
         return finish(publicationId, key, () => ({ kind: "notWritten", reason: error instanceof Error ? error.message : "The Collection changed." }));
       }
     }
-    // A retry finds its deterministic moment first: a committed write completes the original receipt.
-    const found = precheck ? null : await committed();
-    if (found) return finish(publicationId, key, () => found);
     // A closed store sends nothing new; the next open settles this reservation.
     if (closed()) return;
     if (!contained(envelope.path)) return finish(publicationId, key, () => ({ kind: "notWritten", reason: "This response is outside your workspace." }));
+    if (!row.submitted) options.transaction(() => db.prepare("UPDATE local_collection_creates SET submitted=1 WHERE publication_id=? AND idempotency_key=?").run(publicationId, key));
     try {
       const written = await call(undefined, engine => engine.create(envelope));
       if (written.momentId !== envelope.momentId) throw new LocalAppUnavailableError("The workspace engine recorded another change.");
@@ -166,11 +177,11 @@ export function createLocalCollectionApps(options: {
     }
   }
   /** One reconciliation per key at a time; later callers join it. */
-  function settle(publicationId: string, key: string, precheck?: () => Promise<unknown>): Promise<void> {
+  function settle(publicationId: string, key: string): Promise<void> {
     const id = JSON.stringify([publicationId, key]);
     let running = settling.get(id);
     if (!running) {
-      running = attempt(publicationId, key, precheck).finally(() => settling.delete(id));
+      running = attempt(publicationId, key).finally(() => settling.delete(id));
       settling.set(id, running);
     }
     return running;
@@ -202,12 +213,15 @@ export function createLocalCollectionApps(options: {
     const { capability } = current(publicationId, input.authorityRevision);
     const payload = sha(JSON.stringify(["dohc-local-collection-create-v1", publicationId, capability.collectionPath, capability.schemaSha256,
       Object.fromEntries(Object.entries(input.fields).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))]));
-    const retry = async (row: Create) => {
+    const answer = async (row: Create) => {
       if (row.payload_sha256 === payload && row.envelope !== null) await until(settle(publicationId, key), signal).catch(() => {});
-      return result(stored(publicationId, key) ?? row, payload);
+      // Only a request whose approval lasted until now receives the outcome.
+      signal.throwIfAborted();
+      current(publicationId, input.authorityRevision);
+      return result(stored(publicationId, key)!, payload);
     };
     const prior = stored(publicationId, key);
-    if (prior) return retry(prior);
+    if (prior) return answer(prior);
     const versionId = await call(signal, engine => engine.activeVersionId());
     const fields = validateAppCollectionCreateFields(input.fields, capability, await schema(capability, versionId, signal));
     if (!fields.ok) throw new Error(fields.message);
@@ -227,13 +241,10 @@ export function createLocalCollectionApps(options: {
       const row = { publication_id: publicationId, idempotency_key: key, payload_sha256: payload, created_at_ms: createdAt, envelope: JSON.stringify(envelope), outcome: null };
       const bytes = createBytes(row);
       options.charge(bytes);
-      db.prepare("INSERT INTO local_collection_creates VALUES(?,?,?,?,?,NULL,?)").run(publicationId, key, payload, createdAt, row.envelope, bytes);
+      db.prepare("INSERT INTO local_collection_creates VALUES(?,?,?,?,?,NULL,?,0)").run(publicationId, key, payload, createdAt, row.envelope, bytes);
       return null;
     });
-    if (raced) return retry(raced);
-    // The schema may change after admission; the first submission rechecks the pinned approved schema.
-    await until(settle(publicationId, key, () => schema(capability, versionId)), signal).catch(() => {});
-    return result(stored(publicationId, key)!, payload);
+    return answer(raced ?? stored(publicationId, key)!);
   }
   async function list(publicationId: string, raw: { authorityRevision: number; limit: unknown; afterPath?: unknown }, signal: AbortSignal): Promise<AppCollectionPage> {
     if (!isAppCollectionPageRequest(raw.limit, raw.afterPath)) throw new Error("Invalid collection page.");
@@ -242,15 +253,27 @@ export function createLocalCollectionApps(options: {
     if (!capability.readFields.length) throw new Error("This app cannot read its Collection.");
     if (afterPath !== undefined && !afterPath.startsWith(`${capability.collectionPath}/`)) throw new Error("Invalid collection page.");
     const versionId = await call(signal, engine => engine.activeVersionId());
-    const approved = await schema(capability, versionId, signal);
-    const listed = await call(signal, engine => engine.listFiles({ versionId, folder: capability.collectionPath, ...(afterPath === undefined ? {} : { afterPath }), limit }));
-    const rows: Array<{ path: string; record: AppCollectionPage["records"][number] | null }> = [];
-    for (const file of listed.files) {
-      if (!isAppCollectionRecordPath(capability.collectionPath, file.path) || !contained(file.path) || file.contentKind !== "text" || file.byteLength === null || file.byteLength > APP_COLLECTION_MAX_RECORD_BYTES) { rows.push({ path: file.path, record: null }); continue; }
-      const text = await call(signal, engine => engine.readText({ versionId, path: file.path }));
-      rows.push({ path: file.path, record: text === null ? null : projectAppCollectionRecord(file.path, new TextEncoder().encode(text), capability, approved) });
+    const approvedSchema = await schema(capability, versionId, signal);
+    // Only direct-child Markdown files in the workspace can be records. No other file reaches the page, so no cursor names one.
+    const prefix = `${capability.collectionPath}/`, rows: Array<{ path: string; record: AppCollectionPage["records"][number] | null }> = [];
+    let cursor = afterPath, scanning = true, more = false;
+    while (scanning) {
+      const after = cursor;
+      const listed = await call(signal, engine => engine.listFiles({ versionId, folder: capability.collectionPath, ...(after === undefined ? {} : { afterPath: after }), limit: 500 }));
+      scanning = listed.more;
+      for (const file of listed.files) {
+        cursor = file.path;
+        // Skip a nested folder in one step: `0` follows `/` in byte order.
+        const nested = file.path.indexOf("/", prefix.length);
+        if (nested >= 0) { cursor = `${file.path.slice(0, nested)}0`; scanning = true; break; }
+        if (!isAppCollectionRecordPath(capability.collectionPath, file.path) || !contained(file.path)) continue;
+        if (rows.length === limit) { more = true; scanning = false; break; }
+        const text = file.contentKind !== "text" || file.byteLength === null || file.byteLength > APP_COLLECTION_MAX_RECORD_BYTES ? null
+          : await call(signal, engine => engine.readText({ versionId, path: file.path }));
+        rows.push({ path: file.path, record: text === null ? null : projectAppCollectionRecord(file.path, new TextEncoder().encode(text), capability, approvedSchema) });
+      }
     }
-    const page = pageAppCollectionRecords(rows, listed.more);
+    const page = pageAppCollectionRecords(rows, more);
     current(publicationId, raw.authorityRevision);
     return page;
   }
