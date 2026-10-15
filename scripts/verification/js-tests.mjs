@@ -97,8 +97,11 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       const recorded = readTestRecord(record);
       const flaky = [...(row.flaky ?? []), ...recorded.filter(test => test.flaky).map(test => test.test)];
       if (flaky.length) row.flaky = flaky;
-      // vitest's slow tests come from its reporter; node:test's from the spec report of the attempt that ran last.
-      const times = [...recorded.filter(test => test.seconds >= 2), ...nodeTestTimes(readLog(row.retryLog ?? row.log)).filter(test => test.seconds >= 2)];
+      // vitest's failed and slow tests come from its reporter; node:test's from the spec report of the attempt that ran last.
+      const last = readLog(row.retryLog ?? row.log);
+      const failed = [...recorded.filter(test => test.failed).map(test => test.test), ...nodeTestFailures(last)];
+      if (failed.length) row.failed = failed;
+      const times = [...recorded.filter(test => test.seconds >= 2), ...nodeTestTimes(last).filter(test => test.seconds >= 2)];
       if (times.length) row.slowest = slowest(times);
       save();
     }).catch(error => {
@@ -190,6 +193,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       ...(desktop ? ["desktop-scripts"] : []), ...(runProofs ? ["proofs"] : []), ...(desktop ? ["desktop-runtime-packaging"] : [])]);
     if (stopped) report.stopped = stopped;
     report.flaky = report.steps.flatMap(step => (step.flaky ?? []).map(test => ({ step: step.name, test })));
+    report.failed = report.steps.flatMap(step => (step.failed ?? []).map(test => ({ step: step.name, test })));
     report.slowest = slowest(report.steps.flatMap(step => (step.slowest ?? []).map(test => ({ step: step.name, ...test }))));
     finish(); save();
   }
