@@ -484,7 +484,7 @@ async function world(options: {
       await writeFile(absolutePath, text.replace(requested, id), { flag: writeOptions?.createOnly ? "wx" : "w" });
       records.set(id, { id, path, collection: dirname(path).replaceAll("\\", "/"), doc: new Y.Doc() });
       queueMicrotask(() => { for (const listener of settleListeners) listener([path]); });
-      return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied" };
+      return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied", objectId: "object", momentId: "moment", deduped: false };
     },
   };
 
