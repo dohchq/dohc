@@ -3936,6 +3936,46 @@ fn a_ydoc_base_waits_for_a_retired_file_at_its_path() {
     assert_eq!(paths(&store).0, [("doc-a".to_owned(), "a.md".to_owned())]);
 }
 
+/// From engine merge 4: a departed document's path, and a retired file's,
+/// matched exactly, while capture holds match case aliases and descendants.
+/// `A.md`, and separately `a.md/c.md`, waits for `doc-b`, departed and then
+/// retired, until its file is gone.
+#[test]
+fn a_departed_path_holds_its_case_aliases_and_descendants() {
+    for path in ["A.md", "a.md/c.md"] {
+        let (_scratch, _path, mut store, client) = departing_b();
+        let feed = client.transport();
+        feed.unshare("doc-b");
+        sync(&client, &mut store);
+        ydoc_base(feed, "doc-a", path, "hosted a");
+        feed.share("doc-a", path);
+        sync(&client, &mut store);
+        assert_eq!(
+            hold(&store, "doc-a"),
+            Some(HostedHold::WorkWaiting),
+            "{path}"
+        );
+
+        assert_eq!(
+            retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
+            TxnOutcome::Committed(true)
+        );
+        sync(&client, &mut store);
+        assert_eq!(
+            hold(&store, "doc-a"),
+            Some(HostedHold::WorkWaiting),
+            "{path}"
+        );
+
+        assert_eq!(
+            forget_retired_hosted_file(&mut store, "ws", "a.md", &NoFaults).unwrap(),
+            TxnOutcome::Committed(())
+        );
+        sync(&client, &mut store);
+        assert!(ready(&store, "doc-a"), "{path}");
+    }
+}
+
 /// Sol's held-backfill review, second finding: a held backfill retained
 /// every row behind its collision, so one longer than the deferred-work
 /// limit failed every pass, froze the main cursor and kept out the rename

@@ -1004,6 +1004,10 @@ impl ApplicationOwner {
         self.current.push(registration.clone());
         Ok(ApplicationHandle { registration })
     }
+    /// Retire every registration, on a reconnect or a close. A hosted replica
+    /// retires them in memory only, as [`release`](Self::release) does: a
+    /// document held meanwhile cannot register again, and its binding must
+    /// stay available for the accepted work it journaled to push.
     pub fn invalidate(&mut self, store: &mut EngineStore) -> Result<(), ApplicationError> {
         for current in &self.current {
             current
@@ -1011,8 +1015,18 @@ impl ApplicationOwner {
                 .map_err(|_| ApplicationError::Interrupted)?
                 .live = false;
         }
-        for current in &self.current {
-            invalidate_registration(store, current)?;
+        let hosted: bool = store.read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM hosted_replicas WHERE workspace_id=?1)",
+                [&self.workspace_id],
+                |row| row.get(0),
+            )
+            .map_err(read_sql)
+        })?;
+        if !hosted {
+            for current in &self.current {
+                invalidate_registration(store, current)?;
+            }
         }
         self.current.clear();
         Ok(())

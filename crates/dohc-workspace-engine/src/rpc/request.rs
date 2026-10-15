@@ -266,7 +266,8 @@ impl EngineService {
     /// Await an actor read under the request's cancellation/deadline — the
     /// wait is abandoned (the actor's work completes and is discarded),
     /// the same shape capture.flush uses. Read commands carry no token, so
-    /// abandoning the wait IS the cancellation semantics.
+    /// abandoning the wait IS the cancellation semantics. A read that has
+    /// already answered is answered, not reported as cancelled.
     pub(super) async fn read_under_ctx<T>(
         cancellation: &OperationCancellation,
         what: &str,
@@ -274,8 +275,8 @@ impl EngineService {
     ) -> Result<T, WireError> {
         tokio::select! {
             biased;
-            () = cancellation.token.cancelled() => Err(cancellation.interruption(what)),
             result = read => result.map_err(map_runtime),
+            () = cancellation.token.cancelled() => Err(cancellation.interruption(what)),
         }
     }
 }
@@ -283,6 +284,18 @@ impl EngineService {
 #[cfg(test)]
 mod tests {
     use super::{required_idempotency_key, validated_author};
+
+    #[tokio::test]
+    async fn a_read_that_answered_is_not_reported_as_cancelled() {
+        let ctx = super::RequestContext::unbounded();
+        ctx.cancel.cancel();
+        let cancellation = super::OperationCancellation::new(&ctx);
+        let read = crate::EngineService::read_under_ctx(&cancellation, "read", async {
+            Ok::<_, super::RuntimeError>(7)
+        })
+        .await;
+        assert_eq!(read.ok(), Some(7));
+    }
 
     #[test]
     fn request_ids_cannot_claim_internal_durability_markers() {

@@ -289,8 +289,7 @@ pub fn retired_hosted_files(
     })
 }
 
-/// Forget the retired file at `path` once it is gone, or is left alone
-/// because it holds something else. Its path is free again.
+/// Forget the retired file at `path` once it is gone. Its path is free again.
 pub fn forget_retired_hosted_file(
     store: &mut EngineStore,
     workspace_id: &str,

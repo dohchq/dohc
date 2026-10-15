@@ -2767,9 +2767,10 @@ fn retire_departed_hosted(
 }
 
 /// Remove each retired file that still holds its document's head, and free
-/// its path. One that holds anything else stays on disk, its path is freed,
-/// and it is named. A removal that fails keeps the path held for the next
-/// pass. Answers whether any path came free.
+/// its path. One that holds anything else stays on disk with its path held,
+/// so its document stays departed, and every pass names it. A removal that
+/// fails also keeps the path held for the next pass. Answers whether any path
+/// came free.
 fn remove_retired_files(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -2778,7 +2779,9 @@ fn remove_retired_files(
     let files = dohc_engine_sync::retired_hosted_files(store, workspace_id)?;
     let freed = !files.is_empty();
     for file in files {
-        let removed = dohc_engine_files::remove_file_holding(root, &file.path, &file.sha256)?;
+        if !dohc_engine_files::remove_file_holding(root, &file.path, &file.sha256)? {
+            return Err(RuntimeError::HostedFileUnexpected { path: file.path });
+        }
         match dohc_engine_sync::forget_retired_hosted_file(
             store,
             workspace_id,
@@ -2787,9 +2790,6 @@ fn remove_retired_files(
         )? {
             TxnOutcome::Committed(()) => {}
             TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
-        }
-        if !removed {
-            return Err(RuntimeError::HostedFileUnexpected { path: file.path });
         }
     }
     Ok(freed)
@@ -3196,6 +3196,79 @@ mod hosted_refusal_tests {
             assert_eq!(transport.take_pending(), None, "{operation:?} sent nothing");
             assert_eq!(everything(&store), before, "{operation:?} wrote nothing");
         }
+    }
+
+    /// The switch-over plan: a retired file holding anything but its head was
+    /// forgotten before it was named, so its document left `departed` while
+    /// the file stayed. Its path stays held now: every pass names the file,
+    /// across a restart, until it holds its head again and goes.
+    #[test]
+    fn a_retired_file_holding_anything_else_keeps_its_document_departed() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                     VALUES ('ws','a.md','doc-b',?1)",
+                    [dohc_engine_storage::hex_sha256(b"hosted b")],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let file = root.path().join("a.md");
+        std::fs::write(&file, "not the head").unwrap();
+        let pass = |store: &mut EngineStore| {
+            retire_departed_hosted(
+                store,
+                &mut WriterDocCache::new(),
+                &LeaseRegistry::default(),
+                "ws",
+                root.path(),
+                2_000,
+            )
+        };
+        let departed = |store: &EngineStore| {
+            dohc_engine_sync::departed_hosted_object_ids(store, "ws").unwrap()
+        };
+
+        for _ in 0..2 {
+            let refused = pass(&mut store);
+            assert!(
+                matches!(&refused, Err(RuntimeError::HostedFileUnexpected { path }) if path == "a.md"),
+                "{refused:?}"
+            );
+            assert_eq!(departed(&store), ["doc-b"]);
+        }
+        drop(store);
+        let mut store = EngineStore::open(&path, 3_000).unwrap();
+        let refused = pass(&mut store);
+        assert!(
+            matches!(&refused, Err(RuntimeError::HostedFileUnexpected { path }) if path == "a.md"),
+            "{refused:?}"
+        );
+        assert_eq!(departed(&store), ["doc-b"]);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "not the head");
+
+        std::fs::write(&file, "hosted b").unwrap();
+        assert!(pass(&mut store).unwrap(), "its path came free");
+        assert!(departed(&store).is_empty());
+        assert!(!file.exists());
     }
 }
 

@@ -3734,3 +3734,94 @@ fn a_released_registration_still_proves_the_update_it_accepted() {
         ApplicationResult::Pending(ApplicationPending::ApplicabilityUnavailable)
     );
 }
+
+/// Opus's slice 2 review: a reconnect or a close wrote `available=0`, and a
+/// document held meanwhile could not register again, so the update it
+/// accepted could never prove and its queued write stalled the host's push.
+/// On a hosted replica both retire registrations in memory only, like a
+/// release; an ordinary host still marks the binding unavailable.
+#[test]
+fn a_hosted_reconnect_or_close_keeps_a_held_documents_accepted_update_provable() {
+    use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+    for (hosted, reconnect) in [(true, false), (true, true), (false, false)] {
+        let mut f = Fixture::new("Original");
+        let update = f
+            .doc
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Accepted")
+            .unwrap();
+        f.accept(update.clone(), 1);
+        let set = |f: &mut Fixture, sql: &str| {
+            f.store
+                .write_with(&NoFaults, |tx| tx.execute_batch(sql).map_err(write_sql))
+                .unwrap();
+        };
+        if hosted {
+            set(
+                &mut f,
+                "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                   VALUES ('workspace','service-host:host','epoch','stream',1); \
+                 INSERT INTO hosted_replicas (workspace_id,scope_generation,created_at_ms) VALUES ('workspace',1,1); \
+                 INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
+                   VALUES ('workspace','object','a.md','ready',1);",
+            );
+        }
+        let held =
+            "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting'";
+        let mut reconnected = f.host.clone();
+        reconnected.connection_id = "reconnected".into();
+        if reconnect {
+            set(&mut f, held);
+            assert!(matches!(
+                f.owner.register(
+                    &mut f.store,
+                    "namespace".into(),
+                    reconnected.clone(),
+                    f.binding.clone()
+                ),
+                Err(ApplicationError::Conflict)
+            ));
+        } else {
+            f.owner.invalidate(&mut f.store).unwrap();
+            if hosted {
+                set(&mut f, held);
+                assert!(matches!(
+                    f.owner.register(
+                        &mut f.store,
+                        "namespace".into(),
+                        reconnected,
+                        f.binding.clone()
+                    ),
+                    Err(ApplicationError::Conflict)
+                ));
+            }
+        }
+        let available: bool = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT available FROM live_device_application_bindings",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(available, hosted, "hosted {hosted}, reconnect {reconnect}");
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let proof = f.store.read_with(|conn| {
+            contains_in(
+                conn,
+                &key,
+                &f.binding.current_path,
+                Some(&f.binding.lineage_claim_id),
+                PublicationContentKind::Ydoc,
+                &hex_sha256(&update),
+                &mut 4_000_000,
+            )
+        });
+        assert_eq!(
+            proof.ok() == Some(PublicationProof::Contained),
+            hosted,
+            "hosted {hosted}, reconnect {reconnect}"
+        );
+    }
+}

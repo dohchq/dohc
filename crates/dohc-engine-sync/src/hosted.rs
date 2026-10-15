@@ -349,7 +349,8 @@ pub(crate) fn wait_for_departed_occupant_in_tx(
 }
 
 /// Whether a hosted document that left the scope, or the file a retired one
-/// left, holds `path` here against `object_id`.
+/// left, holds `path` here against `object_id`. A path held this way matches
+/// like a capture hold: in any case, and with everything beneath it.
 fn held_by_departed(
     conn: &Connection,
     workspace_id: &str,
@@ -357,17 +358,28 @@ fn held_by_departed(
     object_id: &str,
     path: &str,
 ) -> Result<bool, SyncError> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM snapshots s \
-         JOIN hosted_documents d ON d.workspace_id=s.workspace_id AND d.object_id=s.object_id \
-         JOIN hosted_replicas h ON h.workspace_id=d.workspace_id \
-         WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3 AND s.object_id<>?4 \
-           AND d.scope_generation<>h.scope_generation) \
-         OR EXISTS(SELECT 1 FROM hosted_retired_files WHERE workspace_id=?1 AND path=?3)",
-        params![workspace_id, version_id, path, object_id],
-        |row| row.get(0),
-    )
-    .map_err(SyncError::corrupt)
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT s.path FROM snapshots s \
+             JOIN hosted_documents d ON d.workspace_id=s.workspace_id AND d.object_id=s.object_id \
+             JOIN hosted_replicas h ON h.workspace_id=d.workspace_id \
+             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id<>?3 \
+               AND d.scope_generation<>h.scope_generation \
+             UNION ALL SELECT path FROM hosted_retired_files WHERE workspace_id=?1",
+        )
+        .map_err(SyncError::corrupt)?;
+    let held = statement
+        .query_map(params![workspace_id, version_id, object_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(SyncError::corrupt)?;
+    for held in held {
+        let held = held.map_err(SyncError::corrupt)?;
+        if dohc_engine_storage::capture_file_holds::path_is_held(&held, path) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The path and version an op takes or writes through: a moment's after
