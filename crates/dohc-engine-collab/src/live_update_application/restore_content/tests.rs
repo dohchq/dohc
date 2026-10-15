@@ -133,7 +133,7 @@ fn append_history_copies(f: &mut Fixture, copies: i64, bytes: Vec<u8>) -> Vec<Li
                     update_bytes: bytes.clone(),
                 };
                 event.validate()?;
-                accepted_history::append(tx, &held, &event, 100_000_000)?;
+                accepted_history::append_native(tx, &held, &event, 100_000_000)?;
                 if f.sequence > 0 {
                     insert_application(tx, &held, &event, f.sequence)?;
                 }
@@ -430,7 +430,7 @@ fn ordinary_checkpoint_streams_cumulative_metadata_above_working_reserve() {
                     },
                     update_bytes: bytes.clone(),
                 };
-                accepted_history::append(tx, &held, &event, 8 * 1024 * 1024)?;
+                accepted_history::append_native(tx, &held, &event, 8 * 1024 * 1024)?;
                 last = Some(event.metadata.accepted.receipt);
             }
             Ok(last.unwrap())
@@ -725,7 +725,7 @@ fn append_after_restore_avoids_historical_json_and_checkpoint_document_reads() {
                 _ => Authorization::Allow,
             }))
             .map_err(read_sql)?;
-            let appended = accepted_history::append(tx, &held, &event, 8 * 1024 * 1024);
+            let appended = accepted_history::append_native(tx, &held, &event, 8 * 1024 * 1024);
             tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
                 .map_err(read_sql)?;
             appended

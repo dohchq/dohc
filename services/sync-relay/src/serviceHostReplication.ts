@@ -27,7 +27,7 @@ export function createServiceHostReplication(options: {
 }) {
   // It passes no session reauthentication, so a held log read answers at once.
   const replication = createWorkspaceReplicationRoutes(options.storage, Date.now, {wakeLog() {}, wait: async () => {}},
-    undefined, (request, workspaceId, rows) => options.onLogRead?.({workspaceId,
+    {watched: () => false}, undefined, (request, workspaceId, rows) => options.onLogRead?.({workspaceId,
       bearer: (request.headers.get("authorization") ?? "").slice(7)}, rows));
   const blobs = createWorkspaceBlobRoutes(options.storage, Date.now);
   const feed = options.hostedFeed ? createServiceHostFeed(options.storage) : undefined;

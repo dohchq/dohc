@@ -112,6 +112,7 @@ impl Registry {
 #[doc(hidden)]
 #[derive(Clone)]
 pub enum LiveApplicationInput {
+    Replica(Box<super::replica::ReplicaInput>),
     Admitted(Box<AdmittedApplicationInput>),
     Restore(Box<restore::RestoreInput>),
     Owner(Box<super::owner_delivery::OwnerInput>),

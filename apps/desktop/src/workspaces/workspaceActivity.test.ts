@@ -1,3 +1,4 @@
+import { createFolderAppDetection } from "./folderAppDetection";
 import { settleYDocsAfterFileObservation } from "./workspaceActivity";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -989,3 +990,31 @@ it("still settles healthy workspaces when an outage checkpoint fails",async()=>{
  let release!:()=>void;const healthyDrain=new Promise<void>(done=>{release=done;});const settled=vi.fn(async()=>{});
  const quit=settleYDocsAfterFileObservation([Promise.reject(Error("checkpoint disk full")),healthyDrain],settled);await Promise.resolve();expect(settled).not.toHaveBeenCalled();release();await quit;expect(settled).toHaveBeenCalledOnce();
 });
+
+ it.each(["appeared", "changed", "disappeared"] as const)("round2 policy %s reaches listing refresh but no file-work consumer", async kind => {
+  const notify = vi.fn();
+  const observeFileEvents = vi.fn();
+  const handleWatcherEvents = vi.fn();
+  const sources = vi.fn(async () => ["index.html"]);
+  const apps = createFolderAppDetection({ sources, updated: vi.fn(), failed: vi.fn() });
+  const onWatcherBatch = vi.fn((w, events) => { handleWatcherEvents(events); apps.settledEvents(w, events); });
+  let observation!: WorkspaceObservationCallbacks;
+  const w = workspace();
+  const activity = createWorkspaceActivity(notify, {
+    observationFor: (w, callbacks) => { observation = callbacks; return idleObservation(w, callbacks); },
+    onWatcherBatch,
+    captureFor: () => ({ shareView: false, capture: { start() {}, observeFileEvents, settleAndCloseAllLiveSessions: async () => {}, stop: async () => {} } as never }),
+  });
+  try {
+    await activity.open(w);
+    await apps.read(w, ".");
+    notify.mockClear();
+    observation.facts([{ path: ".dohc/visibility.toml", kind }]);
+    await apps.retire(w.attachmentId);
+    expect.soft(observeFileEvents).not.toHaveBeenCalled();
+    expect.soft(onWatcherBatch).not.toHaveBeenCalled();
+    expect.soft(handleWatcherEvents).not.toHaveBeenCalled();
+    expect.soft(sources).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledExactlyOnceWith({ workspaceId: w.workspaceId, paths: [".dohc/visibility.toml"], pathSetChanged: kind !== "changed" });
+  } finally { await activity.stopAll(); await apps.retire(w.attachmentId); }
+ });
