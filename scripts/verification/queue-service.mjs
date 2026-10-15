@@ -141,8 +141,9 @@ export async function runService({
   const instance = await holdInstance(root);
   if (!instance) { log("another service already serves this queue root"); return 0; }
   const startedAt = new Date().toISOString();
-  // The previous service's last heartbeat says how long its interrupted runs had been awake.
-  const previousRuns = serviceRuns(readJson(paths.service)).runs;
+  // The previous service's last heartbeat says when it stopped and how long its interrupted runs had been awake.
+  const previous = readJson(paths.service);
+  const previousRuns = serviceRuns(previous).runs;
   const health = { diskFreeGb: null, diskOk: true, dockerOk: true, dockerCheckedAt: 0, pausedUntil: 0, environmentStreak: 0, reason: null };
   // A request may use twice the per-run limit across all its attempts.
   const requestBudgetMs = 2 * timeLimitMs;
@@ -219,10 +220,12 @@ export async function runService({
       const attempt = entry.status.attempts.at(-1);
       const grant = { request: entry.id, attempt: attempt?.n, head: entry.request.head, base: entry.request.base };
       const result = attempt ? readJson(join(paths.attempt(entry.id, attempt.n), "result.json")) : null;
+      // Until the receipt is final, only the package report records which package tests failed.
+      const tests = attempt ? readJson(join(paths.attempt(entry.id, attempt.n), "js-tests", "result.json")) : null;
       const last = previousRuns.find(row => row.id === entry.id && row.attempt === attempt?.n)?.awakeMs ?? 0;
       const stopped = entry.status.stopping ?? "service restart";
       // A recovery that cannot be recorded would repeat every tick; restart under the supervisor's backoff instead.
-      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last, flaky: result?.flaky ?? [], ...timesOf(result) }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
+      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last, flaky: result?.flaky ?? [], ...timesOf(result) }, attemptOutcome(result, grant, { stopped, tests, stoppedAt: previous?.heartbeatAt }), { cleanup: true }); }
       catch (error) { fatal = error; return; }
     }
   }

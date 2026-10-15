@@ -64,6 +64,59 @@ test("only a receipt for this exact attempt counts", () => {
   assert.equal(attemptOutcome(null, grant, { stopped: "time budget" }).outcome, "error", "a run cut short by the shared budget gets no verdict");
 });
 
+// A run that a service restart cut off during its package tests, shaped like the first attempt of request 000000071-5df0bf.
+const restartedAt = "2026-10-15T05:39:00.000Z";
+function cutOffRun(grant, steps, fields = {}) {
+  const folder = `C:\\w\\_verification\\requests\\${grant.request}\\attempts\\${grant.attempt}`;
+  const jsTests = `${folder}\\js-tests\\result.json`;
+  const result = { version: 1, mode: "pr", scope: "all", full: false, grant, commit: grant.head, baseCommit: grant.base, verdict: "RUNNING", jsTests,
+    flaky: [{ step: "rust", test: "engine::settles" }],
+    steps: [{ name: "typecheck", verdict: "PASS", startedAt: "2026-10-15T05:13:25.788Z", finishedAt: "2026-10-15T05:15:04.981Z" },
+      { name: "tests", runner: "testWorkspace", report: jsTests, startedAt: "2026-10-15T05:15:13.862Z", verdict: "RUNNING" }], ...fields };
+  const tests = { version: 1, concurrency: 2, proofs: true, verdict: "RUNNING", startedAt: "2026-10-15T05:15:13.865Z",
+    packages: [{ name: "@dohc/desktop", script: "test:unit", resource: null }, { name: "@dohc/share-web", script: "test", resource: "postgres" }],
+    steps: [{ name: "inventory", args: ["-r", "list", "--depth", "-1", "--json"], verdict: "PASS", startedAt: "2026-10-15T05:15:13.971Z", finishedAt: "2026-10-15T05:15:21.830Z" },
+      { name: "@dohc/desktop", args: ["--filter", "@dohc/desktop", "run", "test:unit"], verdict: "RUNNING", startedAt: "2026-10-15T05:15:21.836Z" }, ...steps] };
+  return { result, tests };
+}
+const exited = (code, name = "_dohc_share-web") => `C:\\Program Files\\nodejs\\node.exe failed (${code}). Log: C:\\w\\_verification\\requests\\r\\attempts\\1\\js-tests\\${name}.log`;
+const shareWeb = (verdict, fields = {}) => ({ name: "@dohc/share-web", args: ["--filter", "@dohc/share-web", "run", "test"], startedAt: "2026-10-15T05:15:21.947Z",
+  verdict, ...(verdict === "FAIL" ? { error: exited(1), finishedAt: "2026-10-15T05:21:38.400Z", seconds: 376.45 } : {}), ...fields });
+const repository = (verdict, fields = {}) => ({ name: "repository", args: ["run", "test:repo"], startedAt: "2026-10-15T05:15:13.866Z",
+  verdict, ...(verdict === "FAIL" ? { error: exited(1, "repository"), finishedAt: "2026-10-15T05:21:40.000Z", seconds: 386.13 } : {}), ...fields });
+
+test("a run a service restart cut off after a package test failed ends failed, with partial coverage", () => {
+  const grant = { request: "000000071-5df0bf", attempt: 1, head: "h", base: "b" };
+  const recovered = steps => { const { result, tests } = cutOffRun(grant, steps); return attemptOutcome(result, grant, { stopped: "service restart", tests, stoppedAt: restartedAt }); };
+  assert.deepEqual(recovered([shareWeb("FAIL")]), { outcome: "failed", cause: "check", reason: "The run stopped at a service restart after @dohc/share-web failed, so its coverage is partial." });
+  assert.equal(recovered([repository("FAIL"), shareWeb("FAIL")]).reason, "The run stopped at a service restart after repository and @dohc/share-web failed, so its coverage is partial.");
+});
+
+test("a restart retries a run whose package steps show no failure of their own", () => {
+  const grant = { request: "000000071-5df0bf", attempt: 1, head: "h", base: "b" };
+  const recovered = steps => { const { result, tests } = cutOffRun(grant, steps); return attemptOutcome(result, grant, { stopped: "service restart", tests, stoppedAt: restartedAt }).outcome; };
+  assert.equal(recovered([shareWeb("FAIL")]), "failed", "a package that failed on its own");
+  assert.equal(recovered([shareWeb("FAIL", { error: exited("interrupted") })]), "environment", "a step that was interrupted");
+  assert.equal(recovered([shareWeb("NOT RUN", { error: exited("interrupted"), reason: "stopped after typecheck failed", finishedAt: "2026-10-15T05:21:38.400Z" })]), "environment", "a step a stop kept from finishing");
+  assert.equal(recovered([shareWeb("RUNNING"), repository("PASS")]), "environment", "no failure yet");
+  assert.equal(recovered([shareWeb("FAIL", { error: exited(53445) })]), "environment", "a command the job relay could not start");
+  assert.equal(recovered([repository("FAIL", { finishedAt: "2026-10-15T05:38:04.450Z" })]), "environment", "a failure in the minutes before the stop, when a logoff stops new processes from starting");
+  assert.equal(recovered([{ name: "proofs", runner: "runProofs", verdict: "FAIL", error: exited(1, "browser-install"), finishedAt: "2026-10-15T05:21:38.400Z" }]), "environment", "the proofs, which include host steps");
+  assert.equal(recovered([{ name: "inventory", verdict: "FAIL", error: exited(1, "inventory"), finishedAt: "2026-10-15T05:15:21.830Z" }]), "environment", "the package inventory");
+});
+
+test("a restart still retries a run its receipt blames on the host, and only a restart keeps a package failure", () => {
+  const grant = { request: "000000071-5df0bf", attempt: 1, head: "h", base: "b" };
+  const { result, tests } = cutOffRun(grant, [shareWeb("FAIL")]);
+  const recovered = (fields, options = { stopped: "service restart" }) => attemptOutcome({ ...result, ...fields }, grant, { tests, stoppedAt: restartedAt, ...options });
+  assert.equal(recovered({ verdict: "FAIL", failure: { kind: "check", cause: "tests" } }).outcome, "failed", "a check failure the receipt recorded before its cleanup ended");
+  assert.deepEqual(recovered({ verdict: "FAIL", failure: { kind: "environment", cause: "postgres-start" } }), { outcome: "environment", cause: "service restart", reason: "The worker stopped before its receipt was final." });
+  assert.equal(recovered({ failure: { kind: "environment", cause: "interrupted" } }).outcome, "environment");
+  assert.equal(recovered({}, { stopped: "preparation limit" }).outcome, "environment", "a stop the service decided");
+  assert.equal(recovered({}, { stopped: undefined }).outcome, "environment", "a worker that ended without a final receipt");
+  assert.equal(recovered({}, { stopped: "service restart", stoppedAt: undefined }).outcome, "environment", "a stop time that was never recorded");
+});
+
 test("the nightly run of main goes ahead of the line, and only a ready one does", () => {
   const first = entry("000000001-aaaaaa", { head: "h1" });
   const nightly = entry("000000009-nnnnnn", { head: "h9", branch: "refs/heads/main", checkout: "nightly", full: true, nightly: true });
@@ -448,6 +501,45 @@ test("a restarted service keeps a finished receipt and retries an interrupted ru
   assert.deepEqual(finished.map(candidate => candidate.status.verdict), ["PASS", "PASS", "PASS"]);
   assert.deepEqual(finished[0].status.attempts[0].flaky, [{ step: "rust", test: "engine::settles" }], "a recovered receipt keeps its flaky tests");
   assert.deepEqual(calls.map(grant => [grant.request, grant.attempt]), [["000000002-bbbbbb", 2], ["000000003-cccccc", 2]], "only interrupted requests run again, as new attempts");
+});
+
+test("a restarted service ends a run cut off after a package test failed, and retries one with no such failure", async t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-queue-restart-failed-"));
+  const fixture = fixtureRepo();
+  t.after(() => { rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); rmSync(fixture.repo, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
+  const paths = queuePaths(root);
+  // The previous service's last heartbeat is when it stopped.
+  await writeJson(paths.service, { protocol: 1, pid: 1, heartbeatAt: restartedAt, lanes: 1, running: [] });
+  const plant = async (id, steps, fields) => {
+    await writeJson(join(paths.request(id), "request.json"), { id, sequence: Number(id.slice(0, 9)), head: fixture.head, base: fixture.base, scope: "all", gates: { rust: true, js: true }, checkout: "pass", branch: `refs/heads/${id}` });
+    await writeJson(join(paths.request(id), "status.json"), { state: "running", attempts: [{ n: 1, startedAt: "2026-10-15T05:05:21.235Z" }] });
+    const { result, tests } = cutOffRun({ request: id, attempt: 1, head: fixture.head, base: fixture.base }, steps, fields);
+    await writeJson(join(paths.attempt(id, 1), "result.json"), result);
+    await writeJson(join(paths.attempt(id, 1), "js-tests", "result.json"), tests);
+  };
+  await plant("000000001-aaaaaa", [repository("FAIL", { finishedAt: "2026-10-15T05:38:04.450Z" }), shareWeb("FAIL")]);
+  await plant("000000002-bbbbbb", [repository("FAIL", { error: exited("interrupted", "repository") }), shareWeb("NOT RUN", { error: exited("interrupted"), reason: "stopped after typecheck failed" })]);
+  await plant("000000003-cccccc", [shareWeb("FAIL")], { verdict: "FAIL", failure: { kind: "environment", cause: "postgres-start" } });
+  await plant("000000004-dddddd", [repository("FAIL", { finishedAt: "2026-10-15T05:38:04.450Z" })]);
+  const calls = [];
+  const stop = new AbortController();
+  const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100,
+    docker: async () => true, prepare: async () => {}, sweep: async () => 0, holdLane: async () => ({ release() {} }), retryDelay: () => 0,
+    worker: async ({ grant, output }) => { calls.push(grant); writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, verdict: "PASS", final: true })); },
+    stop: stop.signal, log: () => {} });
+  const finished = await waitFor(() => {
+    const all = listRequests(root);
+    return all.length === 4 && all.every(candidate => terminalStates.has(candidate.status.state)) ? all : null;
+  }, "4 requests must finish");
+  stop.abort();
+  await service;
+  const [failed] = finished;
+  assert.deepEqual([failed.status.state, failed.status.verdict, failed.status.cause], ["failed", "FAIL", "check"]);
+  assert.equal(failed.status.reason, "The run stopped at a service restart after @dohc/share-web failed, so its coverage is partial.", "a failure in the minutes before the stop is not named");
+  assert.match(failed.status.result, /attempts[\\/]1[\\/]result\.json$/u);
+  assert.deepEqual(failed.status.attempts[0].flaky, [{ step: "rust", test: "engine::settles" }], "the cut-off receipt keeps its flaky tests");
+  assert.deepEqual(finished.slice(1).map(candidate => [candidate.status.state, candidate.status.attempts[0].outcome]), [["passed", "environment"], ["passed", "environment"], ["passed", "environment"]]);
+  assert.deepEqual(calls.map(grant => [grant.request, grant.attempt]), [["000000002-bbbbbb", 2], ["000000003-cccccc", 2], ["000000004-dddddd", 2]], "only the run with an earlier package failure is not run again");
 });
 
 test("a newer commit submitted while the service was down replaces the request it interrupted", async t => {

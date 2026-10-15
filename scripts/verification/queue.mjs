@@ -137,11 +137,29 @@ export function nextRequest(requests, { diskOk, dockerOk }, now = Date.now()) {
 /** Backoff after an environment failure: 30 s, 2 min, 5 min, then every 15 min. */
 export const retryDelayMs = failures => [30_000, 120_000, 300_000][failures - 1] ?? 900_000;
 
+// A command that failed on its own reports its exit status, as "failed (1)". An interrupted or timed-out
+// command reports neither, and one that could not start reports a Windows status far above 255.
+const ownFailure = / failed \([1-9]\d{0,2}\)\./u;
+// A logoff makes new processes fail to start for a while before the service stops, so a later failure may be the stop's doing.
+const restartMarginMs = 5 * 60_000;
+
+/**
+ * The test steps in an attempt's js-tests/result.json that failed on their own, after their retry,
+ * at least five minutes before the service stopped. The package inventory never counts, nor do the
+ * proofs, which include host steps such as the browser install.
+ */
+function failedBeforeRestart(tests, stoppedAt) {
+  const steps = new Set(["repository", "desktop-scripts", "desktop-runtime-packaging", ...(tests?.packages ?? []).map(row => row.name)]);
+  return (tests?.steps ?? []).filter(row => steps.has(row.name) && row.verdict === "FAIL" && ownFailure.test(row.error ?? "")
+    && Date.parse(row.finishedAt) <= Date.parse(stoppedAt) - restartMarginMs).map(row => row.name);
+}
+
 /**
  * What one attempt proved. Only a receipt that names this exact attempt
  * counts; anything else means the attempt did not finish its checks.
+ * `tests` and `stoppedAt` let a run that a service restart cut off keep a package failure it already had.
  */
-export function attemptOutcome(result, grant, { stopped } = {}) {
+export function attemptOutcome(result, grant, { stopped, tests, stoppedAt } = {}) {
   if (stopped === "time limit") return { outcome: "failed", cause: "time limit", reason: "The run passed its time limit. Read the last step's log for a hang." };
   // Only machine failures lead to another attempt, so a run cut short by the shared budget gets no verdict.
   if (stopped === "time budget") return { outcome: "error", cause: "time budget", reason: "Its attempts used the request's time limit after machine failures." };
@@ -149,6 +167,9 @@ export function attemptOutcome(result, grant, { stopped } = {}) {
   const matches = result?.grant && result.grant.request === grant.request && result.grant.attempt === grant.attempt
     && result.commit === grant.head && result.baseCommit === grant.base;
   if (!matches) return { outcome: "environment", cause: stopped ?? "no receipt", reason: "The worker ended without a receipt for this attempt." };
+  // A run with a failed package would have ended FAIL, so running it again proves nothing new. A receipt that blames the host is retried.
+  const failed = result.final !== true && stopped === "service restart" && (!result.failure || result.failure.kind === "check") ? failedBeforeRestart(tests, stoppedAt) : [];
+  if (failed.length) return { outcome: "failed", cause: "check", reason: `The run stopped at a service restart after ${new Intl.ListFormat("en").format(failed)} failed, so its coverage is partial.` };
   if (result.final !== true) return { outcome: "environment", cause: stopped ?? "unfinished", reason: "The worker stopped before its receipt was final." };
   if (result.verdict === "PASS") return { outcome: "passed", cause: "pass" };
   if (result.verdict === "FAIL" && result.failure?.kind === "check") return { outcome: "failed", cause: "check", reason: result.error };

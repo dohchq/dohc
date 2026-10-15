@@ -123,6 +123,9 @@ Run `pnpm verify:queue cancel <id>` to stop a request. A finished request keeps 
 The `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
 A supervisor runs the service in a Windows job object. When the service exits or its heartbeat stops for two minutes, the supervisor stops it and everything it started, then starts it again.
 A request that was running when the service stopped runs again as a new attempt. A request whose receipt already finished keeps that result.
+A request whose run had already failed a check ends FAIL instead, and its reason says the coverage is partial.
+That check is a package test, repository check, or desktop script step that `js-tests/result.json` records as failed after its retry, at least five minutes before the service's last heartbeat.
+During a logoff, new processes fail to start before the service stops, so a later failure can be the logoff's doing.
 Install or upgrade the service from a checkout of `origin/main` with `pnpm verify:queue install`. An upgrade takes effect when the current runs end. No new run starts until then.
 
 CI, other platforms, and runs with their own `DOHC_BUILD_SLOT_ROOT` verify inline in their checkout.
