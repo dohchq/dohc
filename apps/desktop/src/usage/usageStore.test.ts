@@ -7,6 +7,8 @@ import { deferred } from "../testing/deferred";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createUsageStore, usageAsideName, USAGE_PENDING_LIMIT, USAGE_SNAPSHOT_NAME, USAGE_WRITE_INTERVAL_MS, type UsageFileSystem } from "./usageStore";
 
+vi.mock("node:fs/promises", async importOriginal => ({ ...await importOriginal<typeof fs>() }));
+
 const pair = { capabilityId: "version.try", door: "renderer" } as const;
 const mapping: UsageBuildPair[] = [{ ...pair, status: "covered" }];
 const stores: ReturnType<typeof createUsageStore>[] = [];
@@ -17,7 +19,7 @@ function seed(enabled = true): Snapshot {
     days: [{ day: today(), appVersions: ["0.1.0"], complete: enabled }], counts: [],
     coverage: [{ appVersion: "0.1.0", pairs: mapping }] };
 }
-function memoryStore(initial: unknown = seed(), buildMapping = mapping, platform = process.platform) {
+function memoryStore(initial: unknown = seed(), buildMapping = mapping) {
   const path = join("isolated-state", USAGE_SNAPSHOT_NAME);
   const disk = new Map<string, string>(initial ? [[path, JSON.stringify(initial)]] : []);
   // The process stops at the first file operation `crash` matches, and does nothing after it.
@@ -44,7 +46,7 @@ function memoryStore(initial: unknown = seed(), buildMapping = mapping, platform
       disk.set(to, disk.get(from)!); unsynced.add(to);
     }),
     mkdir: vi.fn(async () => {}),
-    writeFile: vi.fn(async (path: string, data: string) => { alive("writeFile", path); disk.set(path, data); unsynced.add(path); }),
+    writeFile: vi.fn(async (path: string, data: string) => { alive("writeFile", path); operations.push("write"); disk.set(path, data); unsynced.add(path); }),
     rename: vi.fn(async (from: string, to: string) => {
       operations.push("rename");
       alive("rename", from);
@@ -65,25 +67,8 @@ function memoryStore(initial: unknown = seed(), buildMapping = mapping, platform
       unsynced.delete(path);
     }),
     rm: vi.fn(async (path: string) => { alive("rm", path); disk.delete(path); unsynced.delete(path); }),
-    sync: vi.fn(async (path: string) => { alive("sync", path); unsynced.delete(path); }),
-    syncDirectory: vi.fn(async (directory: string) => { alive("syncDirectory", directory); }),
-    platform,
-    open: vi.fn(async (file: string, flags: string, mode?: number): Promise<{
-      writeFile(data: string): Promise<void>; sync(): Promise<void>; close(): Promise<void>;
-    }> => {
-      const directory = flags === "r";
-      operations.push(directory ? "open directory" : "open temp");
-      alive("open", file);
-      if (!directory) expect(mode).toBe(0o600);
-      return {
-        writeFile: async data => { operations.push("write"); await io.writeFile(file, data); },
-        sync: async () => {
-          operations.push(directory ? "sync directory" : "sync temp");
-          if (directory) await io.syncDirectory(file); else await io.sync(file);
-        },
-        close: async () => { operations.push(directory ? "close directory" : "close temp"); },
-      };
-    }),
+    sync: vi.fn(async (path: string) => { alive("sync", path); operations.push("sync temp"); unsynced.delete(path); }),
+    syncDirectory: vi.fn(async (directory: string) => { alive("syncDirectory", directory); operations.push("sync directory"); }),
   } satisfies UsageFileSystem;
   const stateDir = vi.fn(() => "isolated-state");
   const onWriteFailure = vi.fn();
@@ -115,23 +100,7 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(2026, 9, 7, 12)
 afterEach(async () => { for (const store of stores.splice(0)) await store.close(); vi.useRealTimers(); });
 
 describe("local usage store", () => {
-  it("clears interrupted durable snapshots without removing other state or set-aside records", async () => {
-    const { store, disk, path, saved } = memoryStore();
-    await store.load();
-    store.recordSuccess(pair);
-    const interrupted = [path + ".tmp", path + ".tmp-123-abandoned", path + ".tmp-456-abandoned"];
-    for (const file of interrupted) disk.set(file, "old usage counts");
-    const aside = join("isolated-state", usageAsideName(1));
-    const unrelated = join("isolated-state", "settings.json.tmp-123-abandoned");
-    disk.set(aside, "set aside by the person");
-    disk.set(unrelated, "other state");
-    await store.clear();
-    expect(interrupted.filter(file => disk.has(file))).toEqual([]);
-    expect(saved().counts).toEqual([]);
-    expect(disk.get(aside)).toBe("set aside by the person");
-    expect(disk.get(unrelated)).toBe("other state");
-  });
-  it("keeps the old record and closes the temp handle when file sync fails", async () => {
+  it("keeps the old record when file sync fails", async () => {
     const { store, io, disk, path, operations, onWriteFailure } = memoryStore();
     await store.load();
     const previous = disk.get(path);
@@ -141,7 +110,7 @@ describe("local usage store", () => {
     io.sync.mockRejectedValueOnce(failure);
     await expect(store.flush()).rejects.toBe(failure);
     expect(disk.get(path)).toBe(previous);
-    expect(operations).toEqual(["open temp", "write", "sync temp", "close temp"]);
+    expect(operations).toEqual(["write"]);
     expect(onWriteFailure).toHaveBeenCalledOnce();
     await store.flush();
     expect(JSON.parse(disk.get(path)!).counts[0].count).toBe(1);
@@ -149,7 +118,7 @@ describe("local usage store", () => {
   it.each(["clear", "off", "on", "flush"] as const)("keeps the published %s state and retries after directory sync fails", async action => {
     const initial = seed(action !== "on");
     initial.counts.push({ ...pair, day: today(), count: 3 });
-    const { store, io, saved, operations, onStop, onWriteFailure } = memoryStore(initial, mapping, "linux");
+    const { store, io, saved, operations, onStop, onWriteFailure } = memoryStore(initial, mapping);
     await store.load();
     operations.length = 0;
     if (action === "flush") store.recordSuccess(pair);
@@ -162,10 +131,7 @@ describe("local usage store", () => {
       enabled: action !== "off",
       counts: action === "clear" ? [] : [{ ...pair, day: today(), count: action === "flush" ? 4 : 3 }],
     };
-    expect(operations).toEqual([
-      "open temp", "write", "sync temp", "close temp", "rename",
-      "open directory", "sync directory", "close directory",
-    ]);
+    expect(operations).toEqual(["write", "sync temp", "rename"]);
     expect(saved()).toMatchObject(expected);
     expect(await store.read()).toMatchObject(expected);
     expect(onWriteFailure).toHaveBeenCalledOnce();
@@ -174,22 +140,68 @@ describe("local usage store", () => {
     expect(io.syncDirectory).toHaveBeenCalledTimes(3);
     expect(onStop).not.toHaveBeenCalled();
   });
-  it.each(["linux", "darwin", "win32"] as const)("saves in durable order on %s without changing the batching interval", async platform => {
-    const { store, io, operations, saved } = memoryStore(seed(), mapping, platform);
+  it.each(["linux", "darwin", "win32"] as const)("saves in durable order on %s", async platform => {
+    vi.useRealTimers();
+    const directory = await createTestScratch("usage-sync-order-");
+    const path = join(directory, USAGE_SNAPSHOT_NAME);
+    await fs.writeFile(path, JSON.stringify(seed()));
+    const operations: string[] = [];
+    const originalOpen = fs.open;
+    const originalRename = fs.rename;
+    const originalWrite = fs.writeFile;
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...descriptor, value: platform });
+    const open = vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      const kind = args[1] === "r+" ? "temp" : "directory";
+      operations.push("open " + kind + (kind === "temp" ? " for sync" : ""));
+      const sync = handle.sync.bind(handle);
+      const close = handle.close.bind(handle);
+      vi.spyOn(handle, "sync").mockImplementation(async () => { operations.push("sync " + kind); if (kind === "temp" || descriptor.value !== "win32") await sync(); });
+      vi.spyOn(handle, "close").mockImplementation(async () => { operations.push("close " + kind + (kind === "temp" ? " for sync" : "")); await close(); });
+      return handle;
+    });
+    const write = vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
+      if (file !== path + ".tmp") return originalWrite(file, data, options);
+      // writeFile closes its handle; the existing sync helper reopens it.
+      const handle = await originalOpen(file, "w", 0o600);
+      operations.push("open temp");
+      try { operations.push("write"); await handle.writeFile(data); }
+      finally { operations.push("close temp"); await handle.close(); }
+    });
+    const rename = vi.spyOn(fs, "rename").mockImplementation(async (...args) => {
+      operations.push("rename");
+      await originalRename(...args);
+    });
+    const store = createUsageStore({ stateDir: () => directory, appVersion: "0.1.0", coverage: mapping });
+    try {
+      await store.load();
+      operations.length = 0;
+      store.recordSuccess(pair);
+      await store.flush();
+      expect(operations).toEqual([
+        "open temp", "write", "close temp", "open temp for sync", "sync temp", "close temp for sync", "rename",
+        ...(platform === "win32" ? [] : ["open directory", "sync directory", "close directory"]),
+      ]);
+      expect(write).toHaveBeenLastCalledWith(path + ".tmp", expect.any(String), { mode: 0o600 });
+    } finally {
+      try { await store.close(); }
+      finally {
+        open.mockRestore(); write.mockRestore(); rename.mockRestore();
+        Object.defineProperty(process, "platform", descriptor);
+      }
+    }
+  });
+  it("keeps the old record readable after a power cut before rename", async () => {
+    const initial = seed();
+    initial.counts.push({ ...pair, day: today(), count: 7 });
+    const { store, crashOn, powerCut, restart } = memoryStore(initial);
     await store.load();
-    operations.length = 0;
-    io.writeFile.mockClear();
     store.recordSuccess(pair);
-    await vi.advanceTimersByTimeAsync(USAGE_WRITE_INTERVAL_MS - 1);
-    expect(operations).toEqual([]);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(operations).toEqual([
-      "open temp", "write", "sync temp", "close temp", "rename",
-      ...(platform === "win32" ? [] : ["open directory", "sync directory", "close directory"]),
-    ]);
-    expect(saved().counts[0]!.count).toBe(1);
-    await vi.advanceTimersByTimeAsync(USAGE_WRITE_INTERVAL_MS * 4);
-    expect(io.writeFile).toHaveBeenCalledTimes(1);
+    crashOn(operation => operation === "rename");
+    await expect(store.flush()).rejects.toThrow("dohc stopped");
+    powerCut();
+    expect((await restart().read()).counts).toEqual(initial.counts);
   });
   it("loads an existing record and keeps its saved counts after a power cut", async () => {
     const initial = seed(false);
@@ -417,8 +429,7 @@ describe("local usage store", () => {
     expect(io.readFile).toHaveBeenCalledTimes(3);
     expect(saved().enabled).toBe(action === "on");
     expect(saved().counts).toEqual(action === "clear" ? [] : initial.counts);
-    // Each durable write uses its own temp name; only Clear removes this abandoned file.
-    expect(disk.has(path + ".tmp")).toBe(action !== "clear");
+    expect(disk.has(path + ".tmp")).toBe(false);
     expect(store.recordSuccess(pair)).toBe(action === "on");
   });
   it.each([

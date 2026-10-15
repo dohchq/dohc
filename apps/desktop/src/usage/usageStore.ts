@@ -6,7 +6,6 @@ import {
   USAGE_MAX_COUNT, USAGE_RETENTION_DAYS, localUsageDay, queryUsage, usageRowKey,
   type UsageBuildPair, type UsageCount, type UsageDayRecord, type UsageQuery, type UsageSnapshot,
 } from "@dohc/workspace-contracts/usage";
-import { atomicWriteFile, type DurableFileOperations } from "../atomicReplaceFile";
 import { INVALID_USAGE_RECORD } from "../ipc/bridgeContract";
 
 export const USAGE_WRITE_INTERVAL_MS = 30_000;
@@ -21,8 +20,6 @@ export const usageAsideName = (number: number) => `dohc-usage.set-aside-${number
 const INCOMING = ".incoming";
 const READY = ".ready";
 export interface UsageFileSystem {
-  open: NonNullable<DurableFileOperations["open"]>;
-  platform?: NodeJS.Platform;
   readFile(path: string, encoding: "utf8"): Promise<string>;
   readdir(path: string): Promise<string[]>;
   copyFile(from: string, to: string): Promise<unknown>;
@@ -36,7 +33,6 @@ export interface UsageFileSystem {
   syncDirectory(path: string): Promise<void>;
 }
 const nodeFiles: UsageFileSystem = {
-  open: (path, flags, mode) => fs.open(path, flags, mode),
   readFile: (path, encoding) => fs.readFile(path, encoding),
   readdir: path => fs.readdir(path),
   copyFile: (from, to) => fs.copyFile(from, to),
@@ -280,22 +276,19 @@ export function createUsageStore(deps: {
       // Maps contain only validated aggregates; avoid re-validating the whole store.
       const data = JSON.stringify(snapshot(cleanExit));
       await io.mkdir(directory, { recursive: true });
-      await atomicWriteFile(path, data, {
-        open: (file, flags, mode) => io.open(file, flags, mode),
-        platform: io.platform,
-        rename: async (from, to) => {
-          await io.rename(from, to);
-          // Rename publishes these bytes even if the directory sync fails.
-          lastBytes = data;
-        },
-      });
+      const tmp = path + ".tmp";
+      await io.writeFile(tmp, data, { mode: 0o600 });
+      await io.sync(tmp);
+      await io.rename(tmp, path);
+      // Rename publishes these bytes even if the directory sync fails.
+      lastBytes = data;
+      await io.syncDirectory(directory);
       savedRevision = writingRevision;
       committedCleanExit = cleanExit;
       admissionReady = !cleanExit;
       if (admissionReady) applyPending();
     } catch (error) {
       incomplete();
-      changed();
       try { deps.onWriteFailure?.(); } catch { /* Preserve the write error. */ }
       throw error;
     } finally { scheduleWrite(); }
@@ -509,11 +502,6 @@ export function createUsageStore(deps: {
         refreshDay(); incomplete(); changed();
         try {
           await io.rm(path + ".tmp", { force: true });
-          for (const name of await io.readdir(directory)) {
-            if (name.startsWith(USAGE_SNAPSHOT_NAME + ".tmp-")) {
-              await io.rm(join(directory, name), { force: true });
-            }
-          }
           await write();
         } catch (error) {
           if (lastBytes === previousBytes) {
