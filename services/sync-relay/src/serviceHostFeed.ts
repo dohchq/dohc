@@ -93,6 +93,7 @@ function hostedWriter(scope: ServiceHostFeedScope, opKind: string, payload: unkn
   const claim = claimedDocument(opKind, record);
   const objectId = hostedObject(scope, claim, scope.hosted);
   if (objectId === null) return null;
+  if (!scope.writable.has(objectId)) return null;
   if (opKind === "live.audit.application") return objectId;
   const path = scope.hosted.get(objectId)!;
   if (claim!.path !== path) return null;

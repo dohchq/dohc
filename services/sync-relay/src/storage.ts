@@ -388,8 +388,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string) {
     return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
   }
-  currentServiceHostWorkspace(workspaceId: string) {
-    return serviceHostEnrollmentStorage.currentServiceHostWorkspace(this, workspaceId);
+  currentServiceHostWorkspace(workspaceId: string, includeUndrained = false) {
+    return serviceHostEnrollmentStorage.currentServiceHostWorkspace(this, workspaceId, includeUndrained);
   }
   readServiceHostFeedScope(workspaceId: string) {
     return serviceHostFeedStorage.readServiceHostFeedScope(this, workspaceId);

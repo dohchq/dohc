@@ -16,11 +16,34 @@ export const SERVICE_HOST_ENROLLMENTS = "sync_relay_service_host_enrollments";
 export const SERVICE_HOST_MAX_DOCUMENTS = 64;
 export const SERVICE_HOST_MAX_WORKSPACES = 16;
 const MIGRATION = "service-host-enrollments-v2";
+const DRAIN_MIGRATION = "service-host-enrollments-v3";
 // `owner_stop` is the owner's Pause or Stop. Stop applies at once. Pause cuts
 // the service host's reads at once and applies in full once the host no
 // longer holds the document; until then the enrollment stays enabled, so the
 // document keeps its binding and its writes while unsettled work settles.
 const SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
+  workspace_id TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  owner_user_id TEXT NOT NULL,
+  share_id TEXT NOT NULL,
+  replication_epoch TEXT NOT NULL,
+  stream_identity TEXT NOT NULL,
+  owner_stop TEXT CHECK (owner_stop IN ('pause','retire')),
+  enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0,1) AND (retired=0 OR enabled=0)),
+  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+  host_drained_at_ms INTEGER CHECK (host_drained_at_ms IS NULL OR host_drained_at_ms >= 0),
+  accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND 9007199254740991),
+  CHECK (enabled=1 OR retired=1 OR owner_stop='pause'),
+  PRIMARY KEY (workspace_id, object_id),
+  UNIQUE (workspace_id, path),
+  FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY (share_id) REFERENCES sync_relay_shares(share_id)
+) STRICT`;
+// The v2 layout before host drain tracking.
+const V2_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   workspace_id TEXT NOT NULL,
   object_id TEXT NOT NULL,
   path TEXT NOT NULL,
@@ -82,6 +105,7 @@ export interface ServiceHostEnrollment {
   readonly retired: boolean;
   readonly createdAtMs: number;
   readonly updatedAtMs: number;
+  readonly hostDrainedAtMs: number | null;
   readonly acceptedCursor?: number;
 }
 export interface EnrollServiceHostDocumentInput {
@@ -103,22 +127,40 @@ function canonicalPath(value: string): string {
 }
 function row(value: Record<string, unknown>): ServiceHostEnrollment {
   const text = (key: string) => parseLiveUpdateIdentifier(value[key], key);
-  const createdAtMs = timestamp(value.created_at_ms), updatedAtMs = timestamp(value.updated_at_ms), ownerStop = value.owner_stop;
+  const createdAtMs = timestamp(value.created_at_ms), updatedAtMs = timestamp(value.updated_at_ms),
+    hostDrainedAtMs = value.host_drained_at_ms === null ? null : timestamp(value.host_drained_at_ms), ownerStop = value.owner_stop;
   if (updatedAtMs < createdAtMs || (value.enabled !== 0 && value.enabled !== 1) || (value.retired !== 0 && value.retired !== 1) ||
     (value.retired === 1 && value.enabled !== 0) ||
     (ownerStop !== null && ownerStop !== "pause" && ownerStop !== "retire")) throw new Error("Service host enrollment is damaged.");
   return Object.freeze({workspaceId: parseWorkspaceId(value.workspace_id), objectId: text("object_id"), path: canonicalPath(String(value.path)),
     ownerUserId: text("owner_user_id"), shareId: text("share_id"), replicationEpoch: text("replication_epoch"),
-    streamIdentity: text("stream_identity"), ownerStop, enabled: value.enabled === 1, retired: value.retired === 1, createdAtMs, updatedAtMs});
+    streamIdentity: text("stream_identity"), ownerStop, enabled: value.enabled === 1, retired: value.retired === 1, createdAtMs, updatedAtMs, hostDrainedAtMs});
 }
 export function initializeServiceHostEnrollmentSchema(db: SqliteDb): void {
   const isMarked = (migration: string) => db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration) !== undefined;
-  const marked = isMarked(MIGRATION);
-  const existing = db.prepare("SELECT type,sql FROM sqlite_schema WHERE name=?").get(SERVICE_HOST_ENROLLMENTS);
-  const exact = (sql: string) => !!existing && existing.type === "table" && typeof existing.sql === "string" &&
-    existing.sql.replace(/\s+/g, " ").trim() === sql.replace(/\s+/g, " ").trim();
-  if (marked) {
+  const marked = isMarked(MIGRATION), drainMarked = isMarked(DRAIN_MIGRATION);
+  const existing = () => db.prepare("SELECT type,sql FROM sqlite_schema WHERE name=?").get(SERVICE_HOST_ENROLLMENTS);
+  const exact = (sql: string) => {
+    const value = existing();
+    return !!value && value.type === "table" && typeof value.sql === "string" &&
+      value.sql.replace(/\s+/g, " ").trim() === sql.replace(/\s+/g, " ").trim();
+  };
+  if (drainMarked) {
     if (!exact(SQL)) throw new Error("Service host enrollment storage is damaged.");
+  } else if (marked) {
+    if (exact(V2_SQL)) {
+      assertServiceHostEnrollmentConstraints(db);
+      db.exec(`ALTER TABLE ${SERVICE_HOST_ENROLLMENTS} RENAME TO ${SERVICE_HOST_ENROLLMENTS}_v2;
+        ${SQL};
+        INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,host_drained_at_ms,accounted_bytes)
+          SELECT workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,NULL,accounted_bytes
+          FROM ${SERVICE_HOST_ENROLLMENTS}_v2;
+        DROP TABLE ${SERVICE_HOST_ENROLLMENTS}_v2;
+        ${ACTIVE_INDEX_SQL};
+        ${RETIRED_INDEX_SQL};`);
+    } else if (!exact(SQL)) {
+      throw new Error("Service host enrollment storage is damaged.");
+    }
   } else if (isMarked(V1_MIGRATION)) {
     if (!exact(V1_SQL)) throw new Error("Service host enrollment storage is damaged.");
     assertServiceHostEnrollmentConstraints(db);
@@ -133,7 +175,7 @@ export function initializeServiceHostEnrollmentSchema(db: SqliteDb): void {
       ${ACTIVE_INDEX_SQL};
       ${RETIRED_INDEX_SQL};`);
   } else {
-    if (existing) throw new Error("Unmarked service host enrollment storage exists.");
+    if (existing()) throw new Error("Unmarked service host enrollment storage exists.");
     db.exec(SQL);
     db.exec(ACTIVE_INDEX_SQL);
     db.exec(RETIRED_INDEX_SQL);
@@ -141,8 +183,9 @@ export function initializeServiceHostEnrollmentSchema(db: SqliteDb): void {
   }
   assertServiceHostEnrollmentConstraints(db);
   if (!marked) db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(MIGRATION, Date.now());
+  if (!drainMarked) db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(DRAIN_MIGRATION, Date.now());
 }
-/** The v1 and v2 layouts share these indexes, so one check covers both. */
+/** All enrollment layouts share these indexes, so one check covers them. */
 function assertServiceHostEnrollmentConstraints(db: SqliteDb): void {
   const indexes = db.prepare(`PRAGMA index_list(${SERVICE_HOST_ENROLLMENTS})`).all();
   const activeIndex = db.prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?").get(ACTIVE_INDEX);
@@ -257,7 +300,7 @@ function enrollInsideTransaction(storage: StorageContext, input: EnrollServiceHo
       assertCurrent(storage, current, ownerUserId);
       if (current.objectId !== objectId) throw relayError("conflict", "Service host enrollment path belongs to another document.");
       if (current.retired) assertCapacity(storage, workspaceId);
-      storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=NULL,enabled=1,retired=0,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
+      storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=NULL,enabled=1,retired=0,host_drained_at_ms=NULL,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
         .run(Math.max(nowMs, current.updatedAtMs), workspaceId, objectId);
       return read(storage, workspaceId, path)!;
     }
@@ -296,24 +339,27 @@ export interface ServiceHostWorkspace {
 const CURRENT = `FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
   WHERE e.workspace_id=? AND e.enabled=1 AND e.retired=0 AND e.owner_user_id=w.owner_user_id
     AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity`;
+const CURRENT_UNDRAINED = `FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
+  WHERE e.workspace_id=? AND e.host_drained_at_ms IS NULL AND e.owner_user_id=w.owner_user_id
+    AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity`;
 /**
- * The workspace identity while at least one of its enrollments is enabled and
- * current, else null. One SQL snapshot; safe both on the request path and
- * inside a write guard.
+ * The workspace identity while at least one enrollment is eligible for the
+ * requested credential. Ordinary callers require enabled and current rows;
+ * hosted callers may include any undrained current row. One SQL snapshot is
+ * safe both on the request path and inside a write guard.
  */
-export function currentServiceHostWorkspace(storage: StorageContext, workspaceId: string): ServiceHostWorkspace | null {
+export function currentServiceHostWorkspace(storage: StorageContext, workspaceId: string, includeUndrained = false): ServiceHostWorkspace | null {
   storage.captureStanding();
-  const value = storage.db.prepare(`SELECT e.workspace_id,e.owner_user_id,e.replication_epoch,e.stream_identity ${CURRENT} LIMIT 1`)
+  const value = storage.db.prepare(`SELECT e.workspace_id,e.owner_user_id,e.replication_epoch,e.stream_identity ${includeUndrained ? CURRENT_UNDRAINED : CURRENT} LIMIT 1`)
     .get(parseWorkspaceId(workspaceId));
   return value ? Object.freeze({workspaceId: parseWorkspaceId(value.workspace_id), ownerUserId: parseLiveUpdateIdentifier(value.owner_user_id, "owner_user_id"),
     replicationEpoch: parseLiveUpdateIdentifier(value.replication_epoch, "replication_epoch"),
     streamIdentity: parseLiveUpdateIdentifier(value.stream_identity, "stream_identity")}) : null;
 }
-/** The enrollments `currentServiceHostWorkspace` counts, in one SQL snapshot. */
+/** The current identity's undrained enrollments, in one SQL snapshot. */
 export function currentServiceHostEnrollments(storage: StorageContext, workspaceId: string): readonly ServiceHostEnrollment[] {
   storage.captureStanding();
-  const values = storage.db.prepare(`SELECT e.* ${CURRENT} ORDER BY e.path LIMIT ?`).all(parseWorkspaceId(workspaceId), SERVICE_HOST_MAX_DOCUMENTS + 1);
-  if (values.length > SERVICE_HOST_MAX_DOCUMENTS) throw new Error("Service host enrollment capacity is damaged.");
+  const values = storage.db.prepare(`SELECT e.* ${CURRENT_UNDRAINED} ORDER BY e.path`).all(parseWorkspaceId(workspaceId));
   return values.map(row);
 }
 export class ServiceHostRetirementConflict extends Error {
@@ -353,8 +399,8 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
     // Pause leaves the host's reads now and keeps the binding until host unload. Stop fences new acceptance in this transaction.
     const enabled = input.retire ? false : input.enabled || current.enabled;
     const retired = !enabled && (current.retired || ownerStop === "retire");
-    storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,enabled=?,retired=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
-      .run(ownerStop, Number(enabled), Number(retired), Math.max(nowMs, current.updatedAtMs), workspaceId, current.objectId);
+    storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,enabled=?,retired=?,host_drained_at_ms=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
+      .run(ownerStop, Number(enabled), Number(retired), input.enabled ? null : current.hostDrainedAtMs, Math.max(nowMs, current.updatedAtMs), workspaceId, current.objectId);
     return {...read(storage, workspaceId, current.path)!, ...(acceptedCursor === undefined ? {} : {acceptedCursor})};
   });
 }
@@ -384,13 +430,14 @@ export function releaseServiceHostEnrollment(storage: StorageContext, input: {wo
   const nowMs = timestamp(input.nowMs), standing = storage.captureStanding();
   return storage.tx(() => {
     standing();
-    const value = storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=? AND retired=0`).get(parseWorkspaceId(input.workspaceId), input.objectId);
+    const value = storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=? AND object_id=?`).get(parseWorkspaceId(input.workspaceId), input.objectId);
     const current = value ? row(value) : null;
     if (!current) return null;
     const uncovered = !coveredByEditGrant(storage, current);
-    if (!uncovered && !(current.enabled && current.ownerStop)) return null;
-    storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
-      .run(Number(uncovered || current.ownerStop === "retire"), Math.max(nowMs, current.updatedAtMs), current.workspaceId, current.objectId);
+    if (current.retired && current.hostDrainedAtMs !== null) return null;
+    if (!current.retired && !uncovered && !(current.enabled && current.ownerStop)) return null;
+    storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=?,host_drained_at_ms=COALESCE(host_drained_at_ms,?),updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
+      .run(Number(current.retired || uncovered || current.ownerStop === "retire"), nowMs, Math.max(nowMs, current.updatedAtMs), current.workspaceId, current.objectId);
     if (!currentServiceHostWorkspace(storage, current.workspaceId)) forgetServiceHostUploads(storage, current.workspaceId);
     return read(storage, current.workspaceId, current.path);
   });

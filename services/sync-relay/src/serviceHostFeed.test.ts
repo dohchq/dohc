@@ -694,7 +694,7 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
   for (const sha256 of [A.sha256, Y.sha256, B.sha256]) expect(await f.blobStatus(sha256)).toBe(404);
   expect((await f.request("GET", `log?${identity}&scope=${paused.scope.token}&since=0&object=object-b`)).status).toBe(400);
   // The paused document keeps its binding, so the host's accepted work still lands while it settles.
-  expect([...f.storage.readServiceHostFeedScope(ws)!.hosted.keys()]).toEqual([binding.objectId]);
+  expect([...f.storage.readServiceHostFeedScope(ws)!.hosted.keys()]).toEqual([binding.objectId, "object-b"]);
   const settling = blob("settling edit");
   await f.upload(settling);
   expect(await (await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", settling)]])).json())
@@ -703,7 +703,7 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
   // The stopped one takes no more writes.
   expect(await (await f.push([["ydoc.update", ydoc("object-b", "docs/b.md", settling)]], 1)).json())
     .toMatchObject({refusals: [{originSeq: 1, reason: "outside-hosted-documents"}]});
-  expect(release("object-b")).toBeNull();
+  expect(release("object-b")).toMatchObject({hostDrainedAtMs: 31});
   // Resuming before the release cancels the Pause and brings the document back.
   set("docs/a.md", true);
   expect(await documents()).toEqual([binding.objectId]);
@@ -718,6 +718,37 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
   expect(release(binding.objectId)).toMatchObject({enabled: false, retired: true});
   expect(f.storage.readServiceHostFeedScope(ws)).toBeNull();
   expect((await f.request("GET", `log?${identity}`)).status).toBe(404);
+});
+
+it("keeps only the hosted credential alive for an undrained Stop and then drops it", async () => {
+  const f = await fixture();
+  const ordinary = () => authorizeServiceHostReplication(f.storage, {key, namespace, workspaceId: ws, bearer: f.bearer,
+    method: "GET", pathname: `/sync/${ws}/log`});
+  const hosted = () => authorizeServiceHostReplication(f.storage, {key, namespace, workspaceId: ws, bearer: f.bearer,
+    method: "GET", pathname: `/sync/${ws}/hosted/log`});
+  expect(ordinary()).toBe("owner-1");
+  expect(hosted()).toBe("owner-1");
+  expect(f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1",
+    enabled: false, retire: true, nowMs: 20, guard() {}})).toMatchObject({retired: true, enabled: false, hostDrainedAtMs: null});
+  expect(ordinary()).toBeNull();
+  expect(hosted()).toBe("owner-1");
+  const undrained = f.storage.readServiceHostFeedScope(ws);
+  expect(undrained).toMatchObject({replicationEpoch: "epoch", streamIdentity: "stream"});
+  expect(undrained?.shared).toEqual(new Map());
+  const empty = await f.read();
+  expect(empty.scope.documents).toEqual([]);
+  expect(f.objects(empty)).toEqual(["workspace"]);
+  expect(await f.blobStatus(A.sha256)).toBe(404);
+
+  expect(f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: binding.objectId, nowMs: 21}))
+    .toMatchObject({retired: true, enabled: false, hostDrainedAtMs: 21});
+  expect(hosted()).toBeNull();
+  expect(f.storage.readServiceHostFeedScope(ws)).toBeNull();
+
+  f.storage.enrollServiceHostDocument({workspaceId: ws, path: "docs/a.md", shareId: scope.shareId, ownerUserId: "owner-1", nowMs: 22, guard() {}});
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 23, guard() {}});
+  expect(f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 24})).toBe("rotated");
+  expect(hosted()).toBeNull();
 });
 
 it("keeps the read replica's routes and guards apart from the session host's", async () => {
@@ -748,7 +779,7 @@ it("admits the engine's own settlement batch for its hosted document, both ways"
   const settlement = nativeAuthoredSettlement.find(op => op.opKind === "live.audit.settlement")!;
   const document = (settlement.payload as {record: {binding: {workspaceId: string; objectId: string; currentPath: string}}}).record.binding;
   const held = new Map([[document.objectId, document.currentPath]]);
-  const hosted = {workspaceId: document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream", hosted: held,
+  const hosted = {workspaceId: document.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream", hosted: held, writable: new Set(held.keys()),
     departed: new Set<string>(), shared: held, token: "token"};
   for (const op of nativeAuthoredSettlement) {
     expect(hostedWriteAllowed(hosted, op.opKind, op.payload), op.opKind).toBe(true);

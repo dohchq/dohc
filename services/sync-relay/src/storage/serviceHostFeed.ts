@@ -24,6 +24,8 @@ export interface ServiceHostFeedScope {
   readonly streamIdentity: string;
   /** Enrolled documents, object to enrolled path. The host may settle these at that path until their release. */
   readonly hosted: ReadonlyMap<string, string>;
+  /** Hosted documents whose owner has not issued Stop. Paused documents stay writable while they settle. */
+  readonly writable: ReadonlySet<string>;
   /** The hosted documents no longer at their enrolled path. Their publications project nowhere. */
   readonly departed: ReadonlySet<string>;
   /**
@@ -50,15 +52,17 @@ export function readServiceHostFeedScope(storage: StorageContext, workspaceId: s
       const parsed = parseStoredAnyShareSelectorJson(share.selectorJson), selector = parsed && effectiveShareSelector(parsed, "edit");
       return selector && isLiveEditShareSelector(selector) && canonicalLiveSelector(share, selector) ? [selector] : [];
     });
-  const hosted = new Map<string, string>(), departed = new Set<string>(), shared = new Map<string, string>();
+  const hosted = new Map<string, string>(), writable = new Set<string>(), departed = new Set<string>(), shared = new Map<string, string>();
   for (const row of enrollments) {
     hosted.set(row.objectId, row.path);
+    if (!row.retired && row.ownerStop !== "retire") writable.add(row.objectId);
     if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) departed.add(row.objectId);
-    // A Pause or Stop cuts reads at once, like a revoked grant; writes land until the release.
-    else if (row.ownerStop === null && selectors.some(selector => pathVisibleThroughShare(selector, row.path))) shared.set(row.objectId, row.path);
+    // A Pause or Stop cuts reads at once, like a revoked grant. Pause keeps
+    // the binding writable while the host settles; Stop refuses new writes.
+    else if (!row.retired && row.ownerStop === null && selectors.some(selector => pathVisibleThroughShare(selector, row.path))) shared.set(row.objectId, row.path);
   }
   const token = createHash("sha256").update(JSON.stringify(["dohc-hosted-scope-v1", workspaceId, replicationEpoch, streamIdentity, [...shared]])).digest("hex");
-  return Object.freeze({workspaceId, replicationEpoch, streamIdentity, hosted, departed, shared, token});
+  return Object.freeze({workspaceId, replicationEpoch, streamIdentity, hosted, writable, departed, shared, token});
 }
 
 /** One document's rows after a relay sequence, in relay order. Callers still decide each row. */

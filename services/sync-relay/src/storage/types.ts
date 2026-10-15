@@ -615,7 +615,7 @@ export interface SyncRelayStorage {
   hasKeptServiceHostEnrollment(workspaceId: string, path: string): boolean;
   readServiceHostEnrollment(workspaceId: string, path: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string): {documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: string | null};
-  currentServiceHostWorkspace(workspaceId: string): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
+  currentServiceHostWorkspace(workspaceId: string, includeUndrained?: boolean): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
   readServiceHostFeedScope(workspaceId: string): import("./serviceHostFeed").ServiceHostFeedScope | null;
   listServiceHostDocumentRows(input: {workspaceId: string; objectId: string; afterRelaySeq: number; limit: number}): SyncRelayLogRow[];
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
