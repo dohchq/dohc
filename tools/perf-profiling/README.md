@@ -246,10 +246,11 @@ Boundary/25 ms worker heap samples can miss brief peaks. Exclude final heap samp
 A five-second asynchronous process sampler replaces one-second pwsh launches; its cost is recorded.
 GUI memory and history probes run independently of typing.
 The engine compacts a document once 64 updates are pending past its snapshot.
-Only the soak times compaction, and the soak gates no typing. Arms that gate typing never wait on the engine.
+Only the soak times compaction. The soak gates its edit rate, not typing latency, and arms that gate typing latency never wait on the engine.
 Before each soak key, the harness reads the edited document's head.
-In the last four keys before the threshold, each key waits for its own append, so the crossing key is known.
+In the last four keys before the threshold, each key waits for an append, so the harness finds the key that crossed it.
 Compaction timing starts at that key's dispatch and ends when the new snapshot is visible.
+If the editor's saves trail by four keys or more, a key can cross the threshold without waiting, and that compaction has no timing; the half-coverage rule then fails the soak. If they trail by fewer, the append a key waits for can be an earlier key's, so timing starts a key late and leaves out part of the save delay. Compare `compactionTimings` with `compactions` after the first soak at 10 MiB.
 A detached 5 ms poll times it while typing continues, so compaction neither stalls the soak's rate nor goes untyped.
 The soak's compaction check needs a timing for at least half of the observed compactions.
 A 60-key arm spends most of each 125 ms key on CDP round trips and frame waits, so its rate measures the harness.

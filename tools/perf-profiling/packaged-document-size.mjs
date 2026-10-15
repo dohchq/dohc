@@ -323,9 +323,9 @@ export async function measurePackagedDocument({
         await page.evaluate(
           () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
         );
-        // Only the soak times compaction, and it gates no typing. Each soak key reads the edited
-        // document's head first. The last four keys before 64 pending wait for their own append, so
-        // the crossing key is known; its compaction is timed from its dispatch while typing continues.
+        // Only the soak times compaction, and it gates no typing latency. Each soak key reads the
+        // edited document's head first. The last four keys before 64 pending wait for an append to
+        // find the crossing key; its compaction is timed from its dispatch while typing continues.
         let prior = null;
         if (soak) {
           const heads = engineHeads(workspace);
