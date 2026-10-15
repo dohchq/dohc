@@ -5,6 +5,7 @@ import { nameSlug } from "@dohc/workspace-contracts/names";
 import { SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/automation-controls";
 import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
+import { UNNAMED_AGENT_ID } from "../agents/activeAgentRun";
 import {
   CLI_PROTOCOL_VERSION,
   MAX_CLI_REQUEST_BYTES,
@@ -338,6 +339,8 @@ export interface CliServerOptions {
   // an automation that woke the agent and the agent cannot start each other
   // forever.
   agentRunDepth(workspaceId: string): number;
+  // Whether a run dohc dispatched holds the workspace's run slot.
+  dispatchedAgentRun(workspaceId: string): boolean;
   // Runs once a command has made its last durable change.
   onWrite?(workspace: CliWorkspaceContext): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
@@ -637,8 +640,19 @@ function writeActor(
   return options.agentRunDepth(context.workspaceId) > 0 ? "agent" : actor;
 }
 
+// The name an agent writing through this socket claims: its handshake or
+// --agent name. A run dohc dispatched is one agent that gives no name, as its
+// file edits and replies are, so while it holds the slot no write claims one.
+function claimedAgentName(
+  agent: string | undefined,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): string | undefined {
+  return options.dispatchedAgentRun(context.workspaceId) ? undefined : agent;
+}
+
 // Provenance for a CLI/MCP collection write, derived main-side only. Agent
-// traffic carries its handshake name, or `dohc-mcp` when unnamed,
+// traffic carries its claimed name, or `dohc-mcp` when unnamed,
 // acting on behalf of the local owner, at the depth of the
 // agent run in progress; a human write is attributed as this device's local
 // author under the workspace display name.
@@ -651,7 +665,7 @@ function collectionWriteAuthor(
   if (writeActor(actor, context, options) === "agent") {
     return {
       kind: "agent",
-      agentId: agent ?? "dohc-mcp",
+      agentId: claimedAgentName(agent, context, options) ?? UNNAMED_AGENT_ID,
       onBehalfOf: options.localPersonId(),
       depth: options.agentRunDepth(context.workspaceId),
     };
@@ -678,7 +692,7 @@ const CREATE_AS_AGENT_REFUSAL = "a document created through the CLI socket is re
 
 // Provenance for a document edit, derived here. A person types in the
 // editor, so every edit through this socket is an agent's on behalf of the
-// local owner, recorded under its handshake name or the unnamed agent label,
+// local owner, recorded under its claimed name or the unnamed agent label,
 // at the depth of the agent run in progress. Any process holding the socket
 // token could otherwise claim the person's typing.
 function documentEditOrigin(
@@ -687,7 +701,7 @@ function documentEditOrigin(
   options: CliServerOptions,
 ): LiveDocumentEditOrigin {
   return {
-    actorOriginId: agent ?? "dohc-mcp",
+    actorOriginId: claimedAgentName(agent, context, options) ?? UNNAMED_AGENT_ID,
     attribution: {
       actorKind: "agent",
       onBehalfOf: options.localPersonId(),
@@ -1886,9 +1900,10 @@ async function startFileChat(
     return { created: false, result: mcpFailure(error, `failed to start a chat on: ${input.path}`) };
   }
   let message: ChatMessage;
+  const agentName = claimedAgentName(input.agent, context, options);
   try {
     message = await options.chatWrites.sendMessage(context, {
-      writer: { via: "cli", actor: "agent", ...(input.agent ? { agentName: input.agent } : {}) },
+      writer: { via: "cli", actor: "agent", ...(agentName ? { agentName } : {}) },
       threadId: thread.id,
       body,
       resolveAttachments: async () => [],

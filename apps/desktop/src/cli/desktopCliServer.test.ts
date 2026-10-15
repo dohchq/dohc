@@ -114,7 +114,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
-    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0) },
+    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgentRun: vi.fn(() => false) },
     linkedChatStoreFor: vi.fn(() => store),
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
