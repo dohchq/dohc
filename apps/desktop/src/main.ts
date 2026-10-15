@@ -394,6 +394,7 @@ import { startWorkspaceFileObservation } from "./workspaces/workspaceFileObserva
 import { createWorkspaceFilesWorker } from "./workspaces/workspaceFilesWorker";
 import {
   createRustEngineDaemon,
+  EngineClient,
   defaultEngineBinaryPath,
 } from "@dohc/workspace-engine-client/daemon";
 import {
@@ -2517,6 +2518,7 @@ const activity = {
       ...workspaceActivity.getStatus(workspace, lease.state.activity),
       ownerLiveDelivery: desktopEngine.ownerLiveDeliveryStatus(workspaceId),
       ownerLiveDeliveryReason: desktopEngine.ownerLiveDeliveryReason(workspaceId),
+      ownerLiveStopFailures: desktopEngine.ownerLiveStopFailures(workspaceId),
       hasOwnerLiveRefusals: desktopEngine.hasOwnerLiveRefusals(workspaceId),
     })),
   recordShareViewStoreRefusal: (
@@ -5994,6 +5996,27 @@ function registerIpcHandlers(): void {
     relayShareJsonWithCredentials,
     relayShareErrorCopy,
     relayShareDiscussionActivityPolls,
+    listOwnerLiveStops: workspace => requireEngineSessions().run(workspace, async session => {
+      const client = desktopEngine.daemon?.currentClient();
+      if (!(client instanceof EngineClient)) throw new Error("dohc could not read live editing. Restart dohc and try again.");
+      return client.ownerYDocStopList({id:0,workspace:session.workspace,deadlineMs:30_000});
+    }),
+    ownerLiveStop: async (workspace,action,path,binding,acceptedCursor) => {
+      const result=await requireEngineSessions().run(workspace,async session => {
+        const client=desktopEngine.daemon?.currentClient();
+        if (!(client instanceof EngineClient)) throw new Error("dohc could not change live editing. Restart dohc and try again.");
+        const request={id:0,workspace:session.workspace,deadlineMs:30_000};
+        if (action==="request") return client.ownerYDocStopRequest(request,path);
+        if (action==="release" && binding && "lineageClaimId" in binding) return client.ownerYDocRelease(request,binding,acceptedCursor!);
+        if (action==="retired") {await client.ownerYDocStopRetired(request,binding!);return undefined;}
+        await client.ownerYDocStopClear(request,path);return undefined;
+      });
+      if ((result?.state==="released" && !result.retirementOwed) || action==="retired") {
+        desktopEngine.clearOwnerLiveStopFailure(workspace.workspaceId,{objectId:result?.document.objectId ?? binding!.objectId});
+      } else if (action==="clear") desktopEngine.clearOwnerLiveStopFailure(workspace.workspaceId,{path});
+      desktopEngine.retryOwnerDelivery(workspace.workspaceId);
+      return result;
+    },
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,
   });
