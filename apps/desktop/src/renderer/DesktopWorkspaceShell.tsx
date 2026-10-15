@@ -7,6 +7,7 @@ import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
+import { matchShellShortcut } from "../shortcuts/shortcutRegistry";
 import { hasBlockingModal } from "./modalFocus";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
@@ -792,6 +793,7 @@ export function DesktopWorkspaceShell(props: {
     shellErrors,
     hideShellError,
     reportShellError,
+    reportButtonError,
     reportShellFailure,
     reportShareCapture,
     clearKind,
@@ -3795,88 +3797,6 @@ export function DesktopWorkspaceShell(props: {
     invalidateVisibility,
   ]);
 
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      // A stopped workspace answers no workspace shortcut.
-      if (storeUpdateRequiredRef.current) return;
-      const mod = event.metaKey || event.ctrlKey;
-      if (!mod) return;
-      if (event.metaKey && event.ctrlKey) return;
-      if (event.defaultPrevented) return;
-      if (event.repeat || event.isComposing) return;
-      const key = event.key.toLowerCase();
-      const secondarySidebarKey =
-        event.altKey &&
-        (key === "b" || (event.metaKey && event.code === "KeyB"));
-      if (event.key === "," && !event.shiftKey && !event.altKey) {
-        if (!hasBlockingModal()) {
-          event.preventDefault();
-          openSettings();
-        }
-        return;
-      }
-      if (
-        key === "z" &&
-        !event.shiftKey &&
-        !event.altKey
-      ) {
-        const activeUndo = undoForEditor(wbRef.current.activeEditorGroup);
-        if (activeUndo?.acceptsEvent(event)) {
-          event.preventDefault();
-          void activeUndo.run().catch((error) =>
-            reportShellError("Could not undo the last history restore.", error),
-          );
-        }
-        return;
-      }
-      // Zoom chords are deliberately absent here: they are native menu
-      // accelerators (applicationMenu.ts), so they work on windows that
-      // never mount this shell.
-      // This handler owns main-frame shortcuts. On Windows/Linux the menu only
-      // displays them. On macOS it is the unhandled fallback, so preventing a
-      // claimed keydown also prevents a duplicate menu command. Shift and Caps
-      // Lock affect key casing, so routing uses modifiers and a normalized key.
-      if (event.shiftKey && key !== "p") return;
-      if (event.altKey && !secondarySidebarKey) return;
-      if (key === "n") {
-        event.preventDefault();
-        setNewFileOpen(true);
-      } else if (key === "k" || (key === "p" && event.shiftKey)) {
-        event.preventDefault();
-        setPaletteOpen((open) => !open);
-      } else if (key === "p") {
-        event.preventDefault();
-        setQuickOpenOpen((open) => !open);
-      } else if (secondarySidebarKey) {
-        // CommandOrControl+Alt+B mirrors VS Code's secondary-sidebar toggle,
-        // which is the About rail.
-        event.preventDefault();
-        mutateWb(toggleAbout);
-      } else if (key === "b") {
-        event.preventDefault();
-        toggleSidePanel();
-      } else if (key === "w") {
-        // CommandOrControl+W closes the tab. Close Window keeps the separate
-        // CommandOrControl+Shift+W native accelerator.
-        event.preventDefault();
-        closeActiveTab();
-      } else if (key === "\\") {
-        event.preventDefault();
-        openEditorGroupRight();
-      }
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [
-    closeActiveTab,
-    openEditorGroupRight,
-    mutateWb,
-    openSettings,
-    reportShellError,
-    toggleSidePanel,
-    undoForEditor,
-  ]);
-
   const openWorkspaceFolder = useCallback(async function openWorkspaceFolder() {
     try {
       const picked = await bridge().pickWorkspaceRoot();
@@ -3970,6 +3890,45 @@ export function DesktopWorkspaceShell(props: {
     () => paletteCommandRows(commandContext).map((row) => ({ ...row, run: commandHandlers[row.id] })),
     [commandContext, commandHandlers],
   );
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      // A stopped workspace answers no workspace shortcut.
+      if (storeUpdateRequiredRef.current) return;
+      const command = matchShellShortcut(event);
+      if (!command) return;
+      if (command === "settings") {
+        if (!hasBlockingModal()) {
+          event.preventDefault();
+          openSettings();
+        }
+        return;
+      }
+      if (command === "history-restore-undo") {
+        const activeUndo = undoForEditor(wbRef.current.activeEditorGroup);
+        if (activeUndo?.acceptsEvent(event)) {
+          event.preventDefault();
+          void activeUndo.run().catch((error) =>
+            reportShellError("Could not undo the last history restore.", error),
+          );
+        }
+        return;
+      }
+      // Editors see the key first. preventDefault keeps the macOS native
+      // fallback from dispatching the same command a second time.
+      event.preventDefault();
+      if (command === "command-palette") setPaletteOpen((open) => !open);
+      else if (command === "quick-open") setQuickOpenOpen((open) => !open);
+      else commandHandlers[command]();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    commandHandlers,
+    openSettings,
+    reportShellError,
+    undoForEditor,
+  ]);
 
   useEffect(() => {
     return bridge().onMenuCommand((command) => {
@@ -5681,7 +5640,7 @@ export function DesktopWorkspaceShell(props: {
                 knownMarkdownFiles={markdownWikilinkFiles}
                 appFolder={appEntries.get(tabPath) ?? null}
                 onRunApp={openAppTab}
-                onButtonError={reportShellError}
+                onButtonError={reportButtonError}
                 onButtonNotice={showSuccessNotice}
                 onOpenRecordHistory={recordHistory.open}
                 accessEnded={shareViewEnded}
@@ -5699,6 +5658,9 @@ export function DesktopWorkspaceShell(props: {
                 <span className="text-sm text-muted">
                   Select a file, or create one
                 </span>
+                {/* Known exceptions to the shortcut registry, pinned in
+                    DesktopWorkspaceShell.shortcuts.test.tsx until macOS
+                    shows its own keys here. */}
                 <div className="flex items-center gap-2">
                   <button
                     type="button"

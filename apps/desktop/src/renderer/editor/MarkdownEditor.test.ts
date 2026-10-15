@@ -17,6 +17,9 @@ import {
   Editor,
   Extension,
   getSchema,
+  getExtensionField,
+  getSchemaTypeByName,
+  type AnyConfig,
   type JSONContent,
   type TiptapEditorHTMLElement,
 } from "@tiptap/core";
@@ -40,6 +43,7 @@ import {
   getDohcYDocBodyFragment,
   markdownToYDoc,
 } from "@dohc/ydoc-projection";
+import { SHORTCUTS } from "../../shortcuts/shortcutRegistry";
 import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
 import { measureParseWork } from "./markdownParseWork";
 import {
@@ -1993,4 +1997,44 @@ describe("MarkdownEditor focus", () => {
       view.unmount();
     }
   });
+});
+
+
+it.each(["Win32", "MacIntel"])("keeps the display catalogue and allowed shell conflicts aligned with the mounted %s editor keymaps", async (platform) => {
+  const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+  try {
+    render(createElement(MarkdownEditor, { value: "Text", onDirty: vi.fn(), workspaceId: "ws", path: "note.md", knownFiles: [] }));
+    const surface = await screen.findByTestId("markdown-editor");
+    const editor = await waitFor(() => editorBehind(surface));
+    const keymaps = editor.extensionManager.extensions.flatMap((extension) => {
+      const shortcuts = getExtensionField<AnyConfig["addKeyboardShortcuts"]>(extension, "addKeyboardShortcuts", {
+        name: extension.name, options: extension.options, storage: extension.storage, editor, type: getSchemaTypeByName(extension.name, editor.schema),
+      });
+      return Object.keys(shortcuts?.() ?? {}).filter((key) => /Mod-|Ctrl-|Alt-|Meta-/.test(key))
+        .map((key) => ({ extension: extension.name, key }));
+    });
+    const canonical = (key: string) => {
+      const parts = key.toLowerCase().split("-");
+      return [parts.includes("mod") ? "commandorcontrol" : "", parts.includes("ctrl") ? "ctrl" : "", parts.includes("meta") ? "meta" : "", parts.includes("shift") ? "shift" : "", parts.includes("alt") ? "alt" : "", parts.at(-1)!].filter(Boolean).join("+");
+    };
+    const mounted = [...new Set(keymaps.map(({ key }) => canonical(key)))].sort();
+    const listed = Object.values(SHORTCUTS).filter((row) => row.owner === "editor" && (!("platform" in row) || platform === "MacIntel"))
+      .flatMap((row) => row.accelerators.map((key) => key.toLowerCase())).sort();
+    expect(listed).toEqual(mounted);
+    if (platform === "MacIntel") {
+      expect(mounted).toEqual(expect.arrayContaining(["ctrl+a", "ctrl+e", "ctrl+h", "ctrl+d", "ctrl+alt+backspace"]));
+      expect(mounted).not.toContain("commandorcontrol+d");
+    }
+    const conflicts = Object.entries(SHORTCUTS).filter(([, row]) => row.owner === "shell" || row.owner === "history-restore")
+      .flatMap(([id, row]) => row.accelerators.filter((key) => ["commandorcontrol", "ctrl", "meta"].some((modifier) => mounted.includes(key.toLowerCase().replace("commandorcontrol", modifier)))).map((accelerator) => [id, accelerator]));
+    // These existing overlaps belong to the editor when it claims the event.
+    // A new overlap must be reviewed rather than silently taking an editor key.
+    expect(conflicts).toEqual([
+      ["command-palette", "CommandOrControl+K"],
+      ["toggle-sidebar", "CommandOrControl+B"],
+      ["history-restore-undo", "CommandOrControl+Z"],
+    ]);
+  } finally {
+    platformSpy.mockRestore();
+  }
 });
