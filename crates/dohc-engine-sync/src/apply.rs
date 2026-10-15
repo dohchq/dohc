@@ -255,7 +255,11 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
     envelope.validate()?;
     crate::settlement_publication::validate(envelope)?;
     let payload_json = envelope.payload_json()?;
+    let passive = store.is_passive();
     let result = store.write_with(faults, |tx| {
+        if passive && let Some(cursor) = envelope.relay_seq {
+            dohc_engine_storage::replica::advance_frontiers(tx, &envelope.workspace_id, cursor, 0)?;
+        }
         // A hosted replica receives each origin sparsely, so the journal alone
         // says whether a coordinate applied, and its ack never moves.
         let hosted = crate::hosted::is_hosted(tx, &envelope.workspace_id)?;

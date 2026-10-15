@@ -29,7 +29,7 @@ function row(overrides: Partial<ChatReactionRecord> = {}): ChatReactionRecord {
 // The fields the hook reads. Main's items carry more; the hook passes them through.
 function item(id: string, reactions: ChatReactionRecord[] = []) {
   return {
-    message: { id, threadId: "thread-1", authorKind: "human", authorDisplayName: "You", body: id, createdAtMs: 1 },
+    message: { presentation: { group: "fixture", hue: null, self: false }, id, threadId: "thread-1", authorKind: "human", authorDisplayName: "You", body: id, createdAtMs: 1 },
     thread: { id: "thread-1", title: "Thread", createdAtMs: 1, updatedAtMs: 1 },
     reactions,
     viewerAuthorId: "author-you",

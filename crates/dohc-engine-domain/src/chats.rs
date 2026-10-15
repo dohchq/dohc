@@ -609,6 +609,8 @@ pub struct ChatFeedItem {
 /// Opening-message projection used by a channel thread summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelOpeningMessage {
+    pub author_actor_key: Option<String>,
+    pub origin: Option<String>,
     pub message_id: String,
     pub author_kind: ChatActorKind,
     pub author_display_name: String,
@@ -3467,6 +3469,8 @@ impl<'a> LinkedChatStore<'a> {
                 let opening_message = opening_id
                     .and_then(|opening_id| opening_messages.remove(&opening_id))
                     .map(|message| ChannelOpeningMessage {
+                        author_actor_key: message.author_actor_key,
+                        origin: message.origin,
                         reactions: reactions.remove(&message.message_id).unwrap_or_default(),
                         body_snippet: opening_message_body_snippet(&message.body),
                         message_id: message.message_id,

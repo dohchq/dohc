@@ -14,6 +14,7 @@ pub(crate) mod ordinary_live_host;
 pub(crate) mod owner_delivery;
 pub(super) mod reads;
 pub(super) mod relay;
+pub(crate) mod replica;
 pub(super) mod request;
 pub(super) mod search;
 pub(super) mod secrets;
