@@ -56,7 +56,7 @@ test("fixture reports an ordinary nonzero command exit as status", { timeout: 20
 
 test("verification prepares before parallel jobs and runs every JavaScript package and proof", { concurrency: 2 }, async (t) => {
   const cases = [];
-  for (const [mode, job, fault, changed = "pnpm-lock.yaml", full = false] of [
+  for (const [mode, job, fault, changed = "pnpm-lock.yaml", full = false, keepGoing = false] of [
     ["pr", null, null], ["pr", "rust", null], ["pr", "js", null],
     ["smoke", null, null], ["e2e", null, null],
     ["pr", null, "rust-verdict"], ["pr", "rust", "cargo-version"], ["pr", null, "source"],
@@ -72,7 +72,9 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
     ["pr", null, null, null, true], ["pr", "js", null, null, true], ["pr", "rust", null, null, true],
     ["pr", "js", null, null],
     ["pr", null, "warm"], ["pr", null, "pre-typecheck"], ["pr", "rust", "pre-clippy"],
-  ]) cases.push(t.test([mode, job, fault, changed ?? "empty diff", full ? "full" : ""].filter(Boolean).join(" "), async (context) => {
+    // A failure stops the other job unless the run keeps going.
+    ["pr", null, "js", undefined, false, true],
+  ]) cases.push(t.test([mode, job, fault, changed ?? "empty diff", full ? "full" : "", keepGoing ? "keep-going" : ""].filter(Boolean).join(" "), async (context) => {
     const rust = mode === "pr" && job !== "js" && (full || job === "rust" || changed === "pnpm-lock.yaml");
     const js = mode === "pr" && job !== "rust";
     const warm = ["warm", "pre-typecheck"].includes(fault);
@@ -207,7 +209,8 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
             if(${rust && js}) {
               writeFileSync(join(repoRoot,'.dohc-dev/rust-running'),'yes');
               releaseJavascript();
-              await javascriptStarted;
+              // A stop interrupts the running Rust job as run() does.
+              await Promise.race([javascriptStarted, new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(Object.assign(Error('cargo failed (interrupted).'), {interrupted: true}))))]);
               assert.equal(readFileSync(join(repoRoot,'.dohc-dev/jobs-overlapped'),'utf8'),'yes');
             }
             rustFinished = true;
@@ -234,7 +237,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
               await rustStarted;
               assert.equal(readFileSync(join(repoRoot,'.dohc-dev/rust-running'),'utf8'),'yes');
               writeFileSync(join(repoRoot,'.dohc-dev/jobs-overlapped'),'yes');
-              if(['js','rust-and-js'].includes(process.env.FIXTURE_FAULT))releaseRust();
+              if(process.env.FIXTURE_FAULT==='rust-and-js' || process.env.FIXTURE_FAULT==='js' && ${keepGoing})releaseRust();
             }
             if(args[1]==='typecheck' && ['js','rust-and-js'].includes(process.env.FIXTURE_FAULT))throw Error('fixture JS failed');
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
@@ -326,7 +329,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         put(changed, changed === "pnpm-lock.yaml" ? "gate-lock" : "export const value = 2;\n");
         git(["add", "."]); git(["commit", "-m", "Change fixture input"]);
       }
-      const args = mode === "pr" ? [mode, "--base", base, ...(job ? ["--job", job] : []), ...(full ? ["--full"] : [])]
+      const args = mode === "pr" ? [mode, "--base", base, ...(job ? ["--job", job] : []), ...(full ? ["--full"] : []), ...(keepGoing ? ["--keep-going"] : [])]
         : mode === "e2e" ? [mode, "--", "--project", "fixture"] : [mode];
       const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
       const result = await runFixture(process.execPath, ["--input-type=module", "-e", `
@@ -372,9 +375,26 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
       } else if (fault && !warm) {
         assert.equal(result.status, fault === "rust-cancel" ? 143 : 1, result.stderr);
         assert.equal(report.verdict, "FAIL");
-        assert.ok(report.steps.every(step => ["PASS", "FAIL"].includes(step.verdict)));
+        assert.ok(report.steps.every(step => ["PASS", "FAIL", "NOT RUN"].includes(step.verdict)));
+        assert.equal(report.final, true);
+        assert.equal(report.keepGoing, keepGoing);
         if (fault === "rust-and-js") assert.match(report.rustError, /fixture Rust failed/);
-        if (fault === "js" && rust) assert.equal(report.steps.find(step => step.name === "rust-verdict").verdict, "PASS");
+        if (fault === "js" && rust) {
+          const verdicts = Object.fromEntries(report.steps.map(step => [step.name, step.verdict]));
+          if (keepGoing) {
+            assert.equal(verdicts["rust-verdict"], "PASS", "a run that keeps going finishes the other job");
+            assert.equal(report.stopped, undefined);
+          } else {
+            // The failed typecheck interrupts the running Rust job, which never counts as a pass.
+            assert.deepEqual([verdicts.typecheck, verdicts.rust, verdicts["rust-verdict"]], ["FAIL", "NOT RUN", "NOT RUN"]);
+            assert.equal(report.steps.find(step => step.name === "rust").reason, "stopped after typecheck failed");
+            // The tests the typecheck failure kept from starting are listed too.
+            assert.deepEqual(report.stopped, { after: "typecheck", notRun: ["rust", "rust-verdict", "tests"] });
+            assert.deepEqual(report.failure, { kind: "check", cause: "typecheck" });
+            assert.equal(report.rustEvidence, undefined);
+            assert.match(result.stdout, /Stopped after typecheck failed. These steps did not finish/);
+          }
+        }
         const messages = {
           source: /Source changed during verification/,
           "rust-source": /Source changed during verification/,
@@ -412,7 +432,13 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
           if (js) {
             const typecheck = report.steps.find(step => step.name === "typecheck");
             assert.equal(typecheck.verdict, fault === "rust-and-js" ? "FAIL" : "PASS");
-            if (fault !== "rust-and-js") assert.equal(report.steps.find(step => step.name === "tests").verdict, "PASS");
+            // The Rust failure stops the tests before runtime packaging, their last step.
+            if (fault !== "rust-and-js") {
+              assert.equal(report.steps.find(step => step.name === "tests").verdict, "NOT RUN");
+              assert.deepEqual(JSON.parse(readFileSync(report.jsTests, "utf8")).stopped.notRun, ["desktop-runtime-packaging"]);
+              // A failed rust step also kept its verdict check from starting.
+              assert.deepEqual(report.stopped, { after: failedStep, notRun: failedStep === "rust" ? ["tests", "rust-verdict", "tests: desktop-runtime-packaging"] : ["tests", "tests: desktop-runtime-packaging"] });
+            }
           }
         }
         if (fault === "js") {

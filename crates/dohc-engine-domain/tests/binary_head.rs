@@ -152,6 +152,7 @@ fn m2_same_path_binary_gen_is_strictly_below_next_text_and_is_superseded() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -333,6 +334,7 @@ fn rollback_first_binary_write_removes_file_and_object() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -408,6 +410,7 @@ fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -459,6 +462,7 @@ fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -520,6 +524,7 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -555,6 +560,7 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -693,6 +699,7 @@ fn rollback_of_pending_binary_write_with_bytes_on_disk_cleans_disk() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,
@@ -747,6 +754,7 @@ fn rollback_of_pending_binary_write_with_bytes_on_disk_cleans_disk() {
         &store,
         scratch.path(),
         &MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer: &StdReplacer,
             backoff: &NoBackoff,

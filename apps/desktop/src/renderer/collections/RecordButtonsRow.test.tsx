@@ -467,7 +467,7 @@ function shellWith(
     return (
       <>
         {props.recordOpen ? (
-          <RecordButtonsRow workspaceId={props.workspaceId} path="Invoices/12.md" onError={notices.reportShellError} onNotice={() => undefined} onOpenHistory={recordHistory.open} />
+          <RecordButtonsRow workspaceId={props.workspaceId} path="Invoices/12.md" onError={notices.reportButtonError} onNotice={() => undefined} onOpenHistory={recordHistory.open} />
         ) : null}
         {session ? (
           <RecordHistoryDialog
