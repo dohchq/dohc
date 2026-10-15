@@ -792,6 +792,7 @@ export function DesktopWorkspaceShell(props: {
     shellErrors,
     hideShellError,
     reportShellError,
+    reportButtonError,
     reportShellFailure,
     reportShareCapture,
     clearKind,
@@ -5679,7 +5680,7 @@ export function DesktopWorkspaceShell(props: {
                 knownMarkdownFiles={markdownWikilinkFiles}
                 appFolder={appEntries.get(tabPath) ?? null}
                 onRunApp={openAppTab}
-                onButtonError={reportShellError}
+                onButtonError={reportButtonError}
                 onButtonNotice={showSuccessNotice}
                 onOpenRecordHistory={recordHistory.open}
                 accessEnded={shareViewEnded}
