@@ -15,7 +15,7 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   put("apps/desktop/package.json", "{}");
   put("scripts/verification/rust-reuse.mjs", "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
   put(".github/workflows/pr-checks.yml", "fixture workflow");
-  put("node_modules/js-yaml/index.js", "exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
+  put("node_modules/js-yaml/index.js", "exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],repository:[]};");
   put("tools/rust-engine-program/build-slot-real.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/build-slot.mjs")));
   put("tools/rust-engine-program/build-slot.mjs", "export {acquireExclusiveSlot, buildQueueStatus} from './build-slot-real.mjs';export const capBuildParallelism=source=>({...source});export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('unexpected slot acquisition')};export const acquireVerificationSlot=()=>null;");
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
