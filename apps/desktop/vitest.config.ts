@@ -12,6 +12,7 @@ import { desktopTestFiles } from "./vitest.projects.ts";
 const WORKER_CAP = Math.min(8, Math.max(2, Math.floor(availableParallelism() / 4)));
 const require = createRequire(import.meta.url);
 const PURE_INSPECTOR_TEST = "src/renderer/FileInspector.test.tsx";
+const SHARED_WORKER_SETUP = "./src/testSharedWorkerSetup.ts";
 const tests = desktopTestFiles(dirname(fileURLToPath(import.meta.url)), {
   exclude: [PURE_INSPECTOR_TEST],
   // vitest.projects.ts chooses most isolated files from their source. These
@@ -65,6 +66,8 @@ export default defineConfig({
     projects: [
       { ...common, test: { ...desktop, name: "desktop", include: tests.isolated } },
       // Files in a shared project run one after another in the same worker.
+      // Each file leaves the next one its environment variables, globals, and
+      // real timers, and in jsdom an empty document and empty storage.
       {
         ...common,
         test: {
@@ -72,11 +75,19 @@ export default defineConfig({
           name: "desktop-shared-dom",
           include: tests.sharedDom,
           isolate: false,
-          // Each file leaves the next one an empty document, empty storage, and real globals.
-          setupFiles: [...desktop.setupFiles, "./src/testSharedDomSetup.ts"],
+          setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP, "./src/testSharedDomSetup.ts"],
         },
       },
-      { ...common, test: { ...desktop, name: "desktop-shared-node", include: tests.sharedNode, isolate: false } },
+      {
+        ...common,
+        test: {
+          ...desktop,
+          name: "desktop-shared-node",
+          include: tests.sharedNode,
+          isolate: false,
+          setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP],
+        },
+      },
       {
         ...common,
         test: {
