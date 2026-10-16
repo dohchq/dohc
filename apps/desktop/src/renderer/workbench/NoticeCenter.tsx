@@ -210,12 +210,13 @@ export const AUTOMATION_HOLDS_UNREADABLE =
 type LiveDeliveryRecovery = "retry" | "live-documents" | "restart";
 function liveDeliveryCopy(
   reason: SyncStatusResult["ownerLiveDeliveryReason"],
-): { title: string; body: string; recovery: LiveDeliveryRecovery } {
+): { title: string; body: string; recovery: LiveDeliveryRecovery; Icon: typeof Bell } {
   if (reason === "document-unavailable") {
     return {
       title: "Live editing paused",
       body: "A document this workspace was editing live is no longer available. Open Live documents to review it.",
       recovery: "live-documents",
+      Icon: RefreshCw,
     };
   }
   if (reason === "workspace-changed") {
@@ -223,14 +224,17 @@ function liveDeliveryCopy(
       title: "Live editing paused",
       body: "This workspace changed while live editing was running. Open Live documents to review affected documents.",
       recovery: "live-documents",
+      Icon: RefreshCw,
     };
   }
   // Resume in Live documents is the owner's Try again for this document.
+  // Nothing retries until then, so it shows the warning, not the retry mark.
   if (reason === "session-host-refused") {
     return {
       title: "Live editing stopped",
       body: "The server stopped live editing for a document in this workspace. Your copy and its history are unchanged. People you shared it with can't edit it live for now. Open Live documents to try again.",
       recovery: "live-documents",
+      Icon: AlertTriangle,
     };
   }
   if (reason === "restart-required") {
@@ -238,12 +242,14 @@ function liveDeliveryCopy(
       title: "Live editing paused",
       body: "Restart dohc to enable live editing. Your edits are saved on this device.",
       recovery: "restart",
+      Icon: RefreshCw,
     };
   }
   return {
     title: "Live editing retrying",
     body: "dohc is retrying live editing for this workspace. Your edits are saved on this device.",
     recovery: "retry",
+    Icon: RefreshCw,
   };
 }
 
@@ -994,7 +1000,7 @@ export function NoticeCenter(props: {
         body: liveDelivery.body,
         ...(liveDeliveryAction ? { actions: [liveDeliveryAction] } : {}),
         copyText: liveDeliveryDetails,
-        Icon: RefreshCw,
+        Icon: liveDelivery.Icon,
       });
     }
 
@@ -1417,7 +1423,7 @@ export function NoticeCenter(props: {
               aria-live="polite"
               className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
             >
-              <RefreshCw size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+              <liveDelivery.Icon size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
               <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
                 {liveDelivery.title}. {liveDelivery.body}
               </span>

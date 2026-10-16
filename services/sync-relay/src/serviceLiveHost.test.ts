@@ -776,7 +776,8 @@ it("keeps a workspace with no documents attached until its replica drains, then 
 });
 
 // Proves: a stopped document cannot settle, so it goes once the engine has its
-// unload, and its accepted cut stays. Its workspace drains and detaches.
+// unload, and its accepted cut stays. Its accepted work is pushed right before
+// the unload, while the engine can still prove it. Its workspace drains and detaches.
 it.each(["settlement-pending", "delivery-pending"])("drops a stopped last document with %s and drains its workspace", async reason => {
   const o = await emptyServiceHost();
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
@@ -792,6 +793,8 @@ it.each(["settlement-pending", "delivery-pending"])("drops a stopped last docume
   await o.host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
   expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toHaveLength(1);
+  const methods = o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
+  expect(methods[methods.indexOf("liveApplication.unloadDocument") - 1]).toBe("sync.push");
   expect(o.host.isDocumentReady(o.document)).toBe(false);
   await expect(o.host.detachDrained("workspace")).resolves.toBe(true);
   expect(o.host.automationLedger("workspace")).toBeNull();

@@ -826,12 +826,12 @@ async function withSelfHostProof(name: string, run: (proof: SelfHostProof) => Pr
   await close();
 }
 
-// The owner stops live editing. Its replica parks it, and the host releases
-// its enrollment, keeping the store. Stop refuses what the host has not
-// published, and parking waits for it, so the host publishes everything first.
-async function stopLiveEditing(proof: SelfHostProof) {
-  await vi.waitFor(() => expect(proof.unpushed()).toEqual([]), {timeout: 30000});
+// The owner stops live editing. The relay refuses what the host has not
+// published, its replica parks the document, and the host releases its
+// enrollment, keeping the store. `stopped` runs once Stop has answered.
+async function stopLiveEditing(proof: SelfHostProof, stopped = () => {}) {
   expect((await proof.route("DELETE", {path: "docs/a.md", retire: true})).body).toMatchObject({status: "retired"});
+  stopped();
   await vi.waitFor(() => {
     expect(proof.hosted()?.state).toBe("parked");
     expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")?.hostDrainedAtMs).not.toBeNull();
@@ -839,10 +839,18 @@ async function stopLiveEditing(proof: SelfHostProof) {
 }
 
 it("parks a stopped document in its store and resumes the same activation when it is shared again", () => withSelfHostProof("self-host-park", async proof => {
+  // The owner stops while the host still holds a live edit it accepted and has not pushed.
+  harness.unreachable.add("sync.push");
   const accepted = await proof.liveEdit("beforeStop", "live");
   const saved = proof.activation()!, before = await proof.hostState(), stores = readdirSync(proof.hostRoot);
   expect(stores).toEqual([basename(proof.store)]);
-  await stopLiveEditing(proof);
+  const waiting = proof.unpushed();
+  expect(waiting.map(row => row.op_kind)).toContain("ydoc.update");
+  await stopLiveEditing(proof, () => harness.unreachable.delete("sync.push"));
+  // The relay refused that work at its coordinates; nothing of it was published.
+  const coordinate = proof.relayRead.prepare("SELECT op_kind FROM sync_relay_log WHERE workspace_id='workspace' AND origin_id=? AND origin_seq=?");
+  expect(waiting.map(row => (coordinate.get(row.origin_id, row.origin_seq) as {op_kind: string} | undefined)?.op_kind))
+    .toEqual(waiting.map(() => "relay.refused"));
   const captures = harness.captures.length;
   expect((await proof.route("POST", {shareId: "share"})).status).toBe(202);
   await vi.waitFor(async () => expect(await proof.documents()).toEqual([expect.objectContaining({path: "docs/a.md", status: "ready"})]), {timeout: 30000});

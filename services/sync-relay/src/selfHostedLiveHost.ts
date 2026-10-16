@@ -59,7 +59,7 @@ export async function startSelfHostedLiveHost(options: {
   // A release applies to the document: it was stopped, paused, or no Edit grant covers it.
   const departs = (row: ServiceHostEnrollment, covered: boolean) => row.retired || !covered || row.ownerStop !== null;
   const atPath = (row: ServiceHostEnrollment) => storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
-  const documentKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId]);
+  const documentKey = (row: Pick<ServiceHostEnrollment, "workspaceId" | "objectId">) => JSON.stringify([row.workspaceId, row.objectId]);
   const movedKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId, row.path, row.replicationEpoch, row.streamIdentity]);
   // Moved documents whose replica let them go. Nothing releases one: its
   // enrollment stays, so it is hosted again once it returns to its path.
@@ -241,8 +241,12 @@ export async function startSelfHostedLiveHost(options: {
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
     /** Whether the running daemon cannot continue the document until its owner tries again. */
     blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document) ?? false;},
-    /** Lets a blocked document try once more. Returns whether it was blocked. */
-    unblock(document: {workspaceId: string; objectId: string}) {return current?.unblock(document) ?? false;},
+    /** Lets a blocked document try once more. Returns whether it was blocked. Its next block is reported again. */
+    unblock(document: {workspaceId: string; objectId: string}) {
+      const unblocked = current?.unblock(document) ?? false;
+      if (unblocked) refused.delete(documentKey(document));
+      return unblocked;
+    },
     get unavailable() {return signal.aborted || !initialReconciliationComplete || lastError !== undefined ||
       (selectedDocuments && (!current || current.invalidated.aborted));},
     reconcile: schedule,

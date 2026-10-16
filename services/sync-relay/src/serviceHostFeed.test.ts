@@ -834,8 +834,15 @@ it("keeps the hosted credential alive for an undrained Stop and then drops it, n
   expect(empty.scope.documents).toEqual([]);
   expect(f.objects(empty)).toEqual(["workspace"]);
   expect(await f.blobStatus(A.sha256)).toBe(404);
-  expect((await f.request("POST", "blobs/have", JSON.stringify({sha256s: [A.sha256]}))).status).toBe(404);
-  expect((await f.request("PUT", `blobs/${A.sha256}`, A.content, "application/octet-stream")).status).toBe(404);
+  // The host's last accepted work asks to upload nothing, writes no bytes, and is refused like any op outside the scope.
+  const last = blob("last accepted edit");
+  expect(await (await f.request("POST", "blobs/have", JSON.stringify({sha256s: [A.sha256, last.sha256]}))).json()).toEqual({ok: true, missing: []});
+  expect((await f.request("PUT", `blobs/${last.sha256}`, last.content, "application/octet-stream")).status).toBe(404);
+  expect(f.uploads()).toBe(0);
+  expect(await (await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", last)]])).json())
+    .toMatchObject({refusals: [{originSeq: 0, reason: "outside-hosted-documents"}]});
+  expect(f.storage.getBlob(ws, last.sha256)).toBeNull();
+  expect(await f.blobStatus(last.sha256)).toBe(404);
 
   expect(f.storage.releaseServiceHostEnrollment({workspaceId: ws, objectId: binding.objectId, nowMs: 21}))
     .toMatchObject({retired: true, enabled: false, hostDrainedAtMs: 21});

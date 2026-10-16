@@ -99,6 +99,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     const pulledAfterDeparture = (document: Document) => attached.has(document.workspaceId) && !holds(document);
     return {invalidated: controller.signal, close, update, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, onEvent: () => () => undefined,
       blocked: (document: Document) => holds(document) && blocked.has(document.objectId),
+      unblock: (document: Document) => holds(document) && blocked.delete(document.objectId),
       diverged: () => [...diverged].map(([workspaceId, root]) => ({workspaceId, root}))} as never;
   });
   const onError = vi.fn();
@@ -497,7 +498,7 @@ it("keeps a diverged store in place and its workspace detached across passes and
 
 // Proves: the operator learns where a blocked document's store is kept, once
 // per block, and the document stays hosted. A new block after its owner's
-// retry is reported again.
+// retry is reported again, even one before any reconciliation saw it unblocked.
 it("reports a blocked document's store to the operator once per block", async () => {
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   const reported = expect.objectContaining({message: expect.stringContaining(`docs/a.md in workspace ${scope.workspaceId} stopped until its owner tries again. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`)});
@@ -512,6 +513,11 @@ it("reports a blocked document's store to the operator once per block", async ()
   expect(f.host.blocked(binding)).toBe(false);
   f.block(binding.objectId);
   await vi.waitFor(() => {f.host.reconcile(); expect(f.onError.mock.calls).toEqual([[reported], [reported]]);}, {timeout: 10_000});
+  // Resume, and its one more capture blocks again before the next reconciliation.
+  expect(f.host.unblock(binding)).toBe(true);
+  f.block(binding.objectId);
+  await vi.waitFor(() => {f.host.reconcile(); expect(f.onError.mock.calls).toEqual([[reported], [reported], [reported]]);}, {timeout: 10_000});
+  expect(f.host.unblock({...binding, objectId: "object-other"})).toBe(false);
 });
 
 // Proves: a divergence whose detach failed as its daemon exited keeps the

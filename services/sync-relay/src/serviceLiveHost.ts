@@ -416,8 +416,10 @@ export async function startServiceLiveHost(options: {
     // output reached the relay; its workspace stays attached, so its hosted
     // replica can retire it. Resolves to why it stays loaded, or undefined
     // once it is gone. Until then it stays in activation passes, which settle it.
-    // A fenced document cannot settle: it goes once the engine has its unload
-    // request, and the replica keeps it departed while the engine holds its work.
+    // A fenced document cannot settle. Its accepted work is still pushed while
+    // it is loaded, where the engine can prove it, so the relay refuses it at its
+    // coordinates; it goes once the engine has its unload request, and the
+    // replica keeps it departed while the engine holds its work.
     const depart = async (key: string, joined: AbortSignal) => {
       await resolveUnload(key, joined);
       const row = hosted.get(key);
@@ -440,17 +442,20 @@ export async function startServiceLiveHost(options: {
         const document = activation!.ownerDocument(row.target);
         // A document with no owner has nothing delivered here to settle; the engine reports any work it still holds.
         const leave = async (operation: AbortSignal) => {
-          if (!fenced && document) {
-            if (!activation!.completed(row.target)) return "Service document activation is incomplete.";
-            const {consumer} = activation!.consumer(document);
-            if (settleTarget && !(await consumer.settle(document, operation)).materialized) return "Settlement has not reached the file.";
+          if (document) {
+            if (!fenced) {
+              if (!activation!.completed(row.target)) return "Service document activation is incomplete.";
+              const {consumer} = activation!.consumer(document);
+              if (settleTarget && !(await consumer.settle(document, operation)).materialized) return "Settlement has not reached the file.";
+            }
             if ((await attachments.get(row.target.workspaceId)!.hosted.publish(operation)).hasMore) return "Hosted publication has more pages.";
           }
-          return requestUnload(row, operation);
+          const pending = await requestUnload(row, operation);
+          return fenced ? undefined : pending;
         };
         // The unload waits for delivery and settlement already running on the document.
         const waiting = document ? await runDocument(document, joined, leave) : await leave(joined);
-        if (waiting !== undefined && !fenced) return waiting;
+        if (waiting !== undefined) return waiting;
       }
       forget(key);
       return undefined;

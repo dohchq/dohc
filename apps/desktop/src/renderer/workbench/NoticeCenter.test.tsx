@@ -124,6 +124,12 @@ function liveDeliveryStatus(
   };
 }
 
+// The lucide name of the first icon in a live delivery toast or row: the mark before its text.
+function liveDeliveryIcon(surface: HTMLElement): string | undefined {
+  const icon = surface.querySelector("svg");
+  return [...(icon?.classList ?? [])].find((name) => name.startsWith("lucide-"))?.slice("lucide-".length);
+}
+
 type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
 
 function declined(overrides: Partial<SharingDeclined> = {}): SharingDeclined {
@@ -1371,10 +1377,12 @@ describe("notice center", () => {
     const toast = screen.getByTestId("owner-live-delivery-toast");
     expect(toast.textContent).toContain("Live editing retrying");
     expect(toast.textContent).toContain("Your edits are saved on this device.");
+    expect(liveDeliveryIcon(toast)).toBe("refresh-cw");
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notice = screen.getByTestId("notice-owner-live-delivery");
     expect(notice.textContent).toContain("Live editing retrying");
+    expect(liveDeliveryIcon(notice)).toBe("refresh-cw");
     await user.click(
       within(notice).getByRole("button", { name: "Copy error details" }),
     );
@@ -1431,6 +1439,7 @@ describe("notice center", () => {
 
   // A document the server stopped waits for its owner. The way to try again
   // is its Resume in the live documents list, from the toast and the row.
+  // Nothing retries meanwhile, so both show the warning, not the retry mark.
   it("sends a document the server stopped to the live documents list", async () => {
     const onOpenLiveDocuments = vi.fn();
     const onRetryLiveDelivery = vi.fn();
@@ -1445,12 +1454,14 @@ describe("notice center", () => {
 
     const toast = screen.getByTestId("owner-live-delivery-toast");
     expect(toast.textContent).toContain(`Live editing stopped. ${body}`);
+    expect(liveDeliveryIcon(toast)).toBe("triangle-alert");
     await user.click(screen.getByTestId("owner-live-delivery-toast-action"));
     expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notice = screen.getByTestId("notice-owner-live-delivery");
     expect(notice.textContent).toContain("Live editing stopped");
+    expect(liveDeliveryIcon(notice)).toBe("triangle-alert");
     expect(notice.textContent).toContain(body);
     expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
     await user.click(within(notice).getByRole("button", { name: "Copy error details" }));

@@ -319,8 +319,7 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
     }
 
     if (head === "blobs" && second === "have" && route.length === 2 && request.method === "POST") {
-      let scope = currentScope(workspaceId);
-      if (!scope.hosted.size) throw notFound();
+      currentScope(workspaceId);
       const body = await readJsonObject(request);
       if (!Array.isArray(body.sha256s)) throw badRequest("sha256s must be an array");
       if (body.sha256s.length > MAX_BLOB_HAVE) throw badRequest("too many sha256s");
@@ -331,8 +330,10 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
       });
       await warmReach(workspaceId);
       guard();
-      scope = currentScope(workspaceId);
-      if (!scope.hosted.size) throw notFound();
+      const scope = currentScope(workspaceId);
+      // With no hosted document the log refuses every op before it checks a
+      // blob, so the host uploads nothing and its last pushes are refused.
+      if (!scope.hosted.size) return jsonResponse({ ok: true, missing: [] });
       const stored = new Set(sha256s.filter(blobReach.known(scope)));
       for (const sha256 of storage.missingBlobs(workspaceId, [...stored])) stored.delete(sha256);
       return jsonResponse({ ok: true, missing: sha256s.filter(sha256 => !stored.has(sha256)) });
