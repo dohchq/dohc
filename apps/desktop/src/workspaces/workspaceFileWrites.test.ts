@@ -25,7 +25,7 @@ async function fixture() {
     await options?.beforeWrite?.(absolute);
     await mkdir(dirname(absolute), { recursive: true });
     await writeFile(absolute, content);
-    return { resolvedAbsolutePath: absolute, materializeOutcome: "applied" };
+    return { resolvedAbsolutePath: absolute, materializeOutcome: "applied", objectId: "object", momentId: "moment", deduped: false };
   }) };
   return { rootPath, operation, capture, run: (files: Parameters<typeof writeWorkspaceFilesAs>[1]) =>
     writeWorkspaceFilesAs(operation, files, author, { capture, requestId: "batch" }) };
@@ -183,7 +183,7 @@ describe("workspace file write admission", () => {
 
   it.each(["error", "skipped", undefined])("refuses unpublished outcome %s", async materializeOutcome => {
     const f = await fixture();
-    f.capture.writeAuthoredFile.mockResolvedValueOnce({ resolvedAbsolutePath: join(f.rootPath, "plain.txt"), materializeOutcome });
+    f.capture.writeAuthoredFile.mockResolvedValueOnce({ resolvedAbsolutePath: join(f.rootPath, "plain.txt"), materializeOutcome, objectId: "object", momentId: "moment", deduped: false });
     expect(await f.run([file("plain.txt")])).toMatchObject({ ok: false, written: [], reason: expect.stringContaining("could not publish") });
   });
 
@@ -196,7 +196,7 @@ describe("workspace file write admission", () => {
 
   it("reports publication conflicts as failures", async () => {
     const f = await fixture();
-    f.capture.writeAuthoredFile.mockResolvedValueOnce({ resolvedAbsolutePath: join(f.rootPath, "plain.txt"), materializeOutcome: "conflict" });
+    f.capture.writeAuthoredFile.mockResolvedValueOnce({ resolvedAbsolutePath: join(f.rootPath, "plain.txt"), materializeOutcome: "conflict", objectId: "object", momentId: "moment", deduped: false });
     expect(await f.run([file("plain.txt")])).toMatchObject({ ok: false, written: [], currentSha256: null });
   });
 
