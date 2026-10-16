@@ -3269,10 +3269,12 @@ ALTER TABLE ydoc_deferred_updates ADD COLUMN release_digest TEXT CHECK(release_d
 ALTER TABLE ydoc_deferred_updates ADD COLUMN release_generation INTEGER CHECK(release_generation IS NULL OR release_generation>=0) CHECK((release_digest IS NULL)=(release_generation IS NULL));
 CREATE INDEX ydoc_deferred_release ON ydoc_deferred_updates(workspace_id,version_id,object_id,release_digest) WHERE release_digest IS NOT NULL;
 CREATE TABLE owner_release_closed_sessions (
-    outbox_id TEXT PRIMARY KEY,
+    outbox_id TEXT NOT NULL,
     workspace_id TEXT NOT NULL,
     version_id TEXT NOT NULL,
-    object_id TEXT NOT NULL
+    object_id TEXT NOT NULL,
+    release_digest TEXT NOT NULL CHECK(length(release_digest)=64 AND release_digest NOT GLOB '*[^0-9a-f]*'),
+    PRIMARY KEY(outbox_id,release_digest)
 ) STRICT;
 ";
 
@@ -4103,7 +4105,7 @@ mod tests {
             ),
             (
                 "v2-owner-release-lifecycle",
-                "1eba7c3bcfc7521f9e0a1668da9597caaa98d7bdabe814d0625f30fb2485fc81",
+                "d6d0da82f7b5e7808442a57a62e775b251bbfcfaf136936fceb5100d754a1652",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4113,6 +4115,42 @@ mod tests {
                 migration_checksum(migration.sql),
                 checksum,
                 "the {id} migration changed after it shipped"
+            );
+        }
+    }
+
+    #[test]
+    fn fix4_closed_sessions_keep_each_release_identity() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        run_migrations(
+            &mut conn,
+            BASELINE_MIGRATIONS,
+            &MigrationContext::current(1),
+            &NoFaults,
+        )
+        .unwrap();
+        for digest in ["a".repeat(64), "b".repeat(64)] {
+            conn.execute(
+                "INSERT INTO owner_release_closed_sessions VALUES('outbox','ws','main','doc',?1)",
+                [digest],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM owner_release_closed_sessions WHERE outbox_id='outbox'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        for digest in ["a".repeat(63), "G".repeat(64)] {
+            let error = conn.execute("INSERT INTO owner_release_closed_sessions VALUES('other','ws','main','doc',?1)", [digest]).unwrap_err();
+            assert!(
+                matches!(error, rusqlite::Error::SqliteFailure(ref e, _) if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK),
+                "{error:?}"
             );
         }
     }

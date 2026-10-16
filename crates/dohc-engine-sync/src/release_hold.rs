@@ -109,14 +109,25 @@ impl ReleaseHold {
         tx: &rusqlite::Connection,
         replay: bool,
     ) -> Result<(), SyncError> {
-        let encoded = serde_json::to_string(&self.binding).map_err(SyncError::corrupt)?;
-        let ready: Option<(bool,bool)> = tx.query_row("SELECT replay_ready,abandoned FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND json(binding_json)=json(?5) AND relay_namespace=?6",
-            params![self.binding.workspace_id,self.binding.main_version_id,self.binding.object_id,self.digest,encoded,self.namespace], |r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(SyncError::corrupt)?;
-        if ready.is_none_or(|(ready, abandoned)| abandoned || (replay && !ready)) {
+        let (ready, abandoned) = self.state_in(tx)?;
+        if (abandoned && !replay) || (replay && !ready) {
             return Err(waiting());
         }
         if replay {
             self.check_released_in(tx)?;
+        }
+        Ok(())
+    }
+    fn state_in(&self, conn: &rusqlite::Connection) -> Result<(bool, bool), SyncError> {
+        let encoded = serde_json::to_string(&self.binding).map_err(SyncError::corrupt)?;
+        conn.query_row("SELECT replay_ready,abandoned FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND json(binding_json)=json(?5) AND relay_namespace=?6",
+            params![self.binding.workspace_id,self.binding.main_version_id,self.binding.object_id,self.digest,encoded,self.namespace], |r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(SyncError::corrupt)?.ok_or_else(waiting)
+    }
+    // Reports and closure must survive a held delete of the ordinary document.
+    fn check_report_in(&self, conn: &rusqlite::Connection) -> Result<(), SyncError> {
+        let (ready, abandoned) = self.state_in(conn)?;
+        if abandoned && !ready {
+            return Err(waiting());
         }
         Ok(())
     }
@@ -247,7 +258,7 @@ pub fn prepare_release_hold_replay_in(
     hold: &ReleaseHold,
     remote_closed: bool,
 ) -> Result<(), SyncError> {
-    hold.check_in(tx, false)?;
+    hold.check_report_in(tx)?;
     hold.check_released_in(tx)?;
     let sealed: bool = tx.query_row("SELECT anchor_cursor IS NOT NULL AND anchor_sha256 IS NOT NULL FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
@@ -376,7 +387,7 @@ pub fn replay_release_held_envelope(
     leases: &dyn LeaseProbe,
     hold: &ReleaseHold,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
-    store.read_with(|conn| hold.check_in(conn, false))?;
+    store.read_with(|conn| hold.check_report_in(conn))?;
     let completed=store.read_with(|c|c.query_row("SELECT envelope_json,stage,record_facts_json FROM release_held_ops WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND release_digest=?4",
         params![op.workspace_id,op.origin_id,op.origin_seq,hold.digest],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?))).optional().map_err(SyncError::corrupt))?;
     if let Some((json, stage, facts)) = completed {
@@ -552,7 +563,7 @@ pub fn acknowledge_release_replay_in(
 }
 
 pub fn close_release_hold_in(tx: &Transaction<'_>, hold: &ReleaseHold) -> Result<bool, SyncError> {
-    hold.check_in(tx, false)?;
+    hold.check_report_in(tx)?;
     let deleted=tx.execute("DELETE FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND remote_closed=1
         AND NOT EXISTS(SELECT 1 FROM release_held_ops WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
         params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id]).map_err(SyncError::persist)?;

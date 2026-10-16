@@ -667,9 +667,12 @@ pub fn append_old_session_in_tx(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     let stop = super::release::read_in(tx, &key)?.ok_or(OwnerOutboxError::ParentMismatch)?;
+    let progress = stop
+        .prefix
+        .as_ref()
+        .ok_or(OwnerOutboxError::ParentMismatch)?;
     if stop.binding.as_ref() != Some(&input.binding)
-        || stop.prefix.as_ref().is_none()
-        || session_closed_in(tx, &key, outbox)?
+        || session_closed_in(tx, &key, outbox, &progress.release_digest)?
     {
         return Err(OwnerOutboxError::ParentMismatch);
     }
@@ -752,13 +755,20 @@ pub fn close_consumed_in_tx(
     key: &DocKey,
     outbox: &str,
 ) -> Result<(), OwnerOutboxError> {
-    let owned: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_prefix_consumed WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4) OR EXISTS(SELECT 1 FROM owner_release_closed_sessions WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4)",params![key.workspace_id,key.version_id,key.object_id,outbox],|r|r.get(0)).map_err(read_sql)?;
+    let progress = progress_in(tx, key)?.ok_or(OwnerOutboxError::StopConflict)?;
+    let owned: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_prefix_consumed WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4) OR EXISTS(SELECT 1 FROM owner_release_closed_sessions WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4 AND release_digest=?5)",params![key.workspace_id,key.version_id,key.object_id,outbox,progress.release_digest],|r|r.get(0)).map_err(read_sql)?;
     if !owned {
         return Err(OwnerOutboxError::ParentMismatch);
     }
     tx.execute(
-        "INSERT INTO owner_release_closed_sessions VALUES (?1,?2,?3,?4) ON CONFLICT DO NOTHING",
-        params![outbox, key.workspace_id, key.version_id, key.object_id],
+        "INSERT INTO owner_release_closed_sessions VALUES (?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
+        params![
+            outbox,
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            progress.release_digest
+        ],
     )
     .map_err(write_sql)?;
     Ok(())
@@ -770,7 +780,13 @@ pub fn cleanup_consumed_in_tx(
     key: &DocKey,
     outbox: &str,
 ) -> Result<usize, OwnerOutboxError> {
-    if !session_closed_in(tx, key, outbox)? {
+    let progress = progress_in(tx, key)?.ok_or(OwnerOutboxError::StopConflict)?;
+    if !session_closed_in(tx, key, outbox, &progress.release_digest)? {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    // Restore classification needs every folded publication coordinate until the hold closes.
+    let holding: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)", params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0)).map_err(read_sql)?;
+    if holding {
         return Err(OwnerOutboxError::StopConflict);
     }
     tx.execute("DELETE FROM owner_prefix_consumed WHERE rowid IN (SELECT rowid FROM owner_prefix_consumed WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4 LIMIT 64)",params![key.workspace_id,key.version_id,key.object_id,outbox]).map_err(write_sql)
@@ -864,6 +880,7 @@ pub(super) fn session_closed_in(
     conn: &Connection,
     key: &DocKey,
     outbox: &str,
+    digest: &str,
 ) -> Result<bool, OwnerOutboxError> {
-    conn.query_row("SELECT EXISTS(SELECT 1 FROM owner_release_closed_sessions WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4)",params![key.workspace_id,key.version_id,key.object_id,outbox],|r|r.get(0)).map_err(read_sql)
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM owner_release_closed_sessions WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4 AND release_digest=?5)",params![key.workspace_id,key.version_id,key.object_id,outbox,digest],|r|r.get(0)).map_err(read_sql)
 }

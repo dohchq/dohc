@@ -136,7 +136,10 @@ impl ActorHandle {
                     OwnerReleaseLifecycle::CleanupSession { hold, outbox } => {
                         require_cleanup_hold(tx, &key, &hold)?;
                         prefix::cleanup_consumed_in_tx(tx, &key, &outbox)
-                            .map_err(StorageError::corrupt_public)?;
+                            .map_err(|error| match error {
+                                dohc_engine_collab::OwnerOutboxError::StopConflict => sync::SyncError::RetryableState { reason: "owner release cleanup is waiting" },
+                                error => sync::SyncError::Storage(StorageError::corrupt_public(error)),
+                            })?;
                         prefix::cleanup_session_page_in_tx(tx, hold.binding())
                             .map_err(StorageError::corrupt_public)?;
                         hold

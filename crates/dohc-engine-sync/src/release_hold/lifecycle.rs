@@ -165,7 +165,7 @@ pub fn unbind_release_in(
     prefix::mark_released_in_tx(tx, b, &hold.digest, now_ms).map_err(SyncError::corrupt)
 }
 
-/// Compare the resolved claim before fencing both held and dependency replay.
+/// Fence unfinished claims; a released claim can only replay already-held peer work.
 pub fn abandon_release_hold_in(
     tx: &Transaction<'_>,
     hold: &ReleaseHold,
@@ -175,7 +175,8 @@ pub fn abandon_release_hold_in(
     if expected_digest != hold.digest {
         return Err(SyncError::CoordinateDiverged);
     }
-    tx.execute("UPDATE release_holds SET abandoned=1,replay_ready=0 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4",params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id,hold.digest]).map_err(SyncError::persist)?;
+    let encoded = serde_json::to_string(&hold.binding).map_err(SyncError::corrupt)?;
+    tx.execute("UPDATE release_holds SET abandoned=1,replay_ready=EXISTS(SELECT 1 FROM owner_live_stops s WHERE s.workspace_id=?1 AND s.main_version_id=?2 AND s.object_id=?3 AND s.state='released' AND json_extract(s.binding_json,'$.binding')=json(?5) AND json_extract(s.binding_json,'$.prefix.releaseDigest')=?4 AND s.relay_database_namespace=?6) WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4",params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id,hold.digest,encoded,hold.namespace]).map_err(SyncError::persist)?;
     Ok(())
 }
 
@@ -185,9 +186,10 @@ pub(crate) fn check_deferred_release_in(
     origin: &str,
     seq: i64,
 ) -> Result<(), SyncError> {
-    let saved:Option<(String,i64,Option<String>,bool,bool)>=conn.query_row("SELECT d.release_digest,d.release_generation,h.release_digest,COALESCE(h.replay_ready,0),COALESCE(h.abandoned,0) FROM ydoc_deferred_updates d LEFT JOIN release_holds h ON h.workspace_id=d.workspace_id AND h.version_id=d.version_id AND h.object_id=d.object_id WHERE d.workspace_id=?1 AND d.origin_id=?2 AND d.origin_seq=?3 AND d.release_digest IS NOT NULL",params![key.workspace_id,origin,seq],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(SyncError::corrupt)?;
-    if let Some((digest, generation, held, ready, abandoned)) = saved {
-        if held.is_some_and(|held| held != digest || abandoned || !ready) {
+    let saved:Option<(String,i64,Option<String>,bool)>=conn.query_row("SELECT d.release_digest,d.release_generation,h.release_digest,COALESCE(h.replay_ready,0) FROM ydoc_deferred_updates d LEFT JOIN release_holds h ON h.workspace_id=d.workspace_id AND h.version_id=d.version_id AND h.object_id=d.object_id WHERE d.workspace_id=?1 AND d.origin_id=?2 AND d.origin_seq=?3 AND d.release_digest IS NOT NULL",params![key.workspace_id,origin,seq],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(SyncError::corrupt)?;
+    if let Some((digest, generation, held, ready)) = saved {
+        // Unfinished abandonment clears readiness; only the exact final release retains it.
+        if held.is_some_and(|held| held != digest || !ready) {
             return Err(waiting());
         }
         dohc_engine_collab::live_update_application::require_restore_generation(

@@ -318,7 +318,7 @@ async fn part1_adopts_preexisting_pending_and_runtime_unbind_exempts_only_exact_
 }
 
 #[tokio::test]
-async fn part1_abandonment_fences_acknowledged_dependencies_and_retains_restart_wake() {
+async fn fix4_released_abandonment_replays_dependencies_and_closes_hold() {
     let (mut f, supervisor, actor) = pending_release_fixture(0).await;
     let h = begin(&f, &actor).await;
     let peer = Ydoc::wire();
@@ -365,7 +365,7 @@ async fn part1_abandonment_fences_acknowledged_dependencies_and_retains_restart_
     .await
     .unwrap();
     let prior = update(&mut f, &prior, "other-peer", 0);
-    // The ordinary arrival also tries the deferred drain, which must observe abandonment.
+    // A finished release cannot authorize another prefix, but its peer edits must survive.
     assert!(
         sync::apply_replication_envelope(
             &mut f.store,
@@ -386,18 +386,9 @@ async fn part1_abandonment_fences_acknowledged_dependencies_and_retains_restart_
         .is_ok()
     );
     assert!(matches!(
-        actor
-            .owner_release_replay(
-                h.clone(),
-                dependent.clone(),
-                Arc::new(NoLiveLeases),
-                Arc::new(NoFaults),
-                CancellationToken::new()
-            )
-            .await,
-        Err(dohc_engine_runtime::RuntimeError::Sync(
-            sync::SyncError::RetryableState { .. }
-        ))
+        f.store
+            .read_with(|c| prefix::commit_blocker_in(c, &f.binding, h.digest())),
+        Err(dohc_engine_collab::OwnerOutboxError::Stopping)
     ));
     supervisor.close_all().unwrap();
     let actor = supervisor.open(&f.db, 50).unwrap().actor;
@@ -406,7 +397,7 @@ async fn part1_abandonment_fences_acknowledged_dependencies_and_retains_restart_
             .owner_release_deferred_wakes("workspace".into(), None)
             .await
             .unwrap(),
-        vec![key()]
+        Vec::<DocKey>::new()
     );
     assert!(
         sync::drain_deferred_ydoc_for_key(
@@ -417,7 +408,7 @@ async fn part1_abandonment_fences_acknowledged_dependencies_and_retains_restart_
         )
         .is_ok()
     );
-    assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
+    assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
     let text = dohc_engine_collab::load_persisted(&f.store, &key())
         .unwrap()
         .unwrap()
@@ -425,7 +416,14 @@ async fn part1_abandonment_fences_acknowledged_dependencies_and_retains_restart_
         .project(ContentKind::Richdoc)
         .unwrap()
         .content;
-    assert!(!text.contains("dependent"));
+    assert!(text.contains("dependent"));
+    f.store
+        .write_with(&NoFaults, |tx| {
+            assert!(sync::close_release_hold_in(tx, &h)?);
+            Ok::<_, sync::SyncError>(())
+        })
+        .unwrap();
+    assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 0);
     supervisor.close_all().unwrap();
 }
 
@@ -484,7 +482,7 @@ async fn part1_cleanup_orders_closure_before_reclamation_and_fences_late_runtime
         )
         .await,
         Err(dohc_engine_runtime::RuntimeError::Sync(
-            sync::SyncError::Storage(StorageError::StateCorrupt { .. })
+            sync::SyncError::RetryableState { .. }
         ))
     ));
     // Parent cleanup is permitted while the consumed result still owns retry identity.
@@ -515,15 +513,20 @@ async fn part1_cleanup_orders_closure_before_reclamation_and_fences_late_runtime
     )
     .await
     .unwrap();
-    lifecycle(
-        &actor,
-        Action::CleanupSession {
-            hold: h.clone(),
-            outbox,
-        },
-    )
-    .await
-    .unwrap();
+    assert!(matches!(
+        lifecycle(
+            &actor,
+            Action::CleanupSession {
+                hold: h.clone(),
+                outbox: outbox.clone(),
+            },
+        )
+        .await,
+        Err(dohc_engine_runtime::RuntimeError::Sync(
+            sync::SyncError::RetryableState { .. }
+        ))
+    ));
+    assert_eq!(f.store.table_row_count("owner_prefix_consumed").unwrap(), 1);
     assert!(matches!(
         actor
             .owner_ydoc_outbox_append("workspace".into(), retry.clone(), CancellationToken::new())
@@ -542,6 +545,15 @@ async fn part1_cleanup_orders_closure_before_reclamation_and_fences_late_runtime
             Ok::<_, sync::SyncError>(())
         })
         .unwrap();
+    lifecycle(
+        &actor,
+        Action::CleanupSession {
+            hold: h.clone(),
+            outbox,
+        },
+    )
+    .await
+    .unwrap();
     lifecycle(&actor, Action::FinishCleanup(h)).await.unwrap();
     assert!(
         f.store
@@ -725,6 +737,13 @@ async fn fix1_closed_session_refuses_existing_entry_retry_before_and_after_clean
     .unwrap();
     for cleaned in [false, true] {
         if cleaned {
+            f.store
+                .write_with(&NoFaults, |tx| {
+                    sync::prepare_release_hold_replay_in(tx, &h, true)?;
+                    assert!(sync::close_release_hold_in(tx, &h)?);
+                    Ok::<_, sync::SyncError>(())
+                })
+                .unwrap();
             lifecycle(
                 &actor,
                 Action::CleanupSession {
@@ -866,5 +885,252 @@ async fn fix2_settlement_after_abandon_is_retryable_not_corruption() {
         ),
         "{error:?}"
     );
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn fix4_second_release_at_same_binding_keeps_its_draft_open() {
+    use dohc_engine_collab::owner_outbox::draft::{
+        ObservedOwnerBinding, OwnerDraftAppendInput, install_observed_binding_in_tx,
+    };
+    let (mut f, supervisor, actor) = pending_release_fixture(1).await;
+    let h = begin(&f, &actor).await;
+    let outbox: String = f
+        .store
+        .read_with(|c| {
+            c.query_row("SELECT outbox_id FROM owner_ydoc_outboxes", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    let old_bytes = f.store.read_with(|c| c.query_row("SELECT b.bytes FROM binary_blobs b JOIN owner_ydoc_outbox_entries e ON e.update_blob_digest=b.sha256 WHERE e.append_key='pending-0'", [], |r| r.get::<_, Vec<u8>>(0))).unwrap();
+    seal(&mut f, &h);
+    fold(&mut f, &h);
+    save(&f, &actor, &h).await;
+    lifecycle(&actor, Action::Unbind(h.clone())).await.unwrap();
+    lifecycle(
+        &actor,
+        Action::CloseSession {
+            hold: h.clone(),
+            outbox: outbox.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            sync::prepare_release_hold_replay_in(tx, &h, true)?;
+            assert!(sync::close_release_hold_in(tx, &h)?);
+            tx.execute("UPDATE sync_relay_push_state SET pushed_seq=1000000", [])
+                .unwrap();
+            Ok::<_, sync::SyncError>(())
+        })
+        .unwrap();
+    lifecycle(
+        &actor,
+        Action::CleanupSession {
+            hold: h.clone(),
+            outbox: outbox.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    lifecycle(&actor, Action::FinishCleanup(h)).await.unwrap();
+    stop_action(&actor, &f, "clear").await.unwrap();
+    let marker = dohc_engine_collab::read_marker(&f.store, &key())
+        .unwrap()
+        .unwrap();
+    let checkpoint = dohc_engine_collab::load_persisted(&f.store, &key())
+        .unwrap()
+        .unwrap()
+        .doc
+        .encode_full_state();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            install_observed_binding_in_tx(
+                tx,
+                "workspace",
+                &ObservedOwnerBinding {
+                    binding: f.binding.clone(),
+                    relay_database_namespace: "relay".into(),
+                    revision: 1,
+                    accepted_cursor: 0,
+                    native_head_sequence: marker.head_update_seq,
+                    checkpoint_digest: hex_sha256(&checkpoint),
+                    limits: dohc_engine_collab::OwnerOutboxLimits {
+                        max_pending_bytes: 1_000_000,
+                        max_pending_age_ms: 100_000,
+                    },
+                },
+                &checkpoint,
+            )
+        })
+        .unwrap();
+    let input = OwnerDraftAppendInput {
+        person_edit: true,
+        binding: f.binding.clone(),
+        expected_revision: 1,
+        append_key: "second-release".into(),
+        update: f.doc.richdoc_append_paragraph("second release draft"),
+        now_ms: 80,
+        agent_declaration: None,
+        automation_declaration: None,
+    };
+    let entry = actor
+        .owner_ydoc_append_draft(
+            "workspace".into(),
+            input.clone(),
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.outbox_id, outbox);
+    stop_action(&actor, &f, "request").await.unwrap();
+    let h = lifecycle(
+        &actor,
+        Action::Begin {
+            binding: f.binding.clone(),
+            namespace: "relay".into(),
+            digest: "b".repeat(64),
+        },
+    )
+    .await
+    .unwrap();
+    seal(&mut f, &h);
+    actor
+        .owner_ydoc_open_draft(f.binding.clone(), 1, CancellationToken::new(), Arc::new(()))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut input = input;
+    input.append_key = "second-release-more".into();
+    input.update = f.doc.richdoc_append_paragraph("still writable");
+    actor
+        .owner_ydoc_append_draft(
+            "workspace".into(),
+            input.clone(),
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    fold(&mut f, &h);
+    let redirected = f
+        .store
+        .write_with(&NoFaults, |tx| {
+            prefix::append_old_session_in_tx(tx, &outbox, &input, |_, _, _, _, _| {
+                panic!("saved retry")
+            })
+        })
+        .unwrap();
+    assert!(matches!(
+        redirected,
+        dohc_engine_storage::TxnOutcome::Committed(Some(_))
+    ));
+    save(&f, &actor, &h).await;
+    lifecycle(&actor, Action::Unbind(h.clone())).await.unwrap();
+    // Raw callers have no release identity. Every previous closure still fences them.
+    assert!(matches!(
+        actor
+            .owner_ydoc_outbox_append(
+                "workspace".into(),
+                dohc_engine_collab::OwnerOutboxAppendInput {
+                    binding: f.binding.clone(),
+                    base_update: f.bytes.clone(),
+                    append_key: "pending-0".into(),
+                    update: old_bytes,
+                    limits: dohc_engine_collab::OwnerOutboxLimits {
+                        max_pending_bytes: 1_000_000,
+                        max_pending_age_ms: 100_000
+                    },
+                    created_at_ms: 90,
+                },
+                CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::ParentMismatch)
+    ));
+    // An earlier closure must not authorize cleanup of this release's results.
+    f.store
+        .write_with(&NoFaults, |tx| {
+            sync::prepare_release_hold_replay_in(tx, &h, true)?;
+            assert!(sync::close_release_hold_in(tx, &h)?);
+            Ok::<_, sync::SyncError>(())
+        })
+        .unwrap();
+    assert!(matches!(
+        f.store
+            .write_with(&NoFaults, |tx| prefix::cleanup_consumed_in_tx(
+                tx,
+                &key(),
+                &outbox
+            )),
+        Err(dohc_engine_collab::OwnerOutboxError::StopConflict)
+    ));
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn fix4_final_abandonment_before_replay_preparation_keeps_held_work() {
+    let (mut f, supervisor, actor) = pending_release_fixture(0).await;
+    let h = begin(&f, &actor).await;
+    let peer = Ydoc::wire();
+    peer.apply(&f.bytes).unwrap();
+    let op = update(
+        &mut f,
+        &peer.richdoc_append_paragraph("acknowledged peer edit"),
+        "peer",
+        0,
+    );
+    retain(&mut f, &h, &op);
+    seal(&mut f, &h);
+    save(&f, &actor, &h).await;
+    lifecycle(&actor, Action::Unbind(h.clone())).await.unwrap();
+    lifecycle(
+        &actor,
+        Action::Abandon {
+            hold: h.clone(),
+            resolved_digest: h.digest().into(),
+        },
+    )
+    .await
+    .unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            sync::prepare_release_hold_replay_in(tx, &h, true)
+        })
+        .unwrap();
+    actor
+        .owner_release_replay(
+            h.clone(),
+            op.clone(),
+            Arc::new(NoLiveLeases),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            sync::acknowledge_release_replay_in(tx, &op)?;
+            assert!(sync::close_release_hold_in(tx, &h)?);
+            Ok::<_, sync::SyncError>(())
+        })
+        .unwrap();
+    assert!(
+        dohc_engine_collab::load_persisted(&f.store, &key())
+            .unwrap()
+            .unwrap()
+            .doc
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("acknowledged peer edit")
+    );
+    assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 0);
     supervisor.close_all().unwrap();
 }

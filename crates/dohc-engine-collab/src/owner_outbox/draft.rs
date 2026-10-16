@@ -51,9 +51,14 @@ pub(super) fn draft_proof(
     }
     let parent = find_parent_for_binding(conn, binding)?;
     let progress = super::prefix::progress_in(conn, &key(binding)?)?;
-    if progress.is_some() {
+    if let Some(progress) = &progress {
         if let Some(parent) = &parent {
-            if super::prefix::session_closed_in(conn, &key(binding)?, &parent.outbox_id)? {
+            if super::prefix::session_closed_in(
+                conn,
+                &key(binding)?,
+                &parent.outbox_id,
+                &progress.release_digest,
+            )? {
                 return Err(OwnerOutboxError::ParentMismatch);
             }
         }
