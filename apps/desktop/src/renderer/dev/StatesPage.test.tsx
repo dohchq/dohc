@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ObserverStub } from "../DesktopWorkspaceShell.testSupport";
 import { setOwnPresentation } from "../workbench/actorPresentation";
 import { setChosenColors } from "../workbench/chosenColors";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
@@ -20,8 +19,6 @@ describe("states page", () => {
 
   it("renders both themes side by side and holds the document light while open", () => {
     vi.stubGlobal("dohcDesktop", {});
-    // jsdom has no ResizeObserver; the page measures its sections.
-    vi.stubGlobal("ResizeObserver", ObserverStub);
     try {
     document.documentElement.dataset.theme = "dark";
     setOwnPresentation({ group: "own", hue: "plum", self: true });
@@ -58,6 +55,13 @@ describe("states page", () => {
     // The same sections in both themes, so a capture compares like with like.
     for (const title of ["Buttons", "Copy", "State mark", "Menu", "Text inputs", "List rows", "Toasts", "Notices", "Dialog", "Kind glyph", "Page identity"]) {
       expect(screen.getAllByRole("heading", { name: title })).toHaveLength(2);
+    }
+    // The specimen keeps its existing Ctrl text on every host.
+    for (const [label, key] of [["Zoom out", "-"], ["Zoom in", "="], ["Reset zoom to 100%, now 100%", "0"]]) {
+      const button = document.querySelector<HTMLElement>('[aria-label="' + label + '"]')!;
+      fireEvent.mouseEnter(button.parentElement!);
+      expect(Array.from(button.parentElement!.querySelectorAll("[role=tooltip] kbd"), (kbd) => kbd.textContent)).toEqual(["Ctrl", key]);
+      fireEvent.mouseLeave(button.parentElement!);
     }
     // Every forced state names an element the capture can find. A menu's
     // rows exist while it is open, and one menu is open at a time, so each

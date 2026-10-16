@@ -49,18 +49,21 @@ export async function runBounded(tasks, execute, concurrency = 2) {
   if (failure) throw failure;
 }
 
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null } = {}) {
+// `stop` is the caller's cancellation scope: its stop interrupts these commands, and their first confirmed failure stops it.
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null, stop } = {}) {
   if (runProofs !== undefined && typeof runProofs !== "function") throw new Error("runProofs must be a function.");
   mkdirSync(output, { recursive: true });
   const report = { version: 1, concurrency: 2, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
   const finish = startTiming(report);
   const save = () => writeFileSync(join(output, "result.json"), JSON.stringify(report, null, 2) + "\n");
   const cancellation = cancellationScope("Workspace tests");
+  const stopper = stop ?? cancellation;
   // The first command to fail stops every lane from starting another.
   let failure;
   const databaseFinished = Promise.withResolvers();
-  function fail(error) {
+  function fail(error, name = "tests") {
     failure ??= error;
+    stopper.stop(error?.step ?? name, error);
     // Wake the repository lane when failure prevents a queued database test.
     databaseFinished.resolve();
     throw error;
@@ -68,6 +71,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
   async function checkpoint() {
     await cancellation.checkpoint();
     if (failure) throw failure;
+    stopper.signal.throwIfAborted();
   }
   // `rerun` marks a node:test step: one that failed only in its tests runs once more.
   async function command(name, args, { rerun = false } = {}) {
@@ -76,7 +80,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const row = { name, args, log: `${file}.log` };
     report.steps.push(row);
     const record = `${file}.tests.jsonl`;
-    const execute = log => run(...pnpm(args), { env: { ...env, DOHC_TEST_RECORD: record }, log });
+    const execute = log => run(...pnpm(args), { env: { ...env, DOHC_TEST_RECORD: record }, log, signal: stopper.signal });
     return timed(row, async () => {
       try { return await execute(row.log); }
       catch (error) {
@@ -93,11 +97,17 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       const recorded = readTestRecord(record);
       const flaky = [...(row.flaky ?? []), ...recorded.filter(test => test.flaky).map(test => test.test)];
       if (flaky.length) row.flaky = flaky;
-      // vitest's slow tests come from its reporter; node:test's from the spec report of the attempt that ran last.
-      const times = [...recorded.filter(test => test.seconds >= 2), ...nodeTestTimes(readLog(row.retryLog ?? row.log)).filter(test => test.seconds >= 2)];
+      // vitest's failed and slow tests come from its reporter; node:test's from the spec report of the attempt that ran last.
+      const last = readLog(row.retryLog ?? row.log);
+      const failed = [...recorded.filter(test => test.failed).map(test => test.test), ...(rerun ? nodeTestFailures(last) : [])];
+      if (failed.length) row.failed = failed;
+      const times = [...recorded.filter(test => test.seconds >= 2), ...nodeTestTimes(last).filter(test => test.seconds >= 2)];
       if (times.length) row.slowest = slowest(times);
       save();
-    }).catch(fail);
+    }).catch(error => {
+      if (stopper.notRun(row, error)) save();
+      return fail(error, name);
+    });
   }
   async function planPackages() {
     const inventory = await command("inventory", ["-r", "list", "--depth", "-1", "--json"]);
@@ -151,7 +161,10 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
         await checkpoint();
         const row = { name: "proofs", runner: "runProofs" };
         report.steps.push(row);
-        await timed(row, () => runProofs(checkpoint), save);
+        await timed(row, () => runProofs(checkpoint), save).catch(error => {
+          stopper.notRun(row, error);
+          return fail(error, "proofs");
+        });
       }
     };
     // Every lane settles before cleanup, including after a sibling fails.
@@ -170,11 +183,17 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
   } catch (error) {
     report.verdict = "FAIL";
     report.error = error.message;
+    stopper.notRun(report, error);
     throw error;
   } finally {
     const interrupted = await cancellation.dispose();
     if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
+    const desktop = report.packages?.some(task => task.name === "@dohc/desktop");
+    const stopped = stopper.unfinished(report.steps, ["repository", ...(report.packages ?? []).map(task => task.name),
+      ...(desktop ? ["desktop-scripts"] : []), ...(runProofs ? ["proofs"] : []), ...(desktop ? ["desktop-runtime-packaging"] : [])]);
+    if (stopped) report.stopped = stopped;
     report.flaky = report.steps.flatMap(step => (step.flaky ?? []).map(test => ({ step: step.name, test })));
+    report.failed = report.steps.flatMap(step => (step.failed ?? []).map(test => ({ step: step.name, test })));
     report.slowest = slowest(report.steps.flatMap(step => (step.slowest ?? []).map(test => ({ step: step.name, ...test }))));
     finish(); save();
   }

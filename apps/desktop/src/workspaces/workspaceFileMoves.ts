@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { OPERATION_ID_PREFIX } from "@dohc/workspace-contracts/engine";
 import { constants } from "node:fs";
 import { copyFile, link, lstat, mkdir, readdir, realpath, rename, rmdir, unlink } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
@@ -236,7 +238,7 @@ export async function prepareMoveWorkspacePathAs<Workspace extends PathChangeWor
       // The capture settles, closes and checks these endpoints before the hold.
       const endpoints = [(await admitPath(rootPath, input.fromPath)).physical, (await admitPath(rootPath, input.toPath)).physical];
       return await options.capture.changePathsAs<Changed<{ fromPath: string; toPath: string; withoutHistory: string[]; replacedWithoutHistory: string[] }, MoveFailure>>(endpoints,
-        { operation: "move", author, correlationId: `fileMove:${options.requestId}` },
+        { operation: "move", author, operationId: `${OPERATION_ID_PREFIX}${randomUUID()}` },
         async engine => {
           // Admission runs here, with capture held, right before the disk changes.
           assertWritable(operation);
@@ -478,7 +480,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
       // The capture settles, closes and checks this endpoint before the hold.
       const endpoint = (await admitPath(rootPath, path)).physical;
       return await options.capture.changePathsAs<Changed<{ path: string; withoutHistory: string[] }, DeleteFailure>>([endpoint],
-        { operation: "delete", author, correlationId: `fileDelete:${options.requestId}` },
+        { operation: "delete", author, operationId: `${OPERATION_ID_PREFIX}${randomUUID()}` },
         async engine => {
           // Admission runs here, with capture held, right before the disk changes.
           assertWritable(operation);
@@ -593,7 +595,7 @@ export async function deleteWorkspacePathByHand(
     // History holds nothing the engine cannot address, and nothing is open there.
     if (capture === null || !engineAddresses(endpoint)) return { ...await trash(), refused: undefined };
     let gone: string[] = [];
-    return await capture.changePathsAs([endpoint], { operation: "delete", author: person, correlationId: `fileDelete:${options.requestId}` },
+    return await capture.changePathsAs([endpoint], { operation: "delete", author: person, operationId: `${OPERATION_ID_PREFIX}${randomUUID()}` },
       async engine => {
         // Checked again here, with capture held, right before the disk changes.
         assertWritable(operation);

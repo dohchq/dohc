@@ -2,7 +2,9 @@ import { expect, test } from "@playwright/test";
 import { startAccountServer } from "./harness";
 
 let server: Awaited<ReturnType<typeof startAccountServer>>;
-test.beforeAll(async () => { server = await startAccountServer(); });
+test.beforeAll(async ({}, testInfo) => {
+  server = await startAccountServer({ signal: AbortSignal.timeout(testInfo.timeout - 10_000) });
+});
 test.afterAll(async () => { await server?.close(); });
 
 test("untrusted Origin and forged forwarded addresses cannot bypass account boundaries", async ({ request }) => {

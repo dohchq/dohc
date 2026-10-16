@@ -401,6 +401,7 @@ async function recipientCredit(page: Page, workspaceId: string, text: string, hu
 
 test("@shared-continuity a live document keeps its person's and agent's work through restart, a recipient continues it, the owner restores it, and the work continues with a new recipient", async ({ browser }, testInfo) => {
   test.setTimeout(900_000);
+  const signal = AbortSignal.timeout(testInfo.timeout - 10_000);
   const ownerTemp = await createTempWorkspace();
   const recipientTemp = await createTempWorkspace();
   const newRecipientTemp = await createTempWorkspace();
@@ -496,7 +497,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
   // Accepted history folds into checkpoints; the owner's imported audit record must not change.
   const expectAuditKept = ({ change, audit }: AcceptedDeclaration) => expect(ownerAudit(change.deliveryId)).toEqual(audit);
   try {
-    stack = await startSelfHostOnboardingStack(ownerTemp.baseDir, { live: true });
+    stack = await startSelfHostOnboardingStack(ownerTemp.baseDir, { live: true, signal });
     const origin = stack.relayUrl;
     expect(new URL(origin).protocol).toBe("https:");
     trust = trustFixtureCa(stack.ca!.ca);

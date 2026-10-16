@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useRef, useState} from "react";
 import {createNamedLiveBrowserTransport, type NamedLiveBrowserState, type NamedLiveSelection} from "@dohc/ydoc-projection/named-live-browser-transport";
+import {fetchShareWeb} from "./apiVersion";
 import {accountUser, namedFiles, namedRequest, ShareAccessRemovedError, type NamedRecipientFiles} from "./namedRecipient";
 import {NamedDocumentEditor, type NamedDocumentSession} from "./NamedDocumentEditor";
 import {DiscardDraft} from "./DiscardDraft";
@@ -53,6 +54,7 @@ export default function NamedRecipientApp({grantId}: {grantId: string | null}) {
     if (!files || !account) return;
     leave(() => {
       transport.current ??= createNamedLiveBrowserTransport({publicOrigin: location.origin, limits: files.limits,
+        fetch: fetchShareWeb,
         recordingContext: selection => ({kind: "account", accountId: selection.accountId})});
       const session = transport.current.select({accountId: account.id, workspaceId: files.workspaceId, grantId: files.grantId, objectId});
       const value = {session, path, objectId}; currentSelection.current = value; setSelection(value); setSessionState(session.state());
