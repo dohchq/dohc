@@ -102,8 +102,8 @@ The service verifies the commit in its own checkout, `C:\w\_verification\lane` o
 Stopping `pnpm verify:pr` does not stop the request. Run the same command again to follow it, or to get its result once it has finished.
 Pass `--detach` to submit the request and return at once.
 
-- Requests run in the order the service accepted them.
-- A newer commit on the same branch replaces that branch's waiting request and keeps its place. A running request finishes.
+- [Owners take turns](#owners-take-turns). Each owner's requests run in the order the service accepted them, unless someone [moves one](#move-a-waiting-request).
+- A newer commit on the same branch replaces that branch's waiting request and keeps its owner and its place, including a place a move gave it. A running request finishes.
 - The same commit with the same gates joins the existing request, or reuses its pass.
 - A run that fails because of the machine is retried in place, after 30 seconds, 2 minutes, 5 minutes, then every 15 minutes. Machine failures include a program that could not start, too little disk, and Docker or the host tools not responding.
 - A run that fails a check is reported at once. The service never retries it.
@@ -117,8 +117,30 @@ Each attempt records the load it verified under in `status.json` and `C:\w\_veri
 Each attempt has its own evidence folder, `C:\w\_verification\requests\<id>\attempts\<n>`, and its `result.json` names the request and attempt.
 Read the service's verdict from the request's `status.json`, or from the last line `pnpm verify:pr` prints.
 
-Run `pnpm verify:queue status` to see the service, the running requests, the line, and wait estimates.
-Run `pnpm verify:queue cancel <id>` to stop a request. A finished request keeps its verdict.
+Run `pnpm verify:queue status` to see the service, a pause, the running requests, the line with each request's owner, and wait estimates.
+Run `pnpm verify:queue cancel <id>` to stop one of your own requests. Never cancel a request another agent submitted. A finished request keeps its verdict.
+
+The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows what holds each verification lane, a queued request or an agent's inline gate, with its steps and its live output, then the requests ready and waiting for a lane, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Threads, Tests, and Nightly tabs show the whole line, every run this week, each thread's runs and results, the tests that failed on two or more branches in the last day, the slowest and flaky tests, and the nightly runs.
+A test that fails on several branches and on main's nightly points to a broken main. One that the nightly did not fail is more often flaky.
+When T3 runs on the host, the dashboard names each request by the T3 thread that linked its branch's pull request, or whose worktree or branch it uses. It reads T3's local database read-only once a minute. Without T3 it names requests by their branch.
+Select a run to see its failing step's test summary, its steps on a timeline, and any of its logs. The dashboard refreshes every few seconds. It records the host's CPU and free memory once a minute in `monitor-load.json` in the queue root.
+When the page cannot reach the dashboard server, it says so and since when, keeps what it last showed, and tries again. It waits at most 15 seconds for each answer.
+
+The dashboard's only change to the queue is its Pause and Resume button. Pause asks for an optional reason and does what `pnpm verify:queue pause` does. Resume does what `pnpm verify:queue resume` does, without asking first.
+While the queue is paused, every tab shows a banner with the words `pnpm verify:queue status` uses, such as `Paused and idle: safe to restart`. A hold after a computer restart says so. Start estimates count from the resume, such as `40 min after resume`.
+The pause records `by` as `{ "name": "dashboard", "host": "<host name the page used>" }`, and the service log records each pause and resume from the dashboard.
+
+To open the dashboard from another device, serve it on the tailnet only:
+
+```powershell
+tailscale serve --bg --https=8446 http://127.0.0.1:4250
+```
+
+Then open `https://<host>.<tailnet>.ts.net:8446`. Every device and user that the tailnet's access rules let reach this port can read the page and pause or resume the queue.
+Do not use Tailscale Funnel: the page shows branch names and test output. The page refuses every request that arrives through Funnel.
+The page answers only to the host's own names and to tailnet names.
+Pause and resume accept only a JSON `POST` whose `Origin` header names the host the request was sent to. A page from any other origin, including another port on this host or another tailnet machine, cannot send that request, so it cannot pause or resume the queue.
+A write body must arrive within 10 seconds and be at most 4 KB. The server answers a refused write and closes its connection.
 
 The `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
 A supervisor runs the service in a Windows job object. When the service exits or its heartbeat stops for two minutes, the supervisor stops it and everything it started, then starts it again.
@@ -126,7 +148,8 @@ A request that was running when the service stopped runs again as a new attempt.
 Install or upgrade the service from a checkout of `origin/main` with `pnpm verify:queue install`. An upgrade takes effect when the current runs end. No new run starts until then.
 
 CI, other platforms, and runs with their own `DOHC_BUILD_SLOT_ROOT` verify inline in their checkout.
-Pass `--inline` to do the same on the shared host when the service is unavailable. Inline runs still wait for the host's verification lane, so they never overlap a queued run.
+On the shared host, pass `--inline` only when the queue cannot do the job: the service is unavailable, or the run needs `--reuse-rust`, or `--keep-going` without `--full`.
+An inline run takes a lane outside the [owners' turns](#owners-take-turns), and it says so when it starts. Inline runs still wait for the host's verification lane, so they never overlap a queued run.
 An inline run owns its checkout until cleanup and receipt writing finish. Another PR run in that checkout fails before installation or queue admission and reports the owner.
 
 Inspect the host's Cargo slots and verification lane without joining them:
@@ -172,17 +195,104 @@ Compare elapsed time, queue time, failures, and peak host memory under matching 
 Do not change the live queue root or remove another run's tickets to conduct a trial.
 Remove the two verification trial environment variables from the shell before returning to ordinary verification.
 
+### Restart the computer without losing a run
+
+A computer restart stops every run in progress, and each one later starts again from the beginning. Pause the queue first:
+
+1. Run `pnpm verify:queue pause --reason "<why>"`.
+2. Run `pnpm verify:queue status` until it prints `paused and idle: safe to restart`.
+3. Restart the computer.
+4. Run `pnpm verify:queue resume`.
+
+The dashboard can do steps 1, 2, and 4: select Pause, wait for the banner `Paused and idle: safe to restart`, and select Resume after the restart.
+
+While the queue is paused, runs in progress finish and no new run starts, the nightly run included. The line keeps its order.
+An inline run that holds a verification lane counts as running. An inline run without a lane waits, says once that the queue is paused, and starts after the resume.
+The pause lasts until you resume it, through service and computer restarts.
+
+If the computer restarts while the queue is not paused, the service pauses it when it starts, with the reason `the computer restarted`.
+No run starts until you run `pnpm verify:queue resume` or select Resume on the dashboard. `pnpm verify:queue status` shows the reason, and the dashboard shows the hold. A service restart within one boot, such as an upgrade, does not pause the queue.
+Windows fast startup hibernates the system at shutdown, so the next start continues the same boot and the service sees no restart. Pause the queue before you shut down.
+
 ### Flaky tests
 
 The gate runs a failing test once more before it fails the change.
 nextest, vitest, and Playwright retry the failing test itself. The repository and desktop script steps run again when their report names a failed test; a failed check or build is not retried. The self-host proof runs again from an empty evidence folder.
 A test that passes only on that retry does not fail the gate. `result.json` lists it under `flaky`, the verifier prints it, and the queue history records it.
-A flaky test is a defect. Fix the condition it races, or report it to whoever owns it. A test that fails twice still fails the gate.
+A flaky test is a defect. Fix the condition it races, or report it to whoever owns it.
 A repository or desktop script step reruns as a whole, after its first attempt's ignored outputs. A test that fails on a clean tree but passes beside those outputs is recorded as flaky like any other, so treat every entry as a real failure until you have read it.
+
+Both tries run under the same load, so a package test or a repository or desktop script test that fails both tries runs once more, alone, with one worker.
+The gate runs the test's whole file at once, with the step's environment, while other steps continue. A test that fails only after another test in its file still fails alone, and so does a file that fails in a way its report does not name.
+A file passes alone only when it exits cleanly and its report shows, by name, that each of its tests that failed both tries passed. A test that skips itself alone is no pass.
+If every file with a failed test passes alone, the step passes. `result.json` and `js-tests/result.json` list each failed test under `flaky` with `passedAlone: true`, and the verifier marks it "failed both tries, passed alone".
+A test that passes only alone usually depends on timing, a race, or something other tests share. It is a defect like any other flaky test.
+If a file fails alone too, the step fails, and the gate fails the change. `failed` then also lists each test the file failed alone, so the commands under `rerun` cover them. `js-tests/result.json` records each file run alone under its step's `alone`, with its log and its outcome: `passed`, `failed`, `no test ran`, or `interrupted`.
+A step that failed outside its tests gets no isolated retry. That includes a failed check or build and a test with no rerun command. In package tests it also includes a file that failed to load, a failed hook, and an unhandled error.
+In script tests, node:test reports a failed hook as a failed test, and a file that failed to load or threw an unhandled error as a failed file, so their files run alone.
+A script test gets no isolated retry when it failed before the script's last command, because the commands after it never ran. It gets none when it failed only when the step ran again, because it did not fail both tries.
+An interrupted step gets no isolated retry either. The Rust tests and the Playwright proofs have none yet.
+
+### Failures other branches share
+
+`result.json` lists each test that failed on its last try under `failed`, with the same step and test names as `flaky`. The queue records both lists for each attempt in `status.json` and the queue history.
+The list covers package tests, the repository and desktop script tests, the account and desktop browser proofs, and the Rust tests. A step that fails outside a test, such as typecheck, lists none.
+Before you resubmit a failed run, run each command that it prints and records under `rerun` until its failed tests pass.
+
+When a run fails on the shared host, the verifier looks for its failed tests in the last day of queue history. It prints each test that another branch's run also failed, with those branches, and records them in `result.json` under `shared`. Runs of your own branch do not count.
+A failure that other branches share often comes from main or from a flaky test, not from your change.
+
+When the gate prints that list, check the test on `origin/main` and in the [last nightly](#nightly-run). Do this before you change your branch for that test.
+Do not add a workaround for that failure to your PR. Fix main or the flaky test in its own PR, or wait for that fix and rebase.
+
+### Owners take turns
+
+The service records an owner for each request when it accepts it:
+
+1. The T3 thread a person started for the work. A subagent's thread counts under the thread a person started above it. The service finds the thread as the dashboard does: by the checkout's worktree, a linked pull request, or the branch.
+2. If T3 does not know the thread, the name given with `pnpm verify:pr --owner <name>`.
+3. Otherwise, the checkout.
+
+`pnpm verify:pr` prints the owner when the service accepts the request.
+If T3 does not know your thread, pass the same `--owner` name for all of your thread's work. A new name for each request makes each request a new owner.
+
+The service starts the nightly run first, then any request [moved with `--first`](#move-a-waiting-request).
+Then the next lane goes to an owner with no run in progress, the one that has gone longest without a start. An owner that has never started goes first.
+An owner with a run in progress waits until every owner without one has had a turn.
+Each turn starts the owner's first request in line, so a thread with 30 waiting requests gets one start per turn, like a thread with one.
+A request that cannot start yet, because it needs Docker while Docker is down or waits for a retry, holds no turn. Its owner's next request can take the turn.
+An attempt that failed because of the machine uses no turn.
+The turns add no capacity. They give each thread quick feedback on its most important request, so put that request first with `move --before`.
+
+`pnpm verify:queue status`, the wait estimates, and the dashboard show the line in the order the service starts it when every request can start.
+The dashboard's Queue tab shows each request's owner and how many requests that owner has waiting.
+An [inline run](#the-verification-queue-on-the-shared-windows-host) takes no turn.
+
+### Move a waiting request
+
+```sh
+pnpm verify:queue move <id> --before <other-id> --reason "<why>" [--by "<name>"]
+pnpm verify:queue move <id> --first --reason "<why>" [--by "<name>"]
+```
+
+`--before` orders your own requests. It puts a request just ahead of another waiting request with the same owner, so it runs on that owner's next turn.
+`--first` puts a request at the front of the line, behind only the nightly run and ahead of every owner's turn.
+Use `--first` only to unblock other work: a fix for a failure that several branches share, a fix for a broken main, or a request a person asked to hurry.
+Never use `--first` only to get your own run sooner. Any agent may move any waiting request, including one another thread submitted.
+
+A move only brings a waiting request forward. `--before` needs another waiting request that is ahead of it now.
+A move never stops or starts a run. It changes only which request starts next, and the nightly run still goes first.
+The service applies the move within a few seconds, and the command prints the request's new place. If the service is not running, the move applies when it starts.
+A service installed before this command existed applies no moves. After 30 seconds the command says so. Run `pnpm verify:queue upgrade` from a checkout of `origin/main` to install a service that applies them.
+The command refuses to move a request that is unknown, running, or finished. It refuses `--before` a request with another owner, a request moved with `--first`, or one the request is already ahead of. It says why.
+
+The service records each move in `history.jsonl` with its reason, the `--by` name, the OS user, and the checkout that asked. It keeps the reason to one line of at most 300 characters.
+`pnpm verify:queue status` shows the last move beside the request, such as `moved first by Ice (C:\w\fix-grid): fixes the grid test three branches fail`. Every agent on the host runs as the same OS user, so the checkout always shows.
+The dashboard marks a moved request in the line and in its lane once it runs. Point at the mark, or move keyboard focus to it, to see who moved it and why.
 
 ### A failure stops the run
 
-The first step that fails stops the rest of a PR run. A step fails only after its retry, so a test that passes on retry stops nothing.
+The first step that fails stops the rest of a PR run. A step fails only after its retry and its isolated retry, so a test that passes on either stops nothing.
 The runner interrupts the running Rust job, package tests, and proofs as it does on Ctrl+C. It then removes their processes, Postgres, and containers.
 The verdict is FAIL. `result.json` names the failed step under `stopped.after` and lists each step that did not finish under `stopped.notRun`.
 Each of those steps has the verdict `NOT RUN`. `js-tests/result.json` records the package tests and proofs that did not finish in the same way.

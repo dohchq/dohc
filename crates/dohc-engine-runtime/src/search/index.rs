@@ -96,6 +96,54 @@ fn insert_file_index_row(
     Ok(())
 }
 
+/// Replace a group's search rows with one table scan, using the policy read before mutation.
+pub(crate) fn begin_file_search_index_batch(
+    conn: &Connection,
+    policy: &SearchPolicySnapshot,
+    workspace_id: &str,
+    version_id: &str,
+    objects_json: &str,
+) -> Result<(), SearchError> {
+    if policy.is_degraded() {
+        conn.execute(
+            "UPDATE engine_search_index_state SET file_policy_degraded=1
+             WHERE workspace_id=?1 AND version_id=?2",
+            params![workspace_id, version_id],
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM engine_search_files_fts
+             WHERE workspace_id=?1 AND version_id=?2
+                 AND object_id IN (SELECT value FROM json_each(?3))",
+            params![workspace_id, version_id, objects_json],
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn insert_file_search_index_with_policy(
+    conn: &Connection,
+    policy: &SearchPolicySnapshot,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    path: &str,
+    text: &str,
+) -> Result<(), SearchError> {
+    if path_is_search_indexed(policy, path) {
+        insert_file_index_row(
+            conn,
+            workspace_id,
+            version_id,
+            object_id,
+            path,
+            &extract_search_text(path, text),
+        )?;
+    }
+    Ok(())
+}
+
 /// Upsert a single text file's FTS row, respecting the fail-closed FILE policy
 /// freeze. Ports `upsertFileSearchIndex`. Reads the policy
 /// off `root_dir`; a broken policy freezes the file index — the FTS rows and the

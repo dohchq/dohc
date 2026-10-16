@@ -27,6 +27,7 @@ describe("live gateway raw request validation", () => {
   });
   it("returns only the session discriminator and unchanged ticket credential", () => {
     expect(parse(request())).toEqual({ session, ticketToken: token });
+    expect(parse(request([...headers, "x-dohc-share-web-api-version", "99"]))).toEqual({session, ticketToken: token});
     expect(parse(request(["hOsT", "SHARE.EXAMPLE.TEST", ...headers.slice(2)]))).toEqual({ session, ticketToken: token });
     expect(parse(request([...headers.slice(0, 4), "Sec-WebSocket-Protocol", `dohc-live-ticket.${token},\tdohc-live-v1`]))).toEqual({ session, ticketToken: token });
     expect(parse(request([...headers, "Cookie", "browser=session-cookie", "Accept-Language", "en"]))).toEqual({ session, ticketToken: token });
@@ -61,6 +62,7 @@ describe("live gateway raw request validation", () => {
   });
 
   it.each([
+    `${target}&apiVersion=1`, `/api/live?apiVersion=1&session=${session}`,
     "/api/live", "/api/live?session=", `${target}&session=${session}`, `${target}&extra=1`,
     `${target}#fragment`, `/api/../api/live?session=${session}`, `/api/%6cive?session=${session}`,
     `${origin}${target}`, `//share.example.test${target}`, `/api/live?session=${token}`,

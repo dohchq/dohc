@@ -196,7 +196,8 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
     startReplicas: async (options) => {
       hooks = options;
       if (input.startReplicas) return await input.startReplicas(options);
-      return { unavailable: false, replica: (id) => open.get(id), reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
+      return { unavailable: false, replica: (id) => open.get(id), reconcile: () => undefined, deleteWorkspaces: async () => undefined,
+      failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
     },
     ...(input.live ? { live: input.live } : {}),
     ...(input.recordDelivery ? {recordDelivery: input.recordDelivery} : {}),
@@ -265,8 +266,8 @@ describe("a server that runs a workspace's automations", () => {
         latestMomentId: "edited", metadataOrigin: "api" });
       vi.spyOn(engine, "readHistoryPage").mockResolvedValue({
         activeVersion: { id: "main", workspaceId: WORKSPACE, kind: "main", name: "Main", createdAtMs: 0 },
-        moments: [moment], protectedMoments: [], versionMarkers: [], latestMomentOrder: 1, nextCursor: null,
-        startCursor: { format: 1, engineUuid: "test", workspaceId: WORKSPACE, versionId: "main", objectId: "object", textFence: 1, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null },
+        moments: [{...moment, beforePath: moment.beforePath ?? null}], protectedMoments: [], versionMarkers: [], latestMomentOrder: 1, nextCursor: null,
+        startCursor: { format: 1, engineUuid: "test", workspaceId: WORKSPACE, versionId: "main", objectId: "object", operationId: null, textFence: 1, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null },
       });
       vi.spyOn(engine, "getMoment").mockResolvedValue(moment);
     });
