@@ -39,7 +39,7 @@ async function queueRoot(t) {
     running: [{ id: "000000003-cccccc", attempt: 1, checkout: "C:\\w\\_verification\\lane-2", phase: "verifying", startedAt: iso(10), awakeMs: 540_000 }], health: { cpuBusyPercent: 40, freeMemGb: 20 } });
   const event = (minutesAgo, fields) => appendFileSync(paths.history, `${JSON.stringify({ at: iso(minutesAgo), event: "finished", ...fields })}\n`);
   event(9 * 1440, { flaky: [{ step: "rust", test: "engine::settles" }], slowest: [{ step: "desktop", test: "states page", seconds: 900 }] });
-  event(150, { outcome: "passed", steps: { tests: 1000, rust: 900 }, flaky: [{ step: "rust", test: "engine::settles" }], slowest: [{ step: "desktop", test: "states page", seconds: 280 }, { step: "rust", test: "capture", seconds: 80 }] });
+  event(150, { outcome: "passed", steps: { tests: 1000, rust: 900 }, flaky: [{ step: "rust", test: "engine::settles" }, { step: "repository", test: "heartbeat", passedAlone: true }], slowest: [{ step: "desktop", test: "states page", seconds: 280 }, { step: "rust", test: "capture", seconds: 80 }] });
   event(100, { outcome: "passed", steps: { tests: 1200 }, flaky: [{ step: "rust", test: "engine::settles" }, { step: "repository", test: "heartbeat" }], slowest: [{ step: "desktop", test: "states page", seconds: 260 }] });
   appendFileSync(paths.history, "a torn line\n");
   return root;
@@ -62,7 +62,8 @@ test("the snapshot shows the week's attempts with their lanes, the line in order
   assert.equal(state.typicalMs, 1_800_000);
   assert.deepEqual(state.queued.map(entry => [entry.branch, entry.retry, entry.nightly]), [["main (nightly)", false, true], ["again", true, false]], "the nightly run goes first");
   assert.equal(state.queued[1].waiting, "Docker did not answer. Retrying.");
-  assert.deepEqual(state.flaky.map(item => [item.test, item.flaky]), [["engine::settles", 2], ["heartbeat", 1]], "only this week's flaky tests count");
+  assert.deepEqual(state.flaky.map(item => [item.test, item.flaky, item.passedAlone]), [["heartbeat", 1, 1], ["engine::settles", 2, 0]],
+    "only this week's flaky tests count, and a test that passed alone, which would have failed the gate, counts apart and goes first");
   assert.deepEqual(state.slowest.map(item => [item.test, item.runs, item.totalSeconds]), [["states page", 2, 540], ["capture", 1, 80]]);
   assert.deepEqual(state.nightly, { id: "000000005-eeeeee", head: head.slice(0, 12), state: "queued", at: null });
   assert.equal(state.lastNightlyPass, null);

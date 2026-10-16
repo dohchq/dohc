@@ -4,6 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import { readHistoryMoments } from "./helpers/history";
 import { relayJson } from "./helpers/relayPeer";
 import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
@@ -172,12 +173,8 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
       }, { timeout: 120_000, intervals: [2_000] })
       .toBe(SCHEMA_TWO);
     await expect
-      .poll(async () => await owner!.page.evaluate(async ({ workspaceId, path }) => {
-        const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-        const page = await api.listEngineMoments({ workspaceId, limit: 100 });
-        if (!("moments" in page)) return null;
-        return page.moments.find((moment) => moment.path === path && moment.namedAuthor)?.namedAuthor?.label ?? null;
-      }, { workspaceId: ownerWorkspaceId, path: SCHEMA_PATH }), { timeout: 60_000, intervals: [2_000] })
+      .poll(async () => (await readHistoryMoments(owner!.page, ownerWorkspaceId, SCHEMA_PATH))
+        ?.find((moment) => moment.namedAuthor)?.namedAuthor?.label ?? null, { timeout: 60_000, intervals: [2_000] })
       .toBe(`${RECIPIENT_EMAIL} (Edit)`);
 
     // --- A race: the owner changes the automations first -----------------
