@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
+import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER, SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
 import { loadShareWebConfig } from "./config";
 import {
@@ -143,10 +143,10 @@ describe("share-web sessions", () => {
         viewerAssetsDir,
       });
       const valid = await handler(
-        request("/s/abcdefghijkl", { headers: { "user-agent": "ExampleBot/1.0" } }),
+        request("/s/abcdefghijkl", { headers: { "user-agent": "ExampleBot/1.0", [SHARE_WEB_API_VERSION_HEADER]: "99" } }),
       );
       const garbage = await handler(
-        request("/s/not-a-session", { headers: { "user-agent": "Mozilla/5.0" } }),
+        request("/s/not-a-session", { headers: { "user-agent": "Mozilla/5.0", [SHARE_WEB_API_VERSION_HEADER]: "99" } }),
       );
 
       expect(valid.headers.get("x-robots-tag")).toBe("noindex, nofollow, noarchive");
@@ -300,6 +300,7 @@ describe("share-web sessions", () => {
       publicHosts: new Set([HOST]),
       fetchRelay: async (relayRequest) => {
         versions.push(relayRequest.headers.get(RELAY_API_VERSION_HEADER));
+        expect(relayRequest.headers.has(SHARE_WEB_API_VERSION_HEADER)).toBe(false);
         return Response.json({ ok: true, grantId: "grant-alpha", capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: 901_000 });
       },
       nowMs: () => 1_000,
@@ -307,6 +308,7 @@ describe("share-web sessions", () => {
     });
     const exchangeRequest = request("/api/exchange", exchange(SECRET_ALPHA));
     exchangeRequest.headers.set(RELAY_API_VERSION_HEADER, "99");
+    exchangeRequest.headers.set(SHARE_WEB_API_VERSION_HEADER, String(SHARE_WEB_API_VERSION));
 
     expect((await handler(exchangeRequest)).status).toBe(200);
     expect(versions).toEqual([String(RELAY_API_VERSION)]);

@@ -199,9 +199,41 @@ afterEach(() => {
 });
 
 describe("SettingsDialog", () => {
+  it("shows a failed-open state instead of loading workspace settings", async () => {
+    const props = { workspaceId: "ws-1", workspacePath: "/x", initialSection: "agents" as const,
+      workspaceIsReady: false, workspaceOpenFailed: true, onClose: vi.fn() };
+    render(<SettingsDialog {...props} />);
+    expect(screen.getByText("Couldn’t open this workspace. Close Settings to try again.")).toBeTruthy();
+    expect(screen.queryByText("Loading settings...")).toBeNull();
+    await waitFor(() => expect(bridge.getUserSettings).toHaveBeenCalled());
+    expect(bridge.getWorkspaceSettings).not.toHaveBeenCalled();
+    expect(bridge.getMcpConfig).not.toHaveBeenCalled();
+    expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
+  });
+
+  it.each(["agents", "files", "workbench", "privacy", "cloud", "advanced"] as const)("holds the %s section and workspace search until admission", async initialSection => {
+    const onError = vi.fn();
+    const props = { workspaceId: "ws-1", workspacePath: "/x", initialSection, onClose: vi.fn(), onError, onOpenSharing: vi.fn() };
+    const view = render(<SettingsDialog {...props} workspaceIsReady={false} />);
+    await waitFor(() => expect(bridge.getUserSettings).toHaveBeenCalled());
+    expect(bridge.getWorkspaceSettings).not.toHaveBeenCalled();
+    expect(bridge.getMcpConfig).not.toHaveBeenCalled();
+    expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
+    expect(bridge.readScheduleHost).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: initialSection } });
+    expect(bridge.requestAccessRefresh).not.toHaveBeenCalled();
+    expect(bridge.listSharingAccess).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(screen.getByText("Loading settings...")).toBeTruthy();
+    view.rerender(<SettingsDialog {...props} workspaceIsReady />);
+    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledOnce());
+    if (initialSection === "agents") await waitFor(() => expect(bridge.getMcpConfig).toHaveBeenCalledOnce());
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it("renders the settings shell, searches sections, and shows an empty search state", async () => {
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
     expect(screen.getByTestId("settings-section-general")).toBeTruthy();
@@ -216,7 +248,7 @@ describe("SettingsDialog", () => {
   });
 
   it("groups the nav by where settings apply, under the workspace's folder", async () => {
-    render(<SettingsDialog workspaceId="ws-1" workspacePath={"C:\\Users\\sam\\dohc\\trip"} onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath={"C:\\Users\\sam\\dohc\\trip"} onClose={() => {}} />);
 
     const nav = (await screen.findByTestId("settings-sidebar")).querySelector("nav")!;
     const order = [...nav.children].map((child) =>
@@ -243,7 +275,7 @@ describe("SettingsDialog", () => {
 
   it("names the section Agents and still finds it by MCP", async () => {
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     expect((await screen.findByTestId("settings-nav-agents")).textContent).toBe("Agents");
     await user.type(screen.getByTestId("settings-search"), "MCP");
@@ -257,7 +289,7 @@ describe("SettingsDialog", () => {
     const onClose = vi.fn();
     render(
       <Overlay onClose={onClose}>
-        <SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
+        <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
       </Overlay>,
     );
 
@@ -274,7 +306,7 @@ describe("SettingsDialog", () => {
           Go back
         </button>
         <Overlay onClose={onClose}>
-          <SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
+          <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
         </Overlay>
       </>,
     );
@@ -304,7 +336,7 @@ describe("SettingsDialog", () => {
   it("persists appearance changes and applies them immediately", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -326,7 +358,7 @@ describe("SettingsDialog", () => {
   it("saves your colors, the accent, and the editor type", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -371,7 +403,7 @@ describe("SettingsDialog", () => {
   it("shows a modified setting as a dot and resets it from an icon", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -401,7 +433,7 @@ describe("SettingsDialog", () => {
 
   it("draws the theme as a radiogroup of three windows", async () => {
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -429,7 +461,7 @@ describe("SettingsDialog", () => {
       source: "default" as const,
     });
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -457,7 +489,7 @@ describe("SettingsDialog", () => {
 
   it("keeps a stepper under the pointer when its row becomes changed", async () => {
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="appearance" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="appearance" onClose={() => {}} />);
 
     const row = await screen.findByTestId("settings-row-editor-size");
     const larger = within(row).getByRole("button", { name: "Larger editor text" });
@@ -480,7 +512,7 @@ describe("SettingsDialog", () => {
 
   it("shows a stepper's tooltip on hover and on keyboard focus, each on its own", async () => {
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="appearance" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="appearance" onClose={() => {}} />);
 
     const row = await screen.findByTestId("settings-row-zoom");
     const zoomIn = within(row).getByRole("button", { name: "Zoom in" });
@@ -511,7 +543,7 @@ describe("SettingsDialog", () => {
   });
 
   it("keeps the reset's place on a row that cannot reset, so controls share a right edge", async () => {
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     const updates = await screen.findByTestId("settings-row-desktop-updates");
     const last = within(updates).getByTestId("install-update-button").parentElement!.lastElementChild!;
@@ -525,7 +557,7 @@ describe("SettingsDialog", () => {
     const onClose = vi.fn();
     render(
       <Overlay onClose={onClose}>
-        <SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="appearance" onClose={onClose} />
+        <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="appearance" onClose={onClose} />
       </Overlay>,
     );
 
@@ -544,13 +576,13 @@ describe("SettingsDialog", () => {
 
   it("drops the History rail and Current workspace rows, and the Keyboard section", async () => {
     const view = render(
-      <SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="workbench" onClose={() => {}} />,
+      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="workbench" onClose={() => {}} />,
     );
     const workbench = await screen.findByTestId(settingsSectionPin("workbench"));
     expect(workbench.textContent).not.toContain("History rail");
     view.unmount();
 
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     const general = await screen.findByTestId(settingsSectionPin("general"));
     expect(general.textContent).not.toContain("Current workspace");
     expect(screen.queryByTestId("settings-nav-keyboard")).toBeNull();
@@ -559,7 +591,7 @@ describe("SettingsDialog", () => {
   it("shows the window zoom as a percentage and steps it through settings", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -585,7 +617,7 @@ describe("SettingsDialog", () => {
       return () => undefined;
     });
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -622,7 +654,7 @@ describe("SettingsDialog", () => {
     const load = deferred<Awaited<ReturnType<typeof bridge.getUserSettings>>>();
     bridge.getUserSettings.mockImplementationOnce(() => load.promise);
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -666,7 +698,7 @@ describe("SettingsDialog", () => {
     const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
     bridge.setUserSettings.mockImplementationOnce(() => save.promise);
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -705,7 +737,7 @@ describe("SettingsDialog", () => {
   it("saves a preferred name and previews agent attribution", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="general"
@@ -738,7 +770,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="general"
@@ -765,7 +797,7 @@ describe("SettingsDialog", () => {
     bridge.setUserSettings.mockRejectedValueOnce(denied);
     const onError = vi.fn();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -789,7 +821,7 @@ describe("SettingsDialog", () => {
     // DesktopRoot has already applied the settings the dialog opens with.
     applyLookSettings(DEFAULT_USER_SETTINGS);
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -819,7 +851,7 @@ describe("SettingsDialog", () => {
   it("supports arrow-key navigation inside segmented appearance controls", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -845,7 +877,7 @@ describe("SettingsDialog", () => {
 
   it("shows the workspace path, a copyable MCP config snippet, and usage examples", async () => {
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/home/sam/dohc/personal"
         initialSection="agents"
@@ -866,7 +898,7 @@ describe("SettingsDialog", () => {
   it("does not call an active agent run a connected agent", async () => {
     runActive = true;
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -900,14 +932,14 @@ describe("SettingsDialog", () => {
       },
       source: "default",
     });
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
     await waitFor(() => expect(screen.getByTestId("agent-setup-runner-state").textContent).toBe("Dispatch ready"));
     expect(screen.queryByTestId("agent-setup-mcp-action")).toBeNull();
   });
 
   it("does not move focus to Copy when the run row starts the run", async () => {
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
     await screen.findByTestId("mcp-config-snippet");
     await user.click(screen.getByTestId("mcp-enable-toggle"));
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
@@ -922,7 +954,7 @@ describe("SettingsDialog", () => {
       },
       source: "default",
     });
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
     await waitFor(() => expect(screen.getByTestId("agent-setup-runner-state").getAttribute("data-state")).toBe("unnamed"));
     expect(screen.getByTestId("agent-setup-runner-state").textContent).toBe("Agent name needed");
   });
@@ -930,7 +962,7 @@ describe("SettingsDialog", () => {
   it("shows the trusted runner controls and persists command, toggle, and timeout", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -977,7 +1009,7 @@ describe("SettingsDialog", () => {
   it("keeps runner enable disabled until the command draft is non-empty", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1018,7 +1050,7 @@ describe("SettingsDialog", () => {
   it("saves the runner draft before self-test and reports success", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1062,7 +1094,7 @@ describe("SettingsDialog", () => {
   it("tells the user to restart when this session has no recorder", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1093,7 +1125,7 @@ describe("SettingsDialog", () => {
   // must not prescribe a restart that cannot make the self-test work.
   it("shows the shared-view note without a restart instruction", async () => {
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1120,7 +1152,7 @@ describe("SettingsDialog", () => {
   it("disables the self-test in a shared view before the recorder status resolves", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1147,7 +1179,7 @@ describe("SettingsDialog", () => {
     });
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1175,7 +1207,7 @@ describe("SettingsDialog", () => {
     const onOpenLiveDocuments = vi.fn();
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="cloud"
@@ -1195,7 +1227,7 @@ describe("SettingsDialog", () => {
   it("keeps share lists out of sync and sharing", async () => {
     const onConnect = vi.fn();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="cloud"
@@ -1219,7 +1251,7 @@ describe("SettingsDialog", () => {
     const onOpenSharing = vi.fn();
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         onOpenSharing={onOpenSharing}
@@ -1251,7 +1283,7 @@ describe("SettingsDialog", () => {
   it("offers no Shared by me result in a shared view", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         sharedView
@@ -1268,7 +1300,7 @@ describe("SettingsDialog", () => {
 
   it("hides live documents in a shared view", async () => {
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="cloud"
@@ -1286,7 +1318,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     stubClipboard();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1306,7 +1338,7 @@ describe("SettingsDialog", () => {
     const report = vi.fn<ReportShellFailure>();
     render(
       <ShellErrorReporter.Provider value={report}>
-        <SettingsDialog
+        <SettingsDialog workspaceIsReady
           workspaceId="ws-1"
           workspacePath="/x"
           initialSection="agents"
@@ -1330,7 +1362,7 @@ describe("SettingsDialog", () => {
     const onError = vi.fn();
     bridge.getMcpConfig.mockRejectedValueOnce(new Error("MCP unavailable"));
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1356,7 +1388,7 @@ describe("SettingsDialog", () => {
       throw cause;
     });
     const view = render(
-      <SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />,
+      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />,
     );
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
     await user.click(screen.getByTestId("mcp-enable-toggle"));
@@ -1376,7 +1408,7 @@ describe("SettingsDialog", () => {
       runActive = false;
       throw new Error("Repair .dohc/agent-runs.json, then try again.");
     });
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={vi.fn()} onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={vi.fn()} onClose={() => {}} />);
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
     await user.click(screen.getByTestId("mcp-enable-toggle"));
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped"));
@@ -1390,7 +1422,7 @@ describe("SettingsDialog", () => {
     runActive = true;
     const user = userEvent.setup();
     const onError = vi.fn();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
     const recovery = deferred<Awaited<ReturnType<typeof bridge.getAgentRunStatus>>>();
     bridge.endAgentRun.mockImplementationOnce(async () => {
@@ -1420,7 +1452,7 @@ describe("SettingsDialog", () => {
       runActive = false;
       throw new Error("Repair .dohc/agent-runs.json, then try again.");
     });
-    const view = render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
+    const view = render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
     await user.click(screen.getByTestId("mcp-enable-toggle"));
     await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped"));
@@ -1436,7 +1468,7 @@ describe("SettingsDialog", () => {
   it("retries only the read after a successful start", async () => {
     const user = userEvent.setup();
     const onError = vi.fn();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
     await screen.findByTestId("mcp-config-snippet");
     bridge.startAgentRun.mockImplementationOnce(async () => {
       runActive = true;
@@ -1457,7 +1489,7 @@ describe("SettingsDialog", () => {
     const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.");
     bridge.startAgentRun.mockRejectedValueOnce(cause);
     render(
-      <SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />,
+      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />,
     );
     await screen.findByTestId("mcp-config-snippet");
     expect(screen.getByTestId("mcp-enable-toggle").textContent).toBe("Start run");
@@ -1477,7 +1509,7 @@ describe("SettingsDialog", () => {
     const onAgentActiveChange = vi.fn();
     const cause = new Error("");
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1511,7 +1543,7 @@ describe("SettingsDialog", () => {
       throw cause;
     });
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1543,7 +1575,7 @@ describe("SettingsDialog", () => {
     const cause = new Error("capture refused the clear");
     bridge.endAgentRun.mockRejectedValueOnce(cause);
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1574,7 +1606,7 @@ describe("SettingsDialog", () => {
     const onAgentActiveChange = vi.fn();
     const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs.json, then try again.");
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1630,7 +1662,7 @@ describe("SettingsDialog", () => {
     const loadFailure = new Error("MCP unavailable");
     bridge.getMcpConfig.mockRejectedValueOnce(loadFailure);
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1669,12 +1701,12 @@ describe("SettingsDialog", () => {
     const onAgentActiveChange = vi.fn();
     const props = { workspacePath: "/x", initialSection: "agents" as const, onAgentActiveChange, onClose: () => {} };
     bridge.getMcpConfig.mockRejectedValueOnce(new Error("MCP unavailable"));
-    const view = render(<SettingsDialog workspaceId="ws-1" {...props} />);
+    const view = render(<SettingsDialog workspaceIsReady workspaceId="ws-1" {...props} />);
     await screen.findByTestId("mcp-load-error");
     const oldRetryRead = deferred<Awaited<ReturnType<typeof bridge.getAgentRunStatus>>>();
     bridge.getAgentRunStatus.mockImplementationOnce(() => oldRetryRead.promise);
     await user.click(screen.getByRole("button", { name: "Retry" }));
-    view.rerender(<SettingsDialog workspaceId="ws-2" {...props} />);
+    view.rerender(<SettingsDialog workspaceIsReady workspaceId="ws-2" {...props} />);
     await waitFor(() => expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(false));
     const starting = deferred<Awaited<ReturnType<typeof bridge.startAgentRun>>>();
     bridge.startAgentRun.mockImplementationOnce(() => starting.promise);
@@ -1707,7 +1739,7 @@ describe("SettingsDialog", () => {
         return { id: "run-1", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "local", status: "running" as const };
       });
       render(
-        <SettingsDialog
+        <SettingsDialog workspaceIsReady
           workspaceId="ws-1"
           workspacePath="/x"
           initialSection="agents"
@@ -1742,7 +1774,7 @@ describe("SettingsDialog", () => {
       return { id: "run-1", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "local", status: "running" as const };
     });
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1773,11 +1805,11 @@ describe("SettingsDialog", () => {
         .mockImplementationOnce(() => recovery.promise);
       return { id: "run-1", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "local", status: "running" as const };
     });
-    const view = render(<SettingsDialog workspaceId="ws-1" {...props} />);
+    const view = render(<SettingsDialog workspaceIsReady workspaceId="ws-1" {...props} />);
     await screen.findByTestId("mcp-config-snippet");
     await user.click(screen.getByTestId("mcp-enable-toggle"));
     await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(4));
-    view.rerender(<SettingsDialog workspaceId="ws-2" {...props} />);
+    view.rerender(<SettingsDialog workspaceIsReady workspaceId="ws-2" {...props} />);
     await waitFor(() =>
       expect(bridge.getAgentRunStatus).toHaveBeenLastCalledWith({ workspaceId: "ws-2" }),
     );
@@ -1801,7 +1833,7 @@ describe("SettingsDialog", () => {
         throw cause;
       });
       render(
-        <SettingsDialog
+        <SettingsDialog workspaceIsReady
           workspaceId="ws-1"
           workspacePath="/x"
           initialSection="agents"
@@ -1832,7 +1864,7 @@ describe("SettingsDialog", () => {
     const onAgentActiveChange = vi.fn();
     const cause = new Error("dohc could not read this workspace's agent run history. Check .dohc/agent-runs.json, then try again.");
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1867,7 +1899,7 @@ describe("SettingsDialog", () => {
     const onError = vi.fn();
     const onAgentActiveChange = vi.fn();
     const props = { workspacePath: "/x", initialSection: "agents" as const, onError, onAgentActiveChange, onClose: () => {} };
-    const view = render(<SettingsDialog workspaceId="ws-1" {...props} />);
+    const view = render(<SettingsDialog workspaceIsReady workspaceId="ws-1" {...props} />);
     await waitFor(() =>
       expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
     );
@@ -1882,7 +1914,7 @@ describe("SettingsDialog", () => {
       .mockImplementationOnce(() => recovery.promise);
     await user.click(screen.getByTestId("mcp-enable-toggle"));
     await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function)));
-    view.rerender(<SettingsDialog workspaceId="ws-2" {...props} />);
+    view.rerender(<SettingsDialog workspaceIsReady workspaceId="ws-2" {...props} />);
     await waitFor(() =>
       expect(bridge.getAgentRunStatus).toHaveBeenLastCalledWith({ workspaceId: "ws-2" }),
     );
@@ -1921,7 +1953,7 @@ describe("SettingsDialog", () => {
         });
       });
       const view = render(
-        <SettingsDialog
+        <SettingsDialog workspaceIsReady
           workspaceId="ws-old"
           workspacePath="/old"
           initialSection="agents"
@@ -1933,7 +1965,7 @@ describe("SettingsDialog", () => {
       );
 
       view.rerender(
-        <SettingsDialog
+        <SettingsDialog workspaceIsReady
           workspaceId="ws-new"
           workspacePath="/new"
           initialSection="agents"
@@ -1957,7 +1989,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const onAgentActiveChange = vi.fn();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1986,7 +2018,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const onAgentActiveChange = vi.fn();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -2012,7 +2044,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const onAgentActiveChange = vi.fn();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -2048,7 +2080,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const onAgentActiveChange = vi.fn();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -2079,7 +2111,7 @@ describe("SettingsDialog", () => {
   });
 
   it("shows current desktop update version and channel", async () => {
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
@@ -2092,7 +2124,7 @@ describe("SettingsDialog", () => {
 
   it("checks for updates and enables restart when an update is ready", async () => {
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await screen.findByTestId("desktop-updates-status");
 
     await user.click(screen.getByTestId("check-updates-button"));
@@ -2111,7 +2143,7 @@ describe("SettingsDialog", () => {
   it("shows update check failures and re-enables checking", async () => {
     bridge.checkForUpdates.mockRejectedValueOnce(new Error("offline"));
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await screen.findByTestId("desktop-updates-status");
 
     await user.click(screen.getByTestId("check-updates-button"));
@@ -2132,7 +2164,7 @@ describe("SettingsDialog", () => {
       state: idleUpdateState,
     });
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await screen.findByTestId("desktop-updates-status");
 
     await user.click(screen.getByTestId("check-updates-button"));
@@ -2148,7 +2180,7 @@ describe("SettingsDialog", () => {
     const pending = deferred<{ checked: boolean; state: typeof readyUpdateState }>();
     bridge.checkForUpdates.mockImplementationOnce(() => pending.promise);
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await screen.findByTestId("desktop-updates-status");
 
     await user.click(screen.getByTestId("check-updates-button"));
@@ -2183,7 +2215,7 @@ describe("SettingsDialog", () => {
       pushUpdate = listener;
       return () => undefined;
     });
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
         "idle",
@@ -2215,7 +2247,7 @@ describe("SettingsDialog", () => {
       pushUpdate = listener;
       return () => undefined;
     });
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     if (!pushUpdate) throw new Error("Update subscription was not registered.");
     pushUpdate(readyUpdateState);
@@ -2231,7 +2263,7 @@ describe("SettingsDialog", () => {
   it("restarts into a ready update from settings", async () => {
     updateReady = true;
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
         "ready",
@@ -2250,7 +2282,7 @@ describe("SettingsDialog", () => {
       state: readyUpdateState,
     });
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
         "ready",
@@ -2269,7 +2301,7 @@ describe("SettingsDialog", () => {
   it("persists the attachment location and hides the folder name for same-folder", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="files"
@@ -2304,7 +2336,7 @@ describe("SettingsDialog", () => {
   it("saves and resets the default site preview mode", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="workbench"
@@ -2351,7 +2383,7 @@ describe("SettingsDialog", () => {
 
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="files"
@@ -2390,7 +2422,7 @@ describe("SettingsDialog", () => {
   it("keeps an earlier edit when the next control is saved", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="files"
@@ -2428,7 +2460,7 @@ describe("SettingsDialog", () => {
     };
 
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="advanced"
@@ -2450,7 +2482,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const onError = vi.fn();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="advanced"
@@ -2478,7 +2510,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const ask = vi.fn();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection={CUSTOMIZE_TARGETS.sidebar.section}
@@ -2501,7 +2533,7 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const ask = vi.fn();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection={CUSTOMIZE_TARGETS.editor.section}
@@ -2523,14 +2555,14 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const setUp = vi.fn();
     const { rerender } = render(
-      <SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="advanced" onClose={() => {}} />,
+      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="advanced" onClose={() => {}} />,
     );
     const row = await screen.findByTestId("settings-row-settings-file");
     expect(row.dataset.highlighted).toBeUndefined();
     expect(within(row).queryByTestId("ask-agent")).toBeNull();
 
     rerender(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="advanced"
@@ -2550,7 +2582,7 @@ describe("SettingsDialog", () => {
   it("hands every workspace settings answer to the shell", async () => {
     const onWorkspaceSettingsRead = vi.fn();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="advanced"
@@ -2566,7 +2598,7 @@ describe("SettingsDialog", () => {
   it("persists an edited attachment folder name", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog
+      <SettingsDialog workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="files"

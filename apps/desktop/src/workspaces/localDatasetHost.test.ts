@@ -671,3 +671,32 @@ describe("local dataset owner adapter", () => {
     expect(await readdir(target)).toEqual([]);
   });
 });
+
+it("returns transfer metadata even when the page prunes every local head", async () => {
+  const { host, workspaceRoot } = await open(); await activate(host);
+  expect(host.historyHeads({ positions: [], sourceIds: [id(1)] })).toMatchObject({ transferred: [], pages: [] });
+  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  try { db.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,?,?,?,?)").run("w", id(1), "transfer", "https://relay.example", "{}", "imported", digest("manifest"), null, null); }
+  finally { db.close(); }
+  expect(host.historyHeads({ positions: [], sourceIds: [id(1)] })).toMatchObject({ transferred: [id(1)], pages: [] });
+});
+
+it("selects local and transferred sources together by retained journal activity", async () => {
+  const { host, workspaceRoot } = await open(); await activate(host);
+  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  try {
+    const journal = createDatasetJournal({ db, transaction: work => work() });
+    const insert = db.prepare("INSERT INTO dohc_dataset_catalog SELECT workspace_id,?,revision_json,artifacts_json FROM dohc_dataset_catalog WHERE dataset_id=?");
+    for (let n = 2; n <= 134; n++) {
+      journal.initialize({ scope: { workspaceId: "w", datasetId: id(n) }, hostEpoch: "epoch", approvedRevisionHash: digest(id(n)),
+        source: "source", schemaSql: "schema", definitionJson: "{}", checkpoint: new Uint8Array([1]), authorize() {} });
+      insert.run(id(n), id(1));
+    }
+    for (let n = 1; n <= 134; n++) db.prepare("UPDATE dohc_dataset_checkpoint_times SET recorded_at_ms=? WHERE dataset_id=?").run(n, id(n));
+    db.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,?,?,?,?)").run("w", id(134), "transfer", "https://relay.example", "{}", "imported", digest("manifest"), null, null);
+  } finally { db.close(); }
+  const heads = host.historyHeads({ limit: 1 });
+  expect(heads.sourceCount).toBe(134); expect(heads.sourceIds).toHaveLength(129);
+  expect(heads.sourceIds[0]).toBe(id(134)); expect(heads.sourceIds).not.toContain(id(1));
+  expect(heads.transferred).toEqual([id(134)]); expect(heads.pages).toHaveLength(128);
+});
