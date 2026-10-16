@@ -1,3 +1,4 @@
+import { workspaceIsDeleted, accountIsFenced } from "./storage/accountDeletion";
 import {isDeepStrictEqual} from "node:util";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
@@ -418,10 +419,11 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   }
 
   async function nameOf(ws: WorkspaceState, userId: string): Promise<string | null> {
+    if (accountIsFenced(storage, userId)) return null;
     const known = ws.names.get(userId);
     if (known !== undefined) return known;
     const name = (await options.lookupUserDisplayName(userId))?.trim() || null;
-    if (name !== null) ws.names.set(userId, cutText(name, 40));
+    if (name !== null && !accountIsFenced(storage, userId) && !ws.closed) ws.names.set(userId, cutText(name, 40));
     return ws.names.get(userId) ?? null;
   }
 
@@ -927,7 +929,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     if (current && current.replica === replica) return;
     const opening = current ? close(current) : Promise.resolve();
     void opening.then(() => {
-      if (!closed && replica && replicas.replica(workspaceId) === replica && !hosted.has(workspaceId)) open(replica);
+      if (!closed && !workspaceIsDeleted(storage, workspaceId) && replica && replicas.replica(workspaceId) === replica && !hosted.has(workspaceId)) open(replica);
     }).catch((error: unknown) => options.onError(`close the automations of workspace "${workspaceId}"`, error));
   }
 
@@ -945,7 +947,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
 
   let capacityReporting = Promise.resolve();
   const excluded = new Map<string, { ownerUserId: string; noticeId: string }>();
-  const allWantedWorkspaces = () => [...new Set([...storage.serverHostedWorkspaces(), ...(options.live?.workspaces() ?? []), ...(options.datasetHost?.automations.wantedWorkspaces() ?? [])])];
+  const allWantedWorkspaces = () => [...new Set([...storage.serverHostedWorkspaces(), ...(options.live?.workspaces() ?? []), ...(options.datasetHost?.automations.wantedWorkspaces() ?? [])])].filter(id => !workspaceIsDeleted(storage, id));
   function wantedWorkspaces(): string[] {
     const running = runningWorkspaces();
     // A copy an owner's action reopened stays open while the action runs,
@@ -1171,6 +1173,13 @@ export async function startAutomationServer(options: AutomationServerOptions) {
   });
 
   return {
+    deleteAccount(userId: string) {
+      for (const ws of hosted.values()) ws.names.delete(userId);
+    },
+    async deleteWorkspaces(workspaceIds: readonly string[]) {
+      for (const id of workspaceIds) {const ws = hosted.get(id); if (ws) await close(ws); visits.delete(id); excluded.delete(id); toldOverBudget.delete(id); gate.forgetWorkspace(id);}
+      await replicas.deleteWorkspaces(workspaceIds);
+    },
     async pressDataset(auth: Extract<AppBackendAuth, { kind: "named" }>, input: DatasetServerPress, signal: AbortSignal) {
       if (!options.datasetHost) throw notFound();
       return options.datasetHost.automations.press(auth, input.datasetId, signal, async describe => {
@@ -1282,6 +1291,7 @@ export function createRunGate(input: {
   });
 
   return {
+    forgetWorkspace(workspaceId: string) {buckets.delete(workspaceId);},
     async admit(workspaceId: string, signal: AbortSignal): Promise<RunAdmission | null> {
       for (;;) {
         if (signal.aborted) return null;

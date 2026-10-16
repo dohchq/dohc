@@ -46,6 +46,8 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "moments.list"
                 | "moments.get"
                 | "history.page"
+                | "history.operations"
+                | "history.undo"
         )
 }
 
@@ -90,6 +92,8 @@ impl EngineService {
                 | "sync.materializePendingCursor"
                 | "sync.commitCursor"
                 | "sync.push"
+                | "sync.createHostedReplica"
+                | "sync.pullHosted"
                 // The claim ledger, so the relay's automations can run the
                 // field changes this host claims when it accepts a live frame.
                 // Nothing that writes files, chats, schedules, or presses.
@@ -171,6 +175,12 @@ impl EngineService {
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
+        if request.method == "replica.cut" {
+            return Ok(ServiceResponse::response(Response {
+                id,
+                result: self.replica_cut(request.workspace, request.params).await?,
+            }));
+        }
         if let Some(action) = request.method.strip_prefix("ydoc.ownerStop.") {
             if !matches!(action, "request" | "release" | "clear" | "list" | "retired") {
                 return Err(WireError::new(
@@ -387,6 +397,13 @@ impl EngineService {
             "sync.recoverOrigin" => {
                 Box::pin(self.sync_recover_origin(&ctx, request.workspace, request.params)).await?
             }
+            "sync.createHostedReplica" => {
+                Box::pin(self.sync_create_hosted_replica(&ctx, request.workspace, request.params))
+                    .await?
+            }
+            "sync.pullHosted" => {
+                Box::pin(self.sync_pull_hosted(&ctx, request.workspace, request.params)).await?
+            }
             "keys.upload" => {
                 Box::pin(self.keys_upload(&ctx, request.workspace, request.params)).await?
             }
@@ -550,7 +567,10 @@ impl EngineService {
                 self.capture_set_author(&ctx, request.workspace, request.params)
                     .await?
             }
-            "capture.hold" => self.capture_hold(&ctx, request.workspace).await?,
+            "capture.hold" => {
+                self.capture_hold(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "capture.renew" => {
                 self.capture_renew(request.workspace, request.params)
                     .await?
@@ -595,6 +615,11 @@ impl EngineService {
                 self.moments_list(&ctx, request.workspace, request.params)
                     .await?
             }
+            "history.operations" => {
+                self.history_operation(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "history.undo" => self.history_undo(&ctx, request).await?,
             "history.page" => {
                 self.history_page(&ctx, request.workspace, request.params)
                     .await?
@@ -1057,6 +1082,7 @@ impl EngineService {
             && !matches!(
                 method,
                 "workspace.close"
+                    | "replica.cut"
                     | "replica.frontiers"
                     | "replica.applyJournalPage"
                     | "sync.adoptJoinIdentity"
@@ -1230,6 +1256,8 @@ mod tests {
             "sync.materializePendingCursor",
             "sync.commitCursor",
             "sync.push",
+            "sync.createHostedReplica",
+            "sync.pullHosted",
         ] {
             request.method = method.into();
             request.workspace = Some(attached_handle.clone());
@@ -1528,8 +1556,10 @@ mod tests {
             "sync.resetClaimRefusal",
             "sync.materializePendingCursor",
             "sync.commitCursor",
+            "sync.createHostedReplica",
             "sync.probe",
             "sync.pull",
+            "sync.pullHosted",
             "sync.remoteChanges",
             "sync.push",
             "sync.recoverOrigin",
