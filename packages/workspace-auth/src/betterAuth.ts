@@ -1,5 +1,5 @@
 import { betterAuth } from "better-auth";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthEndpoint, sessionMiddleware } from "better-auth/api";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
 import type { SignUpAdmission } from "./signUp";
@@ -39,9 +39,14 @@ interface WorkspaceAuthOptions {
   // sign-up password, so on a closed server no password works until someone
   // opens the emailed link and chooses one there.
   admitAccount?: (email: string) => Promise<SignUpAdmission>;
+  accountDeletion?: {
+    preview(user: { id: string; email: string }): Promise<Record<string, unknown>>;
+    delete(user: { id: string; email: string }, token: string, confirmPassword: () => Promise<void>): Promise<Record<string, unknown>>;
+  };
 }
 
 export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
+  const passwordAttemptLimit = { window: 60, max: 10 };
   // The browser account pages live at the auth origin, so every emailed link
   // points at a dohc page that then calls /api/auth itself.
   const page = (path: string): string => new URL(path, options.baseURL).toString();
@@ -167,7 +172,8 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       window: 60,
       max: 600,
       customRules: {
-        "/sign-in/email": { window: 60, max: 10 },
+        "/sign-in/email": passwordAttemptLimit,
+        "/account/delete": passwordAttemptLimit,
         "/sign-up/email": { window: 3600, max: 10 },
         "/request-password-reset": { window: 3600, max: 5 },
         "/forget-password": { window: 3600, max: 5 },
@@ -176,6 +182,29 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       },
     },
     plugins: [
+      ...(options.accountDeletion ? [{
+        id: "dohc-account-deletion",
+        endpoints: {
+          accountDeletionPreview: createAuthEndpoint("/account/deletion-preview", {method: "POST", use: [sessionMiddleware], requireHeaders: true}, async ctx => {
+            return ctx.json(await options.accountDeletion!.preview(ctx.context.session.user));
+          }),
+          deleteServerAccount: createAuthEndpoint("/account/delete", {method: "POST", use: [sessionMiddleware], requireHeaders: true}, async ctx => {
+            const body: unknown = ctx.body;
+            const token = body && typeof body === "object" && "previewToken" in body ? body.previewToken : undefined;
+            if (typeof token !== "string" || token.length > 512) throw new APIError("BAD_REQUEST", {code: "PREVIEW_REQUIRED", message: "Review account deletion before continuing."});
+            return ctx.json(await options.accountDeletion!.delete(ctx.context.session.user, token, async () => {
+              const password = body && typeof body === "object" && "password" in body ? body.password : undefined;
+              if (typeof password !== "string" || password.length === 0) throw new APIError("BAD_REQUEST", {code: "PASSWORD_REQUIRED", message: "Enter your server account password to delete this account."});
+              try {
+                await ctx.context.password.checkPassword(ctx.context.session.user.id, ctx);
+              } catch (error) {
+                if (error instanceof APIError && error.body?.code === "INVALID_PASSWORD") throw new APIError("BAD_REQUEST", {code: "INVALID_PASSWORD", message: "The password is incorrect. Enter your server account password."});
+                throw error;
+              }
+            }));
+          }),
+        },
+      }] : []),
       // The desktop authenticates API calls with `Authorization: Bearer
       // <session token>` (the device flow's access_token IS a session token).
       bearer(),

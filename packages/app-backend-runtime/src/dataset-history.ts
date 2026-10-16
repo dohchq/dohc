@@ -4,12 +4,28 @@ import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifact
 import type { DatasetScope, JournalDb } from "./journal.js";
 import { datasetHistoryUndo } from "./dataset-history-undo.js";
 
+const statements = new WeakMap<JournalDb, Map<string, ReturnType<JournalDb["prepare"]>>>();
+export function historyStatement(db: JournalDb, sql: string) {
+  let cache = statements.get(db);
+  if (!cache) { cache = new Map(); statements.set(db, cache); }
+  let statement = cache.get(sql);
+  if (!statement) { statement = db.prepare(sql); cache.set(sql, statement); }
+  return statement;
+}
+
+/** Latest dated journal revision, using each table's workspace/dataset/revision index. */
+export const historyActivitySql = `(SELECT recorded_at_ms FROM (
+  SELECT * FROM (SELECT revision,recorded_at_ms FROM dohc_dataset_events WHERE workspace_id=j.workspace_id AND dataset_id=j.dataset_id ORDER BY revision DESC LIMIT 1)
+  UNION ALL SELECT * FROM (SELECT revision,recorded_at_ms FROM dohc_dataset_checkpoint_times WHERE workspace_id=j.workspace_id AND dataset_id=j.dataset_id ORDER BY revision DESC LIMIT 1)
+) ORDER BY revision DESC LIMIT 1)`;
+
 /** Called inside an owner-authorized transaction. No input payloads or grants leave this boundary. */
-export function readDatasetHistory(db: JournalDb, scope: DatasetScope, approved: DatasetRevision, before: number, limit: number) {
-  const rows = db.prepare(`WITH changes AS (
+export function readDatasetHistory(db: JournalDb, scope: DatasetScope, approved: DatasetRevision | undefined, before: number, limit: number, metadataOnly = false) {
+  const receipt = metadataOnly ? "NULL" : "CASE WHEN length(CAST(e.result_json AS BLOB)) <= 16384 THEN e.result_json END";
+  const changes = `WITH changes AS (
     SELECT e.revision,e.operation,e.caller_key,e.recorded_at_ms,e.approved_revision_hash,
       length(e.changeset) AS changeset_bytes,json_array_length(e.attached_file_ids) AS attachment_count,
-      CASE WHEN length(CAST(e.result_json AS BLOB)) <= 16384 THEN e.result_json END AS undo_receipt,
+      ${receipt} AS undo_receipt,
       NULL AS previous_hash,a.automation_id,a.depth AS automation_depth FROM dohc_dataset_events e
       LEFT JOIN dohc_dataset_automation_revisions a ON a.workspace_id=e.workspace_id AND a.dataset_id=e.dataset_id AND a.revision=e.revision
       WHERE e.workspace_id=? AND e.dataset_id=? AND e.revision<?
@@ -25,17 +41,21 @@ export function readDatasetHistory(db: JournalDb, scope: DatasetScope, approved:
       LEFT JOIN dohc_dataset_checkpoint_times t ON t.workspace_id=j.workspace_id AND t.dataset_id=j.dataset_id AND t.revision=j.checkpoint_revision
       WHERE j.workspace_id=? AND j.dataset_id=? AND j.checkpoint_revision<? AND j.checkpoint_previous_json IS NOT NULL
         AND json_extract(j.checkpoint_previous_json,'$.approvedRevisionHash') != j.approved_revision_hash
-  ) SELECT * FROM changes ORDER BY revision DESC LIMIT ?`).all(
-    scope.workspaceId, scope.datasetId, before, scope.workspaceId, scope.datasetId, before,
-    scope.workspaceId, scope.datasetId, before, limit + 1);
+   )`;
+  const bindings = [scope.workspaceId, scope.datasetId, before, scope.workspaceId, scope.datasetId, before, scope.workspaceId, scope.datasetId, before];
+  const rows = historyStatement(db, `${changes} SELECT * FROM changes ORDER BY revision DESC LIMIT ?`).all(...bindings, limit + 1);
+  let olderRecordedAtMs = rows.find(row => row.recorded_at_ms !== null)?.recorded_at_ms ?? null;
+  if (metadataOnly && rows[0]?.recorded_at_ms === null && olderRecordedAtMs === null) {
+    olderRecordedAtMs = historyStatement(db, `${changes} SELECT recorded_at_ms FROM changes WHERE recorded_at_ms IS NOT NULL ORDER BY revision DESC LIMIT 1`).get(...bindings)?.recorded_at_ms ?? null;
+  }
   const entries = [];
   let undoBytes = 0;
   for (const row of rows.slice(0, limit)) {
-    const undo = datasetHistoryUndo(approved, String(row.operation), String(row.approved_revision_hash), row.undo_receipt);
+    const undo = !metadataOnly && approved ? datasetHistoryUndo(approved, String(row.operation), String(row.approved_revision_hash), row.undo_receipt) : undefined;
     const bytes = undo ? Buffer.byteLength(JSON.stringify(undo)) : 0;
     if (entries.length && undoBytes + bytes > 64 * 1024) break;
     undoBytes += bytes;
-    const approval = row.previous_hash === null ? undefined : db.prepare("SELECT agent_json FROM dohc_dataset_approval_provenance WHERE workspace_id=? AND dataset_id=? AND revision=? AND approved_revision_hash=?").get(scope.workspaceId,scope.datasetId,Number(row.revision),String(row.approved_revision_hash));
+    const approval = row.previous_hash === null ? undefined : historyStatement(db, "SELECT agent_json FROM dohc_dataset_approval_provenance WHERE workspace_id=? AND dataset_id=? AND revision=? AND approved_revision_hash=?").get(scope.workspaceId,scope.datasetId,Number(row.revision),String(row.approved_revision_hash));
     entries.push({ ...(approval ? {approvalAgent:parseApprovalAgent(JSON.parse(String(approval.agent_json)))} : {}), revision: Number(row.revision), operation: String(row.operation),
       callerReference: row.caller_key === null ? null : String(row.caller_key),
       recordedAtMs: row.recorded_at_ms === null ? null : Number(row.recorded_at_ms),
@@ -45,7 +65,7 @@ export function readDatasetHistory(db: JournalDb, scope: DatasetScope, approved:
       ...(row.automation_id === null ? {} : { automation: { automationId: String(row.automation_id), depth: Number(row.automation_depth) } }),
       ...(row.previous_hash === null ? {} : { schema: { previousRevisionHash: String(row.previous_hash), revisionHash: String(row.approved_revision_hash) } }) });
   }
-  return { entries, nextBeforeRevision: rows.length > entries.length ? entries.at(-1)!.revision : null };
+  return { ...(metadataOnly ? { olderRecordedAtMs: olderRecordedAtMs === null ? null : Number(olderRecordedAtMs) } : {}), entries, nextBeforeRevision: rows.length > entries.length ? entries.at(-1)!.revision : null };
 }
 
 /** Returns the immutable approved source, never the mutable workspace file at the same path. */

@@ -127,6 +127,9 @@ struct CaptureApplyProbeInner {
     fence_release: tokio::sync::Semaphore,
     fence_wait_armed: std::sync::atomic::AtomicBool,
     fence_wait_entered: tokio::sync::Semaphore,
+    undo_placement_armed: std::sync::atomic::AtomicBool,
+    undo_placement_entered: tokio::sync::Semaphore,
+    undo_placement_release: tokio::sync::Semaphore,
     commit_armed: std::sync::atomic::AtomicBool,
     commit_entered: tokio::sync::Semaphore,
     commit_release: tokio::sync::Semaphore,
@@ -158,6 +161,9 @@ impl Default for CaptureApplyProbeInner {
             fence_release: tokio::sync::Semaphore::new(0),
             fence_wait_armed: std::sync::atomic::AtomicBool::new(false),
             fence_wait_entered: tokio::sync::Semaphore::new(0),
+            undo_placement_armed: std::sync::atomic::AtomicBool::new(false),
+            undo_placement_entered: tokio::sync::Semaphore::new(0),
+            undo_placement_release: tokio::sync::Semaphore::new(0),
             commit_armed: std::sync::atomic::AtomicBool::new(false),
             commit_entered: tokio::sync::Semaphore::new(0),
             commit_release: tokio::sync::Semaphore::new(0),
@@ -250,6 +256,23 @@ impl CaptureApplyProbe {
             .await
             .expect("capture apply probe remains open")
             .forget();
+    }
+
+    pub fn pause_next_undo_placement(&self) {
+        self.inner
+            .undo_placement_armed
+            .store(true, Ordering::Release);
+    }
+    pub async fn wait_until_undo_placement_paused(&self) {
+        self.inner
+            .undo_placement_entered
+            .acquire()
+            .await
+            .expect("Undo probe open")
+            .forget();
+    }
+    pub fn release_undo_placement(&self) {
+        self.inner.undo_placement_release.add_permits(1);
     }
 
     pub fn pause_next_version_commit(&self) {
@@ -410,6 +433,23 @@ impl CaptureApplyProbe {
             if self.inner.fence_wait_armed.swap(false, Ordering::AcqRel) {
                 self.inner.fence_wait_entered.add_permits(1);
             }
+        }
+    }
+
+    pub(crate) async fn pause_undo_placement_if_armed(&self) {
+        #[cfg(feature = "harness")]
+        if self
+            .inner
+            .undo_placement_armed
+            .swap(false, Ordering::AcqRel)
+        {
+            self.inner.undo_placement_entered.add_permits(1);
+            self.inner
+                .undo_placement_release
+                .acquire()
+                .await
+                .expect("Undo probe open")
+                .forget();
         }
     }
 
@@ -1371,6 +1411,7 @@ async fn manifest_seed(
     root: &Path,
     actor: &ActorHandle,
     workspace_id: &str,
+    operation_id: Option<&str>,
 ) -> Result<ManifestSeed, RuntimeError> {
     let version_id = match actor.active_version_id(workspace_id.to_owned()).await {
         Ok(version_id) => version_id,
@@ -1379,9 +1420,16 @@ async fn manifest_seed(
         }
         Err(error) => return Err(error),
     };
-    let entries = actor
-        .capture_manifest_seed(workspace_id.to_owned(), version_id)
-        .await?;
+    let entries = if let Some(operation) = operation_id {
+        // Include authored heads so outside edits reconcile into the affected objects.
+        actor
+            .history_operation_capture_seed(workspace_id.to_owned(), operation.to_owned())
+            .await?
+    } else {
+        actor
+            .capture_manifest_seed(workspace_id.to_owned(), version_id)
+            .await?
+    };
     if entries.is_empty() {
         return Ok(ManifestSeed::Existing(None));
     }
@@ -2051,7 +2099,7 @@ impl DriverEnv for RealEnv {
         // layer claims to be current).
         let fingerprint_before_seed = policy_fingerprint(&self.root);
         let (seed, seed_loaded) =
-            match manifest_seed(&self.root, &self.actor, &self.workspace_id).await {
+            match manifest_seed(&self.root, &self.actor, &self.workspace_id, None).await {
                 Ok(seed) => (seed, true),
                 Err(_) => {
                     // Empty is the conservative capture fallback, but a failed
@@ -2332,6 +2380,7 @@ pub(crate) async fn reconcile_full_for_switch(
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
     author_json: Option<String>,
+    operation_id: Option<&str>,
     provenance: CaptureProvenance,
     events: EngineEvents,
     token: CancellationToken,
@@ -2339,13 +2388,29 @@ pub(crate) async fn reconcile_full_for_switch(
     if token.is_cancelled() {
         return Err(SwitchReconcileError::Cancelled);
     }
-    let seed = manifest_seed(root, actor, workspace_id)
+    let seed = manifest_seed(root, actor, workspace_id, operation_id)
         .await
         .map_err(|_| SwitchReconcileError::Unavailable)?
         .into_scan_seed();
     let captured_root = bind_capture_root(root).map_err(|_| SwitchReconcileError::Unavailable)?;
+    let paths = if let Some(operation) = operation_id {
+        let group = actor
+            .history_operation(workspace_id.to_owned(), operation.to_owned())
+            .await
+            .map_err(|_| SwitchReconcileError::Unavailable)?;
+        let mut paths: Vec<String> = group
+            .moments
+            .into_iter()
+            .flat_map(|m| std::iter::once(m.path).chain(m.before_path))
+            .collect();
+        paths.sort();
+        paths.dedup();
+        Some(paths)
+    } else {
+        None
+    };
     let files =
-        FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
+        FilesActor::spawn_async_with_paths(root.to_path_buf(), ScanBounds::default(), seed, paths)
             .await
             .map_err(|_| SwitchReconcileError::Unavailable)?;
     let files = FilesActorCloseGuard::new(files);
@@ -2402,6 +2467,9 @@ pub(crate) async fn reconcile_full_for_switch(
             };
             if !applied || deferred {
                 Err(SwitchReconcileError::ApplyFailed)
+            } else if operation_id.is_some() {
+                // Undo checks every affected hold atomically with its inverse commit.
+                Ok(manifest_changed)
             } else {
                 Ok(manifest_changed)
             }

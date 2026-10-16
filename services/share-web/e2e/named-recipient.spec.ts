@@ -10,6 +10,7 @@ import {markdownToYDoc, yDocToMarkdown} from "@dohc/ydoc-projection";
 import {createLiveFrameSession, encodeLiveFrameSync, type LiveFrame} from "@dohc/live-session-contract/live-frame";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {ensureLocalhostTls} from "../src/testing/device-control/localhostTls.js";
+import {viewerPage} from "../viewer/src/pages";
 
 // Real browser, HTTPS/WSS, editor and wire codec. This host fixture does not prove native durability or account authentication.
 test("named invitation signs in, edits the current Y.Doc, and preserves a stopped draft for review", async ({browser}, testInfo) => {
@@ -19,7 +20,7 @@ test("named invitation signs in, edits the current Y.Doc, and preserves a stoppe
   const limits = {provider: {frames, maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4},
     maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 5000, sendTimeoutMs: 1000, drainPollMs: 10};
   const doc = markdownToYDoc("# Shared file\n\nEdit together.");
-  const binding = {workspaceId: "workspace", mainVersionId: "main" as const, objectId: "document", lineageClaimId: "a".repeat(64),
+  const binding = {workspaceId: "named:grant", mainVersionId: "main" as const, objectId: "document", lineageClaimId: "a".repeat(64),
     currentPath: "docs/shared.md", selectorPaths: ["docs"], restoreFenceGeneration: 1};
   let origin = "", accept = true, cursor = 0, refuseSession: (() => void) | undefined;
   const failures: string[] = [], sockets = new WebSocketServer({noServer: true, perMessageDeflate: false, handleProtocols: protocols => protocols.has("dohc-live-v1") ? "dohc-live-v1" : false});
@@ -37,12 +38,12 @@ test("named invitation signs in, edits the current Y.Doc, and preserves a stoppe
       }
       if (url.pathname.startsWith("/api/")) {
         if (!authenticated) {response.writeHead(404).end(); return;}
-        if (url.pathname === "/api/live/named-documents") {json({subjectName: "Trip", sharerName: "Ana (owner@dohc.test)", access: "edit", userId: "alice", workspaceId: "workspace", shareId: "share", grantId: "grant", limits, files: [{objectId: "document", path: binding.currentPath}]}); return;}
+        if (url.pathname === "/api/live/named-documents") {json({subjectName: "Trip", sharerName: "Ana (owner@dohc.test)", access: "edit", userId: "alice", workspaceId: "named:grant", shareId: "share", grantId: "grant", limits, files: [{objectId: "document", path: binding.currentPath}]}); return;}
         if (url.pathname === "/api/live/named-session") {json({discriminator: "abcdefghijkl", expiresAtMs: Date.now() + 60000}); return;}
         if (url.pathname === "/api/live/named-ticket") {json({token: "ab".repeat(32), expiresAtMs: Date.now() + 60000}); return;}
         response.writeHead(404).end(); return;
       }
-      const asset = url.pathname.startsWith("/s/assets/") ? url.pathname.slice(3) : "index.html";
+      const asset = url.pathname.startsWith("/s/assets/") ? url.pathname.slice(3) : viewerPage(url.pathname);
       if (asset.includes("..")) {response.writeHead(404).end(); return;}
       response.setHeader("content-type", asset.endsWith(".js") ? "text/javascript" : asset.endsWith(".css") ? "text/css" : "text/html");
       response.end(await readFile(join(service, "viewer/dist", asset)));

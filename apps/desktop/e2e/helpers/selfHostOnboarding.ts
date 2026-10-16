@@ -352,6 +352,7 @@ function selfHostLiveEnv(directory: string, origin: string): NodeJS.ProcessEnv {
     DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
     DOHC_RELAY_PUBLIC_ORIGIN: origin,
     DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
+    DOHC_RELAY_SHARE_WEB_URL: origin,
     DOHC_RELAY_NAMED_LIVE_HOSTS: new URL(origin).host,
     DOHC_RELAY_LINK_KEY: randomBytes(32).toString("hex"),
     DOHC_RELAY_EXCHANGE_KEY: randomBytes(32).toString("hex"),
