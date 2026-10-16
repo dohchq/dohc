@@ -109,7 +109,7 @@ Pass `--detach` to submit the request and return at once.
 - A run that fails a check is reported at once. The service never retries it.
 - A run stops and fails after two hours of awake time. Time the machine spends asleep does not count.
 - While Docker does not respond, runs that need the JavaScript gate wait and Rust-only runs continue.
-- A run beyond the first starts only while free memory is at least 10 GB. A check that fails after free memory fell below 3 GB during the run is retried as a machine failure.
+- A run beyond the first starts only while free memory is at least 10 GB. The service counts only its own runs here, not inline gates holding a lane. A check that fails after free memory fell below 3 GB during the run is retried as a machine failure.
 - While free disk is below the 40 GB floor, no run starts. The service first deletes the build output of its lanes that have no run.
 
 Each lane runs with its own temp folder, `C:\w\_verification\tmp\<lane>`, which antivirus skips and the service empties before each run.
@@ -179,7 +179,8 @@ If registered work arrives during measurement, it stops its own child and record
 Its host context covers registered lanes and does not prove that the host was otherwise idle.
 
 The host runs one verification at a time unless `verification-lanes` in the slot root holds a larger count, up to `4`.
-Every verifier and the queue service read that file, so all of them agree on the count. Direct `pnpm verify:pr` runs on the host take the same lanes.
+The queue service and every verifier from #1972 on read that file and agree on the count. Direct `pnpm verify:pr` runs on the host take the same lanes.
+A verifier older than #1972 reads only 1 or 2. While the setting is 3 or 4, its `--inline` gate fails at admission; its queued gates are unaffected, because the service holds their lane.
 The queue service runs each extra lane's requests in its own checkout, `C:\w\_verification\lane-2` to `lane-4`, and creates each one on its first run there. Each one's build output takes about 10 GB more disk.
 Use the dashboard's lane switch for 2 or 3 lanes. For another count, write the file on the host:
 
@@ -213,6 +214,7 @@ A computer restart stops every run in progress, and each one later starts again 
 4. Run `pnpm verify:queue resume`.
 
 The dashboard can do steps 1, 2, and 4: select Pause, wait for the banner `Paused and idle: safe to restart`, and select Resume after the restart.
+With 3 or more lanes, read step 2 from the dashboard or from `status` in a checkout that includes #1972. An older checkout counts inline gates only in lanes 1 and 2, so it can call a restart safe while lane 3 runs.
 
 While the queue is paused, runs in progress finish and no new run starts, the nightly run included. The line keeps its order.
 An inline run that holds a verification lane counts as running. An inline run without a lane waits, says once that the queue is paused, and starts after the resume.
