@@ -82,6 +82,8 @@ node tools/self-host/bootstrap.mjs init --origin https://your-server.your-tailne
 The command creates `.env.self-host` and generates the deployment secrets.
 It refuses to replace an existing configuration.
 Restrict access to this file; it contains credentials.
+Copy `DOHC_SNAPSHOT_KEY` to storage that does not depend on this server.
+Without that key, nobody can open the server's relay snapshots.
 
 Edit these SMTP settings and your approved email in `.env.self-host`:
 
@@ -314,6 +316,7 @@ Run the takedown command again after restoring such a backup.
 ## Back up and maintain the deployment
 
 Follow the [backup and recovery procedure](self-host-recovery.md) before changing your deployment.
+To upload an encrypted relay snapshot every hour, follow [Take hourly off-site snapshots](self-host-recovery.md#take-hourly-off-site-snapshots).
 Recovery must preserve revoked access; replacing current databases with an older snapshot is not a supported rollback.
 
 Stop the services without removing data:

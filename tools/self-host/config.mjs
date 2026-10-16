@@ -39,6 +39,14 @@ export function validateSettings(settings) {
   if (settings.DOHC_SERVER_NETWORK_ACCESS === 'private' && !/^https:\/\/[^/]+\.ts\.net(?::[0-9]+)?$/.test(settings.DOHC_PUBLIC_ORIGIN ?? '')) {
     errors.push('Private mode requires your Tailscale HTTPS hostname ending in .ts.net.');
   }
+  if (!/^[A-Za-z0-9_-]{43}$/.test(settings.DOHC_SNAPSHOT_KEY ?? '')) errors.push('Set DOHC_SNAPSHOT_KEY to the key that bootstrap generated.');
+  const storage = ['DOHC_SNAPSHOT_S3_ENDPOINT', 'DOHC_SNAPSHOT_S3_BUCKET', 'DOHC_SNAPSHOT_S3_ACCESS_KEY_ID', 'DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY'];
+  if (storage.some(name => settings[name])) {
+    for (const name of storage) if (!settings[name]) errors.push(`Set ${name}, or clear every DOHC_SNAPSHOT_S3_ value to turn off snapshot upload.`);
+    if (!/^https:\/\/[^/]+$/.test(settings.DOHC_SNAPSHOT_S3_ENDPOINT ?? '')) errors.push('Set DOHC_SNAPSHOT_S3_ENDPOINT to the storage service\'s HTTPS origin.');
+    if (!/^[^\s@,]+@[^\s@,]+$/.test(settings.DOHC_SNAPSHOT_ALERT_EMAIL ?? '')) errors.push('Set DOHC_SNAPSHOT_ALERT_EMAIL to the operator address for snapshot failures.');
+  }
+  if (settings.DOHC_SNAPSHOT_HEARTBEAT_URL && !settings.DOHC_SNAPSHOT_HEARTBEAT_URL.startsWith('https://')) errors.push('Set DOHC_SNAPSHOT_HEARTBEAT_URL to an HTTPS URL or leave it empty.');
   if (Boolean(settings.DOHC_SMTP_USER) !== Boolean(settings.DOHC_SMTP_PASSWORD)) errors.push('Set both DOHC_SMTP_USER and DOHC_SMTP_PASSWORD.');
   if (!['true', 'false'].includes(settings.DOHC_SMTP_SECURE)) errors.push('Set DOHC_SMTP_SECURE to true or false.');
   if (!/^\d+$/.test(settings.DOHC_SMTP_PORT ?? '') || Number(settings.DOHC_SMTP_PORT) < 1 || Number(settings.DOHC_SMTP_PORT) > 65535) errors.push('Set DOHC_SMTP_PORT to a valid port.');
@@ -47,5 +55,7 @@ export function validateSettings(settings) {
 
 export function composeArgs(envFile, settings, ...args) {
   return ['compose', '--env-file', resolve(envFile), '-f', 'docker-compose.self-host.yml',
-    ...(settings.DOHC_SERVER_NETWORK_ACCESS === 'private' ? ['-f', 'tools/self-host/compose.private.yml'] : []), ...args];
+    ...(settings.DOHC_SERVER_NETWORK_ACCESS === 'private' ? ['-f', 'tools/self-host/compose.private.yml'] : []),
+    // Hourly snapshots run only when off-site storage is configured.
+    ...(settings.DOHC_SNAPSHOT_S3_BUCKET ? ['--profile', 'snapshots'] : []), ...args];
 }

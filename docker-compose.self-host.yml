@@ -112,6 +112,34 @@ services:
       timeout: 5s
       retries: 20
 
+  relay-snapshot:
+    <<: *service
+    profiles: [snapshots]
+    entrypoint: [node, /app/services/sync-relay/dist/relay-snapshot.js]
+    command: [run, --database, /data/sync-relay.sqlite, --state-directory, /snapshots]
+    environment:
+      DOHC_SERVER_NAME: ${DOHC_SERVER_NAME:-dohc}
+      DOHC_SNAPSHOT_KEY: ${DOHC_SNAPSHOT_KEY:?Run the self-host bootstrap to generate secrets}
+      DOHC_SNAPSHOT_S3_ENDPOINT: ${DOHC_SNAPSHOT_S3_ENDPOINT:-}
+      DOHC_SNAPSHOT_S3_REGION: ${DOHC_SNAPSHOT_S3_REGION:-auto}
+      DOHC_SNAPSHOT_S3_BUCKET: ${DOHC_SNAPSHOT_S3_BUCKET:-}
+      DOHC_SNAPSHOT_S3_ACCESS_KEY_ID: ${DOHC_SNAPSHOT_S3_ACCESS_KEY_ID:-}
+      DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: ${DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY:-}
+      DOHC_SNAPSHOT_ALERT_EMAIL: ${DOHC_SNAPSHOT_ALERT_EMAIL:-}
+      DOHC_SNAPSHOT_HEARTBEAT_URL: ${DOHC_SNAPSHOT_HEARTBEAT_URL:-}
+      DOHC_SMTP_HOST: ${DOHC_SMTP_HOST:?Set DOHC_SMTP_HOST}
+      DOHC_SMTP_PORT: ${DOHC_SMTP_PORT:-587}
+      DOHC_SMTP_SECURE: ${DOHC_SMTP_SECURE:-false}
+      DOHC_SMTP_USER: ${DOHC_SMTP_USER:-}
+      DOHC_SMTP_PASSWORD: ${DOHC_SMTP_PASSWORD:-}
+      DOHC_SMTP_FROM: ${DOHC_SMTP_FROM:?Set DOHC_SMTP_FROM}
+    depends_on:
+      sync-relay: {condition: service_healthy}
+    # The relay database is read-only here; continuity is never mounted.
+    volumes:
+      - dohc_self_host_sync_relay:/data:ro
+      - dohc_self_host_snapshots:/snapshots
+
   share-web:
     <<: *service
     command: [share-web]
@@ -171,5 +199,6 @@ volumes:
   dohc_self_host_sync_relay:
   dohc_self_host_relay_continuity:
   dohc_self_host_host_data:
+  dohc_self_host_snapshots:
   dohc_self_host_tls:
   dohc_self_host_gateway_config:

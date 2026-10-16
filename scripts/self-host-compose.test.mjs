@@ -129,6 +129,33 @@ test('private mode selects the private-only gateway overlay and the real env fil
   assert.match(readFileSync('tools/self-host/compose.private.yml', 'utf8'), /127\.0\.0\.1/);
 });
 
+test('hourly snapshots read the relay read-only, never mount continuity, and start only with off-site storage', () => {
+  const service = compose.services['relay-snapshot'];
+  assert.deepEqual(service.profiles, ['snapshots']);
+  assert.deepEqual(service.volumes, ['dohc_self_host_sync_relay:/data:ro', 'dohc_self_host_snapshots:/snapshots']);
+  assert.ok(!JSON.stringify(service).includes('continuity'));
+  assert.equal(service.read_only, true);
+  assert.equal(service.depends_on['sync-relay'].condition, 'service_healthy');
+  assert.equal(service.environment.DOHC_SNAPSHOT_KEY, '${DOHC_SNAPSHOT_KEY:?Run the self-host bootstrap to generate secrets}');
+  assert.ok(!Object.keys(compose.services['sync-relay'].environment).some(name => name.startsWith('DOHC_SNAPSHOT_')));
+  assert.ok(!composeArgs('.env.self-host', settings(), 'up').includes('--profile'));
+  const enabled = composeArgs('.env.self-host', { ...settings(), DOHC_SNAPSHOT_S3_BUCKET: 'dohc-snapshots' }, 'up');
+  assert.deepEqual(enabled.slice(enabled.indexOf('--profile'), enabled.indexOf('--profile') + 3), ['--profile', 'snapshots', 'up']);
+});
+
+test('bootstrap generates a snapshot key and settings refuse partial snapshot storage', () => {
+  assert.match(settings().DOHC_SNAPSHOT_KEY, /^[A-Za-z0-9_-]{43}$/);
+  assert.ok(validateSettings({ ...settings(), DOHC_SNAPSHOT_KEY: 'change-me' }).some(error => error.includes('DOHC_SNAPSHOT_KEY')));
+  const storage = { DOHC_SNAPSHOT_S3_ENDPOINT: 'https://account.r2.cloudflarestorage.com', DOHC_SNAPSHOT_S3_BUCKET: 'dohc-snapshots',
+    DOHC_SNAPSHOT_S3_ACCESS_KEY_ID: 'id', DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: 'secret', DOHC_SNAPSHOT_ALERT_EMAIL: 'ops@team.invalid' };
+  assert.deepEqual(validateSettings({ ...settings(), ...storage }), []);
+  assert.deepEqual(validateSettings({ ...settings(), ...storage, DOHC_SNAPSHOT_HEARTBEAT_URL: 'https://heartbeat.invalid/ping' }), []);
+  assert.ok(validateSettings({ ...settings(), ...storage, DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: '' }).some(error => error.includes('DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY')));
+  assert.ok(validateSettings({ ...settings(), ...storage, DOHC_SNAPSHOT_ALERT_EMAIL: '' }).some(error => error.includes('DOHC_SNAPSHOT_ALERT_EMAIL')));
+  assert.ok(validateSettings({ ...settings(), ...storage, DOHC_SNAPSHOT_S3_ENDPOINT: 'http://storage.invalid' }).some(error => error.includes('HTTPS origin')));
+  assert.ok(validateSettings({ ...settings(), DOHC_SNAPSHOT_HEARTBEAT_URL: 'http://heartbeat.invalid' }).some(error => error.includes('HEARTBEAT')));
+});
+
 test('both gateways refuse internal paths before proxy handles', () => {
   for (const file of ['Caddyfile', 'Caddyfile.private']) {
     const config = readFileSync(`tools/self-host/${file}`, 'utf8');

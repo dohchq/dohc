@@ -16,7 +16,7 @@ export function initialSettings({ origin, mode = 'public', name = 'dohc', image 
   return {
     DOHC_PUBLIC_ORIGIN: origin, DOHC_PUBLIC_HOST: url.host, DOHC_IMAGE: image,
     DOHC_SERVER_NETWORK_ACCESS: mode, DOHC_SERVER_NAME: name,
-    ...Object.fromEntries(['POSTGRES_PASSWORD', 'BETTER_AUTH_SECRET', 'DOHC_RELAY_LINK_KEY', 'DOHC_RELAY_EXCHANGE_KEY']
+    ...Object.fromEntries(['POSTGRES_PASSWORD', 'BETTER_AUTH_SECRET', 'DOHC_RELAY_LINK_KEY', 'DOHC_RELAY_EXCHANGE_KEY', 'DOHC_SNAPSHOT_KEY']
       .map(key => [key, randomBytes(32).toString('base64url')])),
   };
 }
@@ -94,6 +94,7 @@ function main() {
   for (const [key, value] of Object.entries(settings)) content = content.replace(new RegExp(`^${key}=.*$`, 'm'), () => `${key}='${value}'`);
   writeFileSync(values['env-file'], content, { flag: 'wx', mode: 0o600 });
   console.log(`Created ${values['env-file']}. Restrict access to this file and preserve its secrets during upgrades.`);
+  console.log('Copy DOHC_SNAPSHOT_KEY to a password manager or other store away from this host. Lost keys make relay snapshots unreadable.');
   console.log('Set the SMTP values before starting the server. No network or containers were changed.');
   console.log(`Connection URL: ${values.origin}`);
   if (settings.DOHC_SERVER_NETWORK_ACCESS === 'private') console.log(privateRouteInstructions(settings).join('\n'));

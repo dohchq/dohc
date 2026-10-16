@@ -4,6 +4,7 @@ import { copyFile, lstat, mkdir, open, readFile, realpath, rename, stat, writeFi
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 import { validateRelayDeploymentMarker, withRelayDeploymentMaintenance, type DeploymentConfig } from "./relayDeployment";
+import { describeRelaySnapshot, parseRelaySnapshotManifest, relayRelease } from "./relaySnapshot";
 
 type Deployment = { config: Readonly<DeploymentConfig>; stamp: number };
 const snapshotName = "relay.sqlite";
@@ -79,11 +80,8 @@ export async function backupRelayDeployment(configPath: string, directory: strin
       try { snapshot.exec("PRAGMA journal_mode=DELETE"); } finally { snapshot.close(); }
       await inspectSnapshot(path, deployment);
       await syncFile(path);
-      await writeFile(join(directory, "manifest.json"), JSON.stringify({
-        version: 1, kind: "dohc-relay-snapshot", namespace: deployment.config.namespace,
-        generation: deployment.config.generation, stamp: deployment.stamp,
-        sha256: await digest(path), createdAt: new Date().toISOString(),
-      }, null, 2) + "\n", { flag: "wx", mode: 0o600, flush: true });
+      const manifest = await describeRelaySnapshot(path, relayRelease());
+      await writeFile(join(directory, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", { flag: "wx", mode: 0o600, flush: true });
       await syncDirectory(directory);
       await syncDirectory(dirname(directory));
     } finally { source.close(); }
@@ -94,9 +92,8 @@ async function checkedSnapshot(directory: string, deployment: Deployment): Promi
   await directoryOutsideDeployment(directory, deployment, false);
   const manifestPath = join(directory, "manifest.json");
   await canonical(manifestPath);
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-  if (manifest?.version !== 1 || manifest.kind !== "dohc-relay-snapshot" ||
-      manifest.namespace !== deployment.config.namespace || manifest.generation !== deployment.config.generation ||
+  const manifest = parseRelaySnapshotManifest(JSON.parse(await readFile(manifestPath, "utf8")));
+  if (manifest.namespace !== deployment.config.namespace || manifest.generation !== deployment.config.generation ||
       manifest.stamp !== deployment.stamp) {
     throw new Error("This snapshot does not match current deployment continuity. Preserve it for recovery; do not reset continuity.");
   }

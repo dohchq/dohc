@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,6 +81,36 @@ test("restore and failed maintenance remain stopped", async t => {
     assert.equal(mock.calls.some(args => args.includes("start")), false);
   }
 });
+test("snapshot runs online and never stops, restarts or deletes anything", async t => {
+  const root = await fixture(t), mock = runner();
+  await runRecovery(parseRecoveryArguments(["snapshot", join(root, "offsite")]), mock.run, () => {}, ["compose"]);
+  assert.equal(mock.calls.some(args => args.includes("stop") || args.includes("start") || args.includes("rm") || args.includes("down")), false);
+  const run = mock.calls.find(args => args.includes("run"));
+  assert.deepEqual(run.slice(run.indexOf("relay-snapshot")), ["relay-snapshot", "snapshot", "--database", "/data/sync-relay.sqlite",
+    "--state-directory", "/snapshots", "--directory", "/backup/offsite"]);
+  assert.ok(run.includes(`${root}:/backup`));
+});
+
+test("verify mounts no deployment volume and passes only the snapshot key", async t => {
+  const root = await fixture(t), envFile = join(root, "env");
+  await writeFile(envFile, "DOHC_SNAPSHOT_KEY=key-from-env\nPOSTGRES_PASSWORD=not-passed\n");
+  const snapshot = join(root, "taken.dohc-snapshot");
+  await writeFile(snapshot, "sealed");
+  const calls = [];
+  const run = (args, env) => { calls.push({ args, env }); return args.includes("config") ? JSON.stringify(config) : "verified"; };
+  await runRecovery(parseRecoveryArguments(["verify", join(root, "checked"), "--snapshot", snapshot, "--env-file", envFile]), run, () => {}, ["compose"]);
+  const verify = calls.at(-1);
+  assert.deepEqual(verify.env, { DOHC_SNAPSHOT_KEY: "key-from-env" });
+  assert.equal(verify.args.filter(value => value.startsWith("type=volume")).length, 0);
+  assert.deepEqual(verify.args.slice(verify.args.indexOf("--network"), verify.args.indexOf("--network") + 2), ["--network", "none"]);
+  assert.ok(verify.args.includes(`type=bind,source=${root},target=/source,readonly`));
+  assert.equal(calls.some(({ args }) => args.includes("stop") || args[0] === "volume"), false);
+  await mkdir(join(root, "existing"));
+  await assert.rejects(runRecovery(parseRecoveryArguments(["verify", join(root, "existing"), "--snapshot", snapshot, "--env-file", envFile]), run, () => {}, ["compose"]), /new directory/);
+  assert.throws(() => parseRecoveryArguments(["verify", join(root, "checked")]));
+  assert.throws(() => parseRecoveryArguments(["backup", join(root, "b"), "--snapshot", snapshot]));
+});
+
 test("a foreign volume user is refused before stop", async t => {
   const root = await fixture(t), mock = runner({ foreign: true });
   await assert.rejects(runRecovery(parseRecoveryArguments(["backup", join(root, "snapshot")]), mock.run, () => {}, ["compose"]), /Another running project/);
