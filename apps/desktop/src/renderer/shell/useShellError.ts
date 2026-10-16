@@ -3,6 +3,7 @@ import { shareCaptureNoticeState } from "../../workspaces/shareCaptureNotice";
 import type { ShareUnconfirmedChanges } from "../../workspaces/shareViewInfo";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import type { ReportKinds } from "../../ipc/bridgeContract";
+import type { ReportButtonError } from "../collections/useAutomationButtons";
 import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -281,6 +282,12 @@ export function useShellError(workspaceId: string) {
       });
     },
     [push],
+  );
+  // The error hook the shell hands its parts (ReportButtonError): no kind, and
+  // an identity when the part names what failed.
+  const reportButtonError = useCallback<ReportButtonError>(
+    (fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity),
+    [reportShellError],
   );
   // A failure already worded for the person. Report facts, such as a raw
   // cause, go into Copy details only; so does `cause`, the error that caused
@@ -654,6 +661,7 @@ export function useShellError(workspaceId: string) {
     clearKind,
     clearIdentity,
     reportShellError,
+    reportButtonError,
     reportShellFailure,
     reportShareCapture,
     reportLaneFailure,

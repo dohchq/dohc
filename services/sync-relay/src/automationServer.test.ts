@@ -266,8 +266,8 @@ describe("a server that runs a workspace's automations", () => {
         latestMomentId: "edited", metadataOrigin: "api" });
       vi.spyOn(engine, "readHistoryPage").mockResolvedValue({
         activeVersion: { id: "main", workspaceId: WORKSPACE, kind: "main", name: "Main", createdAtMs: 0 },
-        moments: [moment], protectedMoments: [], versionMarkers: [], latestMomentOrder: 1, nextCursor: null,
-        startCursor: { format: 1, engineUuid: "test", workspaceId: WORKSPACE, versionId: "main", objectId: "object", textFence: 1, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null },
+        moments: [{...moment, beforePath: moment.beforePath ?? null}], protectedMoments: [], versionMarkers: [], latestMomentOrder: 1, nextCursor: null,
+        startCursor: { format: 1, engineUuid: "test", workspaceId: WORKSPACE, versionId: "main", objectId: "object", operationId: null, textFence: 1, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null },
       });
       vi.spyOn(engine, "getMoment").mockResolvedValue(moment);
     });
