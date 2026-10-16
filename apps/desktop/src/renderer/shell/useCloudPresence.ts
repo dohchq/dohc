@@ -6,6 +6,7 @@ import { buildChatCollaboration } from "../collab/chatCollaboration";
 export function useCloudPresence(
   workspaceId: string,
   onStatusUnavailable: (retry: () => void) => void,
+  workspaceIsReady: boolean,
 ) {
   // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
   // gets a live presence transport (connected + relayUrl) or stays dormant.
@@ -14,7 +15,7 @@ export function useCloudPresence(
     { workspaceId: string; status: CloudStatusResult } | null
   >(null);
   const cloudStatus =
-    scopedStatus?.workspaceId === workspaceId ? scopedStatus.status : null;
+    workspaceIsReady && scopedStatus?.workspaceId === workspaceId ? scopedStatus.status : null;
   // The workspace whose last status read failed, so "not read yet" and
   // "could not be read" stay apart. A read that answers clears it.
   const [unreadableFor, setUnreadableFor] = useState<string | null>(null);
@@ -32,6 +33,7 @@ export function useCloudPresence(
   const cloudStatusToken = useRef(0);
   const refreshCloudStatus = useCallback(() => {
     const token = ++cloudStatusToken.current;
+    if (!workspaceIsReady) return;
     bridge()
       .cloudStatus({ workspaceId })
       .then((status) => {
@@ -48,7 +50,7 @@ export function useCloudPresence(
           if (token === cloudStatusToken.current) refreshCloudStatus();
         });
       });
-  }, [workspaceId, onStatusUnavailable]);
+  }, [workspaceId, onStatusUnavailable, workspaceIsReady]);
   useEffect(() => {
     setScopedStatus(null);
     refreshCloudStatus();

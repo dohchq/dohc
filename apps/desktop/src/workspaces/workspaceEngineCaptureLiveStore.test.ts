@@ -2364,7 +2364,7 @@ describe("createCaptureLiveStores", () => {
   });
 
   it("keeps live and recovery origins on history moments and nowhere else", async () => {
-    const historyMoment = Object.fromEntries(Object.entries(moment).filter(([key]) => ["momentOrder", "momentId", "versionId", "objectId", "path", "recordedAtMs", "operation", "afterContentKind", "afterByteLength", "metadataOrigin", "metadataSummary", "metadataCorrelationId", "authors", "syncRecordOnly"].includes(key)));
+    const historyMoment = { beforePath: null, ...Object.fromEntries(Object.entries(moment).filter(([key]) => ["momentOrder", "momentId", "versionId", "objectId", "path", "recordedAtMs", "operation", "afterContentKind", "afterByteLength", "metadataOrigin", "metadataSummary", "metadataCorrelationId", "authors", "syncRecordOnly"].includes(key))) };
     const client = clientFor(async (request) => {
       if (request.method === VERSIONED_METHOD.historyPage) {
         return {
