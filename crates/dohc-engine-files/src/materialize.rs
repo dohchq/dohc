@@ -561,6 +561,65 @@ pub enum ProjectionTargetKind {
     Secret,
 }
 
+/// Metadata-only proof for rechecking a hashed projection under a write lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionTargetStamp {
+    Absent,
+    File {
+        byte_length: u64,
+        modified: std::time::SystemTime,
+    },
+    Unavailable,
+}
+
+/// A projection probe bound to one canonical workspace root.
+pub struct ProjectionProbe {
+    root: PathBuf,
+}
+
+impl ProjectionProbe {
+    pub fn new(root: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            root: std::fs::canonicalize(root)?,
+        })
+    }
+    pub fn stamp(&self, rel: &str) -> ProjectionTargetStamp {
+        projection_target_stamp_in(&self.root, rel)
+    }
+    pub fn probe(&self, rel: &str, kind: ProjectionTargetKind) -> ProjectionTargetState {
+        probe_projection_target_in(&self.root, rel, kind)
+    }
+}
+
+pub fn projection_target_stamp(root: &Path, rel: &str) -> ProjectionTargetStamp {
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return ProjectionTargetStamp::Unavailable;
+    };
+    projection_target_stamp_in(&root, rel)
+}
+
+fn projection_target_stamp_in(root: &Path, rel: &str) -> ProjectionTargetStamp {
+    let Ok(target) = resolve_target(root, rel) else {
+        return ProjectionTargetStamp::Unavailable;
+    };
+    if !matches!(projection_has_file_ancestor(root, &target), Ok(false))
+        || !existing_ancestor_is_contained(root, &target)
+    {
+        return ProjectionTargetStamp::Unavailable;
+    }
+    match std::fs::symlink_metadata(target) {
+        Err(e) if e.kind() == ErrorKind::NotFound => ProjectionTargetStamp::Absent,
+        Ok(m) if m.file_type().is_file() && !m.file_type().is_symlink() => match m.modified() {
+            Ok(modified) => ProjectionTargetStamp::File {
+                byte_length: m.len(),
+                modified,
+            },
+            Err(_) => ProjectionTargetStamp::Unavailable,
+        },
+        _ => ProjectionTargetStamp::Unavailable,
+    }
+}
+
 /// Read a prospective projection target without treating foreign or
 /// transiently unreadable content as an overwrite preimage.
 pub fn probe_projection_target(
@@ -572,11 +631,19 @@ pub fn probe_projection_target(
         Ok(root) => root,
         Err(_) => return ProjectionTargetState::UntrackedContent,
     };
-    let target = match resolve_target(&canonical_root, rel) {
+    probe_projection_target_in(&canonical_root, rel, kind)
+}
+
+fn probe_projection_target_in(
+    canonical_root: &Path,
+    rel: &str,
+    kind: ProjectionTargetKind,
+) -> ProjectionTargetState {
+    let target = match resolve_target(canonical_root, rel) {
         Ok(target) => target,
         Err(_) => return ProjectionTargetState::UntrackedContent,
     };
-    match projection_has_file_ancestor(&canonical_root, &target) {
+    match projection_has_file_ancestor(canonical_root, &target) {
         Ok(true) => return ProjectionTargetState::Absent,
         Ok(false) => {}
         Err(_) => return ProjectionTargetState::UntrackedContent,
@@ -584,7 +651,7 @@ pub fn probe_projection_target(
     let metadata = match std::fs::symlink_metadata(&target) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return if existing_ancestor_is_contained(&canonical_root, &target) {
+            return if existing_ancestor_is_contained(canonical_root, &target) {
                 ProjectionTargetState::Absent
             } else {
                 ProjectionTargetState::UntrackedContent
@@ -595,7 +662,7 @@ pub fn probe_projection_target(
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
         return ProjectionTargetState::UntrackedContent;
     }
-    if !existing_ancestor_is_contained(&canonical_root, &target) {
+    if !existing_ancestor_is_contained(canonical_root, &target) {
         return ProjectionTargetState::UntrackedContent;
     }
     let cap = match kind {
@@ -657,13 +724,10 @@ pub fn write_precondition_sha256(
 }
 
 fn existing_ancestor_is_contained(root: &Path, target: &Path) -> bool {
-    let Ok(canonical_root) = std::fs::canonicalize(root) else {
-        return false;
-    };
     let mut candidate = Some(target);
     while let Some(path) = candidate {
         match std::fs::canonicalize(path) {
-            Ok(canonical) => return canonical.starts_with(&canonical_root),
+            Ok(canonical) => return canonical.starts_with(root),
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 candidate = path.parent();
             }
