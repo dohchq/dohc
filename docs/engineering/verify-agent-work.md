@@ -197,8 +197,9 @@ The gate runs it at once, with the step's environment and the command it prints 
 If every failed test of the step passes alone, the step passes. `result.json` and `js-tests/result.json` list each of those tests under `flaky` with `passedAlone: true`, and the verifier marks it "failed both tries under load, passed alone".
 A pass alone means the test fails when the host is busy: a timing bound, a race, or a resource it shares with other tests. It is a defect like any other flaky test.
 If a test fails alone too, the step fails, and the gate fails the change.
-A step that failed outside its tests gets no isolated retry. That includes a failed check or build, a file that failed to load, a failed hook, an unhandled error, and a test with no rerun command.
-A script test also gets none when it failed before the script's last command, because the commands after it never ran.
+A step that failed outside its tests gets no isolated retry. That includes a failed check or build and a test with no rerun command. In package tests it also includes a file that failed to load, a failed hook, and an unhandled error.
+In script tests, node:test reports a failed hook as a failed test, and a file that failed to load or threw an unhandled error as a failed file. The gate runs that test or that whole file alone.
+A script test gets no isolated retry when it failed before the script's last command, because the commands after it never ran.
 An interrupted step gets no isolated retry either. The Rust tests and the Playwright proofs have none yet.
 
 ### Failures other branches share
