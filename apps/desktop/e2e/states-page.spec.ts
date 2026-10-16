@@ -72,6 +72,7 @@ const PARTS = [
   "page-identity",
   "settings-sync",
   "data-grid",
+  "tab-strip-overflow",
   "tab-glyphs",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
@@ -412,6 +413,30 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       const label = page.getByTestId(`states-tab-row-actions-cut-${theme}`).locator(".truncate");
       if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
         failures.push(`the narrow tab row's save state (${theme}) is not cut short`);
+      }
+    }
+    // An overflowing strip fades only the edges it can still scroll past,
+    // 24px each, and its active tab sits clear of them. Each specimen must
+    // really overflow the way its label says, or its capture proves nothing.
+    for (const theme of THEMES) {
+      for (const [at, left, right] of [["start", false, true], ["middle", true, true], ["end", true, false]] as const) {
+        const strip = page.getByTestId(`states-tab-strip-overflow-${at}-${theme}`).getByRole("tablist");
+        const shown = await strip.evaluate((el) => {
+          const list = el.getBoundingClientRect();
+          const tab = el.querySelector('[role="tab"][data-active]')?.getBoundingClientRect();
+          return {
+            left: el.hasAttribute("data-overflow-left"),
+            right: el.hasAttribute("data-overflow-right"),
+            before: tab ? tab.left - list.left : -1,
+            after: tab ? list.right - tab.right : -1,
+          };
+        });
+        if (shown.left !== left || shown.right !== right) {
+          failures.push(`the strip at the ${at} (${theme}) fades left ${shown.left} and right ${shown.right}`);
+        }
+        if (shown.before < (left ? 24 : 0) || shown.after < (right ? 24 : 0)) {
+          failures.push(`the strip at the ${at} (${theme}) shows its active tab under a fade or cut`);
+        }
       }
     }
 
