@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use dohc_engine_collab::live_update_application::ApplicationHostCoordinate;
+use dohc_engine_collab::live_update_application::{ApplicationHostCoordinate, ImportedOwnerSource};
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
     transport::{
@@ -2875,6 +2875,148 @@ impl SessionHost {
             .await
             .map(|registered| registered["registrationId"].clone())
     }
+
+    /// Resume the retained activation of the document at `path`, as the relay
+    /// does once it saved one.
+    async fn resume(
+        &mut self,
+        path: &str,
+        activation_id: &str,
+    ) -> Result<Value, (ErrorCode, String)> {
+        self.call(
+            "liveApplication.captureOwnerActivation",
+            json!({"path": path, "maxBytes": 1_000_000, "activationId": activation_id}),
+        )
+        .await
+        .map_err(|error| (error.code, error.message))
+    }
+
+    /// Detach the store and stop, as before a restart.
+    async fn stop(mut self) {
+        self.call("liveApplication.detachWorkspace", json!({}))
+            .await
+            .expect("detach");
+    }
+}
+
+/// Retain an activation of `object_id` at `path`, whose head holds `text`, as
+/// a capture leaves one in the store, and return its id.
+fn retain_activation(scratch: &ScratchDir, object_id: &str, path: &str, text: &str) -> String {
+    let mut conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
+    let tx = conn.transaction().expect("transaction");
+    let baseline = dohc_engine_collab::Ydoc::wire().encode_full_state();
+    let full_state = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, text);
+    let lineage = dohc_engine_storage::put_binary_blob(&tx, &baseline).expect("baseline");
+    let full_state_digest = dohc_engine_storage::put_binary_blob(&tx, &full_state).expect("state");
+    let source = ImportedOwnerSource {
+        version: 1,
+        relay_database_namespace: "hosted-relay".into(),
+        workspace_id: WORKSPACE.into(),
+        main_version_id: "main".into(),
+        object_id: object_id.into(),
+        lineage_claim_id: lineage.clone(),
+        current_path: path.into(),
+        replication_epoch: "epoch-2".into(),
+        stream_identity: "stream-2".into(),
+        committed_cursor: 2,
+        base_origin_id: "owner".into(),
+        base_origin_seq: 1,
+        base_relay_seq: 2,
+        source_moment_id: "moment-owner-1".into(),
+        source_digest: hex_sha256(text.as_bytes()),
+        source_byte_length: text.len() as i64,
+        native_head_sequence: 1,
+        full_state_digest: full_state_digest.clone(),
+        full_state_byte_length: full_state.len(),
+    };
+    let descriptor = serde_json::to_string(&source).expect("descriptor");
+    let activation_id = format!("ordinary-activation-{}", hex_sha256(descriptor.as_bytes()));
+    tx.execute(
+        "INSERT INTO ydoc_owner_activation_sources(activation_id,relay_database_namespace,\
+         workspace_id,version_id,object_id,lineage_claim_id,source_moment_id,source_digest,\
+         full_state_digest,descriptor_json) VALUES (?1,?2,?3,'main',?4,?5,?6,?7,?8,?9)",
+        rusqlite::params![
+            activation_id,
+            source.relay_database_namespace,
+            WORKSPACE,
+            object_id,
+            lineage,
+            source.source_moment_id,
+            source.source_digest,
+            full_state_digest,
+            descriptor
+        ],
+    )
+    .expect("retain activation");
+    tx.commit().expect("commit");
+    activation_id
+}
+
+/// A relay sharing `doc-b` at `b.md`.
+fn sharing_doc_b() -> FakeRelay {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-b", "b.md", "hosted b");
+    relay.share("doc-b", "b.md");
+    FakeRelay::start(relay)
+}
+
+/// Sol's review of the unready refusal: after a restart, a parked document has
+/// no head and no session, so its resume finds it through the activation the
+/// store retained and says it is not ready. The session host then forgets it,
+/// rather than retrying an unavailable workspace on every pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_documents_resume_after_a_restart_says_it_is_unready() {
+    let relay = sharing_doc_b();
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut host = SessionHost::start(&scratch, &relay).await;
+    host.call(
+        "sync.createHostedReplica",
+        json!({"workspaceId": WORKSPACE, "replicationEpoch": "epoch-2", "streamIdentity": "stream-2"}),
+    )
+    .await
+    .expect("create");
+    host.sync().await;
+    relay.relay().unshare("doc-b");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
+    assert_eq!(head_path(&scratch, "doc-b"), None);
+    host.stop().await;
+    let activation = retain_activation(&scratch, "doc-b", "b.md", "hosted b");
+
+    let mut host = SessionHost::start(&scratch, &relay).await;
+    assert_eq!(
+        host.resume("b.md", &activation).await,
+        Err((ErrorCode::Conflict, "hosted-document-unready".to_owned()))
+    );
+}
+
+/// Sol's review of resume refusals: a workspace identity change selects a new
+/// store, which never held the activation the relay retained. Once backfill
+/// gives the document its head there, its resume is refused as a conflict, so
+/// the session host blocks it rather than retrying an internal error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_store_that_never_held_the_activation_refuses_its_resume_as_a_conflict() {
+    let relay = sharing_doc_b();
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut host = SessionHost::start(&scratch, &relay).await;
+    host.call(
+        "sync.createHostedReplica",
+        json!({"workspaceId": WORKSPACE, "replicationEpoch": "epoch-2", "streamIdentity": "stream-2"}),
+    )
+    .await
+    .expect("create");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
+    assert_eq!(head_path(&scratch, "doc-b").as_deref(), Some("b.md"));
+    let elsewhere = format!("ordinary-activation-{}", "a".repeat(64));
+    assert_eq!(
+        host.resume("b.md", &elsewhere).await,
+        Err((ErrorCode::Conflict, "live-application-conflict".to_owned()))
+    );
 }
 
 /// Part 5's held fence under the session host's real publication budget. The

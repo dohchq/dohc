@@ -243,13 +243,15 @@ pub fn resume_imported_owner_activation(
         return Err(invalid("invalid ordinary activation resume"));
     }
     store.read_with(|conn| {
+        // A store that does not hold the activation, as one an identity change
+        // selected, can never resume it.
         let sizes: (i64,i64,i64) = conn.query_row(
             "SELECT length(CAST(a.descriptor_json AS BLOB)),length(b.bytes),length(f.bytes)
              FROM ydoc_owner_activation_sources a JOIN binary_blobs b ON b.sha256=a.lineage_claim_id
              JOIN binary_blobs f ON f.sha256=a.full_state_digest WHERE a.activation_id=?1
              AND a.relay_database_namespace=?2 AND a.workspace_id=?3 AND a.version_id=?4 AND a.object_id=?5",
             params![activation_id,namespace,key.workspace_id,key.version_id,key.object_id],
-            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(read_sql)?;
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(read_sql)?.ok_or(ApplicationError::Conflict)?;
         let mut total=0usize;
         for length in [sizes.0,sizes.1,sizes.2] {
             let length=usize::try_from(length).map_err(|_|ApplicationError::Corrupt)?;

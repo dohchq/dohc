@@ -371,6 +371,26 @@ fn a_held_documents_resume_is_unready_and_a_ready_divergence_conflicts() {
     ));
 }
 
+/// A store that does not hold the retained activation, as one an identity
+/// change selected, refuses its resume as a conflict, so the relay stops
+/// resuming it instead of retrying an internal error.
+#[test]
+fn a_store_without_the_retained_activation_refuses_its_resume_as_a_conflict() {
+    let mut f = imported_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    let other = format!("ordinary-activation-{}", "0".repeat(64));
+    assert!(matches!(
+        resume_imported(&mut f, &other, 1_000_000),
+        Err(ApplicationError::Conflict)
+    ));
+    assert_eq!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000)
+            .unwrap()
+            .activation_id,
+        captured.activation_id
+    );
+}
+
 #[test]
 fn retained_activation_rejects_unadopted_native_changes_and_epoch_changes() {
     let mut f = imported_fixture();

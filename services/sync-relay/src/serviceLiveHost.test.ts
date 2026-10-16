@@ -635,7 +635,7 @@ it("keeps damaged evidence and caller cancellation visible for public delivery",
 
 const stopLookup = {operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"};
 const conflictOpen = () => new EngineRequestError(1, {code: "INVALID_PARAMS", message: "ydoc-conflict-open", retry: "no"} as never);
-// The engine's refusals of a capture: a hosted document that is not ready, and a retained activation that diverged.
+// The engine's refusals of a capture: a hosted document that is not ready, and a retained activation that diverged or its store never held.
 const unready = () => new EngineRequestError(1, {code: "CONFLICT", message: "hosted-document-unready", retry: "no"} as never);
 const diverged = () => new EngineRequestError(1, {code: "CONFLICT", message: "live-application-conflict", retry: "no"} as never);
 
@@ -1074,6 +1074,38 @@ it.each([false, true])("detaches a workspace at once when its identity changes, 
   expect(o.host.automationLedger("workspace-2")).not.toBeNull();
   expect(o.membership.every(row => row.workspace !== "attached-workspace-2")).toBe(true);
   expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
+});
+
+// Proves: after an identity change, an activated document re-enrolled into
+// the new store resumes its retained activation once. That store never held
+// it, so the engine refuses it as a conflict and the document blocks. Its
+// workspace keeps pushing and pulling, and a sibling document keeps its passes.
+it("blocks a document re-enrolled into a new store after an identity change while its workspace keeps syncing", async () => {
+  const o = await emptyServiceHost(), rotatedRoot = join(o.f.root, "workspace-rotated");
+  await mkdir(rotatedRoot);
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  expect(o.f.storage.rotateWorkspaceIdentity({workspaceId: "workspace", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 10})).toBe("rotated");
+  const rotated = {...o.workspace, root: rotatedRoot,
+    hostedReplication: {...o.workspace.hostedReplication!, identity: {replicationEpoch: "epoch-2", streamIdentity: "stream-2"}}};
+  const captures = () => o.client().captureOwnerActivation.mock.calls.length, before = captures();
+  const pushes = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.push").length;
+  const visits = () => vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls.filter(call => call[0].path === o.other.path).length;
+  o.refuseCapture(diverged());
+  await o.host.update({workspaces: [rotated], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(captures()).toBe(before + 1));
+  expect(o.client().captureOwnerActivation).toHaveBeenLastCalledWith(expect.anything(), "docs/a.md", 1_000_000, expect.any(AbortSignal), `ordinary-activation-${"a".repeat(64)}`);
+  const pushed = pushes();
+  await o.nextPull(); await o.nextPull();
+  expect(pushes()).toBeGreaterThan(pushed);
+  expect(captures()).toBe(before + 1);
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  await o.host.update({workspaces: [rotated], documents: [o.sibling, o.other], ...stay});
+  const visited = visits();
+  await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));
+  expect(captures()).toBe(before + 1);
+  expect(o.host.retains(o.sibling)).toBe(true);
 });
 
 it("keeps the daemon after a refused attach and retires it when the engine expires its connection", async () => {

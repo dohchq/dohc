@@ -181,12 +181,30 @@ impl EngineService {
             let db_path = open.db_path.clone();
             let workspace_id = open.workspace_id.clone();
             let path = params.path.clone();
+            let namespace = namespace.clone();
+            let activation_id = params.activation_id.clone();
             let key = tokio::task::spawn_blocking(move || {
+                use rusqlite::OptionalExtension;
                 let store = dohc_engine_storage::EngineStore::open_read_only(&db_path).map_err(|_|workspace_unavailable())?;
-                let object_id: String = store.read_with(|conn| conn.query_row(
-                    "SELECT s.object_id FROM snapshots s JOIN path_aliases p USING(workspace_id,version_id,object_id,path)
-                     WHERE s.workspace_id=?1 AND s.version_id='main' AND s.path=?2 AND s.content_kind='text'",
-                    rusqlite::params![workspace_id,path], |row|row.get(0))).map_err(|_|workspace_unavailable())?;
+                // A resume finds its document through the activation it retained, so one
+                // with no head, as once it parked, still answers whether it is ready.
+                let object_id: Option<String> = store.read_with(|conn| match &activation_id {
+                    Some(activation_id) => conn.query_row(
+                        "SELECT object_id FROM ydoc_owner_activation_sources WHERE activation_id=?1
+                         AND relay_database_namespace=?2 AND workspace_id=?3 AND version_id='main'",
+                        rusqlite::params![activation_id,namespace,workspace_id], |row|row.get(0)).optional(),
+                    None => conn.query_row(
+                        "SELECT s.object_id FROM snapshots s JOIN path_aliases p USING(workspace_id,version_id,object_id,path)
+                         WHERE s.workspace_id=?1 AND s.version_id='main' AND s.path=?2 AND s.content_kind='text'",
+                        rusqlite::params![workspace_id,path], |row|row.get(0)).optional(),
+                }).map_err(|_|workspace_unavailable())?;
+                let object_id = match object_id {
+                    Some(object_id) => object_id,
+                    // This store never held the activation, as after an identity change selected a new one.
+                    None if activation_id.is_some() => return Err(map_runtime(
+                        dohc_engine_collab::live_update_application::ApplicationError::Conflict.into())),
+                    None => return Err(workspace_unavailable()),
+                };
                 dohc_engine_collab::DocKey::new(workspace_id, "main", object_id).map_err(|_|workspace_unavailable())
             }).await.map_err(|_|workspace_unavailable())??;
             let lease = self
