@@ -995,6 +995,25 @@ function markdownLists(projected = false) {
   name: 'dohcMarkdownLists', priority: 1001, markdownTokenName: 'list',
   markdownTokenizer: { name: 'list', level: 'block', start: () => -1, tokenize(src, _tokens, helpers) {
     if (!' -+*0123456789'.includes(src[0]) || !/^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|\n|$)/u.test(src)) return undefined
+    // A whole tight list of ordinary single-line items needs only inline lexing.
+    // Keep marker changes, blank lines, indentation and complex starts on Marked.
+    const flatTasks = /^([-+*]) \[[ xX]\] [A-Za-z][^\n\t]*(?:\n\1 \[[ xX]\] [A-Za-z][^\n\t]*)*\n?$/u.test(src)
+    if (flatTasks || /^([-+*]) [A-Za-z][^\n\t]*(?:\n\1 [A-Za-z][^\n\t]*)*\n?$/u.test(src)) {
+      const lines = src.replace(/\n$/u, '').split('\n')
+      return {
+        type: 'list', raw: src, ordered: false, start: '', loose: false,
+        items: lines.map((line, at) => {
+          const body = line.slice(flatTasks ? 6 : 2)
+          const text = at === lines.length - 1 ? body.trimEnd() : body
+          return {
+            type: 'list_item', raw: line + (at < lines.length - 1 ? '\n' : ''),
+            task: flatTasks, ...(flatTasks ? { checked: line[3].toLowerCase() === 'x' } : {}),
+            loose: false, text,
+            tokens: [{ type: 'paragraph', raw: text, text, tokens: helpers.inlineTokens(text) }],
+          }
+        }),
+      }
+    }
     // The upstream scanner is cheaper for flat ordered items. Limit it to
     // one delimiter and ordinary item starts, so it cannot flatten boundaries.
     if (/^[0-9]{1,9}([.)]) [A-Za-z][^\n\t]*(?:\n[0-9]{1,9}\1 [A-Za-z][^\n\t]*)*\n?$/u.test(src)) {

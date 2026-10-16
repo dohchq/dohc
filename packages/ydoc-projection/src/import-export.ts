@@ -479,7 +479,7 @@ export function markdownToYDoc(
 // blank lines end lazy continuation, but not an indented continuation block.
 function assertSupportedListMarkdown(markdown: string): string {
   // Flat items beginning with ordinary text cannot introduce child blocks.
-  if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) [A-Za-z][^\n\t]*(?:\n|$))+$/u.test(markdown)) return markdown
+  if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?:\[[ xX]\] )?[A-Za-z][^\n\t]*(?:\n|$))+$/u.test(markdown)) return markdown
   const parents: Array<{ indent: number; column: number; content?: number }> = []
   const lines = markdown.split('\n')
   let changed = false
