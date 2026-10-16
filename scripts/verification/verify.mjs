@@ -135,7 +135,8 @@ export async function postgres(output, command = run, measure = (_name, action) 
   const stop = async () => {
     // Also protect cleanup when the successfully started database is stopped later.
     unlisten(); listen();
-    try { return await measure("postgres-stop", () => command("docker", ["rm", "--force", id ?? name], { log: join(output, "postgres-stop.log"), timeoutMs: 30_000 })); }
+    // --volumes also removes the anonymous data volume the image declares, about 49 MB a run.
+    try { return await measure("postgres-stop", () => command("docker", ["rm", "--force", "--volumes", id ?? name], { log: join(output, "postgres-stop.log"), timeoutMs: 30_000 })); }
     finally { unlisten(); }
   };
   listen();
