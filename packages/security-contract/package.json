@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./account-deletion": "./src/accountDeletion.ts",
     "./approval-provenance": "./src/approvalProvenance.ts",
     "./link-refusal": "./src/linkRefusal.ts",
     "./dataset-conversion": "./src/datasetConversion.ts",
@@ -25,7 +26,8 @@
     "./share-selector": "./src/shareSelector.ts",
     "./share-discussion": "./src/shareDiscussion.ts",
     "./share-proposal-bound": "./src/shareProposalBound.ts",
-    "./wire-patterns": "./src/wirePatterns.ts"
+    "./wire-patterns": "./src/wirePatterns.ts",
+    "./app-collection-checks": "./src/appCollectionChecks.ts"
   },
   "scripts": {
     "test": "vitest run",

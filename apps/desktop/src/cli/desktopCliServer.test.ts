@@ -76,7 +76,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         throw new VersionedTextStoreError("target-path-exists", "File already exists");
       }
-      return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied" };
+      return { resolvedAbsolutePath: absolutePath, materializeOutcome: "applied", objectId: "object", momentId: "moment", deduped: false };
     }),
     // Runs the move or delete as the capture does, with no live documents to
     // settle: the policy is read once the change runs, History holds every
@@ -114,7 +114,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),
-    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0) },
+    activity: { engineCaptureFor: vi.fn(() => currentCapture), queueCloudSync: vi.fn(), agentRunDepth: vi.fn(() => 0), dispatchedAgentRun: vi.fn(() => false) },
     linkedChatStoreFor: vi.fn(() => store),
     currentDaemon: vi.fn(() => daemon),
     agentDispatchStoreHandleFor: vi.fn(() => ({ store: dispatchStore })),
@@ -774,7 +774,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
     expect(await f.invoke("fileDelete", { path: "moved.txt", ...(agent ? { agent } : {}) })).toMatchObject({ ok: true, path: "moved.txt", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/trash\//) });
     const author = { kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 };
     expect(vi.mocked(f.capture.changePathsAs).mock.calls.map(call => call[1])).toEqual([
-      { operation: "move", author, correlationId: "fileMove:raw" }, { operation: "delete", author, correlationId: "fileDelete:raw" },
+      { operation: "move", author, operationId: expect.stringMatching(/^dohc-operation:/) }, { operation: "delete", author, operationId: expect.stringMatching(/^dohc-operation:/) },
     ]);
     expect(f.dependencies.markDeletedUnderPath).toHaveBeenCalledWith(expect.any(Symbol), "moved.txt");
   });

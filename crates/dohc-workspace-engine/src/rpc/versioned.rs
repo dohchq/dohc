@@ -1,6 +1,5 @@
 use crate::EngineService;
 use crate::rpc::capture::MAX_DESKTOP_CAPTURE_TEXT_BYTES;
-use crate::rpc::capture::require_capture_hold;
 use crate::rpc::error::map_runtime;
 use crate::rpc::history::moment_json;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
@@ -751,7 +750,8 @@ impl EngineService {
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.rename (queued)")
             .await?;
-        require_capture_hold(&open, params.capture_hold_id.as_deref())?;
+        let operation_id =
+            crate::rpc::capture::capture_operation_id(&open, params.capture_hold_id.as_deref())?;
         self.ensure_path_not_leased(&open, &params.version_id, &from_path)
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &to_path)
@@ -771,7 +771,7 @@ impl EngineService {
                     request_id,
                     metadata_origin: origin,
                     metadata_summary: params.summary,
-                    metadata_correlation_id: params.correlation_id,
+                    metadata_correlation_id: operation_id.or(params.correlation_id),
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
@@ -818,7 +818,8 @@ impl EngineService {
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.delete (queued)")
             .await?;
-        require_capture_hold(&open, params.capture_hold_id.as_deref())?;
+        let operation_id =
+            crate::rpc::capture::capture_operation_id(&open, params.capture_hold_id.as_deref())?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
         let request_id = request.idempotency_key;
@@ -834,7 +835,7 @@ impl EngineService {
                     request_id,
                     metadata_origin: origin,
                     metadata_summary: params.summary,
-                    metadata_correlation_id: params.correlation_id,
+                    metadata_correlation_id: operation_id.or(params.correlation_id),
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },

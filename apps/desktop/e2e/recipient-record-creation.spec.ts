@@ -7,6 +7,7 @@ import { mintLocalhostCa } from "../../../services/share-web/src/testing/localho
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { resolveEngineBinary } from "../src/testing/engineBinary";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
+import { readHistoryMoments } from "./helpers/history";
 import { relayJson } from "./helpers/relayPeer";
 import { startServerProxy, type ProxiedCollectionWriteResponse } from "./helpers/selfHostOnboarding";
 import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
@@ -55,14 +56,14 @@ function acceptedLiveEdits(relay: SyncRelayHandle, path: string) {
   } finally { db.close(); }
 }
 async function ownerRecordHistory(page: Page, path: string) {
-  return page.evaluate(async ({ workspaceId, path }) => {
+  const moments = await readHistoryMoments(page, OWNER_ID, path);
+  if (moments === null) throw new Error("Owner History is unavailable.");
+  return page.evaluate(async ({ workspaceId, moments }) => {
     const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-    const result = await api.listEngineMoments({ workspaceId, limit: 100 });
-    if (!("moments" in result)) return [];
-    const details = await Promise.all(result.moments.filter(moment => moment.path === path)
+    const details = await Promise.all(moments
       .map(moment => api.readEngineMoment({ workspaceId, momentId: moment.id })));
     return details.flatMap(result => result.moment === null ? [] : [result.moment]);
-  }, { workspaceId: OWNER_ID, path });
+  }, { workspaceId: OWNER_ID, moments });
 }
 
 async function withSharedCollection(
@@ -205,10 +206,8 @@ test("@two-client an Edit recipient's new record opens immediately, becomes edit
       await expect.poll(() => fixture.ownerText(created!.path), { timeout: 120_000, intervals: [1000] }).toContain("Status: Ready");
       await expect.poll(async () => creationOps(await log(fixture.relay)).length, { timeout: 120_000 }).toBe(1);
       expect(creationOps(await log(fixture.relay))[0]!.payload.authors).toMatchObject([{ kind: "named", userId: "e2e-recipient" }]);
-      await expect.poll(() => fixture.owner.page.evaluate(async ({ workspaceId, path }) => {
-        const result = await (window as unknown as { dohcDesktop: Api }).dohcDesktop.listEngineMoments({ workspaceId, limit: 100 });
-        return "moments" in result ? result.moments.find(moment => moment.path === path && moment.namedAuthor)?.namedAuthor?.label : null;
-      }, { workspaceId: OWNER_ID, path: created!.path }), { timeout: 120_000 }).toBe(`${RECIPIENT_EMAIL} (Edit)`);
+      await expect.poll(async () => (await readHistoryMoments(fixture.owner.page, OWNER_ID, created!.path))
+        ?.find(moment => moment.namedAuthor)?.namedAuthor?.label ?? null, { timeout: 120_000 }).toBe(`${RECIPIENT_EMAIL} (Edit)`);
       await openCollection(fixture.owner.page);
       await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
       await page.emulateMedia({ reducedMotion: "reduce" });
@@ -231,11 +230,15 @@ test("@two-client an Edit recipient's new record opens immediately, becomes edit
       const changedFieldHistory = async () => (await ownerRecordHistory(fixture.owner.page, created!.path))
         .filter(moment => (moment.origin === "ydoc" || moment.origin === "local-file")
           && moment.beforeText !== moment.afterText && /^(Task|Status):/mu.test(moment.afterText ?? ""));
-      await expect.poll(async () => (await changedFieldHistory()).length, { timeout: 120_000 }).toBeGreaterThan(0);
-      const liveHistory = await changedFieldHistory();
+      let liveHistory: Awaited<ReturnType<typeof changedFieldHistory>> = [];
+      await expect(async () => {
+        liveHistory = await changedFieldHistory();
+        expect(liveHistory.length).toBeGreaterThan(0);
+      }).toPass({ timeout: 120_000 });
       await test.info().attach("recipient live attribution", { contentType: "application/json",
         body: JSON.stringify({ liveEdits, liveHistory }, null, 2) });
-      for (const moment of liveHistory) expect(moment.authors).toEqual([liveAuthor]);
+      // History records the relay-admitted author; the relay's live-edit list above does not.
+      for (const moment of liveHistory) expect(moment.authors).toEqual([{ ...liveAuthor, relayConfirmed: true }]);
       await test.info().attach("recipient-only restore state", {contentType: "application/json",
         body: JSON.stringify({live: fixture.ownerLiveState(created!.path), disk: await fixture.ownerText(created!.path)}, null, 2)});
       const restored = await fixture.owner.page.evaluate(async workspaceId =>
@@ -280,7 +283,10 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
       const documents = fixture.ownerLiveState(created[0]!.path).documents as {head_update_seq: number; settled_update_seq: number | null}[];
       return documents.some(doc => doc.head_update_seq !== doc.settled_update_seq);
     }, {timeout: 120_000}).toBe(true);
-    expect((await ownerRecordHistory(fixture.owner.page, created[0]!.path)).some(moment => moment.afterText?.includes("Owner text KEEP"))).toBe(false);
+    await expect(async () => {
+      expect((await ownerRecordHistory(fixture.owner.page, created[0]!.path))
+        .some(moment => moment.afterText?.includes("Owner text KEEP"))).toBe(false);
+    }).toPass({ timeout: 120_000 });
     if (restartBeforeRestore) {
       await fixture.stopOwner();
       await fixture.restartOwner();

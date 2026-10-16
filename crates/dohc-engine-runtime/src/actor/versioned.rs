@@ -1113,6 +1113,7 @@ fn publish_write_job(
                     self_writes,
                     now_ms,
                     faults,
+                    None,
                 );
                 let settled = !matches!(
                     result.1,
@@ -1214,6 +1215,7 @@ fn versioned_text_rename_on_store(
             self_writes,
             result.moment.recorded_at_ms,
             faults,
+            None,
         );
         if write_ready {
             materialize_expected_job(
@@ -1224,6 +1226,7 @@ fn versioned_text_rename_on_store(
                 self_writes,
                 result.moment.recorded_at_ms,
                 faults,
+                None,
             );
         }
     }
@@ -1317,6 +1320,7 @@ fn versioned_text_delete_on_store(
                     self_writes,
                     result.moment.recorded_at_ms,
                     faults,
+                    None,
                 );
             }
             materialize_scene_asset_deletes(
@@ -1326,6 +1330,7 @@ fn versioned_text_delete_on_store(
                 &asset_jobs,
                 self_writes,
                 faults,
+                None,
                 None,
             )?;
             Ok(result)
@@ -1378,6 +1383,7 @@ fn checked_delete_on_store(
         faults,
         false,
         result.deduped,
+        None,
     )?;
     Ok(result)
 }
@@ -1395,6 +1401,7 @@ pub(super) fn publish_checked_delete_on_store(
     faults: &dyn FaultInjector,
     recovery: bool,
     request_retry: bool,
+    holds: Option<&dohc_engine_files::PlacementHolds>,
 ) -> Result<(), RuntimeError> {
     use dohc_engine_files::{
         DurabilityPolicy, JobOutcome, MaterializeOptions, StdBackoff, StdReplacer,
@@ -1447,6 +1454,7 @@ pub(super) fn publish_checked_delete_on_store(
                         self_writes,
                         now_ms,
                         faults,
+                        holds,
                     );
                 }
                 Ok(())
@@ -1518,6 +1526,7 @@ pub(super) fn publish_checked_delete_on_store(
                 root,
                 &job,
                 &MaterializeOptions {
+                    holds,
                     policy: DurabilityPolicy::per_os(),
                     replacer: &StdReplacer,
                     backoff: &StdBackoff,
@@ -1577,6 +1586,7 @@ pub(super) fn publish_checked_delete_on_store(
                     self_writes,
                     now_ms,
                     faults,
+                    holds,
                 );
             }
             materialize_scene_asset_deletes(
@@ -1587,6 +1597,7 @@ pub(super) fn publish_checked_delete_on_store(
                 self_writes,
                 faults,
                 None,
+                holds,
             )?;
         }
     }
@@ -1785,7 +1796,15 @@ pub(super) fn delete_owned_scene_assets_in_tx(
                 request_id: None,
                 metadata_origin: "ydoc".to_owned(),
                 metadata_summary: Some("Deleted drawing asset".to_owned()),
-                metadata_correlation_id: Some(drawing_delete.moment.moment_id.clone()),
+                metadata_correlation_id: Some(
+                    drawing_delete
+                        .moment
+                        .metadata_correlation_id
+                        .as_ref()
+                        .filter(|id| id.starts_with(dohc_engine_domain::OPERATION_ID_PREFIX))
+                        .cloned()
+                        .unwrap_or_else(|| drawing_delete.moment.moment_id.clone()),
+                ),
                 author_json: drawing_delete.moment.author_json.clone(),
                 now_ms: drawing_delete.moment.recorded_at_ms,
             },
@@ -1862,7 +1881,7 @@ fn scene_asset_delete_moments(
             .query_row(
                 "SELECT recorded_at_ms FROM moments WHERE workspace_id=?1 AND version_id=?2 \
                  AND moment_id=?3 AND operation='delete' AND before_content_kind='binary' \
-                 AND metadata_origin IN ('ydoc','local-file') AND metadata_correlation_id=?4 \
+                 AND metadata_origin IN ('ydoc','local-file') AND (metadata_correlation_id=?4 OR metadata_correlation_id=(SELECT metadata_correlation_id FROM moments WHERE workspace_id=?1 AND moment_id=?4 AND metadata_correlation_id LIKE 'dohc-operation:%')) \
                  AND path=?5 AND before_binary_sha256=?6",
                 params![
                     workspace_id,
@@ -1913,7 +1932,7 @@ fn scene_asset_deletes_ready_for_rollback(
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?2 \
                  AND moment_id=?3 AND operation='delete' AND before_content_kind='binary' \
-                 AND metadata_origin IN ('ydoc','local-file') AND metadata_correlation_id=?4 \
+                 AND metadata_origin IN ('ydoc','local-file') AND (metadata_correlation_id=?4 OR metadata_correlation_id=(SELECT metadata_correlation_id FROM moments WHERE workspace_id=?1 AND moment_id=?4 AND metadata_correlation_id LIKE 'dohc-operation:%')) \
                  AND path=?5 AND before_binary_sha256=?6)",
                 params![
                     workspace_id,
@@ -2015,6 +2034,7 @@ pub(super) fn materialize_scene_asset_deletes(
     self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
     root_guard: Option<&dyn WorkspaceRootGuard>,
+    holds: Option<&dohc_engine_files::PlacementHolds>,
 ) -> Result<(), RuntimeError> {
     for (job_id, recorded_at_ms) in jobs {
         validate_workspace_root(root_dir, root_guard)?;
@@ -2026,6 +2046,7 @@ pub(super) fn materialize_scene_asset_deletes(
             self_writes,
             *recorded_at_ms,
             faults,
+            holds,
         );
     }
     Ok(())
@@ -2353,6 +2374,7 @@ fn versioned_text_rollback_on_store(
                 self_writes,
                 job.created_at_ms,
                 faults,
+                None,
             ),
             JobStatus::Conflict | JobStatus::Cancelled => {
                 (false, PostCommitMaterializeOutcome::Conflict)
@@ -2397,6 +2419,7 @@ fn versioned_text_rollback_on_store(
             self_writes,
             write_job.created_at_ms,
             faults,
+            None,
         ),
         // Follow-up: same pairing rule as the startup replay's
         // "binary-rename-1-delete-mat_" case — a cancelled write means its
@@ -2446,6 +2469,7 @@ fn versioned_text_rollback_on_store(
             self_writes,
             delete_job.created_at_ms,
             faults,
+            None,
         ),
         JobStatus::Conflict | JobStatus::Cancelled => {
             (false, PostCommitMaterializeOutcome::Conflict)
@@ -2612,6 +2636,7 @@ fn materialize_restored_scene_assets(
                     self_writes,
                     job.created_at_ms,
                     faults,
+                    None,
                 )
                 .1
             }
@@ -2883,6 +2908,7 @@ fn versioned_text_merge_on_store(
         self_writes,
         input.now_ms,
         faults,
+        None,
     );
     Ok(MergeExecutionResult {
         merge: result,
@@ -3294,6 +3320,58 @@ mod doc_cache_reset_tests {
     }
 
     #[test]
+    fn checked_delete_replay_keeps_a_held_intent_parked() {
+        let (root, mut store, input, expected) = checked_delete_fixture(false);
+        crash_checked_delete(
+            &root,
+            &mut store,
+            &input,
+            &expected,
+            FaultPoint::StorageAfterCommitBeforeAck,
+        );
+        let outside = format!("{} held outside edit\n", "> ".repeat(121));
+        std::fs::write(root.join("record.md"), &outside).unwrap();
+        let hold = dohc_engine_storage::capture_file_holds::CaptureFileHold {
+            workspace_id: "workspace".into(),
+            source_version_id: "main".into(),
+            object_id: "document".into(),
+            path: "record.md".into(),
+            observed_sha256: hex_sha256(outside.as_bytes()),
+            observed_size: outside.len() as u64,
+            reason: dohc_engine_storage::capture_file_holds::NOT_REPRESENTABLE.into(),
+            observed_at_ms: 4,
+            attempt_count: 1,
+            retry_requested: false,
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::capture_file_holds::record_in(tx, &hold)
+            })
+            .unwrap();
+        checked_delete_replay(&mut store, &root);
+        assert_eq!(
+            store
+                .load_materialization_job("restore-delete-mat_restore-delete")
+                .unwrap()
+                .expect("a held checked delete must stay parked")
+                .status,
+            JobStatus::Pending
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("record.md")).unwrap(),
+            outside
+        );
+        assert_eq!(
+            store
+                .read_with(|conn| {
+                    dohc_engine_storage::capture_file_holds::hold_in(conn, "workspace", "record.md")
+                })
+                .unwrap(),
+            Some(hold)
+        );
+    }
+
+    #[test]
     fn checked_delete_discard_refuses_a_moment_exported_before_disk_publication() {
         for via_sync in [false, true] {
             let (root, mut store, input, expected) = checked_delete_fixture(true);
@@ -3548,6 +3626,7 @@ mod doc_cache_reset_tests {
                     &mut store,
                     &root,
                     super::super::materialization::MaterializationReplayScope {
+                        holds: None,
                         workspace_id: "workspace",
                         self_writes: None,
                         progress: None,
@@ -3586,6 +3665,7 @@ mod doc_cache_reset_tests {
                 &mut store,
                 &root,
                 super::super::materialization::MaterializationReplayScope {
+                    holds: None,
                     workspace_id: "workspace",
                     self_writes: None,
                     progress: None,
@@ -3647,6 +3727,7 @@ mod doc_cache_reset_tests {
             store,
             root,
             super::super::materialization::MaterializationReplayScope {
+                holds: None,
                 workspace_id: "workspace",
                 self_writes: None,
                 progress: None,
@@ -3823,6 +3904,7 @@ mod doc_cache_reset_tests {
                     &NoFaults,
                     true,
                     false,
+                    None,
                 )
                 .unwrap_err();
                 if failure == "commit" {
@@ -3941,6 +4023,7 @@ mod doc_cache_reset_tests {
                     &root,
                     Some("workspace"),
                     &dohc_engine_files::MaterializeOptions {
+                        holds: None,
                         policy: dohc_engine_files::DurabilityPolicy::per_os(),
                         replacer: &dohc_engine_files::StdReplacer,
                         backoff: &dohc_engine_files::NoBackoff,
@@ -3968,6 +4051,7 @@ mod doc_cache_reset_tests {
                     faults,
                     true,
                     false,
+                    None,
                 );
                 if crash_finish {
                     assert!(
@@ -3993,6 +4077,7 @@ mod doc_cache_reset_tests {
                     &mut store,
                     &root,
                     super::super::materialization::MaterializationReplayScope {
+                        holds: None,
                         workspace_id: "workspace",
                         self_writes: Some(&writes),
                         progress: None,
@@ -4090,6 +4175,7 @@ mod doc_cache_reset_tests {
                                 &NoFaults,
                                 true,
                                 false,
+                                None,
                             )
                         };
                         assert!(
@@ -4369,6 +4455,7 @@ mod doc_cache_reset_tests {
                         &mut store,
                         &root,
                         super::super::materialization::MaterializationReplayScope {
+                            holds: None,
                             workspace_id: "workspace",
                             self_writes: None,
                             progress: None,
@@ -4513,6 +4600,7 @@ mod doc_cache_reset_tests {
                         &mut store,
                         &root,
                         super::super::materialization::MaterializationReplayScope {
+                            holds: None,
                             workspace_id: "workspace",
                             self_writes: None,
                             progress: None,
@@ -4683,6 +4771,7 @@ mod doc_cache_reset_tests {
                     &NoFaults,
                     false,
                     false,
+                    None,
                 )
                 .is_err()
             );
@@ -4691,6 +4780,7 @@ mod doc_cache_reset_tests {
                     &mut store,
                     &root,
                     super::super::materialization::MaterializationReplayScope {
+                        holds: None,
                         workspace_id: "workspace",
                         self_writes: None,
                         progress: None,
@@ -4716,6 +4806,7 @@ mod doc_cache_reset_tests {
                         &(),
                         4,
                         &NoFaults,
+                        None,
                     );
                 assert!(!materialized);
                 assert!(matches!(reported, PostCommitMaterializeOutcome::Skipped));
@@ -4724,6 +4815,7 @@ mod doc_cache_reset_tests {
                         &store,
                         &root,
                         &dohc_engine_files::MaterializeOptions {
+                            holds: None,
                             policy: dohc_engine_files::DurabilityPolicy::per_os(),
                             replacer: &dohc_engine_files::StdReplacer,
                             backoff: &dohc_engine_files::StdBackoff,
@@ -4783,6 +4875,7 @@ mod doc_cache_reset_tests {
                 &NoFaults,
                 true,
                 false,
+                None,
             )
             .unwrap();
             assert_checked_delete_absent(&store);

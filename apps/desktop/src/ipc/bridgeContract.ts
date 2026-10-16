@@ -9,7 +9,10 @@ import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-b
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
 import { PublicationAgent } from "@dohc/cli/app-publication";
+import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "@dohc/cli/account";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
+import type { WorkspaceRefTarget } from "@dohc/workspace-contracts/workspace-ref";
+import { DatasetHistoryPage } from "@dohc/cli/dataset";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
 import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
@@ -107,6 +110,7 @@ import {
   WORKBENCH_MENU_COMMANDS,
 } from "./channels";
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
+import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
 import {
@@ -400,6 +404,7 @@ export const OwnerLiveDocument = z.object({
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
   reason: z.enum(["document-unavailable", "workspace-changed"]).optional(),
   canResume: z.boolean(),
+  deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
@@ -1382,6 +1387,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "restart-required"]).optional(),
+  ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
@@ -1689,7 +1695,7 @@ export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
 export const HistoryMomentPosition = z.object({ recordedAtMs: z.number().int(), momentOrder: z.number().int().nonnegative() }).strict();
 export const HistoryCursor = z.object({
   format: z.literal(1), engineUuid: z.string().min(1), workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID,
-  objectId: OPAQUE_ID.nullable(), textFence: z.number().int().min(-1), protectedFence: z.number().int().min(-1),
+  operationId: OPAQUE_ID.nullable(), objectId: OPAQUE_ID.nullable(), textFence: z.number().int().min(-1), protectedFence: z.number().int().min(-1),
   markerFence: z.number().int().min(-1), text: HistoryMomentPosition.nullable(), protected: HistoryMomentPosition.nullable(),
   marker: z.object({ createdAtMs: z.number().int(), versionId: OPAQUE_ID }).strict().nullable(),
 }).strict();
@@ -1741,6 +1747,60 @@ export const ListEngineMomentsResponse = z.union([
 export type ListEngineMomentsResponse = z.infer<
   typeof ListEngineMomentsResponse
 >;
+
+export type HistoryObject = Extract<WorkspaceRefTarget, { kind: "file" | "dataset" }>;
+export const HistoryObject: z.ZodType<HistoryObject> = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("file"), objectId: OPAQUE_ID }).strict(),
+  z.object({ kind: z.literal("dataset"), datasetId: z.string().uuid() }).strict(),
+]);
+export const HISTORY_MAX_SOURCES = 128;
+export const HISTORY_CURSOR_BYTES = 64 * 1024;
+export const TimelineCollectionCursor = z.object({
+  datasetId: z.string().uuid(), remote: z.boolean(), fenceRevision: z.number().int().nonnegative(),
+  beforeRevision: z.number().int().positive().safe(), lineage: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  head: z.object({ revision: z.number().int().positive().safe(), sortAtMs: z.number().int().safe().nullable() }).strict().nullable(),
+  timeHint: z.number().int().nullable(), done: z.boolean(),
+  excluded: z.enum(["deadline", "unavailable"]).nullable(),
+}).strict();
+export const TimelineCursor = z.object({
+  format: z.literal(1), workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID, object: HistoryObject.nullable(),
+  engine: HistoryCursor.nullable(), engineDone: z.boolean(),
+  collections: z.array(TimelineCollectionCursor).max(HISTORY_MAX_SOURCES),
+  omittedSources: z.number().int().nonnegative().safe(),
+}).strict().refine(cursor => new Set(cursor.collections.map(source => source.datasetId)).size === cursor.collections.length, "Collection IDs must be unique.")
+  .refine(cursor => !cursor.engine || cursor.engine.workspaceId === cursor.workspaceId && cursor.engine.versionId === cursor.versionId, "History cursor engine scope differs.")
+  .refine(cursor => cursor.versionId === "main" && cursor.object?.kind !== "file" || cursor.collections.length === 0 && cursor.omittedSources === 0, "Collections belong only to main workspace History.")
+  .refine(cursor => { const object = cursor.object; return object?.kind !== "dataset" || cursor.collections.every(source => source.datasetId === object.datasetId); }, "Collection cursor object differs.")
+  .refine(cursor => new TextEncoder().encode(JSON.stringify(cursor)).byteLength <= HISTORY_CURSOR_BYTES, "History cursor exceeds 64 KiB.");
+export type TimelineCursor = z.infer<typeof TimelineCursor>;
+export const TimelineEntry = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("file"), moment: EngineMomentRecord }).strict(),
+  z.object({ kind: z.literal("version"), version: HistoryVersionMarker }).strict(),
+  z.object({ kind: z.literal("collection"), datasetId: z.string().uuid(), name: z.string(),
+    sortAtMs: z.number().int().nullable(), change: DatasetHistoryPage.shape.entries.element.omit({ undo: true }) }).strict(),
+]);
+export type TimelineEntry = z.infer<typeof TimelineEntry>;
+export const ListHistoryPayload = z.object({
+  workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID.optional(), object: HistoryObject.optional(),
+  limit: z.number().int().min(1).max(50).optional(), cursor: TimelineCursor.optional(),
+}).strict();
+export type ListHistoryPayload = z.infer<typeof ListHistoryPayload>;
+export const ListHistoryPage = z.object({
+  status: z.literal("ready"), workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID,
+  entries: z.array(TimelineEntry).max(50), nextCursor: TimelineCursor.nullable(),
+  unavailableSources: z.array(z.object({ datasetId: z.string().uuid(), reason: z.enum(["deadline", "unavailable"]) }).strict()),
+  omittedSources: z.number().int().nonnegative().safe(),
+  completeness: z.enum(["complete", "partial"]),
+}).strict();
+export const ListHistoryResult = z.union([ListHistoryPage, ListEngineMomentsUpdatingResult, HistoryPolicyUnreadableResult]);
+export type ListHistoryResult = z.infer<typeof ListHistoryResult>;
+export const historyOperations = {
+  listHistory: {
+    capabilityId: "history.list", channel: "desktop:list-history", guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "History stopped loading because this window changed workspaces.",
+    payload: ListHistoryPayload, result: ListHistoryResult,
+  },
+} as const satisfies OperationTable;
 
 export const ReadEngineMomentPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -6365,7 +6425,7 @@ export const scheduleHostOperations = {
   readScheduleHost: {
     capabilityId: "automation.host.read",
     scope: "workspace",
-    handlerCheck: {"check":"main.scheduleHostState","reason":"Host selection and credential generation have their own lifetime."},
+    handlerCheck: {"check":"scheduleHostHandlers.currentRendererSession","reason":"The sender must show this workspace; relay calls run without a workspace lease."},
     channel: "desktop:read-schedule-host",
     payload: ScheduleHostWorkspace, result: ScheduleHostResult, guard: "trusted-sender",
   },
@@ -6373,7 +6433,7 @@ export const scheduleHostOperations = {
   chooseScheduleHost: {
     capabilityId: "automation.host.choose",
     scope: "workspace",
-    handlerCheck: {"check":"main.scheduleHostState","reason":"Host selection and credential generation have their own lifetime."},
+    handlerCheck: {"check":"scheduleHostHandlers.currentRendererSession","reason":"The sender must show this workspace; relay calls run without a workspace lease."},
     channel: "desktop:choose-schedule-host",
     payload: ScheduleHostWorkspace.extend({
       installId: z.string().min(1).max(256),
@@ -6385,7 +6445,7 @@ export const scheduleHostOperations = {
   takeOverScheduleHost: {
     capabilityId: "automation.host.takeover",
     scope: "workspace",
-    handlerCheck: {"check":"main.scheduleHostState","reason":"Host selection and credential generation have their own lifetime."},
+    handlerCheck: {"check":"scheduleHostHandlers.currentRendererSession","reason":"The sender must show this workspace; relay calls run without a workspace lease."},
     channel: "desktop:take-over-schedule-host",
     payload: ScheduleHostWorkspace.extend({ generation: z.number().int().nonnegative() }),
     result: ScheduleHostResult, guard: "trusted-sender",
@@ -6823,12 +6883,45 @@ export const chatOperations = {
   },
 } as const satisfies OperationTable;
 
+// The server account this computer is connected to. Main sends both requests
+// with its own session; the window never sees the session.
+export const serverAccountOperations = {
+  previewServerAccountDeletion: {
+    capabilityId: "account.delete.preview",
+    scope: "device",
+    channel: "desktop:preview-server-account-deletion",
+    payload: z.object({}).strict(),
+    result: ServerAccountDeletionPreview,
+    guard: "trusted-sender",
+  },
+  deleteServerAccount: {
+    capabilityId: "account.delete",
+    scope: "device",
+    channel: "desktop:delete-server-account",
+    payload: ServerAccountDeleteRequest,
+    result: ServerAccountDeleteResult,
+    guard: "trusted-sender",
+  },
+  // Runs a disconnect that failed after a deletion again.
+  retryServerAccountDisconnect: {
+    capabilityId: "account.delete",
+    scope: "device",
+    channel: "desktop:retry-server-account-disconnect",
+    payload: z.object({}).strict(),
+    result: z.null(),
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export interface DohcDesktopBridge
-  extends OperationBridge<typeof chatOperations>,
+  extends OperationBridge<typeof workspaceFileOperations>,
+    OperationBridge<typeof chatOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
+    OperationBridge<typeof serverAccountOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
+    OperationBridge<typeof historyOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
     OperationBridge<typeof fileObservationOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
@@ -6887,30 +6980,7 @@ export interface DohcDesktopBridge
   // Opens (or focuses) the workspace manager in its own window.
   openWorkspaceManager(): Promise<void>;
   closeThisWindow(): Promise<void>;
-  listWorkspaceFiles(
-    payload: ListWorkspaceFilesPayload,
-  ): Promise<ListWorkspaceFilesResult>;
   createCollectionRecord(payload: CreateCollectionRecordPayload): Promise<{ path: string; recordId: string; kept?: Record<string, unknown>; delivery?: "pending" | "accepted" | "refused"; reason?: string } | import("@dohc/cli/creation").CreationPartial>;
-  createWorkspaceFile(
-    payload: CreateWorkspaceFilePayload,
-  ): Promise<CreateWorkspaceFileResult>;
-  createWorkspaceFolder(
-    payload: CreateWorkspaceFolderPayload,
-  ): Promise<CreateWorkspaceFileResult>;
-  moveWorkspacePath(
-    payload: MoveWorkspacePathPayload,
-  ): Promise<CreateWorkspaceFileResult>;
-  deleteWorkspacePath(
-    payload: DeleteWorkspacePathPayload,
-  ): Promise<DeleteWorkspacePathResult>;
-  exportWorkspaceZip(
-    payload: ExportWorkspaceZipPayload,
-  ): Promise<ExportWorkspaceZipResult>;
-  // Document export ("Copy as Markdown" / "Export as HTML" / "Export as
-  // PDF" document menu). See the payload's comment for the kind split.
-  exportDocumentFile(
-    payload: ExportDocumentFilePayload,
-  ): Promise<ExportDocumentFileResult>;
   // Native explorer context menu; resolves with the chosen closed-tuple
   // command (validated in the preload against ExplorerMenuCommand) or null.
   showExplorerMenu(
@@ -6924,20 +6994,6 @@ export interface DohcDesktopBridge
   // File.path since Electron 32). The paths feed importWorkspaceFiles'
   // droppedPaths — see the trust-delta note on that payload.
   getDroppedFilePaths(files: File[]): string[];
-  importWorkspaceFiles(
-    payload: ImportWorkspaceFilesPayload,
-  ): Promise<ImportWorkspaceFilesResult>;
-  readWorkspaceText(
-    payload: ReadWorkspaceTextPayload,
-  ): Promise<ReadWorkspaceTextResult>;
-  writeWorkspaceText(
-    payload: WriteWorkspaceTextPayload,
-  ): Promise<WriteWorkspaceTextResult>;
-  writeWorkspaceAsset(payload: WriteWorkspaceAssetPayload): Promise<void>;
-  // `/image`: a MAIN-process open dialog rooted at the workspace directory,
-  // returning the chosen files' bytes (see PickImageFilesPayload).
-  pickImageFiles(payload: PickImageFilesPayload): Promise<PickImageFilesResult>;
-  openFileExternally(payload: OpenFileExternallyPayload): Promise<void>;
   readWorkspaceGraph(
     payload: ReadWorkspaceGraphPayload,
   ): Promise<WorkspaceGraphResult>;
