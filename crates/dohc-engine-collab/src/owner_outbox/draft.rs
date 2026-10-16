@@ -6,7 +6,7 @@ const SAFE: i64 = 9_007_199_254_740_991;
 const SCOPE: &str =
     "workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ObservedOwnerBinding {
     pub binding: LiveObjectBinding,
     pub relay_database_namespace: String,

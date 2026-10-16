@@ -8,7 +8,6 @@ macro_rules! owned_pending { () => { "EXISTS(SELECT 1 FROM release_held_ops r JO
     AND r.version_id=p.main_version_id AND r.object_id=p.object_id AND h.relay_namespace=p.relay_namespace
     AND json(h.binding_json)=json(p.binding_json) AND json(r.envelope_json)=json(p.envelope_json))" }; }
 pub(crate) use owned_pending;
-pub(crate) const OWNED_PENDING: &str = owned_pending!();
 
 /// Open before sending a claim. Pending settlements still block unbinding until adopted.
 pub fn begin_release_hold_in(
@@ -122,9 +121,9 @@ pub fn pending_release_blocked_in(
 ) -> Result<bool, SyncError> {
     let b = &hold.binding;
     hold.check_identity_in(conn)?;
-    conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements p
+    conn.query_row(concat!("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements p
         WHERE p.workspace_id=?1 AND p.main_version_id=?2 AND p.object_id=?3 AND p.lineage_claim_id=?4 AND p.relay_namespace=?5 AND p.applied=0
-        AND NOT ({OWNED_PENDING}))"),
+        AND NOT (",owned_pending!(),"))"),
         params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,hold.namespace],|r|r.get(0)).map_err(SyncError::corrupt)
 }
 

@@ -3265,8 +3265,8 @@ const V2_OWNER_RELEASE_LIFECYCLE_DDL: &str = "\
 ALTER TABLE release_holds ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0 CHECK(abandoned IN (0,1));
 ALTER TABLE owner_pending_settlements ADD COLUMN envelope_json TEXT CHECK(envelope_json IS NULL OR json_valid(envelope_json));
 ALTER TABLE owner_prefix_consumed ADD COLUMN ordinary_edit INTEGER NOT NULL DEFAULT 0 CHECK(ordinary_edit IN (0,1));
-ALTER TABLE ydoc_deferred_updates ADD COLUMN release_digest TEXT;
-ALTER TABLE ydoc_deferred_updates ADD COLUMN release_generation INTEGER CHECK(release_generation IS NULL OR release_generation>=0);
+ALTER TABLE ydoc_deferred_updates ADD COLUMN release_digest TEXT CHECK(release_digest IS NULL OR (length(release_digest)=64 AND release_digest NOT GLOB '*[^0-9a-f]*'));
+ALTER TABLE ydoc_deferred_updates ADD COLUMN release_generation INTEGER CHECK(release_generation IS NULL OR release_generation>=0) CHECK((release_digest IS NULL)=(release_generation IS NULL));
 CREATE INDEX ydoc_deferred_release ON ydoc_deferred_updates(workspace_id,version_id,object_id,release_digest) WHERE release_digest IS NOT NULL;
 CREATE TABLE owner_release_closed_sessions (
     outbox_id TEXT PRIMARY KEY,
@@ -4103,7 +4103,7 @@ mod tests {
             ),
             (
                 "v2-owner-release-lifecycle",
-                "e503c9ed5aed460779485a15089b7ceac2dc96d3638e9f84a08fa93e4d6c3d83",
+                "1eba7c3bcfc7521f9e0a1668da9597caaa98d7bdabe814d0625f30fb2485fc81",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4115,6 +4115,51 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    fn fix2_deferred_release_tags_are_paired_and_hex() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-owner-release-lifecycle");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("INSERT INTO versioned_workspaces VALUES('ws','main')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES('ws','doc',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) VALUES('ws','main','doc','peer',0,1)", []).unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        for (digest, generation) in [
+            (Some("a".repeat(64)), None),
+            (None, Some(0)),
+            (Some("G".repeat(64)), Some(0)),
+            (Some("a".repeat(63)), Some(0)),
+        ] {
+            let error = conn
+                .execute(
+                    "UPDATE ydoc_deferred_updates SET release_digest=?1,release_generation=?2",
+                    rusqlite::params![digest, generation],
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, rusqlite::Error::SqliteFailure(ref e, _) if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK),
+                "{error:?}"
+            );
+        }
+        conn.execute(
+            "UPDATE ydoc_deferred_updates SET release_digest=?1,release_generation=0",
+            ["a".repeat(64)],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE ydoc_deferred_updates SET release_digest=NULL,release_generation=NULL",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]

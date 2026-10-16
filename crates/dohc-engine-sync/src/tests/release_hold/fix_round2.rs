@@ -789,6 +789,36 @@ fn fix1_abandoned_inactive_lineage_keeps_row_without_stopping_workspace_drain() 
     assert_eq!(applied, other_text);
     assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
     assert_eq!(release_deferred_wakes_in_for_test(&store).len(), 1);
+    let mut ordinary = update(
+        &mut store,
+        &owner,
+        &doc.richdoc_append_paragraph("R must survive"),
+        1,
+    );
+    ordinary.payload["lineageClaimId"] = json!(lineage);
+    let arrival = apply_replication_envelope(
+        &mut store,
+        &mut WriterDocCache::new(),
+        &ordinary,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(
+        matches!(arrival.primary, ApplyDisposition::Applied(_)),
+        "{arrival:?}"
+    );
+    assert!(arrival.refusals.is_empty());
+    let drained = drain_deferred_ydoc_for_key(
+        &mut store,
+        &mut WriterDocCache::new(),
+        &DocKey::new("ws", "main", "owner").unwrap(),
+        &NoFaults,
+    )
+    .unwrap();
+    assert!(drained.refusals.is_empty());
+    assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 2);
+    assert_eq!(release_deferred_wakes_in_for_test(&store).len(), 1);
     let sha:String=store.read_with(|c|c.query_row("SELECT full_state_blob_sha256 FROM ydoc_inactive_lineages WHERE lineage_claim_id=?1",[lineage],|r|r.get(0))).unwrap();
     let saved = Ydoc::wire();
     saved
@@ -806,4 +836,134 @@ fn release_deferred_wakes_in_for_test(store: &EngineStore) -> Vec<DocKey> {
     store
         .read_with(|c| release_deferred_wakes_in(c, "ws", None))
         .unwrap()
+}
+
+fn fenced_inactive_stall(fenced_rows: i64, fenced_bytes: usize, ordinary_bytes: usize) {
+    let (_dir, mut store, owner, _) = owner_publication::fixture();
+    let hold = open(&mut store, &owner);
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Other branch\n")
+        .unwrap();
+    let lineage = store.put_binary_blob(&doc.encode_full_state()).unwrap();
+    let vector = store.put_binary_blob(&doc.encode_state_vector()).unwrap();
+    store.read_with(|c| c.execute("INSERT INTO ydoc_inactive_lineages(workspace_id,version_id,object_id,lineage_claim_id,disposition,content_kind,path,full_state_blob_sha256,state_vector_blob_sha256,recorded_at_ms,updated_at_ms) VALUES('ws','main','owner',?1,'rejected-base','richdoc','owner.md',?1,?2,2,2)", params![lineage,vector])).unwrap();
+    let mut tagged = update(
+        &mut store,
+        &owner,
+        &doc.richdoc_append_paragraph(&"f".repeat(fenced_bytes)),
+        0,
+    );
+    tagged.payload["lineageClaimId"] = json!(lineage);
+    retain(&mut store, &hold, &tagged);
+    released(&mut store, &owner, &hold);
+    replay(&mut store, &hold, &tagged);
+    ack(&mut store, &tagged);
+    store
+        .write_with(&NoFaults, |tx| {
+            abandon_release_hold_in(tx, &hold, hold.digest())
+        })
+        .unwrap();
+    for seq in 1..fenced_rows {
+        let mut op = update(
+            &mut store,
+            &owner,
+            &doc.richdoc_append_paragraph("queued lineage mate"),
+            seq,
+        );
+        op.payload["lineageClaimId"] = json!(lineage);
+        let result = apply_replication_envelope(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(result.primary, ApplyDisposition::Applied(_)),
+            "{result:?}"
+        );
+        assert!(result.refusals.is_empty());
+    }
+    // A second inactive lineage of another document must get past the fenced group.
+    let other = Ydoc::wire();
+    other
+        .rewrite_content_to_markdown(ContentKind::Richdoc, "Independent branch\n")
+        .unwrap();
+    let base = other.encode_full_state();
+    let other_lineage = store.put_binary_blob(&base).unwrap();
+    let other_vector = store.put_binary_blob(&other.encode_state_vector()).unwrap();
+    store.read_with(|c| {
+        c.execute("INSERT INTO file_objects(workspace_id,object_id,created_at_ms) VALUES('ws','other',1)", [])?;
+        c.execute("INSERT INTO ydoc_inactive_lineages(workspace_id,version_id,object_id,lineage_claim_id,disposition,content_kind,path,full_state_blob_sha256,state_vector_blob_sha256,recorded_at_ms,updated_at_ms) VALUES('ws','main','other',?1,'rejected-base','richdoc','other.md',?1,?2,2,2)", params![other_lineage,other_vector])
+    }).unwrap();
+    let mut op = update(
+        &mut store,
+        &owner,
+        &other.richdoc_append_paragraph(&"o".repeat(ordinary_bytes)),
+        0,
+    );
+    op.origin_id = "other-origin".into();
+    op.relay_seq = Some(1000);
+    op.payload["objectId"] = json!("other");
+    op.payload["path"] = json!("other.md");
+    op.payload["lineageClaimId"] = json!(other_lineage);
+    let result = apply_replication_envelope(
+        &mut store,
+        &mut WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert!(
+        matches!(result.primary, ApplyDisposition::Applied(_)),
+        "{result:?}"
+    );
+    assert!(result.refusals.is_empty());
+    let queued: i64 = store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT count(*) FROM ydoc_deferred_updates WHERE object_id='other'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(queued, 0, "ordinary inactive row must drain past the fence");
+    assert_eq!(
+        store.table_row_count("ydoc_deferred_updates").unwrap(),
+        fenced_rows
+    );
+    let sha: String = store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT full_state_blob_sha256 FROM ydoc_inactive_lineages WHERE object_id='other'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let saved = Ydoc::wire();
+    saved
+        .apply(&store.get_binary_blob(&sha).unwrap().unwrap())
+        .unwrap();
+    assert!(
+        saved
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains(&"o".repeat(ordinary_bytes))
+    );
+    assert_eq!(release_deferred_wakes_in_for_test(&store).len(), 1);
+}
+
+#[test]
+fn fix2_inactive_drain_passes_a_full_page_of_fenced_rows() {
+    fenced_inactive_stall(257, 1, 1);
+}
+
+#[test]
+fn fix2_inactive_drain_does_not_charge_fenced_bytes() {
+    fenced_inactive_stall(1, 17 * 1024 * 1024, 8 * 1024 * 1024);
 }

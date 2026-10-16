@@ -18,7 +18,7 @@ fn drain2b_closed_session_cannot_reinsert_after_consumed_cleanup() {
     let key = key(&observed.binding).unwrap();
     prefix_turn(&mut store, &mut Default::default(), &observed);
     store.write_with(&NoFaults, |tx| {
-        prefix::close_consumed_in_tx(tx, &key, &outbox, 9)?;
+        prefix::close_consumed_in_tx(tx, &key, &outbox)?;
         prefix::cleanup_consumed_in_tx(tx, &key, &outbox)?;
         Ok::<_,OwnerOutboxError>(())
     }).unwrap();
@@ -217,7 +217,7 @@ fn prefix_retry_between_consumed_cleanup_pages_cannot_append_twice() {
             tx.execute("UPDATE owner_live_stops SET state='released'", [])
                 .map_err(write_sql)?;
             {
-                prefix::close_consumed_in_tx(tx, &key, &outbox, 9)?;
+                prefix::close_consumed_in_tx(tx, &key, &outbox)?;
                 prefix::cleanup_consumed_in_tx(tx, &key, &outbox)
             }
         })
@@ -988,7 +988,7 @@ fn prefix_late_session_keys_are_scoped_idempotent_and_expire_with_cleanup() {
         .unwrap();
     store
         .write_with(&NoFaults, |tx| {
-            prefix::close_consumed_in_tx(tx, &key, &outbox, 9)?;
+            prefix::close_consumed_in_tx(tx, &key, &outbox)?;
             prefix::cleanup_consumed_in_tx(tx, &key, &outbox)
         })
         .unwrap();
@@ -1133,7 +1133,7 @@ fn prefix_consumed_cleanup_is_bounded_and_generation_changes_refuse_late_edits()
     for remaining in [66, 2, 0] {
         store
             .write_with(&NoFaults, |tx| {
-                prefix::close_consumed_in_tx(tx, &key, &outbox, 9)?;
+                prefix::close_consumed_in_tx(tx, &key, &outbox)?;
                 prefix::cleanup_consumed_in_tx(tx, &key, &outbox)
             })
             .unwrap();

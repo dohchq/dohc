@@ -751,7 +751,6 @@ pub fn close_consumed_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     outbox: &str,
-    _now_ms: i64,
 ) -> Result<(), OwnerOutboxError> {
     let owned: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_prefix_consumed WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4) OR EXISTS(SELECT 1 FROM owner_release_closed_sessions WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4)",params![key.workspace_id,key.version_id,key.object_id,outbox],|r|r.get(0)).map_err(read_sql)?;
     if !owned {

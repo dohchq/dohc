@@ -179,7 +179,7 @@ impl ReleaseHold {
         }
         tx.execute("INSERT INTO release_held_ops(workspace_id,origin_id,origin_seq,version_id,object_id,release_digest,envelope_json,retained_bytes) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             params![op.workspace_id,op.origin_id,op.origin_seq,self.binding.main_version_id,self.binding.object_id,self.digest,json,bytes]).map_err(SyncError::persist)?;
-        let unowned:bool=tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements p WHERE p.workspace_id=?1 AND p.origin_id=?2 AND p.origin_seq=?3 AND NOT ({}))",OWNED_PENDING),params![op.workspace_id,op.origin_id,op.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
+        let unowned:bool=tx.query_row(concat!("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements p WHERE p.workspace_id=?1 AND p.origin_id=?2 AND p.origin_seq=?3 AND NOT (",owned_pending!(),"))"),params![op.workspace_id,op.origin_id,op.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
         if unowned {
             return Err(waiting());
         }

@@ -1096,7 +1096,13 @@ fn drain_deferred_ydoc(
                     &key.workspace_id,
                     faults,
                 )?);
-                drained_coordinates.push((origin_id, origin_seq));
+                let queued = store.read_with(|conn| conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",
+                    params![key.workspace_id, origin_id, origin_seq], |r| r.get::<_, bool>(0),
+                )).map_err(SyncError::corrupt)?;
+                if !queued {
+                    drained_coordinates.push((origin_id, origin_seq));
+                }
             }
             continue;
         }
@@ -3304,35 +3310,48 @@ pub(crate) fn drain_inactive_ydoc_updates(
     }
     let search_policy = search_policy_for_store(store);
     let mut all_refusals = Vec::new();
+    let mut cursor: Option<(i64, String, i64)> = None;
     loop {
         let result = store.write_with(faults, |tx| {
+        // Check every tagged group before paging so even earlier untagged mates stay private.
+        let mut fenced = std::collections::BTreeSet::new();
+        let mut tagged = tx.prepare("SELECT version_id,object_id,lineage_claim_id,origin_id,origin_seq FROM ydoc_deferred_updates INDEXED BY ydoc_deferred_release WHERE workspace_id=?1 AND release_digest IS NOT NULL").map_err(SyncError::corrupt)?;
+        for row in tagged.query_map([workspace_id], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,i64>(4)?))).map_err(SyncError::corrupt)? {
+            let (version, object, lineage, origin, seq) = row.map_err(SyncError::corrupt)?;
+            let key = DocKey::new(workspace_id, &version, &object).map_err(map_collab_hard_error)?;
+            if !crate::release_hold::deferred_release_ready_in(tx, &key, &origin, seq)? { fenced.insert((version, object, lineage)); }
+        }
+        let fenced = serde_json::to_string(&fenced).map_err(SyncError::corrupt)?;
         let mut statement = tx.prepare(
-            "SELECT r.origin_id,r.origin_seq,r.recorded_at_ms,r.payload_json,b.byte_length,d.release_digest IS NOT NULL \
+            "WITH page AS (SELECT r.origin_id,r.origin_seq,r.recorded_at_ms,r.payload_json,b.byte_length,COALESCE(d.relay_seq,-1) AS relay_seq,d.release_digest IS NOT NULL AS tagged \
              FROM ydoc_deferred_updates d JOIN ydoc_inactive_lineages l \
              ON l.workspace_id=d.workspace_id AND l.version_id=d.version_id \
              AND l.object_id=d.object_id AND l.lineage_claim_id=d.lineage_claim_id \
              JOIN replication_log r ON r.workspace_id=d.workspace_id \
              AND r.origin_id=d.origin_id AND r.origin_seq=d.origin_seq \
              LEFT JOIN binary_blobs b ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') \
-             WHERE d.workspace_id=?1 ORDER BY d.relay_seq,d.origin_id,d.origin_seq LIMIT 256",
+             WHERE d.workspace_id=?1 AND (?3 IS NULL OR (COALESCE(d.relay_seq,-1),d.origin_id,d.origin_seq)>(?3,?4,?5)) \
+             AND NOT EXISTS(SELECT 1 FROM json_each(?2) f WHERE json_extract(f.value,'$[0]')=d.version_id \
+             AND json_extract(f.value,'$[1]')=d.object_id AND json_extract(f.value,'$[2]')=d.lineage_claim_id) \
+             ORDER BY relay_seq,d.origin_id,d.origin_seq LIMIT 256), \
+             bounded AS (SELECT page.*,SUM(COALESCE(byte_length,0)+length(CAST(payload_json AS BLOB))) OVER w AS cost,ROW_NUMBER() OVER w AS n \
+             FROM page WINDOW w AS (ORDER BY relay_seq,origin_id,origin_seq ROWS UNBOUNDED PRECEDING)) \
+             SELECT origin_id,origin_seq,recorded_at_ms,payload_json,byte_length,relay_seq,tagged FROM bounded \
+             WHERE cost<=25165824 OR n=1 ORDER BY relay_seq,origin_id,origin_seq",
         ).map_err(SyncError::corrupt)?;
-        let rows = statement.query_map([workspace_id], |row| Ok((
-            row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<i64>>(4)?, row.get::<_,bool>(5)?,
+        let rows = statement.query_map(params![workspace_id,fenced,cursor.as_ref().map(|c|c.0),cursor.as_ref().map(|c|c.1.as_str()),cursor.as_ref().map(|c|c.2)], |row| Ok((
+            row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<i64>>(4)?, row.get::<_,i64>(5)?, row.get::<_,bool>(6)?,
         ))).map_err(SyncError::corrupt)?.collect::<Result<Vec<_>,_>>().map_err(SyncError::corrupt)?;
+        let next = rows.last().map(|r| (r.5, r.0.clone(), r.1));
         let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
-        let mut batch_bytes = 0;
-        let mut fenced = std::collections::BTreeSet::new();
-        for (processed, (origin, seq, at, json, byte_length, release)) in rows.into_iter().enumerate() {
-            let cost = usize::try_from(byte_length.ok_or(SyncError::BlobInvalid)?).map_err(SyncError::corrupt)?.saturating_add(json.len());
+        for (origin, seq, at, json, byte_length, _, release) in rows {
             // One admitted update is at most 20 MiB, plus a 256 KiB payload.
-            if batch_bytes + cost > 24 * 1024 * 1024 {
-                if processed == 0 { return Err(SyncError::BlobInvalid); }
-                break;
-            }
-            batch_bytes += cost;
+            let cost = usize::try_from(byte_length.ok_or(SyncError::BlobInvalid)?).map_err(SyncError::corrupt)?.saturating_add(json.len());
+            if cost > 24 * 1024 * 1024 { return Err(SyncError::BlobInvalid); }
             let payload: YdocUpdatePayload = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
-            if release { let key = DocKey::new(workspace_id,&payload.version_id,&payload.object_id).map_err(map_collab_hard_error)?;
-                if !crate::release_hold::deferred_release_ready_in(tx,&key,&origin,seq)? { fenced.insert((payload.version_id,payload.object_id,payload.lineage_claim_id)); continue; }
+            if release {
+                let key = DocKey::new(workspace_id,&payload.version_id,&payload.object_id).map_err(map_collab_hard_error)?;
+                crate::release_hold::check_deferred_release_in(tx,&key,&origin,seq)?;
             }
             let bytes = get_binary_blob(tx, &payload.update_blob_sha256).map_err(SyncError::Storage)?.ok_or(SyncError::BlobInvalid)?;
             if hex_sha256(&bytes) != payload.update_blob_sha256 { return Err(SyncError::BlobInvalid); }
@@ -3340,10 +3359,7 @@ pub(crate) fn drain_inactive_ydoc_updates(
                 .or_default().push((origin,seq,at,payload,bytes));
         }
         let mut refusals = Vec::new();
-        let mut consumed = 0;
-        for ((version,object,lineage), rows) in groups {
-            if fenced.contains(&(version.clone(),object.clone(),lineage)) { continue; }
-            consumed += rows.len();
+        for ((version,object,_), rows) in groups {
             let key = DocKey::new(workspace_id, version, object).map_err(map_collab_hard_error)?;
             let last = rows.last().unwrap();
             let updates = rows.iter().map(|row| row.4.clone()).collect::<Vec<_>>();
@@ -3361,14 +3377,15 @@ pub(crate) fn drain_inactive_ydoc_updates(
                     params![workspace_id,origin,seq]).map_err(SyncError::persist)?;
             }
         }
-        Ok::<_,SyncError>((consumed,refusals))
+        Ok::<_,SyncError>((next,refusals))
     })?;
         match result {
-            TxnOutcome::Committed((processed, refusals)) => {
+            TxnOutcome::Committed((next, refusals)) => {
                 all_refusals.extend(refusals);
-                if processed == 0 {
+                let Some(next) = next else {
                     return Ok(all_refusals);
-                }
+                };
+                cursor = Some(next);
             }
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }

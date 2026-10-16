@@ -749,3 +749,122 @@ async fn fix1_closed_session_refuses_existing_entry_retry_before_and_after_clean
     }
     supervisor.close_all().unwrap();
 }
+
+#[tokio::test]
+async fn fix2_close_session_cannot_hide_an_abandoned_draft() {
+    let (mut f, supervisor, actor) = pending_release_fixture(40).await;
+    let h = begin(&f, &actor).await;
+    seal(&mut f, &h);
+    let outbox: String = f
+        .store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT outbox_id FROM owner_ydoc_outboxes WHERE object_id='object'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    fold(&mut f, &h);
+    lifecycle(
+        &actor,
+        Action::Abandon {
+            hold: h.clone(),
+            resolved_digest: h.digest().into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        lifecycle(
+            &actor,
+            Action::CloseSession {
+                hold: h.clone(),
+                outbox
+            }
+        )
+        .await,
+        Err(dohc_engine_runtime::RuntimeError::Sync(
+            sync::SyncError::RetryableState { .. }
+        ))
+    ));
+    let drafts = actor
+        .owner_ydoc_list_drafts(
+            "workspace".into(),
+            None,
+            64,
+            true,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(drafts.len(), 1);
+    actor
+        .owner_ydoc_open_draft(f.binding.clone(), 1, CancellationToken::new(), Arc::new(()))
+        .await
+        .unwrap()
+        .unwrap();
+    actor
+        .owner_ydoc_append_draft(
+            "workspace".into(),
+            dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                person_edit: true,
+                binding: f.binding.clone(),
+                expected_revision: 1,
+                append_key: "offline".into(),
+                update: f.doc.richdoc_append_paragraph("offline edit"),
+                now_ms: 70,
+                agent_declaration: None,
+                automation_declaration: None,
+            },
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        f.store
+            .read_with(|c| prefix::commit_blocker_in(c, &f.binding, h.digest())),
+        Err(dohc_engine_collab::OwnerOutboxError::Stopping)
+    ));
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn fix2_settlement_after_abandon_is_retryable_not_corruption() {
+    let (mut f, supervisor, actor) = pending_release_fixture(1).await;
+    let h = begin(&f, &actor).await;
+    seal(&mut f, &h);
+    fold(&mut f, &h);
+    lifecycle(
+        &actor,
+        Action::Abandon {
+            hold: h.clone(),
+            resolved_digest: h.digest().into(),
+        },
+    )
+    .await
+    .unwrap();
+    let error = actor
+        .owner_release_settle(
+            h,
+            f.root.path().to_owned(),
+            Arc::new(()),
+            60,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            dohc_engine_runtime::RuntimeError::Sync(sync::SyncError::RetryableState { .. })
+        ),
+        "{error:?}"
+    );
+    supervisor.close_all().unwrap();
+}

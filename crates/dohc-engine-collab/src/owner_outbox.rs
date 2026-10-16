@@ -609,8 +609,8 @@ fn append_with_retained_base(
 
     let durable_main = tx
         .query_row(
-            "SELECT main_version_id,CASE WHEN ?5 THEN EXISTS(SELECT 1 FROM owner_release_closed_sessions WHERE outbox_id=?4 AND workspace_id=?1 AND version_id=?2 AND object_id=?3) ELSE 0 END FROM versioned_workspaces WHERE workspace_id=?1",
-            params![binding.workspace_id,binding.main_version_id,binding.object_id,outbox_id,draft_revision.is_none()],
+            "SELECT main_version_id,CASE WHEN ?3 THEN EXISTS(SELECT 1 FROM owner_release_closed_sessions WHERE outbox_id=?2) ELSE 0 END FROM versioned_workspaces WHERE workspace_id=?1",
+            params![binding.workspace_id,outbox_id,draft_revision.is_none()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
         )
         .optional()

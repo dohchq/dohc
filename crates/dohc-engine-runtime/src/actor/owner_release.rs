@@ -43,7 +43,10 @@ impl ActorHandle {
             let b = hold.binding();
             let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
             let capability = store.read_with(|c| {
-                prefix::PrefixSettlement::prepare_in(c, b).map_err(StorageError::corrupt_public)
+                prefix::PrefixSettlement::prepare_in(c, b).map_err(|error| match error {
+                    dohc_engine_collab::OwnerOutboxError::Stopping => sync::SyncError::RetryableState { reason: "owner release is abandoned" },
+                    error => sync::SyncError::Storage(StorageError::corrupt_public(error)),
+                })
             })?;
             if capability.release_digest != hold.digest() {
                 return Err(sync::SyncError::CoordinateDiverged.into());
@@ -124,7 +127,9 @@ impl ActorHandle {
                     }
                     OwnerReleaseLifecycle::CloseSession { hold, outbox } => {
                         require_cleanup_hold(tx, &key, &hold)?;
-                        prefix::close_consumed_in_tx(tx, &key, &outbox, now_ms)
+                        let released: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND state='released')",rusqlite::params![key.workspace_id,key.version_id,key.object_id],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
+                        if !released { return Err(sync::SyncError::RetryableState { reason: "owner release is not released" }); }
+                        prefix::close_consumed_in_tx(tx, &key, &outbox)
                             .map_err(StorageError::corrupt_public)?;
                         hold
                     }
