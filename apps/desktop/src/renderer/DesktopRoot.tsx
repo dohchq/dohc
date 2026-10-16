@@ -23,6 +23,7 @@ import { useHeldWorkspacePathOpenFailures, WorkspacePathOpenFailures } from "./s
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import { useStatesPageOpen } from "./dev/statesRoute";
 import { ReactionStoreProvider } from "./workbench/reactionStore";
+import { useAccountDeletion } from "./shell/useAccountDeletion";
 
 // Development only, and its own chunk: the app's bundle does not carry it.
 const LazyStatesPage = lazy(() =>
@@ -50,6 +51,8 @@ export function DesktopRoot() {
   const shareHandoffRevision = useRef(0);
   const sentNotices = useSentNotices(!isManagerWindow);
   const pathOpenFailures = useHeldWorkspacePathOpenFailures();
+  // Outlives every workspace switch, so a sent deletion still reports.
+  const accountDeletion = useAccountDeletion();
   // What to open once the workspace a notice's Open switched to is ready.
   const [openOnSwitch, setOpenOnSwitch] = useState<{
     workspaceId: string;
@@ -346,6 +349,7 @@ export function DesktopRoot() {
             refreshWorkspaceRegistry={refreshWorkspaceRegistry}
             onManageWorkspaces={() => bridge().openWorkspaceManager()}
             sentNotices={sentNotices}
+            accountDeletion={accountDeletion.deletion}
             {...(openOnSwitch?.workspaceId === workspace.workspaceId
               ? { openOnReady: openOnSwitch.open }
               : {})}
@@ -364,6 +368,7 @@ export function DesktopRoot() {
           <DevPanel workspaceId={workspace.workspaceId} />
         </>
       )}
+      {accountDeletion.dialog}
     </ReactionStoreProvider>
     </WorkspacePathOpenFailures.Provider>
   );
