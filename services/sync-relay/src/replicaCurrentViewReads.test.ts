@@ -8,6 +8,8 @@ import {registered, cleanupLiveDeliveryFixtures} from "../../../packages/ydoc-pr
 import type {StorageContext} from "./storage/context";
 import {replicaCurrentViewReadCacheSize} from "./replicaCurrentViewReads";
 import {replicaCurrentViewStoredCacheSize} from "./storage/replicaCurrentViews";
+import {fenceAccount, initializeAccountDeletion} from "./storage/accountDeletion";
+import {accountDeletionKey} from "@dohc/workspace-auth/accountDeletion";
 
 afterEach(async () => {cleanupLiveDeliveryFixtures(); await closeTestStorages();});
 
@@ -279,6 +281,26 @@ it("a revoked grant forgets caches without a running replica", async () => {
     expect(replicaCurrentViewReadCacheSize(context)).toBe(1); expect(replicaCurrentViewStoredCacheSize(context)).toBe(1);
     expect(storage.revokeShareGrant({shareId:"cache-revoke-share",grantId:"cache-revoke-grant",revokedAtMs:2}).ok).toBe(true);
     expect(replicaCurrentViewReadCacheSize(context)).toBe(0); expect(replicaCurrentViewStoredCacheSize(context)).toBe(0);
+  } finally {closeTestStorage(storage);}
+});
+
+it("deleting the owner's account forgets their cached views", async () => {
+  const storage = await testStorage(), context = storage as StorageContext;
+  try {
+    storage.claimWorkspace({workspaceId:"cache-delete",ownerUserId:"owner",createdAtMs:1});
+    storage.claimWorkspaceIdentity({workspaceId:"cache-delete",replicationEpoch:"epoch",streamIdentity:"stream"});
+    storage.createShare({share:{shareId:"cache-delete-share",workspaceId:"cache-delete",granterUserId:"owner",selectorJson:'{"paths":["docs"],"versionId":null}',createdAtMs:1},
+      grant:{grantId:"cache-delete-grant",shareId:"cache-delete-share",principalKind:"user",principalUserId:"reader",principalEmail:null,access:"edit",generation:1,status:"active",createdAtMs:1,revokedAtMs:null,parentGrantId:null}});
+    const lease = createReplicaReadPrincipal(storage).issue("cache-delete","cache-delete"); storage.bindReplicaCurrentView(lease);
+    const text = "cached", file = {versionId:"main",objectId:"object",path:"docs/a.md",contentKind:"text" as const,sha256:sha256(text),byteLength:text.length,lineageClaimId:null,restoreGeneration:null};
+    storage.storeReplicaCurrentView(lease,{workspaceId:"cache-delete",revision:1,logCursor:0,journalCursor:0,files:[file],omitted:[],texts:[{sha256:file.sha256,text}]});
+    const read = {grantId:"cache-delete-grant",generation:1,principal:{kind:"user" as const,userId:"reader"},path:file.path};
+    expect(storage.readReplicaCurrentViewFile(read)).toMatchObject({status:"ready"});
+    expect(replicaCurrentViewReadCacheSize(context)).toBe(1); expect(replicaCurrentViewStoredCacheSize(context)).toBe(1);
+    const key = accountDeletionKey("replica-read-cache-test-secret-at-least-thirty-two");
+    initializeAccountDeletion(context,key); fenceAccount(context,key,"owner","owner@dohc.test");
+    expect(replicaCurrentViewReadCacheSize(context)).toBe(0); expect(replicaCurrentViewStoredCacheSize(context)).toBe(0);
+    expect(storage.readReplicaCurrentViewFile(read)).toMatchObject({status:"denied"});
   } finally {closeTestStorage(storage);}
 });
 

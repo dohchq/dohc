@@ -1220,9 +1220,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   revokeShare(shareId: string, revokedAtMs: number): boolean {
     try { return sharesStorage.revokeShare(this, shareId, revokedAtMs); }
-    finally {
-      notifyDesktopReadiness(this, {shareId});
-    }
+    finally { notifyDesktopReadiness(this, {shareId}); }
   }
 
   listObjectMomentLogRowsByBlob(input: {
