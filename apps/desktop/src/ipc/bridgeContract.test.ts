@@ -84,6 +84,7 @@ import {
   StopAgentRunPayload,
   ResumeThreadDispatchPayload,
   SendChatMessagePayload,
+  StartChannelThreadPayload,
   SendChatMessageResult,
   SetChatReactionPayload,
   ShowWorkbenchMenuPayload,
@@ -4542,4 +4543,34 @@ describe("exclusive app creation IPC contract", () => {
   expect(activityPathsAffectWorkspaceListing([".dohc/visibility.toml"], "linux")).toBe(true);
   expect(activityPathsAffectWorkspaceListing([".DOHC/VISIBILITY.TOML"], "win32")).toBe(true);
   expect(activityPathsAffectWorkspaceListing([".dohc/files.toml", ".dohc/ui-state.json", ".dohc/engine"], "win32")).toBe(false);
+});
+
+
+describe("poll send payloads", () => {
+  const doors = [
+    { name: "send", schema: SendChatMessagePayload, target: { threadId: "thread" } },
+    { name: "start", schema: StartChannelThreadPayload, target: { channelId: "channel" } },
+  ];
+  it.each(doors)("keeps poll fields on $name without normalizing choices", ({ schema, target }) => {
+    const payload = { workspaceId: "workspace", ...target, body: "When?", needsDecision: true, options: [" Monday ", "Monday", " ", "two\nlines"] };
+    expect(schema.parse(payload)).toEqual(payload);
+    expect(schema.parse({ ...payload, needsDecision: false, options: [] })).toEqual({ ...payload, needsDecision: false, options: [] });
+    const { needsDecision: _decision, ...implied } = payload;
+    expect(schema.parse(implied)).toEqual(implied);
+  });
+  for (const { name, schema, target } of doors) {
+    it("accepts the poll choice limits on " + name, () => {
+      const payload = { workspaceId: "workspace", ...target, body: "When?" };
+      expect(schema.parse({ ...payload, options: Array.from({ length: 12 }, (_, i) => String(i)) })).toHaveProperty("options");
+      expect(schema.parse({ ...payload, options: ["x".repeat(200)] })).toHaveProperty("options");
+    });
+    it.each([
+      { reason: "13 choices", options: Array.from({ length: 13 }, (_, i) => String(i)) },
+      { reason: "a 201-character choice", options: ["x".repeat(201)] },
+      { reason: "an empty choice", options: [""] },
+      { reason: "a non-string choice", options: [42] },
+    ])("refuses $reason on " + name, ({ options }) => {
+      expect(schema.safeParse({ workspaceId: "workspace", ...target, body: "When?", options }).success).toBe(false);
+    });
+  }
 });

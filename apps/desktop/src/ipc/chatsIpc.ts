@@ -459,6 +459,8 @@ export function registerChatsIpcHandlers<
       threadId: input.threadId,
       ...(input.parentMessageId ? { parentMessageId: input.parentMessageId } : {}),
       body: input.body,
+      ...(input.needsDecision !== undefined ? { needsDecision: input.needsDecision } : {}),
+      ...(input.options !== undefined ? { options: input.options } : {}),
       resolveAttachments: () =>
         resolveChatFileReferences(
           scope.workspace,
@@ -983,6 +985,8 @@ export function registerChatsIpcHandlers<
       channelId: input.channelId,
       ...(input.lane ? { lane: input.lane } : {}),
       body: input.body,
+      ...(input.needsDecision !== undefined ? { needsDecision: input.needsDecision } : {}),
+      ...(input.options !== undefined ? { options: input.options } : {}),
       resolveAttachments: () =>
         resolveChatFileReferences(workspace, capture.fileObjectIdForPath, input.fileReferences),
     });

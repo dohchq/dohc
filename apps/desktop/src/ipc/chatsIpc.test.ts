@@ -1,3 +1,11 @@
+import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import { createDesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
+import { createTestScratch } from "../workspaces/testTemp";
+import { StartChannelThreadResult, SendChatMessageResult, ListChatMessagesResult, ListChatThreadDecisionsResult } from "./bridgeContract";
+import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import { ipcWireError } from "./errorWords";
+import { ipcErrorMessage } from "../renderer/ipcError";
 import { chatOperations } from "./bridgeContract";
 import { workspaceFileRef } from "../workspaces/resolveEngineFiles";
 import { describe, expect, it, vi } from "vitest";
@@ -21,7 +29,7 @@ type ScopeKind = "local" | "view" | "comment" | "edit" | "ended" | "damaged";
 type Event = { sender: { trusted: boolean } };
 type Operation = { workspace: RegistryEntry; assertCurrent(): void };
 
-function fixture(kind: ScopeKind = "local") {
+function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatStore) {
   const workspace: RegistryEntry = {
     workspaceId: "workspace", rootPath: "/workspace", kind: "personal", mode: "local-first",
   };
@@ -85,7 +93,7 @@ function fixture(kind: ScopeKind = "local") {
     markPersonalFeedSeen: vi.fn<DesktopLinkedChatStore["markPersonalFeedSeen"]>(async input => ({ ...input, lastSeenCreatedAtMs: 3, lastSeenMessageId: "message", updatedAtMs: 5 })),
   };
   // Unused ports fail if a handler unexpectedly reaches them. Each configured method keeps the production signature.
-  const store = new Proxy(storeMethods, {
+  const store = persistedStore ?? new Proxy(storeMethods, {
     get(target, key) {
       if (key in target) return Reflect.get(target, key);
       throw new Error(`Unexpected chat store method: ${String(key)}`);
@@ -591,4 +599,84 @@ it("keeps two unknown authors distinct in a received share view", async () => {
   expect(tokens[0]).toMatchObject({ hue: null, self: false });
   expect(tokens[1]!.group).not.toBe(tokens[0]!.group);
   expect(tokens[2]!.group).toBe(tokens[0]!.group);
+});
+
+
+describe("poll IPC writes", () => {
+  const doors = [
+    { name: "send", channel: chatOperations.sendChatMessage.channel, target: { threadId: "thread" }, method: "sendMessage" },
+    { name: "start", channel: chatOperations.startChannelThread.channel, target: { channelId: "channel" }, method: "startChannelThread" },
+  ] as const;
+  it.each(doors)("passes a poll through chatWrites on $name", async ({ channel, target, method }) => {
+    const test = fixture();
+    const poll = { needsDecision: true, options: [" Monday ", "Tuesday"] };
+    await test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", ...poll });
+    expect(test.storeMethods[method]).toHaveBeenCalledWith(expect.objectContaining(poll));
+  });
+  it.each(doors)("passes choices without a decision flag on $name", async ({ channel, target, method }) => {
+    const test = fixture();
+    await test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", options: ["Monday", "Tuesday"] });
+    const input = test.storeMethods[method].mock.calls[0]![0];
+    expect(input).toMatchObject({ options: ["Monday", "Tuesday"] });
+    expect(input).not.toHaveProperty("needsDecision");
+  });
+  it.each(doors)("refuses a poll in a share view on $name before persistence", async ({ channel, target, name }) => {
+    const test = fixture("view");
+    await expect(test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", needsDecision: true, options: ["Monday", "Tuesday"] }))
+      .rejects.toThrow(name === "send" ? "Chats are read-only in this shared view." : "A shared view has no capture.");
+    for (const method of Object.values(test.storeMethods)) expect(method).not.toHaveBeenCalled();
+    expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
+  });
+  for (const sentence of [
+    "A poll has at most twelve choices.",
+    "Each choice is one line of at most 200 characters.",
+    "Each choice appears once.",
+  ]) {
+    it.each(doors)("shows the engine poll sentence on $name: " + sentence, async ({ channel, target, method }) => {
+      const test = fixture();
+      test.storeMethods[method].mockRejectedValueOnce(new DaemonRefusalError({ code: "INVALID_PARAMS", message: sentence, retry: "no" }, null));
+      let caught: unknown;
+      try {
+        await test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", options: ["Monday", " Monday "] });
+      } catch (error) { caught = error; }
+      expect(caught).toBeInstanceOf(DaemonRefusalError);
+      const received = new Error("Error invoking remote method '" + channel + "': " + String(ipcWireError(caught)));
+      expect(ipcErrorMessage(received, "Could not send that message.")).toBe(sentence);
+    });
+  }
+});
+
+
+it("reads both IPC polls back with their decisions from the live chat store", async () => {
+  const workspace = { workspaceId: "workspace", rootPath: await createTestScratch("dohc-ipc-poll-") };
+  const engine = new ChatsLoopbackEngine();
+  const client = { close() {}, async sendRequest(request: import("@dohc/workspace-engine-client").Request): Promise<import("@dohc/workspace-engine-client").Response> {
+    if (request.method === "workspace.open") return { id: request.id, result: { workspace: workspace.workspaceId } };
+    if (request.method === "workspace.close") return { id: request.id, result: { closed: true } };
+    return engine.sendRequest(request);
+  } };
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+  const store = createDesktopLinkedChatStore(workspace, { sessions });
+  try {
+    const channel = await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
+    const test = fixture("local", store);
+    const first = StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
+      workspaceId: workspace.workspaceId, channelId: channel.id, body: "Which day?", needsDecision: true, options: [" Monday ", "Tuesday"],
+    }));
+    const second = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, {
+      workspaceId: workspace.workspaceId, threadId: first.thread.id, body: "Which time?", options: ["Morning", "Afternoon"],
+    }));
+    const messages = ListChatMessagesResult.parse(await test.invoke(chatOperations.listChatMessages.channel, {
+      workspaceId: workspace.workspaceId, threadId: first.thread.id,
+    }));
+    expect(messages.messages.map(message => message.id)).toEqual([first.message.id, second.message.id]);
+    const decisions = ListChatThreadDecisionsResult.parse(await test.invoke(CHANNELS.listChatThreadDecisions, {
+      workspaceId: workspace.workspaceId, threadId: first.thread.id,
+    }));
+    expect(decisions.decisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ messageId: first.message.id, state: "open", options: ["Monday", "Tuesday"] }),
+      expect.objectContaining({ messageId: second.message.id, state: "open", options: ["Morning", "Afternoon"] }),
+    ]));
+    expect(decisions.decisions).toHaveLength(2);
+  } finally { await sessions.closeWorkspace(workspace); }
 });
