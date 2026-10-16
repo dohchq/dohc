@@ -105,7 +105,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     closeTimeout: limits.drainTimeoutMs, handleProtocols: () => "dohc-live-v1" };
   const server = new WebSocketServer(wsOptions);
   const connections = new Set<() => void>(), admission = options.admission ?? createLiveConnectionAdmission();
-  const buffers = admission.buffers(limits.maxBufferedBytes);
+  const buffers = admission.buffers(limits.maxBufferedBytes), validationBuffers = admission.validationBuffers(limits.maxBufferedBytes);
   const shutdown = new AbortController();
   const storage = options.storage, editors = liveEditors(storage);
   const captureNative = options.captureNative.bind(options), validate = options.validate;
@@ -271,7 +271,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         if (shareId) scopes.push([JSON.stringify(["share", workspaceId, shareId]), Math.max(1, Math.floor(limits.maxBufferedBytes *
           Math.min(1, limits.maxConnectionsPerGrant / limits.maxConnections)))]);
         reserveBytes = size => buffers.reserve(size, scopes);
-        validationBudget = {reserve: () => admission.reserve([[JSON.stringify(["validation", principal]), 1]]), reserveBytes: buffers.reserve};
+        validationBudget = {reserve: () => admission.reserve([[JSON.stringify(["validation", principal]), 1]]),
+          maxBytes: limits.maxBufferedBytes, reserveBytes: validationBuffers.reserve};
       }
       if (options.kind === "owner") {
         const {document, shareId} = ownerTarget!;

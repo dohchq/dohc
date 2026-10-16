@@ -27,6 +27,7 @@ import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveF
 import { fixture as ticketFixture, audience, binding, host, key, scope } from "./liveTickets.test-helper.js";
 import { parseNamedLiveConfig } from "./namedLiveConfig.js";
 import type { StorageContext } from "./storage/context.js";
+import type { LiveUpdateJournalCut } from "./storage/types.js";
 import { liveEditors } from "./liveEditors.js";
 
 const exchangeKey = "test-exchange-key-".repeat(3), relayHost = "relay.example.test";
@@ -1063,7 +1064,14 @@ it("rejects an owner reserve that exhausts total or workspace capacity", () => {
   expect(parseNamedLiveRouteLimits({...profile, reservedOwnerConnections: 0}).reservedOwnerConnections).toBe(0);
 });
 
-it.each(["named", "owner", "link"])("keeps %s validation work in the shared budget and retries an occupied person slot", async kind => {
+function submitUpdate(f: Awaited<ReturnType<typeof fixture>>, socket: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>, deliveryId: string, transferId: number) {
+  const updateBytes = Uint8Array.of(0, 0);
+  socket.ws.send(encodeLiveFrame({kind: "begin", purpose: "submit-update", deliveryId, transferId, totalBytes: updateBytes.length,
+    digest: createHash("sha256").update(updateBytes).digest("hex")}, f.frames.receive.maxFrameBytes));
+  socket.ws.send(encodeLiveFrame({kind: "chunk", transferId, offset: 0, bytes: updateBytes}, f.frames.receive.maxFrameBytes));
+}
+
+it.each(["named", "owner", "link"])("keeps %s validation work out of frame buffers and retries an occupied person slot", async kind => {
   const profile = selfHostLiveProfile(), admission = createLiveConnectionAdmission(), limits = profile.namedLive.transport;
   const f = await fixture(limits, kind === "link", undefined, kind === "owner", false, admission, 1, 1, true);
   const socket = f.connect(kind === "owner" ? "" : (await f.mint()).token); expect(await socket.status).toBe(101);
@@ -1071,17 +1079,14 @@ it.each(["named", "owner", "link"])("keeps %s validation work in the shared budg
   const principal = JSON.stringify(kind === "link" ? ["principal", "link", scope.workspaceId, scope.grantId,
     hashLinkProfileSecret(f.profile, key)] : ["principal", "named", kind === "owner" ? "owner-1" : "reader-1"]);
   const release = admission.reserve([[JSON.stringify(["validation", principal]), 1]])!;
-  const budget = admission.buffers(limits.maxBufferedBytes), read = vi.spyOn(f.storage, "readLiveUpdateJournalCut").mockImplementation((_input, reserve) => {
+  const frameBudget = admission.buffers(limits.maxBufferedBytes), budget = admission.validationBuffers(limits.maxBufferedBytes);
+  const read = vi.spyOn(f.storage, "readLiveUpdateJournalCut").mockImplementation((_input, reserve) => {
     expect(reserve).toBeDefined(); reserve!(20 * 1024 * 1024);
     expect(budget.usage()).toBeGreaterThan(20 * 1024 * 1024);
+    expect(frameBudget.usage()).toBeLessThan(1024 * 1024);
     return {kind: "refused", reason: "baseline-missing"};
   });
-  const submit = (deliveryId: string, transferId: number) => {
-    const updateBytes = Uint8Array.of(0, 0);
-    socket.ws.send(encodeLiveFrame({kind: "begin", purpose: "submit-update", deliveryId, transferId, totalBytes: updateBytes.length,
-      digest: createHash("sha256").update(updateBytes).digest("hex")}, f.frames.receive.maxFrameBytes));
-    socket.ws.send(encodeLiveFrame({kind: "chunk", transferId, offset: 0, bytes: updateBytes}, f.frames.receive.maxFrameBytes));
-  };
+  const submit = (deliveryId: string, transferId: number) => submitUpdate(f, socket, deliveryId, transferId);
   try {
     submit("occupied", 2);
     await vi.waitFor(() => expect(socket.received).toContainEqual(expect.objectContaining({kind: "result", result: "retry", reason: "admission-unavailable"})));
@@ -1091,6 +1096,57 @@ it.each(["named", "owner", "link"])("keeps %s validation work in the shared budg
   await vi.waitFor(() => expect(socket.received).toContainEqual(expect.objectContaining({kind: "result", deliveryId: "available", reason: "baseline-missing"})));
   expect(read).toHaveBeenCalledOnce();
   await vi.waitFor(() => expect(budget.usage()).toBe(0));
+});
+
+it("keeps another workspace's 4 MiB sync open while a nearly full workspace checks a large edit", async () => {
+  const profile = selfHostLiveProfile(), limits = profile.namedLive.transport, admission = createLiveConnectionAdmission(), MiB = 1024 * 1024;
+  const frameBudget = admission.buffers(limits.maxBufferedBytes), validationBudget = admission.validationBuffers(limits.maxBufferedBytes);
+  const editor = await fixture(limits, true, undefined, false, false, admission, 1, 1, true);
+  const editing = editor.connect((await editor.mint()).token); expect(await editing.status).toBe(101);
+  await openProductionSync(editor, editing);
+  const releaseFrames = frameBudget.reserve(76 * MiB, [[JSON.stringify(["workspace", scope.workspaceId]), 80 * MiB]]);
+  const checking = deferred<void>(), drained = deferred<void>(), updateBytes = Uint8Array.of(0, 0);
+  vi.spyOn(editor.storage, "readLiveUpdateJournalCut").mockImplementation((_input, reserve) => {
+    reserve!(50 * MiB);
+    return {kind: "cut", cut: {checkpoint: {bytes: Uint8Array.of(0, 0)}, suffix: []} as unknown as LiveUpdateJournalCut};
+  });
+  vi.spyOn(editor.storage, "commitLiveUpdateJournal").mockReturnValue({result: {kind: "accepted", receipt: {deliveryId: "large-edit",
+    updateDigest: createHash("sha256").update(updateBytes).digest("hex"), journalCursor: 1, acceptingHostEpoch: host.hostEpoch}}} as never);
+  vi.mocked(editor.native.drain).mockImplementation(async () => { checking.resolve(); await drained.promise; });
+  try {
+    submitUpdate(editor, editing, "large-edit", 2);
+    await checking.promise;
+    expect(frameBudget.usage() + validationBudget.usage()).toBeGreaterThanOrEqual(126 * MiB);
+    const other = await fixture(limits, true, undefined, false, false, admission, 2, 1, true, "other-workspace");
+    vi.mocked(other.native.client.openLiveAppliedSync).mockResolvedValue({binding: {...other.binding, selectorPaths: [other.binding.currentPath]},
+      hostVector: Buffer.from([0]), missingStateUpdate: Buffer.alloc(4 * MiB - 1024), observedLocalYDocHeadSequence: 1,
+      position: {eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(32)}});
+    const reader = other.connect((await other.mint()).token); expect(await reader.status).toBe(101);
+    const before = frameBudget.usage();
+    await openProductionSync(other, reader, false);
+    await vi.waitFor(() => expect(reader.ws.readyState === WebSocket.CLOSED || frameBudget.usage() > before + 4 * MiB - 2048).toBe(true));
+    expect(reader.ws.readyState).toBe(WebSocket.OPEN);
+    const pong = once(reader.ws, "pong"); reader.ws.ping("still-live"); await pong;
+    expect(reader.ws.readyState).toBe(WebSocket.OPEN); expect(editing.ws.readyState).toBe(WebSocket.OPEN);
+    expect(validationBudget.usage()).toBeGreaterThanOrEqual(50 * MiB);
+  } finally {drained.resolve(); releaseFrames();}
+  await vi.waitFor(() => expect(editing.received).toContainEqual(expect.objectContaining({kind: "result", deliveryId: "large-edit", result: "retry", reason: "application-pending"})));
+  await vi.waitFor(() => expect(validationBudget.usage()).toBe(0));
+}, 60_000);
+
+it.each(["named", "owner", "link"])("finally refuses a %s edit whose check can never fit the validation pool", async kind => {
+  const profile = selfHostLiveProfile(), admission = createLiveConnectionAdmission(), limits = profile.namedLive.transport;
+  const f = await fixture(limits, kind === "link", undefined, kind === "owner", false, admission, 1, 1, true);
+  const socket = f.connect(kind === "owner" ? "" : (await f.mint()).token); expect(await socket.status).toBe(101);
+  await openProductionSync(f, socket);
+  const read = vi.spyOn(f.storage, "readLiveUpdateJournalCut").mockImplementation((_input, reserve) => {
+    reserve!(limits.maxBufferedBytes - 6 + 1);
+    throw new Error("The cut is read only after its check is reserved.");
+  });
+  submitUpdate(f, socket, "oversized", 2);
+  await vi.waitFor(() => expect(socket.received).toContainEqual(expect.objectContaining({kind: "result", deliveryId: "oversized", result: "refused", reason: "capacity-refused"})));
+  expect(read).toHaveBeenCalledOnce();
+  expect(admission.validationBuffers(limits.maxBufferedBytes).usage()).toBe(0);
 });
 
 it("contains stalled syncs across two links in one workspace while another workspace stays open", async () => {

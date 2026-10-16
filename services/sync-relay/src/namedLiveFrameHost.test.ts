@@ -97,7 +97,7 @@ async function setup(maxListeners = 4, reserveBytes?: (size: number) => () => vo
   const native = { client, workspace: "trusted-native-handle", registrationId: 7, coordinate: host, binding: nativeBinding,
     invalidated: invalidated.signal, changes, deadlineMs: 5000, nextRequestId: () => ++requestId, drain };
   const bounds = { maxClientVectorBytes: 32, maxSyncOutputBytes: 1024, maxAppliedUpdateBytes: 1024, maxSubmissionBytes: 1024, maxAdmissionBytes: 4096 };
-  const capture = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(scope), storage: state.storage, validate, native, bounds, reserveBytes, validationBudget: reserveBytes ? {reserve: () => () => {}, reserveBytes} : undefined });
+  const capture = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(scope), storage: state.storage, validate, native, bounds, reserveBytes, validationBudget: reserveBytes ? {reserve: () => () => {}, maxBytes: Number.MAX_SAFE_INTEGER, reserveBytes} : undefined });
   cleanup.push(async () => { capture.close(); });
   return { ...state, peer, client, changes, invalidated, drain, capture, validate, native, bounds };
 }
@@ -536,7 +536,7 @@ it("admits an edit to a 2 MiB checkpoint and retries a concurrent validation fro
     const session = captureOwnerLiveFrameHost({authenticatedUserId: "owner", shareId: "share", storage: f.storage, native,
       bounds: {...peer.bounds, maxAdmissionBytes: 20 * MiB}, validate,
       reserveBytes: size => buffers.reserve(size, [[key, 12 * MiB]]),
-      validationBudget: {reserve: () => admission.reserve([[JSON.stringify(["validation", key]), 1]]), reserveBytes: buffers.reserve}});
+      validationBudget: {reserve: () => admission.reserve([[JSON.stringify(["validation", key]), 1]]), maxBytes: 128 * MiB, reserveBytes: buffers.reserve}});
     cleanup.push(async () => session.close()); return session;
   };
   const first = capture(), second = capture(), updateBytes = f.update("title", "Edited after checkpoint");
@@ -616,7 +616,7 @@ it.each(["validator", "commit"])("releases validation bytes across repeated %s r
   }), {waitForCapacity});
   if (mode === "commit") for (let index = 0; index < 3; index++) commit.mockReturnValueOnce({result: {kind: "retry", reason: "admission-unavailable"}, admitted: null});
   const capture = captureNamedLiveFrameHost({ticket: f.capture.ticket, actor: liveBrowserActor(scope), storage: f.storage,
-    native: f.native, bounds: f.bounds, validate, validationBudget: {reserve, reserveBytes: budget.reserve}});
+    native: f.native, bounds: f.bounds, validate, validationBudget: {reserve, maxBytes: 12_288, reserveBytes: budget.reserve}});
   cleanup.push(async () => capture.close());
   expect(await capture.submit({deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal)).toEqual({result: "success", ack});
   expect(read).toHaveBeenCalledTimes(4); expect(validate).toHaveBeenCalledTimes(4);
@@ -639,7 +639,7 @@ it.each(["refusal", "deadline", "cancellation"])("releases validation bytes and 
   };
   commit.mockReturnValue({result: {kind: "refused", reason: "invalid-update"}, admitted: null});
   const capture = captureNamedLiveFrameHost({ticket: f.capture.ticket, actor: liveBrowserActor(scope), storage: f.storage,
-    native: {...f.native, deadlineMs: 50}, bounds: f.bounds, validate, validationBudget: {reserve, reserveBytes: budget.reserve}});
+    native: {...f.native, deadlineMs: 50}, bounds: f.bounds, validate, validationBudget: {reserve, maxBytes: 12_288, reserveBytes: budget.reserve}});
   cleanup.push(async () => capture.close());
   vi.useFakeTimers();
   const caller = new AbortController(), submitted = capture.submit({deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes}, caller.signal);

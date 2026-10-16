@@ -42,8 +42,11 @@ export interface NamedFrameHostBounds {
 
 export interface NamedFrameValidationBudget {
   reserve(): (() => void) | null;
+  /** A check larger than this can never be reserved, so it is refused instead of retried. */
+  readonly maxBytes: number;
   reserveBytes(size: number): () => void;
 }
+class ValidationExceedsBudget extends Error {}
 
 /** Wraps an established authenticated native registration. It never owns host retirement. */
 export function captureNamedLiveFrameHost(options: {
@@ -260,7 +263,9 @@ function captureLiveFrameHost(options: {
             check(admissionSignal);
             if (validate.hasCapacity?.() === false) continue;
             const read = storage.readLiveUpdateJournalCut({ document }, options.validationBudget ? size => {
-              releaseBytes = options.validationBudget!.reserveBytes(size + 3 * updateBytes.length);
+              const charge = size + 3 * updateBytes.length;
+              if (charge > options.validationBudget!.maxBytes) throw new ValidationExceedsBudget();
+              releaseBytes = options.validationBudget!.reserveBytes(charge);
             } : undefined);
             if (read.kind !== "cut") return { result: "refused", reason: read.reason };
             const cut = read.cut;
@@ -311,6 +316,7 @@ function captureLiveFrameHost(options: {
           ack.acceptingHostEpoch !== receipt.acceptingHostEpoch) throw new Error("Native application ACK identity changed.");
         return { result: "success", ack };
       } catch (error) {
+        if (error instanceof ValidationExceedsBudget) return {result: "refused", reason: "capacity-refused"};
         if (error instanceof LiveConnectionLimitError) return {result: "retry", reason: "admission-unavailable"};
         throw error;
       } finally { submitting = false; releaseValidationBytes(); releaseValidation?.(); }
