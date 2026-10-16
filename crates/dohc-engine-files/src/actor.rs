@@ -153,6 +153,15 @@ impl FilesActor {
         bounds: ScanBounds,
         rehydrated: Option<(ScanManifest, ScanGeneration)>,
     ) -> Result<Self, FilesError> {
+        Self::spawn_with_paths(root, bounds, rehydrated, None)
+    }
+
+    fn spawn_with_paths(
+        root: PathBuf,
+        bounds: ScanBounds,
+        rehydrated: Option<(ScanManifest, ScanGeneration)>,
+        paths: Option<Vec<String>>,
+    ) -> Result<Self, FilesError> {
         debug_assert_off_runtime();
         let (tx, rx) = mpsc::channel::<Command>(CHANNEL_CAPACITY);
         // Reserve the dedicated Close slot up front (the channel is empty, so
@@ -171,6 +180,7 @@ impl FilesActor {
                     root,
                     bounds,
                     rehydrated,
+                    paths,
                     rx,
                     worker_state,
                     worker_overflow,
@@ -216,11 +226,23 @@ impl FilesActor {
         bounds: ScanBounds,
         rehydrated: Option<(ScanManifest, ScanGeneration)>,
     ) -> Result<Self, FilesError> {
+        Self::spawn_async_with_paths(root, bounds, rehydrated, None).await
+    }
+
+    /// Reconcile only the supplied exact paths, retaining the ordinary hash and apply pipeline.
+    pub async fn spawn_async_with_paths(
+        root: PathBuf,
+        bounds: ScanBounds,
+        rehydrated: Option<(ScanManifest, ScanGeneration)>,
+        paths: Option<Vec<String>>,
+    ) -> Result<Self, FilesError> {
         let (tx, rx) = oneshot::channel();
         std::thread::Builder::new()
             .name("dohc-files-spawn".to_owned())
             .spawn(move || {
-                let _ = tx.send(FilesActor::spawn_with_manifest(root, bounds, rehydrated));
+                let _ = tx.send(FilesActor::spawn_with_paths(
+                    root, bounds, rehydrated, paths,
+                ));
             })
             .map_err(|_| FilesError::PoolUnavailable {
                 reason: "could not spawn files actor startup thread",
@@ -426,10 +448,12 @@ fn debug_assert_off_runtime() {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn worker_main(
     root: PathBuf,
     bounds: ScanBounds,
     rehydrated: Option<(ScanManifest, ScanGeneration)>,
+    paths: Option<Vec<String>>,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     pending_overflow: Arc<AtomicBool>,
@@ -446,7 +470,7 @@ fn worker_main(
     }
     let _closed_guard = ClosedGuard(Arc::clone(&state));
 
-    let scanner = match Scanner::new(bounds) {
+    let scanner = match Scanner::new(bounds).map(|scanner| scanner.with_paths(paths)) {
         Ok(scanner) => scanner,
         Err(err) => {
             let _ = startup_tx.send(Err(err));

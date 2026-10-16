@@ -38,3 +38,25 @@ export function relayUrlsMatch(left: string, right: string): boolean {
 // copy in `crates/dohc-engine-sync-http` equal.
 export const RELAY_API_VERSION_HEADER = "x-dohc-api-version";
 export const RELAY_API_VERSION = 1;
+
+// Share-web and the relay have independent wire contracts. Never stamp the
+// relay version onto share-web requests, even when both counters are equal.
+export const SHARE_WEB_API_VERSION_HEADER = "x-dohc-share-web-api-version";
+export const SHARE_WEB_API_VERSION = 1;
+
+export interface ApiVersionRange {
+  readonly min: number;
+  readonly max: number;
+}
+
+export type ApiVersionCheck = "accepted" | "malformed" | "too_old" | "too_new";
+
+// Versions select wire shapes only. Authentication, grants, revocation and
+// resource limits must apply equally to every accepted version.
+export function checkApiVersion(named: string | null, versions: ApiVersionRange): ApiVersionCheck {
+  if (named !== null && !/^[1-9][0-9]{0,8}$/.test(named)) return "malformed";
+  const version = named === null ? 1 : Number(named);
+  if (version < versions.min) return "too_old";
+  if (version > versions.max) return "too_new";
+  return "accepted";
+}
