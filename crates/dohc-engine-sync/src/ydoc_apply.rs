@@ -1071,6 +1071,7 @@ fn drain_deferred_ydoc(
     } else {
         None
     };
+    let mut queued_inactive_lineages = std::collections::BTreeSet::new();
     let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
     let mut last_coordinate: Option<(String, i64)> = None;
     let mut projection_coordinates = Vec::new();
@@ -1091,16 +1092,20 @@ fn drain_deferred_ydoc(
             && store.read_with(|conn| inactive_lineage_exists(conn, key, &lineage_claim_id))?
         {
             if matches!(mode, DeferredDrainMode::All) {
-                refusals.extend(drain_inactive_ydoc_updates(
-                    store,
-                    &key.workspace_id,
-                    faults,
-                )?);
+                if !queued_inactive_lineages.contains(&lineage_claim_id) {
+                    refusals.extend(drain_inactive_ydoc_updates(
+                        store,
+                        &key.workspace_id,
+                        faults,
+                    )?);
+                }
                 let queued = store.read_with(|conn| conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",
                     params![key.workspace_id, origin_id, origin_seq], |r| r.get::<_, bool>(0),
                 )).map_err(SyncError::corrupt)?;
-                if !queued {
+                if queued {
+                    queued_inactive_lineages.insert(lineage_claim_id);
+                } else {
                     drained_coordinates.push((origin_id, origin_seq));
                 }
             }
@@ -1162,6 +1167,7 @@ fn drain_deferred_ydoc(
                 recovery_leases,
                 release,
             )? {
+                queued_inactive_lineages.clear();
                 lineage_replacements.push(replacement);
             }
             conflicts_opened += store.read_with(|conn| {
@@ -3310,7 +3316,6 @@ pub(crate) fn drain_inactive_ydoc_updates(
     }
     let search_policy = search_policy_for_store(store);
     let mut all_refusals = Vec::new();
-    let mut cursor: Option<(i64, String, i64)> = None;
     loop {
         let result = store.write_with(faults, |tx| {
         // Check every tagged group before paging so even earlier untagged mates stay private.
@@ -3323,28 +3328,28 @@ pub(crate) fn drain_inactive_ydoc_updates(
         }
         let fenced = serde_json::to_string(&fenced).map_err(SyncError::corrupt)?;
         let mut statement = tx.prepare(
-            "WITH page AS (SELECT r.origin_id,r.origin_seq,r.recorded_at_ms,r.payload_json,b.byte_length,COALESCE(d.relay_seq,-1) AS relay_seq,d.release_digest IS NOT NULL AS tagged \
+            "WITH page AS (SELECT r.origin_id,r.origin_seq,r.recorded_at_ms,r.payload_json,b.byte_length,d.relay_seq,d.release_digest IS NOT NULL AS tagged \
              FROM ydoc_deferred_updates d JOIN ydoc_inactive_lineages l \
              ON l.workspace_id=d.workspace_id AND l.version_id=d.version_id \
              AND l.object_id=d.object_id AND l.lineage_claim_id=d.lineage_claim_id \
              JOIN replication_log r ON r.workspace_id=d.workspace_id \
              AND r.origin_id=d.origin_id AND r.origin_seq=d.origin_seq \
              LEFT JOIN binary_blobs b ON b.sha256=json_extract(r.payload_json,'$.updateBlobSha256') \
-             WHERE d.workspace_id=?1 AND (?3 IS NULL OR (COALESCE(d.relay_seq,-1),d.origin_id,d.origin_seq)>(?3,?4,?5)) \
+             WHERE d.workspace_id=?1 \
              AND NOT EXISTS(SELECT 1 FROM json_each(?2) f WHERE json_extract(f.value,'$[0]')=d.version_id \
              AND json_extract(f.value,'$[1]')=d.object_id AND json_extract(f.value,'$[2]')=d.lineage_claim_id) \
              ORDER BY relay_seq,d.origin_id,d.origin_seq LIMIT 256), \
              bounded AS (SELECT page.*,SUM(COALESCE(byte_length,0)+length(CAST(payload_json AS BLOB))) OVER w AS cost,ROW_NUMBER() OVER w AS n \
              FROM page WINDOW w AS (ORDER BY relay_seq,origin_id,origin_seq ROWS UNBOUNDED PRECEDING)) \
-             SELECT origin_id,origin_seq,recorded_at_ms,payload_json,byte_length,relay_seq,tagged FROM bounded \
+             SELECT origin_id,origin_seq,recorded_at_ms,payload_json,byte_length,tagged FROM bounded \
              WHERE cost<=25165824 OR n=1 ORDER BY relay_seq,origin_id,origin_seq",
         ).map_err(SyncError::corrupt)?;
-        let rows = statement.query_map(params![workspace_id,fenced,cursor.as_ref().map(|c|c.0),cursor.as_ref().map(|c|c.1.as_str()),cursor.as_ref().map(|c|c.2)], |row| Ok((
-            row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<i64>>(4)?, row.get::<_,i64>(5)?, row.get::<_,bool>(6)?,
+        let rows = statement.query_map(params![workspace_id,fenced], |row| Ok((
+            row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<i64>>(4)?, row.get::<_,bool>(5)?,
         ))).map_err(SyncError::corrupt)?.collect::<Result<Vec<_>,_>>().map_err(SyncError::corrupt)?;
-        let next = rows.last().map(|r| (r.5, r.0.clone(), r.1));
+        let empty = rows.is_empty();
         let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
-        for (origin, seq, at, json, byte_length, _, release) in rows {
+        for (origin, seq, at, json, byte_length, release) in rows {
             // One admitted update is at most 20 MiB, plus a 256 KiB payload.
             let cost = usize::try_from(byte_length.ok_or(SyncError::BlobInvalid)?).map_err(SyncError::corrupt)?.saturating_add(json.len());
             if cost > 24 * 1024 * 1024 { return Err(SyncError::BlobInvalid); }
@@ -3377,15 +3382,14 @@ pub(crate) fn drain_inactive_ydoc_updates(
                     params![workspace_id,origin,seq]).map_err(SyncError::persist)?;
             }
         }
-        Ok::<_,SyncError>((next,refusals))
+        Ok::<_,SyncError>((empty,refusals))
     })?;
         match result {
-            TxnOutcome::Committed((next, refusals)) => {
+            TxnOutcome::Committed((empty, refusals)) => {
                 all_refusals.extend(refusals);
-                let Some(next) = next else {
+                if empty {
                     return Ok(all_refusals);
-                };
-                cursor = Some(next);
+                }
             }
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }

@@ -838,7 +838,12 @@ fn release_deferred_wakes_in_for_test(store: &EngineStore) -> Vec<DocKey> {
         .unwrap()
 }
 
-fn fenced_inactive_stall(fenced_rows: i64, fenced_bytes: usize, ordinary_bytes: usize) {
+fn fenced_inactive_stall(
+    fenced_rows: i64,
+    fenced_bytes: usize,
+    ordinary_bytes: usize,
+    tagged_last: bool,
+) {
     let (_dir, mut store, owner, _) = owner_publication::fixture();
     let hold = open(&mut store, &owner);
     let doc = Ydoc::wire();
@@ -854,6 +859,9 @@ fn fenced_inactive_stall(fenced_rows: i64, fenced_bytes: usize, ordinary_bytes: 
         0,
     );
     tagged.payload["lineageClaimId"] = json!(lineage);
+    if tagged_last {
+        tagged.relay_seq = Some(fenced_rows);
+    }
     retain(&mut store, &hold, &tagged);
     released(&mut store, &owner, &hold);
     replay(&mut store, &hold, &tagged);
@@ -870,6 +878,10 @@ fn fenced_inactive_stall(fenced_rows: i64, fenced_bytes: usize, ordinary_bytes: 
             &doc.richdoc_append_paragraph("queued lineage mate"),
             seq,
         );
+        if tagged_last {
+            op.origin_id = "earlier-mates".into();
+            op.origin_seq = seq - 1;
+        }
         op.payload["lineageClaimId"] = json!(lineage);
         let result = apply_replication_envelope(
             &mut store,
@@ -956,14 +968,52 @@ fn fenced_inactive_stall(fenced_rows: i64, fenced_bytes: usize, ordinary_bytes: 
             .contains(&"o".repeat(ordinary_bytes))
     );
     assert_eq!(release_deferred_wakes_in_for_test(&store).len(), 1);
+    if tagged_last {
+        let earlier: i64 = store.read_with(|c| c.query_row(
+            "SELECT count(*) FROM ydoc_deferred_updates WHERE release_digest IS NULL AND relay_seq<?1",
+            [fenced_rows], |r| r.get(0),
+        )).unwrap();
+        assert_eq!(earlier, 256, "F is beyond the first unfiltered page");
+        #[derive(Default)]
+        struct Commits(AtomicUsize);
+        impl FaultInjector for Commits {
+            fn poll(&self, point: FaultPoint) -> dohc_engine_storage::FaultAction {
+                if point == FaultPoint::StorageAfterCommitBeforeAck {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+                dohc_engine_storage::FaultAction::Continue
+            }
+        }
+        let commits = Commits::default();
+        let drained = drain_deferred_ydoc_for_key(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &DocKey::new("ws", "main", "owner").unwrap(),
+            &commits,
+        )
+        .unwrap();
+        assert!(drained.refusals.is_empty());
+        assert_eq!(
+            store.table_row_count("ydoc_deferred_updates").unwrap(),
+            fenced_rows
+        );
+        assert_eq!(release_deferred_wakes_in_for_test(&store).len(), 1);
+        // One initial batch and one for the first mate; later mates only check their key.
+        assert_eq!(commits.0.load(Ordering::Relaxed), 2);
+    }
 }
 
 #[test]
 fn fix2_inactive_drain_passes_a_full_page_of_fenced_rows() {
-    fenced_inactive_stall(257, 1, 1);
+    fenced_inactive_stall(257, 1, 1, false);
 }
 
 #[test]
 fn fix2_inactive_drain_does_not_charge_fenced_bytes() {
-    fenced_inactive_stall(1, 17 * 1024 * 1024, 8 * 1024 * 1024);
+    fenced_inactive_stall(1, 17 * 1024 * 1024, 8 * 1024 * 1024, false);
+}
+
+#[test]
+fn fix3_inactive_drain_checks_earlier_fenced_mates_once() {
+    fenced_inactive_stall(257, 1, 1, true);
 }
