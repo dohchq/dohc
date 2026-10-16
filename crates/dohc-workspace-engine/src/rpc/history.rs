@@ -73,6 +73,8 @@ struct HistoryPageParams {
     #[serde(default)]
     object_id: Option<String>,
     #[serde(default)]
+    operation_id: Option<String>,
+    #[serde(default)]
     limit: Option<i64>,
     #[serde(default)]
     cursor: Option<HistoryCursor>,
@@ -225,7 +227,7 @@ fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError>
 fn history_moment_json(moment: &HistoryMomentMetadata) -> Value {
     json!({
         "momentOrder":moment.moment_order,"momentId":moment.moment_id,"versionId":moment.version_id,
-        "objectId":moment.object_id,"path":moment.path,"recordedAtMs":moment.recorded_at_ms,
+        "objectId":moment.object_id,"path":moment.path,"beforePath":moment.before_path,"recordedAtMs":moment.recorded_at_ms,
         "operation":moment.operation.as_str(),"afterContentKind":moment.after_content_kind,
         "afterByteLength":moment.after_byte_length,"metadataOrigin":moment.metadata_origin,
         "metadataSummary":moment.metadata_summary,"metadataCorrelationId":moment.metadata_correlation_id,
@@ -536,6 +538,32 @@ impl EngineService {
         Ok(encode_moment_page(&page)?.into_json())
     }
 
+    pub(super) async fn history_operation(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            operation_id: String,
+        }
+        let params: Params = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let result = Self::read_under_ctx(
+            &cancellation,
+            "history.operations",
+            open.actor
+                .history_operation(open.workspace_id.clone(), params.operation_id),
+        )
+        .await?;
+        Ok(
+            json!({"operationId":result.operation_id,"versionId":result.version_id,"momentCount":result.moments.len()}),
+        )
+    }
+
     pub(super) async fn history_page(
         &self,
         ctx: &RequestContext,
@@ -589,6 +617,7 @@ impl EngineService {
                 open.workspace_id.clone(),
                 params.version_id,
                 params.object_id,
+                params.operation_id,
                 limit,
                 params.cursor,
             ),

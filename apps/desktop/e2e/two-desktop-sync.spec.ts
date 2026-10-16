@@ -6,6 +6,7 @@ import { openLiveDaemonWorkspace } from "./helpers/daemonSeed";
 import { createWorkspaceEngineCapture } from "../src/workspaces/workspaceEngineCapture";
 import { waitForPathMoments } from "../src/workspaces/waitForPathMoments";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import { readHistoryMoments } from "./helpers/history";
 import { withEngineDb } from "./helpers/engineDb";
 import { spawnSyncRelay } from "./helpers/syncRelay";
 import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, seedCloudCredentials, waitForWorkspaceFile, waitForWorkspaceReady, writeWorkspaceFiles } from "./helpers/workspace";
@@ -102,17 +103,23 @@ test("@two-client two desktops resolve conflicting offline edits and keep the ch
     const leftText = "Chosen text from the first desktop.\n";
     const rightText = "Offline edit from the second desktop.\n";
     async function momentCount(desktop: Desktop) {
-      return desktop.page.evaluate(async (workspaceId) => {
-        const result = await (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.listEngineMoments({ workspaceId, limit: 100 });
-        return "moments" in result ? result.moments.filter((entry) => entry.path === "shared.md").length : 0;
-      }, workspaceId);
+      const moments = await readHistoryMoments(desktop.page, workspaceId, "shared.md");
+      if (moments === null) throw new Error("History is unavailable.");
+      return moments.length;
     }
-    const beforeLeft = await momentCount(left);
-    const beforeRight = await momentCount(right);
+    let beforeLeft = 0, beforeRight = 0;
+    await expect(async () => {
+      beforeLeft = await momentCount(left!);
+      beforeRight = await momentCount(right!);
+    }).toPass({ timeout: 30_000 });
     await writeWorkspaceFiles(first, [{ path: "shared.md", contents: leftText }]);
     await writeWorkspaceFiles(second, [{ path: "shared.md", contents: rightText }]);
-    await expect.poll(() => momentCount(left!)).toBeGreaterThan(beforeLeft);
-    await expect.poll(() => momentCount(right!)).toBeGreaterThan(beforeRight);
+    await expect(async () => {
+      expect(await momentCount(left!)).toBeGreaterThan(beforeLeft);
+    }).toPass({ timeout: 30_000 });
+    await expect(async () => {
+      expect(await momentCount(right!)).toBeGreaterThan(beforeRight);
+    }).toPass({ timeout: 30_000 });
     relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
     let receivingRight = true;
     await expect.poll(async () => {

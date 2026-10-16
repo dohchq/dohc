@@ -154,7 +154,8 @@ body {
 /* Text fields use their border and a thin underline, including borderless
  * editors. Unlayered so field utilities cannot hide keyboard focus. A data
  * grid's cell draws the focus outline for the field inside it
- * (ui/DataGrid.tsx), so that field takes no second mark. */
+ * (ui/DataGrid.tsx), so this rule skips that field; a database cell's editor
+ * draws its own underline (DatabaseStudioView.tsx). */
 :is(input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'], [type='color'], [type='button'], [type='submit'], [type='reset']), textarea, select):not([data-grid-cell] *):focus {
   outline: none;
   border-color: var(--dohc-muted);
