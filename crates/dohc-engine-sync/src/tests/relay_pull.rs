@@ -3115,7 +3115,7 @@ fn relay_pull_rejects_a_tampered_own_ydoc_echo() {
     assert!(
         crate::apply::is_acknowledged_envelope(&engine, &local)
             .expect("first delivery exact durable row"),
-        "the first owner delivery at acked_seq + 1 must use the durable echo path"
+        "the durable row matches at acked_seq + 1"
     );
     assert!(matches!(
         apply_replication_envelope(

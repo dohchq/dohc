@@ -941,6 +941,10 @@ async fn skipped_moment_committed_crash_clears_before_next_envelope() {
             let mut own =
                 dohc_engine_sync::list_replication_ops(store, WORKSPACE, ORIGIN, -1, 1)?.remove(0);
             own.relay_seq = Some(1);
+            assert!(
+                cache.doc_full_state_for_test(&key()).is_some(),
+                "the append keeps the document cached"
+            );
             CRASH_CURSOR.set(true);
             let result = dohc_engine_sync::apply_replication_envelope(
                 store,
