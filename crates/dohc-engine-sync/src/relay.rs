@@ -3992,7 +3992,9 @@ pub(crate) fn take_local_blob_bytes_call_count() -> usize {
     })
 }
 
-/// Read the stored length and validate it for the kind being asked for.
+/// Read the stored length; with `validate_ceiling`, refuse one over the kind's
+/// ceiling. Upload passes `false` and only needs the length;
+/// `local_blob_bytes` refuses its bytes.
 ///
 /// Both questions, because they stopped being the same one. `Binary` and
 /// `Ydoc` share `binary_blobs` and no longer share a ceiling, so bare table
@@ -4003,7 +4005,7 @@ pub(crate) fn take_local_blob_bytes_call_count() -> usize {
 /// `hydrate_blob_content`, the only place `MAX_CAPTURE_BINARY_FILE_BYTES` is
 /// enforced — and materialize as an oversized captured file.
 ///
-/// So stored bytes over the requested kind's ceiling are refused here, by
+/// So pull's stored bytes over the requested kind's ceiling are refused here, by
 /// name, rather than reported present. Refused rather than re-fetched: the
 /// length is already known, and downloading identical bytes to reject them
 /// would only make the observed size less exact.
