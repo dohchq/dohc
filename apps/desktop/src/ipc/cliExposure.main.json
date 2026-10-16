@@ -2,6 +2,8 @@
   "socketVerbs": [
     "accessObject",
     "accessSharing",
+    "accountDelete",
+    "accountDeletePreview",
     "appPublication",
     "automationButtons",
     "automationList",
@@ -57,6 +59,8 @@
   "publicSocketVerbs": [
     "accessObject",
     "accessSharing",
+    "accountDelete",
+    "accountDeletePreview",
     "appPublication",
     "automationButtons",
     "automationList",
@@ -93,7 +97,8 @@
     "dataset",
     "app",
     "history",
-    "automation"
+    "automation",
+    "account"
   ],
   "publicVerbs": [
     "access object",
@@ -168,7 +173,9 @@
     "automation runs",
     "automation run",
     "automation retry",
-    "automation press"
+    "automation press",
+    "account deletePreview",
+    "account delete"
   ],
   "help": {
     "top": {
@@ -181,7 +188,8 @@
         {"group":"dataset","block":"  dataset      Create, change, and use transactional Collections.\n               list, describe, history, historyRevision, prepareHistoryRestore,\n               permissions, setGrant, removeGrant, lifecycle, archive, restore,\n               deletePreview, delete, pendingAttempts, reconcileAttempt,\n               cancelAttempt, export, prepareRecovery, claimRecovery,\n               discardRecovery, upload, file, createForm,\n               prepareRelationChoices, create, prepare, approve, discard,\n               prepareMigration, migrationPreviewPage, prepareSchemaChange,\n               approveMigration, discardMigration, invoke\n"},
         {"group":"app","block":"  app          Approve, open, and share apps.\n               createLink, listLocal, prepareLocal, launchLocal, list, prepare,\n               approve, cancel, withdraw, revokeCollection, reviewReactivation,\n               responses, undo-responses\n"},
         {"group":"history","block":"  history      Read the changes History records for files.\n               list, show\n"},
-        {"group":"automation","block":"  automation   Press Button fields, read an automation's runs, and try a failed\n               run again.\n               list, switch, buttons, runs, run, retry, press\n"}
+        {"group":"automation","block":"  automation   Press Button fields, read an automation's runs, and try a failed\n               run again.\n               list, switch, buttons, runs, run, retry, press\n"},
+        {"group":"account","block":"  account      Review and delete the server account the dohc app is connected\n               to.\n               deletePreview, delete\n"}
       ],
       "suffix": "\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc <command> --help to see what each verb does.\n"
     },
@@ -265,6 +273,9 @@
     "automation runs": "Usage: dohc automation runs <collection> <automation> [options]\n\nList an automation's runs on this computer, newest first.\n\nLists 20 runs at a time, newest first, as the Automations panel does. Each line\nstarts with the run's ID.\nWhen older runs remain, the last line gives the --page value that lists them.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Collection by its folder in the workspace, and an automation by its id in\nthe Collection's automations.yaml.\nEach computer keeps the runs of the automations it ran. Try again follows the\nsame rules as in dohc.\n\nOptions:\n  --page <page>   List the older runs the last line of an earlier listing names.\n  --as-agent      Post and read chat as an agent.\n  --json          Print the result as JSON.\n  --help          Show help. -h does the same.\n",
     "automation run": "Usage: dohc automation run <collection> <automation> <run> [options]\n\nShow one run: what started it, what each step changed, and why it failed.\n\nSteps count from 1 in the order automations.yaml lists them, including the steps\ninside if and otherwise. A step that changed nothing is not listed.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Collection by its folder in the workspace, and an automation by its id in\nthe Collection's automations.yaml.\nEach computer keeps the runs of the automations it ran. Try again follows the\nsame rules as in dohc.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
     "automation retry": "Usage: dohc automation retry <collection> <automation> <run> [options]\n\nTry a failed run again. It resumes after the last step that finished.\n\nOnly the computer that ran it can try a run again. Anywhere else, the command\nnames that computer.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Collection by its folder in the workspace, and an automation by its id in\nthe Collection's automations.yaml.\nEach computer keeps the runs of the automations it ran. Try again follows the\nsame rules as in dohc.\n\nOptions:\n  --start-over   Run it from the first step when the automation changed since\n                 the run failed. This can repeat changes the run already made.\n  --as-agent     Post and read chat as an agent.\n  --json         Print the result as JSON.\n  --help         Show help. -h does the same.\n",
-    "automation press": "Usage: dohc automation press <collection> <button> <record> [options]\n\nPress a Button field on one record, as a person clicks it in dohc.\n\nName the record by its id, or a dataset record by its primary key as JSON.\nThe press prints the id of the run it started. Follow it with automation run.\nWith --as-agent, the press is recorded as the agent's, for you. A press from an\nagent run that an automation started is the agent's too, and counts in that\nchain of automations, which stops after 4 steps.\nIn a shared view, a press goes to the owner's computer, which runs it, as in\ndohc.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Collection by its folder in the workspace, and an automation by its id in\nthe Collection's automations.yaml.\nEach computer keeps the runs of the automations it ran. Try again follows the\nsame rules as in dohc.\n\nOptions:\n  --table <table>      Name the table when the button is in more than one table\n                       of a dataset Collection.\n  --confirm <action>   Run this action, which dohc cannot undo. The press names\n                       each action it would run. Repeat for more actions.\n  --request-id <id>    Send the same id again, after a timeout for example, to\n                       get the same press instead of a second one.\n  --as-agent           Post and read chat as an agent.\n  --json               Print the result as JSON.\n  --help               Show help. -h does the same.\n"
+    "automation press": "Usage: dohc automation press <collection> <button> <record> [options]\n\nPress a Button field on one record, as a person clicks it in dohc.\n\nName the record by its id, or a dataset record by its primary key as JSON.\nThe press prints the id of the run it started. Follow it with automation run.\nWith --as-agent, the press is recorded as the agent's, for you. A press from an\nagent run that an automation started is the agent's too, and counts in that\nchain of automations, which stops after 4 steps.\nIn a shared view, a press goes to the owner's computer, which runs it, as in\ndohc.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Collection by its folder in the workspace, and an automation by its id in\nthe Collection's automations.yaml.\nEach computer keeps the runs of the automations it ran. Try again follows the\nsame rules as in dohc.\n\nOptions:\n  --table <table>      Name the table when the button is in more than one table\n                       of a dataset Collection.\n  --confirm <action>   Run this action, which dohc cannot undo. The press names\n                       each action it would run. Repeat for more actions.\n  --request-id <id>    Send the same id again, after a timeout for example, to\n                       get the same press instead of a second one.\n  --as-agent           Post and read chat as an agent.\n  --json               Print the result as JSON.\n  --help               Show help. -h does the same.\n",
+    "account": "Usage: dohc account <verb> [arguments] [options]\n\nReview and delete the server account the dohc app is connected to.\n\nVerbs:\n  deletePreview   List what deleting the connected server account removes.\n  delete          Delete the connected server account and the workspaces it owns\n                  on the server.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUnlike other commands, account verbs also work outside a workspace folder.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc account <verb> --help to see its arguments and options.\n",
+    "account deletePreview": "Usage: dohc account deletePreview [options]\n\nList what deleting the connected server account removes.\n\nThe result holds the server and previewToken that delete needs. The token\nexpires after five minutes.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUnlike other commands, account verbs also work outside a workspace folder.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
+    "account delete": "Usage: dohc account delete [options]\n\nDelete the connected server account and the workspaces it owns on the server.\n\ndohc reads the account password from stdin, or asks for it when stdin is a\nterminal. Never pass it as an argument.\nThis cannot be undone. Copies on this computer stay. People you shared with lose\naccess and keep their copies.\nIf you create an account again later, the server will not accept your old copies\nof the deleted workspaces. Its backups keep the data until they expire.\nWhen the server cannot finish at once, the account stays blocked and the server\nfinishes later. Either way, the dohc app disconnects from the server. If it\ncannot, delete exits 1 and says how to finish.\nIf the preview expired or changed, run deletePreview again.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUnlike other commands, account verbs also work outside a workspace folder.\n\nOptions:\n  --server <address>        Use server from deletePreview. Required.\n  --preview-token <token>   Use previewToken from deletePreview. Required.\n  --as-agent                Post and read chat as an agent.\n  --json                    Print the result as JSON.\n  --help                    Show help. -h does the same.\n"
   }
 }

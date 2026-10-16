@@ -14,21 +14,24 @@ export function useAgentSetup(
   settingsSection: SettingsSectionId | null,
   workspaceIsReady: boolean,
 ) {
-  const [agentRunStatus, setAgentRunStatus] = useState<AgentRunStatusResult | null>(null);
+  // Each answer keeps the workspace it was read for, so the render between a
+  // switch and its reset never pairs one workspace's run with another.
+  const [agentRunStatus, setAgentRunStatus] = useState<{ workspaceId: string; run: AgentRunStatusResult } | null>(null);
   const agentSetupRequestRef = useRef(0);
   const bootstrapAgentStatusRead = useRef<Promise<AgentRunStatusResult> | null>(null);
 
   const agentSetup = useMemo<AgentSetupSummary | null>(() => {
-    if (!workspaceIsReady || !userSettings || !agentRunStatus) return null;
+    if (!workspaceIsReady || !userSettings || agentRunStatus?.workspaceId !== workspaceId) return null;
     return {
+      workspaceId,
       preferredName: userSettings.settings.profile.preferredName,
       agentName: userSettings.settings.profile.agentName,
       runnerConfigured:
         configuredRunnerCommand(userSettings.settings.runner).length > 0,
       runnerEnabled: userSettings.settings.runner.enabled,
-      agentRunActive: agentRunStatus.activeRun !== null,
+      agentRunActive: agentRunStatus.run.activeRun !== null,
     };
-  }, [agentRunStatus, userSettings, workspaceIsReady]);
+  }, [agentRunStatus, userSettings, workspaceId, workspaceIsReady]);
 
   // The workspace-scoped half of the setup snapshot is also the initial
   // agent-status answer for the history lane. Both consumers share this promise.
@@ -45,7 +48,7 @@ export function useAgentSetup(
     void read
       .then((run) => {
         if (agentSetupRequestRef.current !== version) return;
-        setAgentRunStatus(run);
+        setAgentRunStatus({ workspaceId, run });
       })
       .catch(() => {
         if (agentSetupRequestRef.current === version) setAgentRunStatus(null);
@@ -66,7 +69,7 @@ export function useAgentSetup(
     void bridge()
       .getAgentRunStatus({ workspaceId })
       .then((run) => {
-        if (agentSetupRequestRef.current === version) setAgentRunStatus(run);
+        if (agentSetupRequestRef.current === version) setAgentRunStatus({ workspaceId, run });
       })
       .catch(() => {
         if (agentSetupRequestRef.current === version) setAgentRunStatus(null);

@@ -280,6 +280,52 @@ fn retained_activation_reopens_after_adoption_and_a_later_native_head() {
 }
 
 #[test]
+fn hosted_activation_waits_for_its_document_backfill_not_the_ordinary_cursor() {
+    let mut f = imported_fixture();
+    let set = |f: &mut Fixture, sql: &str| {
+        f.store
+            .write_with(&NoFaults, |tx| tx.execute(sql, []).map_err(write_sql))
+            .unwrap();
+    };
+    set(&mut f, "DELETE FROM sync_relay_cursors");
+    set(
+        &mut f,
+        "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+         VALUES ('workspace','service-host:host','epoch','stream',1)",
+    );
+    // The base arrived in the document's backfill, past the frozen main cursor.
+    set(
+        &mut f,
+        "INSERT INTO hosted_replicas (workspace_id,scope_token,scope_generation,main_cursor,created_at_ms) \
+         VALUES ('workspace','scope',1,4,1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_documents (workspace_id,object_id,path,state,backfill_cursor,scope_generation) \
+         VALUES ('workspace','object','object.md','backfilling',9,1)",
+    );
+    assert!(matches!(
+        capture_imported(&mut f, 1_000_000),
+        Err(ApplicationError::Conflict)
+    ));
+    set(&mut f, "UPDATE hosted_documents SET state='ready'");
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    assert_eq!(captured.source.committed_cursor, 9);
+    assert_eq!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000)
+            .unwrap()
+            .source,
+        captured.source
+    );
+    // A document that left the scope stops activating, ready or not.
+    set(&mut f, "UPDATE hosted_replicas SET scope_generation=2");
+    assert!(matches!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000),
+        Err(ApplicationError::Conflict)
+    ));
+}
+
+#[test]
 fn retained_activation_rejects_unadopted_native_changes_and_epoch_changes() {
     let mut f = imported_fixture();
     let captured = capture_imported(&mut f, 1_000_000).unwrap();

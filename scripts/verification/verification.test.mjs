@@ -1185,7 +1185,7 @@ test("Postgres startup rejection cleans its created container and preserves star
         containers.add(ownedName);
         throw startupError;
       }
-      assert.deepEqual(args, ["rm", "--force", ownedName]);
+      assert.deepEqual(args, ["rm", "--force", "--volumes", ownedName]);
       if (cleanupFails) throw new Error("Docker cleanup is unavailable");
       containers.delete(ownedName);
       return { stdout: ownedName };

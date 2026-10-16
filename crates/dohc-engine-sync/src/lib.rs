@@ -18,6 +18,7 @@ mod deferred;
 mod enrolment;
 mod error;
 mod file_search;
+mod hosted;
 mod hydration;
 mod journal;
 mod live_audit;
@@ -58,19 +59,26 @@ pub use conflict_resolve_v1::{
     prepare_local_conflict_resolve_v1_in_tx,
 };
 pub use cursor::{
-    CursorKind, RelayCursor, ShareCursor, SharedPeerPosition, commit_relay_cursor,
+    CursorCommit, CursorKind, RelayCursor, ShareCursor, SharedPeerPosition, commit_relay_cursor,
     commit_share_cursor, read_pushed_seq, read_relay_cursor, read_share_cursor,
     read_shared_peer_position,
 };
 pub use enrolment::{originate_closing_ydoc_base_in_tx, originate_live_ydoc_base_in_tx};
 use error::ShareDisposition;
 pub use error::{ObservedBytes, RelayError, SyncError};
+pub use hosted::{
+    DepartedDocument, DepartedHead, HOSTED_REPLICA_NOT_PRISTINE, HostedCursor, HostedDocumentState,
+    HostedDocumentStatus, HostedHold, HostedRead, HostedReplicaState, PASSIVE_STORE_CANNOT_HOST,
+    RetiredFile, SERVICE_HOST_ORIGIN_PREFIX, commit_hosted_cursor, departed_hosted_documents,
+    forget_retired_hosted_file, hosted_document_retirable, is_hosted_replica, read_hosted_replica,
+    retire_hosted_document, retired_hosted_files,
+};
 pub use hydration::{
     BlobContent, BlobHydration, BlobKind, MAX_INGEST_BLOB_BYTES, blob_ceiling, hydrate_blob_content,
 };
 pub use journal::{
     AdoptJoinIdentityOutcome, ShareViewIdentity, ShareViewIdentityOutcome, SyncIdentity,
-    adopt_join_identity, create_claim_identity, journal_local_op_in_tx,
+    adopt_join_identity, create_claim_identity, create_hosted_replica, journal_local_op_in_tx,
     journal_local_replication_op, list_replication_ops, read_replication_acked_seq,
     read_sync_identity, record_share_view_identity, workspace_journals_file_moments_in_tx,
     workspace_replicates_with_relay, workspace_replicates_with_relay_in_tx,
@@ -97,7 +105,8 @@ pub use relay::{
     BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobDownloadSpec,
     BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse,
     DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, DirectWriteState,
-    DirectWriteStatus, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
+    DirectWriteStatus, EpochRequest, EpochResponse, HostedPassOutcome, HostedPullRequest,
+    HostedPullResponse, HostedScope, HostedScopeDocument, KeyEnvelopeDownloadRequest,
     KeyEnvelopeDownloadResponse, KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest,
     LogCoordinateResponse, MAX_BASE_REPAIR_LOOKUPS, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest,
     ProbeResponse, PullRequest, PullResponse, PushRequest, PushResponse, PushWorkspaceProgress,
@@ -108,7 +117,8 @@ pub use relay::{
     ShareReplicationEnvelope, ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal,
     ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
     SharedChannelRejection, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
-    collision_key, read_direct_write_status, read_record_creation_statuses,
+    collision_key, hosted_feed_only, no_hosted_feed, read_direct_write_status,
+    read_record_creation_statuses,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;
