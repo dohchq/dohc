@@ -115,8 +115,9 @@ pub struct Request {
     /// Target workspace, when the method is workspace-scoped.
     #[cfg_attr(feature = "bindings", ts(optional = nullable))]
     pub workspace: Option<WorkspaceHandle>,
-    /// Relative deadline. The engine clamps it to its maximum and fails the
-    /// request with `DEADLINE_EXCEEDED` when it elapses.
+    /// Relative deadline. The engine clamps it to its maximum. When it
+    /// elapses, a request whose work did not happen fails with
+    /// `DEADLINE_EXCEEDED`; one whose work landed answers with its result.
     #[cfg_attr(feature = "bindings", ts(optional = nullable))]
     pub deadline_ms: Option<u32>,
     /// Required on retryable mutations: the engine deduplicates replays of

@@ -411,11 +411,9 @@ impl EngineService {
                 degraded: initial_snapshot.degraded,
             });
         }
-        // A flush can drive up to MAX_FLUSH_CYCLES reconciles or sit behind
-        // a full flush queue — a cancelled/deadlined caller must get its
-        // answer now, like every other workspace RPC. The driver still
-        // finishes its pass; only the wait is abandoned (the reply send
-        // fails harmlessly).
+        // A flush can sit behind a full flush queue, so a cancelled caller
+        // stops waiting for a place. Once the driver holds the flush it runs
+        // its passes regardless, so the request answers with their outcome.
         let cancellation = OperationCancellation::new(ctx);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         tokio::select! {
@@ -429,13 +427,7 @@ impl EngineService {
                 }
             }
         }
-        tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                Err(cancellation.interruption(operation))
-            }
-            outcome = reply_rx => Ok(outcome.unwrap_or(unavailable)),
-        }
+        Ok(reply_rx.await.unwrap_or(unavailable))
     }
 
     /// Force the live capture manifest to rebuild, then answer after the first

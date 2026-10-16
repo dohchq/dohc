@@ -2580,7 +2580,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_move_cancellation_and_deadline_return_while_actor_query_is_queued() {
+    async fn a_stopped_check_move_answers_once_its_queued_actor_query_runs() {
         use dohc_engine_protocol::transport::EngineService as _;
         for deadline in [false, true] {
             let scratch = ScratchDir::new().unwrap();
@@ -2648,30 +2648,25 @@ mod tests {
             } else {
                 cancel.cancel();
             }
-            let result = tokio::time::timeout(Duration::from_millis(250), checking.as_mut()).await;
-            let actor_still_held = !held.is_finished();
+            tokio::task::yield_now().await;
+            std::future::poll_fn(|cx| {
+                assert!(
+                    std::future::Future::poll(checking.as_mut(), cx).is_pending(),
+                    "a queued actor query is awaited, not answered for"
+                );
+                std::task::Poll::Ready(())
+            })
+            .await;
             if deadline {
                 tokio::time::resume();
             }
             gate.release();
             held.await.unwrap().unwrap();
-            drop(checking);
+            let checked = tokio::time::timeout(Duration::from_secs(5), checking)
+                .await
+                .expect("checkMove answers once its query runs");
+            assert!(checked.is_ok(), "{checked:?}");
             service.workspace_close(Some(handle)).await.unwrap();
-            assert!(
-                actor_still_held,
-                "the actor query cannot finish before cancellation"
-            );
-            assert_eq!(
-                result
-                    .expect("cancelled checkMove returns before actor release")
-                    .unwrap_err()
-                    .code,
-                if deadline {
-                    ErrorCode::DeadlineExceeded
-                } else {
-                    ErrorCode::Cancelled
-                }
-            );
         }
     }
 

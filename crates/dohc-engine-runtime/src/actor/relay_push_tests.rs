@@ -426,9 +426,17 @@ fn consumed_upload_updates_only_the_matching_inventory_identity() {
     assert!(transport.take_pending().is_none());
 }
 
-#[tokio::test]
-async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
-    let (_scratch, path, mut store) = fixture();
+/// Push after an acknowledged prefix, cancelling the request when `cancel_at`
+/// is first issued. Returns the outcome and the relay.
+async fn push_cancelled_at(
+    cancel_at: fn(&RelayIoRequest) -> bool,
+) -> (
+    Result<RelayOperationOutcome, RuntimeError>,
+    ScratchDir,
+    std::path::PathBuf,
+    Relay,
+) {
+    let (scratch, path, mut store) = fixture();
     let mut relay = Relay::default();
     assert_eq!(pump_pass(&mut store, &mut relay), (PREFIX_OPS, true));
     drop(store);
@@ -436,10 +444,9 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 2_100).expect("open actor").actor;
     let token = CancellationToken::new();
+    let request_token = token.clone();
     let relay = Arc::new(Mutex::new(relay));
-    let cancelled_upload = Arc::new(Mutex::new(None));
     let io_relay = Arc::clone(&relay);
-    let io_cancelled_upload = Arc::clone(&cancelled_upload);
     let outcome = actor
         .relay_with_io(
             false,
@@ -447,37 +454,63 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
             LeaseRegistry::default(),
             token.clone(),
             None,
-            move |request, token| {
+            move |request, _token| {
                 let relay = Arc::clone(&io_relay);
-                let cancelled_upload = Arc::clone(&io_cancelled_upload);
+                let request_token = request_token.clone();
                 async move {
-                    if let RelayIoRequest::UploadBlob(upload) = &request {
-                        *cancelled_upload.lock().unwrap() = Some(upload.sha256.clone());
-                        token.cancel();
-                        std::future::pending::<Result<RelayIoResponse, RelayError>>().await
-                    } else {
-                        Ok(relay.lock().unwrap().answer(&request))
+                    if cancel_at(&request) {
+                        request_token.cancel();
                     }
+                    Ok(relay.lock().unwrap().answer(&request))
                 }
             },
         )
         .await;
-    assert!(matches!(outcome, Err(RuntimeError::Cancelled)));
-    assert!(token.is_cancelled());
-    let cancelled_upload = cancelled_upload
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("upload reached");
+    assert!(token.is_cancelled(), "the request was cancelled");
     supervisor.close(&path).expect("close actor");
+    let relay = std::mem::take(&mut *relay.lock().unwrap());
+    (outcome, scratch, path, relay)
+}
+
+#[tokio::test]
+async fn a_push_cancelled_after_its_upload_is_issued_answers_with_what_it_pushed() {
+    let (outcome, _scratch, path, mut relay) =
+        push_cancelled_at(|request| matches!(request, RelayIoRequest::UploadBlob(_))).await;
+    assert!(
+        matches!(
+            outcome,
+            Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                pushed: PREFIX_OPS,
+                has_more: true,
+                ..
+            }))
+        ),
+        "{outcome:?}"
+    );
+    let mut store = EngineStore::open(&path, 2_200).expect("reopen store");
+    assert_eq!(
+        read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(),
+        2 * PREFIX_OPS as i64 - 1
+    );
+    assert_eq!(relay.ops.len(), 2 * PREFIX_OPS);
+    finish(&mut store, &mut relay);
+    assert_eq!(relay.skipped, 0);
+}
+
+#[tokio::test]
+async fn a_push_cancelled_during_its_inventory_read_preserves_the_acknowledged_prefix() {
+    let (outcome, _scratch, path, mut relay) =
+        push_cancelled_at(|request| matches!(request, RelayIoRequest::BlobsHave(_))).await;
+    assert!(
+        matches!(outcome, Err(RuntimeError::Cancelled)),
+        "{outcome:?}"
+    );
     let mut store = EngineStore::open(&path, 2_200).expect("reopen store");
     assert_eq!(
         read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(),
         PREFIX_OPS as i64 - 1
     );
-    let mut relay = relay.lock().unwrap();
     assert_eq!(relay.ops.len(), PREFIX_OPS);
-    assert!(!relay.blobs.contains(&cancelled_upload));
     finish(&mut store, &mut relay);
     assert_eq!(relay.skipped, 0);
 }

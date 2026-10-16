@@ -14,6 +14,7 @@ use dohc_engine_collab::Ydoc;
 use dohc_engine_domain::{VersionedTextStore, WriteText, reconcile_collections_in_tx};
 use dohc_engine_protocol::{
     error::ErrorCode,
+    supervisor::{Supervisor, SupervisorConfig},
     transport::{
         EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
     },
@@ -2843,6 +2844,114 @@ async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
         )
         .expect("persisted relay cursor");
     assert_eq!(persisted, "1");
+}
+
+/// Commit a pulled cursor through the real supervisor while the session lock
+/// is held. The commit's follow-up waits on that lock, so the request is
+/// stopped after its cursor is durable and before it answers.
+async fn commit_stopped_after_its_cursor_lands(expire: bool) {
+    let workspace_id = if expire {
+        "rpc-relay-commit-expired"
+    } else {
+        "rpc-relay-commit-cancelled"
+    };
+    let relay = FakeRelay::start(RelayState {
+        workspace_ops: vec![workspace_row(
+            1,
+            workspace_id,
+            "remote",
+            0,
+            "workspace.init",
+            json!({}),
+        )],
+        ..RelayState::default()
+    });
+    let scratch = ScratchDir::new().expect("scratch");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let mut id = 1;
+    let handle = open_workspace(&transport, &scratch, &relay, id, workspace_id).await;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    seed_sync_identity(&transport, &handle, &mut id, workspace_id).await;
+    let pulled = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.pull",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    let db_path = engine_db_path(&scratch).expect("engine db path");
+    let stored_cursor = || {
+        Connection::open(&db_path)
+            .expect("open engine db")
+            .query_row(
+                "SELECT cursor FROM sync_relay_cursors WHERE workspace_id=?1",
+                [workspace_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .expect("read relay cursor")
+    };
+    assert_eq!(stored_cursor(), None);
+
+    let session_ops = service
+        .session_ops_for_harness(&handle)
+        .await
+        .expect("session lock");
+    let supervisor = Supervisor::new(SupervisorConfig::default(), Arc::clone(&service));
+    id += 1;
+    let mut commit = request(
+        id,
+        "sync.commitCursor",
+        Some(handle.clone()),
+        json!({ "workspaceId": workspace_id, "pendingCursor": pulled["pendingCursor"] }),
+    );
+    commit.deadline_ms = Some(60_000);
+    let mut answer = supervisor.try_submit(commit).expect("admitted");
+    let waiting = std::time::Instant::now();
+    while stored_cursor().is_none() {
+        assert!(
+            waiting.elapsed() < Duration::from_secs(10),
+            "the cursor commit never landed"
+        );
+        tokio::task::yield_now().await;
+    }
+    if expire {
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(61)).await;
+    } else {
+        assert!(supervisor.cancel(id));
+    }
+    tokio::task::yield_now().await;
+    assert!(
+        matches!(
+            answer.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "the landed commit is answered by its handler"
+    );
+    drop(session_ops);
+    if expire {
+        tokio::time::resume();
+    }
+    let committed = answer
+        .await
+        .expect("answered")
+        .expect("a commit stopped after its cursor landed answers committed");
+    assert_eq!(committed.response.result["committed"], json!(true));
+    assert_eq!(stored_cursor().as_deref(), Some("1"));
+    close(&transport, &handle, &mut id).await;
+}
+
+#[tokio::test]
+async fn a_commit_cancelled_after_its_cursor_lands_answers_committed() {
+    commit_stopped_after_its_cursor_lands(false).await;
+}
+
+#[tokio::test]
+async fn a_commit_expired_after_its_cursor_lands_answers_committed() {
+    commit_stopped_after_its_cursor_lands(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

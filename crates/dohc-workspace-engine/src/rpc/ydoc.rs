@@ -514,11 +514,10 @@ impl EngineService {
         Ok((Some(draft), Some(reservation)))
     }
 
-    /// Keep scene-open exclusion owned by the detached completion. The
-    /// protocol supervisor can stop waiting on cancellation or deadline, but
-    /// a queued actor command still runs after its reply receiver is dropped.
+    /// Keep scene-open exclusion owned by the detached completion: a queued
+    /// actor command still runs after its caller is dropped. The request
+    /// waits for it, since materialization ignores cancellation once queued.
     async fn complete_scene_seed_materialization(
-        cancellation: &OperationCancellation,
         materialization: impl std::future::Future<
             Output = Result<YdocSeedMaterialization, RuntimeError>,
         > + Send
@@ -533,21 +532,18 @@ impl EngineService {
         ),
         WireError,
     > {
-        let completion = tokio::spawn(async move {
+        let (materialization, serial, lease) = tokio::spawn(async move {
             let materialization = materialization.await;
             (materialization, serial, lease)
-        });
-        tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                Err(cancellation.interruption("ydoc.open (scene asset materialization)"))
-            }
-            completed = completion => {
-                let (materialization, serial, lease) = completed
-                    .map_err(|_| WireError::new(ErrorCode::Internal, "ydoc scene asset materialization task failed"))?;
-                Ok((materialization.map_err(map_runtime)?, serial, lease))
-            }
-        }
+        })
+        .await
+        .map_err(|_| {
+            WireError::new(
+                ErrorCode::Internal,
+                "ydoc scene asset materialization task failed",
+            )
+        })?;
+        Ok((materialization.map_err(map_runtime)?, serial, lease))
     }
 
     pub(super) async fn owner_ydoc_stop(
@@ -1074,13 +1070,8 @@ impl EngineService {
                     )
                     .await
             };
-            let (materialization, serial, lease) = Self::complete_scene_seed_materialization(
-                &cancellation,
-                materialization,
-                serial,
-                lease,
-            )
-            .await?;
+            let (materialization, serial, lease) =
+                Self::complete_scene_seed_materialization(materialization, serial, lease).await?;
             if !materialization.materialized {
                 return Err(scene_seed_materialization_error(materialization));
             }
@@ -2064,7 +2055,6 @@ mod tests {
     }
     use crate::EngineService;
     use crate::rpc::error::map_owner_outbox;
-    use crate::rpc::request::OperationCancellation;
     use dohc_engine_collab::DocKey;
     use dohc_engine_collab::LeaseRegistry;
     use dohc_engine_collab::OwnerOutboxError;
@@ -2960,12 +2950,8 @@ mod tests {
             .expect("workspace close");
     }
 
-    async fn assert_scene_seed_interruption_retains_exclusion(
-        ctx: RequestContext,
-        expected_code: ErrorCode,
-    ) {
-        let signal = ctx.cancel.clone();
-        let cancellation = OperationCancellation::new(&ctx);
+    #[tokio::test]
+    async fn scene_seed_materialization_keeps_exclusion_when_its_caller_leaves() {
         let session_ops = Arc::new(tokio::sync::Mutex::new(()));
         let serial = Arc::clone(&session_ops).lock_owned().await;
         let leases = LeaseRegistry::new();
@@ -2974,36 +2960,22 @@ mod tests {
         let lease = leases.acquire(&key).expect("initial lease");
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let waiting = tokio::spawn(async move {
-            EngineService::complete_scene_seed_materialization(
-                &cancellation,
-                async move {
-                    let _ = started_tx.send(());
-                    release_rx.await.expect("release materialization");
-                    Ok(YdocSeedMaterialization {
-                        materialized: true,
-                        incomplete_jobs: 0,
-                        invalid_jobs: 0,
-                    })
-                },
-                serial,
-                lease,
-            )
-            .await
-        });
+        let waiting = tokio::spawn(EngineService::complete_scene_seed_materialization(
+            async move {
+                let _ = started_tx.send(());
+                release_rx.await.expect("release materialization");
+                Ok(YdocSeedMaterialization {
+                    materialized: true,
+                    incomplete_jobs: 0,
+                    invalid_jobs: 0,
+                })
+            },
+            serial,
+            lease,
+        ));
         started_rx.await.expect("materialization started");
-        if expected_code == ErrorCode::Cancelled {
-            signal.cancel();
-        }
-        let result = tokio::time::timeout(Duration::from_secs(5), waiting)
-            .await
-            .expect("interrupted wait completed")
-            .expect("completion task");
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("an interrupted wait must not return materialization"),
-        };
-        assert_eq!(error.code, expected_code);
+        waiting.abort();
+        assert!(waiting.await.expect_err("caller left").is_cancelled());
         assert!(
             session_ops.try_lock().is_err(),
             "the session serial must stay held until actor completion"
@@ -3024,22 +2996,6 @@ mod tests {
         })
         .await
         .expect("completion released serial and lease");
-    }
-
-    #[tokio::test]
-    async fn scene_seed_cancellation_keeps_exclusion_until_actor_completion() {
-        assert_scene_seed_interruption_retains_exclusion(
-            RequestContext::unbounded(),
-            ErrorCode::Cancelled,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn scene_seed_deadline_keeps_exclusion_until_actor_completion() {
-        let mut ctx = RequestContext::unbounded();
-        ctx.deadline = Some(std::time::Instant::now() + Duration::from_millis(100));
-        assert_scene_seed_interruption_retains_exclusion(ctx, ErrorCode::DeadlineExceeded).await;
     }
 
     #[test]

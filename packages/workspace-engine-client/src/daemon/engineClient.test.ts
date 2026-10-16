@@ -2408,6 +2408,29 @@ describe("EngineClient", () => {
     transport.close();
   });
 
+  it("settles a cancelled request with the result of work that landed first", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const envelopes: Envelope[] = [];
+    peer.onEnvelope = (envelope) => envelopes.push(envelope);
+
+    const operation = transport.sendRequest(request(4_243, "sync.commitCursor"));
+    await transport.cancelRequest(4_243);
+
+    expect(envelopes).toMatchObject([
+      { type: "request", id: 1, method: "sync.commitCursor" },
+      { type: "cancel", id: 1 },
+    ]);
+    peer.send({ type: "response", id: 1, result: { committed: true } });
+    await expect(operation).resolves.toEqual({
+      id: 4_243,
+      result: { committed: true },
+    });
+    transport.close();
+  });
+
   it("times out only the expired request and ignores its late reply", async () => {
     vi.useFakeTimers();
     try {

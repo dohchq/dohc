@@ -105,7 +105,7 @@ impl EngineService {
         .await
         .map_err(|_| workspace_unavailable())??;
         let current = self.open(Some(workspace))?;
-        if !Arc::ptr_eq(&open, &current) || cancellation.token.is_cancelled() {
+        if !Arc::ptr_eq(&open, &current) {
             return Err(workspace_unavailable());
         }
         Ok(ServiceResponse {
@@ -225,7 +225,9 @@ impl EngineService {
             )
         })?;
         let captured = captured.map_err(map_runtime)?;
-        if !guard.is_current() || !Arc::ptr_eq(&open, &self.open(Some(&workspace))?) {
+        // The capture landed: install its session even for a cancelled
+        // request. The writer withholds the answer once the guard lapses.
+        if !connection.is_current() || !Arc::ptr_eq(&open, &self.open(Some(&workspace))?) {
             return Err(workspace_unavailable());
         }
         let session_id = if let Some(id) = existing {

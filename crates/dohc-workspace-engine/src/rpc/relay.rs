@@ -4,6 +4,7 @@ use crate::lock;
 use crate::rpc::error::map_runtime;
 use crate::rpc::error::workspace_unavailable;
 use crate::rpc::request::OperationCancellation;
+use crate::rpc::request::after_landing;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::workspace::OpenWorkspace;
@@ -752,7 +753,9 @@ impl EngineService {
         // A push can be what makes enrollment ready. The sweep inside it left
         // each open document to its session. Claim those now, then request a
         // fresh push budget for the newly queued bytes.
-        let (claimed, declined) = self.originate_live_sessions(ctx, &open).await?;
+        let (claimed, declined) = self
+            .originate_live_sessions(&after_landing(ctx), &open)
+            .await?;
         if claimed > 0
             && let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { has_more, .. }) =
                 &mut outcome
@@ -952,7 +955,7 @@ impl EngineService {
             result["pendingCursor"] = issued;
         } else if reconcile_at_commit {
             // Nothing to materialize or commit: the page's changes are in place.
-            self.collections_changed(ctx, &open).await?;
+            self.collections_changed(&after_landing(ctx), &open).await?;
         }
         Ok(result)
     }
@@ -1136,11 +1139,12 @@ impl EngineService {
             open.request_collection_reconcile();
         }
         // A cursor commit can be what makes enrollment ready, as a push can.
-        let (_, declined) = self.originate_live_sessions(ctx, &open).await?;
+        let landed = after_landing(ctx);
+        let (_, declined) = self.originate_live_sessions(&landed, &open).await?;
         if let RelayOperationOutcome::CursorCommitted { sharing_declined } = &mut outcome {
             sharing_declined.extend(declined);
             if reconcile_collections && !share_view {
-                self.collections_changed(ctx, &open).await?;
+                self.collections_changed(&landed, &open).await?;
             }
         }
         relay_outcome_json(outcome)

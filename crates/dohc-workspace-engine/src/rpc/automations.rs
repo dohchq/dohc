@@ -1121,18 +1121,26 @@ impl EngineService {
         let params: AutomationMakeDurableParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let reply = open.durability.submit(
-            open.actor.clone(),
-            open.workspace_id.clone(),
-            params.claim_id,
-            cancellation.token(),
-        );
-        let token = cancellation.token();
-        tokio::select! {
-            biased;
-            () = token.cancelled() => return Err(cancellation.interruption("automations.makeDurable")),
-            result = reply => result.map_err(|_| WireError::new(ErrorCode::WorkspaceUnavailable, "workspace actor is unavailable"))??,
-        }
+        // The batch skips a claim whose token fired before it ran, so its
+        // reply is the claim's real outcome.
+        open.durability
+            .submit(
+                open.actor.clone(),
+                open.workspace_id.clone(),
+                params.claim_id,
+                cancellation.token(),
+            )
+            .await
+            .map_err(|_| {
+                WireError::new(
+                    ErrorCode::WorkspaceUnavailable,
+                    "workspace actor is unavailable",
+                )
+            })?
+            .map_err(|error| match error.code {
+                ErrorCode::Cancelled => cancellation.interruption("automations.makeDurable"),
+                _ => error,
+            })?;
         Ok(json!({}))
     }
 

@@ -16,8 +16,9 @@ method: string,
  */
 workspace?: WorkspaceHandle | null, 
 /**
- * Relative deadline. The engine clamps it to its maximum and fails the
- * request with `DEADLINE_EXCEEDED` when it elapses.
+ * Relative deadline. The engine clamps it to its maximum. When it
+ * elapses, a request whose work did not happen fails with
+ * `DEADLINE_EXCEEDED`; one whose work landed answers with its result.
  */
 deadlineMs?: number | null, 
 /**
