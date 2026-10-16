@@ -328,6 +328,7 @@ impl RelayError {
             // wrong, the store was simply busy. Advancing the cursor past it
             // would drop content the next pull would have applied.
             | RelayError::StoreBusy
+            | RelayError::HostedRefusal(_)
             | RelayError::Local(_) => None,
         }
     }
@@ -466,6 +467,11 @@ pub enum RelayError {
     /// relay route give the same answer as every other route.
     #[error("engine store is busy")]
     StoreBusy,
+    /// An operation that does not fit the replica: an ordinary one on a hosted
+    /// replica, or a hosted one on an ordinary replica. It keeps its reason,
+    /// which callers are shown.
+    #[error("{0}")]
+    HostedRefusal(&'static str),
     #[error("local sync state failed: {0}")]
     Local(String),
 }

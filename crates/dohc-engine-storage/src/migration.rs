@@ -3247,6 +3247,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "CREATE INDEX idx_moments_operation_correlation ON moments(workspace_id, metadata_correlation_id);",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 56,
+        id: "v2-hosted-replica",
+        sql: V2_HOSTED_REPLICA_DDL,
+        sets_user_version: None,
+    },
 ];
 
 const V2_REPLICA_FRONTIERS_DDL: &str = "\
@@ -3307,6 +3313,70 @@ CREATE TABLE owner_live_stops (
     FOREIGN KEY(workspace_id,main_version_id,object_id) REFERENCES ydoc_docs(workspace_id,version_id,object_id) ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX idx_owner_live_stops_requested ON owner_live_stops(workspace_id,main_version_id,object_id) WHERE state='requested';
+";
+
+/// A session host's replica of the documents the relay's scoped feed serves
+/// it. The row is the replica kind: admission, deferred replay and outbound
+/// sequences read it, never an inference from other state.
+const V2_HOSTED_REPLICA_DDL: &str = "\
+CREATE TABLE hosted_replicas (
+    workspace_id TEXT NOT NULL PRIMARY KEY REFERENCES sync_identity(workspace_id),
+    scope_token TEXT CHECK (scope_token IS NULL OR length(scope_token) > 0),
+    scope_generation INTEGER NOT NULL DEFAULT 0 CHECK (scope_generation >= 0),
+    main_cursor INTEGER NOT NULL DEFAULT 0 CHECK (main_cursor >= 0),
+    cursor_commits INTEGER NOT NULL DEFAULT 0 CHECK (cursor_commits >= 0),
+    last_outbound_seq INTEGER NOT NULL DEFAULT -1 CHECK (last_outbound_seq >= -1),
+    created_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE TABLE hosted_documents (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    object_id TEXT NOT NULL,
+    path TEXT NOT NULL CHECK (length(path) > 0),
+    state TEXT NOT NULL CHECK (state IN ('backfilling','held','ready')),
+    held_reason TEXT CHECK (held_reason IN
+      ('hosted-backfill-path-held','hosted-backfill-work-waiting','hosted-scope-path-mismatch',
+       'hosted-conflict-parent-withheld')),
+    held_path TEXT CHECK (length(held_path) > 0),
+    held_by TEXT CHECK (length(held_by) > 0),
+    held_conflict_id TEXT CHECK (length(held_conflict_id) > 0),
+    backfill_cursor INTEGER NOT NULL DEFAULT 0 CHECK (backfill_cursor >= 0),
+    scope_generation INTEGER NOT NULL CHECK (scope_generation >= 0),
+    PRIMARY KEY (workspace_id, object_id),
+    CHECK ((state = 'held') = (held_reason IS NOT NULL)),
+    CHECK ((held_by IS NOT NULL) = (held_reason IS 'hosted-backfill-path-held')),
+    CHECK ((held_conflict_id IS NOT NULL) = (held_reason IS 'hosted-conflict-parent-withheld')),
+    CHECK (held_reason IS NOT 'hosted-backfill-path-held' OR held_path IS NOT NULL),
+    CHECK (held_reason NOT IN ('hosted-backfill-work-waiting','hosted-conflict-parent-withheld')
+      OR held_path IS NULL)
+) STRICT;
+CREATE TABLE hosted_withheld_befores (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    moment_id TEXT NOT NULL,
+    before_object_id TEXT NOT NULL,
+    before_path TEXT NOT NULL,
+    before_sha256 TEXT NOT NULL,
+    before_content_kind TEXT NOT NULL CHECK (before_content_kind IN ('text','binary')),
+    PRIMARY KEY (workspace_id, moment_id),
+    FOREIGN KEY (workspace_id, moment_id)
+      REFERENCES moments(workspace_id, moment_id) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE hosted_deferred_ops (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    object_id TEXT NOT NULL,
+    relay_seq INTEGER NOT NULL CHECK (relay_seq > 0),
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, origin_id, origin_seq)
+      REFERENCES relay_deferred_ops(workspace_id, origin_id, origin_seq) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX hosted_deferred_ops_by_document ON hosted_deferred_ops(workspace_id, object_id, relay_seq);
+CREATE TABLE hosted_retired_files (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    path TEXT NOT NULL CHECK (length(path) > 0),
+    sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+    PRIMARY KEY (workspace_id, path)
+) STRICT;
 ";
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
@@ -4002,6 +4072,10 @@ mod tests {
                 "v2-history-operation-correlation",
                 "c0f4d24b926a03be07f0999f3aab707da566b2de18654243031f0cb1b80a4819",
             ),
+            (
+                "v2-hosted-replica",
+                "332fbe3728b51bdb26a1cc9cc0d8d1da4decd311aa991687be899f4def7c7468",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -4062,6 +4136,117 @@ mod tests {
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
         assert_eq!(state, (1, 0, 100));
+    }
+
+    #[test]
+    fn hosted_replica_applies_fresh_and_upgrades_a_store_at_its_predecessor() {
+        let hosted = |conn: &Connection| {
+            conn.execute_batch(
+                "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                 VALUES ('hosted','service-host:a','epoch','stream',1); \
+                 INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('hosted',1); \
+                 INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
+                 VALUES ('hosted','doc','doc.md','backfilling',0); \
+                 INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
+                 VALUES ('hosted','gone.md',printf('%064d',0));",
+            )
+            .unwrap();
+            let state: (Option<String>, i64, i64, i64, i64, i64) = conn
+                .query_row(
+                    "SELECT scope_token,scope_generation,main_cursor,cursor_commits, \
+                     last_outbound_seq,(SELECT backfill_cursor FROM hosted_documents) \
+                     FROM hosted_replicas",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(state, (None, 0, 0, 0, -1, 0));
+            for invalid in [
+                "INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('no-identity',1)",
+                "UPDATE hosted_documents SET state='retired'",
+                "UPDATE hosted_documents SET state='held'",
+                "UPDATE hosted_documents SET held_reason='hosted-backfill-work-waiting'",
+                "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-path-held',\
+                 held_path='a.md'",
+                "UPDATE hosted_documents SET state='held',held_reason='hosted-conflict-parent-withheld'",
+                "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting',\
+                 held_conflict_id='conflict'",
+                "UPDATE hosted_documents SET path=''",
+                "INSERT INTO hosted_deferred_ops (workspace_id,origin_id,origin_seq,object_id,relay_seq) \
+                 VALUES ('hosted','origin:a',0,'doc',1)",
+                "UPDATE hosted_replicas SET scope_token=''",
+                "UPDATE hosted_replicas SET cursor_commits=-1",
+                "UPDATE hosted_replicas SET last_outbound_seq=-2",
+                "INSERT INTO hosted_withheld_befores (workspace_id,moment_id,before_object_id,\
+                 before_path,before_sha256,before_content_kind) \
+                 VALUES ('hosted','no-moment','private','a.md','sha','text')",
+                "INSERT INTO hosted_retired_files (workspace_id,path,sha256) VALUES ('hosted','a.md','sha')",
+                "INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
+                 VALUES ('ordinary','a.md',printf('%064d',0))",
+            ] {
+                assert!(conn.execute(invalid, []).is_err(), "{invalid}");
+            }
+            conn.execute("DELETE FROM hosted_replicas", []).unwrap();
+            let documents: i64 = conn
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM hosted_documents) \
+                     + (SELECT COUNT(*) FROM hosted_retired_files)",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                documents, 0,
+                "documents and their files leave with their replica"
+            );
+        };
+        let ctx = MigrationContext::current(1);
+        let dir = tempdir();
+        let mut fresh = open_bare(&dir.join("fresh.db"));
+        fresh.pragma_update(None, "foreign_keys", true).unwrap();
+        run_migrations(&mut fresh, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        hosted(&fresh);
+
+        let mut upgraded = open_bare(&dir.join("upgraded.db"));
+        upgraded.pragma_update(None, "foreign_keys", true).unwrap();
+        let before = migration_index("v2-hosted-replica");
+        run_migrations(
+            &mut upgraded,
+            &BASELINE_MIGRATIONS[..before],
+            &ctx,
+            &NoFaults,
+        )
+        .unwrap();
+        upgraded
+            .execute_batch(
+                "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                 VALUES ('ordinary','origin:a','epoch','stream',1);",
+            )
+            .unwrap();
+        assert_eq!(
+            run_migrations(
+                &mut upgraded,
+                &BASELINE_MIGRATIONS[..=before],
+                &ctx,
+                &NoFaults
+            )
+            .unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let replicas: i64 = upgraded
+            .query_row("SELECT COUNT(*) FROM hosted_replicas", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(replicas, 0, "an existing replica stays ordinary");
+        hosted(&upgraded);
     }
 
     #[test]
