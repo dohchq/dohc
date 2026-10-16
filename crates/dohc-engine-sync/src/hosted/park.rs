@@ -204,41 +204,36 @@ pub fn departed_hosted_materialization(
     if !unmaterialized {
         return Ok(None);
     }
-    let rows = store.read_with(|conn| {
-        conn.prepare_cached(JOURNALED_SQL)
-            .map_err(SyncError::corrupt)?
-            .query_map(params![workspace_id, version_id, object_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            })
-            .map_err(SyncError::corrupt)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(SyncError::corrupt)
-    })?;
+    // One journaled row is held at a time, however long its history.
     let mut stored = crate::relay::ChangedPaths::new();
-    for (origin_id, origin_seq, op_kind, payload, recorded_at_ms) in rows {
-        let op = crate::ReplicationEnvelope {
-            settlement_admission: None,
-            admitted_author_snapshot: None,
-            workspace_id: workspace_id.to_owned(),
-            origin_id,
-            origin_seq,
-            relay_seq: None,
-            op_kind,
-            payload: serde_json::from_str(&payload).map_err(SyncError::corrupt)?,
-            recorded_at_ms,
-        };
-        for change in crate::router::redelivered_materialization_changes(store, &op)? {
-            if change.version_id == version_id {
-                crate::relay::insert_changed_path(&mut stored, change);
+    store.read_with(|conn| {
+        let mut statement = conn
+            .prepare_cached(JOURNALED_SQL)
+            .map_err(SyncError::corrupt)?;
+        let mut rows = statement
+            .query(params![workspace_id, version_id, object_id])
+            .map_err(SyncError::corrupt)?;
+        while let Some(row) = rows.next().map_err(SyncError::corrupt)? {
+            let payload: String = row.get(3).map_err(SyncError::corrupt)?;
+            let op = crate::ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
+                workspace_id: workspace_id.to_owned(),
+                origin_id: row.get(0).map_err(SyncError::corrupt)?,
+                origin_seq: row.get(1).map_err(SyncError::corrupt)?,
+                relay_seq: None,
+                op_kind: row.get(2).map_err(SyncError::corrupt)?,
+                payload: serde_json::from_str(&payload).map_err(SyncError::corrupt)?,
+                recorded_at_ms: row.get(4).map_err(SyncError::corrupt)?,
+            };
+            for change in crate::router::redelivered_materialization_changes(store, &op)? {
+                if change.version_id == version_id {
+                    crate::relay::insert_changed_path(&mut stored, change);
+                }
             }
         }
-    }
+        Ok::<_, SyncError>(())
+    })?;
     let page = store.read_with(|conn| {
         let mut occupancy = Occupancy::new(conn, workspace_id);
         let mut page = crate::relay::ChangedPaths::new();

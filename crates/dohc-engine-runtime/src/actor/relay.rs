@@ -3559,6 +3559,120 @@ mod hosted_refusal_tests {
                 .is_empty()
         );
     }
+
+    /// Sol's sixth park review: a finish that stops after writing a
+    /// document's file keeps only that document departed while the others
+    /// park, and after a restart the next pass parks it too.
+    #[test]
+    fn an_interrupted_finish_holds_back_only_its_document_until_a_restart() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        for (seq, object_id) in [(1, "doc-a"), (2, "doc-b")] {
+            dohc_engine_domain::VersionedTextStore::new(&mut store)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: object_id.to_owned(),
+                        path: format!("{object_id}.md"),
+                        text: format!("hosted {object_id}"),
+                        moment_id: format!("moment-{seq}"),
+                        metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1_000 + seq,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        // Both applied rows no committed pass wrote, then left the scope.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_documents \
+                     (workspace_id,object_id,path,state,scope_generation,unmaterialized_seq) \
+                     VALUES ('ws','doc-a','doc-a.md','ready',1,1),\
+                     ('ws','doc-b','doc-b.md','ready',1,2)",
+                    [],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let pass = |store: &mut EngineStore| {
+            park_departed_hosted(
+                store,
+                &mut WriterDocCache::new(),
+                &LeaseRegistry::default(),
+                "ws",
+                root.path(),
+                2_000,
+            )
+        };
+        let departed = |store: &EngineStore| {
+            dohc_engine_sync::departed_hosted_object_ids(store, "ws").unwrap()
+        };
+        let a = root.path().join("doc-a.md");
+
+        let faults = dohc_engine_testkit::ScriptedFaults::crash_at(
+            dohc_engine_storage::FaultPoint::MaterializeAfterRenameBeforeComplete,
+        );
+        let armed: Arc<dyn dohc_engine_storage::FaultInjector> = faults.clone();
+        super::super::versions::tests::RELAY_FAULTS.with(|relay| relay.replace(Some(armed)));
+        let interrupted = pass(&mut store);
+        super::super::versions::tests::RELAY_FAULTS.with(|relay| relay.take());
+        assert!(faults.fired());
+        assert!(
+            matches!(
+                interrupted,
+                Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs: 1 })
+            ),
+            "{interrupted:?}"
+        );
+        assert_eq!(departed(&store), ["doc-a"]);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "hosted doc-a");
+        assert!(!root.path().join("doc-b.md").exists());
+
+        drop(store);
+        let mut store = EngineStore::open(&path, 3_000).unwrap();
+        super::super::materialization::replay_pending_materializations(
+            &mut store,
+            root.path(),
+            super::super::materialization::MaterializationReplayScope {
+                holds: None,
+                workspace_id: "ws",
+                self_writes: None,
+                progress: None,
+                file_outcomes_settled: false,
+                released_hold_paths: None,
+            },
+            3_000,
+            &NoFaults,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(pass(&mut store).unwrap());
+        assert!(departed(&store).is_empty());
+        assert!(!a.exists());
+    }
 }
 
 #[cfg(all(test, debug_assertions))]

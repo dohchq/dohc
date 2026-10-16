@@ -401,6 +401,12 @@ fn run_relay_batch(
         }
         selected.insert(projection.spec.job_id);
     }
+    #[cfg(test)]
+    let faults = tests::RELAY_FAULTS.with(|faults| faults.borrow().clone());
+    #[cfg(test)]
+    let faults = faults.as_deref().unwrap_or(&dohc_engine_storage::NoFaults);
+    #[cfg(not(test))]
+    let faults = &dohc_engine_storage::NoFaults;
     let replay = replay_pending_materializations(
         store,
         root_dir,
@@ -413,7 +419,7 @@ fn run_relay_batch(
             released_hold_paths: None,
         },
         now_ms,
-        &dohc_engine_storage::NoFaults,
+        faults,
         Some(&selected),
         false,
     )?;
@@ -1180,24 +1186,18 @@ pub(super) fn materialize_relay_page_on_store(
             }
             .into());
         }
-        let head = relay_head(
-            store,
-            workspace_id,
-            &active,
-            root_dir,
-            &change,
-            &mut secret_key,
-        )?;
-        page.push((path_key(&change.path), change, head));
+        // Each head's body loads only when its change runs.
+        let has_head = relay_has_head(store, workspace_id, &active, &change)?;
+        page.push((path_key(&change.path), change, has_head));
     }
     let writes: Vec<Vec<String>> = page
         .iter()
-        .filter(|(_, _, head)| head.is_some())
+        .filter(|(_, _, has_head)| *has_head)
         .map(|(key, _, _)| key.clone())
         .collect();
     let mut alias_order = HashMap::new();
-    for (key, change, head) in &page {
-        let first = head.is_none() && relay_delete_precedes_write(key, &writes);
+    for (key, change, has_head) in &page {
+        let first = !has_head && relay_delete_precedes_write(key, &writes);
         let depth = key.len();
         let order = alias_order
             .entry(key.clone())
@@ -1212,12 +1212,12 @@ pub(super) fn materialize_relay_page_on_store(
         b.0.cmp(&a.0)
             .then_with(|| if a.0 { b.1.cmp(&a.1) } else { a.1.cmp(&b.1) })
             .then_with(|| a.2.cmp(&b.2))
-            .then_with(|| a_head.is_some().cmp(&b_head.is_some()))
+            .then_with(|| a_head.cmp(b_head))
     });
     let mut projections: Vec<SwitchProjection> = Vec::new();
     let mut batch_aliases = HashSet::new();
     let mut deleted: Vec<String> = Vec::new();
-    for (key, change, head) in page {
+    for (key, change, _) in page {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
@@ -1260,6 +1260,14 @@ pub(super) fn materialize_relay_page_on_store(
                 },
             )
         };
+        let head = relay_head(
+            store,
+            workspace_id,
+            &active,
+            root_dir,
+            &change,
+            &mut secret_key,
+        )?;
         // A path with no head needs no file there, and a folder is none.
         if head.is_none() && is_folder(root_dir, &change.path) {
             continue;
@@ -1327,9 +1335,21 @@ struct RelayHead {
     sha: String,
     inline: Option<Vec<u8>>,
     file_sha: String,
+    #[cfg(test)]
+    _held: tests::HeldHead,
 }
 
 impl RelayHead {
+    fn new(sha: String, inline: Option<Vec<u8>>, file_sha: String) -> Self {
+        Self {
+            sha,
+            inline,
+            file_sha,
+            #[cfg(test)]
+            _held: tests::HeldHead::new(),
+        }
+    }
+
     /// Whether the file `state` describes already holds this head.
     fn current(&self, state: &ProjectionTargetState, secret: bool) -> bool {
         if secret {
@@ -1366,38 +1386,160 @@ fn relay_head(
             };
             let file_sha = hex_sha256(plaintext.as_bytes());
             drop(plaintext);
-            Some(RelayHead {
-                sha: secret_ciphertext_sha(store, workspace_id, active, path)?,
-                inline: None,
+            Some(RelayHead::new(
+                secret_ciphertext_sha(store, workspace_id, active, path)?,
+                None,
                 file_sha,
-            })
+            ))
         }
         "binary" => VersionedTextStore::new(store)
             .read_binary(workspace_id, active, path)?
-            .map(|head| RelayHead {
-                file_sha: head.sha256.clone(),
-                sha: head.sha256,
-                inline: None,
-            }),
+            .map(|head| RelayHead::new(head.sha256.clone(), None, head.sha256)),
         "text" => VersionedTextStore::new(store)
             .read_text(workspace_id, active, path)?
-            .map(|head| RelayHead {
-                file_sha: head.blob_sha256.clone(),
-                sha: head.blob_sha256,
-                inline: Some(head.text.into_bytes()),
+            .map(|head| {
+                RelayHead::new(
+                    head.blob_sha256.clone(),
+                    Some(head.text.into_bytes()),
+                    head.blob_sha256,
+                )
             }),
-        _ => {
-            return Err(DomainError::StateCorrupt {
-                reason: "ordinary materialization kind is invalid",
-            }
-            .into());
-        }
+        _ => return Err(invalid_relay_kind()),
     })
 }
 
+/// Whether [`relay_head`] finds a head at `change`'s path in `active`, read
+/// from the head's row without its body.
+fn relay_has_head(
+    store: &EngineStore,
+    workspace_id: &str,
+    active: &str,
+    change: &dohc_engine_sync::MomentMaterializationChange,
+) -> Result<bool, RuntimeError> {
+    let sql = match change.content_kind {
+        "secret" => {
+            "SELECT EXISTS(SELECT 1 FROM secret_files \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3)"
+        }
+        "binary" | "text" => {
+            "SELECT EXISTS(SELECT 1 FROM path_aliases a JOIN snapshots s \
+             ON s.workspace_id = a.workspace_id AND s.version_id = a.version_id \
+             AND s.object_id = a.object_id \
+             WHERE a.workspace_id = ?1 AND a.version_id = ?2 AND a.path = ?3)"
+        }
+        _ => return Err(invalid_relay_kind()),
+    };
+    Ok(store.read_with(|connection| {
+        connection
+            .query_row(sql, params![workspace_id, active, change.path], |row| {
+                row.get(0)
+            })
+            .map_err(StorageError::corrupt_public)
+    })?)
+}
+
+fn invalid_relay_kind() -> RuntimeError {
+    DomainError::StateCorrupt {
+        reason: "ordinary materialization kind is invalid",
+    }
+    .into()
+}
+
 #[cfg(test)]
-mod tests {
-    use super::{is_inside, path_key, relay_delete_precedes_write};
+pub(super) mod tests {
+    use super::{
+        ensure_mutation_version_on_store, is_inside, materialize_relay_page_on_store, path_key,
+        relay_delete_precedes_write,
+    };
+    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    use dohc_engine_storage::{FaultInjector, NoFaults};
+    use dohc_engine_sync::MomentMaterializationChange;
+    use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    thread_local! {
+        /// How many relay heads are loaded on this thread, and the most at once.
+        static HEADS_HELD: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+        /// The faults relay pages on this thread write their files under.
+        pub(in crate::actor) static RELAY_FAULTS: RefCell<Option<Arc<dyn FaultInjector>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// A loaded relay head, counted in [`HEADS_HELD`] until it drops.
+    pub(super) struct HeldHead;
+
+    impl HeldHead {
+        pub(super) fn new() -> Self {
+            HEADS_HELD.with(|held| {
+                let (now, most) = held.get();
+                held.set((now + 1, most.max(now + 1)));
+            });
+            Self
+        }
+    }
+
+    impl Drop for HeldHead {
+        fn drop(&mut self) {
+            HEADS_HELD.with(|held| {
+                let (now, most) = held.get();
+                held.set((now - 1, most));
+            });
+        }
+    }
+
+    /// A page whose files already match holds one head's body at a time,
+    /// however many changes it has.
+    #[test]
+    fn a_page_loads_each_head_only_when_its_change_runs() {
+        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
+        let mut changes = Vec::new();
+        for index in 0..8 {
+            let path = format!("d{}/note-{index}.md", index % 2);
+            let text = format!("body {index}\n");
+            VersionedTextStore::new(&mut store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: format!("doc-{index}"),
+                        path: path.clone(),
+                        text: text.clone(),
+                        moment_id: format!("moment-{index}"),
+                        metadata_origin: "test".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2 + index,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            let file = scratch.join(&path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, &text).unwrap();
+            changes.push(MomentMaterializationChange {
+                version_id: "main".to_owned(),
+                path,
+                operation: "write",
+                content_kind: "text",
+            });
+        }
+        HEADS_HELD.with(|held| held.set((0, 0)));
+        materialize_relay_page_on_store(
+            &mut store,
+            "ws",
+            &scratch,
+            changes,
+            &(),
+            20,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(HEADS_HELD.with(Cell::get), (0, 1));
+    }
 
     #[test]
     fn a_delete_precedes_only_the_writes_it_lies_inside() {
