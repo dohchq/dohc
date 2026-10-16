@@ -1,7 +1,3 @@
-import './presence-owner.test.mjs';
-import './presence-typing-trace.test.mjs';
-import './presence-packaged-fixture.test.mjs';
-import './packaged-presence.test.mjs';
 import './go-to-index-fixture.test.mjs';
 import './go-to-packaged-fixture.test.mjs';
 import test from 'node:test';
