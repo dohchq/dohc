@@ -9,7 +9,7 @@ import { useRequestSequence } from "./useRequestSequence";
 export type LiveDocumentRow = {
   path: string;
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed";
+  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
 };
@@ -138,6 +138,7 @@ function mergeRows(
 function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
+  if (row.reason === "session-host-refused") return "Stopped by the server";
   switch (row.status) {
     case "ready":
       return "Live";

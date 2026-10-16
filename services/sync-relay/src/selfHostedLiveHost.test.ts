@@ -53,6 +53,8 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
   // departed document until its retirement stops being pending. A workspace
   // with no documents drains once nothing of it is pending.
   const pending = new Set<string>(options.pending), updates: ServiceHostedSet[] = [], attachedAfter: string[][] = [], events: string[] = [];
+  // Documents the running host cannot continue until their owner tries again.
+  const blocked = new Set<string>();
   const refusal = new Error("Workspace attach refused.");
   let failUpdate: Error | undefined, refusedPath: string | undefined, holdUpdate: {entered: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>} | undefined;
   let running: {holds(document: Document): boolean; diverge(workspaceId: string, detached: boolean): void; attached: Map<string, string>} | undefined;
@@ -96,6 +98,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     // Its replica had its chance to retire the document once it is attached and no longer hosts it.
     const pulledAfterDeparture = (document: Document) => attached.has(document.workspaceId) && !holds(document);
     return {invalidated: controller.signal, close, update, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, onEvent: () => () => undefined,
+      blocked: (document: Document) => holds(document) && blocked.has(document.objectId),
       diverged: () => [...diverged].map(([workspaceId, root]) => ({workspaceId, root}))} as never;
   });
   const onError = vi.fn();
@@ -141,6 +144,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     refuseAttach(path: string | undefined) {refusedPath = path;},
     holds: (objectId: string, workspaceId = scope.workspaceId) => running?.holds({workspaceId, objectId}) ?? false,
     diverge: (workspaceId = scope.workspaceId, detached = true) => running!.diverge(workspaceId, detached),
+    block(objectId: string) {blocked.add(objectId);}, unblock(objectId: string) {blocked.delete(objectId);},
     holdNextUpdate() {holdUpdate = {entered: deferred(), release: deferred()}; return holdUpdate;}};
 }
 
@@ -489,6 +493,25 @@ it("keeps a diverged store in place and its workspace detached across passes and
   expect((await readdir(f.data)).sort()).toEqual([storeName(scope.workspaceId), storeName(workspaceId, "epoch-2", "stream-2")].sort());
   expect(await readdir(store)).toEqual(["replica.sqlite"]);
   expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("unpublished work");
+});
+
+// Proves: the operator learns where a blocked document's store is kept, once
+// per block, and the document stays hosted. A new block after its owner's
+// retry is reported again.
+it("reports a blocked document's store to the operator once per block", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  const reported = expect.objectContaining({message: expect.stringContaining(`docs/a.md in workspace ${scope.workspaceId} stopped until its owner tries again. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`)});
+  f.block(binding.objectId);
+  await vi.waitFor(() => {f.host.reconcile(); expect(f.onError.mock.calls).toEqual([[reported]]);}, {timeout: 10_000});
+  expect(f.host.blocked(binding)).toBe(true);
+  await f.waitPasses();
+  expect(f.onError).toHaveBeenCalledTimes(1);
+  expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md"]);
+  f.unblock(binding.objectId);
+  await f.waitPasses();
+  expect(f.host.blocked(binding)).toBe(false);
+  f.block(binding.objectId);
+  await vi.waitFor(() => {f.host.reconcile(); expect(f.onError.mock.calls).toEqual([[reported], [reported]]);}, {timeout: 10_000});
 });
 
 // Proves: a divergence whose detach failed as its daemon exited keeps the

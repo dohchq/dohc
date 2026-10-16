@@ -219,6 +219,11 @@ describe("LiveDocumentsDialog", () => {
           reason: "workspace-changed",
           canResume: false,
         }),
+        row("docs/refused.md", {
+          status: "unavailable",
+          reason: "session-host-refused",
+          canResume: true,
+        }),
         row("docs/stopped.md", { status: "retired", canResume: true }),
         row("docs/stopped-gone.md", { status: "retired" }),
       ]),
@@ -236,6 +241,7 @@ describe("LiveDocumentsDialog", () => {
       "Paused",
       "File moved or removed",
       "Workspace changed",
+      "Stopped by the server",
       "Stopped",
       "Stopped",
     ]);
@@ -249,6 +255,10 @@ describe("LiveDocumentsDialog", () => {
     expect(actions("docs/paused-locked.md")).toEqual(["Stop live editing"]);
     expect(actions("docs/moved.md")).toEqual(["Stop live editing"]);
     expect(actions("docs/elsewhere.md")).toEqual(["Stop live editing"]);
+    expect(actions("docs/refused.md")).toEqual([
+      "Resume live editing",
+      "Stop live editing",
+    ]);
     expect(actions("docs/stopped.md")).toEqual(["Resume live editing"]);
     expect(actions("docs/stopped-gone.md")).toEqual([]);
   });

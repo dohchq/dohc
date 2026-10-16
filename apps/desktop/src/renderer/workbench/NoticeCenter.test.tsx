@@ -1429,6 +1429,39 @@ describe("notice center", () => {
     expect(onRetryLiveDelivery).not.toHaveBeenCalled();
   });
 
+  // A document the server stopped waits for its owner. The way to try again
+  // is its Resume in the live documents list, from the toast and the row.
+  it("sends a document the server stopped to the live documents list", async () => {
+    const onOpenLiveDocuments = vi.fn();
+    const onRetryLiveDelivery = vi.fn();
+    const user = userEvent.setup();
+    renderNotices({
+      syncStatus: liveDeliveryStatus("retrying", "session-host-refused"),
+      onOpenLiveDocuments,
+      onRetryLiveDelivery,
+    });
+    const body =
+      "The server stopped live editing for a document in this workspace. Your copy and its history are unchanged. People you shared it with can't edit it live for now. Open Live documents to try again.";
+
+    const toast = screen.getByTestId("owner-live-delivery-toast");
+    expect(toast.textContent).toContain(`Live editing stopped. ${body}`);
+    await user.click(screen.getByTestId("owner-live-delivery-toast-action"));
+    expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-owner-live-delivery");
+    expect(notice.textContent).toContain("Live editing stopped");
+    expect(notice.textContent).toContain(body);
+    expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
+    await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
+    const copied = await navigator.clipboard.readText();
+    expect(copied).toContain("Live editing: Live editing stopped");
+    expect(copied).toContain("Reason: session-host-refused");
+    await user.click(within(notice).getByRole("button", { name: "Live documents" }));
+    expect(onOpenLiveDocuments).toHaveBeenCalledTimes(2);
+    expect(onRetryLiveDelivery).not.toHaveBeenCalled();
+  });
+
   // There is no command that restarts the app for the user, so the notice
   // names the step instead of offering a control that cannot run.
   it("names the restart without offering a retry", async () => {

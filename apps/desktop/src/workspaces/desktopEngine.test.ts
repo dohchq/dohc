@@ -800,6 +800,47 @@ describe("server owner peer lifecycle", () => {
     } finally {await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
+  // Proves: a document the server refused names the workspace's reason over
+  // every other, including a frozen document that clears on its own, and
+  // stops naming it once the server no longer reports it.
+  it("reports a document the server refused ahead of every other reason", async () => {
+    const f = fixture(), credentials = new AbortController();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-server-owner-refused-");
+    f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+    const document = {binding: {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace", shareId: "share"};
+    const refused = {path: "refused.md", status: "unavailable", reason: "session-host-refused"};
+    const others = [{path: "changed.md", status: "unavailable", reason: "workspace-changed"}, {path: "moved.md", status: "unavailable", reason: "document-unavailable"}];
+    const ready = {path: "a.md", status: "ready", document};
+    let rows: unknown[] = others;
+    const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+      frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+        maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
+      attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
+    f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
+      connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
+        retire: async () => 0, refusals: async () => {}, documents: async () => ({ok: true, documents: rows})})};
+    ownerDeliveryMock.pass.mockResolvedValue("frozen");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("workspace-changed"));
+      // With no document to deliver.
+      rows = [...others, refused]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      // A frozen document outranks the server's other reasons, but not a refusal.
+      rows = [ready, ...others]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"));
+      rows = [ready, ...others, refused]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      // The owner's retry succeeded, so the server no longer reports it.
+      rows = [ready, ...others]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"));
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
   it.each(["credentials", "daemon", "workspace"])("discovers ready documents and holds the session until %s cancellation settles", async mode => {
     const f = fixture(), credentials = new AbortController(), entered = deferred(), settled = deferred();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));

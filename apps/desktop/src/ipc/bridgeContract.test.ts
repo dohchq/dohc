@@ -93,6 +93,7 @@ import {
   StartDmPayload,
   SyncDmsResult,
   SyncStatusResult,
+  OwnerLiveDocument,
   engineStoreRefusalCopy,
   engineStoreRefusalRecovery,
   ListWorkspaceVersionsResult,
@@ -3422,6 +3423,15 @@ describe("sync status IPC contract", () => {
       });
     }
     expect(SyncStatusResult.safeParse({ ...status, fileObservationFailure: "history-off" }).success).toBe(false);
+  });
+  it("carries a document the server refused to the status and the live documents list", () => {
+    const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveDelivery: "retrying" };
+    expect(SyncStatusResult.parse({ ...status, ownerLiveDeliveryReason: "session-host-refused" }).ownerLiveDeliveryReason).toBe("session-host-refused");
+    expect(SyncStatusResult.safeParse({ ...status, ownerLiveDeliveryReason: "session-host-blocked" }).success).toBe(false);
+    const row = { path: "docs/a.md", status: "unavailable", canResume: true };
+    expect(OwnerLiveDocument.parse({ ...row, reason: "session-host-refused" }).reason).toBe("session-host-refused");
+    expect(OwnerLiveDocument.safeParse({ ...row, reason: "session-host-blocked" }).success).toBe(false);
   });
   it("refuses a status that cannot say why history is off", () => {
     const status = {

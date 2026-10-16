@@ -965,11 +965,14 @@ it("captures a document held for an unadmitted live edit once, then not again un
   expect(pushes()).toBeGreaterThan(pushed);
   expect(captures()).toBe(before + 1);
   expect(o.host.isDocumentReady(o.document)).toBe(false);
+  expect(o.host.blocked(o.sibling)).toBe(true);
   await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
   const visited = visits();
   await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));
   expect(captures()).toBe(before + 1);
+  expect(o.host.blocked(o.other)).toBe(false);
   expect(o.host.unblock(o.sibling)).toBe(true);
+  expect(o.host.blocked(o.sibling)).toBe(false);
   await vi.waitFor(() => expect(captures()).toBe(before + 2));
   const retried = visits();
   await vi.waitFor(() => expect(visits()).toBeGreaterThan(retried + 2));
@@ -1001,8 +1004,10 @@ it("resumes a document whose retained activation diverged once, then not again u
   expect(count("sync.push")).toBeGreaterThan(pushed);
   expect(captures()).toBe(1);
   expect(restarted.isDocumentReady(o.document)).toBe(false);
+  expect(restarted.blocked(o.sibling)).toBe(true);
   expect(restarted.unblock(o.sibling)).toBe(true);
   await vi.waitFor(() => expect(captures()).toBe(2));
+  await vi.waitFor(() => expect(restarted.blocked(o.sibling)).toBe(true));
   await o.nextPull(); await o.nextPull();
   expect(captures()).toBe(2);
   expect(restarted.retains(o.sibling)).toBe(true);

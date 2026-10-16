@@ -225,6 +225,14 @@ function liveDeliveryCopy(
       recovery: "live-documents",
     };
   }
+  // Resume in Live documents is the owner's Try again for this document.
+  if (reason === "session-host-refused") {
+    return {
+      title: "Live editing stopped",
+      body: "The server stopped live editing for a document in this workspace. Your copy and its history are unchanged. People you shared it with can't edit it live for now. Open Live documents to try again.",
+      recovery: "live-documents",
+    };
+  }
   if (reason === "restart-required") {
     return {
       title: "Live editing paused",

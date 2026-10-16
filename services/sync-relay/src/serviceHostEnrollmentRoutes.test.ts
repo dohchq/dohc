@@ -19,7 +19,12 @@ async function fixture() {
   f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES (?,'owner',0,'moment.append','{}',1,1)").run(scope.workspaceId);
   f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(scope.workspaceId, binding.currentPath, "b".repeat(64));
   const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
-  const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false};
+  // The documents the session host blocked until their owner tries again.
+  const blocked = new Set<string>();
+  const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false,
+    blocked: vi.fn((document: {objectId: string}) => blocked.has(document.objectId)),
+    unblock: vi.fn((document: {objectId: string}) => blocked.delete(document.objectId)),
+    block(objectId: string) {blocked.add(objectId);}};
   let actor = {workspaceId: scope.workspaceId, userId: "owner-1"};
   const resolveActor = vi.fn(async () => actor);
   const handle = createServiceHostEnrollmentRoutes({storage: f.storage, history, host, resolveActor});
@@ -104,6 +109,33 @@ it("reports ready only with completed retained activation and the current native
   expect(await state()).toEqual({path: binding.currentPath, status: "ready", document: {binding, relayDatabaseNamespace: namespace, shareId: scope.shareId}});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
   expect((await state()).status).toBe("paused");
+});
+
+// Proves: a document the session host blocked reads as refused until its
+// owner's Resume, which gives it exactly one more attempt. Enrolling its share
+// again is not a Resume, and a reading never clears the block.
+it("reports a document the session host refused until the owner resumes it", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const documents = async () => (await (await f.handle(f.request())).json()).documents;
+  const refused = {path: binding.currentPath, status: "unavailable", reason: "session-host-refused"};
+  f.host.ready.mockReturnValue(true);
+  f.host.block(enrolled.objectId);
+  expect(await documents()).toEqual([refused]);
+  expect(await documents()).toEqual([refused]);
+  expect((await f.handle(f.request("POST", {shareId: scope.shareId}))).status).toBe(202);
+  expect(await documents()).toEqual([refused]);
+  expect(f.host.unblock).not.toHaveBeenCalled();
+  const resumed = await f.handle(f.request("POST", {path: binding.currentPath}));
+  expect(resumed.status).toBe(202);
+  expect(await resumed.json()).toEqual({ok: true, path: binding.currentPath, status: "preparing"});
+  expect(f.host.unblock).toHaveBeenCalledTimes(1);
+  expect(f.host.unblock).toHaveBeenCalledWith(expect.objectContaining({workspaceId: scope.workspaceId, objectId: enrolled.objectId}));
+  expect(f.host.unblock.mock.invocationCallOrder[0]).toBeLessThan(f.host.reconcile.mock.invocationCallOrder.at(-1)!);
+  expect(await documents()).toEqual([{path: binding.currentPath, status: "preparing"}]);
+  // Its one attempt failed, so the host blocked it again.
+  f.host.block(enrolled.objectId);
+  expect(await documents()).toEqual([refused]);
+  expect(f.host.unblock).toHaveBeenCalledTimes(1);
 });
 
 it("lists automatic enrollment refusals without enrolling documents or exposing other workspaces", async () => {

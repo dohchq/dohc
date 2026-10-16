@@ -76,7 +76,7 @@ export function serviceHostEnrollmentRefusals(storage: SyncRelayStorage, workspa
 
 export function createServiceHostEnrollmentRoutes(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; resolveActor: ResolveActor;
-  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable">;
+  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "unblock">;
 }) {
   const {storage, history, host} = options;
   const activation = storage.createServiceActivationStore(history);
@@ -86,6 +86,8 @@ export function createServiceHostEnrollmentRoutes(options: {
     if (!row.enabled || row.ownerStop) return {...base, status: "paused"};
     if (!storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) || storage.verifyWorkspaceIdentity(row) !== "matched") return {...base, status: "unavailable", reason: "workspace-changed"};
     if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) !== row.objectId) return {...base, status: "unavailable", reason: "document-unavailable"};
+    // Only the owner's Resume lets the host try a document it could not continue.
+    if (host.blocked(row)) return {...base, status: "unavailable", reason: "session-host-refused"};
     const saved = activation.read(row.workspaceId, row.path, 4 * 1024 * 1024);
     if (!saved?.completed) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
     const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.source.objectId, lineageClaimId: saved.source.lineageClaimId};
@@ -139,6 +141,8 @@ export function createServiceHostEnrollmentRoutes(options: {
       const shareId = parseShareId(input.shareId ?? retained!.shareId);
       const paths = input.path === undefined ? serviceHostSharePaths(storage, {workspaceId, shareId, ownerUserId: actor.userId, missingOnly: input.retry === true}) : [input.path as string];
       const rows = storage.enrollServiceHostDocuments(paths.map(path => ({workspaceId, path, shareId, ownerUserId: actor.userId, nowMs: Date.now(), guard})));
+      // A Resume gives a blocked document one more attempt in the store it has.
+      if (input.path !== undefined) host.unblock(rows[0]!);
       host.reconcile();
       const documents = rows.map(state);
       return response({ok: true, ...(input.path === undefined ? {documents} : documents[0])}, documents.every(row => row.status === "ready") ? 200 : 202);

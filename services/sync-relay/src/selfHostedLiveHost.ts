@@ -93,6 +93,8 @@ export async function startSelfHostedLiveHost(options: {
   const diverged = new Set<string>();
   // The documents this reconciliation released, or tried to.
   const left = new Set<string>();
+  // Blocked documents already reported to the operator.
+  const refused = new Set<string>();
   function schedule() {
     if (!signal.aborted) Queue.offerUnsafe(changes, undefined);
   }
@@ -174,6 +176,14 @@ export async function startSelfHostedLiveHost(options: {
         await current?.update(desired);
         signature = next;
       }
+      // The owner learns only that live editing stopped. Where its work is kept is for the operator.
+      for (const row of [...targets, ...departing]) {
+        const key = documentKey(row);
+        if (current?.blocked(row) !== true) {refused.delete(key); continue;}
+        if (refused.has(key)) continue;
+        refused.add(key);
+        options.onError?.(new Error(`Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. Its store is kept at ${join(root, storeName(row))}.`));
+      }
       // A workspace with no documents detaches once its replica drained, then
       // releases its enrollments. Its store stays, so a document shared again
       // resumes there. A failure between steps leaves them undrained, so the next start drains again.
@@ -229,6 +239,10 @@ export async function startSelfHostedLiveHost(options: {
   return {
     current: () => current,
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
+    /** Whether the running daemon cannot continue the document until its owner tries again. */
+    blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document) ?? false;},
+    /** Lets a blocked document try once more. Returns whether it was blocked. */
+    unblock(document: {workspaceId: string; objectId: string}) {return current?.unblock(document) ?? false;},
     get unavailable() {return signal.aborted || !initialReconciliationComplete || lastError !== undefined ||
       (selectedDocuments && (!current || current.invalidated.aborted));},
     reconcile: schedule,
