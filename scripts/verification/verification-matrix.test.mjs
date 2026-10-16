@@ -281,9 +281,9 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
             }
             return {stdout:''};
           }
-          if(command==='pnpm' && args[2]==='exec' && args.includes('-t')) {
+          if(command==='pnpm' && args[1]==='@dohc/fixture' && args[2]==='exec') {
             assert.equal(process.env.FIXTURE_FAULT,'passed-alone','Unexpected isolated retry');
-            assert.deepEqual(args.slice(0,12),['--filter','@dohc/fixture','exec','vitest','run','src/index.test.ts','-t','^keeps its value$','--maxWorkers=1','--no-file-parallelism','--retry=0','--reporter=default']);
+            assert.deepEqual(args.slice(0,10),['--filter','@dohc/fixture','exec','vitest','run','src/index.test.ts','--maxWorkers=1','--no-file-parallelism','--retry=0','--reporter=default']);
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
             appendFileSync(options.env.DOHC_TEST_RECORD,JSON.stringify({run:'passed',outside:0,passed:1})+'\\n');
             return {stdout:''};
@@ -502,7 +502,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         if (fault === "passed-alone") {
           assert.deepEqual(report.flaky, [{ step: "@dohc/fixture", test: "src/index.test.ts › keeps its value", passedAlone: true }]);
           assert.deepEqual(report.failed, []);
-          assert.match(result.stdout, /\[verification\] 1 flaky test\(s\) passed only on retry\. Each one is a defect to fix:\n {2}@dohc\/fixture: src\/index\.test\.ts › keeps its value \(failed both tries under load, passed alone\)\n/u);
+          assert.match(result.stdout, /\[verification\] 1 flaky test\(s\) passed only on retry\. Each one is a defect to fix:\n {2}@dohc\/fixture: src\/index\.test\.ts › keeps its value \(failed both tries, passed alone\)\n/u);
         }
         assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);
         assert.ok(report.steps.every(step => step.startedAt && step.finishedAt && step.seconds >= 0));

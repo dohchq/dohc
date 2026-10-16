@@ -213,14 +213,16 @@ export function monitorState(root, { now = Date.now(), days = 7, finished = new 
   for (const event of events) {
     for (const row of event.flaky ?? []) {
       const key = `${row.step}\n${row.test}`;
-      const item = tests.get(key) ?? { step: row.step, test: row.test, flaky: 0, slow: [], last: null };
-      item.flaky += 1;
+      const item = tests.get(key) ?? { step: row.step, test: row.test, flaky: 0, passedAlone: 0, slow: [], last: null };
+      // A test that passed only alone failed both tries, so before the isolated retry it would have failed the gate.
+      if (row.passedAlone) item.passedAlone += 1;
+      else item.flaky += 1;
       item.last = event.at;
       tests.set(key, item);
     }
     for (const row of event.slowest ?? []) {
       const key = `${row.step}\n${row.test}`;
-      const item = tests.get(key) ?? { step: row.step, test: row.test, flaky: 0, slow: [], last: null };
+      const item = tests.get(key) ?? { step: row.step, test: row.test, flaky: 0, passedAlone: 0, slow: [], last: null };
       item.slow.push(row.seconds);
       tests.set(key, item);
     }
@@ -260,7 +262,7 @@ export function monitorState(root, { now = Date.now(), days = 7, finished = new 
     now, days,
     service: record ? { alive, commit: record.commit?.slice(0, 12) ?? null, pid: record.pid, startedAt: record.startedAt, heartbeatAt: record.heartbeatAt, lanes: record.lanes ?? 1, health: record.health ?? null } : null,
     typicalMs, runs, queued, lanes, threads,
-    flaky: all.filter(item => item.flaky).sort((a, b) => b.flaky - a.flaky).slice(0, 15).map(({ slow: _slow, ...item }) => item),
+    flaky: all.filter(item => item.flaky || item.passedAlone).sort((a, b) => b.passedAlone - a.passedAlone || b.flaky - a.flaky).slice(0, 15).map(({ slow: _slow, ...item }) => item),
     slowest: all.filter(item => item.slow.length).map(item => ({ step: item.step, test: item.test, runs: item.slow.length, medianSeconds: median(item.slow), totalSeconds: Math.round(item.slow.reduce((sum, seconds) => sum + seconds, 0)) }))
       .sort((a, b) => b.totalSeconds - a.totalSeconds).slice(0, 15),
     // Each step's median seconds in the week's passing runs, for typical step times.

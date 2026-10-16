@@ -10,6 +10,7 @@ import { affectedPackages, packageReferences } from "./selection.mjs";
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 const longestFirst = ["@dohc/ydoc-projection", "@dohc/desktop", "@dohc/sync-relay", "@dohc/app-backend-runtime"];
 const desktopRoot = join(repoRoot, "apps/desktop");
+const fileOf = test => test.slice(0, test.indexOf(" › "));
 
 export function testPlan(packages) {
   return packages.filter(({ manifest }) => manifest.scripts?.test).map(({ name, manifest }) => {
@@ -101,30 +102,48 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
         : recordedRun(record)?.outside === 0 ? readTestRecord(record).filter(test => test.failed).map(test => test.test) : [];
       if (!tests.length || !tests.every(test => rerunCommand({ step: name, test }))) return [];
       if (!rerun) return tests;
+      // A test that failed only the retry did not fail every try.
+      const first = nodeTestFailures(readLog(row.log));
+      if (!tests.every(test => first.includes(test))) return [];
       // A test that failed in an earlier command of the script stopped the commands after it, which never ran.
-      const script = JSON.parse(readLog(join(rerun, "package.json")) || "{}").scripts?.[args.at(-1)] ?? "";
+      let script;
+      try { script = JSON.parse(readLog(join(rerun, "package.json"))).scripts?.[args.at(-1)]; } catch { return []; }
+      if (typeof script !== "string") return [];
       const last = script.split("&&").at(-1).trim().split(/\s+/u);
-      return tests.every(test => last.includes(test.slice(0, test.indexOf(" › ")))) ? tests : [];
+      return tests.every(test => last.includes(fileOf(test))) ? tests : [];
     }
-    // Load from other steps can fail a test on both tries. Alone, with one worker, it shows whether the test itself fails.
-    async function passAlone(test, base) {
-      const [program, ...words] = [...rerunCommand({ step: name, test }).matchAll(/"([^"]*)"|(\S+)/gu)].map(match => match[1] ?? match[2]);
-      if (rerun) words.splice(words.indexOf("--test") + 1, 0, "--test-concurrency=1");
-      else words.push("--maxWorkers=1", "--no-file-parallelism", "--retry=0", "--reporter=default", `--reporter=${testRecordReporter}`);
+    // The whole test file, with one worker. A test can fail only after another test in its file, or fail its file in a way the report does not name.
+    function wholeFile(testFile) {
+      if (!rerun) return pnpm(["--filter", name, "exec", "vitest", "run", testFile, "--maxWorkers=1", "--no-file-parallelism", "--retry=0", "--reporter=default", `--reporter=${testRecordReporter}`]);
+      const nodeTest = [...(testFile.endsWith(".ts") ? ["--experimental-transform-types"] : []), "--test", "--test-concurrency=1", testFile];
+      return name === "repository" ? [process.execPath, nodeTest] : pnpm(["--filter", "@dohc/desktop", "exec", "node", ...nodeTest]);
+    }
+    // Load from other steps can fail a test on both tries. Its file alone shows whether the file fails by itself.
+    async function passAlone(testFile, tests, base) {
       const log = `${base}.log`, aloneRecord = `${base}.tests.jsonl`;
-      (row.aloneLogs ??= []).push(log);
-      await run(...(program === "pnpm" ? pnpm(words) : [process.execPath, words]), { env: { ...env, DOHC_TEST_RECORD: aloneRecord }, log, signal: stopper.signal });
-      // Both runners pass when a pattern matches no test, so the report must show the test passed.
-      if (rerun ? !nodeTestPassed(readLog(log), test) : !(recordedRun(aloneRecord)?.passed > 0)) throw new Error(`${test} did not run alone.`);
+      const alone = { file: testFile, outcome: "interrupted" };
+      (row.alone ??= []).push(alone);
+      await checkpoint();
+      alone.log = log;
+      try { await run(...wholeFile(testFile), { env: { ...env, DOHC_TEST_RECORD: aloneRecord }, log, signal: stopper.signal }); }
+      catch (error) {
+        if (!error.interrupted) alone.outcome = "failed";
+        throw error;
+      }
+      // Both runners pass a file whose tests did not run, so the report must show each failed test passed.
+      const report = readLog(log), ended = recordedRun(aloneRecord);
+      const passed = rerun ? !nodeTestFailures(report).length && tests.every(test => nodeTestPassed(report, test)) : ended?.outside === 0 && ended.passed > 0;
+      alone.outcome = passed ? "passed" : "no test ran";
+      if (!passed) throw new Error(`${testFile} did not pass its failed tests alone.`);
     }
     return timed(row, async () => {
       try { return await attempts(); }
       catch (error) {
-        // Before a failure stops the run, each test that failed every try runs once more alone. An interrupted command did not fail by itself.
+        // Before a failure stops the run, each file with a test that failed every try runs once more alone. An interrupted command did not fail by itself.
         const tests = error.commandExitFailure ? failedEveryTry() : [];
         if (!tests.length) throw error;
-        for (const [index, test] of tests.entries()) {
-          try { await checkpoint(); await passAlone(test, `${file}.alone-${index + 1}`); }
+        for (const [index, [testFile, fileTests]] of [...Map.groupBy(tests, fileOf)].entries()) {
+          try { await passAlone(testFile, fileTests, `${file}.alone-${index + 1}`); }
           catch { throw error; }
         }
         row.passedAlone = tests;

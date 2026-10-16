@@ -193,13 +193,13 @@ A flaky test is a defect. Fix the condition it races, or report it to whoever ow
 A repository or desktop script step reruns as a whole, after its first attempt's ignored outputs. A test that fails on a clean tree but passes beside those outputs is recorded as flaky like any other, so treat every entry as a real failure until you have read it.
 
 Both tries run under the same load, so a package test or a repository or desktop script test that fails both tries runs once more, alone, with one worker.
-The gate runs it at once, with the step's environment and the command it prints under `rerun`, while other steps continue.
-If every failed test of the step passes alone, the step passes. `result.json` and `js-tests/result.json` list each of those tests under `flaky` with `passedAlone: true`, and the verifier marks it "failed both tries under load, passed alone".
-A pass alone means the test fails when the host is busy: a timing bound, a race, or a resource it shares with other tests. It is a defect like any other flaky test.
-If a test fails alone too, the step fails, and the gate fails the change.
+The gate runs the test's whole file at once, with the step's environment, while other steps continue. A test that fails only after another test in its file still fails alone, and so does a file that fails in a way its report does not name.
+If every file with a failed test passes alone, the step passes. `result.json` and `js-tests/result.json` list each failed test under `flaky` with `passedAlone: true`, and the verifier marks it "failed both tries, passed alone".
+A test that passes only alone usually depends on timing, a race, or something other tests share. It is a defect like any other flaky test.
+If a file fails alone too, the step fails, and the gate fails the change. `js-tests/result.json` records each file run alone under its step's `alone`, with its log and its outcome: `passed`, `failed`, `no test ran`, or `interrupted`.
 A step that failed outside its tests gets no isolated retry. That includes a failed check or build and a test with no rerun command. In package tests it also includes a file that failed to load, a failed hook, and an unhandled error.
-In script tests, node:test reports a failed hook as a failed test, and a file that failed to load or threw an unhandled error as a failed file. The gate runs that test or that whole file alone.
-A script test gets no isolated retry when it failed before the script's last command, because the commands after it never ran.
+In script tests, node:test reports a failed hook as a failed test, and a file that failed to load or threw an unhandled error as a failed file, so their files run alone.
+A script test gets no isolated retry when it failed before the script's last command, because the commands after it never ran. It gets none when it failed only when the step ran again, because it did not fail both tries.
 An interrupted step gets no isolated retry either. The Rust tests and the Playwright proofs have none yet.
 
 ### Failures other branches share
