@@ -46,6 +46,8 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "moments.list"
                 | "moments.get"
                 | "history.page"
+                | "history.operations"
+                | "history.undo"
         )
 }
 
@@ -556,7 +558,10 @@ impl EngineService {
                 self.capture_set_author(&ctx, request.workspace, request.params)
                     .await?
             }
-            "capture.hold" => self.capture_hold(&ctx, request.workspace).await?,
+            "capture.hold" => {
+                self.capture_hold(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "capture.renew" => {
                 self.capture_renew(request.workspace, request.params)
                     .await?
@@ -601,6 +606,11 @@ impl EngineService {
                 self.moments_list(&ctx, request.workspace, request.params)
                     .await?
             }
+            "history.operations" => {
+                self.history_operation(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "history.undo" => self.history_undo(&ctx, request).await?,
             "history.page" => {
                 self.history_page(&ctx, request.workspace, request.params)
                     .await?

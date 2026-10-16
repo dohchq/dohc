@@ -60,7 +60,9 @@ import { ChatAvatar } from "../workbench/ChatAvatar";
 import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
 import { ThreadMessages } from "../workbench/ChatPosts";
 import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
+import { ComposerModeBar } from "../workbench/ChatsControls";
 import { ComposerCatalogOptions, MentionComposer } from "../workbench/MentionComposer";
+import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddressed";
 import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
@@ -623,6 +625,50 @@ function ChatThreadSpecimen() {
 }
 
 const COMPOSER_DRAFT = "Can we cut the last paragraph?";
+
+// The agent picked from the roster, in each state its offer says. The
+// specimen agent takes the default agent colour, not a chosen one.
+const AGENT_OFFER_STATES: readonly AgentOfferState[] = ["runs", "working", "paused", "runner-off", "no-command", "unknown"];
+const AGENT_DRAFT = "@agent can you check funnel.csv against last week?";
+function agentOffer(state: AgentOfferState): AgentAddressedOffer {
+  return {
+    kind: "agent-addressed",
+    agent: { id: "agent:default", kind: "agent", handle: "agent", label: "Nova" },
+    presentation: { group: "states-agent", hue: null, self: false },
+    state,
+    working: state === "working",
+    reach: "C:\\Users\\ada\\trip-planner",
+  };
+}
+
+function AgentOfferComposer(props: {
+  state: AgentOfferState;
+  surface: "post" | "stream";
+  id: string;
+  width?: string;
+  focus?: boolean;
+  replying?: boolean;
+}) {
+  const composer = (
+    <MentionComposer testIdPrefix={props.id} composerId={props.id} value={AGENT_DRAFT} sending={false}
+      surface={props.surface} authorName="Ada" authorPresentation={SAMPLE_ADA}
+      placeholder={props.surface === "post" ? "What's happening in #general?" : "Message #general"}
+      sendLabel={props.surface === "post" ? "Start post" : "Send message"} candidates={[]} onChange={noop} onSend={noop}
+      agentOffer={agentOffer(props.state)} onSetUpAgent={noop}
+      above={props.replying ? (
+        <ComposerModeBar testId={`${props.id}-replying-mode`} cancelTestId={`${props.id}-replying-cancel`}
+          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+      ) : undefined} />
+  );
+  const focused = props.focus ? (
+    <div data-force-state="focus-visible" data-force-target='[data-testid="composer-agent-offer-setup"]'>{composer}</div>
+  ) : composer;
+  // A stream composer floats its offer above its top edge, into the room the
+  // end of its conversation keeps, so it gets that room here.
+  return props.surface === "post"
+    ? <div id={`${props.id}-specimen`} className={props.width ?? "w-[560px]"}>{focused}</div>
+    : <div id={`${props.id}-specimen`} className={`${props.width ?? "w-[400px]"} rounded-lg border border-line bg-panel pt-9`}>{focused}</div>;
+}
 
 // The About rail at the drawing's 290px, on the chrome.
 function AboutPanelSpecimen(props: { children: ReactNode }) {
@@ -2034,7 +2080,8 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       {/* Offers sit in space already there: a folder row's glyph, the tab
-          row's end, and a row floating under a pasted line. */}
+          row's end, a row floating under a pasted line, the space before a
+          post's Send, and above a message composer's Send. */}
       <Section part="offers" title="Offers" menusAtRest>
         <Specimen label="an app folder in Files: at rest, selected, focused">
           <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
@@ -2054,6 +2101,30 @@ function Pane(props: { theme: "light" | "dark" }) {
               <UrlOfferSpecimen key={focused} force={focused === "link" ? "url-paste-link" : "url-paste-plain"} />
             ))}
             <UrlOfferSpecimen chosen />
+          </div>
+        </Specimen>
+        <Specimen label="the agent picked in a new post: runs, working, paused, dispatch off, no runner, unknown">
+          <div className="flex flex-col gap-3">
+            {AGENT_OFFER_STATES.map((state) => (
+              <AgentOfferComposer key={state} state={state} surface="post" id={`states-agent-post-${state}-${theme}`} />
+            ))}
+          </div>
+        </Specimen>
+        <Specimen label="the agent picked in a message or comment: the same states, above Send">
+          <div className="flex flex-col gap-3">
+            {AGENT_OFFER_STATES.map((state) => (
+              <AgentOfferComposer key={state} state={state} surface="stream" id={`states-agent-stream-${state}-${theme}`} />
+            ))}
+          </div>
+        </Specimen>
+        <Specimen label="Set up focused; above a reply bar; then a narrow pane">
+          <div className="flex flex-col gap-3">
+            <AgentOfferComposer state="no-command" surface="post" id={`states-agent-post-focus-${theme}`} focus />
+            <AgentOfferComposer state="runner-off" surface="stream" id={`states-agent-stream-focus-${theme}`} focus />
+            <AgentOfferComposer state="runs" surface="stream" id={`states-agent-stream-replying-${theme}`} replying />
+            <AgentOfferComposer state="runs" surface="post" id={`states-agent-post-narrow-${theme}`} width="w-[300px]" />
+            <AgentOfferComposer state="paused" surface="stream" id={`states-agent-stream-narrow-${theme}`} width="w-[300px]" />
+            <AgentOfferComposer state="no-command" surface="stream" id={`states-agent-stream-narrow-setup-${theme}`} width="w-[300px]" />
           </div>
         </Specimen>
       </Section>

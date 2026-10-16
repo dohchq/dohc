@@ -107,6 +107,7 @@ import {
   WORKBENCH_MENU_COMMANDS,
 } from "./channels";
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
+import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
 import {
@@ -1691,7 +1692,7 @@ export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
 export const HistoryMomentPosition = z.object({ recordedAtMs: z.number().int(), momentOrder: z.number().int().nonnegative() }).strict();
 export const HistoryCursor = z.object({
   format: z.literal(1), engineUuid: z.string().min(1), workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID,
-  objectId: OPAQUE_ID.nullable(), textFence: z.number().int().min(-1), protectedFence: z.number().int().min(-1),
+  operationId: OPAQUE_ID.nullable(), objectId: OPAQUE_ID.nullable(), textFence: z.number().int().min(-1), protectedFence: z.number().int().min(-1),
   markerFence: z.number().int().min(-1), text: HistoryMomentPosition.nullable(), protected: HistoryMomentPosition.nullable(),
   marker: z.object({ createdAtMs: z.number().int(), versionId: OPAQUE_ID }).strict().nullable(),
 }).strict();
@@ -6832,7 +6833,8 @@ export const chatOperations = {
 } as const satisfies OperationTable;
 
 export interface DohcDesktopBridge
-  extends OperationBridge<typeof chatOperations>,
+  extends OperationBridge<typeof workspaceFileOperations>,
+    OperationBridge<typeof chatOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof accessOperations>,
@@ -6895,30 +6897,7 @@ export interface DohcDesktopBridge
   // Opens (or focuses) the workspace manager in its own window.
   openWorkspaceManager(): Promise<void>;
   closeThisWindow(): Promise<void>;
-  listWorkspaceFiles(
-    payload: ListWorkspaceFilesPayload,
-  ): Promise<ListWorkspaceFilesResult>;
   createCollectionRecord(payload: CreateCollectionRecordPayload): Promise<{ path: string; recordId: string; kept?: Record<string, unknown>; delivery?: "pending" | "accepted" | "refused"; reason?: string } | import("@dohc/cli/creation").CreationPartial>;
-  createWorkspaceFile(
-    payload: CreateWorkspaceFilePayload,
-  ): Promise<CreateWorkspaceFileResult>;
-  createWorkspaceFolder(
-    payload: CreateWorkspaceFolderPayload,
-  ): Promise<CreateWorkspaceFileResult>;
-  moveWorkspacePath(
-    payload: MoveWorkspacePathPayload,
-  ): Promise<CreateWorkspaceFileResult>;
-  deleteWorkspacePath(
-    payload: DeleteWorkspacePathPayload,
-  ): Promise<DeleteWorkspacePathResult>;
-  exportWorkspaceZip(
-    payload: ExportWorkspaceZipPayload,
-  ): Promise<ExportWorkspaceZipResult>;
-  // Document export ("Copy as Markdown" / "Export as HTML" / "Export as
-  // PDF" document menu). See the payload's comment for the kind split.
-  exportDocumentFile(
-    payload: ExportDocumentFilePayload,
-  ): Promise<ExportDocumentFileResult>;
   // Native explorer context menu; resolves with the chosen closed-tuple
   // command (validated in the preload against ExplorerMenuCommand) or null.
   showExplorerMenu(
@@ -6932,20 +6911,6 @@ export interface DohcDesktopBridge
   // File.path since Electron 32). The paths feed importWorkspaceFiles'
   // droppedPaths — see the trust-delta note on that payload.
   getDroppedFilePaths(files: File[]): string[];
-  importWorkspaceFiles(
-    payload: ImportWorkspaceFilesPayload,
-  ): Promise<ImportWorkspaceFilesResult>;
-  readWorkspaceText(
-    payload: ReadWorkspaceTextPayload,
-  ): Promise<ReadWorkspaceTextResult>;
-  writeWorkspaceText(
-    payload: WriteWorkspaceTextPayload,
-  ): Promise<WriteWorkspaceTextResult>;
-  writeWorkspaceAsset(payload: WriteWorkspaceAssetPayload): Promise<void>;
-  // `/image`: a MAIN-process open dialog rooted at the workspace directory,
-  // returning the chosen files' bytes (see PickImageFilesPayload).
-  pickImageFiles(payload: PickImageFilesPayload): Promise<PickImageFilesResult>;
-  openFileExternally(payload: OpenFileExternallyPayload): Promise<void>;
   readWorkspaceGraph(
     payload: ReadWorkspaceGraphPayload,
   ): Promise<WorkspaceGraphResult>;

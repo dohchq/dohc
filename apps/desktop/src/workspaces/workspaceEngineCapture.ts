@@ -24,6 +24,7 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
   VersionedTextStoreError,
+  refuseCallerOperationId,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
   type MomentWriteAuthor,
@@ -729,7 +730,7 @@ export interface WorkspaceEngineCapture {
   // document writes there are cancelled and the rest are restored.
   changePathsAs<Result>(
     paths: readonly string[],
-    authored: { operation: "move" | "delete"; author: MomentWriteAuthor; correlationId: string },
+    authored: { operation: "move" | "delete"; author: MomentWriteAuthor; operationId: string },
     work: (engine: AuthoredPathChanges) => Promise<Result>,
     removed: (result: Result) => readonly string[],
   ): Promise<Result>;
@@ -5656,6 +5657,8 @@ export function createWorkspaceEngineCapture(
       // The author as submitted, before the write waits for its turn.
       const author = structuredClone(submittedAuthor);
       return enqueueResult("write authored file", async () => {
+        refuseCallerOperationId(writeOptions.correlationId);
+        refuseCallerOperationId(writeOptions.requestId);
         if (writeOptions.signal?.aborted) {
           throw new Error("The write was cancelled.");
         }
@@ -5836,11 +5839,11 @@ export function createWorkspaceEngineCapture(
           // Changes capture has seen land as their own rows first. Changes it
           // has not seen yet are recorded by recordDisk under the hold.
           await engine.flushCapture?.();
-          const { holdId, leaseMs } = await holdCapture.call(engine);
+          const { holdId, leaseMs } = await holdCapture.call(engine, { operationId: authored.operationId });
           const lease = keepCaptureHold(holdId => renewCapture.call(engine, holdId), holdId, leaseMs);
           try {
             const authoredMetadata = (summary: string): ActorNeutralWriteMetadata =>
-              ({ origin: localFileOrApi(authored.author), summary, correlationId: authored.correlationId });
+              ({ origin: localFileOrApi(authored.author), summary });
             const policy = await readPolicyForTask();
             result = { value: await work({
               policy,
@@ -6487,6 +6490,7 @@ export function createWorkspaceEngineCapture(
       // The person as submitted, before the restore waits for its turn.
       const author = structuredClone(person);
       return enqueueResult("restore file", async () => {
+        refuseCallerOperationId(restoreOptions.requestId);
         const policy = await readPolicyForTask();
         if (policy.errors.length) {
           throw new RestorePolicyRefusalError({ reason: "policy-unreadable", unreadable: policy.unreadable, detail: policy.errors.join("; ") });
@@ -6790,6 +6794,7 @@ export function createWorkspaceEngineCapture(
 
     undoAcceptedAppResponse(input, author) {
       return enqueueResult("remove app response", async () => {
+        refuseCallerOperationId(input.requestId);
         const engine=await engineStore(), versionId=await activeVersionIdOf(engine);
         if(versionId!==input.versionId)return {status:"conflict" as const};
         await engine.flushCapture?.();

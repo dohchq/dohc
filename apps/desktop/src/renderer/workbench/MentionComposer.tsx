@@ -1,14 +1,15 @@
 import { AtSign, FileText, Hash, ListChecks, type LucideIcon } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   activeMentionQuery,
   applyMentionCompletion,
   matchMentionCandidates,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
-import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentRosterPick } from "../offers/agentAddressed";
+import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentAddressedOffer, type AgentRosterPick } from "../offers/agentAddressed";
 import type { ActorPresentation, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
+import { AgentOffer } from "./AgentOffer";
 import { ChatAvatar } from "./ChatAvatar";
 import { ownPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ComposerSendButton } from "./ComposerSendButton";
@@ -132,6 +133,13 @@ export function MentionComposer(props: {
   onSend: () => void;
   onRosterPick?: (pick: AgentRosterPick | null) => void;
   rosterScope?: string;
+  // What sending to the picked agent does. The parent derives it from the
+  // pick it was told about; Set up opens Settings → Agents.
+  agentOffer?: AgentAddressedOffer | null;
+  onSetUpAgent?: () => void;
+  // Bars on a stream composer's top edge, such as Replying to. The agent
+  // offer floats above them.
+  above?: ReactNode;
   onEscape?: () => void;
   // Decision resolution is the one composer mode where an empty submit is a
   // meaningful action: the caller records the literal fallback "Resolved ✓".
@@ -553,17 +561,15 @@ export function MentionComposer(props: {
         : "grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-hover hover:text-ink disabled:opacity-40 aria-pressed:bg-selected aria-pressed:text-ink"}
     >
       <ListChecks size={14} strokeWidth={1.9} aria-hidden />
-      {shape === "post" ? "Poll" : null}
+      {shape === "post" ? <span className="@max-[29rem]/composer:hidden">Poll</span> : null}
     </button>
   ) : null;
-  return (
-    <>
-    {isPost ? null : pollBlock}
+  const form = (
     <form
       data-expanded={isPost ? expanded : undefined}
       className={
         isPost
-          ? `relative flex shrink-0 flex-col rounded-xl border bg-panel transition-colors duration-75 ${
+          ? `@container/composer relative flex shrink-0 flex-col rounded-xl border bg-panel transition-colors duration-75 ${
               expanded ? "border-line px-4 pb-2 pt-3" : "border-line px-3 py-2 hover:border-muted/50"
             }`
           : "relative flex shrink-0 items-end gap-1.5 border-t border-line p-2"
@@ -824,7 +830,8 @@ export function MentionComposer(props: {
               className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40"
             >
               <AtSign size={14} strokeWidth={1.9} aria-hidden />
-              Mention
+              {/* A narrow post keeps the room for its words. */}
+              <span className="@max-[29rem]/composer:hidden">Mention</span>
             </button>
             {props.fileCandidates?.length ? (
               <button
@@ -841,11 +848,15 @@ export function MentionComposer(props: {
                 className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40"
               >
                 <FileText size={14} strokeWidth={1.9} aria-hidden />
-                File
+                <span className="@max-[29rem]/composer:hidden">File</span>
               </button>
             ) : null}
             {pollButton("post")}
-            <span className="flex-1" />
+            {props.agentOffer ? (
+              <AgentOffer offer={props.agentOffer} surface="post" onSetUp={props.onSetUpAgent} />
+            ) : (
+              <span className="flex-1" />
+            )}
             <ComposerSendButton
               testId={`${props.testIdPrefix}-send`}
               label={props.sendLabel}
@@ -914,6 +925,18 @@ export function MentionComposer(props: {
         </>
       )}
     </form>
-    </>
+  );
+  if (isPost) return form;
+  // The bars, the poll, the box and the agent offer are one stack, so the
+  // offer floats above the topmost bar and never covers its ×.
+  return (
+    <div className="@container/composer relative shrink-0">
+      {props.above}
+      {pollBlock}
+      {form}
+      {props.agentOffer ? (
+        <AgentOffer offer={props.agentOffer} surface="stream" onSetUp={props.onSetUpAgent} />
+      ) : null}
+    </div>
   );
 }

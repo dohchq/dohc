@@ -29,6 +29,7 @@ import {
   ShareReadFailureNotice,
   ChatHeader,
   joinedChannelLabel,
+  ComposerModeBar,
   ComposerNotice,
   type ShareReadFailure,
 } from "./ChatsControls";
@@ -104,6 +105,7 @@ import {
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
 import { pollChoicesToSend, type PollDraft } from "./chatPoll";
+import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { extractChatFileReferences } from "./chatFileMentions";
@@ -137,6 +139,8 @@ export interface ChatPresenceCollaboration {
 }
 
 export interface AgentSetupSummary {
+  // The workspace whose agent run was read with these settings.
+  workspaceId: string;
   agentName?: string;
   preferredName?: string;
   runnerConfigured: boolean;
@@ -276,12 +280,6 @@ interface ChannelSnapshot {
   threads: ChannelThreadRecord[];
   feedPosts: Record<string, PostData>;
 }
-
-const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
-  liveRunId: null,
-  pendingCount: 0,
-  paused: false,
-};
 
 const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
 
@@ -593,9 +591,8 @@ export function ChatsView(props: {
   const [decisions, setDecisions] = useState<ChatDecisionRecord[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachmentRecord[]>([]);
   const [runRecords, setRunRecords] = useState<Record<string, ChatRunRecord>>({});
-  const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult>(
-    IDLE_DISPATCH_STATE,
-  );
+  // The open thread's dispatch, null until read.
+  const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult | null>(null);
   const [dispatchActionBusy, setDispatchActionBusy] = useState(false);
   const [composer, setComposer] = useState("");
   const [poll, setPoll] = useState<PollDraft | null>(null);
@@ -717,6 +714,18 @@ export function ChatsView(props: {
     [],
   );
   const focusedMessageJump = useRef<string | null>(null);
+
+  // One composer shows at a time. A new post or message starts a new
+  // conversation; this view reads dispatch only for an open thread.
+  const agentOffer = useAgentOffer({
+    workspaceId,
+    scope: `${workspaceId}:${nav.level === "thread" ? `thread:${nav.thread.id}`
+      : nav.level === "channel" ? `channel:${nav.channel.id}`
+        : nav.level === "dm" ? `dm:${nav.dm.channelId}` : nav.level}`,
+    setup: props.agentSetup,
+    dispatch: nav.level === "thread" ? dispatchState : nav.level === "dm" ? null : NEW_CONVERSATION,
+    reach: props.workspacePath,
+  });
 
   const sendContextKey =
     nav.level === "thread"
@@ -1325,7 +1334,7 @@ export function ChatsView(props: {
     setDecisions([]);
     setAttachments([]);
     setRunRecords({});
-    setDispatchState(IDLE_DISPATCH_STATE);
+    setDispatchState(null);
     setDispatchActionBusy(false);
     setComposer("");
     setPoll(null);
@@ -1570,7 +1579,7 @@ export function ChatsView(props: {
       setSharePanelOpen(false);
       setChannelThreads([]);
       setFeedPosts({});
-      setDispatchState(IDLE_DISPATCH_STATE);
+      setDispatchState(null);
       setThreadsLoading(true);
       try {
         const snapshot = await loadChannelSnapshot(channel.id);
@@ -1878,7 +1887,7 @@ export function ChatsView(props: {
       setDecisions([]);
       setAttachments([]);
       setRunRecords({});
-      setDispatchState(IDLE_DISPATCH_STATE);
+      setDispatchState(null);
       setDispatchActionBusy(false);
       setReplyTarget(null);
       setResolveTargetMessageId(null);
@@ -2097,7 +2106,7 @@ export function ChatsView(props: {
       setDecisions([]);
       setAttachments(result.message.attachments ?? []);
       setRunRecords({});
-      setDispatchState(IDLE_DISPATCH_STATE);
+      setDispatchState(NEW_CONVERSATION);
       setDispatchActionBusy(false);
       setReplyTarget(null);
       setResolveTargetMessageId(null);
@@ -3554,10 +3563,11 @@ export function ChatsView(props: {
     });
   }, []);
 
+  const liveRunId = dispatchState?.liveRunId ?? null;
   const stopThreadRun = useCallback(async () => {
     if (
       nav.level !== "thread" ||
-      dispatchState.liveRunId === null ||
+      liveRunId === null ||
       dispatchActionBusy
     ) {
       return;
@@ -3569,7 +3579,7 @@ export function ChatsView(props: {
     try {
       await bridge().stopAgentRun({
         workspaceId,
-        runId: dispatchState.liveRunId,
+        runId: liveRunId,
       });
       const next = await bridge().chatDispatchStateForThread({
         workspaceId,
@@ -3593,10 +3603,11 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, dispatchState.liveRunId, nav, props.onError, workspaceId]);
+  }, [dispatchActionBusy, liveRunId, nav, props.onError, workspaceId]);
 
+  const dispatchPaused = dispatchState?.paused === true;
   const resumeThreadDispatch = useCallback(async () => {
-    if (nav.level !== "thread" || !dispatchState.paused || dispatchActionBusy) {
+    if (nav.level !== "thread" || !dispatchPaused || dispatchActionBusy) {
       return;
     }
     const token = liveToken.current;
@@ -3627,7 +3638,7 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, dispatchState.paused, nav, props.onError, workspaceId]);
+  }, [dispatchActionBusy, dispatchPaused, nav, props.onError, workspaceId]);
 
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").
@@ -3991,6 +4002,10 @@ export function ChatsView(props: {
             loadFileHeadings={loadFileHeadings}
             onChange={setDmDraft}
             onSend={() => void startDm()}
+            onRosterPick={agentOffer.onRosterPick}
+            rosterScope={agentOffer.scope}
+            agentOffer={agentOffer.offer}
+            onSetUpAgent={props.onSetupAgent}
           />
         </div>
       </div>
@@ -4048,6 +4063,7 @@ export function ChatsView(props: {
               onOpenPath={props.onOpenPath}
               flashMessageId={flashMessageId}
               reactionControls={reactionControls}
+              bottomSpace={AGENT_OFFER_SPACE}
             />
           ) : (
             <div
@@ -4078,6 +4094,10 @@ export function ChatsView(props: {
                 presence.setTyping(false);
                 void sendDmMessage();
               }}
+              onRosterPick={agentOffer.onRosterPick}
+              rosterScope={agentOffer.scope}
+              agentOffer={agentOffer.offer}
+              onSetUpAgent={props.onSetupAgent}
             />
           ) : (
             <ComposerNotice testId="chats-dm-ended">
@@ -4146,7 +4166,7 @@ export function ChatsView(props: {
                 }
                 testId="chats-thread-bookmark"
               />
-              {!threadLocked && dispatchState.liveRunId !== null ? (
+              {!threadLocked && liveRunId !== null ? (
                 <button
                   type="button"
                   data-testid="chats-stop-agent-run"
@@ -4176,7 +4196,7 @@ export function ChatsView(props: {
             </>
           }
         />
-        {dispatchState.paused ? (
+        {dispatchState?.paused ? (
           <div
             data-testid="chats-dispatch-status"
             title={dispatchState.pausedReason}
@@ -4197,13 +4217,13 @@ export function ChatsView(props: {
               <span>read-only</span>
             )}
           </div>
-        ) : dispatchState.liveRunId !== null ||
-          dispatchState.pendingCount > 0 ? (
+        ) : dispatchState && (liveRunId !== null ||
+          dispatchState.pendingCount > 0) ? (
           <div
             data-testid="chats-dispatch-status"
             className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 font-mono text-[10px] text-subtle"
           >
-            {dispatchState.liveRunId !== null
+            {liveRunId !== null
               ? `agent working${
                   dispatchState.pendingCount > 0
                     ? ` · ${dispatchState.pendingCount} queued`
@@ -4251,59 +4271,44 @@ export function ChatsView(props: {
                 : "This group is read-only for you."}
             </ComposerNotice>
           ) : (
-            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 sm:px-4">
-              {resolveTargetMessageId ? (
-                <div
-                  data-testid="chats-resolving-mode"
-                  className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
-                >
-                  <span className="min-w-0 flex-1 truncate">
-                    {resolveChosenOption
-                      ? `Answering the poll · ${resolveChosenOption}`
-                      : "Answering the poll"}
-                  </span>
-                  <button
-                    type="button"
-                    data-testid="chats-resolving-cancel"
-                    aria-label="Cancel resolving decision"
-                    onClick={() => {
-                      if (replyTarget?.messageId === resolveTargetMessageId) {
-                        setReplyTarget(null);
-                      }
-                      setResolveTargetMessageId(null);
-                      setResolveChosenOption(null);
-                    }}
-                    className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
-                  >
-                    ×
-                  </button>
-                </div>
-              ) : null}
-              {replyTarget ? (
-                <div
-                  data-testid="chats-replying-mode"
-                  className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
-                >
-                  <span className="min-w-0 flex-1">
-                    Replying to {replyTarget.authorLabel} ·
-                  </span>
-                  <button
-                    type="button"
-                    data-testid="chats-replying-cancel"
-                    aria-label="Cancel reply"
-                    onClick={() => {
-                      if (resolveTargetMessageId === replyTarget.messageId) {
-                        setResolveTargetMessageId(null);
-                      }
-                      setReplyTarget(null);
-                    }}
-                    className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
-                  >
-                    ×
-                  </button>
-                </div>
-              ) : null}
+            // The top space holds a picked agent's offer, so it covers no comment.
+            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 pt-6 sm:px-4">
               <MentionComposer
+                above={<>
+                  {resolveTargetMessageId ? (
+                    <ComposerModeBar
+                      testId="chats-resolving-mode"
+                      cancelTestId="chats-resolving-cancel"
+                      cancelLabel="Cancel resolving decision"
+                      onCancel={() => {
+                        if (replyTarget?.messageId === resolveTargetMessageId) {
+                          setReplyTarget(null);
+                        }
+                        setResolveTargetMessageId(null);
+                        setResolveChosenOption(null);
+                      }}
+                    >
+                      {resolveChosenOption
+                        ? `Answering the poll · ${resolveChosenOption}`
+                        : "Answering the poll"}
+                    </ComposerModeBar>
+                  ) : null}
+                  {replyTarget ? (
+                    <ComposerModeBar
+                      testId="chats-replying-mode"
+                      cancelTestId="chats-replying-cancel"
+                      cancelLabel="Cancel reply"
+                      onCancel={() => {
+                        if (resolveTargetMessageId === replyTarget.messageId) {
+                          setResolveTargetMessageId(null);
+                        }
+                        setReplyTarget(null);
+                      }}
+                    >
+                      Replying to {replyTarget.authorLabel} ·
+                    </ComposerModeBar>
+                  ) : null}
+                </>}
                 testIdPrefix="chats"
                 composerId="chats-composer"
                 value={composer}
@@ -4328,6 +4333,10 @@ export function ChatsView(props: {
                   presence.setTyping(false);
                   void sendMessage();
                 }}
+                onRosterPick={agentOffer.onRosterPick}
+                rosterScope={agentOffer.scope}
+                agentOffer={agentOffer.offer}
+                onSetUpAgent={props.onSetupAgent}
               />
             </div>
           )}
@@ -4498,7 +4507,7 @@ export function ChatsView(props: {
                 title={props.workspacePath}
                 className="hidden shrink-0 truncate font-mono text-[10px] text-subtle sm:inline"
               >
-                reaches {props.workspacePath.split(/[\\/]/u).filter(Boolean).at(-1) ?? props.workspacePath}
+                reaches {reachName(props.workspacePath)}
               </span>
             ) : null}
             {props.onSetupAgent ? (
@@ -4636,6 +4645,9 @@ export function ChatsView(props: {
             onError={props.onError}
             onThreadRead={props.onThreadRead}
             revision={props.threadRevision ?? 0}
+            agentSetup={props.agentSetup}
+            onSetupAgent={props.onSetupAgent}
+            workspacePath={props.workspacePath}
           />
         ) : (
         <PostFeedList
@@ -4670,6 +4682,10 @@ export function ChatsView(props: {
                   poll={newThreadPoll}
                   onPollChange={setNewThreadPoll}
                   onSend={() => void startThread()}
+                  onRosterPick={agentOffer.onRosterPick}
+                  rosterScope={agentOffer.scope}
+                  agentOffer={agentOffer.offer}
+                  onSetUpAgent={props.onSetupAgent}
                 />
               </div>
             ) : null}
