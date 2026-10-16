@@ -1,3 +1,4 @@
+import {accountDeletionKey, ACCOUNT_DELETION_PATH, ACCOUNT_DELETION_KEY_HEADER} from "@dohc/security-contract/account-deletion";
 import { it, expect } from "vitest";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,9 +31,10 @@ it("routes an authenticated viewer launch and allows only app form navigation in
     expect(appPage.headers.get("content-security-policy")).toBe(viewerResponse.headers.get("content-security-policy"));
     const exchange = await application.handle(new Request(viewer + "/api/exchange", {method: "POST", body: JSON.stringify({secret: Buffer.alloc(32, 3).toString("base64url")}), headers: {host, "content-type": "application/json"}}));
     expect(exchange.status).toBe(200);const {session} = await exchange.json();
+    expect(exchange.headers.get("set-cookie")).not.toContain("grant-alpha");
     const cookie = exchange.headers.getSetCookie().map(value => value.split(";", 1)[0]).join("; ");
     const issued = await application.handle(new Request(viewer + "/api/apps/launch", {method: "POST", body: JSON.stringify({discriminator: session, publicationId}), headers: {host, origin: viewer, cookie, "content-type": "application/json"}}));
-    expect(issued.status).toBe(200);expect(await issued.json()).toMatchObject({action: expect.stringMatching(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/), handoff: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/)});
+    expect(issued.status).toBe(200);expect(await issued.json()).toEqual({action: expect.stringMatching(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/), handoff: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/)});
   } finally { await rm(assets, {recursive: true, force: true}); }
 });
 
@@ -42,11 +44,19 @@ it("binds a named launch to the account cookie and rechecks its relay authority"
   const cookie = `${account.sessionToken.name}=account-secret`, exchangeKey = "k".repeat(32);
   const bytes = Buffer.from("document.getElementById('root').textContent='Admin';");
   const file = { path: "bundle.js", sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.length, contentType: "text/javascript; charset=utf-8" };
-  let active = true;
+  let active = true, signedIn = true;
+  const userId = "named-reader", authCalls: string[] = [];
   const calls: string[] = [];
   const application = createShareWebApplication({ publicHosts: new Set(["viewer.example.com"]), relayUrl: "https://relay.example.org", publicRelayUrl: "https://relay.example.org",
-    appLaunch: { viewerOrigin: viewer, appDomain: "example.net" }, relayExchangeKey: exchangeKey,
+    appLaunch: { viewerOrigin: viewer, appDomain: "example.net" }, relayExchangeKey: exchangeKey, internalHosts: new Set(["share-web:1790"]),
     accountAuth: { publicOrigin: viewer, upstreamUrl: "https://auth.example.org" },
+    fetchAuth: async request => {
+      authCalls.push(request.url);
+      expect(request.url).toBe("https://auth.example.org/api/auth/get-session");
+      expect(request.headers.get("cookie")).toBe(cookie);
+      expect(request.headers.has("authorization")).toBe(false);
+      return Response.json(signedIn ? { user: { id: userId, name: "Reader" }, session: { userId } } : null);
+    },
     fetchRelay: async request => {
       calls.push(request.url);
       expect(request.headers.get("cookie")).toBe(cookie);
@@ -63,15 +73,24 @@ it("binds a named launch to the account cookie and rechecks its relay authority"
     } });
   const post = (url: string, body: string, headers: Record<string, string>) => application.handle(new Request(url, { method: "POST", body, headers: { host: new URL(url).host, ...headers } }));
   const issue = (suppliedCookie: string) => post(viewer + "/api/apps/launch", JSON.stringify({ workspaceId, publicationId }), { origin: viewer, cookie: suppliedCookie, "content-type": "application/json" });
-  expect((await issue("unrelated=secret")).status).toBe(404); expect(calls).toHaveLength(0);
+  expect((await issue("unrelated=secret")).status).toBe(404); expect(calls).toHaveLength(0); expect(authCalls).toHaveLength(0);
+  signedIn = false; expect((await issue(cookie)).status).toBe(404); expect(calls).toHaveLength(0);
+  signedIn = true;
   const issued = await issue(cookie + "; unrelated=private"); expect(issued.status).toBe(200);
   const handoff = await issued.json();
+  expect(handoff).toEqual({ action: expect.stringMatching(/^https:\/\/[a-f0-9]{48}\.example\.net\/bootstrap$/), handoff: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) });
+  expect(authCalls).toHaveLength(2);
   const bootstrap = await post(handoff.action, new URLSearchParams({ handoff: handoff.handoff }).toString(), { origin: viewer, "content-type": "application/x-www-form-urlencoded" });
   expect(bootstrap.status).toBe(200);
   const html = await bootstrap.text(), origin = new URL(handoff.action).origin;
-  expect(html).not.toContain("account-secret"); expect(html).not.toContain(exchangeKey);
+  expect(html).not.toContain(userId); expect(html).not.toContain("account-secret"); expect(html).not.toContain(exchangeKey);
   const proof = /const proof="([A-Za-z0-9_-]{43})"/.exec(html)![1]!, appCookie = bootstrap.headers.get("set-cookie")!.split(";")[0]!;
   const invoke = () => post(origin + "/backend", JSON.stringify({ id: "update", op: "backend.invoke", operation: "registrations.update", idempotencyKey: "attempt-1", input: {} }), { origin, cookie: appCookie, "x-dohc-app-proof": proof, "content-type": "application/json" });
   expect((await invoke()).status).toBe(200);
   active = false; expect((await invoke()).status).toBe(404);
+  active = true;
+  const deleted = await post("http://share-web:1790" + ACCOUNT_DELETION_PATH, JSON.stringify({ userId, workspaceIds: [], grantIds: [], publicationIds: [] }), { "content-type": "application/json", [ACCOUNT_DELETION_KEY_HEADER]: accountDeletionKey(exchangeKey) });
+  expect(deleted.status).toBe(200);
+  const before = calls.length;
+  expect((await invoke()).status).toBe(404); expect(calls).toHaveLength(before);
 });

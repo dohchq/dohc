@@ -9,6 +9,7 @@ import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-b
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
 import { PublicationAgent } from "@dohc/cli/app-publication";
+import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "@dohc/cli/account";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
 import type { WorkspaceRefTarget } from "@dohc/workspace-contracts/workspace-ref";
 import { DatasetHistoryPage } from "@dohc/cli/dataset";
@@ -6893,11 +6894,42 @@ export const chatOperations = {
   },
 } as const satisfies OperationTable;
 
+// The server account this computer is connected to. Main sends both requests
+// with its own session; the window never sees the session.
+export const serverAccountOperations = {
+  previewServerAccountDeletion: {
+    capabilityId: "account.delete.preview",
+    scope: "device",
+    channel: "desktop:preview-server-account-deletion",
+    payload: z.object({}).strict(),
+    result: ServerAccountDeletionPreview,
+    guard: "trusted-sender",
+  },
+  deleteServerAccount: {
+    capabilityId: "account.delete",
+    scope: "device",
+    channel: "desktop:delete-server-account",
+    payload: ServerAccountDeleteRequest,
+    result: ServerAccountDeleteResult,
+    guard: "trusted-sender",
+  },
+  // Runs a disconnect that failed after a deletion again.
+  retryServerAccountDisconnect: {
+    capabilityId: "account.delete",
+    scope: "device",
+    channel: "desktop:retry-server-account-disconnect",
+    payload: z.object({}).strict(),
+    result: z.null(),
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceFileOperations>,
     OperationBridge<typeof chatOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
+    OperationBridge<typeof serverAccountOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof historyOperations>,

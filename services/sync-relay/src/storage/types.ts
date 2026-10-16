@@ -698,6 +698,7 @@ export interface SyncRelayStorage {
   readReplicaLiveJournal(input: ReplicaLiveJournalRead): Promise<ReplicaLiveJournalPage>;
 
   close(): void;
+  invalidate(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult;
   automationRecordWriteAllowed(input: {workspaceId: string; ownerUserId: string; currentPath: string;
     declaration: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;

@@ -1294,7 +1294,7 @@ mod tests {
 
         assert!(matches!(
             crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, &crate::NoLiveLeases, 1_000),
-            Ok(dohc_engine_storage::TxnOutcome::Committed(ref declines)) if declines.is_empty()
+            Ok(dohc_engine_storage::TxnOutcome::Committed(ref declines)) if declines.sharing_declined.is_empty()
         ));
         assert_eq!(
             local_ops(&store)
@@ -4580,7 +4580,7 @@ mod tests {
         )
         .expect("commit relay cursor after the local append")
         {
-            dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
+            dohc_engine_storage::TxnOutcome::Committed(declines) => declines.sharing_declined,
             dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
         };
 
@@ -4630,7 +4630,7 @@ mod tests {
         )
         .expect("commit next relay cursor")
         {
-            dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
+            dohc_engine_storage::TxnOutcome::Committed(declines) => declines.sharing_declined,
             dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
         };
 

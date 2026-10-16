@@ -6,6 +6,11 @@
 use dohc_engine_crypto::CryptoError;
 use dohc_engine_storage::StorageError;
 
+/// The [`DomainError::InvalidInput`] reason a hosted replica refuses a write
+/// with: the relay takes only its hosted documents' writes from a session
+/// host. The one input refusal whose reason the RPC surface shows.
+pub const HOSTED_REPLICA_WRITE_REFUSED: &str = "a hosted replica writes only its hosted documents";
+
 /// A typed versioning-domain failure. `#[non_exhaustive]`: later shards add
 /// variants (merge/conflict/secret) without a breaking change.
 #[derive(Debug, thiserror::Error)]
