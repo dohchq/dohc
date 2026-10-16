@@ -1,3 +1,4 @@
+import {accountDeletionKey, ACCOUNT_DELETION_PATH, ACCOUNT_DELETION_KEY_HEADER} from "@dohc/security-contract/account-deletion";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -4285,4 +4286,17 @@ describe("link relay JSON lifecycle", () => {
     expect(answer.headers.has("set-cookie")).toBe(false);
     expect(state.capabilities).toEqual(status === 404 ? [] : [`LinkCapability ${CAP_ALPHA_1}`]);
   });
+});
+
+it("serves account deletion only on its internal host with the correct key", async () => {
+  const invalidate = vi.fn(), secret = "internal-share-web-key-at-least-thirty-two-bytes";
+  const handle = createShareWebHandler({relayUrl:"http://relay.test",relayExchangeKey:secret,publicHosts:new Set([HOST]),internalHosts:new Set(["share-web:1790"]),deleteAccountGateways:invalidate});
+  const call = (host: string, key?: string) => handle(new Request("http://share-web:1790"+ACCOUNT_DELETION_PATH,{method:"POST",headers:{host,"content-type":"application/json",...(key ? {[ACCOUNT_DELETION_KEY_HEADER]:key} : {})},body:JSON.stringify({userId:"deleted",workspaceIds:["owned"],grantIds:[],publicationIds:[]})}));
+  expect((await call("share-web:1790")).status).toBe(404);
+  expect((await call("share-web:1790","wrong")).status).toBe(404);
+  expect((await call(HOST,accountDeletionKey(secret))).status).toBe(404);
+  expect((await call("app.example.test",accountDeletionKey(secret))).status).toBe(404);
+  expect(invalidate).not.toHaveBeenCalled();
+  expect((await call("share-web:1790",accountDeletionKey(secret))).status).toBe(200);
+  expect(invalidate).toHaveBeenCalledWith("deleted",["owned"]);
 });

@@ -454,6 +454,9 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       removeDataGrant(auth: AppBackendAuth, input: {workspaceId: string; datasetId: string; principalKey: string}): void {
         host.setDataGrant(auth, {...input, grant: null});
       },
+      async deleteWorkspaces(datasets: readonly {workspaceId: string; datasetId: string}[]) {
+        for (const scope of datasets) await host.retireScope(scope);
+      },
       close,
     };
   } catch (error) { await close(); throw error; }

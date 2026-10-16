@@ -217,6 +217,7 @@ if (process.env.DENY_DEVICE_LISTEN === '1') {
   const share = child(["--import", pathToFileURL(guard).href, shareMain], { DOHC_SHARE_WEB_DEV: "1", DOHC_SHARE_WEB_PORT: "0",
     DOHC_SHARE_WEB_RELAY_URL: `http://127.0.0.1:${relayPort}`, DOHC_SHARE_WEB_PUBLIC_RELAY_URL: `http://127.0.0.1:${relayPort}`,
     DOHC_SHARE_WEB_PUBLIC_HOSTS: publicHost, DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: exchangeKey,
+    DOHC_SHARE_WEB_INTERNAL_HOSTS: "share-web:1790",
     DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR: assets, DOHC_DEVICE_CONTROL_LIMITS: JSON.stringify(limits),
     DOHC_SHARE_WEB_DEVICE_CONTROL_ADMISSION: JSON.stringify({ capacity: 20, refillPerSecond: 1, maxKeys: 8 }),
     ALLOWED_RELAY_PORT: String(relayPort) });
@@ -303,6 +304,7 @@ it("reports invalid control configuration without echoing its value or a stack t
   const share = child([shareMain], { DOHC_SHARE_WEB_DEV: "1", DOHC_SHARE_WEB_PORT: "0",
     DOHC_SHARE_WEB_RELAY_URL: "http://127.0.0.1:1", DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "http://127.0.0.1:1",
     DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.test", DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: exchangeKey,
+    DOHC_SHARE_WEB_INTERNAL_HOSTS: "share.internal.test",
     DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR: assets, DOHC_DEVICE_CONTROL_LIMITS: JSON.stringify(limits),
     DOHC_SHARE_WEB_DEVICE_CONTROL_ADMISSION: invalid });
   expect(await share.exited).toBe(1);
