@@ -455,6 +455,9 @@ function writeTerminal(pre, text, source, message = false) {
   if (following) pre.scrollTop = pre.scrollHeight;
 }
 
+// How the service found a request's owner, for the owner's tooltip.
+const OWNER_SOURCE = { thread: "The T3 thread a person started", flag: "Named with --owner", checkout: "Named by its checkout" };
+
 // A request someone moved in line. Its tooltip, shown on hover and on keyboard focus, says who moved it and why.
 const movedTag = entry => entry.moved ? `<span class="tag moved" tabindex="0" role="note" data-focus-key="moved:${esc(entry.id)}" aria-label="${esc(entry.moved.replace("\n", ": "))}" data-tip="${esc(entry.moved)}">moved</span>` : "";
 
@@ -536,11 +539,13 @@ function renderNow(d) {
 function renderQueue({ data, starts }) {
   lineChart($("#chart-queue"), ui.load[ui.loadRange], "queued", { cls: "ink", days: ui.loadRange });
   const longest = Math.max(1, ...data.queued.map(q => data.now - Date.parse(q.submittedAt)));
-  patch($("#queue-summary"), data.queued.length ? `${data.queued.length} waiting. Start times assume each run takes the typical ${esc(dur(data.typicalMs))}.` : "");
-  patch($("#queue-table"), data.queued.length ? `<thead><tr><th class="n">#</th><th>Thread</th><th>Waited</th><th class="n">Starts</th><th>Note</th></tr></thead><tbody>${data.queued.map((q, i) => {
+  const owners = new Set(data.queued.filter(q => !q.nightly).map(q => q.owner?.title)).size;
+  patch($("#queue-summary"), data.queued.length ? `${data.queued.length} waiting.${owners > 1 ? ` ${owners} owners take turns.` : ""} Start times assume each run takes the typical ${esc(dur(data.typicalMs))}.` : "");
+  patch($("#queue-table"), data.queued.length ? `<thead><tr><th class="n">#</th><th>Thread</th><th>Owner</th><th>Waited</th><th class="n">Starts</th><th>Note</th></tr></thead><tbody>${data.queued.map((q, i) => {
     const waited = data.now - Date.parse(q.submittedAt);
     return `<tr><td class="n">${i + 1}</td>
       <td><a class="b" href="${esc(prLink(q.branch))}" target="_blank" rel="noreferrer">${esc(titleOf(q))}</a>${q.thread ? `<div class="sub mono">${esc(q.branch)}</div>` : ""}${q.nightly ? '<span class="tag nightly">nightly, goes first</span>' : ""}${q.retry ? '<span class="tag retry">retry</span>' : ""}${movedTag(q)}${q.scope !== "all" ? `<span class="tag scope">${esc(q.scope)} only</span>` : ""}<div class="sub mono">${esc(q.head)}</div></td>
+      <td>${q.owner && !q.nightly ? `<span title="${esc(OWNER_SOURCE[q.owner.source] ?? "")}">${esc(q.owner.title)}</span><div class="sub">${q.owner.waiting} waiting</div>` : ""}</td>
       <td style="min-width:140px"><span class="num">${esc(dur(waited))}</span><div class="waitbar" style="width:${(waited / longest * 100).toFixed(1)}%"></div></td>
       <td class="n">${data.typicalMs ? esc(startText(data, starts[i])) : "unknown"}</td>
       <td class="muted">${esc(q.waiting ?? "")}</td></tr>`;
