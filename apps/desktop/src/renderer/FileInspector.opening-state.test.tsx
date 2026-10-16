@@ -335,6 +335,41 @@ describe("markdown document opening state", () => {
     await screen.findByTestId("properties-panel");
   });
 
+  it("draws an opening document where the ready one draws it", async () => {
+    const { bridgeMock, bind } = makeHeldOpenBridge();
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: `---\nicon: 🎒\n---\n\n${DOC_MARKDOWN}`,
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-open-state");
+    await waitFor(() =>
+      expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph."),
+    );
+
+    // The properties' loading line holds their row, and the block as written
+    // starts closed, as it does once the properties show.
+    expect(screen.getByText("Loading properties...")).toBeTruthy();
+    const asWritten = () => screen.getByTestId("frontmatter-as-written").querySelector("details");
+    expect(asWritten()?.open, "`propertiesShown={!readOnly}` → `propertiesShown={!readOnly && !opening}`. The block opens while the document opens, then closes when it is ready and moves the body.").toBe(false);
+    // The body sits in the editor's column: its 720px measure inside 56px
+    // gutters, 6px under the top matter.
+    const body = screen.getByTestId("view-markdown").querySelector(".dohc-readable-text");
+    expect([...(body?.classList ?? [])]).toEqual(
+      expect.arrayContaining(["mx-auto", "max-w-[832px]", "px-14", "pt-1.5"]),
+    );
+    expect(body?.classList.contains("p-6")).toBe(false);
+
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bind();
+    await screen.findByTestId("markdown-source-toggle");
+    expect(asWritten()?.open).toBe(false);
+  });
+
   it("gives up the bound editor the moment a version switch reopens the session", async () => {
     useAutoAdvancingFakeTimers();
     const user = userEvent.setup();

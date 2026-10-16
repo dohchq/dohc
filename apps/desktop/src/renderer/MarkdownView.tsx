@@ -66,7 +66,7 @@ import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
-import { PROPERTIES_LINE, PROPERTIES_PANEL } from "./pageTopmatter";
+import { PROPERTIES_LINE, PROPERTIES_PANEL, READ_BODY } from "./pageTopmatter";
 import { FrontmatterAsWritten, LiveFrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
@@ -2334,16 +2334,21 @@ export function MarkdownView(props: {
               readOnly={readOnly || opening}
             />
             {recordButtons}
-            {!readOnly && !opening ? (
+            {/* Opening, the panel's loading line holds its row and the block
+                as written starts as it will once the open answers, so the
+                ready document draws in the same place. */}
+            {readOnly ? null : opening ? (
+              <PropertiesFallback />
+            ) : (
               <Suspense fallback={<PropertiesFallback />}>
                 <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
               </Suspense>
-            ) : null}
-            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly && !opening} />
+            )}
+            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
           </div>
           <div
             ref={readDocumentRef}
-            className="dohc-readable-text p-6 text-[length:var(--dohc-editor-font-size)] [font-family:var(--dohc-editor-font)]"
+            className={`dohc-readable-text ${READ_BODY} text-[length:var(--dohc-editor-font-size)] [font-family:var(--dohc-editor-font)]`}
           >
             {renderedDocument}
           </div>
