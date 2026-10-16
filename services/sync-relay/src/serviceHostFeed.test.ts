@@ -654,6 +654,15 @@ it("drops upload proof when the workspace stops being hosted", async () => {
   expect(uploads()).toBe(0);
 });
 
+it("drops upload proof when Stop retires the last hosted document", async () => {
+  const f = await fixture();
+  await f.upload(blob("stopped upload"));
+  expect(f.uploads()).toBe(1);
+  // Stop retires at once, with no release.
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 30, guard() {}});
+  expect(f.uploads()).toBe(0);
+});
+
 it("reads only the current scope with the workspace's one credential as documents join and leave", async () => {
   const f = await fixture();
   // Every enrollment derives the same workspace credential.
