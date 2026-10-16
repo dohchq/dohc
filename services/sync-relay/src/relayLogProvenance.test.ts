@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { assertClientLogProvenance, namedShareOrigin, SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
+import { assertClientLogProvenance, namedShareOrigin, SHARE_MEMBER_ORIGIN_PREFIX, COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX, SERVICE_HOST_ORIGIN_PREFIX } from "./relayLogInputs";
 import { claimWorkspace, closeTestStorages, createShare, jsonBody, request, testHandler, testStorage } from "./testing";
 
 afterEach(closeTestStorages);
@@ -55,8 +55,14 @@ describe("client log provenance", () => {
     expect(origins.every(origin => /^relay:share-member:[a-f0-9]{64}$/.test(origin))).toBe(true);
   });
   it("reserves the relay origins even for an empty batch", () => {
-    for (const prefix of RELAY_ORIGIN_PREFIXES) {
+    for (const prefix of [...RELAY_ORIGIN_PREFIXES, SERVICE_HOST_ORIGIN_PREFIX]) {
       expect(() => assertClientLogProvenance(`${prefix}grant`, [])).toThrow();
+    }
+  });
+  it("lets only the service host's feed write from its reserved origins", () => {
+    expect(() => assertClientLogProvenance(`${SERVICE_HOST_ORIGIN_PREFIX}host`, [], {serviceHost: true})).not.toThrow();
+    for (const origin of ["device", `${SHARE_MEMBER_ORIGIN_PREFIX}grant`]) {
+      expect(() => assertClientLogProvenance(origin, [], {serviceHost: true})).toThrow();
     }
   });
   it("refuses client-stamped relay moments", () => {
