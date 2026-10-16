@@ -676,7 +676,7 @@ impl EngineService {
         workspace_id: &str,
         kind: PendingCursorKind,
         token: &str,
-    ) -> Result<(IssuedCursor, bool), WireError> {
+    ) -> Result<PendingCursor, WireError> {
         let mut pending = lock(&self.pending_cursors);
         let valid = pending.get(token).is_some_and(|issued| {
             issued.handle == *handle
@@ -691,8 +691,35 @@ impl EngineService {
         }
         pending
             .remove(token)
-            .map(|issued| (issued.cursor, issued.reconcile_collections))
             .ok_or_else(|| WireError::new(ErrorCode::InvalidParams, "invalid-pending-cursor"))
+    }
+
+    /// A commit answered CANCELLED or DEADLINE_EXCEEDED did not land, so its
+    /// token stays usable for the retry. A closed workspace or a newer
+    /// cursor of the same kind leaves nothing to restore.
+    fn restore_pending_cursor(
+        &self,
+        open: &Arc<OpenWorkspace>,
+        kind: PendingCursorKind,
+        token: String,
+        cursor: PendingCursor,
+    ) {
+        let handles = lock(&self.handles);
+        if !handles
+            .get(&cursor.handle)
+            .is_some_and(|bound| Arc::ptr_eq(bound, open))
+        {
+            return;
+        }
+        let mut pending = lock(&self.pending_cursors);
+        let superseded = pending.values().any(|issued| {
+            issued.handle == cursor.handle
+                && issued.workspace_id == cursor.workspace_id
+                && issued_as(&issued.cursor, kind)
+        });
+        if !superseded {
+            pending.insert(token, cursor);
+        }
     }
 
     async fn relay_execute(
@@ -1104,11 +1131,12 @@ impl EngineService {
                 "ordinary cursor materialization is incomplete",
             ));
         }
-        let (issued, reconcile_collections) =
+        let consumed =
             self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
-        let share_view = matches!(&issued, IssuedCursor::ShareView(_));
-        let hosted = matches!(&issued, IssuedCursor::Hosted(_));
-        let operation = match issued {
+        let reconcile_collections = consumed.reconcile_collections;
+        let share_view = matches!(&consumed.cursor, IssuedCursor::ShareView(_));
+        let hosted = matches!(&consumed.cursor, IssuedCursor::Hosted(_));
+        let operation = match consumed.cursor.clone() {
             IssuedCursor::Relay(cursor) => RelayOperation::CommitCursor {
                 workspace_id: open.workspace_id.clone(),
                 cursor,
@@ -1125,16 +1153,29 @@ impl EngineService {
                 now_ms: now_ms()?,
             },
         };
+        let executed = if hosted {
+            self.hosted_execute(ctx, &open, configuration, operation, "sync.commitCursor")
+                .await
+        } else {
+            self.relay_execute(ctx, &open, configuration, operation, "sync.commitCursor")
+                .await
+        };
+        let mut outcome = match executed {
+            Err(error)
+                if matches!(
+                    error.code,
+                    ErrorCode::Cancelled | ErrorCode::DeadlineExceeded
+                ) =>
+            {
+                self.restore_pending_cursor(&open, kind, token, consumed);
+                return Err(error);
+            }
+            executed => executed?,
+        };
         // A hosted replica takes no part in enrollment.
         if hosted {
-            let outcome = self
-                .hosted_execute(ctx, &open, configuration, operation, "sync.commitCursor")
-                .await?;
             return relay_outcome_json(outcome);
         }
-        let mut outcome = self
-            .relay_execute(ctx, &open, configuration, operation, "sync.commitCursor")
-            .await?;
         if share_view && reconcile_collections {
             open.request_collection_reconcile();
         }
@@ -1975,6 +2016,135 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// Stop a commit through the real supervisor while it waits for the actor,
+    /// before its cursor lands. It changed nothing, so its token commits on
+    /// retry; once that lands, the token is spent.
+    async fn commit_stopped_before_landing_keeps_its_token(expire: bool) {
+        use dohc_engine_protocol::supervisor::{Supervisor, SupervisorConfig};
+        use rusqlite::OptionalExtension;
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        let workspaces: &'static dohc_engine_runtime::WorkspaceSupervisor =
+            Box::leak(Box::new(dohc_engine_runtime::WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(workspaces));
+        let workspace_id = "commit-before-landing";
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                    "captureMode": "none",
+                    "relay": { "baseUrl": "https://relay.example", "bearerToken": "test-token" },
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        let open = service.open(Some(&handle)).expect("open");
+        lock(&service.pending_cursors).insert(
+            "pending".to_owned(),
+            PendingCursor {
+                handle: handle.clone(),
+                workspace_id: workspace_id.to_owned(),
+                cursor: IssuedCursor::Relay(RelayCursor {
+                    cursor: 7,
+                    replication_epoch: "epoch".to_owned(),
+                    stream_identity: "stream".to_owned(),
+                    bootstrap_complete: true,
+                    settlement_report_id: None,
+                }),
+                materialization_paths: Vec::new(),
+                materialized: false,
+                reconcile_collections: false,
+            },
+        );
+        let stored_cursor = || {
+            rusqlite::Connection::open_with_flags(
+                &open.db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("engine db")
+            .query_row(
+                "SELECT cursor FROM sync_relay_cursors WHERE workspace_id=?1",
+                [workspace_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .expect("read relay cursor")
+        };
+        let commit = |id| dohc_engine_protocol::wire::Request {
+            id,
+            method: "sync.commitCursor".into(),
+            workspace: Some(handle.clone()),
+            deadline_ms: Some(60_000),
+            idempotency_key: None,
+            progress: false,
+            params: json!({
+                "workspaceId": workspace_id,
+                "pendingCursor": { "kind": "relay", "token": "pending" },
+            }),
+        };
+        let supervisor = Supervisor::new(SupervisorConfig::default(), Arc::clone(&service));
+        let hold = service.hold_actor(&handle).await;
+        let answer = supervisor.try_submit(commit(1)).expect("admitted");
+        while lock(&service.pending_cursors).contains_key("pending") {
+            tokio::task::yield_now().await;
+        }
+        if expire {
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        } else {
+            assert!(supervisor.cancel(1));
+            // Let the request's cancellation reach its operation token.
+            tokio::task::yield_now().await;
+        }
+        drop(hold);
+        let refused = answer
+            .await
+            .expect("answered")
+            .expect_err("a commit stopped before it lands is refused");
+        if expire {
+            tokio::time::resume();
+        }
+        assert_eq!(
+            refused.code,
+            if expire {
+                ErrorCode::DeadlineExceeded
+            } else {
+                ErrorCode::Cancelled
+            }
+        );
+        assert_eq!(stored_cursor(), None);
+
+        let committed = supervisor
+            .try_submit(commit(2))
+            .expect("admitted")
+            .await
+            .expect("answered")
+            .expect("the retry commits with the same token");
+        assert_eq!(committed.response.result["committed"], json!(true));
+        assert_eq!(stored_cursor().as_deref(), Some("7"));
+        let spent = supervisor
+            .try_submit(commit(3))
+            .expect("admitted")
+            .await
+            .expect("answered")
+            .expect_err("a landed commit spends its token");
+        assert_eq!(spent.message, "invalid-pending-cursor");
+        service.workspace_close(Some(handle)).await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn a_commit_cancelled_before_it_lands_keeps_its_token() {
+        commit_stopped_before_landing_keeps_its_token(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_commit_expired_before_it_lands_keeps_its_token() {
+        commit_stopped_before_landing_keeps_its_token(true).await;
     }
 
     #[test]

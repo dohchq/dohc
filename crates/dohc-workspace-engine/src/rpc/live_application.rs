@@ -1763,6 +1763,63 @@ mod tests {
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 
+    /// The bootstrap fixture's baseline and its projected Markdown.
+    fn fixture_baseline() -> (Vec<u8>, String) {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json"
+        ))
+        .unwrap();
+        (
+            serde_json::from_value(vectors[1]["bytes"].clone()).unwrap(),
+            vectors[1]["markdown"].as_str().unwrap().to_owned(),
+        )
+    }
+
+    /// Install the fixture baseline through `registration`, as a host does
+    /// before it settles or fences the document.
+    async fn bootstrap_baseline(
+        service: &Arc<EngineService>,
+        owner: &dohc_engine_protocol::transport::ConnectionOwner,
+        workspace: &WorkspaceHandle,
+        registration: u64,
+    ) -> ServiceResponse {
+        let (baseline, markdown) = fixture_baseline();
+        let mut upload = LiveApplicationIngress::new(service.clone(), config()).unwrap();
+        upload.begin(Request {
+            id: 73,
+            method: "liveApplication.bootstrap".into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params: json!({"registrationId":registration,"baselineStreamId":1,"baseline":{
+                "bootstrapId":"bootstrap","bootstrapMomentId":"bootstrap-moment","baselineMomentRelaySequence":0,"baselineRegisteredAtMs":100,
+                "baselineDigest":hex_sha256(&baseline),"baselineByteLength":baseline.len(),"projectedMarkdownDigest":hex_sha256(markdown.as_bytes()),"projectedMarkdownByteLength":markdown.len()
+            }}),
+        }, &owner.handle()).unwrap();
+        upload
+            .start(BlobStart {
+                request_id: 73,
+                stream_id: 1,
+                total_bytes: Some(baseline.len() as u64),
+                sha256: Some(hex_sha256(&baseline)),
+            })
+            .unwrap();
+        let crate::live_application_ingress::UploadCompletion::Admitted(request, input) =
+            upload.chunk(1, true, &baseline).unwrap().unwrap()
+        else {
+            panic!("unexpected refusal")
+        };
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let response = service
+            .call_with_input(ctx, request, Some(input))
+            .await
+            .unwrap();
+        assert_eq!(response.response.result["status"], "bootstrapped");
+        response
+    }
+
     use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
     struct BlockWriter {
         started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -1811,7 +1868,7 @@ mod tests {
             workspace_id: "workspace".into(),
             main_version_id: "main".into(),
             object_id: "document".into(),
-            lineage_claim_id: hex_sha256(&Ydoc::wire().encode_full_state()),
+            lineage_claim_id: hex_sha256(&fixture_baseline().0),
             current_path: "document.md".into(),
             selector_paths: vec!["document.md".into()],
             restore_fence_generation: 0,
@@ -1822,6 +1879,7 @@ mod tests {
             .unwrap()["registrationId"]
             .as_u64()
             .unwrap();
+        bootstrap_baseline(&service, &owner, &workspace, registration).await;
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let actor = open.actor.clone();
@@ -1896,10 +1954,12 @@ mod tests {
             .expect("the request answers once its actor work ends");
         if restore_fence {
             // The fence takes no token, so it ran: the answer is its own.
-            let code = result.expect_err("this fixture's fence refuses").code;
+            let fenced = result.expect("a fence that ran answers fenced");
+            assert_eq!(fenced.response.result["status"], "fenced");
+            // Paused time does not move the clock the guard reads.
             assert!(
-                !matches!(code, ErrorCode::Cancelled | ErrorCode::DeadlineExceeded),
-                "a fence that ran answers with its own outcome, not {code:?}"
+                deadline || !fenced.output_guard.as_ref().unwrap().is_current(),
+                "the writer withholds an answer its caller stopped waiting for"
             );
         } else {
             assert_eq!(
@@ -1970,17 +2030,11 @@ mod tests {
             .unwrap();
         let mut ctx = RequestContext::unbounded();
         ctx.connection = Some(owner.handle());
-        let vectors: Value = serde_json::from_str(include_str!(
-            "../../../dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json"
-        ))
-        .unwrap();
-        let baseline: Vec<u8> = serde_json::from_value(vectors[1]["bytes"].clone()).unwrap();
-        let markdown = vectors[1]["markdown"].as_str().unwrap();
         let binding = LiveObjectBinding {
             workspace_id: "workspace".into(),
             main_version_id: "main".into(),
             object_id: "document".into(),
-            lineage_claim_id: hex_sha256(&baseline),
+            lineage_claim_id: hex_sha256(&fixture_baseline().0),
             current_path: "document.md".into(),
             selector_paths: vec!["document.md".into()],
             restore_fence_generation: 0,
@@ -1991,45 +2045,8 @@ mod tests {
             .unwrap()["registrationId"]
             .as_u64()
             .unwrap();
-        let bootstrap = if restore_fence {
-            let mut upload = LiveApplicationIngress::new(service.clone(), config()).unwrap();
-            upload.begin(Request {
-                id: 73,
-                method: "liveApplication.bootstrap".into(),
-                workspace: Some(workspace.clone()),
-                deadline_ms: None,
-                idempotency_key: None,
-                progress: false,
-                params: json!({"registrationId":registration,"baselineStreamId":1,"baseline":{
-                    "bootstrapId":"bootstrap","bootstrapMomentId":"bootstrap-moment","baselineMomentRelaySequence":0,"baselineRegisteredAtMs":100,
-                    "baselineDigest":hex_sha256(&baseline),"baselineByteLength":baseline.len(),"projectedMarkdownDigest":hex_sha256(markdown.as_bytes()),"projectedMarkdownByteLength":markdown.len()
-                }}),
-            }, &owner.handle()).unwrap();
-            upload
-                .start(BlobStart {
-                    request_id: 73,
-                    stream_id: 1,
-                    total_bytes: Some(baseline.len() as u64),
-                    sha256: Some(hex_sha256(&baseline)),
-                })
-                .unwrap();
-            let crate::live_application_ingress::UploadCompletion::Admitted(request, input) =
-                upload.chunk(1, true, &baseline).unwrap().unwrap()
-            else {
-                panic!("unexpected refusal")
-            };
-            let mut bootstrap_ctx = RequestContext::unbounded();
-            bootstrap_ctx.connection = Some(owner.handle());
-            let response = service
-                .call_with_input(bootstrap_ctx, request, Some(input))
-                .await
-                .unwrap();
-            assert_eq!(response.response.result["status"], "bootstrapped");
-            assert!(response.output_guard.as_ref().unwrap().is_current());
-            Some(response)
-        } else {
-            None
-        };
+        let bootstrap = bootstrap_baseline(&service, &owner, &workspace, registration).await;
+        assert!(bootstrap.output_guard.as_ref().unwrap().is_current());
         let cancel = ctx.cancel.clone();
         let request = if restore_fence {
             fence_request(&workspace, &binding, "completion-test")
@@ -2062,26 +2079,21 @@ mod tests {
                 .unwrap();
         drop(serial);
         cancel.cancel();
-        match waiting.await {
-            Ok(answered) => {
-                assert!(restore_fence, "this fixture's settlement refuses");
-                assert_eq!(answered.response.result["status"], "fenced");
-                assert!(
-                    !answered.output_guard.as_ref().unwrap().is_current(),
-                    "the writer withholds an answer its caller stopped waiting for"
-                );
-            }
-            Err(error) => assert!(
-                !restore_fence
-                    && !matches!(
-                        error.code,
-                        ErrorCode::Cancelled | ErrorCode::DeadlineExceeded
-                    ),
-                "a completed operation answers with its own outcome, not {error:?}"
-            ),
-        }
+        let answered = waiting
+            .await
+            .expect("a completed operation answers with its own outcome");
+        assert_eq!(
+            answered.response.result["status"],
+            if restore_fence { "fenced" } else { "settled" }
+        );
+        assert!(
+            !answered.output_guard.as_ref().unwrap().is_current(),
+            "the writer withholds an answer its caller stopped waiting for"
+        );
+        // The answer holds its admission until the writer drops it.
+        drop(answered);
         assert!(ingress.settlement_admission(4).unwrap().reserve().is_ok());
-        if let Some(bootstrap) = bootstrap {
+        if restore_fence {
             let db = rusqlite::Connection::open_with_flags(
                 scratch.path().join(".dohc/engine/engine.db"),
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -2119,6 +2131,63 @@ mod tests {
                 "a terminal settlement must preserve the host when cancellation is also ready"
             );
         }
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_registration_cancelled_at_the_session_lock_registers_nothing() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let configuration = serde_json::from_value(json!({
+            "version": 1, "relayNamespace": "register-lock-test",
+            "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
+            "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "settlement": {"maxApplicationsPerSettlement":4}
+        })).unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(configuration)
+            .await
+            .unwrap();
+        let workspace = lock(&service.handles).keys().next().unwrap().clone();
+        let open = service.open(Some(&workspace)).unwrap();
+        open.actor
+            .ensure_main_version(
+                "workspace".into(),
+                0,
+                Arc::new(NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let binding = LiveObjectBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "document".into(),
+            lineage_claim_id: hex_sha256(&fixture_baseline().0),
+            current_path: "document.md".into(),
+            selector_paths: vec!["document.md".into()],
+            restore_fence_generation: 0,
+        };
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let serial = open.session_ops.lock().await;
+        let mut waiting = Box::pin(service.live_application_register(
+            &ctx,
+            Some(workspace.clone()),
+            json!({"binding": binding}),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        ctx.cancel.cancel();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("a queued registration stops waiting for the session lock")
+            .expect_err("nothing ran");
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        assert!(lock(&service.live_applications).registrations.is_empty());
+        drop(serial);
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 

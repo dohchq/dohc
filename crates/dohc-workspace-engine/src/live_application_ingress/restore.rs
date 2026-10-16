@@ -822,6 +822,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_restore_settlement_cancelled_after_it_committed_answers_settled() {
+        let mut f = Fixture::new().await;
+        let header = f.prepare_admitted().await;
+        drop(f.restore("liveApplication.applyRestore", &header).await);
+        let bytes = framed(&header);
+        let stream = f.id + 10;
+        let request = f.request(
+            "liveApplication.settleRestore",
+            json!({"streamId":stream,"byteLength":bytes.len(),"digest":hex_sha256(&bytes),"maxOutputBytes":1_000_000}),
+        );
+        let id = request.id;
+        f.ingress.begin(request, &f.owner.handle()).unwrap();
+        f.ingress
+            .start(BlobStart {
+                request_id: id,
+                stream_id: stream,
+                total_bytes: Some(bytes.len() as u64),
+                sha256: Some(hex_sha256(&bytes)),
+            })
+            .unwrap();
+        let super::UploadCompletion::Admitted(request, input) =
+            f.ingress.chunk(stream, true, &bytes).unwrap().unwrap()
+        else {
+            panic!("unexpected refusal")
+        };
+        let ctx = f.context();
+        let cancel = ctx.cancel.clone();
+        let mut waiting = Box::pin(f.service.call_with_input(ctx, request, Some(input)));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // The settlement reached the actor first, so it has committed once
+        // the hold enters.
+        let hold = f.service.hold_actor(&f.workspace).await;
+        cancel.cancel();
+        tokio::task::yield_now().await;
+        drop(hold);
+        let settled = waiting
+            .await
+            .expect("a committed restore settlement answers settled");
+        assert_eq!(settled.response.result["status"], "settled");
+        let receipt: Value =
+            serde_json::from_slice(&settled.blob_egress.as_ref().unwrap().bytes).unwrap();
+        assert_eq!(receipt["materialized"], true);
+        assert!(!settled.output_guard.as_ref().unwrap().is_current());
+        drop(settled);
+        f.close().await;
+    }
+
+    #[tokio::test]
     async fn restore_output_obeys_the_callers_reserved_bound_and_releases_capacity() {
         let mut f = Fixture::new().await;
         let fence = f.fence().await;

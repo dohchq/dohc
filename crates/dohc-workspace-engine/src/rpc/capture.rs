@@ -746,6 +746,48 @@ mod tests {
             .expect("close full workspace");
     }
 
+    #[tokio::test]
+    async fn a_flush_cancelled_once_the_driver_holds_it_answers_with_its_passes() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "flush" }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        // The initial import answers a flush without reaching the driver.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while service
+            .capture_flush(&RequestContext::unbounded(), Some(handle.clone()))
+            .await
+            .expect("flush")["settled"]
+            != json!(true)
+        {
+            assert!(tokio::time::Instant::now() < deadline, "capture settles");
+            tokio::task::yield_now().await;
+        }
+        let ctx = RequestContext::unbounded();
+        let mut waiting = Box::pin(service.capture_flush(&ctx, Some(handle.clone())));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        ctx.cancel.cancel();
+        tokio::task::yield_now().await;
+        let flushed = waiting
+            .await
+            .expect("a flush the driver holds answers with its outcome");
+        assert_eq!(flushed["settled"], json!(true));
+        service.workspace_close(Some(handle)).await.expect("close");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unavailable_recovery_allows_open_and_explicit_reconcile_retries_it() {
         let scratch = ScratchDir::new().expect("scratch");

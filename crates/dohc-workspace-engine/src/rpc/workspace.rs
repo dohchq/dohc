@@ -1287,6 +1287,57 @@ impl EngineService {
 }
 
 #[cfg(test)]
+impl EngineService {
+    /// Occupy a workspace's actor until the returned sender drops, so a test
+    /// can stop a request before its actor work runs. The held write rolls back.
+    pub(crate) async fn hold_actor(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> std::sync::mpsc::Sender<()> {
+        use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
+        struct Hold {
+            held: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl FaultInjector for Hold {
+            fn poll(&self, point: FaultPoint) -> FaultAction {
+                if point != FaultPoint::StorageBeforePersist {
+                    return FaultAction::Continue;
+                }
+                if let Some(held) = lock(&self.held).take() {
+                    let _ = held.send(());
+                    let _ = lock(&self.release).recv();
+                }
+                FaultAction::Crash
+            }
+        }
+        let (held, entered) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let hold = Arc::new(Hold {
+            held: std::sync::Mutex::new(Some(held)),
+            release: std::sync::Mutex::new(released),
+        });
+        let actor = self
+            .open(Some(workspace))
+            .expect("open workspace")
+            .actor
+            .clone();
+        tokio::spawn(async move {
+            let _ = actor
+                .ensure_main_version(
+                    "actor-hold".into(),
+                    0,
+                    hold,
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await;
+        });
+        entered.await.expect("the actor is held");
+        release
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::rpc::relay::IssuedCursor;

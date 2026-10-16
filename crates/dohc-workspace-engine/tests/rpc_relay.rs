@@ -2941,6 +2941,19 @@ async fn commit_stopped_after_its_cursor_lands(expire: bool) {
         .expect("a commit stopped after its cursor landed answers committed");
     assert_eq!(committed.response.result["committed"], json!(true));
     assert_eq!(stored_cursor().as_deref(), Some("1"));
+    id += 1;
+    let spent = supervisor
+        .try_submit(request(
+            id,
+            "sync.commitCursor",
+            Some(handle.clone()),
+            json!({ "workspaceId": workspace_id, "pendingCursor": pulled["pendingCursor"] }),
+        ))
+        .expect("admitted")
+        .await
+        .expect("answered")
+        .expect_err("a landed commit spends its token");
+    assert_eq!(spent.message, "invalid-pending-cursor");
     close(&transport, &handle, &mut id).await;
 }
 
