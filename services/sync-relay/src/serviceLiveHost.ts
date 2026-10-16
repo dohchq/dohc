@@ -1,4 +1,4 @@
-import {parseServiceActivationConfig,parseServiceActivationTarget,ServiceActivationDriver,type ServiceActivationConfig,type ServiceActivationTarget} from "./serviceActivationDriver";
+import {parseServiceActivationConfig,parseServiceActivationTarget,ServiceActivationDriver,type ServiceActivationBlock,type ServiceActivationConfig,type ServiceActivationTarget} from "./serviceActivationDriver";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal.js";
 import {observeRelayWrites, type LiveHostChanges} from "./relayWriteChanges.js";
@@ -745,10 +745,10 @@ export async function startServiceLiveHost(options: {
       diverged(): readonly {readonly workspaceId: string; readonly root: string}[] {
         return [...diverged].map(([workspaceId, root]) => ({workspaceId, root}));
       },
-      /** Whether the hosted document failed the one capture it gets while it cannot progress, and waits for its owner. */
-      blocked(document: {workspaceId: string; objectId: string}): boolean {
+      /** Why the hosted document failed the one capture it gets while it cannot progress and waits for its owner, if it did. */
+      blocked(document: {workspaceId: string; objectId: string}): ServiceActivationBlock | undefined {
         const key = hostedKey(document);
-        return key !== undefined && activation!.blocked(hosted.get(key)!.target);
+        return key === undefined ? undefined : activation!.blocked(hosted.get(key)!.target);
       },
       /**
        * Lets a blocked hosted document try one more capture on the next pass,

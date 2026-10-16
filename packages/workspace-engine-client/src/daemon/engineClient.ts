@@ -612,6 +612,16 @@ export function isHostedDocumentUnready(error: unknown): boolean {
 }
 
 /**
+ * The engine refused a first capture because the document has no Y.Doc
+ * lineage, as a file only ever written as text: nothing can activate until a
+ * device opens it.
+ */
+export function isLiveDocumentWithoutLineage(error: unknown): boolean {
+  return error instanceof EngineRequestError && error.wireError?.code === "CONFLICT" &&
+    error.wireError.message === "live-document-without-lineage";
+}
+
+/**
  * A request the caller deadlined ran out of time before the daemon answered.
  *
  * Expiry can precede transmission. The code remains `transport-error` for

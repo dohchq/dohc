@@ -371,6 +371,88 @@ fn a_held_documents_resume_is_unready_and_a_ready_divergence_conflicts() {
     ));
 }
 
+/// A file written only as text has no Y.Doc to activate, so its capture says
+/// so, unlike a conflict the relay retries. A hosted document that is not
+/// ready, or Y.Doc input waiting for its base, may still bring a lineage, and
+/// a document with one keeps its answers.
+#[test]
+fn a_document_without_lineage_refuses_capture_unlike_one_whose_lineage_may_arrive() {
+    let mut f = imported_fixture();
+    let set = |f: &mut Fixture, sql: &str| {
+        f.store
+            .write_with(&NoFaults, |tx| tx.execute(sql, []).map_err(write_sql))
+            .unwrap();
+    };
+    VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "plain".into(),
+                path: "plain.md".into(),
+                text: "Written as text".into(),
+                moment_id: "plain-write".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 4,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let plain = DocKey::new("workspace", "main", "plain").unwrap();
+    let capture_plain = |f: &mut Fixture| {
+        capture_imported_owner_activation(&mut f.store, "namespace", &plain, "plain.md", 1_000_000, &NoFaults)
+    };
+    assert!(matches!(
+        capture_plain(&mut f),
+        Err(ApplicationError::LiveDocumentWithoutLineage)
+    ));
+    set(
+        &mut f,
+        "INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
+         VALUES ('workspace','main','plain','remote',8,4)",
+    );
+    assert!(matches!(capture_plain(&mut f), Err(ApplicationError::Conflict)));
+    set(&mut f, "DELETE FROM ydoc_deferred_updates");
+    set(&mut f, "DELETE FROM sync_relay_cursors");
+    set(
+        &mut f,
+        "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+         VALUES ('workspace','service-host:host','epoch','stream',1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_replicas (workspace_id,scope_token,scope_generation,main_cursor,created_at_ms) \
+         VALUES ('workspace','scope',1,9,1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_documents (workspace_id,object_id,path,state,backfill_cursor,scope_generation) \
+         VALUES ('workspace','plain','plain.md','backfilling',4,1), \
+                ('workspace','object','owner.md','ready',0,1)",
+    );
+    assert!(matches!(
+        capture_plain(&mut f),
+        Err(ApplicationError::HostedDocumentUnready)
+    ));
+    set(&mut f, "UPDATE hosted_documents SET state='ready' WHERE object_id='plain'");
+    assert!(matches!(
+        capture_plain(&mut f),
+        Err(ApplicationError::LiveDocumentWithoutLineage)
+    ));
+    // The document with a lineage still activates, and its base past the
+    // committed position is still a conflict.
+    capture_imported(&mut f, 1_000_000).unwrap();
+    set(&mut f, "UPDATE ydoc_docs SET base_relay_seq=10");
+    assert!(matches!(
+        capture_imported(&mut f, 1_000_000),
+        Err(ApplicationError::Conflict)
+    ));
+}
+
 /// A store that does not hold the retained activation, as one an identity
 /// change selected, refuses its resume as a conflict, so the relay stops
 /// resuming it instead of retrying an internal error.

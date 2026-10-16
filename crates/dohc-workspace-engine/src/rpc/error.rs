@@ -282,6 +282,7 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
             // The message tells a document that may become ready from a divergence.
             ApplicationError::Conflict
             | ApplicationError::HostedDocumentUnready
+            | ApplicationError::LiveDocumentWithoutLineage
             | ApplicationError::ConfiguredBudgetMismatch => ErrorCode::Conflict,
             // The earlier settlement's file write lands on its own; retry later.
             ApplicationError::MaterializationPending => ErrorCode::Overloaded,
@@ -637,6 +638,10 @@ mod tests {
             ),
             (ApplicationError::Conflict, ErrorCode::Conflict),
             (ApplicationError::HostedDocumentUnready, ErrorCode::Conflict),
+            (
+                ApplicationError::LiveDocumentWithoutLineage,
+                ErrorCode::Conflict,
+            ),
             (
                 ApplicationError::ConfiguredByteBudgetExceeded,
                 ErrorCode::LimitExceeded,

@@ -19,6 +19,7 @@ import {
   FrameType,
   encodeFrame,
   isHostedDocumentUnready,
+  isLiveDocumentWithoutLineage,
   type EngineClientConnectOptions,
   type EngineClientConnection,
 } from "./engineClient";
@@ -29,6 +30,14 @@ it("tells a hosted document that is not ready from any other conflict", () => {
   expect(isHostedDocumentUnready(refusal("CONFLICT", "live-application-conflict"))).toBe(false);
   expect(isHostedDocumentUnready(refusal("INVALID_PARAMS", "hosted-document-unready"))).toBe(false);
   expect(isHostedDocumentUnready(new Error("hosted-document-unready"))).toBe(false);
+});
+
+it("tells a document without lineage from any other conflict", () => {
+  const refusal = (code: string, message: string) => new EngineRequestError(1, { code, message, retry: "no" } as never);
+  expect(isLiveDocumentWithoutLineage(refusal("CONFLICT", "live-document-without-lineage"))).toBe(true);
+  expect(isLiveDocumentWithoutLineage(refusal("CONFLICT", "live-application-conflict"))).toBe(false);
+  expect(isLiveDocumentWithoutLineage(refusal("INVALID_PARAMS", "live-document-without-lineage"))).toBe(false);
+  expect(isLiveDocumentWithoutLineage(new Error("live-document-without-lineage"))).toBe(false);
 });
 
 const LIMITS = {

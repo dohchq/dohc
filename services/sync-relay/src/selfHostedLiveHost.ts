@@ -178,11 +178,15 @@ export async function startSelfHostedLiveHost(options: {
       }
       // The owner learns only that live editing stopped. Where its work is kept is for the operator.
       for (const row of [...targets, ...departing]) {
-        const key = documentKey(row);
-        if (current?.blocked(row) !== true) {refused.delete(key); continue;}
+        const key = documentKey(row), block = current?.blocked(row);
+        if (block === undefined) {refused.delete(key); continue;}
         if (refused.has(key)) continue;
         refused.add(key);
-        options.onError?.(new Error(`Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. Its store is kept at ${join(root, storeName(row))}.`));
+        const store = `Its store is kept at ${join(root, storeName(row))}.`;
+        // Until the session host can start a document's Y.Doc itself (#2069), a device must.
+        options.onError?.(new Error(block === "without-lineage"
+          ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: the document has no live-editing history. Its owner must open it once in dohc on a desktop, then try again. ${store}`
+          : `Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. ${store}`));
       }
       // A workspace with no documents detaches once its replica drained, then
       // releases its enrollments. Its store stays, so a document shared again
@@ -240,7 +244,7 @@ export async function startSelfHostedLiveHost(options: {
     current: () => current,
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
     /** Whether the running daemon cannot continue the document until its owner tries again. */
-    blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document) ?? false;},
+    blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document) !== undefined;},
     /** Lets a blocked document try once more. Returns whether it was blocked. Its next block is reported again. */
     unblock(document: {workspaceId: string; objectId: string}) {
       const unblocked = current?.unblock(document) ?? false;

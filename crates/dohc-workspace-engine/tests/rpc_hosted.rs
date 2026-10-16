@@ -2876,19 +2876,20 @@ impl SessionHost {
             .map(|registered| registered["registrationId"].clone())
     }
 
-    /// Resume the retained activation of the document at `path`, as the relay
-    /// does once it saved one.
-    async fn resume(
+    /// Capture the document at `path` as the relay does, resuming the
+    /// retained activation once it saved one.
+    async fn capture(
         &mut self,
         path: &str,
-        activation_id: &str,
+        activation_id: Option<&str>,
     ) -> Result<Value, (ErrorCode, String)> {
-        self.call(
-            "liveApplication.captureOwnerActivation",
-            json!({"path": path, "maxBytes": 1_000_000, "activationId": activation_id}),
-        )
-        .await
-        .map_err(|error| (error.code, error.message))
+        let mut params = json!({"path": path, "maxBytes": 1_000_000});
+        if let Some(activation_id) = activation_id {
+            params["activationId"] = json!(activation_id);
+        }
+        self.call("liveApplication.captureOwnerActivation", params)
+            .await
+            .map_err(|error| (error.code, error.message))
     }
 
     /// Detach the store and stop, as before a restart.
@@ -2989,7 +2990,7 @@ async fn a_parked_documents_resume_after_a_restart_says_it_is_unready() {
 
     let mut host = SessionHost::start(&scratch, &relay).await;
     assert_eq!(
-        host.resume("b.md", &activation).await,
+        host.capture("b.md", Some(&activation)).await,
         Err((ErrorCode::Conflict, "hosted-document-unready".to_owned()))
     );
 }
@@ -3014,8 +3015,40 @@ async fn a_store_that_never_held_the_activation_refuses_its_resume_as_a_conflict
     assert_eq!(head_path(&scratch, "doc-b").as_deref(), Some("b.md"));
     let elsewhere = format!("ordinary-activation-{}", "a".repeat(64));
     assert_eq!(
-        host.resume("b.md", &elsewhere).await,
+        host.capture("b.md", Some(&elsewhere)).await,
         Err((ErrorCode::Conflict, "live-application-conflict".to_owned()))
+    );
+}
+
+/// A document written only as text has no Y.Doc lineage, so once its replica
+/// is ready its first capture says there is nothing to activate, which the
+/// session host stops on. While it is held, it may still change, so it waits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_document_without_lineage_refuses_its_first_capture_only_once_ready() {
+    let relay = sharing_doc_b();
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut host = SessionHost::start(&scratch, &relay).await;
+    host.call(
+        "sync.createHostedReplica",
+        json!({"workspaceId": WORKSPACE, "replicationEpoch": "epoch-2", "streamIdentity": "stream-2"}),
+    )
+    .await
+    .expect("create");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
+    assert_eq!(
+        host.capture("b.md", None).await,
+        Err((
+            ErrorCode::Conflict,
+            "live-document-without-lineage".to_owned()
+        ))
+    );
+    relay.relay().share("doc-b", "moved.md");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("held"));
+    assert_eq!(
+        host.capture("b.md", None).await,
+        Err((ErrorCode::Conflict, "hosted-document-unready".to_owned()))
     );
 }
 

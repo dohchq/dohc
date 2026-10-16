@@ -143,7 +143,14 @@ pub fn capture_imported_owner_activation(
         return Err(invalid("invalid ordinary activation capture"));
     }
     let result = store.write_with(faults, |tx| {
-        let marker = durable::read_marker_in(tx, key)?.ok_or(ApplicationError::Conflict)?;
+        let Some(marker) = durable::read_marker_in(tx, key)? else {
+            // A hosted document that is not ready, or Y.Doc input waiting for
+            // its base, may still bring a lineage.
+            committed_position(tx, key)?;
+            let deferred: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+                params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0)).map_err(read_sql)?;
+            return Err(if deferred { ApplicationError::Conflict } else { ApplicationError::LiveDocumentWithoutLineage });
+        };
         if marker.content_kind != ContentKind::Richdoc || marker.regime != Regime::Replicated
             || marker.lineage_claim_status != durable::LineageClaimStatus::Exact
             || marker.path.as_deref() != Some(path)

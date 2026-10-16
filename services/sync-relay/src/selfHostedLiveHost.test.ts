@@ -6,6 +6,7 @@ import {tmpdir} from "node:os";
 import {afterEach, expect, it, vi} from "vitest";
 import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
 import type {ServiceHostedSet} from "./serviceLiveHost";
+import type {ServiceActivationBlock} from "./serviceActivationDriver";
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createNamedFrameChanges} from "./liveHostChanges";
@@ -53,8 +54,8 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
   // departed document until its retirement stops being pending. A workspace
   // with no documents drains once nothing of it is pending.
   const pending = new Set<string>(options.pending), updates: ServiceHostedSet[] = [], attachedAfter: string[][] = [], events: string[] = [];
-  // Documents the running host cannot continue until their owner tries again.
-  const blocked = new Set<string>();
+  // Documents the running host cannot continue until their owner tries again, with why.
+  const blocked = new Map<string, ServiceActivationBlock>();
   const refusal = new Error("Workspace attach refused.");
   let failUpdate: Error | undefined, refusedPath: string | undefined, holdUpdate: {entered: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>} | undefined;
   let running: {holds(document: Document): boolean; diverge(workspaceId: string, detached: boolean): void; attached: Map<string, string>} | undefined;
@@ -98,7 +99,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     // Its replica had its chance to retire the document once it is attached and no longer hosts it.
     const pulledAfterDeparture = (document: Document) => attached.has(document.workspaceId) && !holds(document);
     return {invalidated: controller.signal, close, update, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, onEvent: () => () => undefined,
-      blocked: (document: Document) => holds(document) && blocked.has(document.objectId),
+      blocked: (document: Document) => holds(document) ? blocked.get(document.objectId) : undefined,
       unblock: (document: Document) => holds(document) && blocked.delete(document.objectId),
       diverged: () => [...diverged].map(([workspaceId, root]) => ({workspaceId, root}))} as never;
   });
@@ -145,7 +146,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     refuseAttach(path: string | undefined) {refusedPath = path;},
     holds: (objectId: string, workspaceId = scope.workspaceId) => running?.holds({workspaceId, objectId}) ?? false,
     diverge: (workspaceId = scope.workspaceId, detached = true) => running!.diverge(workspaceId, detached),
-    block(objectId: string) {blocked.add(objectId);}, unblock(objectId: string) {blocked.delete(objectId);},
+    block(objectId: string, why: ServiceActivationBlock = "refused") {blocked.set(objectId, why);}, unblock(objectId: string) {blocked.delete(objectId);},
     holdNextUpdate() {holdUpdate = {entered: deferred(), release: deferred()}; return holdUpdate;}};
 }
 
@@ -518,6 +519,18 @@ it("reports a blocked document's store to the operator once per block", async ()
   f.block(binding.objectId);
   await vi.waitFor(() => {f.host.reconcile(); expect(f.onError.mock.calls).toEqual([[reported], [reported], [reported]]);}, {timeout: 10_000});
   expect(f.host.unblock({...binding, objectId: "object-other"})).toBe(false);
+});
+
+// Proves: a document with no Y.Doc lineage tells the operator, once, that its
+// owner must open it on a desktop before it can start.
+it("tells the operator a document without lineage must be opened on a desktop first", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  f.block(binding.objectId, "without-lineage");
+  await vi.waitFor(() => {f.host.reconcile(); expect(f.onError).toHaveBeenCalled();}, {timeout: 10_000});
+  expect(f.onError.mock.calls).toEqual([[expect.objectContaining({message: `Live editing of docs/a.md in workspace ${scope.workspaceId} cannot start: the document has no live-editing history. Its owner must open it once in dohc on a desktop, then try again. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`})]]);
+  expect(f.host.blocked(binding)).toBe(true);
+  await f.waitPasses();
+  expect(f.onError).toHaveBeenCalledTimes(1);
 });
 
 // Proves: a divergence whose detach failed as its daemon exited keeps the

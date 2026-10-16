@@ -1,7 +1,7 @@
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {isDeepStrictEqual} from "node:util";
-import {EngineRequestError,isHostedDocumentUnready,type EngineClient,type NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
+import {EngineRequestError,isHostedDocumentUnready,isLiveDocumentWithoutLineage,type EngineClient,type NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
 import {parseLiveDocumentKey,parseLiveUpdateIdentifier,type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
@@ -48,6 +48,8 @@ export function parseServiceActivationConfig(value:unknown){
     idleUnloadMs:positive(row.idleUnloadMs),idleRetryMs:positive(row.idleRetryMs)});
 }
 export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceActivationConfig>>;
+/** Why a document waits for its owner: the engine refused it, or it has no Y.Doc lineage to activate. */
+export type ServiceActivationBlock="refused"|"without-lineage";
 type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;
   binding:LiveObjectBinding;target:string;actor:{ownerUserId:string;shareId:string}};
 const fenced={kind:"pending" as const,reason:"Service binding is fenced or unavailable."};
@@ -69,9 +71,8 @@ export class ServiceActivationDriver {
   readonly #dormant=new Map<string,string>();
   // Targets a hosted pass left held, with the reason, until the engine captures them again.
   readonly #held=new Map<string,ServiceHostedHold["reason"]>();
-  // Targets that cannot progress: held for an unadmitted live edit, or whose resume diverged.
-  // Each failed its one capture; passes skip it until `unblock` allows one more.
-  readonly #blocked=new Set<string>();
+  // Targets that cannot progress, with why. Each failed its one capture; passes skip it until `unblock` allows one more.
+  readonly #blocked=new Map<string,ServiceActivationBlock>();
   // Each target's document, once known, so a hold applies before the target has an owner, as after a restart.
   readonly #objects=new Map<string,string>();
   constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
@@ -119,16 +120,18 @@ export class ServiceActivationDriver {
       for(const [document,owner] of this.#owners)if(owner.target===key){owner.completed=false;this.#owners.delete(document);}
     }
   }
-  /** Whether the target failed the one capture it gets while it cannot progress. Activation skips it. */
-  blocked(target:ServiceActivationTarget){return this.#blocked.has(targetKey(target));}
+  /** Why the target failed the one capture it gets while it cannot progress, if it did. Activation skips it. */
+  blocked(target:ServiceActivationTarget){return this.#blocked.get(targetKey(target));}
   /** Allows a blocked target one more capture. Returns whether it was blocked. */
   unblock(target:ServiceActivationTarget){return this.#blocked.delete(targetKey(target));}
-  // A held document whose live edit was never admitted cannot become ready, and a
-  // retained activation the engine refuses as diverged cannot resume. Either one
-  // blocks after its failed capture. A document that is only not ready waits.
+  // A document with no Y.Doc lineage has nothing to activate, a held document whose live
+  // edit was never admitted cannot become ready, and a retained activation the engine
+  // refuses as diverged cannot resume. Each blocks after its failed capture. A document
+  // that is only not ready, or whose first capture met another conflict, waits.
   #refused(key:string,resuming:boolean,error:unknown){
     const diverged=resuming && error instanceof EngineRequestError && error.wireError?.code==="CONFLICT" && !isHostedDocumentUnready(error);
-    if(diverged || this.#held.get(key)==="hosted-live-edit-unadmitted")this.#blocked.add(key);
+    if(isLiveDocumentWithoutLineage(error))this.#blocked.set(key,"without-lineage");
+    else if(diverged || this.#held.get(key)==="hosted-live-edit-unadmitted")this.#blocked.set(key,"refused");
   }
   /**
    * Forgets a document the engine unloaded while it stays a target, and ends

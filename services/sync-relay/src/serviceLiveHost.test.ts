@@ -638,6 +638,8 @@ const conflictOpen = () => new EngineRequestError(1, {code: "INVALID_PARAMS", me
 // The engine's refusals of a capture: a hosted document that is not ready, and a retained activation that diverged or its store never held.
 const unready = () => new EngineRequestError(1, {code: "CONFLICT", message: "hosted-document-unready", retry: "no"} as never);
 const diverged = () => new EngineRequestError(1, {code: "CONFLICT", message: "live-application-conflict", retry: "no"} as never);
+// A first capture of a document with no Y.Doc lineage.
+const withoutLineage = () => new EngineRequestError(1, {code: "CONFLICT", message: "live-document-without-lineage", retry: "no"} as never);
 
 // Proves: after a restart, restore steps that send no registration never load
 // the native session, so an open sync conflict cannot block them.
@@ -968,14 +970,14 @@ it("captures a document held for an unadmitted live edit once, then not again un
   expect(pushes()).toBeGreaterThan(pushed);
   expect(captures()).toBe(before + 1);
   expect(o.host.isDocumentReady(o.document)).toBe(false);
-  expect(o.host.blocked(o.sibling)).toBe(true);
+  expect(o.host.blocked(o.sibling)).toBe("refused");
   await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
   const visited = visits();
   await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));
   expect(captures()).toBe(before + 1);
-  expect(o.host.blocked(o.other)).toBe(false);
+  expect(o.host.blocked(o.other)).toBeUndefined();
   expect(o.host.unblock(o.sibling)).toBe(true);
-  expect(o.host.blocked(o.sibling)).toBe(false);
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
   await vi.waitFor(() => expect(captures()).toBe(before + 2));
   const retried = visits();
   await vi.waitFor(() => expect(visits()).toBeGreaterThan(retried + 2));
@@ -1007,13 +1009,48 @@ it("resumes a document whose retained activation diverged once, then not again u
   expect(count("sync.push")).toBeGreaterThan(pushed);
   expect(captures()).toBe(1);
   expect(restarted.isDocumentReady(o.document)).toBe(false);
-  expect(restarted.blocked(o.sibling)).toBe(true);
+  expect(restarted.blocked(o.sibling)).toBe("refused");
   expect(restarted.unblock(o.sibling)).toBe(true);
   await vi.waitFor(() => expect(captures()).toBe(2));
-  await vi.waitFor(() => expect(restarted.blocked(o.sibling)).toBe(true));
+  await vi.waitFor(() => expect(restarted.blocked(o.sibling)).toBe("refused"));
   await o.nextPull(); await o.nextPull();
   expect(captures()).toBe(2);
   expect(restarted.retains(o.sibling)).toBe(true);
+});
+
+// Proves: a document with no Y.Doc lineage has nothing to activate, so its
+// first capture blocks it and no pass captures it again, while its workspace
+// keeps pulling. Unblocking allows exactly one more capture. Any other conflict
+// on a first capture keeps it waiting, captured again on every pass.
+it.each([
+  ["blocks", "live-document-without-lineage", withoutLineage, "without-lineage"],
+  ["keeps retrying", "live-application-conflict", diverged, undefined],
+] as const)("%s a document whose first capture the engine refuses as %s", async (_verb, _reason, refusal, block) => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  const plain = {workspaceId: "workspace", objectId: "object-plain", path: "docs/plain.md", shareId: "share"};
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const captures = () => o.client().captureOwnerActivation.mock.calls.filter(call => call[1] === plain.path).length;
+  const visits = () => vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls.filter(call => call[0].path === plain.path).length;
+  o.refuseCapture(refusal());
+  await o.host.update({workspaces, documents: [o.sibling, plain], ...stay});
+  await vi.waitFor(() => expect(captures()).toBe(1));
+  const visited = visits(), pulls = o.pullCount();
+  await vi.waitFor(() => {expect(visits()).toBeGreaterThan(visited + 2); expect(o.pullCount()).toBeGreaterThan(pulls + 2);});
+  expect(o.host.blocked(plain)).toBe(block);
+  if (block === undefined) {
+    expect(captures()).toBeGreaterThan(2);
+    return;
+  }
+  expect(captures()).toBe(1);
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+  expect(o.host.unblock(plain)).toBe(true);
+  await vi.waitFor(() => expect(captures()).toBe(2));
+  await vi.waitFor(() => expect(o.host.blocked(plain)).toBe(block));
+  const retried = visits();
+  await vi.waitFor(() => expect(visits()).toBeGreaterThan(retried + 2));
+  expect(captures()).toBe(2);
 });
 
 // Proves: a diverged replica stops and detaches, its documents stay retained,
