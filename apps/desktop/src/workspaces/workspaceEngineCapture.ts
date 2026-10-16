@@ -1720,6 +1720,7 @@ export function createWorkspaceEngineCapture(
   let observationDrainUnavailable = false;
   let observationResync: Promise<void> = Promise.resolve();
   let stopped = false;
+  let shuttingDown = false;
   const ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
@@ -3300,6 +3301,7 @@ export function createWorkspaceEngineCapture(
         );
       },
       applyLocalUpdate(update, onArmed, applyOptions) {
+        if (closed) throw closedError();
         if (pendingRecords.size + queuedUpdateCount >= YDOC_PENDING_MAX_RECORDS ||
             pendingUpdateBytes + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
           const record: PendingRecord = {
@@ -5121,46 +5123,6 @@ export function createWorkspaceEngineCapture(
           try {
             await session.close(effective);
           } catch (error) {
-            // THE ORPHAN'S THIRD EXIT. It may not settle — the rule
-            // above — and its prune-close refuses while no artifact holds its
-            // CRDT's bytes. On a policy-excluded path, or a file over the
-            // MAX_TEXT_BYTES capture limit, no capture will ever mint that artifact,
-            // so the refused close's reinserted lease answered every later
-            // open with `ydoc-session-busy` until the daemon restarted.
-            //
-            // An evict writes nothing and discards nothing: the daemon lets go
-            // of the session and keeps the lineage, so the next open
-            // resurrects this document's edits.
-            //
-            // An orphan, OR a write this session already cancelled for good:
-            // a suppressed close-retry forces the same
-            // `settleOnRefusal: false` an orphan's release uses, and can meet
-            // the same dirty-session refusal — but `writeCancelled` means no
-            // caller is ever getting a materialized write from this session
-            // again, so leaving it to strand the lease busy until restart is
-            // strictly worse than discharging it the orphan's way. A session
-            // someone still holds with an open write is converged by its
-            // holder instead. And only a TERMINAL refusal either way: a busy
-            // store or a spent budget is waited out by the ladders that
-            // already exist.
-            if (
-              (liveEntry.orphaned || writeCancelled) &&
-              isYdocUnsettledCloseRefusal(error)
-            ) {
-              try {
-                await session.evict();
-                dischargedByEvict = true;
-                if (liveYDocSessions.get(input.path) === liveEntry) {
-                  liveYDocSessions.delete(input.path);
-                }
-                return;
-              } catch (evictError) {
-                // The daemon kept the session, so the retain below is still
-                // the honest outcome. Report the eviction failure, because it
-                // is the reason this path stays reserved.
-                onError(`ydoc evict of ${input.path}`, evictError);
-              }
-            }
             if (error instanceof YdocReleasedWithSettleFailureError) {
               // A transient settle failure under a succeeded release is the
               // replicated shape: this error is the last time anyone hears
@@ -5239,20 +5201,24 @@ export function createWorkspaceEngineCapture(
               }
               throw error;
             }
-            // Quit cannot resolve a changed target by settling again. Eviction
-            // preserves the provider's pending state and durable lineage while
-            // releasing the lease for capture recovery. Renderer retirement can
-            // start this close before main announces shutdown.
-            if (
-              (opts?.shuttingDown || captureWaitAbort.signal.aborted) &&
-              (isConflictStaleTargetRefusal(error) || isYdocUnsettledCloseRefusal(error))
-            ) {
-              liveEntry.status = "failing-close";
-              await session.evict();
-              if (liveYDocSessions.get(input.path) === liveEntry) {
-                liveYDocSessions.delete(input.path);
+            // A quit cannot wait for another settle attempt. Orphans and
+            // cancelled writes also cannot settle. Eviction hands over pending
+            // text and keeps the durable lineage before releasing the lease.
+            // Interactive close/switch failures keep their guard for retry.
+            if (shuttingDown ||
+                ((liveEntry.orphaned || writeCancelled) && isYdocUnsettledCloseRefusal(error))) {
+              try {
+                await session.evict();
+                dischargedByEvict = true;
+                if (liveYDocSessions.get(input.path) === liveEntry) {
+                  liveYDocSessions.delete(input.path);
+                }
+                return;
+              } catch (evictError) {
+                // Keep the close refusal as the caller's error, and report the
+                // failed release separately. The guard below remains reserved.
+                onError(`ydoc evict of ${input.path}`, evictError);
               }
-              return;
             }
             // The reservation may still be held and the on-disk state is
             // indeterminate — retain a failing-close guard so a retry/force-close
@@ -5930,6 +5896,7 @@ export function createWorkspaceEngineCapture(
     },
 
     beginShutdown() {
+      shuttingDown = true;
       ydocOpenAbort.abort();
       captureWaitAbort.abort();
     },
