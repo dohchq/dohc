@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment";
 import { checkRelayBackup, restoreRelayDeployment } from "./relayDeploymentRecovery";
-import { captureRelaySnapshot, openRelaySnapshot, saveRelaySnapshot, sealRelaySnapshot, signS3Request, snapshotStorageFromEnv,
+import { captureRelaySnapshot, openRelaySnapshot, relaySnapshotKey, saveRelaySnapshot, sealRelaySnapshot, signS3Request, snapshotStorageFromEnv,
   uploadRelaySnapshot, withRelaySnapshot, type SnapshotStorage } from "./relaySnapshot";
 
 const cleanups: (() => void | Promise<void>)[] = [];
@@ -272,5 +272,14 @@ describe("off-site upload", () => {
     expect(() => snapshotStorageFromEnv({ ...complete, DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: "" })).toThrow(/partly configured/);
     expect(() => snapshotStorageFromEnv({ ...complete, DOHC_SNAPSHOT_S3_ENDPOINT: "http://storage.invalid" })).toThrow(/HTTPS origin/);
     expect(() => snapshotStorageFromEnv({ ...complete, DOHC_SNAPSHOT_S3_ENDPOINT: "https://storage.invalid/bucket" })).toThrow(/HTTPS origin/);
+  });
+
+  // Compose passes an empty key to a deployment without snapshots, so every command checks it before it runs.
+  it("refuses to run without a well-formed snapshot key", () => {
+    const key = randomBytes(32);
+    expect(relaySnapshotKey(key.toString("base64url"))).toEqual(key);
+    for (const value of [undefined, "", "change-me", randomBytes(31).toString("base64url"), `${key.toString("base64url")}=`]) {
+      expect(() => relaySnapshotKey(value), String(value)).toThrow("Set DOHC_SNAPSHOT_KEY to the 32-byte key that bootstrap generated.");
+    }
   });
 });

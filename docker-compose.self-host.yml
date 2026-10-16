@@ -119,7 +119,8 @@ services:
     command: [run, --database, /data/sync-relay.sqlite, --state-directory, /snapshots]
     environment:
       DOHC_SERVER_NAME: ${DOHC_SERVER_NAME:-dohc}
-      DOHC_SNAPSHOT_KEY: ${DOHC_SNAPSHOT_KEY:?Run the self-host bootstrap to generate secrets}
+      # Optional here: Compose interpolates this service even when its profile is off. The job refuses to run without a key.
+      DOHC_SNAPSHOT_KEY: ${DOHC_SNAPSHOT_KEY:-}
       DOHC_SNAPSHOT_S3_ENDPOINT: ${DOHC_SNAPSHOT_S3_ENDPOINT:-}
       DOHC_SNAPSHOT_S3_REGION: ${DOHC_SNAPSHOT_S3_REGION:-auto}
       DOHC_SNAPSHOT_S3_BUCKET: ${DOHC_SNAPSHOT_S3_BUCKET:-}

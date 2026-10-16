@@ -15,6 +15,7 @@ Use the same environment file and Compose overrides as your running deployment.
 | `restore` | Repairs missing or corrupt relay storage from a matching snapshot | Refuses snapshots older than accepted relay writes |
 | `archive` | All named deployment volumes, configuration, secrets and image identities | Preserves evidence; no full-deployment restore command |
 | `salvage` | Exports settled tracked file contents from an old snapshot | Creates ordinary files; does not restore a running deployment |
+| `move.mjs` | Starts the deployment on a new host from its attached data disk | Requires the data-disk layout; accounts move separately unless they are in an external database |
 
 The relay keeps an independent continuity record outside its database volume.
 Every accepted mutation advances that record, including permission changes and schema migrations.
@@ -70,7 +71,7 @@ Otherwise, preserve a private deployment archive for further recovery work.
 Use `--env-file PATH` for a different environment file.
 Use `--compose-file PATH` for each additional Compose override.
 Use `--project-name NAME` if your deployment overrides the Compose project name.
-The shared configuration reader includes the private-network overlay automatically.
+The shared configuration reader includes the private-network and data-disk overlays automatically.
 
 ## Take hourly off-site snapshots
 
@@ -113,6 +114,8 @@ A single upload is limited to 5 GB. A larger snapshot fails; save it with `snaps
 If a snapshot fails, the job emails `DOHC_SNAPSHOT_ALERT_EMAIL` through the server's SMTP settings.
 It sends at most one failure email a day, and one email when snapshots work again.
 It keeps this record in the `dohc_self_host_snapshots` volume, so restarts do not repeat the email.
+With a [data disk](self-host.md#keep-server-data-on-an-attached-disk), that volume is the `snapshots` folder on the disk.
+Each snapshot is copied there before it is encrypted, so keep free space of about twice the relay database's size.
 A stopped job cannot send email.
 To detect that, set `DOHC_SNAPSHOT_HEARTBEAT_URL` to an HTTPS monitoring URL.
 The job requests that URL after each successful snapshot.
@@ -132,6 +135,8 @@ The bootstrap command writes `DOHC_SNAPSHOT_KEY` to `.env.self-host`.
 Every snapshot is encrypted with this key, using AES-256-GCM over the database and its manifest.
 Copy the key to a password manager or other storage that does not depend on this server.
 If you lose the key, you cannot open any snapshot encrypted with it.
+The hourly job, `snapshot` and `verify` refuse to run without it.
+A deployment without snapshots does not need it.
 If you replace the key, keep the old key until the lifecycle rule deletes its snapshots.
 
 ## Save an encrypted snapshot locally
@@ -169,6 +174,7 @@ On a replacement host, load the release image and restore `.env.self-host` befor
 
 An hourly snapshot does not include authentication, live-host data, configuration or continuity.
 Server accounts are stored in Postgres and need a separate backup.
+With an [external database](#accounts-in-an-external-database), your provider's backups hold them.
 Repair with `restore` still requires the snapshot stamp to equal current continuity.
 An hourly snapshot usually falls behind within minutes, so it rarely qualifies.
 Restoring a lost server from an off-site snapshot is not supported yet.
@@ -206,6 +212,7 @@ node scripts/self-host/recovery.mjs archive /srv/dohc-backups/deployment-before-
 
 The command stops the project and archives each named volume without modifying it.
 This includes authentication, relay, live-host, continuity and TLS data declared by Compose.
+With an [external database](self-host.md#keep-accounts-in-an-external-postgres), the archive does not include accounts.
 It also saves the environment, resolved Compose configuration, bound configuration files and image identities.
 Bound directories are refused because this procedure does not define their backup scope.
 The command resumes previously running services after success.
@@ -267,17 +274,148 @@ The pre-upgrade snapshot can then be used for offline salvage, but not in-place 
 If an upgrade fails, keep its volumes and diagnose or install a corrected version.
 Do not reset continuity or automatically restore an older deployment archive.
 
+## Move to a new host
+
+Use this procedure for a deployment that keeps its data on an [attached disk](self-host.md#keep-server-data-on-an-attached-disk).
+It also recovers a server that stopped working while its disk survived.
+The new host continues from the last write the relay committed to the disk. Nothing is rolled back.
+
+Always move the live disk. Never start from a snapshot or copy of the disk.
+A copy rolls back the relay database and its continuity record together, and the relay cannot detect that.
+
+The disk carries the relay database, its continuity record, the session host and automation copies, and the snapshot job's state.
+Bring these separately:
+
+- `.env.self-host`, unchanged. It holds the configuration and the server secrets. Keep a private copy off the server.
+- The same release bundle and image version that the old host ran.
+- The accounts volume, which holds accounts and sign-in sessions.
+  Docker names it `<DOHC_DEPLOYMENT_NAME>_dohc_self_host_postgres`, which is `dohc-self-host_dohc_self_host_postgres` by default.
+  Copy the stopped volume to the new host before you start the deployment there.
+  If the old host is lost, restore this volume from your own backup.
+  An older copy brings back sessions and accounts that were removed after it was taken.
+  It also loses accounts created after it was taken.
+  Those people cannot open their workspaces, even after they sign up again, because they get new accounts.
+  Without this volume, the new server has no accounts, and nobody can open the workspaces on the disk as their owner.
+  The move command refuses to start until the volume holds an accounts database.
+  With an [external database](#accounts-in-an-external-database), skip the accounts volume.
+- Nothing for TLS. In public mode, Caddy obtains new certificates when the deployment starts on the new host.
+
+Never copy the disk to run a second server.
+Each copy would accept different work under the same deployment identity.
+
+### Stop the old server for good
+
+1. If the old host still responds, run `node tools/self-host/bootstrap.mjs stop` there.
+2. On the old host, run `docker ps` and confirm that no dohc service is running.
+3. With an external database, skip this step.
+   Otherwise, on the old host, save the accounts volume to a file in a new private folder:
+
+   ```sh
+   (umask 077 && mkdir dohc-accounts && docker run --rm --network none \
+     --mount type=volume,source=dohc-self-host_dohc_self_host_postgres,target=/pg,readonly \
+     postgres:17.9-alpine tar -C /pg -czf - . > dohc-accounts/accounts.tar.gz)
+   ```
+
+   The file contains password hashes and sign-in sessions. Only your user can read the folder and the file.
+   Copy the folder to the new host over a private channel and keep its permissions, for example with `scp -rp dohc-accounts NEW_HOST:`.
+   Never put it in a shared or synced folder.
+4. Shut down the old host.
+5. Detach the disk from the old host.
+6. In your provider's console, confirm that the old host is off and the disk has no attachment.
+
+If the old host starts again without the disk, its relay cannot start because its data folder is missing.
+With an external database, its sign-in service can still start and use that database. Keep the old host off.
+Also remove the old host's address from your provider's allowlist, or change the database password and set the new one as `POSTGRES_PASSWORD` on the new host.
+
+### Start the deployment on the new host
+
+1. Prepare the new host as described in [Set up a dohc server](self-host.md#prepare-the-host).
+2. Copy the release bundle and `.env.self-host` to the new host, then load the release image.
+3. With an external database, copy its CA certificate to the path that `DOHC_POSTGRES_CA_FILE` names, and skip the rest of this step.
+   If your provider limits which addresses can connect, allow the new host's address.
+   Otherwise, from the folder that holds `dohc-accounts`, restore the accounts volume under the same name:
+
+   ```sh
+   docker volume create dohc-self-host_dohc_self_host_postgres
+   docker run --rm -i --network none \
+     --mount type=volume,source=dohc-self-host_dohc_self_host_postgres,target=/pg \
+     postgres:17.9-alpine tar -C /pg -xzf - < dohc-accounts/accounts.tar.gz
+   ```
+
+   Then delete the `dohc-accounts` folder from both hosts, or keep it with your private backups.
+4. Attach the disk and mount it so that `DOHC_DATA_DIRECTORY` names the deployment folder on it.
+   If the mount path changed, update `DOHC_DATA_DIRECTORY` in `.env.self-host`.
+5. For public access, point DNS for the server's domain to the new host.
+6. For private access, remove the old machine from the tailnet.
+   Give the new host the same Tailscale hostname, then follow `node tools/self-host/bootstrap.mjs network`.
+7. From the bundle directory, run:
+
+```sh
+node scripts/self-host/move.mjs
+```
+
+The command refuses to start anything in these cases:
+
+- A running container on this host, such as an old server on the same host, can write the deployment's storage.
+- An existing deployment volume on this host keeps its data somewhere other than the disk.
+- The accounts volume is missing or holds no database.
+- With an external database, the database is unreachable or holds no dohc accounts.
+- `deployment.json` or the relay database is missing from the disk. The command checks through the relay's own volumes.
+- Docker cannot complete one of these checks.
+
+Otherwise it starts the deployment and runs the same checks as `node scripts/check-self-host.mjs --running`.
+Use `--env-file PATH` for a different environment file.
+If you changed `DOHC_DEPLOYMENT_NAME`, use that name in the accounts volume commands.
+
+If the command refuses, check the disk mount, `DOHC_DATA_DIRECTORY` and the accounts volume.
+Never recreate the disk folders, and never start the deployment on an empty folder: setup would create a new deployment.
+If the relay refuses its continuity, keep the services stopped and preserve the disk.
+A host that stopped during a relay write can leave that state, as described above.
+
+Devices need no changes if two conditions hold.
+The accounts must be current: the latest copy of the accounts volume from the old host, or the external database unchanged.
+The server's address must resolve to the new host.
+After a restore from an older backup, devices that signed in after that backup must sign in again.
+Sessions revoked after that backup become valid again.
+
+### Accounts in an external database
+
+With [`DOHC_POSTGRES_HOST` set](self-host.md#keep-accounts-in-an-external-postgres), accounts and sign-in sessions live in your provider's database.
+A move needs no accounts copy: the new host connects to the same database.
+Backups of the accounts are your provider's job. The recovery commands do not save or restore them.
+
+Restore an older backup of that database only when the current one is lost.
+An older backup brings back sessions and accounts that were removed after it was taken.
+It also loses accounts created after it was taken.
+Those people cannot open their workspaces, even after they sign up again, because they get new accounts.
+Devices that signed in after the backup must sign in again.
+
+If the database is lost and you have no backup, the server has no accounts.
+Every start after the first refuses an empty database, so the deployment does not create new accounts by mistake.
+Never start it with `--first-start` to get past this check: nobody could open the workspaces on the disk as their owner.
+
 ## Verify the recovery tooling
 
 Run focused source checks after changing this procedure's commands:
 
 ```sh
 pnpm --filter @dohc/sync-relay exec vitest run src/relayDeployment.test.ts src/relayDeploymentRecovery.test.ts src/relayContentSalvage.test.ts src/relaySnapshot.test.ts src/relaySnapshotJob.test.ts
-node --test scripts/self-host/recovery.test.mjs scripts/self-host-compose.test.mjs
+node --test scripts/self-host/recovery.test.mjs scripts/self-host/move.test.mjs scripts/self-host-compose.test.mjs
 pnpm --filter @dohc/sync-relay build
 DOHC_RECOVERY_TEST_IMAGE=YOUR_DOHC_IMAGE node --test scripts/self-host/recovery.docker.test.mjs
+DOHC_RECOVERY_TEST_IMAGE=YOUR_DOHC_IMAGE node --test scripts/self-host/drill.docker.test.mjs
 ```
 
-The Docker test uses isolated volumes and removes them afterward.
-It proves cold snapshot repair after corruption, production reopen, salvage and private volume archival.
-It does not prove arbitrary old-archive restoration or recovery of a lost physical host.
+The Docker tests use isolated volumes and folders and remove them afterward.
+Build the image from the same checkout.
+The recovery test proves cold snapshot repair after corruption, production reopen, salvage and private volume archival.
+It does not prove arbitrary old-archive restoration.
+
+The drill needs a Linux Docker host.
+It hard-kills a deployment that keeps its data in a folder, then starts a fresh Compose project on that folder.
+It checks that the relay reopens the same deployment without moving continuity back.
+It checks that documents, blobs, shares and accounts survive, and that the relay refuses an older copy of its database.
+It also checks that a missing folder fails to start and that the move command refuses an empty folder.
+It checks that the move command refuses existing volumes stored elsewhere and leaves them unchanged.
+It carries the accounts volume over by name, so it does not prove the accounts volume copy commands.
+A killed container does not lose the host's write cache, so the drill does not prove survival of a power loss.
