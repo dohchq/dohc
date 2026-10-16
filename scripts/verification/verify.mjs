@@ -17,7 +17,7 @@ import { admissionPreflight, installedDependenciesMatch } from "./admission.mjs"
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 import { clippy, fmtCheck, nextest } from "../../tools/rust-engine-program/gate-commands.mjs";
 import { finishRustEvidence, refreshRustReuse, rustIdentity } from "./rust-reuse.mjs";
-import { queueRoot, sharedFailures, verifyThroughQueue } from "./queue.mjs";
+import { pauseHold, queueRoot, sharedFailures, verifyThroughQueue } from "./queue.mjs";
 
 // Windows reports a console program that could not start as STATUS_DLL_INIT_FAILED. The job relay
 // (windows-job.ps1 and windows-command.mjs) exits with 0xD0C5 when its command never started.
@@ -223,7 +223,7 @@ export async function verify(args) {
   const output = grant ? grantOutput : join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
   const report = { version: 1, mode, scope: job ?? "all", full, keepGoing, root: repoRoot, base, ...(grant ? { grant } : {}), ...total, steps: [], timings: [], treeReadings: [], flaky: [], failed: [], output, verdict: "RUNNING" };
-  // Tests that passed only on retry: { step, test }.
+  // Tests that passed only on retry: { step, test }, with passedAlone when they failed both tries and passed only alone.
   const flaky = report.flaky;
   // Tests that failed on their last try, named as in `flaky`.
   const failed = report.failed;
@@ -326,7 +326,8 @@ export async function verify(args) {
         await step("pre-queue-clippy", "cargo", clippy, env);
         await step("pre-queue-test-build", "cargo", [...nextest, "--no-run"], env);
       });
-      const queue = grant || inline ? null : queueRoot();
+      const hostQueue = grant ? null : queueRoot();
+      const queue = inline ? null : hostQueue;
       if (queue && reuseRust) throw new Error("The queue cannot reuse Rust evidence yet. Add --inline to reuse it in this checkout.");
       if (queue && keepGoing && !full) throw new Error("The queue keeps going only with --full. Add --full, or --inline to keep going in this checkout.");
       if (queue) {
@@ -357,6 +358,8 @@ export async function verify(args) {
         lane = await measure("queue", () => acquireVerificationSlot(process.env, {
           metadata: {purpose: "PR verification", checkout: repoRoot, commit: report.commit, phase: "admission"},
           observeTicket: tickets?.observe,
+          // An inline run takes no lane while the host's queue is paused.
+          hold: hostQueue && pauseHold(hostQueue),
         }));
       } finally {
         ticketCleanup = tickets?.settle();
@@ -575,7 +578,7 @@ export async function verify(args) {
       save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
       if (report.stopped?.notRun.length) console.log(`[verification] Stopped after ${report.stopped.after} failed. These steps did not finish, so coverage is partial (--keep-going runs them):\n${report.stopped.notRun.map(name => `  ${name}`).join("\n")}`);
       if (report.slowest.length) console.log(`[verification] slowest tests:\n${report.slowest.slice(0, 5).map(row => `  ${row.seconds}s ${row.step}: ${row.test}`).join("\n")}`);
-      if (flaky.length) console.log(`[verification] ${flaky.length} flaky test(s) passed only on retry. Each one is a defect to fix:\n${flaky.map(row => `  ${row.step}: ${row.test}`).join("\n")}`);
+      if (flaky.length) console.log(`[verification] ${flaky.length} flaky test(s) passed only on retry. Each one is a defect to fix:\n${flaky.map(row => `  ${row.step}: ${row.test}${row.passedAlone ? " (failed both tries, passed alone)" : ""}`).join("\n")}`);
       const shared = report.shared ?? [];
       if (shared.length) console.log(`[verification] ${shared.length === 1 ? "1 failed test" : `${shared.length} failed tests`} also failed on other branches in the last day. A failure that other branches share often comes from main or a flaky test, not from this change. Check origin/main and the nightly before you change this branch to fix ${shared.length === 1 ? "it" : "them"}:\n${shared.map(row => `  ${row.step}: ${row.test} (also ${row.branches.join(", ")})`).join("\n")}`);
       if (rerun.length) console.log(`[verification] Rerun the failed tests locally before resubmitting. Set DOHC_REQUIRE_POSTGRES=1 and DOHC_REQUIRE_ENGINE_E2E=1, as the gate does, so a missing database or engine fails instead of skipping:\n${rerun.map(command => `  ${command}`).join("\n")}`);

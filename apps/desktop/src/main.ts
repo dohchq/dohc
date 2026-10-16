@@ -1,3 +1,4 @@
+import { createHistoryCollectionRemote } from "./workspaces/historyCollectionRemote";
 import { forgetWorkspacePresentation } from "./workspaces/actorPresentation";
 import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
@@ -5857,6 +5858,7 @@ function registerIpcHandlers(): void {
   });
   registerOperations(operationBoundary, workspaceFileOperations, workspaceFilesIpc);
 
+  const historyScopeIds = new WeakMap<object, string>();
   const workspaceEngineIpc = createWorkspaceEngineIpc<
     WebContents,
     IpcMainInvokeEvent,
@@ -5868,6 +5870,32 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
+    historyCollections: async operation => {
+      const { workspace } = operation;
+      const local = await localDatasetHostFor(workspace, operation.signal);
+      operation.assertCurrent();
+      const generation = credentialCacheGeneration;
+      let remoteReady: ReturnType<typeof remoteForWorkspace> | undefined;
+      let scope = historyScopeIds.get(operation.state);
+      if (!scope) { scope = randomUUID(); historyScopeIds.set(operation.state, scope); }
+      return {
+        scope: JSON.stringify([scope, generation]),
+        local: (positions, limit, sourceIds) => local.historyHeads({ positions, limit, sourceIds }),
+        remote: createHistoryCollectionRemote({
+          expected: operation, generation, currentGeneration: () => credentialCacheGeneration,
+          withOperation: work => withPhysicalWorkspaceOperation(workspace.workspaceId, work),
+          dataFor: (signal, current) => createDatasetAuthorityRouter(local, {
+            status: async id => { current(); return local.transferStatus(id); },
+            remote: async targetOrigin => {
+              const remote = await (remoteReady ??= remoteForWorkspace(workspace)); current();
+              if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
+              return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
+                currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: current, relayJson: relayShareJsonWithCredentials });
+            },
+          }),
+        }),
+      };
+    },
     recordHistoryPersonName: (workspaceId, userId, sender) => {
       const workspace = findWorkspace(workspaceId);
       if (!recordHistoryPersonIsNamed(userId, workspace?.remote?.ownerUserId ?? localUserId())) return null;

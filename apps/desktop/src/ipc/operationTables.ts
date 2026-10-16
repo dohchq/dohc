@@ -18,6 +18,7 @@ import {
   workspaceSearchOperations,
   folderAppOfferOperations,
   workspaceVersionOperations,
+  historyOperations,
 } from "./bridgeContract";
 import type { OperationTable } from "./operationTable";
 import { shareCopyOperations } from "./shareCopyOperations";
@@ -32,6 +33,7 @@ export const OPERATION_TABLES = [
   systemMotionOperations,
   accessOperations,
   workspaceVersionOperations,
+  historyOperations,
   workspaceSearchOperations,
   folderAppOfferOperations,
   crashReportOperations,

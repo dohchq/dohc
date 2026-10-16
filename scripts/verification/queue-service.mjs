@@ -8,13 +8,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { cpus, freemem } from "node:os";
+import { cpus, freemem, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
 import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
-import { attemptOutcome, lastNightlyPass, lineOrder, listRequests, monitorPort, nextRequest, orderOf, parseMove, placeMove, placeSubmission, position, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, lastNightlyPass, lineOrder, listRequests, monitorPort, nextRequest, orderOf, parseMove, pauseQueue, placeMove, placeSubmission, position, protocol, queueLanePurpose, queuePaths, readJson, readPause, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
 import { startMonitor } from "./queue-monitor.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
@@ -90,7 +90,7 @@ export async function dockerResponds(command = run) {
 async function holdLegacyLane({ entry, signal, lanes }) {
   // No wait limit: a timeout would only send a durable request to the back of the line. Cancel still stops the wait.
   return acquireVerificationSlot(process.env, { lanes, entry: verifierEntry, signal, waitMs: Infinity,
-    metadata: { purpose: "PR verification (queue)", checkout: entry.request.checkout, commit: entry.request.head, phase: `request ${entry.id}` } });
+    metadata: { purpose: queueLanePurpose, checkout: entry.request.checkout, commit: entry.request.head, phase: `request ${entry.id}` } });
 }
 
 /** Run the lane's own verifier for one attempt. */
@@ -129,13 +129,13 @@ function holdInstance(root) {
  */
 export async function runService({
   root, repo, lane = queuePaths(root).lane, commit = null,
-  tickMs = 2000, timeLimitMs = 120 * 60_000, floorGb = resolveBuildBudget()?.diskFloorGb ?? 40,
+  tickMs = 2000, heartbeatMs = 10_000, timeLimitMs = 120 * 60_000, floorGb = resolveBuildBudget()?.diskFloorGb ?? 40,
   // Another run starts only with this much free memory; a check that failed after it fell under the second floor is not trusted.
   memoryFloorGb = 10, memoryFailGb = 3, freeMemory = () => freemem() / 1024 ** 3,
   freeDisk = () => freeDiskGb(lane) ?? freeDiskGb(root), docker = dockerResponds,
   prepare = prepareLane, sweep = sweepContainers, holdLane = holdLegacyLane,
   worker = defaultWorker, retryDelay = retryDelayMs, cleanupRetryMs = 60_000, prepareLimitMs = 45 * 60_000, stop, log = defaultLog(root),
-  lanes = () => 1, monitor = null,
+  lanes = () => 1, monitor = null, bootedAt = Date.now() - uptime() * 1000,
 }) {
   const paths = queuePaths(root);
   for (const path of [paths.inbox, paths.keys, paths.requests, paths.control]) mkdirSync(path, { recursive: true });
@@ -144,8 +144,15 @@ export async function runService({
   // The page only reads the queue's files, so it starts with the service and never holds up its loop.
   const page = monitor === null ? null : startMonitor({ root, port: monitor, log });
   const startedAt = new Date().toISOString();
+  const previous = readJson(paths.service);
   // The previous service's last heartbeat says how long its interrupted runs had been awake.
-  const previousRuns = serviceRuns(readJson(paths.service)).runs;
+  const previousRuns = serviceRuns(previous).runs;
+  // A computer restart since that heartbeat holds the line until someone resumes it, so no run starts
+  // by itself after logon. A service restart within one boot, or a first start, holds nothing.
+  if (previous?.heartbeatAt && bootedAt > Date.parse(previous.heartbeatAt)) {
+    await pauseQueue(root, { reason: "the computer restarted" });
+    log("the computer restarted since the last heartbeat; no run starts until pnpm verify:queue resume");
+  }
   const health = { diskFreeGb: null, diskOk: true, dockerOk: true, dockerCheckedAt: 0, pausedUntil: 0, environmentStreak: 0, reason: null };
   // A request may use twice the per-run limit across all its attempts.
   const requestBudgetMs = 2 * timeLimitMs;
@@ -178,6 +185,8 @@ export async function runService({
   const history = event => { try { appendFileSync(paths.history, JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n"); } catch { /* History informs estimates and records moves; losing a line must not stop the queue. A request keeps its last move in its status. */ } };
   const beat = () => writeJson(paths.service, {
     protocol, pid: process.pid, commit, startedAt, heartbeatAt: new Date().toISOString(), lanes: laneCount,
+    // Read with the runs: once a heartbeat shows the pause, no run starts that it does not list.
+    paused: readPause(root),
     running: [...running.values()].map(current => ({ id: current.id, attempt: current.attempt, checkout: current.checkout, phase: current.phase, startedAt: current.startedAt, awakeMs: current.awakeMs })),
     health: { diskFreeGb: health.diskFreeGb, diskOk: health.diskOk, dockerOk: health.dockerOk, cpuBusyPercent: host.cpuBusyPercent, freeMemGb: host.freeMemGb,
       pausedUntil: health.pausedUntil ? new Date(health.pausedUntil).toISOString() : null, reason: health.reason },
@@ -462,7 +471,7 @@ export async function runService({
   const pulse = setInterval(() => {
     if (Date.now() - tickAt > 15 * 60_000) return;
     beating ??= beat().catch(error => log(`heartbeat failed: ${error.message}`)).finally(() => { beating = null; });
-  }, 10_000);
+  }, heartbeatMs);
   // Awake time has its own clock too, so slow work in the loop never shortens a run's time.
   // Only awake time counts against a run. A gap of over a minute between ticks is the machine sleeping;
   // a shorter one is a busy host delaying the timer, and the run was working through it.
@@ -548,10 +557,10 @@ export async function runService({
       await checkHealth(requests);
       // Fill free lanes in line order. A request started here still reads as queued in `requests`. A request whose
       // containers are not yet removed waits, because they carry its id and their removal would stop its next run.
-      // A restart, even one requested during this tick, starts nothing new and waits for the runs in flight.
+      // A restart or a pause, even one requested during this tick, starts nothing new and waits for the runs in flight.
       const started = new Set([...running.keys(), ...cleanupPending]);
       // A lone run always starts; another one waits while free memory is low.
-      while (running.size < laneCount && (running.size === 0 || freeMemory() >= memoryFloorGb) && health.pausedUntil <= now && !existsSync(restart)) {
+      while (running.size < laneCount && (running.size === 0 || freeMemory() >= memoryFloorGb) && health.pausedUntil <= now && !existsSync(restart) && !existsSync(paths.pause)) {
         const entry = nextRequest(requests.filter(candidate => !started.has(candidate.id)), health, now);
         if (!entry) break;
         started.add(entry.id);

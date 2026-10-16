@@ -38,6 +38,7 @@ import {
   processCreation,
   verificationLanes,
 } from "../tools/rust-engine-program/build-slot.mjs";
+import { pauseQueue, resumeQueue } from "./verification/queue.mjs";
 
 const buildSlotUrl = new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).href;
 
@@ -412,8 +413,13 @@ function queueHarness(t) {
         else process.emit(command);
       });
       console.log = message => process.send({ type: "waiting", message });
-      const { observe, ...options } = JSON.parse(process.argv[2]);
+      const { observe, pausedQueue, ...options } = JSON.parse(process.argv[2]);
       if (observe) options.observeTicket = ticket => { process.send({ type: "observed", ...ticket, text: readFileSync(ticket.path, "utf8") }); };
+      if (pausedQueue) {
+        // The hold an inline PR gate uses, reporting each look at the queue.
+        const hold = (await import(${JSON.stringify(new URL("./verification/queue.mjs", import.meta.url).href)})).pauseHold(pausedQueue);
+        options.hold = () => { const held = hold(); process.send({ type: "checked", held: Boolean(held) }); return held; };
+      }
       try {
         slot = await (${JSON.stringify(kind)} !== "build-slot"
           ? acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: process.argv[1] }, { entry: ${JSON.stringify(verifier)}, ...options })
@@ -766,6 +772,33 @@ test("observed verification waiters keep FIFO order, lane counts, and cancellati
     waiters[id - 1].send("release");
     await waitFor(() => waiters[id - 1].closed, "released waiter must exit");
   }
+});
+
+test("an inline gate takes no lane while the queue is paused, says so once, and continues after resume", async t => {
+  const { root, start, message, acquired } = queueHarness(t);
+  const queue = mkdtempSync(join(tmpdir(), "dohc-queue-pause-"));
+  t.after(() => rmSync(queue, { recursive: true, force: true }));
+  await pauseQueue(queue, { reason: "the computer restarted" });
+  const looks = child => child.messages.filter(item => item.type === "checked" && item.held).length;
+  const cancelled = start("cancelled", { kind: "verification-slot", pausedQueue: queue });
+  const waiting = start("waiting", { kind: "verification-slot", pausedQueue: queue });
+  // A waiter that looked three times waited between its looks.
+  await waitFor(() => looks(waiting) >= 3 && looks(cancelled) >= 1, "held waiters must keep looking");
+  assert.equal(existsSync(join(root, "verification-slot-1")), false, "a held waiter takes no lane");
+  assert.deepEqual(tickets(root, "verification-slot"), [], "nor a ticket, so it reserves none");
+  const said = waiting.messages.filter(item => item.type === "waiting");
+  assert.equal(said.length, 1, "the pause is said once");
+  assert.match(said[0].message, /the verification queue is paused since \S+ \(the computer restarted\); this gate starts after pnpm verify:queue resume$/u);
+  // Ctrl+C stops a held wait like any other.
+  cancelled.send("SIGINT");
+  await waitFor(() => cancelled.closed, "a cancelled held waiter must exit");
+  assert.equal(cancelled.exitCode, 130, cancelled.stderrText);
+  assert.ok(cancelled.messages.some(item => item.type === "rejected"));
+  await resumeQueue(queue);
+  await message(waiting, "acquired");
+  assert.deepEqual(acquired, ["waiting"]);
+  waiting.send("release");
+  await waitFor(() => waiting.closed, "released waiter must exit");
 });
 
 test("Windows CI is uncapped unless an explicit slot root requests the workstation budget", () => {

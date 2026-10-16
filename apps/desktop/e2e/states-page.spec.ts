@@ -18,9 +18,10 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 // change pass. The captures are made deterministic by construction:
 // software rendering, no animations or backdrop filters, a viewport as tall
 // as the page so nothing scrolls, a pinned color scheme, states forced
-// through the browser instead of pointer events, a paused clock so
-// acknowledged copies hold, fonts checked, each part captured alone at the
-// top of its pane, and each capture repeated until two in a row are equal.
+// through the browser instead of pointer events, the pointer parked outside
+// every part, a paused clock so acknowledged copies hold, fonts checked,
+// each part captured alone at the top of its pane, and each capture
+// repeated until two in a row are equal.
 // So the baselines do not cover a backdrop blur, an animation's end state,
 // anything only the GPU draws, or how a part looks at a display scale other
 // than 100%. The baselines were taken on Windows; Playwright names them per
@@ -274,6 +275,20 @@ async function press(page: Page, button: Locator): Promise<void> {
   await page.keyboard.press("Enter");
 }
 
+// Playwright opens the window on the real desktop, so Chromium hovers what
+// lies under the OS pointer, which can rest on a part. A pointer moved
+// through the page takes its place, here on the page's header, outside
+// every part. An OS pointer that moves over the window still reaches it.
+const PARKED = { x: 2, y: 2 };
+async function parkPointer(page: Page): Promise<void> {
+  await page.mouse.move(PARKED.x, PARKED.y);
+  const clear = await page.evaluate(({ x, y }) => {
+    const under = document.elementFromPoint(x, y);
+    return under !== null && under.closest("[data-part], a, button, input, [tabindex]") === null;
+  }, PARKED);
+  expect(clear, "the parked pointer must rest outside every part and control").toBe(true);
+}
+
 // The gate requires this test by its own tag: the route check below shares
 // @states-page and must not stand in for the pixels.
 test("@states-page @states-baselines every shared part matches its baseline in both themes", async () => {
@@ -451,6 +466,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
 
     // A part shown alone must equal its baseline. It must keep its box while
     // it settles, or the capture would be cut to the box it had before.
+    await parkPointer(page);
     await checkEvery(true, async (name, theme) => {
       const box = await partIn(theme, name).boundingBox();
       if (!box) throw new Error(`${name} (${theme}) has no box on the page`);
@@ -483,6 +499,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       return document.documentElement.scrollHeight;
     });
     await page.setViewportSize({ width: WIDTH, height: roundedHeight });
+    await parkPointer(page);
     await checkEvery(false, async (name, theme) => {
       const path = test.info().snapshotPath(`${name}-${theme}.png`);
       if (!existsSync(path)) return;

@@ -10,6 +10,7 @@ it("routes an authenticated viewer launch and allows only app form navigation in
   const assets = await mkdtemp(join(tmpdir(), "dohc-app-viewer-"));
   try {
     await writeFile(join(assets, "index.html"), "<!doctype html><title>Viewer</title>");
+    await writeFile(join(assets, "apps.html"), "<!doctype html><title>Shared app</title>");
     const capability = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, 2).toString("base64url");
     const publicationId = "a".repeat(64), host = "viewer.example.com", viewer = `https://${host}`;
     const application = createShareWebApplication({publicHosts: new Set([host]), relayUrl: "https://relay.example.org", publicRelayUrl: "https://relay.example.org",
@@ -24,6 +25,9 @@ it("routes an authenticated viewer launch and allows only app form navigation in
     const viewerResponse = await application.handle(new Request(viewer + "/s/?app=" + publicationId, {headers: {host}}));
     expect(viewerResponse.status).toBe(200);
     expect(viewerResponse.headers.get("content-security-policy")).toBe(SHARE_WEB_CSP.replace("form-action 'none'", "form-action https://*.example.net"));
+    const appPage = await application.handle(new Request(`${viewer}/s/apps/workspace/${publicationId}`, {headers: {host}}));
+    expect(await appPage.text()).toContain("Shared app");
+    expect(appPage.headers.get("content-security-policy")).toBe(viewerResponse.headers.get("content-security-policy"));
     const exchange = await application.handle(new Request(viewer + "/api/exchange", {method: "POST", body: JSON.stringify({secret: Buffer.alloc(32, 3).toString("base64url")}), headers: {host, "content-type": "application/json"}}));
     expect(exchange.status).toBe(200);const {session} = await exchange.json();
     const cookie = exchange.headers.getSetCookie().map(value => value.split(";", 1)[0]).join("; ");

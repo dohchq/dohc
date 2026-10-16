@@ -9,7 +9,7 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
-import { attemptOutcome, cancel, lastNightlyPass, listRequests, movedNote, nextRequest, nightlyTaskDefinition, parseMove, placeMove, placeSubmission, position, queuePaths, readJson, requestMove, serviceRuns, sharedFailures, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, cancel, inlineRuns, lastNightlyPass, listRequests, movedNote, nextRequest, nightlyTaskDefinition, parseMove, pauseQueue, pauseStatus, placeMove, placeSubmission, position, queueLanePurpose, queuePaths, readJson, readPause, requestMove, resumeQueue, serviceRuns, serviceState, sharedFailures, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
 import { laneTemp, runService, sweepContainers } from "./queue-service.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
 import { run } from "./process.mjs";
@@ -279,11 +279,13 @@ function fixtureRepo() {
 }
 
 /** A service on a private root with a stub verifier: request.checkout names its behavior. */
-function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs, lanes, cleanupRetryMs = 50, freeMemory = () => 32 } = {}) {
+function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs, lanes, cleanupRetryMs = 50, freeMemory = () => 32, heartbeatMs, bootedAt } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-"));
   const fixture = fixtureRepo();
   const calls = [];
-  const stop = new AbortController();
+  // Runs that pass once the test calls finishHeld.
+  const held = [];
+  let stop = new AbortController();
   const worker = async ({ lane, request, grant, output, signal }) => {
     calls.push({ id: grant.request, attempt: grant.attempt, behavior: request.checkout, lane });
     const receipt = fields => writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, final: true, ...fields }));
@@ -298,14 +300,25 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
       ? { verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } } : { verdict: "PASS" });
     else if (behavior === "crash") throw new Error("worker crashed without a receipt");
     else if (behavior === "hang") await new Promise(done => signal.addEventListener("abort", done, { once: true }));
+    else if (behavior === "held") { await new Promise(done => held.push(done)); receipt({ verdict: "PASS" }); }
     else if (behavior === "host-down") receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } });
     // Two slow machine failures, then a run that ends only when it is stopped.
     else if (behavior === "slow-host" && calls.filter(call => call.id === grant.request).length > 2) await new Promise(done => signal.addEventListener("abort", done, { once: true }));
     else if (behavior === "slow-host") { await sleep(3000); receipt({ verdict: "FAIL", error: "Docker did not answer", failure: { kind: "environment", cause: "postgres-start" } }); }
   };
-  const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, timeLimitMs, floorGb: 1,
-    freeDisk: () => 100, docker, prepare, sweep, prepareLimitMs,
-    holdLane, worker, retryDelay: () => 50, cleanupRetryMs, lanes, freeMemory, stop: stop.signal, log: () => {} });
+  const serve = (overrides = {}) => runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, timeLimitMs, floorGb: 1,
+    freeDisk: () => 100, docker, prepare, sweep, prepareLimitMs, heartbeatMs, bootedAt,
+    holdLane, worker, retryDelay: () => 50, cleanupRetryMs, lanes, freeMemory, stop: stop.signal, log: () => {}, ...overrides });
+  let service = serve();
+  // Stop the service and start another on the same root, as the supervisor does. Resolves once the new one beats.
+  const restart = async overrides => {
+    const before = readJson(queuePaths(root).service)?.startedAt;
+    stop.abort();
+    await service;
+    stop = new AbortController();
+    service = serve(overrides);
+    await waitFor(() => readJson(queuePaths(root).service)?.startedAt !== before, "the restarted service must beat");
+  };
   t.after(async () => { stop.abort(); await service; rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); rmSync(fixture.repo, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
   const request = async (behavior, fields = {}) => {
     // Each behavior verifies its own commit: one commit with the same gates is one piece of work.
@@ -318,7 +331,8 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
     const found = listRequests(root).find(candidate => candidate.id === id);
     return found && terminalStates.has(found.status.state) ? found : null;
   }, `request ${id} did not finish`);
-  return { root, fixture, calls, request, settled, service };
+  const finishHeld = () => held.splice(0).forEach(done => done());
+  return { root, fixture, calls, request, settled, service, restart, finishHeld };
 }
 
 async function waitFor(read, message, timeoutMs = 15_000) {
@@ -997,4 +1011,93 @@ test("a newer commit that replaces two queued requests takes the place of the on
   assert.deepEqual([status.order, status.moved], [40, moved]);
   await cancel(root, hung.id);
   assert.equal((await settled(newer.id)).status.verdict, "PASS");
+});
+
+test("a paused queue starts nothing, lets the run in flight finish, and moves again on resume", async t => {
+  const { root, request, settled, calls, finishHeld } = harness(t, { lanes: () => 2, heartbeatMs: 50 });
+  const state = id => listRequests(root).find(candidate => candidate.id === id).status.state;
+  const status = () => pauseStatus(root, serviceState(root), 0);
+  const running = await request("held");
+  await waitFor(() => calls.find(call => call.id === running.id), "the first run must start");
+  assert.equal((await pauseQueue(root, { reason: "updating drivers" })).changed, true);
+  const waiting = await request("pass");
+  // A later acceptance means the service has decided about the waiting request since it arrived.
+  await request("pass", { branch: "refs/heads/later" });
+  assert.equal(state(waiting.id), "queued", "a free lane takes nothing while paused");
+  await waitFor(() => /^paused since \S+ \(updating drivers\): 1 running, no new runs start$/u.test(status()), "status must count the run in flight");
+  finishHeld();
+  assert.equal((await settled(running.id)).status.verdict, "PASS", "the run in flight finishes normally");
+  await waitFor(() => status() === "paused and idle: safe to restart", "status must say idle once the run ends");
+  await request("pass", { branch: "refs/heads/after-idle" });
+  assert.equal(state(waiting.id), "queued", "an idle paused queue still starts nothing");
+  assert.equal((await resumeQueue(root)).reason, "updating drivers");
+  assert.equal((await settled(waiting.id)).status.verdict, "PASS", "resume starts the line in its order");
+});
+
+test("pausing records no failure and changes no request", async t => {
+  const { root, request, settled } = harness(t, { heartbeatMs: 50 });
+  const paths = queuePaths(root);
+  await pauseQueue(root, { reason: "maintenance" });
+  const waiting = await request("pass");
+  const accepted = readFileSync(join(paths.request(waiting.id), "status.json"), "utf8");
+  await request("pass", { branch: "refs/heads/later" });
+  const record = await waitFor(() => { const beat = readJson(paths.service); return beat?.paused?.reason === "maintenance" && beat; }, "the heartbeat must show the pause");
+  assert.equal(readFileSync(join(paths.request(waiting.id), "status.json"), "utf8"), accepted, "the waiting request's status is untouched");
+  assert.deepEqual({ ...JSON.parse(accepted), updatedAt: undefined }, { state: "queued", attempts: [], updatedAt: undefined });
+  assert.deepEqual([record.health.reason, record.health.pausedUntil], [null, null], "a pause is not a machine failure");
+  assert.deepEqual(readFileSync(paths.history, "utf8").trim().split("\n").map(line => JSON.parse(line).event), ["accepted", "accepted"]);
+  await resumeQueue(root);
+  const passed = await settled(waiting.id);
+  assert.deepEqual(passed.status.attempts.map(attempt => attempt.outcome), ["passed"], "the pause left no failed attempt");
+});
+
+test("a computer restart holds the line until resume; a service restart or a first start does not", async t => {
+  // A first start has no heartbeat to compare, even with a boot just now.
+  const { root, request, settled, restart } = harness(t, { bootedAt: Date.now() });
+  const state = id => listRequests(root).find(candidate => candidate.id === id).status.state;
+  const lastBeat = () => Date.parse(readJson(queuePaths(root).service).heartbeatAt);
+  assert.equal((await settled((await request("pass", { branch: "refs/heads/first" })).id)).status.verdict, "PASS");
+  assert.equal(readPause(root), null, "a first start holds nothing");
+  // The supervisor or an upgrade restarts the service within one boot.
+  await restart({ bootedAt: lastBeat() - 60 * 60_000 });
+  assert.equal(readPause(root), null, "a service restart holds nothing");
+  assert.equal((await settled((await request("pass", { branch: "refs/heads/same-boot" })).id)).status.verdict, "PASS");
+  // The computer booted after the last heartbeat.
+  await restart({ bootedAt: lastBeat() + 1 });
+  assert.equal(readPause(root)?.reason, "the computer restarted");
+  const waiting = await request("pass", { branch: "refs/heads/after-boot" });
+  await request("pass", { branch: "refs/heads/later" });
+  assert.equal(state(waiting.id), "queued", "no run starts after the computer restarts");
+  // The pause outlasts a service restart.
+  await restart({ bootedAt: 0 });
+  assert.equal(readPause(root)?.reason, "the computer restarted");
+  await request("pass", { branch: "refs/heads/later-still" });
+  assert.equal(state(waiting.id), "queued", "the pause survives a service restart");
+  await resumeQueue(root);
+  assert.equal((await settled(waiting.id)).status.verdict, "PASS");
+});
+
+test("status says paused and idle only when nothing runs, counting inline gates", async t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-queue-pause-"));
+  const slots = mkdtempSync(join(tmpdir(), "dohc-queue-pause-slots-"));
+  t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(slots, { recursive: true, force: true }); });
+  assert.equal(pauseStatus(root, { record: null, alive: false }, 0), null, "a queue that is not paused");
+  const { pause } = await pauseQueue(root, { reason: "restarting" });
+  assert.deepEqual(await pauseQueue(root, { reason: "again" }), { pause, changed: false }, "pausing again keeps the first record");
+  const beat = (running, paused = pause) => ({ record: { paused, running: running.map(id => ({ id })) }, alive: true });
+  const busy = count => `paused since ${pause.at} (restarting): ${count} running, no new runs start`;
+  assert.equal(pauseStatus(root, beat([]), 0), "paused and idle: safe to restart");
+  assert.equal(pauseStatus(root, beat(["a", "b"]), 0), busy(2));
+  assert.equal(pauseStatus(root, beat([]), 1), busy(1), "an inline gate holding a lane is running");
+  assert.equal(pauseStatus(root, beat([], null), 0), busy(0), "a service that has not seen the pause may still start a run");
+  assert.equal(pauseStatus(root, { record: beat(["a"]).record, alive: false }, 0), "paused and idle: safe to restart", "a stopped service's runs stopped with it");
+  // The service's own runs hold lanes too; only the other holders are inline gates.
+  for (const [n, purpose] of [[1, queueLanePurpose], [2, "PR verification"]]) {
+    mkdirSync(join(slots, `verification-slot-${n}`));
+    writeFileSync(join(slots, `verification-slot-${n}`, "owner.json"), JSON.stringify({ pid: process.pid, start: new Date().toISOString(), purpose }));
+  }
+  assert.equal(inlineRuns({ DOHC_BUILD_SLOT_ROOT: slots }), 1);
+  assert.deepEqual(await resumeQueue(root), pause);
+  assert.equal(await resumeQueue(root), null, "resuming a moving queue changes nothing");
+  assert.equal(pauseStatus(root, beat([]), 0), null);
 });

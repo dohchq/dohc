@@ -734,3 +734,15 @@ it("preserves schema dates in a Collection transfer over HTTP across historical 
     expect(target.storage.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_checkpoint_times").get()!.n).toBe(0);
   }finally{await archive.dispose();}
 });
+
+it("serves owner-only metadata History and validates its boolean query", async () => {
+  const f = await httpFixture();
+  expect((await f.activate()).status).toBe(200);
+  await f.host.invoke({ kind: "named", workspaceId: "w", userId: "owner" }, { workspaceId: "w", datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256, operationId: id(5), input: { name: "Private" }, idempotencyKey: "metadata" });
+  const response = await f.http(`${f.path}/history?metadataOnly=true`);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ lineage: expect.stringMatching(/^[a-f0-9]{64}$/), archived: false, olderRecordedAtMs: expect.any(Number), entries: [{ revision: 1 }] });
+  expect((await f.http(`${f.path}/history?metadataOnly=false`)).status).toBe(200);
+  for (const query of ["metadataOnly=1", "metadataOnly=true&metadataOnly=false"]) expect((await f.http(`${f.path}/history?${query}`)).status).toBe(400);
+  expect((await f.http(`${f.path}/history?metadataOnly=true`, undefined, { authorization: "Bearer helper" })).status).toBe(404);
+});
