@@ -2005,8 +2005,8 @@ struct RealEnv {
     actor: ActorHandle,
     workspace_id: String,
     leases: LeaseRegistry,
-    /// The lease release count at the last check. A capture deferred to a
-    /// live session is offered again once this moves.
+    /// The lease release count at the last check. Deferred and quarantined
+    /// paths are offered again once this moves.
     lease_releases_seen: u64,
     status: Arc<DriverStatus>,
     author_json: Arc<Mutex<Option<String>>>,
@@ -2371,7 +2371,7 @@ impl DriverEnv for RealEnv {
             return TickIo::RefreshRequired;
         }
         let files = layer.files.handle();
-        offer_deferred_after_release(
+        offer_unrecorded_after_release(
             &self.leases,
             &self.workspace_id,
             &mut self.lease_releases_seen,
@@ -3356,8 +3356,9 @@ async fn materialize_ydoc_recoveries(
 /// Re-offer unrecorded paths when a document session releases its lease.
 /// Empty new files are deferred; outside writes to held new files are
 /// quarantined after repeated refusals. Both need a rescan even when nothing
-/// on disk changes after the session ends.
-async fn offer_deferred_after_release(
+/// on disk changes after the session ends. The release must wake quarantined
+/// paths itself: once the WAL is reused in place, nothing else will.
+async fn offer_unrecorded_after_release(
     leases: &LeaseRegistry,
     workspace_id: &str,
     releases_seen: &mut u64,

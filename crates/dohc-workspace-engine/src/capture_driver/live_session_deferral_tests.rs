@@ -128,13 +128,15 @@ async fn capture_with_a_live_session_on_a_new_file(files_on_disk: &[&str]) {
             .acquire(&elsewhere)
             .expect("another workspace's session"),
     );
-    offer_deferred_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle()).await;
+    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
+        .await;
     assert!(!files.handle().stats().await.expect("stats").dirty);
 
     // The session closes without an edit. Nothing on disk changes, and the
     // release alone brings the file back to capture.
     drop(lease);
-    offer_deferred_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle()).await;
+    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
+        .await;
     let run = reconcile_if_dirty_bound(&root, &files.handle(), CancellationToken::new())
         .await
         .expect("reconcile after release");
@@ -1891,7 +1893,7 @@ async fn a_lease_release_reoffers_quarantined_outside_writes() {
     assert_eq!((parked.deferred, parked.quarantined), (0, 1));
     let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
     drop(lease);
-    offer_deferred_after_release(
+    offer_unrecorded_after_release(
         &harness.leases,
         WORKSPACE_ID,
         &mut releases_seen,
