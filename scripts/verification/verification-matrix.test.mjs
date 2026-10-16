@@ -208,7 +208,7 @@ function createVerificationFixtures(directory) {
         if(args[0]==='run'){writeFileSync(join(repoRoot,'.dohc-dev/database-started'),'yes');return {stdout:'a'.repeat(64)};}
         if(args[0]==='inspect')return {stdout:'healthy'};
         if(args[0]==='port')return {stdout:'127.0.0.1:1234'};
-        assert.deepEqual(args,['rm','--force','a'.repeat(64)]);
+        assert.deepEqual(args,['rm','--force','--volumes','a'.repeat(64)]);
         writeFileSync(join(repoRoot,'.dohc-dev/database-stopped'),'yes');return {stdout:''};
       }
       if(command==='pnpm' && args[0]==='run') {

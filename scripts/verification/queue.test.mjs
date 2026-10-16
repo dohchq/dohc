@@ -610,10 +610,15 @@ test("a lane setting that cannot be read keeps the lane count the service had, f
   assert.equal(slots, 1);
 });
 
-test("a request's cleanup removes only its containers, and the sweep never one another lane may be starting", async () => {
+test("a request's cleanup removes only its containers and their volumes, and the sweep never one another lane may be starting", async () => {
   let removed = [];
+  const flags = [];
   const command = async (_, args) => {
-    if (args[0] === "rm") { removed.push(...args.slice(2)); return { stdout: "" }; }
+    if (args[0] === "rm") {
+      flags.push(args.filter(arg => arg.startsWith("--")));
+      removed.push(...args.slice(1).filter(arg => !arg.startsWith("--")));
+      return { stdout: "" };
+    }
     const filters = args.filter(arg => arg.includes("="));
     const found = filters.includes("label=dohc.verification=r1") ? "own" : filters.includes("status=exited") ? "exited" : filters.includes("status=created") ? "starting" : "";
     return { stdout: found };
@@ -623,6 +628,7 @@ test("a request's cleanup removes only its containers, and the sweep never one a
   removed = [];
   assert.equal(await sweepContainers({ command }), 1);
   assert.deepEqual(removed, ["exited"]);
+  assert.deepEqual(flags, [["--force", "--volumes"], ["--force", "--volumes"]], "each removal takes the container's anonymous data volume with it");
 });
 
 test("each lane has its own temp folder under the queue root", () => {
