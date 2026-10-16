@@ -25,6 +25,7 @@ pub struct HistoryCursor {
     pub workspace_id: String,
     pub version_id: String,
     pub object_id: Option<String>,
+    pub operation_id: Option<String>,
     pub text_fence: i64,
     pub protected_fence: i64,
     // Version rows are append-only. Their rowid fences imported old-dated forks too.
@@ -41,6 +42,7 @@ pub struct HistoryMomentMetadata {
     pub version_id: String,
     pub object_id: String,
     pub path: String,
+    pub before_path: Option<String>,
     pub recorded_at_ms: i64,
     pub operation: MomentOp,
     pub after_content_kind: String,
@@ -68,6 +70,7 @@ impl VersionedTextStore<'_> {
         workspace_id: &str,
         version_id: Option<&str>,
         object_id: Option<&str>,
+        operation_id: Option<&str>,
         limit: usize,
         cursor: Option<HistoryCursor>,
     ) -> Result<HistoryPageRead, DomainError> {
@@ -75,6 +78,14 @@ impl VersionedTextStore<'_> {
             return Err(DomainError::InvalidInput {
                 reason: "invalid history page scope or limit",
             });
+        }
+        if let Some(operation) = operation_id {
+            super::validate_identifier(operation, "operation_id")?;
+            if !operation.starts_with(super::OPERATION_ID_PREFIX) {
+                return Err(DomainError::InvalidInput {
+                    reason: "invalid operation id",
+                });
+            }
         }
         let active_version = self.get_active_version(workspace_id)?;
         let selected_version_id = version_id.unwrap_or(&active_version.version_id).to_owned();
@@ -89,7 +100,7 @@ impl VersionedTextStore<'_> {
                             .as_ref()
                             .is_none_or(|p| p.moment_order >= 0 && p.moment_order <= fence)
                     };
-                    let object_streams_empty = object_id.is_none()
+                    let object_streams_empty = (object_id.is_none() && operation_id.is_none())
                         || (cursor.protected_fence == -1
                             && cursor.marker_fence == -1
                             && cursor.protected.is_none()
@@ -99,6 +110,7 @@ impl VersionedTextStore<'_> {
                         || cursor.workspace_id != workspace_id
                         || cursor.version_id != version_id
                         || cursor.object_id.as_deref() != object_id
+                        || cursor.operation_id.as_deref() != operation_id
                         || cursor.text_fence < -1
                         || cursor.protected_fence < -1
                         || cursor.marker_fence < -1
@@ -119,6 +131,7 @@ impl VersionedTextStore<'_> {
                         workspace_id: workspace_id.to_owned(),
                         version_id: version_id.to_owned(),
                         object_id: object_id.map(str::to_owned),
+                        operation_id: operation_id.map(str::to_owned),
                         text_fence: conn
                             .query_row(
                                 text_fence_query(object_id.is_some()),
@@ -130,7 +143,7 @@ impl VersionedTextStore<'_> {
                                 |r| r.get(0),
                             )
                             .map_err(DomainError::sql_corrupt)?,
-                        protected_fence: if object_id.is_some() {
+                        protected_fence: if object_id.is_some() || operation_id.is_some() {
                             -1
                         } else {
                             conn.query_row(
@@ -141,7 +154,7 @@ impl VersionedTextStore<'_> {
                             )
                             .map_err(DomainError::sql_corrupt)?
                         },
-                        marker_fence: if object_id.is_some() {
+                        marker_fence: if object_id.is_some() || operation_id.is_some() {
                             -1
                         } else {
                             conn.query_row(
@@ -156,12 +169,12 @@ impl VersionedTextStore<'_> {
                 }
             };
             let moments = read_text(conn, &cursor, limit + 1)?;
-            let protected_moments = if object_id.is_some() {
+            let protected_moments = if object_id.is_some() || operation_id.is_some() {
                 Vec::new()
             } else {
                 read_protected(conn, &cursor, limit + 1)?
             };
-            let version_markers = if object_id.is_some() {
+            let version_markers = if object_id.is_some() || operation_id.is_some() {
                 Vec::new()
             } else {
                 read_markers(conn, &cursor, limit + 1)?
@@ -201,7 +214,9 @@ fn read_text(
 
 fn text_query(cursor: &HistoryCursor, limit: usize) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
     // The admission fence must not make SQLite sort all eligible rows before LIMIT.
-    let index = if cursor.object_id.is_some() {
+    let index = if cursor.operation_id.is_some() {
+        "idx_moments_operation_correlation"
+    } else if cursor.object_id.is_some() {
         "idx_moments_object_history_time"
     } else {
         "idx_moments_history_time"
@@ -210,7 +225,7 @@ fn text_query(cursor: &HistoryCursor, limit: usize) -> (String, Vec<Box<dyn rusq
     let mut sql = format!(
         "SELECT m.moment_order,m.moment_id,m.version_id,m.object_id,m.path,m.recorded_at_ms,m.operation, \
          COALESCE(m.after_content_kind,'text'),COALESCE(b.byte_length,bb.byte_length), \
-         m.metadata_origin,m.metadata_summary,m.metadata_correlation_id,m.author_json,COALESCE(m.sync_record_only,0) \
+         m.metadata_origin,m.metadata_summary,m.metadata_correlation_id,m.author_json,COALESCE(m.sync_record_only,0),m.payload_before_path \
          FROM moments m INDEXED BY {index} \
          LEFT JOIN blobs b ON b.sha256=m.after_blob_sha256 \
          LEFT JOIN binary_blobs bb ON bb.sha256=m.after_binary_sha256 \
@@ -226,6 +241,16 @@ fn text_query(cursor: &HistoryCursor, limit: usize) -> (String, Vec<Box<dyn rusq
     if let Some(object_id) = &cursor.object_id {
         sql.push_str(&format!(" AND m.object_id=?{}", binds.len() + 1));
         binds.push(Box::new(object_id.clone()));
+    }
+    if let Some(operation_id) = &cursor.operation_id {
+        sql.push_str(&format!(
+            " AND m.metadata_correlation_id=?{} AND coalesce(m.sync_record_only,0)=0
+            AND NOT EXISTS (SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id
+                AND r.imported=1 AND r.op_kind='moment.append'
+                AND json_extract(r.payload_json,'$.momentId')=m.moment_id)",
+            binds.len() + 1
+        ));
+        binds.push(Box::new(operation_id.clone()));
     }
     if let Some(position) = &cursor.text {
         sql.push_str(&format!(
@@ -254,6 +279,7 @@ fn map_history_text_row(
         version_id: r.get(2)?,
         object_id: r.get(3)?,
         path: r.get(4)?,
+        before_path: r.get(14)?,
         recorded_at_ms: r.get(5)?,
         operation: MomentOp::Write,
         after_content_kind: r.get(7)?,
@@ -372,6 +398,7 @@ mod tests {
                 workspace_id: "ws".into(),
                 version_id: "main".into(),
                 object_id: None,
+                operation_id: None,
                 text_fence: 100,
                 protected_fence: -1,
                 marker_fence: -1,
@@ -420,6 +447,7 @@ mod tests {
                 workspace_id: "ws".into(),
                 version_id: "main".into(),
                 object_id: Some("object".into()),
+                operation_id: None,
                 text_fence: 100,
                 protected_fence: -1,
                 marker_fence: -1,

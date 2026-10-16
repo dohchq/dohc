@@ -33,7 +33,7 @@ fn an_old_sync_arrival_is_fenced_out_of_the_chain_and_visible_on_refresh() {
             .unwrap();
     }
     let mut page = VersionedTextStore::new(&mut store)
-        .history_page("ws", None, None, 1, None)
+        .history_page("ws", None, None, None, 1, None)
         .unwrap();
     let first = page.moments[0].clone();
     let mut cursor = page.cursor.clone();
@@ -65,7 +65,7 @@ fn an_old_sync_arrival_is_fenced_out_of_the_chain_and_visible_on_refresh() {
     let mut ids = vec![first.moment_id];
     loop {
         page = VersionedTextStore::new(&mut store)
-            .history_page("ws", None, None, 1, Some(cursor.clone()))
+            .history_page("ws", None, None, None, 1, Some(cursor.clone()))
             .unwrap();
         let Some(row) = page.moments.first() else {
             break;
@@ -78,7 +78,7 @@ fn an_old_sync_arrival_is_fenced_out_of_the_chain_and_visible_on_refresh() {
     }
     assert_eq!(ids, vec!["local-3", "local-2", "local-1", "local-0"]);
     let refreshed = VersionedTextStore::new(&mut store)
-        .history_page("ws", None, None, 50, None)
+        .history_page("ws", None, None, None, 50, None)
         .unwrap();
     let imported = refreshed
         .moments

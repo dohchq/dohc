@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { readFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
@@ -7,7 +9,7 @@ import { startSmtpCapture } from "./smtpCapture";
 
 export const ACCOUNT_TEST_SECRET = "disposable-account-browser-acceptance-secret-0123456789";
 
-export async function startAccountServer(options: { relayUrl?: string; shareUrl?: string; port?: number; publicOrigin?: string } = {}) {
+export async function startAccountServer(options: { relayUrl?: string; shareUrl?: string; port?: number; publicOrigin?: string; signal?: AbortSignal } = {}) {
   const connectionString = process.env.POSTGRES_URL;
   if (!connectionString || process.env.DOHC_REQUIRE_POSTGRES !== "1") {
     throw new Error("Account browser acceptance requires an explicit disposable POSTGRES_URL and DOHC_REQUIRE_POSTGRES=1.");
@@ -46,30 +48,58 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
   child.stdout.on("data", chunk => { logs = (logs + String(chunk)).slice(-16_384); });
   child.stderr.on("data", chunk => { logs = (logs + String(chunk)).slice(-16_384); });
   let exited = false;
-  const exit = new Promise<void>(resolve => child.once("exit", () => { exited = true; resolve(); }));
-  const ready = await new Promise<void>((resolve, reject) => {
-    const abort = setTimeout(() => reject(new Error("Account server did not start within 20 seconds.")), 20_000);
-    child.once("error", error => { clearTimeout(abort); reject(error); });
-    child.once("exit", code => { clearTimeout(abort); reject(new Error(`Account server exited before startup (${code}). ${logs}`)); });
-    const inspect = () => {
-      if (logs.includes("listening on")) { clearTimeout(abort); resolve(); }
-    };
-    child.stdout.on("data", inspect);
-  }).catch(async error => {
-    child.kill();
+  const killOnExit = () => { child.kill(); };
+  process.once("exit", killOnExit);
+  const exit = new Promise<void>(resolve => child.once("close", () => {
+    exited = true;
+    process.off("exit", killOnExit);
+    resolve();
+  }));
+  const controller = new AbortController();
+  const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+  let lastReadyBody = "No HTTP response.";
+  let childError: Error | undefined;
+  const onError = (error: Error) => { childError = error; controller.abort(error); };
+  const onExit = (code: number | null, exitSignal: NodeJS.Signals | null) => controller.abort(new Error(`Account server exited before readiness (code ${code}, signal ${exitSignal}).`));
+  child.on("error", onError);
+  child.once("exit", onExit);
+  try {
+    while (true) {
+      signal.throwIfAborted();
+      try {
+        const response = await fetch(`${listenOrigin}/ready`, { signal });
+        lastReadyBody = await response.text();
+        const report: { ok?: unknown } | null = JSON.parse(lastReadyBody);
+        signal.throwIfAborted();
+        if (response.ok && report?.ok === true) break;
+      } catch {
+        signal.throwIfAborted();
+      }
+      await delay(100, undefined, { signal });
+    }
+  } catch (error) {
+    if (!exited) child.kill();
+    await exit;
     await mail.close();
     await pool.end();
-    throw error;
-  });
-  void ready;
+    const failure = signal.aborted ? signal.reason : error;
+    const reason = failure instanceof Error ? failure.message : String(failure);
+    throw new Error(`Account server startup failed: ${reason}\nLast /ready body: ${lastReadyBody}\nLogs:\n${logs}`, { cause: failure });
+  } finally {
+    child.off("exit", onExit);
+  }
   return {
     origin, listenOrigin, mail, pool, pid: child.pid,
     logs: () => logs,
     async close() {
-      if (!exited) child.kill();
-      await exit;
-      await mail.close();
-      await pool.end();
+      try {
+        if (!exited) child.kill();
+        if (childError) throw childError;
+        if (!exited) await once(child, "close");
+      } finally {
+        await mail.close();
+        await pool.end();
+      }
     },
   };
 }
