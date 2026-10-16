@@ -6,7 +6,7 @@ import type { ServerAccountDeletionPreview } from "@dohc/cli/account";
 import { deferred } from "../../testing/deferred";
 import { useAccountDeletion, type AccountDeletion } from "./useAccountDeletion";
 
-type DeleteResult = { ok: true; finished: boolean; email: string; server: string };
+type DeleteResult = { ok: true; finished: boolean; email: string; server: string; disconnectError: string | null };
 
 const server = "https://cloud.dohc.test";
 const preview: ServerAccountDeletionPreview = {
@@ -88,7 +88,7 @@ describe("useAccountDeletion", () => {
     const observer = new MutationObserver(() => {
       if (answeredBeforeEffects !== null || !screen.queryByTestId("shell-b")) return;
       answeredBeforeEffects = !started.has("b");
-      answer.resolve({ ok: true, finished: true, email: "me@dohc.test", server });
+      answer.resolve({ ok: true, finished: true, email: "me@dohc.test", server, disconnectError: null });
     });
     observer.observe(document.body, { childList: true, subtree: true });
     // Outside act, so React schedules the switch's effects as it does in the app.

@@ -11,6 +11,8 @@ export interface ServerAccountDeleted {
   finished: boolean;
   email: string;
   server: string;
+  // Why this computer could not disconnect from the deleted account, if so.
+  disconnectError: string | null;
 }
 
 export interface ServerAccountDeleteDialogProps {
@@ -96,7 +98,7 @@ function Delete(props: ServerAccountDeleteDialogProps) {
       const result = await bridge().deleteServerAccount({ server: preview.server, previewToken: preview.previewToken, password });
       if (!alive.current || request.current !== token) return;
       if (result.ok) {
-        props.onDeleted({ finished: result.finished, email: result.email, server: result.server });
+        props.onDeleted({ finished: result.finished, email: result.email, server: result.server, disconnectError: result.disconnectError });
         return;
       }
       if (sessionChanged.current) {

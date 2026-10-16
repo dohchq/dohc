@@ -6845,6 +6845,15 @@ export const serverAccountOperations = {
     result: ServerAccountDeleteResult,
     guard: "trusted-sender",
   },
+  // Runs a disconnect that failed after a deletion again.
+  retryServerAccountDisconnect: {
+    capabilityId: "account.delete",
+    scope: "device",
+    channel: "desktop:retry-server-account-disconnect",
+    payload: z.object({}).strict(),
+    result: z.null(),
+    guard: "trusted-sender",
+  },
 } as const satisfies OperationTable;
 
 export interface DohcDesktopBridge

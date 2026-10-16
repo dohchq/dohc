@@ -94,7 +94,7 @@ describe("server account deletion", () => {
   it("sends the token and password only to the reviewed server, then disconnects that account", async () => {
     const h = await reviewed(() => json(200, { finished: true }));
     await expect(h.deletion.delete(deleteInput)).resolves.toEqual({
-      ok: true, finished: true, email: credentials.email, server: credentials.serverUrl,
+      ok: true, finished: true, email: credentials.email, server: credentials.serverUrl, disconnectError: null,
     });
     expect(h.calls.map((call) => [call.url, call.body])).toEqual([[
       "https://account.example.test/api/auth/account/delete",
@@ -120,10 +120,26 @@ describe("server account deletion", () => {
     expect(h.disconnect).not.toHaveBeenCalled();
   });
 
-  it("keeps a completed deletion when the disconnect fails", async () => {
+  it("keeps a completed deletion and reports a disconnect that failed, until a retry disconnects", async () => {
     const h = await reviewed(() => json(200, { finished: true }));
     h.disconnect.mockRejectedValueOnce(new Error("store failed"));
-    await expect(h.deletion.delete(deleteInput)).resolves.toMatchObject({ ok: true, finished: true });
+    await expect(h.deletion.delete(deleteInput)).resolves.toEqual({
+      ok: true, finished: true, email: credentials.email, server: credentials.serverUrl, disconnectError: "store failed",
+    });
+    h.disconnect.mockRejectedValueOnce(new Error("store still failed"));
+    await expect(h.deletion.retryDisconnect()).rejects.toThrow("store still failed");
+    await expect(h.deletion.retryDisconnect()).resolves.toBeUndefined();
+    expect(h.disconnect.mock.calls).toEqual([[credentials], [credentials], [credentials]]);
+    // Once disconnected, a retry has nothing left to run.
+    await h.deletion.retryDisconnect();
+    expect(h.disconnect).toHaveBeenCalledTimes(3);
+  });
+
+  it("has no disconnect to retry after one that succeeded", async () => {
+    const h = await reviewed(() => json(200, { finished: true }));
+    await h.deletion.delete(deleteInput);
+    await h.deletion.retryDisconnect();
+    expect(h.disconnect).toHaveBeenCalledOnce();
   });
 
   it("never sends the password after the session moved to another server", async () => {
@@ -189,7 +205,11 @@ describe("server account deletion", () => {
 describe("server account IPC", () => {
   it("checks the sender and the payload before main calls the server", async () => {
     const handlers = new Map<string, (trusted: boolean, payload: unknown) => Promise<unknown>>();
-    const deletion = { preview: vi.fn(async () => { throw new Error("unused"); }), delete: vi.fn(async () => ({ ok: false as const, code: "rate-limited" as const, reason: "Wait." })) };
+    const deletion = {
+      preview: vi.fn(async () => { throw new Error("unused"); }),
+      delete: vi.fn(async () => ({ ok: false as const, code: "rate-limited" as const, reason: "Wait." })),
+      retryDisconnect: vi.fn(async () => undefined),
+    };
     registerServerAccountIpc<boolean, never>({
       handle: (channel, handler) => { handlers.set(channel, handler); },
       assertTrustedSender: (trusted) => { if (!trusted) throw new Error("Untrusted sender"); },
@@ -198,6 +218,7 @@ describe("server account IPC", () => {
     expect([...handlers.keys()]).toEqual([
       serverAccountOperations.previewServerAccountDeletion.channel,
       serverAccountOperations.deleteServerAccount.channel,
+      serverAccountOperations.retryServerAccountDisconnect.channel,
     ]);
     const preview = handlers.get(serverAccountOperations.previewServerAccountDeletion.channel)!;
     await expect(preview(false, {})).rejects.toThrow("Untrusted sender");
@@ -210,5 +231,11 @@ describe("server account IPC", () => {
     expect(deletion.delete).not.toHaveBeenCalled();
     await expect(remove(true, deleteInput)).resolves.toEqual({ ok: false, code: "rate-limited", reason: "Wait." });
     expect(deletion.delete).toHaveBeenCalledWith(deleteInput);
+    const retry = handlers.get(serverAccountOperations.retryServerAccountDisconnect.channel)!;
+    await expect(retry(false, {})).rejects.toThrow("Untrusted sender");
+    await expect(retry(true, { userId: "someone-else" })).rejects.toThrow();
+    expect(deletion.retryDisconnect).not.toHaveBeenCalled();
+    await expect(retry(true, {})).resolves.toBeNull();
+    expect(deletion.retryDisconnect).toHaveBeenCalledOnce();
   });
 });

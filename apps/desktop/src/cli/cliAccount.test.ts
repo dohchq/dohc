@@ -29,7 +29,7 @@ async function send(verb: string, args: Record<string, unknown>, serverOptions: 
 
 describe("CLI account verbs", () => {
   it("preview and delete outside any workspace, through the app's account client", async () => {
-    const deleted = { ok: true as const, finished: true, email: "ice@dohc.dev", server };
+    const deleted = { ok: true as const, finished: true, email: "ice@dohc.dev", server, disconnectError: null };
     const account = { preview: vi.fn(async () => preview), delete: vi.fn(async () => deleted) };
     const o = options(account);
     const base = { cwd: "/not/a/workspace", actor: "agent" };
@@ -44,7 +44,7 @@ describe("CLI account verbs", () => {
   });
 
   it("refuses a delete without a password before the account client runs", async () => {
-    const account = { preview: vi.fn(async () => preview), delete: vi.fn(async () => ({ ok: true as const, finished: true, email: "e", server })) };
+    const account = { preview: vi.fn(async () => preview), delete: vi.fn(async () => ({ ok: true as const, finished: true, email: "e", server, disconnectError: null })) };
     const response = await send("accountDelete", { cwd: "/", actor: "human", server, previewToken: "t", password: "" }, options(account).value);
     expect(response).toMatchObject({ ok: false, error: "dohc: invalid CLI request" });
     expect(account.delete).not.toHaveBeenCalled();

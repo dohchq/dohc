@@ -70,6 +70,21 @@ export function createServerAccountDeletion(options: ServerAccountDeletionOption
   // The account each preview token was issued to, so the password only goes
   // with the session that the person reviewed.
   const reviews = new Map<string, { serverUrl: string; userId: string; at: number }>();
+  // Deleted accounts this computer could not disconnect from yet.
+  const undisconnected = new Map<string, CloudCredentials>();
+
+  // Answers why the disconnect failed, or null once it succeeded.
+  async function disconnect(deleted: CloudCredentials): Promise<string | null> {
+    const key = `${deleted.serverUrl}\n${deleted.userId}`;
+    try {
+      await options.disconnect(deleted);
+      undisconnected.delete(key);
+      return null;
+    } catch (error) {
+      undisconnected.set(key, deleted);
+      return (error instanceof Error ? error.message : String(error)) || "The disconnect failed.";
+    }
+  }
 
   async function session(): Promise<CloudCredentials> {
     const credentials = await options.credentials();
@@ -158,8 +173,18 @@ export function createServerAccountDeletion(options: ServerAccountDeletionOption
       // The server already ended every session of the account, finished or
       // not. The disconnect clears the cached session before anything that
       // can fail, so a failure here must not hide the deletion.
-      await options.disconnect(credentials).catch(() => undefined);
-      return ServerAccountDeleteResult.parse({ ok: true, finished: deleted.data.finished, email: credentials.email, server: credentials.serverUrl });
+      const disconnectError = await disconnect(credentials);
+      return ServerAccountDeleteResult.parse({
+        ok: true, finished: deleted.data.finished, email: credentials.email, server: credentials.serverUrl, disconnectError,
+      });
+    },
+
+    // Runs each disconnect that failed after a deletion again.
+    async retryDisconnect(): Promise<void> {
+      for (const credentials of [...undisconnected.values()]) {
+        const error = await disconnect(credentials);
+        if (error !== null) throw new Error(error);
+      }
     },
   };
 }

@@ -53,7 +53,7 @@ describe("dohc account deletePreview", () => {
 
 describe("dohc account delete", () => {
   it("sends the password it read, never from argv, and never prints it", async () => {
-    const request = vi.fn(async (_request: CliRequestWithoutToken) => ({ ok: true, finished: true, email: "ice@dohc.dev", server }));
+    const request = vi.fn(async (_request: CliRequestWithoutToken) => ({ ok: true, finished: true, email: "ice@dohc.dev", server, disconnectError: null }));
     const readPasswordInput = vi.fn(async () => PASSWORD);
     const result = await executeCli({ argv: deleteArgv, env: {}, request, readPassword: readPasswordInput });
 
@@ -72,15 +72,33 @@ describe("dohc account delete", () => {
   it("says the account is blocked while the server finishes", async () => {
     const result = await executeCli({
       argv: [...deleteArgv, "--json"], env: {}, readPassword: async () => PASSWORD,
-      request: async () => ({ ok: true, finished: false, email: "ice@dohc.dev", server }),
+      request: async () => ({ ok: true, finished: false, email: "ice@dohc.dev", server, disconnectError: null }),
     });
-    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 3, ok: true, finished: false, email: "ice@dohc.dev", server });
+    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 3, ok: true, finished: false, email: "ice@dohc.dev", server, disconnectError: null });
+    expect(result.exitCode).toBe(0);
     expectNoPassword(result);
     const text = await executeCli({
       argv: deleteArgv, env: {}, readPassword: async () => PASSWORD,
-      request: async () => ({ ok: true, finished: false, email: "ice@dohc.dev", server }),
+      request: async () => ({ ok: true, finished: false, email: "ice@dohc.dev", server, disconnectError: null }),
     });
     expect(text.stdout).toContain(`ice@dohc.dev on ${server} is blocked. The server will finish removing its data.`);
+  });
+
+  it("says the account was deleted, why the app could not disconnect, and how to finish, then exits 1", async () => {
+    const answer = { ok: true, finished: true, email: "ice@dohc.dev", server, disconnectError: "EPERM: operation\nnot permitted" };
+    const result = await executeCli({ argv: deleteArgv, env: {}, readPassword: async () => PASSWORD, request: async () => answer });
+    expect(result).toEqual({
+      exitCode: 1, stderr: "",
+      stdout: [
+        `Deleted ice@dohc.dev on ${server}. Workspaces on this computer stay.`,
+        "The dohc app could not disconnect from this server: EPERM: operation not permitted",
+        "Quit and reopen the dohc app. If Settings > Sync and sharing still shows ice@dohc.dev, choose Disconnect.",
+        "",
+      ].join("\n"),
+    });
+    const json = await executeCli({ argv: [...deleteArgv, "--json"], env: {}, readPassword: async () => PASSWORD, request: async () => answer });
+    expect(json.exitCode).toBe(1);
+    expect(JSON.parse(json.stdout)).toEqual({ schemaVersion: 3, ...answer });
   });
 
   it.each([

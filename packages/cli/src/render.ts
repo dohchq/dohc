@@ -286,9 +286,17 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     case "accountDelete": {
       const deleted = result as CliResultByVerb["accountDelete"];
       if (!deleted.ok) throw new DohcCliError(deleted.reason);
-      return deleted.finished
-        ? `Deleted ${deleted.email} on ${deleted.server}. The dohc app disconnected from this server. Workspaces on this computer stay.`
-        : `${deleted.email} on ${deleted.server} is blocked. The server will finish removing its data. The dohc app disconnected from this server. Workspaces on this computer stay.`;
+      const outcome = deleted.finished
+        ? `Deleted ${deleted.email} on ${deleted.server}.`
+        : `${deleted.email} on ${deleted.server} is blocked. The server will finish removing its data.`;
+      if (deleted.disconnectError === null) {
+        return `${outcome} The dohc app disconnected from this server. Workspaces on this computer stay.`;
+      }
+      return [
+        `${outcome} Workspaces on this computer stay.`,
+        `The dohc app could not disconnect from this server: ${lineSafe(deleted.disconnectError)}`,
+        `Quit and reopen the dohc app. If Settings > Sync and sharing still shows ${deleted.email}, choose Disconnect.`,
+      ].join("\n");
     }
     case "shareCopy":
     case "accessObject":

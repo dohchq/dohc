@@ -102,14 +102,14 @@ describe("ServerAccountDeleteDialog", () => {
     expect(confirm.disabled).toBe(false);
   });
 
-  it("deletes with the reviewed token and the typed password", async () => {
-    bridgeMock.deleteServerAccount.mockResolvedValue({ ok: true, finished: true, email: "ice@dohc.dev", server });
+  it("deletes with the reviewed token and the typed password, and passes on a failed disconnect", async () => {
+    bridgeMock.deleteServerAccount.mockResolvedValue({ ok: true, finished: true, email: "ice@dohc.dev", server, disconnectError: "store failed" });
     const { props } = renderDialog();
     await screen.findByTestId("server-account-delete-scope");
     typePassword("correct horse");
     fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
 
-    await waitFor(() => expect(props.onDeleted).toHaveBeenCalledWith({ finished: true, email: "ice@dohc.dev", server }));
+    await waitFor(() => expect(props.onDeleted).toHaveBeenCalledWith({ finished: true, email: "ice@dohc.dev", server, disconnectError: "store failed" }));
     expect(bridgeMock.deleteServerAccount).toHaveBeenCalledWith({ server, previewToken: "token-1", password: "correct horse" });
   });
 
@@ -131,7 +131,7 @@ describe("ServerAccountDeleteDialog", () => {
     expect(bridgeMock.previewServerAccountDeletion).toHaveBeenCalledTimes(2);
     expect(props.onDeleted).not.toHaveBeenCalled();
 
-    bridgeMock.deleteServerAccount.mockResolvedValue({ ok: true, finished: true, email: "ice@dohc.dev", server });
+    bridgeMock.deleteServerAccount.mockResolvedValue({ ok: true, finished: true, email: "ice@dohc.dev", server, disconnectError: null });
     typePassword("correct horse");
     fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
     await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenLastCalledWith({ server, previewToken: "token-2", password: "correct horse" }));
@@ -206,7 +206,7 @@ describe("ServerAccountDeleteDialog", () => {
   });
 
   it("still reports a sent delete whose own disconnect changed the session", async () => {
-    const slow = deferred<{ ok: true; finished: boolean; email: string; server: string }>();
+    const slow = deferred<{ ok: true; finished: boolean; email: string; server: string; disconnectError: string | null }>();
     bridgeMock.deleteServerAccount.mockReturnValue(slow.promise);
     const { props } = renderDialog();
     await screen.findByTestId("server-account-delete-scope");
@@ -215,8 +215,8 @@ describe("ServerAccountDeleteDialog", () => {
     await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenCalledOnce());
     changeSession(null);
 
-    await act(async () => { slow.resolve({ ok: true, finished: true, email: "ice@dohc.dev", server }); });
-    expect(props.onDeleted).toHaveBeenCalledWith({ finished: true, email: "ice@dohc.dev", server });
+    await act(async () => { slow.resolve({ ok: true, finished: true, email: "ice@dohc.dev", server, disconnectError: null }); });
+    expect(props.onDeleted).toHaveBeenCalledWith({ finished: true, email: "ice@dohc.dev", server, disconnectError: null });
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
@@ -251,7 +251,7 @@ describe("ServerAccountDeleteDialog", () => {
   });
 
   it("ignores a delete that answers after the dialog closed", async () => {
-    const slow = deferred<{ ok: true; finished: boolean; email: string; server: string }>();
+    const slow = deferred<{ ok: true; finished: boolean; email: string; server: string; disconnectError: string | null }>();
     bridgeMock.deleteServerAccount.mockReturnValue(slow.promise);
     const { props, unmount } = renderDialog();
     await screen.findByTestId("server-account-delete-scope");
@@ -260,7 +260,7 @@ describe("ServerAccountDeleteDialog", () => {
     await waitFor(() => expect(bridgeMock.deleteServerAccount).toHaveBeenCalledOnce());
     unmount();
 
-    await act(async () => { slow.resolve({ ok: true, finished: true, email: "ice@dohc.dev", server }); });
+    await act(async () => { slow.resolve({ ok: true, finished: true, email: "ice@dohc.dev", server, disconnectError: null }); });
     expect(props.onDeleted).not.toHaveBeenCalled();
   });
 });

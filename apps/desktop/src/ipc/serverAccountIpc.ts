@@ -9,5 +9,9 @@ export function registerServerAccountIpc<Event, Operation>(
   registerOperations(boundary, serverAccountOperations, {
     previewServerAccountDeletion: () => deletion.preview(),
     deleteServerAccount: (input) => deletion.delete(input),
+    retryServerAccountDisconnect: async () => {
+      await deletion.retryDisconnect();
+      return null;
+    },
   });
 }

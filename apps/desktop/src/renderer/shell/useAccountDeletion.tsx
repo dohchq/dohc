@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
+import { bridge } from "../bridge";
 import { ServerAccountDeleteDialog, type ServerAccountDeleted } from "../ServerAccountDeleteDialog";
 import { signInCount } from "../settings/CloudAccountRow";
 import type { ConnectionErrorReport } from "./connectionNotices";
@@ -69,7 +70,7 @@ export function useAccountDeletion(): { deletion: AccountDeletion; dialog: React
     };
   }
 
-  // Main already disconnected from the deleted account.
+  // Main already tried to disconnect from the deleted account.
   function deleted(result: ServerAccountDeleted) {
     end((to) => {
       if (result.finished) {
@@ -79,6 +80,23 @@ export function useAccountDeletion(): { deletion: AccountDeletion; dialog: React
           `${result.server} blocked ${result.email} and will finish deleting its data. Workspaces on this computer stay.`,
         );
       }
+      if (result.disconnectError !== null) disconnectFailed(to, result.server, new Error(result.disconnectError));
+    });
+  }
+
+  // Try again runs main's disconnect again. Another failure goes to the
+  // shell open when it arrives.
+  function disconnectFailed(to: AccountDeletionShell, server: string, cause: unknown) {
+    to.report({
+      message: `dohc could not finish disconnecting from ${server}.`,
+      cause,
+      serverUrl: null,
+      retry: () => {
+        void bridge().retryServerAccountDisconnect({}).catch((next: unknown) => {
+          if (shell.current) disconnectFailed(shell.current, server, next);
+        });
+        return true;
+      },
     });
   }
 

@@ -65,5 +65,6 @@
   "desktop:get-folder-app": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:get-system-reduced-motion": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:preview-server-account-deletion": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
-  "desktop:delete-server-account": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null }
+  "desktop:delete-server-account": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:retry-server-account-disconnect": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null }
 }

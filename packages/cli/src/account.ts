@@ -30,9 +30,16 @@ export const ServerAccountDeleteRequest = z.object({
 export type ServerAccountDeleteRequest = z.infer<typeof ServerAccountDeleteRequest>;
 
 // `finished` is false while the server still removes data. The account is
-// blocked either way, and this computer is disconnected from it.
+// blocked either way. `disconnectError` is null once this computer
+// disconnected from it, or says why that failed.
 export const ServerAccountDeleteResult = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), finished: z.boolean(), email: z.string().min(1), server: z.string().min(1) }).strict(),
+  z.object({
+    ok: z.literal(true),
+    finished: z.boolean(),
+    email: z.string().min(1),
+    server: z.string().min(1),
+    disconnectError: z.string().min(1).nullable(),
+  }).strict(),
   z.object({
     ok: z.literal(false),
     code: z.enum(["preview-changed", "wrong-password", "rate-limited"]),

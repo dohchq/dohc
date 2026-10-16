@@ -683,7 +683,7 @@ const ACCOUNT_VERBS = {
       "dohc reads the account password from stdin, or asks for it when stdin is a terminal. Never pass it as an argument.",
       "This cannot be undone. Copies on this computer stay. People you shared with lose access and keep their copies.",
       "If you create an account again later, the server will not accept your old copies of the deleted workspaces. Its backups keep the data until they expire.",
-      "When the server cannot finish at once, the account stays blocked and the server finishes later. Either way, the dohc app disconnects from the server.",
+      "When the server cannot finish at once, the account stays blocked and the server finishes later. Either way, the dohc app disconnects from the server. If it cannot, delete exits 1 and says how to finish.",
       "If the preview expired or changed, run deletePreview again.",
     ],
     strayRefusal: ACCOUNT_DELETE_STRAY,
