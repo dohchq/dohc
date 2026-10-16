@@ -4,9 +4,11 @@ import {
   chatSideOf,
   fileSideOf,
   isChatChannelSelector,
+  isGroupSelector,
   isLiveEditShareSelector,
   parseStoredAnyShareSelectorJson,
   type AnyShareSelector,
+  type GroupShareSelector,
   type ShareSelector,
   type StoredAnyShareSelector,
 } from "./shareFilter";
@@ -173,14 +175,27 @@ export function resolveReceivedShareAuthority(
     : { ok: false, reason: "gauntlet", genericChatWritable: false, fallback };
 }
 
+// A link's files: a path grant, or a Group's folder. The action is still
+// judged against the whole grant, so a Group folder is never live-edited.
 export function authorizeLinkShareAction(
   input: Omit<ShareGrantAuthorizationInput, "principal">,
 ): ShareAuthorizationResult<ShareSelector> {
   const result = authorizeShareGrantAction({ ...input, principal: { kind: "link" } });
-  if (!result.ok || "kind" in result.effectiveSelector) {
-    return { ok: false, reason: "gauntlet" };
-  }
-  return result as AuthorizedShareAction<ShareSelector>;
+  const files = result.ok ? fileSideOf(result.effectiveSelector) : null;
+  if (!result.ok || !files) return { ok: false, reason: "gauntlet" };
+  return { ...result, effectiveSelector: files };
+}
+
+// A link's channel: only a Group share's, while the owner's log still names
+// it an ordinary channel (`selectorTargetsBlockedChannel`).
+export function authorizeLinkChatAction(
+  input: Omit<ShareGrantAuthorizationInput, "principal" | "action"> & { action: "read" | "append" },
+): ShareAuthorizationResult<GroupShareSelector> {
+  const result = authorizeShareGrantAction({ ...input, principal: { kind: "link" } });
+  if (!result.ok) return result;
+  return isGroupSelector(result.effectiveSelector)
+    ? { ...result, effectiveSelector: result.effectiveSelector }
+    : { ok: false, reason: "gauntlet" };
 }
 
 export function authorizeShareGrantAction(

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  authorizeLinkChatAction,
   authorizeLinkShareAction,
   authorizeNamedLiveEditShareGrant,
   authorizeShareAction,
@@ -163,6 +164,48 @@ describe("share authorization", () => {
     expect(authorizeLinkShareAction({
       storage: storageFixture({ grant: parent }), grantId: parent.grantId, action: "live-edit",
     })).toMatchObject({ ok: true, effectiveSelector: { access: "edit" } });
+  });
+
+  it("splits a Group link into its folder for file callers and its channel for chat", () => {
+    const groupShare: SyncRelayShareRow = {
+      ...share,
+      selectorJson: JSON.stringify({ kind: "group", channelWireId: "wire-1", paths: ["team"], versionId: null }),
+    };
+    const chatShare: SyncRelayShareRow = {
+      ...share,
+      selectorJson: JSON.stringify({ kind: "chat", channelWireId: "wire-1" }),
+    };
+    const link = (access: string): SyncRelayShareGrantRow => ({
+      ...grant, grantId: "link-grant", principalKind: "link", principalUserId: null, access,
+    });
+    const files = (storage: AuthorizationStorage, action: ShareAction = "read") =>
+      authorizeLinkShareAction({ storage, grantId: "link-grant", action });
+    const chat = (storage: AuthorizationStorage, action: "read" | "append" = "read") =>
+      authorizeLinkChatAction({ storage, grantId: "link-grant", action });
+
+    for (const [access, fileAccess] of [["read-only", "view"], ["read-write", "edit"]] as const) {
+      const storage = storageFixture({ share: groupShare, grant: link(access) });
+      expect(files(storage), access).toMatchObject({
+        ok: true, effectiveSelector: { paths: ["team"], versionId: null, access: fileAccess },
+      });
+      expect(files(storage, "live-edit"), access).toEqual({ ok: false, reason: "gauntlet" });
+      expect(chat(storage), access).toMatchObject({
+        ok: true, effectiveSelector: { kind: "group", channelWireId: "wire-1", access },
+      });
+    }
+    expect(chat(storageFixture({ share: groupShare, grant: link("read-only") }), "append"))
+      .toEqual({ ok: false, reason: "denied" });
+    expect(chat(storageFixture({ share: groupShare, grant: link("read-write") }), "append"))
+      .toMatchObject({ ok: true });
+    for (const channelKind of ["dm", "agent"] as const) {
+      const storage = storageFixture({ share: groupShare, grant: link("read-write"), channelKind });
+      expect(files(storage), String(channelKind)).toEqual({ ok: false, reason: "gauntlet" });
+      expect(chat(storage), String(channelKind)).toEqual({ ok: false, reason: "gauntlet" });
+    }
+    const chatOnly = storageFixture({ share: chatShare, grant: link("read-write") });
+    expect(files(chatOnly)).toEqual({ ok: false, reason: "gauntlet" });
+    expect(chat(chatOnly)).toEqual({ ok: false, reason: "gauntlet" });
+    expect(chat(storageFixture({ grant: link("view") }))).toEqual({ ok: false, reason: "gauntlet" });
   });
 
   it("derives received-share read selection and generic appendability from one grant pass", () => {

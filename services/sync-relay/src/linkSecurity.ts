@@ -197,6 +197,7 @@ export interface ValidatedLinkCapability {
   grantId: string;
   generation: number;
   access: ShareSelector["access"];
+  // The link's files. On a Group share, its folder.
   effectiveSelector: ShareSelector;
 }
 
