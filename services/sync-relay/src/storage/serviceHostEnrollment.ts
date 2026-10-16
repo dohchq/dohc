@@ -323,14 +323,33 @@ export function listServiceHostEnrollments(storage: StorageContext, workspaceId?
     return values.map(row);
   });
 }
+export interface ServiceHostEnrollmentCursor {readonly workspaceId: string; readonly path: string}
 /**
  * The enrollments the service host has not drained: its documents, and the
- * ones it must still remove from its replicas before their release. Active
- * rows come first; Stop leaves retired rows here, at most a page of them.
+ * ones it must still remove from its replicas before their release. Every
+ * active row comes first, then a page of the retired rows after `after`,
+ * which Stop leaves here.
  */
-export function listUndrainedServiceHostEnrollments(storage: StorageContext): readonly ServiceHostEnrollment[] {
-  return storage.readLiveAuthority(() => storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE host_drained_at_ms IS NULL
-    ORDER BY retired,workspace_id,path LIMIT ?`).all(SERVICE_HOST_MAX_DOCUMENTS * 2).map(row));
+export function listUndrainedServiceHostEnrollments(storage: StorageContext, after?: ServiceHostEnrollmentCursor): {
+  documents: readonly ServiceHostEnrollment[]; nextCursor: ServiceHostEnrollmentCursor | null;
+} {
+  const workspaceId = after === undefined ? "" : parseWorkspaceId(after.workspaceId), path = after === undefined ? "" : canonicalPath(after.path);
+  return storage.readLiveAuthority(() => {
+    // Capacity bounds the active rows.
+    const active = storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE host_drained_at_ms IS NULL AND retired=0
+      ORDER BY workspace_id,path LIMIT ?`).all(SERVICE_HOST_MAX_DOCUMENTS).map(row);
+    const retired = storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE host_drained_at_ms IS NULL AND retired=1
+      AND (workspace_id,path)>(?,?) ORDER BY workspace_id,path LIMIT ?`).all(workspaceId, path, SERVICE_HOST_MAX_DOCUMENTS + 1);
+    const page = retired.slice(0, SERVICE_HOST_MAX_DOCUMENTS).map(row), last = page.at(-1);
+    return {documents: [...active, ...page], nextCursor: retired.length > SERVICE_HOST_MAX_DOCUMENTS && last ? {workspaceId: last.workspaceId, path: last.path} : null};
+  });
+}
+/** The current workspace identities with an undrained enrollment, one per workspace. Each names a hosted store to keep. */
+export function listUndrainedServiceHostWorkspaces(storage: StorageContext): readonly ServiceHostWorkspace[] {
+  return storage.readLiveAuthority(() => storage.db.prepare(`SELECT DISTINCT e.workspace_id,e.owner_user_id,e.replication_epoch,e.stream_identity
+    FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
+    WHERE e.host_drained_at_ms IS NULL AND e.owner_user_id=w.owner_user_id
+      AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity`).all().map(hostWorkspace));
 }
 export function listRetiredServiceHostEnrollments(storage: StorageContext, workspaceId: string, after?: string): {
   documents: readonly ServiceHostEnrollment[]; nextCursor: string | null;
@@ -362,9 +381,12 @@ export function currentServiceHostWorkspace(storage: StorageContext, workspaceId
   storage.captureStanding();
   const value = storage.db.prepare(`SELECT e.workspace_id,e.owner_user_id,e.replication_epoch,e.stream_identity ${includeUndrained ? CURRENT_UNDRAINED : CURRENT} LIMIT 1`)
     .get(parseWorkspaceId(workspaceId));
-  return value ? Object.freeze({workspaceId: parseWorkspaceId(value.workspace_id), ownerUserId: parseLiveUpdateIdentifier(value.owner_user_id, "owner_user_id"),
+  return value ? hostWorkspace(value) : null;
+}
+function hostWorkspace(value: Record<string, unknown>): ServiceHostWorkspace {
+  return Object.freeze({workspaceId: parseWorkspaceId(value.workspace_id), ownerUserId: parseLiveUpdateIdentifier(value.owner_user_id, "owner_user_id"),
     replicationEpoch: parseLiveUpdateIdentifier(value.replication_epoch, "replication_epoch"),
-    streamIdentity: parseLiveUpdateIdentifier(value.stream_identity, "stream_identity")}) : null;
+    streamIdentity: parseLiveUpdateIdentifier(value.stream_identity, "stream_identity")});
 }
 /** The current identity's enabled enrollments, in one SQL snapshot. */
 export function currentServiceHostEnrollments(storage: StorageContext, workspaceId: string): readonly ServiceHostEnrollment[] {

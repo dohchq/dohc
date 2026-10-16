@@ -207,10 +207,34 @@ it("lists the enrollments the host has not drained, including stopped ones, acti
   f.storage.setServiceHostEnrollmentEnabled({...f.input, path: "docs/0.md", enabled: false, retire: true, nowMs: 20});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, path: "docs/released.md", enabled: false, nowMs: 20});
   f.release("released-object");
-  expect(f.storage.listUndrainedServiceHostEnrollments().map(row => [row.path, row.enabled, row.retired, row.ownerStop]))
+  expect(f.storage.listUndrainedServiceHostEnrollments().documents.map(row => [row.path, row.enabled, row.retired, row.ownerStop]))
     .toEqual([[active.path, true, false, null], ["docs/paused.md", true, false, "pause"], ["docs/0.md", false, true, "retire"]]);
   f.release("stopped-object");
-  expect(f.storage.listUndrainedServiceHostEnrollments().map(row => row.path)).toEqual([active.path, "docs/paused.md"]);
+  expect(f.storage.listUndrainedServiceHostEnrollments().documents.map(row => row.path)).toEqual([active.path, "docs/paused.md"]);
+});
+
+// Proves: retired rows come a page at a time after every active row, and the
+// stores to keep come from every undrained current identity, past any page.
+it("pages retired undrained enrollments after the active ones and names every undrained current identity", async () => {
+  const f = await fixture(), active = f.enroll();
+  const stopped = f.raw.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes)
+    VALUES (?,'object','docs/a.md','owner-1',?,'epoch','stream','retire',0,1,1,1,1)`);
+  // More workspaces than two pages, each with a document stopped while the host was down.
+  const workspaces = Array.from({length: 130}, (_, index) => `workspace-${String(index).padStart(3, "0")}`);
+  for (const workspaceId of workspaces) {f.seed(workspaceId, "object", "docs/a.md", `share-${workspaceId}`); stopped.run(workspaceId, `share-${workspaceId}`);}
+  const first = f.storage.listUndrainedServiceHostEnrollments();
+  expect(first.documents.map(row => row.workspaceId)).toEqual([active.workspaceId, ...workspaces.slice(0, 64)]);
+  expect(first.nextCursor).toEqual({workspaceId: workspaces[63], path: "docs/a.md"});
+  const second = f.storage.listUndrainedServiceHostEnrollments(first.nextCursor!);
+  expect(second.documents.map(row => row.workspaceId)).toEqual([active.workspaceId, ...workspaces.slice(64, 128)]);
+  const last = f.storage.listUndrainedServiceHostEnrollments(second.nextCursor!);
+  expect(last).toMatchObject({documents: [{workspaceId: active.workspaceId}, {workspaceId: workspaces[128]}, {workspaceId: workspaces[129]}], nextCursor: null});
+  // An obsolete identity names no store; a drained row keeps none.
+  f.raw.prepare("UPDATE sync_relay_workspaces SET replication_epoch='rotated' WHERE workspace_id=?").run(workspaces[0]);
+  f.raw.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET host_drained_at_ms=30 WHERE workspace_id=?`).run(workspaces[1]);
+  const kept = f.storage.listUndrainedServiceHostWorkspaces();
+  expect(kept.map(row => row.workspaceId).sort()).toEqual([active.workspaceId, ...workspaces.slice(2)].sort());
+  expect(kept.find(row => row.workspaceId === workspaces[129])).toEqual({workspaceId: workspaces[129], ownerUserId: "owner-1", replicationEpoch: "epoch", streamIdentity: "stream"});
 });
 
 it("refuses altered enrollment schema on reopen", async () => {

@@ -801,7 +801,7 @@ it.each(["settlement-pending", "delivery-pending"])("drops a stopped last docume
 // that only from its own pull, and the document is released only once a
 // retry removes it.
 it("retains a departed document through a failed file removal and a restart until its retirement succeeds", async () => {
-  const o = await emptyServiceHost(), workspaces = [o.workspace], left = {workspaceId: "workspace", objectId: "object-left"};
+  const o = await emptyServiceHost(), workspaces = [o.workspace], left = {workspaceId: "workspace", objectId: "object-left", path: "docs/left.md", shareId: "share"};
   vi.spyOn(console, "error").mockImplementation(() => {});
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
@@ -844,6 +844,83 @@ it("clears a held document's readiness until its next capture succeeds", async (
   o.refuseCapture(undefined);
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+// A host on the same relay and engine as the empty host, started after it closed.
+async function restartEmpty(o: Awaited<ReturnType<typeof emptyServiceHost>>) {
+  await o.host.close();
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  const requests = () => o.client().sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string});
+  const count = (method: string) => requests().filter(request => request.method === method).length;
+  return {restarted, requests, count};
+}
+const held = () => new EngineRequestError(1, {code: "INVALID_PARAMS", message: "hosted-document-held", retry: "afterBackoff"} as never);
+
+// Proves: after a restart while the engine holds a document, its catch-up pull
+// marks it held before it has an owner, so its workspace keeps pushing and
+// pulling, which bring what it waits for, until its capture succeeds.
+it("keeps pushing and pulling after a restart while the engine holds a document, until its capture succeeds", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(held());
+  o.replies.pass = {held: [{objectId: o.sibling.objectId, reason: "hosted-backfill-work-waiting"}]};
+  const {restarted, count} = await restartEmpty(o);
+  await restarted.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => {expect(count("sync.push")).toBeGreaterThan(2); expect(count("sync.pullHosted")).toBeGreaterThan(2);});
+  expect(o.client().captureOwnerActivation).toHaveBeenCalled();
+  expect(restarted.isDocumentReady(o.document)).toBe(false);
+  o.replies.pass = {};
+  o.refuseCapture(undefined);
+  await vi.waitFor(() => expect(restarted.isDocumentReady(o.document)).toBe(true));
+  await expect(restarted.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+// Proves: a fresh daemon resumes a departing document an earlier one left,
+// before any pull adopts the scope it left, even one a sibling's activation
+// would make, then settles, publishes and unloads it. Its replica then drains.
+it("resumes a departing document after a restart before any pull, then settles, publishes and unloads it", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  // The sibling has no owner after the restart, so its activation pulls first.
+  const activate = vi.mocked(ServiceActivationDriver.prototype.activate), through = activate.getMockImplementation()!;
+  activate.mockImplementation(function (this: ServiceActivationDriver, ...args) {
+    if (args[0].path !== o.other.path) return through.apply(this, args);
+    return this.options.workspaces.get("workspace")!.replica.pull(args[1]).then(() => ({kind: "pending" as const, reason: "held"}));
+  });
+  const {restarted, requests} = await restartEmpty(o);
+  await restarted.update({workspaces, documents: [o.other], departing: [o.sibling]});
+  await vi.waitFor(() => expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toHaveLength(1));
+  const capture = o.client().captureOwnerActivation;
+  expect(capture).toHaveBeenCalledWith(expect.anything(), "docs/a.md", 1_000_000, expect.any(AbortSignal), `ordinary-activation-${"a".repeat(64)}`);
+  const methods = requests().map(request => request.method), at = (index: number) => o.client().sendRequest.mock.invocationCallOrder[index]!;
+  const pulled = methods.indexOf("sync.pullHosted"), settled = methods.indexOf("liveApplication.settle");
+  expect(pulled === -1 || at(pulled) > capture.mock.invocationCallOrder[0]!).toBe(true);
+  expect(settled).toBeGreaterThan(-1);
+  expect(methods.indexOf("sync.push", settled)).toBeGreaterThan(settled);
+  expect(methods.indexOf("liveApplication.unloadDocument")).toBeGreaterThan(methods.indexOf("sync.push", settled));
+  await vi.waitFor(() => expect(restarted.retains(o.sibling)).toBe(false));
+});
+
+// The engine captures only a document in its replica's current scope. Once a
+// pull adopted the scope a departing document left, its unsettled work stays
+// in the store: it stays retained and its workspace does not drain.
+it("keeps a departing document retained when the engine refuses to resume it after a restart", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(new EngineRequestError(1, {code: "CONFLICT", message: "conflict", retry: "no"} as never));
+  const {restarted} = await restartEmpty(o);
+  await restarted.update({workspaces, documents: [], departing: [o.sibling]});
+  await o.nextPull(); await o.nextPull();
+  expect(o.client().captureOwnerActivation.mock.calls.length).toBeGreaterThan(1);
+  expect(restarted.retains(o.sibling)).toBe(true);
+  expect(restarted.drained("workspace")).toBe(false);
+  expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toEqual([]);
 });
 
 // Proves: a diverged replica stops and detaches, its documents stay retained,

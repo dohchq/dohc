@@ -68,6 +68,8 @@ export class ServiceActivationDriver {
   readonly #dormant=new Map<string,string>();
   // Targets a hosted pass left held, until the engine captures them again.
   readonly #held=new Set<string>();
+  // Each target's document, once known, so a hold applies before the target has an owner, as after a restart.
+  readonly #objects=new Map<string,string>();
   constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
     workspaces:ReadonlyMap<string,{handle:string;replica:ServiceActivationReplica}>;config:ServiceActivationConfig;
     adoption:{maxBytes:number;maxEvents:number};restore?:LiveRestorePreparation;nextRequestId():number;deadlineMs:number;
@@ -79,8 +81,9 @@ export class ServiceActivationDriver {
   /** The documents activation passes visit, in pass order. */
   get targets(){return this.#targets;}
   /** Adds one document to activation passes, replacing an earlier target at its path. */
-  addTarget(target:ServiceActivationTarget){
+  addTarget(target:ServiceActivationTarget,objectId:string){
     this.#targets=[...this.#targets.filter(row=>targetKey(row)!==targetKey(target)),target];
+    this.#objects.set(targetKey(target),objectId);
   }
   /** Whether this driver may have loaded the document into the engine. */
   loaded(target:ServiceActivationTarget){return this.#loaded.has(targetKey(target));}
@@ -95,7 +98,7 @@ export class ServiceActivationDriver {
   removeTarget(target:ServiceActivationTarget){
     const key=targetKey(target);
     this.#targets=this.#targets.filter(row=>targetKey(row)!==key);
-    this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);this.#held.delete(key);
+    this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);this.#held.delete(key);this.#objects.delete(key);
     for(const [document,owner] of this.#owners)if(owner.target===key)this.#owners.delete(document);
   }
   /**
@@ -105,15 +108,11 @@ export class ServiceActivationDriver {
    * which bring what they wait for.
    */
   hold(workspaceId:string,objectIds:readonly string[]){
-    const held=(document:string)=>{
-      const key=parseLiveDocumentKey(JSON.parse(document));
-      return key.workspaceId===workspaceId && objectIds.includes(key.objectId);
-    };
-    for(const [document,owner] of this.#owners){
-      if(!held(document))continue;
-      owner.completed=false;this.#completedTargets.delete(owner.target);this.#owners.delete(document);this.#held.add(owner.target);
+    for(const [key,objectId] of this.#objects){
+      if(JSON.parse(key)[0]!==workspaceId || !objectIds.includes(objectId))continue;
+      this.#completedTargets.delete(key);this.#dormant.delete(key);this.#held.add(key);
+      for(const [document,owner] of this.#owners)if(owner.target===key){owner.completed=false;this.#owners.delete(document);}
     }
-    for(const [target,document] of this.#dormant)if(held(document)){this.#dormant.delete(target);this.#held.add(target);}
   }
   /**
    * Forgets a document the engine unloaded while it stays a target, and ends
@@ -124,7 +123,7 @@ export class ServiceActivationDriver {
     const key=JSON.stringify(parseLiveDocumentKey(document)),owner=this.#owners.get(key);
     owner?.consumer.release(document);
     this.removeTarget(target);
-    this.#targets=[...this.#targets,target];
+    this.addTarget(target,document.objectId);
     this.#dormant.set(targetKey(target),key);
   }
   dormant(target:ServiceActivationTarget){return this.#dormant.has(targetKey(target));}
@@ -135,7 +134,11 @@ export class ServiceActivationDriver {
   }
   wake(target:ServiceActivationTarget){this.#dormant.delete(targetKey(target));}
   hasRetained(){
-    return this.#targets.some(target=>this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes)!==null);
+    return this.#targets.some(target=>this.retained(target));
+  }
+  /** Whether the relay retains an activation of the document at the target's path. */
+  retained(target:ServiceActivationTarget){
+    return this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes)!==null;
   }
   restoreConsumer(document:LiveDocumentKey,lookup:StopRestoreLookup){
     const o=this.options,key=JSON.stringify(parseLiveDocumentKey(document));
@@ -174,7 +177,7 @@ export class ServiceActivationDriver {
         if(sleeping!==undefined && error instanceof EngineRequestError && error.wireError?.code==="INVALID_PARAMS")this.#dormant.set(slot,sleeping);
         throw error;
       }
-      signal?.throwIfAborted();o.assertCurrent();this.#held.delete(slot);
+      signal?.throwIfAborted();o.assertCurrent();this.#held.delete(slot);this.#objects.set(slot,document.objectId);
       if(capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source))throw new Error("Native service activation source changed.");
       this.#owners.set(key,owner);
       return capture;
@@ -190,8 +193,15 @@ export class ServiceActivationDriver {
     if(!owner?.completed || this.#invalidated(owner,document))throw new Error("Service document activation is incomplete.");
     return owner;
   }
+  /**
+   * Activates the target and drains it. A target with no owner here first pulls
+   * its workspace, which also tells this driver whether the engine holds it.
+   * Without `catchUp`, a retained activation resumes without that pull: its
+   * caller pulled already, or the document left the hosted set, and a pull
+   * would adopt the scope it left, after which the engine no longer captures it.
+   */
   async activate(target:ServiceActivationTarget,signal:AbortSignal,
-    settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>){
+    settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>,catchUp=true){
     const o=this.options,c=o.config,workspace=o.workspaces.get(target.workspaceId);
     if(!workspace)throw new Error("Service activation workspace is not attached.");
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
@@ -209,6 +219,7 @@ export class ServiceActivationDriver {
     let saved=this.#store.read(target.workspaceId,target.path,c.maxCaptureBytes);
     if(!saved)this.#completedTargets.delete(key);
     if(saved && saved.shareId!==target.shareId)throw new Error("Service activation share changed.");
+    if(saved)this.#objects.set(key,saved.source.objectId);
     let document=saved?parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,
       objectId:saved.source.objectId,lineageClaimId:saved.source.lineageClaimId}):undefined;
     let owner=document?this.#owners.get(JSON.stringify(document)):undefined;
@@ -218,13 +229,13 @@ export class ServiceActivationDriver {
       if(owner)return fenced;
     }
     if(!owner){
-      if(!saved){
+      if(catchUp || !saved){
         const pulled=await workspace.replica.pull(signal);check();
         if(pulled.hasMore)return {kind:"pending" as const,reason:"Hosted replication has more pages."};
       }
       this.#loaded.add(key);
       const capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,saved?.activationId);check();
-      this.#held.delete(key);
+      this.#held.delete(key);this.#objects.set(key,capture.source.objectId);
       if(capture.source.workspaceId!==target.workspaceId || capture.source.relayDatabaseNamespace!==o.history.namespace ||
         (saved && (capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source)))) {
         throw new Error("Native service activation source changed.");

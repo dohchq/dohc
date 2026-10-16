@@ -65,14 +65,15 @@ function path(value: unknown, directory: boolean): string {
 export type ServiceWorkspace = ReturnType<typeof parseServiceWorkspace>;
 /**
  * The workspaces a host that started empty should hold, the documents it
- * hosts, and the documents that left but may remain in a hosted replica. A
- * workspace stays attached while it has either kind.
+ * hosts, and the documents that left but may remain in a hosted replica, at
+ * their enrolled paths. A workspace stays attached while it has either kind.
  */
 export interface ServiceHostedSet {
   readonly workspaces: readonly ServiceWorkspace[];
-  readonly documents: readonly {readonly workspaceId: string; readonly objectId: string; readonly path: string; readonly shareId: string}[];
-  readonly departing: readonly {readonly workspaceId: string; readonly objectId: string}[];
+  readonly documents: readonly ServiceHostedDocument[];
+  readonly departing: readonly ServiceHostedDocument[];
 }
+interface ServiceHostedDocument {readonly workspaceId: string; readonly objectId: string; readonly path: string; readonly shareId: string}
 function parseServiceWorkspace(item: unknown) {
   const row = record(item, ["root", "workspaceId", "maxRegistrations"], ["hostedReplication"]);
   return Object.freeze({ root: path(row.root, true), workspaceId: parseLiveUpdateIdentifier(row.workspaceId, "workspace ID"),
@@ -172,6 +173,10 @@ export async function startServiceLiveHost(options: {
   const hosted = new Map<string, {target: ServiceActivationTarget; objectId: string}>();
   // Hosted documents that left the hosted set. Passes settle, publish and unload them.
   const leaving = new Set<string>();
+  // Leaving documents an earlier daemon may have left unsettled. Each resumes its retained activation before it unloads.
+  const recovering = new Set<string>();
+  // Whether an update completed on this daemon.
+  let updated = false;
   // The stores of workspaces whose replica diverged and detached. None attaches again until its caller set its store aside.
   const diverged = new Map<string, string>();
   // When each hosted document is due to unload with no live connection, and
@@ -389,7 +394,7 @@ export async function startServiceLiveHost(options: {
       changes?.notifyHost([workspaceId]);
     };
     const forget = (key: string) => {
-      activation!.removeTarget(hosted.get(key)!.target); hosted.delete(key); leaving.delete(key); idle.delete(key); unloading.delete(key);
+      activation!.removeTarget(hosted.get(key)!.target); hosted.delete(key); leaving.delete(key); recovering.delete(key); idle.delete(key); unloading.delete(key);
     };
     // The engine's reason while it holds unfinished work for the document, or undefined once nothing of it is loaded.
     const requestUnload = async (document: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
@@ -417,8 +422,14 @@ export async function startServiceLiveHost(options: {
       await resolveUnload(key, joined);
       const row = hosted.get(key);
       if (!row) return undefined;
+      const fenced = !storage.serviceHostDocumentEnabled({workspaceId: row.target.workspaceId, objectId: row.objectId});
+      // Resuming loads what an earlier daemon left, and delivers and settles it, as for a document that left this one.
+      if (recovering.has(key) && !fenced && activation!.retained(row.target)) {
+        const outcome = await activation!.activate(row.target, joined, settleTarget, false);
+        if (outcome.kind !== "done") return outcome.reason;
+      }
+      recovering.delete(key);
       if (activation!.loaded(row.target) && !activation!.dormant(row.target)) {
-        const fenced = !storage.serviceHostDocumentEnabled({workspaceId: row.target.workspaceId, objectId: row.objectId});
         const document = activation!.ownerDocument(row.target);
         // A document with no owner has nothing delivered here to settle; the engine reports any work it still holds.
         const leave = async (operation: AbortSignal) => {
@@ -501,7 +512,7 @@ export async function startServiceLiveHost(options: {
           throw new Error("Hosted replication has more pages.");
         }
         activation!.wake(row.target); touch(key);
-        await activation!.activate(row.target, joined, settleTarget);
+        await activation!.activate(row.target, joined, settleTarget, false);
       }));
     };
     // Restore work takes a turn, so no idle unload runs beside it. A step that
@@ -528,9 +539,10 @@ export async function startServiceLiveHost(options: {
       if (wanted.size !== value.documents.length) throw new Error("Duplicate service activation target.");
       checkServiceMembership(workspaces, [...wanted.values()].map(row => row.target));
       const departing = new Map(value.departing.map(row => {
-        const document = {workspaceId: parseLiveUpdateIdentifier(row.workspaceId, "workspace ID"), objectId: parseLiveUpdateIdentifier(row.objectId, "object ID")};
-        if (!desired.has(document.workspaceId)) throw new Error("Departing document's workspace is not configured.");
-        return [JSON.stringify([document.workspaceId, document.objectId]), document] as const;
+        const document = {target: parseServiceActivationTarget({workspaceId: row.workspaceId, path: row.path, shareId: row.shareId}),
+          objectId: parseLiveUpdateIdentifier(row.objectId, "object ID")};
+        if (!desired.has(document.target.workspaceId)) throw new Error("Departing document's workspace is not configured.");
+        return [JSON.stringify([document.target.workspaceId, document.objectId]), document] as const;
       }));
       // An identity change fences the old identity: the relay refuses its
       // settlement and replication, so its unsettled work stays in the old
@@ -553,17 +565,29 @@ export async function startServiceLiveHost(options: {
       for (const workspaceId of [...members.keys()]) if (!desired.has(workspaceId) || changed.includes(workspaceId)) await detach(workspaceId, joined);
       for (const workspace of workspaces) if (!members.has(workspace.workspaceId) && !diverged.has(workspace.workspaceId)) await attach(workspace, joined);
       for (const [key, document] of wanted) {
-        if (!hosted.has(key) && members.has(document.target.workspaceId)) {activation.addTarget(document.target); hosted.set(key, document); touch(key);}
+        if (!hosted.has(key) && members.has(document.target.workspaceId)) {activation.addTarget(document.target, document.objectId); hosted.set(key, document); touch(key);}
+      }
+      // A fresh daemon has nothing loaded, but an earlier one may have left a
+      // departing document's work unsettled in its store. Passes resume each
+      // one still enabled at its enrolled path, then settle, publish and unload it.
+      if (!updated) {
+        for (const document of departing.values()) {
+          const {workspaceId, path} = document.target, key = JSON.stringify([workspaceId, path]);
+          if (hosted.has(key) || !members.has(workspaceId) || !storage.serviceHostDocumentEnabled({workspaceId, objectId: document.objectId}) ||
+            storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== document.objectId) continue;
+          hosted.set(key, document); leaving.add(key); recovering.add(key);
+        }
       }
       // A departing document is confirmed gone only by a pull that starts after this.
       for (const [workspaceId, attached] of attachments) {
         for (const objectId of attached.announced.keys()) if (!departing.has(JSON.stringify([workspaceId, objectId]))) attached.announced.delete(objectId);
       }
       for (const document of departing.values()) {
-        const attached = attachments.get(document.workspaceId);
+        const attached = attachments.get(document.target.workspaceId);
         if (attached && !attached.announced.has(document.objectId)) attached.announced.set(document.objectId, attached.pulls + 1);
       }
       registerRetained();
+      updated = true;
     }));
     // Detaches a workspace whose replica drained. Its caller then removes the store and releases its enrollments.
     const detachDrained = (workspaceId: string, callerSignal?: AbortSignal) => exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
@@ -601,6 +625,11 @@ export async function startServiceLiveHost(options: {
             }
           }
         };
+        // Departures go first: a document an earlier daemon left resumes only before a pull adopts the scope it left.
+        for(const key of [...leaving])await step(async()=>{
+          const waiting=await depart(key,passSignal);
+          if(waiting!==undefined)throw new Error(`Departing live document is waiting: ${waiting}`);
+        });
         await step(async()=>{
           for(let visited=0;visited<Math.min(bounds.maxDocumentsPerPass,targets.length);visited++){
             index%=targets.length;
@@ -609,10 +638,6 @@ export async function startServiceLiveHost(options: {
             // fence during it leaves the pass pending rather than ready.
             await activation!.activate(target,passSignal,settleTarget);
           }
-        });
-        for(const key of [...leaving])await step(async()=>{
-          const waiting=await depart(key,passSignal);
-          if(waiting!==undefined)throw new Error(`Departing live document is waiting: ${waiting}`);
         });
         // Every ready workspace pushes, then pulls. One with no documents still pulls, so its replica retires what left.
         for(const [workspaceId,attached] of [...attachments]){
@@ -667,8 +692,9 @@ export async function startServiceLiveHost(options: {
        * Moves this running daemon to the hosted set. It attaches each wanted
        * workspace and adds its documents to activation. Passes settle, publish
        * and unload documents that left, while their workspace stays attached.
-       * A workspace that is no longer wanted, or whose identity changed,
-       * detaches at once. A diverged workspace waits for `rebuild`.
+       * On a fresh daemon, they first resume departing documents that are
+       * still enabled. A workspace that is no longer wanted, or whose identity
+       * changed, detaches at once. A diverged workspace waits for `rebuild`.
        */
       update,
       /**
@@ -680,6 +706,15 @@ export async function startServiceLiveHost(options: {
         const attached = attachments.get(document.workspaceId), required = attached?.announced.get(document.objectId);
         return hostedKey(document) !== undefined || !attached || required === undefined || attached.confirmed < required ||
           attached.hosted.departed?.has(document.objectId) !== false;
+      },
+      /**
+       * Whether its replica has had its chance to retire the departed
+       * document: nothing of it is loaded, and a pull that started after it
+       * departed has succeeded. One it still retains then waits on the engine.
+       */
+      pulledAfterDeparture(document: {workspaceId: string; objectId: string}): boolean {
+        const attached = attachments.get(document.workspaceId), required = attached?.announced.get(document.objectId);
+        return hostedKey(document) === undefined && required !== undefined && attached!.confirmed >= required;
       },
       /** Whether this daemon has delivered and settled the hosted document, in an activation pass or before it unloaded idle. */
       settled(document: {workspaceId: string; objectId: string}): boolean {
