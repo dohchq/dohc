@@ -22,6 +22,11 @@ use dohc_engine_sync_http::HttpRelayTransport;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(not(test))]
+use dohc_engine_storage::NoFaults as CursorFaults;
+#[cfg(test)]
+use relay_push_tests::cache_tests::CursorFaults;
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayConfiguration {
     pub base_url: String,
@@ -1678,6 +1683,7 @@ pub enum RelayOperationOutcome {
     Sync(SyncPassOutcome),
     CursorCommitted {
         sharing_declined: Vec<dohc_engine_sync::SharingDeclined>,
+        writer_cache_changed: bool,
     },
     Probe(bool),
     Claimed,
@@ -1895,6 +1901,7 @@ impl ActorHandle {
                 .run(move |store, cache| {
                     let _reservation = queued_reservation;
                     let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
+                    let is_pull = matches!(&queued_operation, RelayOperation::Pull { .. });
                     let outcome = if queued_token.is_cancelled() {
                         Err(RuntimeError::Cancelled)
                     } else {
@@ -1907,9 +1914,37 @@ impl ActorHandle {
                             &queued_claims,
                         )
                     };
-                    // Push handles enrollment resets below. Every other
-                    // operation clears by default.
-                    if !is_push {
+                    // Push handles enrollment resets below. A pull that only
+                    // redelivers durable echoes leaves the writer cache valid;
+                    // applied or materialized work still invalidates it.
+                    let pull_changed = match &outcome {
+                        Ok(RelayOperationOutcome::Sync(
+                            SyncPassOutcome::Complete {
+                                applied,
+                                changed_paths,
+                                ..
+                            }
+                            | SyncPassOutcome::CrashedAfterApply {
+                                applied,
+                                changed_paths,
+                                ..
+                            },
+                        )) => *applied > 0 || !changed_paths.is_empty(),
+                        Err(RuntimeError::Relay(RelayError::Local(reason)))
+                            if reason == RELAY_IO_PENDING =>
+                        {
+                            false
+                        }
+                        _ => true,
+                    };
+                    let unchanged_commit = matches!(
+                        &outcome,
+                        Ok(RelayOperationOutcome::CursorCommitted {
+                            writer_cache_changed: false,
+                            ..
+                        })
+                    );
+                    if !is_push && !unchanged_commit && (!is_pull || pull_changed) {
                         cache.clear();
                     }
                     outcome
@@ -2331,13 +2366,14 @@ fn run_relay_operation(
             store,
             &workspace_id,
             &cursor,
-            &NoFaults,
+            &CursorFaults,
             leases,
             now_ms,
         )? {
-            TxnOutcome::Committed(sharing_declined) => {
-                Ok(RelayOperationOutcome::CursorCommitted { sharing_declined })
-            }
+            TxnOutcome::Committed(commit) => Ok(RelayOperationOutcome::CursorCommitted {
+                sharing_declined: commit.sharing_declined,
+                writer_cache_changed: commit.writer_cache_changed,
+            }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
         RelayOperation::Probe { workspace_id } => {
@@ -2557,6 +2593,7 @@ fn run_relay_operation(
         } => match client.commit_share_view_cursor(store, &workspace_id, &cursor, &NoFaults)? {
             TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted {
                 sharing_declined: Vec::new(),
+                writer_cache_changed: true,
             }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },

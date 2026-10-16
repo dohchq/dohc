@@ -2606,6 +2606,10 @@ const activity = {
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.agentRunDepth(lease.state.activity),
     ),
+  dispatchedAgentRun: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      lease.state.dispatchAgentRunId !== null,
+    ),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
     return withWorkspaceActivityState(workspaceId, (lease) =>
