@@ -587,7 +587,7 @@ function printStatus(root) {
     const place = position(requests, entry.id);
     // The service's heartbeat says what a running attempt is doing, such as waiting for the host lane.
     const phase = runs.find(row => row.id === entry.id)?.phase;
-    const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase ? `, ${phase}` : ""}` : `#${place}${typical ? `, starts in about ${minutes(startsInMs(place, typical, lanes))}` : ""}`;
+    const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase ? `, ${phase}` : ""}` : `#${place}${typical ? `, starts ${pause ? "about " : "in about "}${minutes(startsInMs(place, typical, lanes))}${pause ? " after resume" : ""}` : ""}`;
     console.log(`${entry.id}  ${where}  ${entry.request.scope}  ${entry.request.head.slice(0, 12)}  ${entry.request.branch?.replace("refs/heads/", "") ?? entry.request.checkout}${entry.status.waiting ? `  (${entry.status.waiting})` : ""}${entry.status.moved ? `  (${movedNote(entry.status.moved)})` : ""}`);
   }
   if (!live.length) console.log("no requests waiting");

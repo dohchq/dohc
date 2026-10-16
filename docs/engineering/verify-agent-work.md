@@ -127,7 +127,7 @@ Select a run to see its failing step's test summary, its steps on a timeline, an
 When the page cannot reach the dashboard server, it says so and since when, keeps what it last showed, and tries again. It waits at most 15 seconds for each answer.
 
 The dashboard's only change to the queue is its Pause and Resume button. Pause asks for an optional reason and does what `pnpm verify:queue pause` does. Resume does what `pnpm verify:queue resume` does, without asking first.
-While the queue is paused, every tab shows a banner with the words `pnpm verify:queue status` uses, such as `Paused and idle: safe to restart`. A hold after a computer restart says so.
+While the queue is paused, every tab shows a banner with the words `pnpm verify:queue status` uses, such as `Paused and idle: safe to restart`. A hold after a computer restart says so. Start estimates count from the resume, such as `40 min after resume`.
 The pause records `by` as `{ "name": "dashboard", "host": "<host name the page used>" }`, and the service log records each pause and resume from the dashboard.
 
 To open the dashboard from another device, serve it on the tailnet only:
@@ -136,9 +136,11 @@ To open the dashboard from another device, serve it on the tailnet only:
 tailscale serve --bg --https=8446 http://127.0.0.1:4250
 ```
 
-Then open `https://<host>.<tailnet>.ts.net:8446`. Do not use Tailscale Funnel: the page shows branch names and test output, and anyone who can open it can pause the queue.
+Then open `https://<host>.<tailnet>.ts.net:8446`. Every device and user that the tailnet's access rules let reach this port can read the page and pause or resume the queue.
+Do not use Tailscale Funnel: the page shows branch names and test output. The page refuses every request that arrives through Funnel.
 The page answers only to the host's own names and to tailnet names.
-Pause and resume accept only a JSON `POST` whose `Origin` header names the host the request was sent to. A page on another site cannot send that request, so it cannot pause or resume the queue.
+Pause and resume accept only a JSON `POST` whose `Origin` header names the host the request was sent to. A page from any other origin, including another port on this host or another tailnet machine, cannot send that request, so it cannot pause or resume the queue.
+A write body must arrive within 10 seconds and be at most 4 KB. The server answers a refused write and closes its connection.
 
 The `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
 A supervisor runs the service in a Windows job object. When the service exits or its heartbeat stops for two minutes, the supervisor stops it and everything it started, then starts it again.

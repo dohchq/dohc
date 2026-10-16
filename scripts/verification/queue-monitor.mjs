@@ -459,22 +459,31 @@ const allowedHost = host => /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/iu.test(h
 // which this server never grants, and a browser names the page's origin, which must be this host.
 const writePaths = { "/api/pause": "pause", "/api/resume": "resume" };
 const bodyLimit = 4096;
+// URL drops a scheme's default port, so `Host: pc.ts.net:443` and `Origin: https://pc.ts.net` name one origin.
+const sameHost = (origin, host) => { try { return new URL(`${origin.protocol}//${host}`).host === origin.host; } catch { return false; } };
 
-/** A write's JSON object, or `{ refused: [status, message] }` before anything changes. Reads at most `bodyLimit` bytes. */
-async function writeBody(request) {
+/**
+ * A write's JSON object, `{ refused: [status, message] }` before anything changes, or `{ gone: true }` when the
+ * client left mid-body. Reads at most `bodyLimit` bytes for at most `waitMs`.
+ */
+async function writeBody(request, waitMs) {
   if ((request.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase() !== "application/json") return { refused: [415, "Send the write as application/json."] };
   let origin = null;
   try { origin = new URL(request.headers.origin); } catch { /* No origin, or not a URL. */ }
-  if (!["http:", "https:"].includes(origin?.protocol) || origin.host.toLowerCase() !== request.headers.host.toLowerCase()) return { refused: [403, "A write must come from the dashboard page on this host."] };
+  if (!["http:", "https:"].includes(origin?.protocol) || !sameHost(origin, request.headers.host)) return { refused: [403, "A write must come from the dashboard page on this host."] };
   if (Number(request.headers["content-length"] ?? 0) > bodyLimit) return { refused: [413, "The request is too large."] };
-  const raw = await new Promise((done, fail) => {
+  let timer;
+  const raw = await new Promise(done => {
     const chunks = [];
     let size = 0;
-    request.on("data", chunk => { size += chunk.length; if (size > bodyLimit) done(null); else chunks.push(chunk); });
+    timer = setTimeout(done, waitMs, "slow");
+    request.on("data", chunk => { size += chunk.length; if (size > bodyLimit) done("large"); else chunks.push(chunk); });
     request.on("end", () => done(Buffer.concat(chunks)));
-    request.on("error", fail);
-  });
-  if (!raw) return { refused: [413, "The request is too large."] };
+    request.on("error", () => done("gone"));
+  }).finally(() => clearTimeout(timer));
+  if (raw === "gone") return { gone: true };
+  if (raw === "slow") return { refused: [408, "The request body did not arrive in time."] };
+  if (raw === "large") return { refused: [413, "The request is too large."] };
   let body;
   try { body = JSON.parse(raw.toString("utf8")); } catch { body = null; }
   if (!body || typeof body !== "object" || Array.isArray(body)) return { refused: [400, "The body is not a JSON object."] };
@@ -483,7 +492,7 @@ async function writeBody(request) {
 }
 
 /** Serve the dashboard and its data on this host. Returns the server; `close()` stops it and its sampler. */
-export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log = () => {}, sampleEveryMs,
+export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log = () => {}, sampleEveryMs, writeWaitMs = 10_000,
   threadOf = threadDirectory(), slotRoot = process.env.DOHC_VERIFICATION_SLOT_ROOT ?? resolveBuildBudget()?.root }) {
   const finished = new Map();
   const history = historyReader(root);
@@ -501,8 +510,10 @@ export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log
   const load = loadSampler(root, () => snapshot().state, { everyMs: sampleEveryMs });
   // Pause or resume the queue for the dashboard page, and record the host name it used.
   const write = async (request, action, send) => {
-    const { body, refused } = await writeBody(request);
-    if (refused) return send(refused[0], "text/plain", refused[1]);
+    const { body, refused, gone } = await writeBody(request, writeWaitMs);
+    if (gone) return;
+    // Closing the connection stops a refused client from streaming the rest of its body.
+    if (refused) return send(refused[0], "text/plain", refused[1], { connection: "close" });
     const host = request.headers.host;
     let answer;
     if (action === "pause") {
@@ -530,6 +541,8 @@ export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log
       try { send(500, "text/plain", "The monitor could not read or change the queue."); } catch { /* The client is gone. */ }
     };
     try {
+      // Tailscale sets this header on every Funnel request and removes any copy a client sends.
+      if (request.headers["tailscale-funnel-request"]) return send(403, "text/plain", "This page does not answer through Tailscale Funnel.");
       if (!allowedHost(request.headers.host)) return send(403, "text/plain", "This page answers only on this host and its tailnet name.");
       const url = new URL(request.url, "http://monitor");
       const action = writePaths[url.pathname];

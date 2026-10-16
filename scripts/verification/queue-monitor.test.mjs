@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
+import { connect } from "node:net";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -185,6 +186,7 @@ test("the server answers reads only on this host's names and the tailnet", async
   assert.equal(JSON.parse(state.body).runs.length > 0, true);
   assert.equal((await get(port, "/api/state", { host: "pc.example.ts.net:8446" })).status, 200, "the tailnet name reaches the page");
   assert.equal((await get(port, "/api/state", { host: "attacker.example" })).status, 403, "a name rebound to this host does not");
+  assert.equal((await get(port, "/api/state", { host: "pc.example.ts.net:8446", headers: { "tailscale-funnel-request": "?1" } })).status, 403, "a request through Funnel does not");
   assert.equal((await get(port, "/api/state", { method: "POST" })).status, 405);
   assert.equal((await get(port, "/api/run?id=000000002-bbbbbb&attempt=7")).status, 404);
   assert.equal((await get(port, "/elsewhere")).status, 404);
@@ -250,15 +252,15 @@ test("the lanes show the gate holding each verification slot, an agent's inline 
   assert.equal(slotLog(status, 1, "rust.log"), null, "a queued request's logs are read by its id, not its slot");
 });
 
-async function monitor(t, root) {
-  const server = startMonitor({ root, port: 0 });
+async function monitor(t, root, options = {}) {
+  const server = startMonitor({ root, port: 0, ...options });
   t.after(() => server.close());
   if (!server.listening) await once(server, "listening");
   const { port } = server.address();
   // A write as the page sends it: a JSON POST that names the page's origin, which each option can change. A GET carries no body, as from a browser.
-  const write = (path, body, { host = `127.0.0.1:${port}`, origin = `http://${host}`, type = "application/json", method = "POST", chunked = false } = {}) =>
+  const write = (path, body, { host = `127.0.0.1:${port}`, origin = `http://${host}`, type = "application/json", method = "POST", chunked = false, headers = {} } = {}) =>
     get(port, path, { host, method, chunked, body: typeof body === "string" || body === undefined ? body : JSON.stringify(body),
-      headers: { ...(origin === null ? {} : { origin }), ...(type === null ? {} : { "content-type": type }) } });
+      headers: { ...(origin === null ? {} : { origin }), ...(type === null ? {} : { "content-type": type }), ...headers } });
   const state = async () => JSON.parse((await get(port, "/api/state")).body);
   return { port, write, state };
 }
@@ -282,6 +284,8 @@ test("the page pauses and resumes the queue with a JSON POST from its own origin
   assert.equal(JSON.parse((await write("/api/resume", {}, tailnet)).body).changed, false, "resuming a moving queue changes nothing");
   await write("/api/pause", { reason: " \n\t " });
   assert.equal(readPause(root).reason, null, "a blank reason records none");
+  const defaultPort = await write("/api/resume", {}, { host: "pc.example.ts.net:443", origin: "https://pc.example.ts.net" });
+  assert.equal(JSON.parse(defaultPort.body).changed, true, "a Host that names the scheme's default port matches an Origin that leaves it out");
 });
 
 test("a write is refused with a status, and changes nothing, unless it is a small JSON POST from the page's own origin on an allowed host", async t => {
@@ -303,6 +307,7 @@ test("a write is refused with a status, and changes nothing, unless it is a smal
     ["a body that is not JSON", "{", {}, 400],
     ["a reason that is not text", { reason: { text: "x" } }, {}, 400],
     ["a name rebound to this host", {}, { host: "attacker.example", origin: "http://attacker.example" }, 403],
+    ["a request through Funnel", {}, { host: "pc.example.ts.net", origin: "https://pc.example.ts.net", headers: { "tailscale-funnel-request": "?1" } }, 403],
   ];
   for (const [name, body, options, status] of refusals) {
     const answer = await write("/api/pause", body, options);
@@ -319,6 +324,21 @@ test("a write is refused with a status, and changes nothing, unless it is a smal
   const preflight = await write("/api/pause", undefined, { method: "OPTIONS", origin: "http://attacker.example", type: null });
   assert.equal(preflight.status, 405);
   assert.deepEqual(Object.keys(preflight.headers).filter(name => name.startsWith("access-control-")), [], "no answer grants another origin");
+});
+
+test("a write whose body is too large or too slow is refused, and its connection closes", async t => {
+  const root = await queueRoot(t);
+  const { port, write } = await monitor(t, root, { writeWaitMs: 200 });
+  const large = await write("/api/pause", { reason: "x".repeat(5000) }, { chunked: true });
+  assert.deepEqual([large.status, large.headers.connection], [413, "close"], "the client cannot keep streaming a body the server refused");
+  // A body that never arrives gets its answer when the wait runs out, then the server closes the connection.
+  const socket = connect(port, "127.0.0.1");
+  let answer = "";
+  socket.setEncoding("utf8").on("data", chunk => { answer += chunk; });
+  socket.write([`POST /api/pause HTTP/1.1`, `host: 127.0.0.1:${port}`, `origin: http://127.0.0.1:${port}`, "content-type: application/json", "content-length: 100", "", "{"].join("\r\n"));
+  await once(socket, "close");
+  assert.match(answer, /^HTTP\/1\.1 408 [^]*did not arrive in time/u, "the monitor answers, not Node's own request timeout");
+  assert.equal(readPause(root), null);
 });
 
 test("the snapshot says when the queue is paused: the runs it waits for, when it is idle, and a hold after the computer restarted", async t => {

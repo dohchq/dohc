@@ -117,6 +117,9 @@ function startTimes(data, running) {
   });
 }
 
+// A paused queue starts nothing, so its estimates count from the resume instead of naming a time.
+const startText = (data, t) => !data.pause ? `≈ ${at(t)}` : t - data.now < MIN ? "on resume" : `${dur(t - data.now)} after resume`;
+
 function derived() {
   const data = ui.data;
   const runs = withLanes(data.runs);
@@ -228,7 +231,7 @@ function renderStrip({ data, running, finished, starts }) {
   patch($("#strip"), `
     <div class="stat"><div class="label">Running</div><div class="value">${busy} of ${lanes}</div><div class="sub">${busy >= lanes ? "every lane busy" : `${lanes - busy} lane free`}${data.lanes?.holders.some(h => h.kind === "inline") ? ", with an inline gate" : ""}</div></div>
     <div class="stat"><div class="label">Waiting</div><div class="value${data.queued.length > 2 * lanes ? " warn" : ""}">${data.queued.length}</div><div class="sub">${data.queued.length ? `oldest waited ${esc(dur(data.now - oldest))}` : "nothing waiting"}</div></div>
-    <div class="stat"><div class="label">Line clears</div><div class="value${clears && clears - data.now > 2 * HOUR ? " warn" : ""}">${clears ? `≈ ${esc(at(clears))}` : "Now"}</div><div class="sub">${clears ? `in ${esc(dur(clears - data.now))} if nothing new arrives` : "no backlog"}</div></div>
+    <div class="stat"><div class="label">Line clears</div><div class="value${clears && clears - data.now > 2 * HOUR ? " warn" : ""}">${clears ? (data.pause ? esc(dur(clears - data.now)) : `≈ ${esc(at(clears))}`) : "Now"}</div><div class="sub">${clears ? (data.pause ? "after resume" : `in ${esc(dur(clears - data.now))} if nothing new arrives`) : "no backlog"}</div></div>
     <div class="stat"><div class="label">Last 24 hours</div><div class="value">${day.length ? Math.round(passed / day.length * 100) : 0}% <span class="muted" style="font-size:14px">passed</span></div>
       <div class="mini" title="${passed} passed, ${failed} failed, ${machines} machine failures"><i class="passed" style="width:${pct(passed, day.length)}"></i><i class="failed" style="width:${pct(failed, day.length)}"></i><i class="environment" style="width:${pct(machines, day.length)}"></i></div>
       <div class="sub">${passed} passed, ${failed} failed, ${machines} machine</div></div>
@@ -311,7 +314,7 @@ function renderLanes(d) {
       patch($(".lane-track", el), "");
       patch($(".lane-steps", el), "");
       $(".terminal", el).hidden = true;
-      patch($(".lane-next", el), next ? `Next up: <b>${esc(titleOf(next))}</b>, starts ≈ ${esc(at(starts[0]))}` : "Nothing is waiting.");
+      patch($(".lane-next", el), next ? `Next up: <b>${esc(titleOf(next))}</b>, starts ${esc(startText(data, starts[0]))}` : "Nothing is waiting.");
       continue;
     }
     const left = view.run && data.typicalMs ? data.typicalMs - (view.clockMs ?? 0) : null;
@@ -539,7 +542,7 @@ function renderQueue({ data, starts }) {
     return `<tr><td class="n">${i + 1}</td>
       <td><a class="b" href="${esc(prLink(q.branch))}" target="_blank" rel="noreferrer">${esc(titleOf(q))}</a>${q.thread ? `<div class="sub mono">${esc(q.branch)}</div>` : ""}${q.nightly ? '<span class="tag nightly">nightly, goes first</span>' : ""}${q.retry ? '<span class="tag retry">retry</span>' : ""}${movedTag(q)}${q.scope !== "all" ? `<span class="tag scope">${esc(q.scope)} only</span>` : ""}<div class="sub mono">${esc(q.head)}</div></td>
       <td style="min-width:140px"><span class="num">${esc(dur(waited))}</span><div class="waitbar" style="width:${(waited / longest * 100).toFixed(1)}%"></div></td>
-      <td class="n">${data.typicalMs ? `≈ ${esc(at(starts[i]))}` : "unknown"}</td>
+      <td class="n">${data.typicalMs ? esc(startText(data, starts[i])) : "unknown"}</td>
       <td class="muted">${esc(q.waiting ?? "")}</td></tr>`;
   }).join("")}</tbody>` : '<tbody><tr><td class="empty">Nothing is waiting.</td></tr></tbody>');
 }
