@@ -2,8 +2,8 @@
 //!
 //! [`BASELINE_MIGRATIONS`] is the frozen list. The baseline (ordinal 0)
 //! assembles the whole schema and stamps `user_version = 2`. A later schema
-//! change appends a new migration with a unique ordinal and flows through the
-//! same runner. Reserved ordinals can land after higher shipped ordinals.
+//! change appends a new migration with the next ordinal and flows through the
+//! same runner.
 //!
 //! Before the runner, the open ritual refuses a store whose ledger holds a
 //! migration this list does not define, completed or not: a newer build ran
@@ -3275,6 +3275,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
+        ordinal: 54,
+        id: "v2-retained-materialization-displacements",
+        sql: V2_RETAINED_DISPLACEMENTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
         ordinal: 55,
         id: "v2-history-operation-correlation",
         sql: "CREATE INDEX idx_moments_operation_correlation ON moments(workspace_id, metadata_correlation_id);",
@@ -3284,12 +3290,6 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 56,
         id: "v2-hosted-replica",
         sql: V2_HOSTED_REPLICA_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 54,
-        id: "v2-retained-materialization-displacements",
-        sql: V2_RETAINED_DISPLACEMENTS_DDL,
         sets_user_version: None,
     },
 ];
@@ -3551,13 +3551,21 @@ fn quick_check_ok(conn: &Connection) -> Result<bool, StorageError> {
     Ok(result.eq_ignore_ascii_case("ok"))
 }
 
-/// Assert the migration list has unique ordinals and ids. Slice order is
-/// application order; a reserved ordinal can follow higher shipped ordinals.
+/// Assert the migration list is well-formed: strictly increasing ordinals and
+/// unique ids. The runner trusts slice order to be ordinal order, so a list
+/// appended out of order would otherwise apply DDL out of order with no other
+/// trip. Fail closed instead.
 fn validate_migration_order(migrations: &[Migration]) -> Result<(), StorageError> {
     let mut seen_ids = std::collections::HashSet::new();
-    let mut seen_ordinals = std::collections::HashSet::new();
+    let mut prev_ordinal: Option<u32> = None;
     for migration in migrations {
-        if !seen_ordinals.insert(migration.ordinal) || !seen_ids.insert(migration.id) {
+        if let Some(prev) = prev_ordinal
+            && migration.ordinal <= prev
+        {
+            return Err(StorageError::MigrationFailed { source: None });
+        }
+        prev_ordinal = Some(migration.ordinal);
+        if !seen_ids.insert(migration.id) {
             return Err(StorageError::MigrationFailed { source: None });
         }
     }
@@ -3839,8 +3847,12 @@ mod tests {
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-retained-materialization-displacements");
         assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 54);
-        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 56);
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let without_retention: Vec<_> = BASELINE_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|migration| migration.ordinal != 54)
+            .collect();
+        run_migrations(&mut conn, &without_retention, &ctx, &NoFaults).unwrap();
         let sha = crate::blob::put_binary_blob(&conn, b"before").unwrap();
         let tx = conn.unchecked_transaction().unwrap();
         crate::materialize::enqueue_job(
@@ -3858,7 +3870,7 @@ mod tests {
         .unwrap();
         tx.commit().unwrap();
         assert_eq!(
-            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let jobs:i64=conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE job_id='pending' AND status='pending'",[],|r|r.get(0)).unwrap();
@@ -4193,16 +4205,16 @@ mod tests {
                 "fd9a692216dd5b73e9c3f08bee04b16dbcd313084e370a3592db4c8bc59d9adb",
             ),
             (
+                "v2-retained-materialization-displacements",
+                "a3acee99edade72fc8fda127206bcf641f876ad08fb4b39ce96c50afc372a2b3",
+            ),
+            (
                 "v2-history-operation-correlation",
                 "c0f4d24b926a03be07f0999f3aab707da566b2de18654243031f0cb1b80a4819",
             ),
             (
                 "v2-hosted-replica",
                 "332fbe3728b51bdb26a1cc9cc0d8d1da4decd311aa991687be899f4def7c7468",
-            ),
-            (
-                "v2-retained-materialization-displacements",
-                "a3acee99edade72fc8fda127206bcf641f876ad08fb4b39ce96c50afc372a2b3",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5562,19 +5574,14 @@ mod tests {
     }
 
     #[test]
-    fn the_real_migration_ledger_has_unique_ordinals_and_ids() {
+    fn the_real_migration_ledger_has_unique_increasing_ordinals_and_ids() {
         validate_migration_order(BASELINE_MIGRATIONS).expect("well-formed migration list");
     }
 
     /// The ordinal a newer build's first migration takes: one past this
-    /// build's highest, so the fixtures hold whatever this build ships.
+    /// build's last, so the fixtures hold whatever this build ships.
     fn next_ordinal() -> u32 {
-        BASELINE_MIGRATIONS
-            .iter()
-            .map(|migration| migration.ordinal)
-            .max()
-            .expect("a migration")
-            + 1
+        BASELINE_MIGRATIONS.last().expect("a migration").ordinal + 1
     }
 
     /// This build's migrations plus newer stand-ins at the following ordinals.
@@ -6117,7 +6124,9 @@ mod tests {
     fn two_migrations() -> Vec<Migration> {
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: next_ordinal(),
+            ordinal: BASELINE_MIGRATIONS
+                .last()
+                .map_or(0, |last| last.ordinal + 1),
             id: "r04-probe",
             sql: M2_SQL,
             sets_user_version: None,
@@ -6694,12 +6703,13 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_migration_ordinals_or_ids_fail_closed() {
+    fn out_of_order_or_duplicate_migration_list_fails_closed() {
         let dir = tempdir();
         let path = dir.join("engine.db");
         let ctx = MigrationContext::current(3_000);
 
-        // Duplicate ordinals fail before applying any DDL.
+        // Ordinals [0, 2, 1]: a dev appended out of order. Must fail closed
+        // before applying anything (no partial out-of-order DDL).
         let a = Migration {
             ordinal: 1,
             id: "a",
@@ -6707,14 +6717,14 @@ mod tests {
             sets_user_version: None,
         };
         let b = Migration {
-            ordinal: 1,
+            ordinal: 2,
             id: "b",
             sql: "CREATE TABLE b (x INTEGER);",
             sets_user_version: None,
         };
-        let duplicate_ordinals = &[BASELINE_MIGRATIONS[0], b, a];
+        let out_of_order = &[BASELINE_MIGRATIONS[0], b, a];
         let mut conn = open_bare(&path);
-        let err = run_migrations(&mut conn, duplicate_ordinals, &ctx, &NoFaults).unwrap_err();
+        let err = run_migrations(&mut conn, out_of_order, &ctx, &NoFaults).unwrap_err();
         assert_eq!(err.code(), "migration-failed");
         // Nothing was applied.
         let applied: Option<i64> = conn
@@ -6725,7 +6735,7 @@ mod tests {
             )
             .optional()
             .expect("q");
-        assert!(applied.is_none(), "duplicate ordinals must apply nothing");
+        assert!(applied.is_none(), "out-of-order list must apply nothing");
 
         // Duplicate id also fails closed.
         let dup = &[
