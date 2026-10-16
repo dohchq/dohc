@@ -122,6 +122,12 @@ pub(super) fn validate_metadata_fields(
     summary: Option<&str>,
     correlation_id: Option<&str>,
 ) -> Result<(), WireError> {
+    if correlation_id.is_some_and(|id| id.starts_with(dohc_engine_domain::OPERATION_ID_PREFIX)) {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "reserved-operation-id",
+        ));
+    }
     if [summary, correlation_id]
         .into_iter()
         .flatten()

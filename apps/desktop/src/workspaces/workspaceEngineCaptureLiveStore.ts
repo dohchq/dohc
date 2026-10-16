@@ -176,7 +176,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   setCaptureAuthor?(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null): Promise<void>;
   // Capture records nothing from hold to release, or until the hold's lease
   // runs out unrenewed or the workspace closes.
-  holdCapture?(): Promise<{ holdId: string; leaseMs: number }>;
+  holdCapture?(input?: { operationId?: string }): Promise<{ holdId: string; leaseMs: number }>;
   renewCapture?(holdId: string): Promise<boolean>;
   releaseCapture?(holdId: string): Promise<boolean>;
   // One rename that refuses to replace, of a visible regular file, under a hold.
@@ -1200,7 +1200,7 @@ export function createCaptureLiveStores(
       return {
         ...page,
         moments: page.moments.map((moment) =>
-          momentSummaryFromWire(input.workspaceId, moment),
+          momentSummaryFromWire(input.workspaceId, {...moment, beforePath: moment.beforePath ?? null}),
         ),
       };
     },
@@ -1522,7 +1522,7 @@ export function createCaptureLiveStores(
       return await runMutation(async (adapter) => await adapter.saveKeptCopy(id));
     },
 
-    holdCapture: async () => await runMutation(async (adapter) => await adapter.holdCapture()),
+    holdCapture: async (input) => await runMutation(async (adapter) => await adapter.holdCapture(input)),
 
     renewCapture: async (holdId: string) =>
       await runMutation(async (adapter) => await adapter.renewCapture(holdId)),
