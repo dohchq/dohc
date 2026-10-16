@@ -128,8 +128,7 @@ test('post-typing clock check accepts three milliseconds and refuses greater dri
 });
 
 test('peer cleanup failure keeps the original typing refusal and logs the cleanup error', async t => {
-  const cause = new Error('original clock details');
-  const original = new Error('Presence clock refused', { cause });
+  const original = new Error('Presence clock refused');
   const finishError = new Error('Peer stopped during acknowledgement drain');
   const log = t.mock.method(console, 'error', () => {});
   let finishes = 0;
