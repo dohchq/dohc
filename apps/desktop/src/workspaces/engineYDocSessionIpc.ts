@@ -1,5 +1,6 @@
 import { isTypingSessionUnresolved } from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
+import { isCaptureFileHeldRefusal } from "../ipc/errorWords";
 import { engineSaveState } from "./engineYDocSaveState";
 import { createHash } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
@@ -1365,6 +1366,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   }
 
   #openRefusal(error: unknown): OpenResult {
+    if (isCaptureFileHeldRefusal(error)) return unavailableOpen({ captureHeld: true });
     if (isYDocPathNotInVersionError(error)) {
       return unavailableOpen({ notInVersion: true });
     }

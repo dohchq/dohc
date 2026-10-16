@@ -7,6 +7,7 @@ import { CLI_COMMANDS } from "@dohc/cli/args";
 import { cliResultSchemas } from "@dohc/cli/protocol";
 import {
   ACCESS_RESULTS,
+  ACCOUNT_RESULTS,
   APP_CHANNEL_REQUESTS,
   APP_RESPONSE_RESULTS,
   APP_RESULTS,
@@ -54,6 +55,7 @@ describe("CLI, MCP, and app channel reference", () => {
     const documented = new Set<string>([
       ...Object.keys(CLI_COMMANDS.chat!.verbs),
       ...Object.values(ACCESS_RESULTS),
+      ...Object.values(ACCOUNT_RESULTS),
       "dataset", "appPublication", "ownerAppResponses", "fileWrite", "fileMove", "fileDelete",
       ...Object.values(MCP_RETURNS).flatMap((returns) => typeof returns === "string" ? [] : [returns.cli]),
     ]);
@@ -74,6 +76,11 @@ describe("CLI, MCP, and app channel reference", () => {
     expect(section).toContain("`freshness` is `fresh`, `stale`, or `unknown`");
     expect(section).toContain("`checkedAtMs`");
     expect(section).toContain("`coverage`");
+    expect(section).toContain("`unknownReason`");
+    expect(section).toContain("When visibility is `hidden` or `missing`, it is null");
+    for (const reason of ["signed-out", "not-synced", "other-account", "other-server", "not-listed-yet", "changed", "unreadable"]) {
+      expect(section).toContain(reason);
+    }
   });
 
   it("parses an example of every chat verb, using every flag the verb declares", async () => {

@@ -20,6 +20,20 @@ import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, READY_U
 // generic error. The notice explains what was found; the rebuild is explicit
 // (a confirmed click), states the destination before anything moves, and the
 // success copy names the reverse path.
+it("keeps a failed document Stop in Notices with Try again and Copy details",async () => {
+  const bridge=makeBridge(Promise.resolve(null));
+  bridge.getSyncStatus=vi.fn(async () => ({...SYNC_STATUS,ownerLiveStopFailures:[{path:"a.md",detail:"corrupt"}]}));
+  renderShell(bridge);
+  const user=userEvent.setup();
+  await user.click(await screen.findByTestId("notice-center-toggle"));
+  const notices=await screen.findByTestId("notice-center");
+  const row=(await within(notices).findByText('dohc could not stop live editing for "a.md".')).closest("li")!;
+  expect(within(row).getByRole("button",{name:"Copy error details"})).toBeTruthy();
+  await user.click(within(row).getByRole("button",{name:"Try again"}));
+  await waitFor(() => expect(bridge.stopOwnerLiveDocument).toHaveBeenCalledWith({workspaceId:WORKSPACE.workspaceId,path:"a.md"}));
+  expect(within(notices).queryByText("corrupt")).toBeNull();
+});
+
 it("dismisses unfinished Stop and restore through its workspace operation before removing the Notice", async () => {
   const bridge = makeBridge(Promise.resolve(null));
   const target = {kind: "person" as const, userId: "ana"};
@@ -1480,7 +1494,7 @@ describe("file transfers", () => {
 
   function sharedViewBridge(refreshOk: boolean[]) {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
     bridge.showExplorerMenu.mockResolvedValue("import-files");
     bridge.refreshSharedView = vi.fn(async () =>
       refreshOk.shift() === false
@@ -1545,7 +1559,7 @@ describe("file transfers", () => {
 
   it("names what landed and why an ordinary import stopped, keeps the raw error for Copy, and Try again asks for files for the same folder", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockResolvedValue({ files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
+    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "notes/a.md", kind: "file" }], folders: ["notes"] });
     bridge.showExplorerMenu.mockResolvedValue("import-files");
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
       imported: ["notes/one.md"],
@@ -2421,6 +2435,7 @@ describe("sync answers after Settings closed", () => {
 
     await startEnableThenClose(bridge);
     view.rerender(shell(OTHER_WORKSPACE));
+    await waitFor(() => expect(bridge.cloudStatus).toHaveBeenLastCalledWith({ workspaceId: OTHER_WORKSPACE.workspaceId }));
     const reads = bridge.cloudStatus.mock.calls.length;
     await act(async () => {
       enable.reject(new Error("dohc could not reach the relay."));

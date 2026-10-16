@@ -24,6 +24,7 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
   VersionedTextStoreError,
+  refuseCallerOperationId,
   type ActorNeutralWriteMetadata,
   type MomentAuthor,
   type MomentWriteAuthor,
@@ -502,8 +503,8 @@ export interface WorkspaceEngineCapture {
     absolutePath: string,
     content: string | Uint8Array,
     author: MomentWriteAuthor,
-    options?: { createOnly?: boolean; signal?: AbortSignal; expectedContentHash?: string; requestId?: string; correlationId?: string; beforeWrite?: (resolvedAbsolutePath: string) => Promise<void> },
-  ): Promise<{ resolvedAbsolutePath: string; materializeOutcome: string | undefined; deduped?: boolean }>;
+    options?: { createOnly?: boolean; signal?: AbortSignal; expectedContentHash?: string; requestId?: string; momentId?: string; versionId?: string; correlationId?: string; beforeWrite?: (resolvedAbsolutePath: string) => Promise<void> },
+  ): Promise<{ resolvedAbsolutePath: string; materializeOutcome: string | undefined; objectId: string; momentId: string; deduped: boolean }>;
   // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
   // file through this capture's Rust workspace sessions. The session journals
   // editor edits as ydoc.update ops and, on each debounced settle, projects the
@@ -640,6 +641,7 @@ export interface WorkspaceEngineCapture {
   // With objectId, the page holds only that file's moments in the active
   // version, across its renames.
   listMoments(input?: {
+    versionId?: string;
     limit?: number;
     cursor?: HistoryCursor;
     objectId?: string;
@@ -729,7 +731,7 @@ export interface WorkspaceEngineCapture {
   // document writes there are cancelled and the rest are restored.
   changePathsAs<Result>(
     paths: readonly string[],
-    authored: { operation: "move" | "delete"; author: MomentWriteAuthor; correlationId: string },
+    authored: { operation: "move" | "delete"; author: MomentWriteAuthor; operationId: string },
     work: (engine: AuthoredPathChanges) => Promise<Result>,
     removed: (result: Result) => readonly string[],
   ): Promise<Result>;
@@ -797,6 +799,7 @@ export interface WorkspaceEngineCaptureOptions {
   onAtomicPlacementUnavailable?: () => void;
   onRecoveryUnavailable?: (unavailable: boolean) => void;
   onKeptFiles?: (paths: readonly (readonly [string, string])[]) => void;
+  onHeldFiles?: (files: import("../ipc/bridgeContract").CaptureFileHold[]) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
@@ -4062,6 +4065,7 @@ export function createWorkspaceEngineCapture(
         if (status) {
           options.onKeptFiles?.(status.keptFiles);
           options.onRecoveryUnavailable?.(status.recoveryUnavailable);
+          options.onHeldFiles?.(status.heldFiles);
         }
         if (status === undefined || (status.running && !status.terminal)) {
           await drainPendingCollectionAdoptions(engine);
@@ -5654,6 +5658,8 @@ export function createWorkspaceEngineCapture(
       // The author as submitted, before the write waits for its turn.
       const author = structuredClone(submittedAuthor);
       return enqueueResult("write authored file", async () => {
+        refuseCallerOperationId(writeOptions.correlationId);
+        refuseCallerOperationId(writeOptions.requestId);
         if (writeOptions.signal?.aborted) {
           throw new Error("The write was cancelled.");
         }
@@ -5682,7 +5688,7 @@ export function createWorkspaceEngineCapture(
         }
         const engine = await engineStore();
         await engine.flushCapture?.();
-        const versionId = await activeVersionIdOf(engine);
+        const versionId = writeOptions.versionId ?? await activeVersionIdOf(engine);
         const metadata: ActorNeutralWriteMetadata = {
           origin: localFileOrApi(author),
           summary: `Updated ${pathBasename(path)}`,
@@ -5699,6 +5705,7 @@ export function createWorkspaceEngineCapture(
             versionId,
             path,
             ...(writeOptions.requestId !== undefined ? { requestId: writeOptions.requestId } : {}),
+            ...(writeOptions.momentId !== undefined ? { momentId: writeOptions.momentId } : {}),
             ...(writeOptions.expectedContentHash !== undefined ? { expectedSha256: writeOptions.expectedContentHash } : {}),
             ...(writeOptions.createOnly ? { createOnly: true } : {}),
             metadata,
@@ -5707,7 +5714,7 @@ export function createWorkspaceEngineCapture(
           const result = typeof decoded === "string"
             ? await engine.writeTextFile({ ...input, text: decoded, publish: true })
             : await engine.writeBinaryFile({ ...input, bytes: decoded });
-          return { resolvedAbsolutePath: resolvedAbsolute, materializeOutcome: result.materializeOutcome, ...(result.deduped ? { deduped: true } : {}) };
+          return { resolvedAbsolutePath: resolvedAbsolute, materializeOutcome: result.materializeOutcome, objectId: result.object.id, momentId: result.moment.id, deduped: result.deduped === true };
         } catch (error) {
           if (error instanceof VersionedTextStoreError && error.code === "write-precondition-failed") {
             throw new AuthoredTextChangedError(path);
@@ -5833,11 +5840,11 @@ export function createWorkspaceEngineCapture(
           // Changes capture has seen land as their own rows first. Changes it
           // has not seen yet are recorded by recordDisk under the hold.
           await engine.flushCapture?.();
-          const { holdId, leaseMs } = await holdCapture.call(engine);
+          const { holdId, leaseMs } = await holdCapture.call(engine, { operationId: authored.operationId });
           const lease = keepCaptureHold(holdId => renewCapture.call(engine, holdId), holdId, leaseMs);
           try {
             const authoredMetadata = (summary: string): ActorNeutralWriteMetadata =>
-              ({ origin: localFileOrApi(authored.author), summary, correlationId: authored.correlationId });
+              ({ origin: localFileOrApi(authored.author), summary });
             const policy = await readPolicyForTask();
             result = { value: await work({
               policy,
@@ -6380,7 +6387,7 @@ export function createWorkspaceEngineCapture(
       const engine = await engineStore();
       const history = await engine.listHistoryPage({
         workspaceId,
-        ...(input.cursor !== undefined ? { versionId: input.cursor.versionId } : {}),
+        ...(input.versionId !== undefined || input.cursor !== undefined ? { versionId: input.versionId ?? input.cursor!.versionId } : {}),
         ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
         ...(input.cursor !== undefined
@@ -6484,6 +6491,7 @@ export function createWorkspaceEngineCapture(
       // The person as submitted, before the restore waits for its turn.
       const author = structuredClone(person);
       return enqueueResult("restore file", async () => {
+        refuseCallerOperationId(restoreOptions.requestId);
         const policy = await readPolicyForTask();
         if (policy.errors.length) {
           throw new RestorePolicyRefusalError({ reason: "policy-unreadable", unreadable: policy.unreadable, detail: policy.errors.join("; ") });
@@ -6787,6 +6795,7 @@ export function createWorkspaceEngineCapture(
 
     undoAcceptedAppResponse(input, author) {
       return enqueueResult("remove app response", async () => {
+        refuseCallerOperationId(input.requestId);
         const engine=await engineStore(), versionId=await activeVersionIdOf(engine);
         if(versionId!==input.versionId)return {status:"conflict" as const};
         await engine.flushCapture?.();

@@ -2206,6 +2206,76 @@ fn validate_successor_base(
     Ok(())
 }
 
+/// A bounded replay cache borrowed from one transaction, never retained by its writer.
+pub(crate) struct TransactionDocCache<'tx, 'conn> {
+    tx: &'tx Transaction<'conn>,
+    docs: WriterDocCache,
+    missing_after_append: std::collections::HashMap<DocKey, bool>,
+}
+
+impl<'tx, 'conn> TransactionDocCache<'tx, 'conn> {
+    pub(crate) fn new(tx: &'tx Transaction<'conn>) -> Self {
+        Self {
+            tx,
+            docs: WriterDocCache::new(),
+            missing_after_append: std::collections::HashMap::new(),
+        }
+    }
+
+    pub(crate) fn append(
+        &mut self,
+        key: &DocKey,
+        update: &[u8],
+        now_ms: i64,
+    ) -> Result<AppendOutcome, CollabError> {
+        validate_update_bytes(update)?;
+        let marker = read_marker_in(self.tx, key)?.ok_or(CollabError::NoMarker)?;
+        let sha = crate::hex_sha256(update);
+        let mut probe = GateBaseProbe::default();
+        let mut append = append_local_update_cached(
+            self.tx, key, &marker, update, &sha, false, None, None, true, now_ms, false,
+            &self.docs, &mut probe,
+        )?;
+        append.emit_outbound = false;
+        probe.capture_commit(self.tx, key);
+        // Only this transaction's private cache advances before commit.
+        // Rollback discards every entry.
+        self.docs.finish_local_append(
+            key,
+            &TxnOutcome::Committed(append.clone()),
+            update,
+            &sha,
+            probe,
+        );
+        if !append.deduped {
+            match self.docs.missing_updates_after_append(key) {
+                Some(missing) => {
+                    self.missing_after_append.insert(key.clone(), missing);
+                }
+                None => {
+                    self.missing_after_append.remove(key);
+                }
+            }
+        }
+        Ok(append)
+    }
+
+    pub(crate) fn has_missing_updates(&self, key: &DocKey) -> Result<bool, CollabError> {
+        match self.missing_after_append.get(key) {
+            Some(missing) => Ok(*missing),
+            // Dedupe-only documents and removed entries need a page-end read.
+            None => self.read_missing_updates(key),
+        }
+    }
+
+    fn read_missing_updates(&self, key: &DocKey) -> Result<bool, CollabError> {
+        Ok(match self.docs.doc_for_consumer(self.tx, key)? {
+            Some(doc) => doc.has_missing_updates(),
+            None => load_doc_in(self.tx, key)?.has_missing_updates(),
+        })
+    }
+}
+
 /// Append one locally-produced update inside the caller's transaction — the
 /// transaction-composable core of [`record_local_update`]. Validates the
 /// bytes, content-dedupes, runs the replay-parity gate, and advances the
@@ -2233,6 +2303,131 @@ pub fn record_update_in_tx(
         false,
         now_ms,
     )
+}
+
+pub(crate) type CreditedUpdate = ((Option<String>, Option<ChangeAttribution>), Vec<u8>);
+
+/// Append a release burst with one log reconstruction and a resident replay
+/// gate. Each original entry retains its own bytes, credit and journal row.
+pub(crate) fn record_credited_updates_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    updates: &[CreditedUpdate],
+    now_ms: i64,
+    mut post_append: impl FnMut(
+        &Transaction<'_>,
+        &[u8],
+        Option<&str>,
+        Option<&ChangeAttribution>,
+        &mut AppendOutcome,
+    ) -> Result<(), CollabError>,
+) -> Result<Vec<dohc_engine_domain::CollectionRecordApplyFacts>, CollabError> {
+    crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
+    crate::live_update_application::require_restore_open(tx, key)?;
+    if crate::owner_outbox::has_adopted_owner_in(tx, key)? {
+        return Err(CollabError::OwnerOutboxFrozen);
+    }
+    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
+    let doc = load_doc_in(tx, key)?;
+    let entries: Vec<_> = updates.iter().map(|(_, bytes)| bytes.clone()).collect();
+    let validated =
+        crate::replay_parity::replay_validated_batch(&doc.encode_full_state(), &entries, true)?;
+    for outcome in validated.outcomes {
+        outcome?;
+    }
+    let validated_state = validated
+        .doc
+        .encode_full_state_bounded(crate::limits::MAX_YDOC_UPDATE_BYTES)
+        .ok_or_else(|| CollabError::Corrupt {
+            reason: "release exceeds document limit".into(),
+        })?;
+    let settlement_requested = crate::author_coverage::check_batch_admission_in(
+        tx,
+        key,
+        updates
+            .iter()
+            .map(|((actor, attribution), _)| (actor.as_deref(), attribution.as_ref())),
+    )?;
+    let indexed = marker.content_kind == ContentKind::Richdoc
+        && dohc_engine_domain::is_collection_record_bound_in_tx(
+            tx,
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+        )
+        .map_err(|error| CollabError::Corrupt {
+            reason: error.to_string(),
+        })?;
+    let mut facts = Vec::new();
+    for ((actor, attribution), update) in updates {
+        if let Some(actor) = actor {
+            crate::validate_actor_origin_id(actor)?;
+        }
+        validate_attribution(attribution.as_ref())?;
+        let before = indexed.then(|| doc.frontmatter_json());
+        doc.apply(update)?;
+        let sha = crate::hex_sha256(update);
+        if blob_seq_in_log(tx, key, &sha, update)?.is_some() {
+            continue;
+        }
+        put_binary_blob_with_sha(tx, update, &sha)?;
+        let seq = append_row(
+            tx,
+            key,
+            &sha,
+            actor.as_deref(),
+            attribution.as_ref(),
+            true,
+            now_ms,
+        )?;
+        let record_facts = if let Some(before) = before {
+            let after = doc.frontmatter_json();
+            dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
+                tx,
+                &key.workspace_id,
+                &key.version_id,
+                &key.object_id,
+                &before,
+                &after,
+                &before,
+                &after,
+                None,
+                actor.as_deref(),
+                attribution.as_ref(),
+                None,
+                now_ms,
+            )
+            .map_err(|error| CollabError::Corrupt {
+                reason: error.to_string(),
+            })?
+        } else {
+            None
+        };
+        let mut outcome = AppendOutcome {
+            settlement_requested,
+            seq,
+            deduped: false,
+            emit_outbound: marker.regime == Regime::Replicated
+                && marker.lineage_claim_status == LineageClaimStatus::Exact,
+            record_facts,
+        };
+        post_append(
+            tx,
+            update,
+            actor.as_deref(),
+            attribution.as_ref(),
+            &mut outcome,
+        )?;
+        if let Some(record_facts) = outcome.record_facts {
+            facts.push(record_facts);
+        }
+    }
+    if doc.encode_full_state() != validated_state {
+        return Err(CollabError::Corrupt {
+            reason: "release replay differs from validated state".into(),
+        });
+    }
+    Ok(facts)
 }
 
 /// The receipt application owner has checked its full binding in this transaction.
@@ -2667,6 +2862,8 @@ pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
 /// Supply an existing transaction to read the marker, snapshot, and updates from
 /// one snapshot. Appends and lineage changes must use that same transaction.
 pub fn load_doc_in(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
+    #[cfg(test)]
+    passive_cache_tests::record_reconstruction();
     read_marker_in(conn, key)?.ok_or(CollabError::NoMarker)?;
     let snapshot = latest_snapshot(conn, key)?;
     let from_seq = snapshot.as_ref().map_or(0, |(seq, _)| *seq);
@@ -3022,7 +3219,7 @@ pub(crate) fn blob_seq_in_log(
 ) -> Result<Option<i64>, CollabError> {
     let seq: Option<i64> = conn
         .query_row(
-            "SELECT seq FROM ydoc_updates \
+            "SELECT seq FROM ydoc_updates INDEXED BY idx_ydoc_updates_doc_blob \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
                AND update_blob_sha256 = ?4 ORDER BY seq ASC LIMIT 1",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, sha],
@@ -3564,3 +3761,7 @@ pub fn record_recovery_update_in_tx(
         rusqlite::params![request_id,hash,-outcome.seq,now_ms]).map_err(map_sql)?;
     Ok(outcome)
 }
+
+#[cfg(test)]
+#[path = "durable/passive_cache_tests.rs"]
+mod passive_cache_tests;

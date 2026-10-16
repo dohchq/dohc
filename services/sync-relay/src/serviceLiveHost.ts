@@ -1,3 +1,4 @@
+import {workspaceIsDeleted} from "./storage/accountDeletion";
 import {parseServiceActivationConfig,parseServiceActivationTarget,ServiceActivationDriver,type ServiceActivationConfig,type ServiceActivationTarget} from "./serviceActivationDriver";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {liveHostSignal, withLiveHostSignal} from "./liveHostSignal.js";
@@ -10,7 +11,7 @@ import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { readFileSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import * as Effect from "effect/Effect";
@@ -72,9 +73,28 @@ function parseServiceWorkspace(item: unknown) {
   return Object.freeze({ root: path(row.root, true), workspaceId: parseLiveUpdateIdentifier(row.workspaceId, "workspace ID"),
     maxRegistrations: integer(row.maxRegistrations), ordinaryReplication: parseServiceOrdinaryReplicationConfig(row.ordinaryReplication) });
 }
+function assertSeparateWorkspaceRoots(roots: readonly string[]): void {
+  for (const [index, root] of roots.entries()) for (const other of roots.slice(index + 1)) {
+    const distance = relative(root, other);
+    if (!distance || (!distance.startsWith(".." + sep) && distance !== ".." && !isAbsolute(distance)) ||
+        (!relative(other, root).startsWith(".." + sep) && relative(other, root) !== ".." && !isAbsolute(relative(other, root)))) throw new TypeError("Service workspace roots must not overlap.");
+  }
+}
+export async function deleteConfiguredServiceWorkspaceRoots(configPath: string, workspaceIds: readonly string[]): Promise<void> {
+  const config: unknown = JSON.parse(readFileSync(configPath, "utf8"));
+  if (!config || typeof config !== "object" || !("workspaces" in config) || !Array.isArray(config.workspaces)) throw new TypeError("Invalid service host configuration.");
+  const roots = config.workspaces.map((workspace: unknown) => {
+    const row = record(workspace, ["root", "workspaceId", "maxRegistrations"], ["ordinaryReplication"]);
+    if (typeof row.root !== "string" || !isAbsolute(row.root) || resolve(row.root) !== row.root || typeof row.workspaceId !== "string") throw new TypeError("Invalid service workspace root.");
+    return {root: row.root, workspaceId: row.workspaceId};
+  });
+  assertSeparateWorkspaceRoots(roots.map(row => row.root));
+  for (const row of roots) if (workspaceIds.includes(row.workspaceId)) await rm(row.root, {recursive: true, force: true});
+}
 function checkServiceMembership(workspaces: readonly ServiceWorkspace[], targets: readonly ServiceActivationTarget[]) {
   if (new Set(workspaces.map(row => row.workspaceId)).size !== workspaces.length ||
     new Set(workspaces.map(row => process.platform === "win32" ? row.root.toLowerCase() : row.root)).size !== workspaces.length) throw new TypeError("Duplicate service workspace.");
+  assertSeparateWorkspaceRoots(workspaces.map(row => row.root));
   for(const target of targets){
     const workspace=workspaces.find(row=>row.workspaceId===target.workspaceId);
     if(!workspace?.ordinaryReplication || targets.filter(row=>row.workspaceId===target.workspaceId).length>workspace.maxRegistrations)throw new Error("Service activation workspace is not configured.");
@@ -82,12 +102,15 @@ function checkServiceMembership(workspaces: readonly ServiceWorkspace[], targets
 }
 
 /** Operator configuration only. Incoming document fields never supply these paths. */
-export function readServiceLiveHostConfig(configPath: string): ServiceLiveHostConfig {
+export function readServiceLiveHostConfig(configPath: string, keepWorkspace: (id: string) => boolean = () => true): ServiceLiveHostConfig {
   const value = record(JSON.parse(readFileSync(path(configPath, false), "utf8")),
     ["version", "engineExecutable", "hostId", "instanceId", "workspaces", "ingress", "client"], ["settlement", "restore", "sync", "adoption", "activation"]);
   // A host may start empty; `update` attaches workspaces as documents are shared.
   if (value.version !== 1 || !Array.isArray(value.workspaces)) throw new TypeError("Invalid service host configuration.");
-  const workspaces = value.workspaces.map(parseServiceWorkspace);
+  const workspaces = value.workspaces.filter(item => {
+    if (!item || typeof item !== "object" || !("workspaceId" in item) || typeof item.workspaceId !== "string") return true;
+    return keepWorkspace(item.workspaceId);
+  }).map(parseServiceWorkspace);
   const ingress = record(value.ingress, ["aggregateBytes", "applicationWorkingReserveBytes", "maxUploads", "uploadDeadlineMs"]);
   const client = record(value.client, ["aggregateBytes", "maxUploads", "connectTimeoutMs", "requestDeadlineMs"]);
   const settlement = parseLiveSettlementConfig(value.settlement);
@@ -98,7 +121,8 @@ export function readServiceLiveHostConfig(configPath: string): ServiceLiveHostCo
     return Object.freeze({maxBytes: integer(row.maxBytes), maxEvents: integer(row.maxEvents),
       ownerOutbox: Object.freeze({maxPendingBytes: integer(outbox.maxPendingBytes), maxPendingAgeMs: integer(outbox.maxPendingAgeMs)})});
   })();
-  const activation=parseServiceActivationConfig(value.activation);
+  const parsedActivation=parseServiceActivationConfig(value.activation);
+  const activation=parsedActivation ? {...parsedActivation, targets: parsedActivation.targets.filter(row => keepWorkspace(row.workspaceId))} : undefined;
   const sync=parseNativeLiveSyncConfig(value.sync,integer(ingress.aggregateBytes));
   checkServiceMembership(workspaces, activation?.targets ?? []);
   if(activation && (!adoption || !sync || activation.maxCaptureBytes>Math.min(sync.policy.maxReadBytes,sync.policy.maxOutputBytes))){
@@ -129,7 +153,7 @@ export async function startServiceLiveHost(options: {
   frameChanges?: LiveHostChanges;
 }) {
   const { storage, history } = options;
-  const config = readServiceLiveHostConfig(options.configPath);
+  const config = readServiceLiveHostConfig(options.configPath, id => !workspaceIsDeleted(options.storage,id));
   // An activation host registers when its first document activates, even if it starts empty.
   const preparingOrdinary = config.activation !== undefined || config.workspaces.some(row => row.ordinaryReplication !== undefined);
   const standing = storage.captureStanding();
@@ -495,7 +519,11 @@ export async function startServiceLiveHost(options: {
       const retiring: {workspaceId: string; objectId: string}[] = [];
       for (const [key, document] of hosted) {
         if (changed.includes(document.target.workspaceId) || isDeepStrictEqual(wanted.get(key), document)) continue;
-        if (await unload(document, joined)) {hosted.delete(key); idle.delete(key); unloading.delete(key);}
+        // A fenced document cannot settle. Keep its durable work in the store, as on an identity change.
+        // The engine keeps it loaded until its workspace detaches; Start activates it again.
+        if (await unload(document, joined) || !storage.serviceHostDocumentEnabled({workspaceId: document.target.workspaceId, objectId: document.objectId})) {
+          activation.removeTarget(document.target); hosted.delete(key); idle.delete(key); unloading.delete(key);
+        }
         else retiring.push({workspaceId: document.target.workspaceId, objectId: document.objectId});
       }
       // Any other workspace detaches only once its last document unloads, so
@@ -588,6 +616,14 @@ export async function startServiceLiveHost(options: {
        * engine still holds; a later update retries them.
        */
       update,
+      async deleteWorkspaces(workspaceIds: readonly string[]) {
+        await exclusive(() => withLiveHostSignal(signal, undefined, async joined => {
+          for (const workspaceId of workspaceIds) {
+            const member = members.get(workspaceId);
+            if (member) {await detach(workspaceId, joined); await rm(member.workspace.root, {recursive: true, force: true});}
+          }
+        }));
+      },
       /** Whether this daemon holds the document: it is hosted, or it left and its unload is pending. */
       holds(document: {workspaceId: string; objectId: string}): boolean {
         return [...hosted.values()].some(row => row.target.workspaceId === document.workspaceId && row.objectId === document.objectId);

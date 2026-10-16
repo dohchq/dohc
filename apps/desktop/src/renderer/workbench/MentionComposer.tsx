@@ -1,15 +1,17 @@
 import { AtSign, FileText, Hash } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   activeMentionQuery,
   applyMentionCompletion,
   matchMentionCandidates,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
-import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentRosterPick } from "../offers/agentAddressed";
-import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
+import { agentRosterPickIsPresent, mapAgentRosterPick, type AgentAddressedOffer, type AgentRosterPick } from "../offers/agentAddressed";
+import type { ActorPresentation, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
+import { AgentOffer } from "./AgentOffer";
 import { ChatAvatar } from "./ChatAvatar";
+import { ownPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import {
@@ -58,6 +60,13 @@ export function MentionComposer(props: {
   onSend: () => void;
   onRosterPick?: (pick: AgentRosterPick | null) => void;
   rosterScope?: string;
+  // What sending to the picked agent does. The parent derives it from the
+  // pick it was told about; Set up opens Settings → Agents.
+  agentOffer?: AgentAddressedOffer | null;
+  onSetUpAgent?: () => void;
+  // Bars on a stream composer's top edge, such as Replying to. The agent
+  // offer floats above them.
+  above?: ReactNode;
   onEscape?: () => void;
   // Decision resolution is the one composer mode where an empty submit is a
   // meaningful action: the caller records the literal fallback "Resolved ✓".
@@ -69,6 +78,7 @@ export function MentionComposer(props: {
   // textarea is always mounted so its pinned test id and drivers keep working.
   authorName?: string;
   authorKind?: "human" | "agent";
+  authorPresentation?: ActorPresentation;
   // Takes focus when it mounts, with the caret after its text.
   autoFocus?: boolean;
 }) {
@@ -375,12 +385,12 @@ export function MentionComposer(props: {
   const isPost = props.surface === "post";
   const locked = props.sending || props.disabled === true;
   const empty = !props.allowEmptySend && props.value.trim().length === 0;
-  return (
+  const form = (
     <form
       data-expanded={isPost ? expanded : undefined}
       className={
         isPost
-          ? `relative flex shrink-0 flex-col rounded-xl border bg-panel transition-colors duration-75 ${
+          ? `@container/composer relative flex shrink-0 flex-col rounded-xl border bg-panel transition-colors duration-75 ${
               expanded ? "border-line px-4 pb-2 pt-3" : "border-line px-3 py-2 hover:border-muted/50"
             }`
           : "relative flex shrink-0 items-end gap-1.5 border-t border-line p-2"
@@ -392,7 +402,7 @@ export function MentionComposer(props: {
     >
       {isPost && props.authorName ? (
         <div className={`flex items-center gap-2.5 ${expanded ? "mb-2" : ""}`}>
-          <ChatAvatar name={props.authorName} kind={props.authorKind ?? "human"} own />
+          <ChatAvatar presentation={props.authorPresentation ?? (props.authorKind === "agent" ? ownAgentPresentation : ownPresentation)} name={props.authorName} kind={props.authorKind ?? "human"} />
           {expanded ? (
             <span className="text-[14px] font-semibold text-ink">{props.authorName}</span>
           ) : (
@@ -633,7 +643,8 @@ export function MentionComposer(props: {
               className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40"
             >
               <AtSign size={14} strokeWidth={1.9} aria-hidden />
-              Mention
+              {/* A narrow post keeps the room for its words. */}
+              <span className="@max-[29rem]/composer:hidden">Mention</span>
             </button>
             {props.fileCandidates?.length ? (
               <button
@@ -650,10 +661,14 @@ export function MentionComposer(props: {
                 className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40"
               >
                 <FileText size={14} strokeWidth={1.9} aria-hidden />
-                File
+                <span className="@max-[29rem]/composer:hidden">File</span>
               </button>
             ) : null}
-            <span className="flex-1" />
+            {props.agentOffer ? (
+              <AgentOffer offer={props.agentOffer} surface="post" onSetUp={props.onSetUpAgent} />
+            ) : (
+              <span className="flex-1" />
+            )}
             <ComposerSendButton
               testId={`${props.testIdPrefix}-send`}
               label={props.sendLabel}
@@ -721,5 +736,17 @@ export function MentionComposer(props: {
         </>
       )}
     </form>
+  );
+  if (isPost) return form;
+  // The bars, the box and the agent offer are one stack, so the offer floats
+  // above the topmost bar and never covers its ×.
+  return (
+    <div className="@container/composer relative shrink-0">
+      {props.above}
+      {form}
+      {props.agentOffer ? (
+        <AgentOffer offer={props.agentOffer} surface="stream" onSetUp={props.onSetUpAgent} />
+      ) : null}
+    </div>
   );
 }

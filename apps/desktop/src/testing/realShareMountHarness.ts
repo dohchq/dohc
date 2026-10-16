@@ -128,6 +128,8 @@ export function createRealShareMountHarness(input: {
     relayShareJsonWithCredentials: unexpected,
     relayShareErrorCopy: unexpected,
     relayShareDiscussionActivityPolls: createPresencePollRegistry(),
+    ownerLiveStop: unexpected,
+    listOwnerLiveStops: unexpected,
     sharesChanged: unexpected,
     reconcileReceivedShares: unexpected,
   });

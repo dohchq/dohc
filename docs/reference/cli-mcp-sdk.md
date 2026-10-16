@@ -16,7 +16,7 @@ Agents and developers use this page to work with dohc from outside the app. It l
 Agent prompts and scripts depend on these names. Before launch, a rename replaces the old name outright, with no alias.
 
 - The desktop MCP server reports its version as `0.3.0`. A rename or removal of a tool, argument, or result field raises it.
-- `--json` output carries `schemaVersion: 2`. A change to the shape of that output raises it.
+- `--json` output carries `schemaVersion: 3`. A change to the shape of that output raises it.
 - The CLI and the app must be the same build. Otherwise the CLI stops with `CLI/app version mismatch — restart the app`.
 
 A tool or command that cannot do what was asked returns `{ ok: false, reason }`, or exits with status 1 and prints the reason. MCP marks such a result as an error.
@@ -24,6 +24,17 @@ A tool or command that cannot do what was asked returns `{ ok: false, reason }`,
 Partial form creation returns `{ kind: "partial", created, failedStage, reason, retry }`. The CLI exits with status 1 and keeps the structured output. MCP marks the result as an error and keeps its structured content.
 
 ## Desktop MCP tools
+
+### `dohc_read_share_copy`
+
+Read one owned grant's share code and named-account invite link. Requires the original workspace and its signed-in owner account. Ended grants return only status; unknown and link grants are refused.
+
+The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.
+
+- `shareId`: `string`. Required.
+- `grantId`: `string`. Required.
+
+Returns `{ status: "active", shareCode, browserInvitationUrl? } | { status: "ended" }`.
 
 ### `dohc_list_automations`
 
@@ -495,6 +506,8 @@ Both verbs return only the allowlisted AccessAnswer fields shown below, with at 
 
 Share answers use the current observation; the CLI never refreshes share inventories. `freshness` is `fresh`, `stale`, or `unknown`; `checkedAtMs` is the observation timestamp in milliseconds, or null when unknown. `coverage` names the observed scope and whether it is complete. Its `observation` is `interval`: pages do not form an atomic snapshot. `nextCursor` continues the answer, or is null at the end.
 
+`unknownReason` is null when coverage is known. When visibility is `hidden` or `missing`, it is null because visibility states why the answer is unavailable. Every other answer with `coverage.kind` set to `unavailable` requires one reason. Its closed values are `signed-out`, `not-synced`, `other-account`, `other-server`, `not-listed-yet`, `changed`, and `unreadable`. Reasons describe only this device's records and account. They contain no account identity, email, server URL, share id, or path.
+
 Queries use only the CLI's registered workspace, with no workspace enumeration. The granted lane contains that workspace owner's grants; the received lane contains the signed-in account's received shares. A received object's answer shows only the recipient's own grant.
 
 Collection answers read current Collection authority and return capability facts, not share grants.
@@ -509,7 +522,7 @@ Read the grants covering an object.
 
 - `--cursor <cursor>`: Continue the previous answer.
 
-With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessObject`.
+With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, unknownReason, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessObject`.
 
 #### `dohc access sharing`
 
@@ -521,11 +534,27 @@ Page this workspace's granted shares or this account's received shares.
 
 - `--cursor <cursor>`: Continue the previous answer.
 
-With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessSharing`.
+With `--json`, prints `{ schemaVersion, ref: { kind: "path", path, versionId } | { kind: "file", objectId } | { kind: "chat", channelWireId } | { kind: "collection", datasetId } | null, rows: ({ kind: "share", shareId, grantId, via, granterUserId, granterEmail, recipientUserId, recipientEmail, subjectName, sharerName, selector, access, status, generation, fileScope?, removalMessage? } | { kind: "collection", datasetId, principal, appId, operationIds, revision, revisionSha256, compatible })[], visibility, coverage: { kind, complete, observation: "interval" }, unknownReason, checkedAtMs, freshness, nextCursor }`. Uses socket verb `accessSharing`.
+
+### `dohc share`
+
+Read copy details for an owned share grant.
+
+Requires the original workspace and its signed-in owner account.
+
+#### `dohc share copy`
+
+```sh
+dohc share copy <shareId> <grantId> [options]
+```
+
+Read a grant's share code and named-account invite link.
+
+With `--json`, prints `{ schemaVersion, status: "active", shareCode, browserInvitationUrl? }` or `{ schemaVersion, status: "ended" }`.
 
 ### `dohc document`
 
-Read, edit, and create live Markdown documents, and comment on tracked text files.
+Read, edit, and create live Markdown documents. List and start chats on tracked files.
 
 Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
 
@@ -572,6 +601,18 @@ Use - as the body to read it from stdin. Use --text instead to supply Markdown. 
 - `--agent <name>`: Record this agent name with the change.
 
 With `--json`, prints `{ schemaVersion, ok: true, path }`.
+
+#### `dohc document chats`
+
+```sh
+dohc document chats <path> [options]
+```
+
+List chats linked to a workspace file.
+
+Chats follow the file across renames. Use chat show --peek with a thread ID to read it without marking it read.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, fileObjectId, threads: { id, title, createdAtMs, updatedAtMs, linkedPathHint? }[] }`.
 
 #### `dohc document comment`
 
@@ -768,7 +809,7 @@ List saved operations, with values to undo edits.
 - `beforeRevision`: `integer`
 - `limit`: `integer`
 
-Returns `{ kind: "history", datasetId, headRevision, entries: { revision, operation, callerReference, recordedAtMs, approvedRevisionHash, changesetBytes, attachmentCount, undo?, automation?, approvalAgent?, schema? }[], nextBeforeRevision }`.
+Returns `{ kind: "history", datasetId, name?, lineage?, olderRecordedAtMs?, archived?, headRevision, entries: { revision, operation, callerReference, recordedAtMs, approvedRevisionHash, changesetBytes, attachmentCount, undo?, automation?, approvalAgent?, schema? }[], nextBeforeRevision }`.
 
 #### `dohc dataset historyRevision`
 
@@ -1471,6 +1512,39 @@ Name the record by its id, or a dataset record by its primary key as JSON. The p
 - `--request-id <id>`: Send the same id again, after a timeout for example, to get the same press instead of a second one.
 
 With `--json`, prints `{ schemaVersion, ok: true, run, outcome, error, waiting }` or `{ schemaVersion, ok: true, relayed: true }`.
+
+### `dohc account`
+
+Review and delete the server account the dohc app is connected to.
+
+Unlike other commands, account verbs also work outside a workspace folder.
+
+#### `dohc account deletePreview`
+
+```sh
+dohc account deletePreview [options]
+```
+
+List what deleting the connected server account removes.
+
+The result holds the server and previewToken that delete needs. The token expires after five minutes.
+
+With `--json`, prints `{ schemaVersion, email, server, workspaces: { workspaceId, name }[], workspacesElsewhere, storedBytes, ownedShareCount, heldGrantCount, previewToken }`.
+
+#### `dohc account delete`
+
+```sh
+dohc account delete [options]
+```
+
+Delete the connected server account and the workspaces it owns on the server.
+
+dohc reads the account password from stdin, or asks for it when stdin is a terminal. Never pass it as an argument. This cannot be undone. Copies on this computer stay. People you shared with lose access and keep their copies. If you create an account again later, the server will not accept your old copies of the deleted workspaces. Its backups keep the data until they expire. When the server cannot finish at once, the account stays blocked and the server finishes later. Either way, the dohc app disconnects from the server. If it cannot, delete exits 1 and says how to finish. If the preview expired or changed, run deletePreview again.
+
+- `--server <address>`: Use server from deletePreview. Required.
+- `--preview-token <token>`: Use previewToken from deletePreview. Required.
+
+With `--json`, prints `{ schemaVersion, ok: true, finished, email, server, disconnectError }`.
 
 ## App channel
 

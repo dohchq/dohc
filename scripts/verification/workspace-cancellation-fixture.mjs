@@ -8,14 +8,14 @@ export async function runCanonicalCancellationFixture(root, sourceRoot) {
   // use offline adapters. No database or native build starts in this fixture.
   const put = (path, text) => { mkdirSync(dirname(join(root,path)),{recursive:true}); writeFileSync(join(root,path),text); };
   put('package.json','{"type":"module"}');
-  for(const file of ['verify.mjs','ticket-evidence.mjs','queue.mjs','js-tests.mjs','selection.mjs','process.mjs','cancellation.mjs','timing.mjs'])
+  for(const file of ['verify.mjs','ticket-evidence.mjs','queue.mjs','js-tests.mjs','selection.mjs','process.mjs','cancellation.mjs','timing.mjs','flaky.mjs'])
     put(`scripts/verification/${file}`,readFileSync(join(sourceRoot,'scripts/verification',file)));
   for(const file of ['git-read.mjs','gate-commands.mjs'])put(`tools/rust-engine-program/${file}`,readFileSync(join(sourceRoot,'tools/rust-engine-program',file)));
   put('apps/desktop/package.json','{}');
   put('apps/desktop/scripts/ensure-electron-installed.mjs','');
   put('scripts/verification/rust-reuse.mjs', "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
   put('.github/workflows/pr-checks.yml','fixture workflow');
-  put('node_modules/js-yaml/index.js',"exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
+  put('node_modules/js-yaml/index.js',"exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],repository:[]};");
   put('node_modules/pnpm/package.json',JSON.stringify({main:'package.json',bin:{pnpm:'fixture.mjs'}}));
   put('scripts/verification/doctor.mjs','export const doctor=()=>({checks:[]});');
   put('scripts/verification/admission.mjs',"export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;");

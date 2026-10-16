@@ -23,7 +23,8 @@ export function installedDependenciesMatch(root) {
 export function admissionPreflight({ rust = false, native = false, root, pins = {}, platform = process.platform, nodeVersion = process.versions.node, command = execFileSync } = {}) {
   const [major, minor] = nodeVersion.split(".").map(Number);
   if (!(major > 24 || major === 24 && minor >= 16)) throw new Error("Verification requires Node 24.16 or newer.");
-  const options = { encoding: "utf8", windowsHide: true, timeout: 10_000, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } };
+  // pwsh alone has taken 2.5-3.8 s to start on the idle shared host.
+  const options = { encoding: "utf8", windowsHide: true, timeout: 60_000, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } };
   if (platform === "win32") {
     const version = command("pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"], options).trim();
     if (Number(version.split(".")[0]) < 7) throw new Error("Verification requires PowerShell 7 on PATH.");

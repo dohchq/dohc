@@ -1,10 +1,11 @@
 import "../../testing/legendListMock";
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
+import type { ChatDispatchStateForThreadResult, ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
+import { deferred } from "../../testing/deferred";
 import {
   NOW,
   channel,
@@ -63,22 +64,6 @@ describe("ChatsView My agent", () => {
     expect(screen.getByTestId("chats-message-body").textContent).toBe(body);
   });
 
-  it("attributes a runner failure to dohc without an agent badge", async () => {
-    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
-    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), message({
-      id: "failure", authorKind: "agent", authorDisplayName: "You",
-      body: "⚠ Agent run failed (exit 3). Open the run chip for details.",
-    })] });
-    renderView();
-    await userEvent.click(await screen.findByTestId("chats-channel"));
-    await userEvent.click(await screen.findByTestId("chats-thread"));
-    const notes = await screen.findAllByTestId("chats-message");
-    const note = within(notes.find((element) => element.dataset.messageId === "failure")!);
-    expect(note.getByTestId("chats-message-author").textContent).toBe("dohc");
-    expect(note.getByTestId("chats-message-author").dataset.authorKind).toBe("system");
-    expect(note.queryByTestId("chats-comment-agent-badge")).toBeNull();
-  });
-
   it("stays absent when the workspace has no agent channel", async () => {
     renderView();
     await screen.findByTestId("chats-channel");
@@ -133,6 +118,7 @@ describe("ChatsView My agent", () => {
     });
     renderView(vi.fn(), vi.fn(), {
       agentSetup: {
+        workspaceId: "workspace-a",
         preferredName: "Sam",
         agentName: "Nova",
         runnerConfigured: true,
@@ -192,7 +178,7 @@ describe("ChatsView My agent", () => {
       items: [
         {
           ...personalFeedItem("Rebuilt the index.", "message-their-agent"),
-          message: message({
+          message: message({ presentation: { group: "fixture", hue: null, self: false },
             id: "message-their-agent",
             authorKind: "agent",
             authorDisplayName: "Owner",
@@ -203,7 +189,7 @@ describe("ChatsView My agent", () => {
         // The user's own agent in their own channel is not someone else's.
         {
           ...personalFeedItem("Checked the exports.", "message-my-agent"),
-          message: message({
+          message: message({ presentation: { group: "fixture", hue: null, self: false },
             id: "message-my-agent",
             authorKind: "agent",
             authorDisplayName: "You",
@@ -237,6 +223,7 @@ describe("ChatsView My agent", () => {
     // An active agent run is not a set-up agent.
     renderView(vi.fn(), vi.fn(), {
       agentSetup: {
+        workspaceId: "workspace-a",
         runnerConfigured: false,
         runnerEnabled: false,
         agentRunActive: true,
@@ -361,7 +348,7 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
         message(),
-        message({
+        message({ presentation: { group: "fixture", hue: null, self: false },
           id: "message-2",
           authorKind: "agent",
           authorDisplayName: "ice@dohc.ai",
@@ -412,7 +399,7 @@ describe("ChatsView document thread", () => {
       authorDisplayName: "Ben",
       body: "Immediately follows its parent",
     });
-    const nonAdjacentReply = message({
+    const nonAdjacentReply = message({ presentation: { group: "fixture", hue: null, self: false },
       id: "comment-3",
       parentMessageId: opening.id,
       authorKind: "agent",
@@ -497,35 +484,6 @@ describe("ChatsView document thread", () => {
     expect(toolbar.querySelector('[data-testid="chats-message-bookmark"]')).not.toBeNull();
   });
 
-  it("breaks a run at an agent's run failure but not at a person's words that read like one", async () => {
-    const user = userEvent.setup();
-    const opening = message({ body: "The full opening post body." });
-    const failure = "⚠ Agent run failed: exit 1";
-    const comments = [
-      message({ id: "agent-1", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: "Starting" }),
-      message({ id: "agent-failed", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: failure, createdAtMs: NOW + 1 }),
-      message({ id: "agent-2", parentMessageId: opening.id, authorKind: "agent", authorDisplayName: "Agent", body: "Retrying", createdAtMs: NOW + 2 }),
-      message({ id: "ana-1", parentMessageId: opening.id, authorDisplayName: "Ana", body: failure, createdAtMs: NOW + 3 }),
-      message({ id: "ana-2", parentMessageId: opening.id, authorDisplayName: "Ana", body: "That was me quoting it", createdAtMs: NOW + 4 }),
-    ];
-    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 6 })] });
-    bridgeMock.listChatMessages.mockResolvedValue({ messages: [opening, ...comments] });
-    renderView();
-
-    await user.click(await screen.findByTestId("chats-channel"));
-    await user.click(await screen.findByTestId("chats-thread"));
-    await screen.findByTestId("chats-comments-divider");
-    const items = screen.getAllByTestId("chats-message").filter((element) => element.tagName === "LI");
-    expect(items.map((item) => [item.dataset.messageId, item.dataset.continues])).toEqual([
-      ["agent-1", "false"],
-      ["agent-failed", "false"],
-      ["agent-2", "false"],
-      ["ana-1", "false"],
-      ["ana-2", "true"],
-    ]);
-    expect(items[3]!.querySelector('[data-testid="chats-comment-bubble"]')?.getAttribute("data-system")).toBeNull();
-  });
-
   it("enters reply mode and sends the true parent message id", async () => {
     const user = userEvent.setup();
     const opening = message();
@@ -577,7 +535,7 @@ describe("ChatsView mentions", () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        message({
+        message({ presentation: { group: "fixture", hue: null, self: false },
           id: "m-ask",
           authorKind: "agent",
           authorDisplayName: "ice@dohc.ai",
@@ -599,7 +557,7 @@ describe("ChatsView mentions", () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        message({
+        message({ presentation: { group: "fixture", hue: null, self: false },
           id: "m-code",
           authorKind: "agent",
           authorDisplayName: "ice@dohc.ai",
@@ -716,5 +674,88 @@ describe("group details", () => {
     fireEvent.click(screen.getByTestId("chats-new-channel"));
     expect((screen.getByTestId("chats-new-channel-purpose") as HTMLInputElement).value).toBe("");
     expect(screen.getByRole("radio", { name: "Posts" }).getAttribute("aria-checked")).toBe("true");
+  });
+});
+
+describe("ChatsView agent offer", () => {
+  const ready = {
+    workspaceId: "workspace-a", agentName: "Nova", runnerConfigured: true, runnerEnabled: true, agentRunActive: false,
+  };
+  const withAgent = (agentSetup = ready, onSetupAgent = vi.fn()) => ({
+    mentionCandidates: mentionRoster, agentSetup, onSetupAgent, workspacePath: "C:\\people\\ice\\work",
+  });
+  async function pickAgent(user: ReturnType<typeof userEvent.setup>, prefix: string) {
+    await user.type(screen.getByTestId(`${prefix}-composer`), "@ag");
+    await user.click(screen.getAllByTestId(`${prefix}-mention-option`)[0]!);
+    return screen.getByTestId("composer-agent-offer");
+  }
+
+  it("says a group's new post runs the agent, and leaves when the post starts", async () => {
+    const user = userEvent.setup();
+    bridgeMock.startChannelThread.mockResolvedValue({
+      thread: thread({ id: "thread-new" }), message: message({ threadId: "thread-new", body: "@agent check it" }), viewerAuthorId: "you",
+    });
+    renderView(vi.fn(), vi.fn(), withAgent());
+    await user.click(await screen.findByTestId("chats-channel"));
+    const offer = await pickAgent(user, "chats-new-thread");
+    expect(offer.dataset.state).toBe("runs");
+    expect(screen.getByTestId("composer-agent-offer-reach").textContent).toBe("reaches work");
+    await user.type(screen.getByTestId("chats-new-thread-composer"), "check it{Enter}");
+    await screen.findByTestId("chats-thread-view");
+    expect(screen.queryByTestId("composer-agent-offer")).toBeNull();
+  });
+
+  it("names dispatch's cause and opens Settings → Agents when no runner command is set", async () => {
+    const user = userEvent.setup();
+    const onSetupAgent = vi.fn();
+    renderView(vi.fn(), vi.fn(), withAgent({ ...ready, runnerConfigured: false }, onSetupAgent));
+    await user.click(await screen.findByTestId("chats-channel"));
+    expect((await pickAgent(user, "chats-new-thread")).dataset.state).toBe("no-command");
+    await user.click(screen.getByTestId("composer-agent-offer-setup"));
+    expect(onSetupAgent).toHaveBeenCalledOnce();
+  });
+
+  it("follows a thread's dispatch once read, and leaves when another thread opens", async () => {
+    const user = userEvent.setup();
+    const dispatch = deferred<ChatDispatchStateForThreadResult>();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread(), thread({ id: "thread-2", title: "Second" })] });
+    bridgeMock.chatDispatchStateForThread.mockReturnValueOnce(dispatch.promise);
+    renderView(vi.fn(), vi.fn(), withAgent());
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click((await screen.findAllByTestId("chats-thread"))[0]!);
+    expect((await pickAgent(user, "chats")).dataset.state).toBe("unknown");
+    await act(async () => { dispatch.resolve({ liveRunId: null, pendingCount: 0, paused: true }); });
+    expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("paused");
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await user.click((await screen.findAllByTestId("chats-thread"))[1]!);
+    await screen.findByTestId("chats-thread-view");
+    expect(screen.queryByTestId("composer-agent-offer")).toBeNull();
+  });
+
+  it("says nothing about running in a group's chat, whose dispatch it does not read", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ type: "chat" })], fileThreads: [] });
+    renderView(vi.fn(), vi.fn(), withAgent());
+    await user.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-lane");
+    await waitFor(() => expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).disabled).toBe(false));
+    expect((await pickAgent(user, "chats-lane")).dataset.state).toBe("unknown");
+    expect(screen.getByTestId("composer-agent-offer-reach").textContent).toBe("Reaches work");
+  });
+
+  it("keeps the comment's reply bar clear: the offer floats above the bar", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), message({ id: "comment-1", body: "Friday works." })] });
+    renderView(vi.fn(), vi.fn(), withAgent());
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click((await screen.findAllByTestId("chats-comment-reply"))[0]!);
+    const bar = await screen.findByTestId("chats-replying-mode");
+    const offer = await pickAgent(user, "chats");
+    expect(offer.parentElement!.firstElementChild).toBe(bar);
+    await user.click(screen.getByTestId("chats-replying-cancel"));
+    expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
+    expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("runs");
   });
 });

@@ -1,12 +1,13 @@
 import {
   activityPathsAffectWorkspaceListing,
-  type ListWorkspaceFilesResult,
+  isWorkspaceVisibilityPolicyPath,
+  type WorkspacePathListing,
   type WorkspaceActivityEvent,
 } from "../ipc/bridgeContract";
 import type { FileObservationFact } from "@dohc/workspace-engine-client/daemon";
 import type { WorkspaceFileListingEntry } from "./workspaceFiles";
 
-type ListingPromise = Promise<ListWorkspaceFilesResult>;
+type ListingPromise = Promise<WorkspacePathListing>;
 interface ListingEntry {
   attachmentId: symbol;
   listing: ListingPromise;
@@ -108,6 +109,8 @@ export class WorkspaceFileListingCache {
     const entry = this.#listings.get(workspaceId);
     if (!entry || entry.attachmentId !== attachmentId) return;
     for (const fact of facts) {
+      // Rules are read separately on every IPC response; they cannot change this path cache.
+      if (isWorkspaceVisibilityPolicyPath(fact.path, this.platform)) continue;
       if (fact.kind !== "changed") { this.#listings.delete(workspaceId); return; }
       entry.changed.add(fact.path);
       const file = entry.files.get(fact.path);
@@ -126,7 +129,7 @@ export class WorkspaceFileListingCache {
     if (event.pathSetChanged === false) return;
     if (
       !event.paths?.length ||
-      activityPathsAffectWorkspaceListing(event.paths, this.platform)
+      activityPathsAffectWorkspaceListing(event.paths.filter(path => !isWorkspaceVisibilityPolicyPath(path, this.platform)), this.platform)
     ) {
       this.#listings.delete(event.workspaceId);
     }

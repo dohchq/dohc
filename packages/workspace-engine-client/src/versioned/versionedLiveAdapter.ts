@@ -1,3 +1,4 @@
+import type { HistoryOperationsStore, HistoryOperation, HistoryUndoResult } from "@dohc/workspace-contracts/engine";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
 import type { SharedFileUpdate, SharedFileUpdateState } from "../ydoc/ydocWireContract";
 import { createHash, randomUUID } from "node:crypto";
@@ -183,7 +184,7 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-export class VersionedLiveAdapter {
+export class VersionedLiveAdapter implements HistoryOperationsStore {
   readonly workspace: WorkspaceHandle;
   readonly workspaceId: string;
   private readonly requester: WorkspaceDaemonRequester;
@@ -1155,6 +1156,16 @@ export class VersionedLiveAdapter {
     return this.request(VERSIONED_METHOD.historyPage, input);
   }
 
+  async readHistoryOperation(input: {workspaceId: string; operationId: string}): Promise<HistoryOperation> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.historyOperations, {operationId: input.operationId});
+  }
+
+  async undoHistoryOperation(input: {workspaceId: string; operationId: string; requestId: string; author?: WriteAuthor}): Promise<HistoryUndoResult> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.historyUndo, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId});
+  }
+
   async getMoment(input: {
     workspaceId: string;
     momentId: string;
@@ -1637,14 +1648,18 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.captureReconcile, {});
   }
 
+  async retryHeldCapture(path: string) {
+    return this.workspaceRequest(WORKSPACE_METHOD.captureRetryHeld, { path });
+  }
+
   async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {
     await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author });
   }
 
   // Capture records nothing until the hold is released, its lease runs out
   // unrenewed, or the workspace closes.
-  async holdCapture(): Promise<{ holdId: string; leaseMs: number }> {
-    return await this.workspaceRequest(WORKSPACE_METHOD.captureHold, {});
+  async holdCapture(input: { operationId?: string } = {}): Promise<{ holdId: string; leaseMs: number }> {
+    return await this.workspaceRequest(WORKSPACE_METHOD.captureHold, input);
   }
 
   async renewCapture(holdId: string): Promise<boolean> {

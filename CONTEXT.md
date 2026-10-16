@@ -40,7 +40,13 @@ _Avoid_: usage record (that stays on the computer)
 
 **Offer**:
 A suggestion for a person at a relevant point in their work. Detection changes nothing; the person chooses whether to act.
-_Avoid_: Offering (what dohc sells), moment (a History term)
+_Avoid_: Offering (what dohc sells), Moment (see History)
+
+### History
+
+**Moment**:
+A recorded file change within a workspace version. Writes, renames, and deletions create moments, including saved live edits and restores. History shows each moment as a row. Moments from one multi-file pass, such as a merge or restore, fold into one expandable row.
+_Avoid_: version (the line of history that holds moments), snapshot (a file's current state within a version, which names its latest moment), checkpoint
 
 ### Collections
 
@@ -158,3 +164,11 @@ _Avoid_: app backend, private app database
 **Dataset operation**:
 A named action in an approved dataset revision with declared caller access and read or write authority. Forms, apps, owner views, and agents use the same operation to enforce its rules.
 _Avoid_: raw database edit (for a governed data change)
+
+## Replica current view
+
+A replica current view is the relay-owned view of a shared workspace after the passive engine drains both replication lanes.
+It contains a complete file manifest, current text, and the applied ordinary and journal cursors.
+The union of current share selectors limits collection. It grants no recipient access.
+The relay replaces the stored view atomically and removes text with no remaining references.
+Settlement cuts remain a separate concept. Recipient access and pinned History are separate changes.

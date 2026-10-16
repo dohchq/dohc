@@ -6,6 +6,7 @@ import type {
 import { renderAuthorDisplayName } from "./chatIdentity";
 import { renderThreadMarkdown } from "./threadMarkdown";
 import { DohcCliError } from "./errors";
+import { formatStoredBytes } from "./account";
 
 type GroupsResult = CliResultByVerb["groups"];
 type ThreadsResult = CliResultByVerb["threads"];
@@ -18,6 +19,28 @@ type ExportResult = CliResultByVerb["export"];
 
 function lineSafe(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function counted(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+function renderAccountDeletionPreview(preview: CliResultByVerb["accountDeletePreview"]): string {
+  const local = preview.workspaces.map((workspace) => lineSafe(workspace.name));
+  return [
+    `Deleting ${preview.email} on ${preview.server} removes it from the server, with:`,
+    `  ${counted(local.length, "workspace", "workspaces")} on this computer${local.length ? `: ${local.join(", ")}` : ""}`,
+    `  ${counted(preview.workspacesElsewhere, "workspace", "workspaces")} not on this computer`,
+    `  ${formatStoredBytes(preview.storedBytes)} of stored files, data, apps, chats, and history`,
+    `  ${counted(preview.ownedShareCount, "share", "shares")} you own. People you shared with lose access and keep their copies.`,
+    "  your access to shares others gave you",
+    "Copies on this computer stay. This cannot be undone.",
+    "If you create an account again later, this server will not accept your old copies of these workspaces.",
+    "The server's backups keep the data until they expire.",
+    "",
+    "To delete, run this within five minutes. dohc asks for the account password:",
+    `  dohc account delete --server ${preview.server} --preview-token ${preview.previewToken}`,
+  ].join("\n");
 }
 
 function dateTime(atMs: number): string {
@@ -258,6 +281,24 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
   options: { grepFilesWithMatches?: boolean; grepContext?: number; momentSide?: "before" | "after" } = {},
 ): string {
   switch (verb) {
+    case "accountDeletePreview":
+      return renderAccountDeletionPreview(result as CliResultByVerb["accountDeletePreview"]);
+    case "accountDelete": {
+      const deleted = result as CliResultByVerb["accountDelete"];
+      if (!deleted.ok) throw new DohcCliError(deleted.reason);
+      const outcome = deleted.finished
+        ? `Deleted ${deleted.email} on ${deleted.server}.`
+        : `${deleted.email} on ${deleted.server} is blocked. The server will finish removing its data.`;
+      if (deleted.disconnectError === null) {
+        return `${outcome} The dohc app disconnected from this server. Workspaces on this computer stay.`;
+      }
+      return [
+        `${outcome} Workspaces on this computer stay.`,
+        `The dohc app could not disconnect from this server: ${lineSafe(deleted.disconnectError)}`,
+        `Quit and reopen the dohc app. If Settings > Sync and sharing still shows ${deleted.email}, choose Disconnect.`,
+      ].join("\n");
+    }
+    case "shareCopy":
     case "accessObject":
     case "accessSharing":
       return JSON.stringify(result, null, 2);

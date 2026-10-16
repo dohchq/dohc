@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import * as Y from "yjs";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
-import { startServiceLiveHost, type ServiceWorkspace } from "./serviceLiveHost.js";
+import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type ServiceWorkspace } from "./serviceLiveHost.js";
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
@@ -764,6 +764,29 @@ it("keeps a workspace attached while its last document's unload is pending and d
   expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
 });
 
+it.each(["settlement-pending", "delivery-pending"])("drops a stopped document with %s and detaches its last workspace", async reason => {
+  const o = await emptyServiceHost();
+  o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling]});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const cut = o.f.storage.readLiveUpdateJournalCut({document: o.document});
+  const generation = o.raw.prepare("SELECT restore_fence_generation FROM sync_relay_live_documents WHERE workspace_id='workspace' AND object_id='object' AND lineage_state='current'").get()!.restore_fence_generation as number;
+  const stopped = o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
+    enabled: false, retire: true, restoreFenceGeneration: generation, nowMs: 20, guard() {}});
+  expect(stopped).toMatchObject({enabled: false, retired: true});
+  o.unloads.push({status: "pending", reason});
+  expect(await o.host.update({workspaces: [], documents: []})).toEqual([]);
+  expect(o.host.holds(o.sibling)).toBe(false);
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  expect(o.host.automationLedger("workspace")).toBeNull();
+  expect(o.membership.at(-1)).toEqual({method: "liveApplication.detachWorkspace", workspace: "attached-handle", params: {}});
+  expect(o.f.storage.readLiveUpdateJournalCut({document: o.document})).toEqual(cut);
+  const calls = o.membership.length;
+  expect(await o.host.update({workspaces: [], documents: []})).toEqual([]);
+  expect(o.membership).toHaveLength(calls);
+  expect(o.client().close).not.toHaveBeenCalled();
+});
+
 it.each([false, true])("detaches a workspace at once when its identity changes, leaving its pending document unsettled (new documents at once: %s)", async newAtOnce => {
   const o = await emptyServiceHost();
   const siblingRoot = join(o.f.root, "workspace-2"), rotatedRoot = join(o.f.root, "workspace-rotated");
@@ -814,6 +837,21 @@ it("keeps the daemon after a refused attach and retires it when the engine expir
   refuse("SESSION_EXPIRED");
   await expect(o.host.update({workspaces, documents: [o.sibling]})).rejects.toThrow("SESSION_EXPIRED");
   expect(o.host.invalidated.aborted).toBe(true);
+});
+
+it("removes a detached configured root after restart and keeps unrelated roots", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-configured-root-deletion-"));
+  cleanup.push(() => rm(root,{recursive:true,force:true}));
+  const deleted = join(root,"deleted"), kept = join(root,"kept");
+  await mkdir(deleted);await mkdir(kept);await writeFile(join(deleted,"account"),"deleted-person");
+  const configPath = join(root,"host.json");
+  await writeFile(configPath,JSON.stringify({workspaces:[{root:deleted,workspaceId:"deleted",maxRegistrations:1},{root:kept,workspaceId:"kept",maxRegistrations:1}]}));
+  await deleteConfiguredServiceWorkspaceRoots(configPath,["deleted"]);
+  await deleteConfiguredServiceWorkspaceRoots(configPath,["deleted"]);
+  expect(existsSync(deleted)).toBe(false);expect(existsSync(kept)).toBe(true);
+  await writeFile(configPath,JSON.stringify({workspaces:[{root,workspaceId:"deleted",maxRegistrations:1},{root:kept,workspaceId:"kept",maxRegistrations:1}]}));
+  await expect(deleteConfiguredServiceWorkspaceRoots(configPath,["deleted"])).rejects.toThrow("overlap");
+  expect(existsSync(kept)).toBe(true);
 });
 
 // An empty host holding the real document and a held one, on a manual clock.

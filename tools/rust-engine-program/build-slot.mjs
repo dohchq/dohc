@@ -434,11 +434,12 @@ function readOwner(lock) {
  * would steal the directory the faster sweeper's waiter had already
  * re-claimed. The lock is held for milliseconds; one left by a dead sweeper
  * is removed after 5 minutes. Returns how many slots were freed.
+ * `ownTicket` names the sweeping waiter's ticket, which is never stale.
  */
-export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot", goneMs = 2 * defaultHeartbeatMs, identify = processCreation }) {
+export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot", goneMs = 2 * defaultHeartbeatMs, identify = processCreation, ownTicket }) {
   try {
     return withSweepLock(root, owns => {
-      reclaimStaleTickets({ root, kind, owns });
+      reclaimStaleTickets({ root, kind, owns, ownTicket });
       return reclaimSlots({ root, slots, kind, staleMs, goneMs, identify, owns });
     }) ?? 0;
   } catch (error) {
@@ -585,9 +586,12 @@ function queueTickets(root, kind) {
 // Each record supplies its heartbeat interval. Temporary records get two
 // heartbeats of grace, with the default interval for missing or torn records.
 // The caller holds reclaim.lock, and stops when it no longer `owns` it.
-function reclaimStaleTickets({ root, kind, owns = () => true }) {
+// The sweeper's own ticket is live by definition, even when a busy event loop
+// has delayed its heartbeat.
+function reclaimStaleTickets({ root, kind, owns = () => true, ownTicket }) {
   for (const name of queueEntries(root, kind)) {
     if (!owns()) return;
+    if (name === ownTicket) continue;
     const temporary = name.endsWith(".json.tmp");
     if (!temporary && !name.endsWith(".json")) continue;
     const path = join(root, `${kind}-queue`, name);
@@ -854,8 +858,9 @@ export function verificationLanes(env = process.env) {
  * Only this checkout's PR verifier may hold it; `entry` is the caller's script.
  * `lanes` replaces reading the host setting for a caller that tracks it already, such as the
  * queue service: it returns the current lane count each time admission is checked.
+ * `hold()` returns why the caller must not take a lane now, such as a paused queue, or null.
  */
-export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1], signal, lanes } = {}) {
+export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1], signal, lanes, hold } = {}) {
   if (!entry || canonical(entry) !== canonical(verifierEntry)) {
     throw new Error(`Only the PR verifier (${verifierEntry}) may hold a verification lane. Run pnpm verify:pr, or take a build slot for other Cargo work.`);
   }
@@ -869,7 +874,7 @@ export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 
   // Verifiers older than the lane setting used one slot and record no count.
   return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots, maxSlots: maxVerificationLanes, limit, legacySlots: 1,
     kind: "verification-slot", lanes: "verification runs", metadata,
-    waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket, signal });
+    waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket, signal, hold });
 }
 
 /** A ticket observer failed, so acquisition stopped before admission instead of retrying. */
@@ -887,6 +892,8 @@ export class TicketEvidenceError extends Error {}
  * admission removes its ticket within milliseconds, so no later reader can
  * rely on seeing it. A throwing or Promise-returning observer rejects
  * acquisition with TicketEvidenceError.
+ * While `hold()` returns a reason, the waiter says it once and waits without a
+ * ticket, so it reserves no slot. Its wait limit starts again when the hold ends.
  */
 async function acquireSlot({
   root,
@@ -906,10 +913,12 @@ async function acquireSlot({
   identityDelayMs,
   goneMs,
   signal,
+  hold,
 }) {
   mkdirSync(root, { recursive: true });
   const label = kind.replace("-", " ");
-  const deadline = Date.now() + waitMs;
+  let deadline = Date.now() + waitMs;
+  let holding = false;
   let denied = false;
   let nextMessageAt = 0;
   let lastSweepAt = -Infinity;
@@ -942,6 +951,17 @@ async function acquireSlot({
   process.on("SIGTERM", onSigterm);
   try { for (;;) {
     cancellation.signal.throwIfAborted();
+    const held = hold?.();
+    if (held) {
+      removeTicket();
+      ticket = undefined;
+      if (!holding) console.log(`  ${held}`);
+      holding = true;
+      deadline = Date.now() + waitMs;
+      await sleep(Math.min(pollMs, 1000), undefined, { signal: cancellation.signal });
+      continue;
+    }
+    holding = false;
     let ahead = -1;
     let free = [];
     let slot;
@@ -974,7 +994,7 @@ async function acquireSlot({
       const sweepMs = reserved ? Math.min(pollMs, 1000) : pollMs;
       if (Date.now() - lastSweepAt >= sweepMs) {
         lastSweepAt = Date.now();
-        reclaimStaleSlots({ root, slots: maxSlots, staleMs, goneMs, kind });
+        reclaimStaleSlots({ root, slots: maxSlots, staleMs, goneMs, kind, ownTicket: ticket.name });
         refreshQueue();
       }
       if (ahead < 0) {
@@ -993,6 +1013,8 @@ async function acquireSlot({
         } catch (error) {
           if (error.code !== "EEXIST") throw error;
         }
+        // A hold that began during this pass gets the slot back before anything runs in it.
+        if (created && hold?.()) { rmSync(dir, { recursive: true, force: true }); continue; }
         if (created) return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata, identityDelayMs);
       }
     } catch (error) {

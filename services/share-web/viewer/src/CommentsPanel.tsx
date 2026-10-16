@@ -1,3 +1,4 @@
+import {fetchShareWeb} from "./apiVersion";
 import {
   normalizeShareDiscussionBody,
   normalizeShareDiscussionDisplayName,
@@ -107,7 +108,7 @@ function discussionRequest(
   init: RequestInit,
   signal: AbortSignal,
 ): Promise<Response> {
-  return fetch(path, {
+  return fetchShareWeb(path, {
     ...init,
     credentials: "same-origin",
     headers: {

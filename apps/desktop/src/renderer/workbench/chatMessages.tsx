@@ -1,5 +1,5 @@
 import { EMOJI_DATA } from "../editor/emojiData";
-import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
+import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
 import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@legendapp/list/react";
 import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
@@ -591,10 +591,7 @@ export function continuesRun(previous: ChatMessageRecord | undefined, message: C
   return previous !== undefined &&
     sameChatDay(previous.createdAtMs, message.createdAtMs) &&
     previous.authorKind === message.authorKind &&
-    (previous.authorUserId && message.authorUserId
-      ? previous.authorUserId === message.authorUserId
-      : !previous.authorUserId && !message.authorUserId &&
-        previous.authorDisplayName === message.authorDisplayName) &&
+    previous.presentation.group === message.presentation.group &&
     message.createdAtMs - previous.createdAtMs < GROUP_WINDOW_MS;
 }
 
@@ -634,8 +631,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   flashMessageId?: string | null;
   // A "New" hairline sits before this message, the first the reader has not seen.
   firstUnreadMessageId?: string | null;
+  // Room under the last message, in pixels, that the list always keeps.
+  bottomSpace?: number;
 }) {
-  const isOwn = useIsOwnAuthor();
   const candidates = props.mentionCandidates ?? EMPTY_MENTION_CANDIDATES;
   const reactionsByMessage = useMemo(() => {
     const grouped = new Map<string, ChatReactionRecord[]>();
@@ -782,10 +780,9 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
                 {formatClock(message.createdAtMs)}
               </time>
             ) : (
-              <ChatAvatar
+              <ChatAvatar presentation={message.presentation}
                 name={message.authorDisplayName}
                 kind={message.authorKind}
-                own={isOwn(message.authorKind, message, props.reactionControls?.viewerAuthorId)}
                 size="comment"
               />
             )}
@@ -846,7 +843,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
         </div>
       </li>
     );
-  }, [props, candidates, reactionsByMessage, isOwn]);
+  }, [props, candidates, reactionsByMessage]);
   if (props.loading || props.messages.length === 0) {
     return <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
       {props.loading ? (
@@ -883,7 +880,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     recycleItems={false}
     alwaysRender={pinned}
     className="min-h-0 flex-1 overflow-y-auto"
-    style={{ paddingTop: 8, paddingBottom: 8, paddingLeft: 12, paddingRight: 12 }}
+    style={{ paddingTop: 8, paddingBottom: props.bottomSpace ?? 8, paddingLeft: 12, paddingRight: 12 }}
     role="list"
     data-chat-virtualized="true"
     onKeyDown={event => {

@@ -1,8 +1,10 @@
+import {accountDeletionKey, presentsAccountDeletionKey, ACCOUNT_DELETION_KEY_HEADER, ACCOUNT_DELETION_PATH} from "@dohc/security-contract/account-deletion";
 import { createAppLaunchHandler } from "./appLaunch";
 import { createNamedAppMaterialResolver } from "./namedAppMaterial";
 import { createAppDiscovery } from "./appDiscovery";
 import type { AppLaunchConfig } from "./appLaunchConfig";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
+import {createNamedRecipientChatClient} from "./namedRecipientChat";
 import {createNamedRecipientDocumentsClient} from "./namedRecipientDocuments";
 import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
@@ -11,7 +13,7 @@ import { extname, join } from "node:path";
 import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { TokenBucketLimiter, readBoundedJson } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core";
-import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
+import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER, SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
 import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
 import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type NamedLiveBrowserSessionContext } from "./namedLiveBrowserClient";
@@ -23,7 +25,8 @@ import {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 export {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
 import {serveRemoteMcp} from "./remoteMcp";
 import {COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES} from "./collectionWrites";
-import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError } from "./relayVersion";
+import { viewerPage } from "../viewer/src/pages";
+import { SHARE_WEB_API_VERSIONS, mcpApiVersions, shareWebApiVersionRefusal } from "./apiVersion";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 
@@ -118,6 +121,7 @@ export interface CreateShareWebApplicationOptions {
   publicRelayUrl: string;
   relayExchangeKey?: string;
   publicHosts: ReadonlySet<string>;
+  internalHosts?: ReadonlySet<string>;
   fetchRelay?: RelayFetch;
   nowMs?: () => number;
   newSessionToken?: () => string;
@@ -130,11 +134,12 @@ export interface CreateShareWebApplicationOptions {
   namedBrowserSessionLimits?: NamedLiveBrowserClientLimits;
   namedLiveTickets?: boolean;
   namedRecipientBrowserLimits?: NamedLiveBrowserLimits;
+  deleteAccountGateways?(userId: string, workspaceIds: readonly string[]): void;
   linkLive?: {publicOrigin: string; requests: NamedLiveBrowserClientLimits; editor: NamedLiveBrowserLimits};
 }
 
 export type LinkBrowserMaterial =
-  | { ok: true; capabilityToken: string; profileSecret: string; setCookie: string | null; currentCapability(): Promise<string | null> }
+  | { ok: true; grantId?: string; capabilityToken: string; profileSecret: string; setCookie: string | null; currentCapability(): Promise<string | null> }
   | { ok: false; status: 404 | 503 };
 
 export interface ShareWebApplication {
@@ -155,6 +160,10 @@ class ShareWebSessionStore {
     if (!Number.isSafeInteger(maxSessions) || maxSessions <= 0) {
       throw new Error("maxSessions must be a positive integer");
     }
+  }
+
+  deleteGrants(grantIds: readonly string[]) {
+    for (const [key, session] of this.sessions) if (grantIds.includes(session.grantId)) this.sessions.delete(key);
   }
 
   set(token: string, session: ShareWebSession, nowMs: number): void {
@@ -398,6 +407,17 @@ async function discussionInput(request: Request): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+function logRelayPath(request: Request): string {
+  const incoming = new URL(request.url).searchParams;
+  const query = new URLSearchParams();
+  for (const key of ["since", "limit", "hold"]) {
+    const value = incoming.get(key);
+    if (value !== null) query.set(key, value);
+  }
+  const serialized = query.toString();
+  return `/sync/link/log${serialized ? `?${serialized}` : ""}`;
 }
 
 function discussionRelayPath(request: Request): string | null {
@@ -859,6 +879,7 @@ export function createShareWebApplication({
   publicRelayUrl,
   relayExchangeKey,
   publicHosts,
+  internalHosts,
   fetchRelay: sendToRelay = (request) => fetch(request),
   nowMs = () => Date.now(),
   newSessionToken = () => randomBytes(32).toString("base64url"),
@@ -871,10 +892,15 @@ export function createShareWebApplication({
   namedBrowserSessionLimits,
   namedLiveTickets,
   namedRecipientBrowserLimits,
+  deleteAccountGateways,
   linkLive: linkLiveConfig,
   publicEditRelease: releaseInput,
   appLaunch: appLaunchConfig,
 }: CreateShareWebApplicationOptions): ShareWebApplication {
+  const apiVersions = SHARE_WEB_API_VERSIONS;
+  if (SHARE_WEB_API_VERSION < apiVersions.min || SHARE_WEB_API_VERSION > apiVersions.max) {
+    throw new TypeError("Share-web API version range must include the compiled version.");
+  }
   // Every relay request names the relay API version this build speaks.
   const fetchRelay: RelayFetch = (request) => {
     const headers = new Headers(request.headers);
@@ -897,6 +923,9 @@ export function createShareWebApplication({
   const namedDocuments = namedRecipientBrowserLimits ? createNamedRecipientDocumentsClient({
     relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits!,
     browserLimits: namedRecipientBrowserLimits, fetchRelay,
+  }) : undefined;
+  const namedChat = namedBrowserSessionLimits ? createNamedRecipientChatClient({
+    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, fetchRelay,
   }) : undefined;
   const accountHandler = accountAuth ? createAccountAuthHandler({
     ...accountAuth,
@@ -952,16 +981,15 @@ export function createShareWebApplication({
 
   async function serveViewer(pathname: string): Promise<Response> {
     if (!viewerAssetsDir) return refused();
-    const relative = pathname.startsWith("/s/assets/")
-      ? pathname.slice("/s/".length)
-      : "index.html";
+    const page = !pathname.startsWith("/s/assets/");
+    const relative = page ? viewerPage(pathname) : pathname.slice("/s/".length);
     if (relative.includes("..") || relative.includes("\\")) return refused();
     try {
       const bytes = await readFile(join(viewerAssetsDir, relative));
       const result = response(bodyBuffer(bytes), {
         headers: { "content-type": contentTypeForAsset(relative) },
       });
-      if (relative === "index.html" && appLaunchConfig) result.headers.set("content-security-policy", SHARE_WEB_CSP.replace("form-action 'none'", `form-action https://*.${appLaunchConfig.appDomain}`));
+      if (page && appLaunchConfig) result.headers.set("content-security-policy", SHARE_WEB_CSP.replace("form-action 'none'", `form-action https://*.${appLaunchConfig.appDomain}`));
       return result;
     } catch {
       return refused();
@@ -1093,7 +1121,7 @@ export function createShareWebApplication({
       if (!sessions.isCurrent(discriminator, authenticated.token, capabilityToken, nowMs())) {
         return { ok: false, status: 404 };
       }
-      return { ok: true, capabilityToken, profileSecret, setCookie: refreshed.headers["set-cookie"] ?? null,
+      return { ok: true, grantId: authenticated.session.grantId, capabilityToken, profileSecret, setCookie: refreshed.headers["set-cookie"] ?? null,
         async currentCapability() {
           await refreshes.get(sessionKey(discriminator, authenticated.token));
           const current = sessions.get(discriminator, authenticated.token, nowMs());
@@ -1193,15 +1221,41 @@ export function createShareWebApplication({
   if (appLaunchConfig && accountAuth && accountAuth.publicOrigin !== appLaunchConfig.viewerOrigin) throw new TypeError("Named app accounts must use the app viewer origin.");
   const resolveNamedAppMaterial = appLaunchConfig && accountAuth && relayExchangeKey ? createNamedAppMaterialResolver({
     relayUrl, publicOrigin: appLaunchConfig.viewerOrigin, exchangeKey: relayExchangeKey, fetchRelay,
+    async resolveAccount(cookie, signal) {
+      const response = await accountHandler!(new Request(new URL("/api/account/session", accountAuth!.publicOrigin), {headers: {cookie, host: new URL(accountAuth!.publicOrigin).host}, signal}));
+      const body: unknown = await response.json();
+      return response.ok && body && typeof body === "object" && "user" in body && body.user && typeof body.user === "object" && "id" in body.user && typeof body.user.id === "string" ? body.user.id : null;
+    },
   }) : undefined;
   const appLaunch = appLaunchConfig ? createAppLaunchHandler({config: appLaunchConfig, relayUrl, fetchRelay, nowMs, resolveMaterial: resolveLinkBrowserMaterial, resolveNamedMaterial: resolveNamedAppMaterial}) : undefined;
   const discoverApps = createAppDiscovery({viewerOrigin: appLaunchConfig?.viewerOrigin, relayUrl, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial});
+  const viewerHost = appLaunchConfig ? new URL(appLaunchConfig.viewerOrigin).host : undefined;
   const handle = async (request: Request): Promise<Response> => {
-    if (appLaunch?.matches(request)) return appLaunch.handle(request);
-    if (!publicHosts.has((request.headers.get("host") ?? "").toLowerCase())) return refused();
+    if (new URL(request.url).pathname === ACCOUNT_DELETION_PATH) {
+      if (!internalHosts?.has((request.headers.get("host") ?? "").toLowerCase()) || request.method !== "POST" || !relayExchangeKey || relayExchangeKey.length < 32 || !presentsAccountDeletionKey(request.headers.get(ACCOUNT_DELETION_KEY_HEADER),accountDeletionKey(relayExchangeKey))) return refused();
+      const body: unknown = await request.json().catch(() => null);
+      if (!body || typeof body !== "object" || !("userId" in body) || typeof body.userId !== "string" || body.userId.length > 1024) return refused();
+      const list = (name: string): string[] | null => {const value = (body as Record<string, unknown>)[name]; return Array.isArray(value) && value.length <= 8 && value.every(id => typeof id === "string" && id.length <= 1024) ? value : null;};
+      const workspaceIds=list("workspaceIds"), grantIds=list("grantIds"), publicationIds=list("publicationIds");
+      if (!workspaceIds || !grantIds || !publicationIds) return refused();
+      sessions.deleteGrants(grantIds);
+      appLaunch?.deleteAccount(body.userId,grantIds,publicationIds);
+      deleteAccountGateways?.(body.userId,workspaceIds);
+      return Response.json({finished:true});
+    }
     const { pathname, search } = new URL(request.url);
+    const host = (request.headers.get("host") ?? "").toLowerCase();
+    const appRequest = appLaunch?.matches(request) ?? false;
+    if (!appRequest && !publicHosts.has(host)) return refused();
+    const viewerAppRoute = pathname === "/api/apps/launch" || pathname === "/api/apps/summary";
+    if (viewerAppRoute ? viewerHost === undefined || request.headers.get("host") === viewerHost : !appRequest) {
+      const refusal = shareWebApiVersionRefusal(request, apiVersions);
+      if (refusal) return refusal;
+    }
+    if (appRequest) return appLaunch!.handle(request);
     const agentOrigin = linkLiveConfig?.publicOrigin ?? `https://${request.headers.get("host")}`;
     if (pathname === "/api/mcp" && request.method === "GET" && !search) return jsonResponse({
+      api: "share-web", apiVersions, versionHeader: SHARE_WEB_API_VERSION_HEADER, defaultVersion: 1, mcpApiVersions: mcpApiVersions(apiVersions),
       endpoint: "/mcp", transport: "streamable-http", exchange: {path: "/api/mcp/exchange", method: "POST", body: {secret: "The secret after # in the share link"}},
       authentication: "Send the returned bearer in the Authorization header as Bearer <bearer>. Each exchange creates a separate agent identity. Keep and reuse the bearer.",
     });
@@ -1234,17 +1288,15 @@ export function createShareWebApplication({
             const internal = new Request(new URL(path, agentOrigin), {
               ...init, signal: init.signal ? AbortSignal.any([signal, init.signal]) : signal,
               headers: {host: new URL(agentOrigin).host, origin: agentOrigin, cookie, [LINK_SESSION_HEADER]: discriminator,
-                "content-type": "application/json"},
+                "content-type": "application/json", [SHARE_WEB_API_VERSION_HEADER]: String(SHARE_WEB_API_VERSION)},
             });
             if (holdsLargeBody) writesInsideAdmittedRequests.add(internal);
             return handle(internal);
           },
         });
         return response(result.body, {status: result.status, headers: result.headers});
-      } catch (error) {
-        return error instanceof RelayVersionRefusalError
-          ? jsonResponse(error.refusal, {status: RELAY_VERSION_REFUSAL_STATUS})
-          : refused();
+      } catch {
+        return refused();
       }
       finally {mcpRequests--; release();}
     }
@@ -1271,6 +1323,12 @@ export function createShareWebApplication({
     if (pathname === "/api/live/named-documents") {
       if (!namedDocuments) return refused();
       const result = await namedDocuments(request);
+      return response(result.body, {status: result.status, headers: result.headers});
+    }
+
+    if (pathname.startsWith("/api/named-chat/")) {
+      if (!namedChat) return refused();
+      const result = await namedChat(request);
       return response(result.body, {status: result.status, headers: result.headers});
     }
 
@@ -1559,7 +1617,7 @@ export function createShareWebApplication({
           return refused();
         }
         return await callRelay(request, authenticated, {
-          path: `/sync/link/log${search}`,
+          path: logRelayPath(request),
           holdMs: Number(hold),
           limiter: activityHoldLimiter,
           ifSessionChanged: true,

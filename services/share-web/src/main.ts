@@ -39,11 +39,13 @@ try {
 }
 
 const application = createShareWebApplication({
+  deleteAccountGateways(userId, workspaceIds) {namedGateway?.deleteAccount(userId,workspaceIds); linkGateway?.deleteAccount(userId,workspaceIds);},
   appLaunch: config.appLaunch,
   relayUrl: config.relayUrl,
   publicRelayUrl: config.publicRelayUrl,
   relayExchangeKey: config.relayExchangeKey,
   publicHosts: config.publicHosts,
+  internalHosts: config.internalHosts,
   viewerAssetsDir,
   accountAuth: config.accountAuth,
   namedBrowserSessionLimits: config.namedBrowserSessionLimits,
@@ -55,12 +57,13 @@ const application = createShareWebApplication({
 
 const server = serveFetchHandler({
   handler: application.handle,
-  maxBodyBytes: url => url.pathname === "/api/mcp/exchange" ? 8 * 1024 : ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents"].includes(url.pathname) && config.namedBrowserSessionLimits
+  maxBodyBytes: url => url.pathname === "/api/mcp/exchange" ? 8 * 1024 : ["/api/live/link-document", "/api/live/link-ticket"].includes(url.pathname) && config.linkLive ? config.linkLive.requests.maxRequestBytes : ["/api/live/named-session", "/api/live/named-ticket", "/api/live/named-documents", "/api/named-chat/messages"].includes(url.pathname) && config.namedBrowserSessionLimits
     ? config.namedBrowserSessionLimits.maxRequestBytes : MAX_REQUEST_BODY_BYTES,
   // These authenticate before they read, then bound the body and its deadline:
   // an agent request and a Collection write can carry megabytes.
   streamBody: url => url.pathname === "/mcp" || url.pathname === COLLECTION_WRITES_PATH,
-  oversized: refusal,
+  oversized: url => url.pathname === "/api/named-chat/messages"
+    ? Response.json({ok: false, error: "Post is too large.", code: "payload_too_large"}, {status: 413, headers: {"cache-control": "private, no-store"}}) : refusal(),
   failure: refusal,
   prepareHeaders: (headers, incoming) => {
     headers.set(

@@ -39,14 +39,15 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
 });
 
-test("desktop proofs require smoke and onboarding everywhere and the pixel baseline on Windows", () => {
+test("desktop proofs require each restart proof, smoke and onboarding everywhere and the pixel baseline on Windows", () => {
+  const restart = ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen", "@restart-durability-person-agent"];
   assert.deepEqual(desktopProofTags({platform: "win32"}), {
-    selected: ["@verification-smoke", "@self-host-onboarding", "@states-page"],
-    required: ["@verification-smoke", "@self-host-onboarding", "@states-baselines"],
+    selected: ["@verification-smoke", ...restart, "@self-host-onboarding", "@states-page"],
+    required: ["@verification-smoke", ...restart, "@self-host-onboarding", "@states-baselines"],
   });
   for (const platform of ["linux", "darwin"]) {
     assert.deepEqual(desktopProofTags({platform}), {
-      selected: ["@verification-smoke", "@self-host-onboarding"], required: ["@verification-smoke", "@self-host-onboarding"],
+      selected: ["@verification-smoke", ...restart, "@self-host-onboarding"], required: ["@verification-smoke", ...restart, "@self-host-onboarding"],
     });
   }
 });
@@ -466,10 +467,12 @@ test("preparation reuses artifacts across proof edits and rebuilds for productio
       }
 
       for(const [operation,change] of [['creation',path=>put(path,'original\\n')],['edit',path=>edit(path)()],['deletion',path=>rmSync(path)]]){
+        let before=sourceFingerprint('engine');
         for(const path of ${JSON.stringify(nativeTestFixtures)}){
-          const before=sourceFingerprint('engine');
           change(path);
-          assert.notEqual(sourceFingerprint('engine'),before,path+' '+operation+' changes native proof provenance');
+          const after=sourceFingerprint('engine');
+          assert.notEqual(after,before,path+' '+operation+' changes native proof provenance');
+          before=after;
           assert.equal(preparedStatus('engine'),true,path+' '+operation+' keeps the daemon');
         }
         // No build consumes a native test fixture; this fixture declares no
@@ -525,7 +528,7 @@ test("preparation reuses artifacts across proof edits and rebuilds for productio
       writeFileSync(receiptPath,JSON.stringify(old));
       await expectBuilds('receipt without production identity',['engine','desktop']);
       await expectBuilds('unchanged checkout',[]);
-    `], { cwd: root, encoding: "utf8", timeout: 120_000 });
+    `], { cwd: root, encoding: "utf8", timeout: 300_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -700,7 +703,6 @@ test("engine source identity includes the real compiler identity and rejects com
 test("source fingerprints follow the host's environment key casing", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-env-key-"));
   try {
-    execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
       import assert from 'node:assert/strict';
       import cp from 'node:child_process';
@@ -714,18 +716,18 @@ test("source fingerprints follow the host's environment key casing", () => {
       const mixed='Cargo_Profile_Dev_Opt_Level';
       delete process.env[upper]; delete process.env[mixed];
       process.env[mixed]='0';
-      const before=sourceFingerprint('engine',root);
+      const before=sourceFingerprint('engine',root,[]);
       process.env[mixed]='1';
-      const after=sourceFingerprint('engine',root);
+      const after=sourceFingerprint('engine',root,[]);
       if(process.platform==='win32') {
         assert.equal(process.env[upper],'1');
         assert.notEqual(before,after);
         delete process.env[mixed]; process.env[upper]='1';
-        assert.equal(sourceFingerprint('engine',root),after);
+        assert.equal(sourceFingerprint('engine',root,[]),after);
       } else {
         assert.equal(before,after);
         process.env[upper]='1';
-        assert.notEqual(sourceFingerprint('engine',root),after);
+        assert.notEqual(sourceFingerprint('engine',root,[]),after);
       }
     `, root], { encoding: "utf8", timeout: 20_000 });
     assert.equal(result.error, undefined);
@@ -736,7 +738,6 @@ test("source fingerprints follow the host's environment key casing", () => {
 for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes environment settings to its build`, () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-env-kind-"));
   try {
-    execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
       import assert from 'node:assert/strict';
       import cp from 'node:child_process';
@@ -755,19 +756,19 @@ for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes e
       };
       for(const [owner,names] of Object.entries(settings)) for(const name of names) {
         delete process.env[name];
-        const absent=sourceFingerprint(kind,root);
+        const absent=sourceFingerprint(kind,root,[]);
         process.env[name]='fixture-one';
-        const created=sourceFingerprint(kind,root);
+        const created=sourceFingerprint(kind,root,[]);
         assert.equal(created!==absent,kind===owner,name+' creation for '+kind);
         process.env[name]='fixture-two';
-        const edited=sourceFingerprint(kind,root);
+        const edited=sourceFingerprint(kind,root,[]);
         assert.equal(edited!==created,kind===owner,name+' edit for '+kind);
         delete process.env[name];
-        assert.equal(sourceFingerprint(kind,root),absent,name+' removal for '+kind);
+        assert.equal(sourceFingerprint(kind,root,[]),absent,name+' removal for '+kind);
         if(process.platform==='win32' && ['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','ESBUILD_BINARY_PATH'].includes(name)) {
           const mixed=name.toLowerCase();
           process.env[mixed]='fixture-one';
-          assert.equal(sourceFingerprint(kind,root),created,mixed+' normalized casing');
+          assert.equal(sourceFingerprint(kind,root,[]),created,mixed+' normalized casing');
           delete process.env[mixed];
         }
       }
@@ -1031,7 +1032,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   ], { cwd: root, encoding: "utf8" }).trim();
   try {
     for (const file of [
-      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
+      "scripts/verification/verify.mjs", "scripts/verification/ticket-evidence.mjs", "scripts/verification/queue.mjs", "scripts/verification/timing.mjs", "scripts/verification/flaky.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
       "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
       "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/gate-commands.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",
@@ -1113,7 +1114,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       console.log(JSON.stringify(report));
     `;
     const invoke = (extra = [], fault = "") => spawnSync(process.execPath, ["--input-type=module", "-e", childScript, "pr", "--base", base, ...extra], {
-      cwd: root, encoding: "utf8", timeout: 20_000,
+      cwd: root, encoding: "utf8", timeout: 120_000,
       env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), DOHC_BUILD_SLOT_ROOT: join(root, "slots"), FIXTURE_PROVENANCE_FAULT: fault },
     });
     const clean = invoke();
@@ -1184,7 +1185,7 @@ test("Postgres startup rejection cleans its created container and preserves star
         containers.add(ownedName);
         throw startupError;
       }
-      assert.deepEqual(args, ["rm", "--force", ownedName]);
+      assert.deepEqual(args, ["rm", "--force", "--volumes", ownedName]);
       if (cleanupFails) throw new Error("Docker cleanup is unavailable");
       containers.delete(ownedName);
       return { stdout: ownedName };

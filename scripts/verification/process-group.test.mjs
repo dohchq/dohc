@@ -47,6 +47,16 @@ test("abort during onSpawn is observed after registering the listener", { timeou
   assert.deepEqual([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")], listeners);
 });
 
+test("a command that exited before its abort reached it keeps its own failure", { timeout: 20_000 }, async () => {
+  const controller = new AbortController();
+  // The abort arrives after the command has exited but before its output closes, as when another step's failure stops the run.
+  const error = await run(process.execPath, ["-e", "process.exit(3)"], { signal: controller.signal, timeoutMs: 15_000,
+    onSpawn: child => child.once("exit", () => controller.abort()) }).catch(failure => failure);
+  assert.equal(error.interrupted, false);
+  assert.equal(error.exitCode, 3);
+  assert.equal(error.commandExitFailure, true);
+});
+
 test("POSIX abort waits for an ignored-stdio descendant after its leader closes", {
   skip: process.platform === "win32" ? "POSIX process-group lifecycle" : false, timeout: 30_000,
 }, async context => {

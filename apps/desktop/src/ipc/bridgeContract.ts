@@ -9,7 +9,10 @@ import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-b
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
 import { PublicationAgent } from "@dohc/cli/app-publication";
+import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "@dohc/cli/account";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
+import type { WorkspaceRefTarget } from "@dohc/workspace-contracts/workspace-ref";
+import { DatasetHistoryPage } from "@dohc/cli/dataset";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
 import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
@@ -107,6 +110,7 @@ import {
   WORKBENCH_MENU_COMMANDS,
 } from "./channels";
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
+import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
 import {
@@ -400,6 +404,7 @@ export const OwnerLiveDocument = z.object({
   status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
   reason: z.enum(["document-unavailable", "workspace-changed"]).optional(),
   canResume: z.boolean(),
+  deferredStop: z.object({unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean()}).strict().optional(),
 }).strict();
 export type OwnerLiveDocument = z.infer<typeof OwnerLiveDocument>;
 export const ListOwnerLiveDocumentsPayload = WorkspaceIdPayload.extend({
@@ -452,7 +457,7 @@ export const WorkspaceFileEntry = z.object({
 });
 export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntry>;
 
-export const ListWorkspaceFilesResult = z.object({
+export const WorkspacePathListing = z.object({
   files: z.array(WorkspaceFileEntry),
   // Directories ride along so empty folders
   // appear in the tree. Optional so older fixtures/consumers keep parsing;
@@ -462,6 +467,21 @@ export const ListWorkspaceFilesResult = z.object({
   // the owned-workspace walk; a cached answer must be revalidated before the
   // renderer uses it as evidence that a path is missing.
   cached: z.literal(true).optional(),
+});
+export type WorkspacePathListing = z.infer<typeof WorkspacePathListing>;
+
+export const WorkspaceListingVisibility = z.object({
+  status: z.enum(["ready", "degraded", "unavailable"]),
+  rules: z.array(z.object({
+    path: z.string().min(1),
+    visibility: z.enum(["visible", "hidden"]).optional(),
+    export: z.enum(["included", "excluded", "redacted"]).optional(),
+  })),
+});
+export type WorkspaceListingVisibility = z.infer<typeof WorkspaceListingVisibility>;
+
+export const ListWorkspaceFilesResult = WorkspacePathListing.extend({
+  visibility: WorkspaceListingVisibility,
 });
 export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 
@@ -1305,6 +1325,16 @@ type _AllEngineStoreRefusalsRepresented = AssertNever<
   Exclude<EngineStoreRefusal, (typeof ENGINE_STORE_REFUSALS)[number]>
 >;
 
+export const CaptureFileHold = z.object({
+  workspaceId: z.string().min(1), sourceVersionId: z.string().min(1), objectId: z.string().min(1), path: z.string().min(1),
+  observedSha256: z.string().min(1), observedSize: z.number().int(),
+  reason: z.literal("ydoc-resolution-not-representable"), observedAtMs: z.number().int(),
+  attemptCount: z.number().int(), retryRequested: z.boolean(),
+});
+export type CaptureFileHold = z.infer<typeof CaptureFileHold>;
+export const CaptureHoldsEvent = z.object({ workspaceId: WORKSPACE_ID, heldFiles: z.array(CaptureFileHold) }).strict();
+export type CaptureHoldsEvent = z.infer<typeof CaptureHoldsEvent>;
+
 const SYNC_STATUS_BASE_FIELDS = {
   state: z.enum([
     "synced",
@@ -1342,6 +1372,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   atomicPlacementUnavailable: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
   keptFiles: z.array(z.tuple([z.string(), z.string()])).optional(),
+  heldFiles: z.array(CaptureFileHold).optional(),
   // Why the last sync pass failed, present until a pass succeeds. Local work
   // is saved either way. A refused claim waits for Try again; network failures back off.
   syncFailure: z
@@ -1356,6 +1387,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   // Active describes owner live delivery, not a fully synchronized workspace.
   ownerLiveDelivery: z.enum(["preparing", "active", "retrying"]).optional(),
   ownerLiveDeliveryReason: z.enum(["document-unavailable", "workspace-changed", "restart-required"]).optional(),
+  ownerLiveStopFailures: z.array(z.object({path:SAFE_RELATIVE_PATH,detail:z.string()})).optional(),
   hasOwnerLiveRefusals: z.boolean().optional(),
   // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
@@ -1438,6 +1470,15 @@ export const ClearCaptureRecoveryPayload = WorkspaceIdPayload.extend({ momentId:
 export type ClearCaptureRecoveryPayload = z.infer<typeof ClearCaptureRecoveryPayload>;
 
 export const captureRecoveryOperations = {
+  retryHeldCapture: {
+    capabilityId: "capture.held.retry",
+    channel: "desktop:retry-held-capture",
+    payload: WorkspaceIdPayload.extend({ path: PATH_STRING }),
+    result: z.object({ settled: z.boolean(), running: z.boolean(), degraded: z.boolean(), retried: z.boolean(), heldFiles: z.array(CaptureFileHold) }),
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation", reason: "Only the sending window's active workspace can retry a held file." },
+  },
   getCaptureRecoveryStatus: {
     capabilityId: "capture.recovery.read",
     channel: "desktop:get-capture-recovery-status",
@@ -1654,7 +1695,7 @@ export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
 export const HistoryMomentPosition = z.object({ recordedAtMs: z.number().int(), momentOrder: z.number().int().nonnegative() }).strict();
 export const HistoryCursor = z.object({
   format: z.literal(1), engineUuid: z.string().min(1), workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID,
-  objectId: OPAQUE_ID.nullable(), textFence: z.number().int().min(-1), protectedFence: z.number().int().min(-1),
+  operationId: OPAQUE_ID.nullable(), objectId: OPAQUE_ID.nullable(), textFence: z.number().int().min(-1), protectedFence: z.number().int().min(-1),
   markerFence: z.number().int().min(-1), text: HistoryMomentPosition.nullable(), protected: HistoryMomentPosition.nullable(),
   marker: z.object({ createdAtMs: z.number().int(), versionId: OPAQUE_ID }).strict().nullable(),
 }).strict();
@@ -1706,6 +1747,60 @@ export const ListEngineMomentsResponse = z.union([
 export type ListEngineMomentsResponse = z.infer<
   typeof ListEngineMomentsResponse
 >;
+
+export type HistoryObject = Extract<WorkspaceRefTarget, { kind: "file" | "dataset" }>;
+export const HistoryObject: z.ZodType<HistoryObject> = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("file"), objectId: OPAQUE_ID }).strict(),
+  z.object({ kind: z.literal("dataset"), datasetId: z.string().uuid() }).strict(),
+]);
+export const HISTORY_MAX_SOURCES = 128;
+export const HISTORY_CURSOR_BYTES = 64 * 1024;
+export const TimelineCollectionCursor = z.object({
+  datasetId: z.string().uuid(), remote: z.boolean(), fenceRevision: z.number().int().nonnegative(),
+  beforeRevision: z.number().int().positive().safe(), lineage: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  head: z.object({ revision: z.number().int().positive().safe(), sortAtMs: z.number().int().safe().nullable() }).strict().nullable(),
+  timeHint: z.number().int().nullable(), done: z.boolean(),
+  excluded: z.enum(["deadline", "unavailable"]).nullable(),
+}).strict();
+export const TimelineCursor = z.object({
+  format: z.literal(1), workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID, object: HistoryObject.nullable(),
+  engine: HistoryCursor.nullable(), engineDone: z.boolean(),
+  collections: z.array(TimelineCollectionCursor).max(HISTORY_MAX_SOURCES),
+  omittedSources: z.number().int().nonnegative().safe(),
+}).strict().refine(cursor => new Set(cursor.collections.map(source => source.datasetId)).size === cursor.collections.length, "Collection IDs must be unique.")
+  .refine(cursor => !cursor.engine || cursor.engine.workspaceId === cursor.workspaceId && cursor.engine.versionId === cursor.versionId, "History cursor engine scope differs.")
+  .refine(cursor => cursor.versionId === "main" && cursor.object?.kind !== "file" || cursor.collections.length === 0 && cursor.omittedSources === 0, "Collections belong only to main workspace History.")
+  .refine(cursor => { const object = cursor.object; return object?.kind !== "dataset" || cursor.collections.every(source => source.datasetId === object.datasetId); }, "Collection cursor object differs.")
+  .refine(cursor => new TextEncoder().encode(JSON.stringify(cursor)).byteLength <= HISTORY_CURSOR_BYTES, "History cursor exceeds 64 KiB.");
+export type TimelineCursor = z.infer<typeof TimelineCursor>;
+export const TimelineEntry = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("file"), moment: EngineMomentRecord }).strict(),
+  z.object({ kind: z.literal("version"), version: HistoryVersionMarker }).strict(),
+  z.object({ kind: z.literal("collection"), datasetId: z.string().uuid(), name: z.string(),
+    sortAtMs: z.number().int().nullable(), change: DatasetHistoryPage.shape.entries.element.omit({ undo: true }) }).strict(),
+]);
+export type TimelineEntry = z.infer<typeof TimelineEntry>;
+export const ListHistoryPayload = z.object({
+  workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID.optional(), object: HistoryObject.optional(),
+  limit: z.number().int().min(1).max(50).optional(), cursor: TimelineCursor.optional(),
+}).strict();
+export type ListHistoryPayload = z.infer<typeof ListHistoryPayload>;
+export const ListHistoryPage = z.object({
+  status: z.literal("ready"), workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID,
+  entries: z.array(TimelineEntry).max(50), nextCursor: TimelineCursor.nullable(),
+  unavailableSources: z.array(z.object({ datasetId: z.string().uuid(), reason: z.enum(["deadline", "unavailable"]) }).strict()),
+  omittedSources: z.number().int().nonnegative().safe(),
+  completeness: z.enum(["complete", "partial"]),
+}).strict();
+export const ListHistoryResult = z.union([ListHistoryPage, ListEngineMomentsUpdatingResult, HistoryPolicyUnreadableResult]);
+export type ListHistoryResult = z.infer<typeof ListHistoryResult>;
+export const historyOperations = {
+  listHistory: {
+    capabilityId: "history.list", channel: "desktop:list-history", guard: "active-workspace", scope: "workspace",
+    inactiveMessage: "History stopped loading because this window changed workspaces.",
+    payload: ListHistoryPayload, result: ListHistoryResult,
+  },
+} as const satisfies OperationTable;
 
 export const ReadEngineMomentPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -1830,9 +1925,18 @@ const CHAT_MESSAGE_AUTOMATION = z.object({
   collectionPath: SAFE_RELATIVE_PATH.nullable(),
 });
 
+// Display only. This token grants no workspace or author authority.
+export const ActorPresentation = z.object({
+  group: z.string(),
+  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose", "olive"]).nullable(),
+  self: z.boolean(),
+});
+export type ActorPresentation = z.infer<typeof ActorPresentation>;
+
 export const ChatMessageRecord = z.object({
   id: OPAQUE_ID,
   threadId: OPAQUE_ID,
+  presentation: ActorPresentation,
   authorKind: CHAT_MESSAGE_AUTHOR_KIND,
   authorDisplayName: z.string().min(1).max(200),
   authorOwnerDisplayName: z.string().min(1).max(200).optional(),
@@ -2201,6 +2305,7 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
   openingMessage: z
     .object({
       id: OPAQUE_ID,
+      presentation: ActorPresentation,
       authorKind: CHAT_MESSAGE_AUTHOR_KIND,
       authorDisplayName: z.string().min(1).max(200),
       authorOwnerDisplayName: z.string().min(1).max(200).optional(),
@@ -3383,7 +3488,11 @@ export function activityPathsAffectWorkspaceListing(
   paths: readonly string[],
   platform: NodeJS.Platform,
 ): boolean {
-  return paths.some((path) => !hasEngineIgnoredSegment(path, platform));
+  return paths.some((path) => isWorkspaceVisibilityPolicyPath(path, platform) || !hasEngineIgnoredSegment(path, platform));
+}
+
+export function isWorkspaceVisibilityPolicyPath(path: string, platform: NodeJS.Platform): boolean {
+  return (platform === "win32" ? path.toLowerCase() : path) === ".dohc/visibility.toml";
 }
 
 // An activity ping must never be dropped on a schema failure: under-notifying is the staleness bug the channel exists to
@@ -3427,6 +3536,7 @@ export const CloudStatusPayload = z.object({
 export type CloudStatusPayload = z.infer<typeof CloudStatusPayload>;
 
 export const CloudStatusResult = z.object({
+  ownPresentation: ActorPresentation.optional(),
   connected: z.boolean(),
   email: z.string().optional(),
   serverUrl: z.string().optional(),
@@ -6315,7 +6425,7 @@ export const scheduleHostOperations = {
   readScheduleHost: {
     capabilityId: "automation.host.read",
     scope: "workspace",
-    handlerCheck: {"check":"main.scheduleHostState","reason":"Host selection and credential generation have their own lifetime."},
+    handlerCheck: {"check":"scheduleHostHandlers.currentRendererSession","reason":"The sender must show this workspace; relay calls run without a workspace lease."},
     channel: "desktop:read-schedule-host",
     payload: ScheduleHostWorkspace, result: ScheduleHostResult, guard: "trusted-sender",
   },
@@ -6323,7 +6433,7 @@ export const scheduleHostOperations = {
   chooseScheduleHost: {
     capabilityId: "automation.host.choose",
     scope: "workspace",
-    handlerCheck: {"check":"main.scheduleHostState","reason":"Host selection and credential generation have their own lifetime."},
+    handlerCheck: {"check":"scheduleHostHandlers.currentRendererSession","reason":"The sender must show this workspace; relay calls run without a workspace lease."},
     channel: "desktop:choose-schedule-host",
     payload: ScheduleHostWorkspace.extend({
       installId: z.string().min(1).max(256),
@@ -6335,7 +6445,7 @@ export const scheduleHostOperations = {
   takeOverScheduleHost: {
     capabilityId: "automation.host.takeover",
     scope: "workspace",
-    handlerCheck: {"check":"main.scheduleHostState","reason":"Host selection and credential generation have their own lifetime."},
+    handlerCheck: {"check":"scheduleHostHandlers.currentRendererSession","reason":"The sender must show this workspace; relay calls run without a workspace lease."},
     channel: "desktop:take-over-schedule-host",
     payload: ScheduleHostWorkspace.extend({ generation: z.number().int().nonnegative() }),
     result: ScheduleHostResult, guard: "trusted-sender",
@@ -6518,6 +6628,7 @@ export const engineYDocSaveOperations = {
 
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
+  captureHeld: z.boolean().optional(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
   objectId: z.string().min(1).optional(),
   versionId: z.string().min(1).optional(),
@@ -6739,11 +6850,78 @@ export const systemMotionOperations = {
   },
 } as const satisfies OperationTable;
 
+export const chatOperations = {
+  listChatFileMentions: {
+    capabilityId: "chat.read", scope: "workspace",
+    channel: "desktop:list-chat-file-mentions", payload: ListChatFileMentionsPayload, result: ListChatFileMentionsResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  listChatMessages: {
+    capabilityId: "chat.read", scope: "workspace",
+    channel: "desktop:list-chat-messages", payload: ListChatMessagesPayload, result: ListChatMessagesResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  sendChatMessage: {
+    capabilityId: "chat.reply", scope: "workspace",
+    channel: "desktop:send-chat-message", payload: SendChatMessagePayload, result: SendChatMessageResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  listPersonalChatFeed: {
+    capabilityId: "chat.inbox.read", scope: "workspace",
+    channel: "desktop:list-personal-chat-feed", payload: ListPersonalChatFeedPayload, result: ListPersonalChatFeedResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  listChannelThreads: {
+    capabilityId: "chat.threads.list", scope: "workspace",
+    channel: "desktop:list-channel-threads", payload: ListChannelThreadsPayload, result: ListChannelThreadsResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+  startChannelThread: {
+    capabilityId: "chat.post", scope: "workspace",
+    channel: "desktop:start-channel-thread", payload: StartChannelThreadPayload, result: StartChannelThreadResult,
+    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
+  },
+} as const satisfies OperationTable;
+
+// The server account this computer is connected to. Main sends both requests
+// with its own session; the window never sees the session.
+export const serverAccountOperations = {
+  previewServerAccountDeletion: {
+    capabilityId: "account.delete.preview",
+    scope: "device",
+    channel: "desktop:preview-server-account-deletion",
+    payload: z.object({}).strict(),
+    result: ServerAccountDeletionPreview,
+    guard: "trusted-sender",
+  },
+  deleteServerAccount: {
+    capabilityId: "account.delete",
+    scope: "device",
+    channel: "desktop:delete-server-account",
+    payload: ServerAccountDeleteRequest,
+    result: ServerAccountDeleteResult,
+    guard: "trusted-sender",
+  },
+  // Runs a disconnect that failed after a deletion again.
+  retryServerAccountDisconnect: {
+    capabilityId: "account.delete",
+    scope: "device",
+    channel: "desktop:retry-server-account-disconnect",
+    payload: z.object({}).strict(),
+    result: z.null(),
+    guard: "trusted-sender",
+  },
+} as const satisfies OperationTable;
+
 export interface DohcDesktopBridge
-  extends OperationBridge<typeof shareCopyOperations>,
+  extends OperationBridge<typeof workspaceFileOperations>,
+    OperationBridge<typeof chatOperations>,
+    OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
+    OperationBridge<typeof serverAccountOperations>,
     OperationBridge<typeof accessOperations>,
     OperationBridge<typeof workspaceVersionOperations>,
+    OperationBridge<typeof historyOperations>,
     OperationBridge<typeof captureRecoveryOperations>,
     OperationBridge<typeof fileObservationOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
@@ -6802,30 +6980,7 @@ export interface DohcDesktopBridge
   // Opens (or focuses) the workspace manager in its own window.
   openWorkspaceManager(): Promise<void>;
   closeThisWindow(): Promise<void>;
-  listWorkspaceFiles(
-    payload: ListWorkspaceFilesPayload,
-  ): Promise<ListWorkspaceFilesResult>;
   createCollectionRecord(payload: CreateCollectionRecordPayload): Promise<{ path: string; recordId: string; kept?: Record<string, unknown>; delivery?: "pending" | "accepted" | "refused"; reason?: string } | import("@dohc/cli/creation").CreationPartial>;
-  createWorkspaceFile(
-    payload: CreateWorkspaceFilePayload,
-  ): Promise<CreateWorkspaceFileResult>;
-  createWorkspaceFolder(
-    payload: CreateWorkspaceFolderPayload,
-  ): Promise<CreateWorkspaceFileResult>;
-  moveWorkspacePath(
-    payload: MoveWorkspacePathPayload,
-  ): Promise<CreateWorkspaceFileResult>;
-  deleteWorkspacePath(
-    payload: DeleteWorkspacePathPayload,
-  ): Promise<DeleteWorkspacePathResult>;
-  exportWorkspaceZip(
-    payload: ExportWorkspaceZipPayload,
-  ): Promise<ExportWorkspaceZipResult>;
-  // Document export ("Copy as Markdown" / "Export as HTML" / "Export as
-  // PDF" document menu). See the payload's comment for the kind split.
-  exportDocumentFile(
-    payload: ExportDocumentFilePayload,
-  ): Promise<ExportDocumentFileResult>;
   // Native explorer context menu; resolves with the chosen closed-tuple
   // command (validated in the preload against ExplorerMenuCommand) or null.
   showExplorerMenu(
@@ -6839,20 +6994,6 @@ export interface DohcDesktopBridge
   // File.path since Electron 32). The paths feed importWorkspaceFiles'
   // droppedPaths — see the trust-delta note on that payload.
   getDroppedFilePaths(files: File[]): string[];
-  importWorkspaceFiles(
-    payload: ImportWorkspaceFilesPayload,
-  ): Promise<ImportWorkspaceFilesResult>;
-  readWorkspaceText(
-    payload: ReadWorkspaceTextPayload,
-  ): Promise<ReadWorkspaceTextResult>;
-  writeWorkspaceText(
-    payload: WriteWorkspaceTextPayload,
-  ): Promise<WriteWorkspaceTextResult>;
-  writeWorkspaceAsset(payload: WriteWorkspaceAssetPayload): Promise<void>;
-  // `/image`: a MAIN-process open dialog rooted at the workspace directory,
-  // returning the chosen files' bytes (see PickImageFilesPayload).
-  pickImageFiles(payload: PickImageFilesPayload): Promise<PickImageFilesResult>;
-  openFileExternally(payload: OpenFileExternallyPayload): Promise<void>;
   readWorkspaceGraph(
     payload: ReadWorkspaceGraphPayload,
   ): Promise<WorkspaceGraphResult>;
@@ -6860,9 +7001,6 @@ export interface DohcDesktopBridge
   listWorkspaceHeadings(
     payload: ListWorkspaceHeadingsPayload,
   ): Promise<ListWorkspaceHeadingsResult>;
-  listChatFileMentions(
-    payload: ListChatFileMentionsPayload,
-  ): Promise<ListChatFileMentionsResult>;
   listChatBookmarks(payload: ListChatBookmarksPayload): Promise<ListChatBookmarksResult>;
   saveChatBookmark(payload: SaveChatBookmarkPayload): Promise<SaveChatBookmarkResult>;
   archiveChatBookmark(
@@ -7068,13 +7206,9 @@ export interface DohcDesktopBridge
   ): Promise<RestoreEngineMomentFileResult>;
   listFileChats(payload: ListFileChatsPayload): Promise<ListFileChatsResponse>;
   createFileChat(payload: CreateFileChatPayload): Promise<CreateFileChatResult>;
-  listChatMessages(
-    payload: ListChatMessagesPayload,
-  ): Promise<ListChatMessagesResult>;
   getChatThreadRevision(
     payload: GetChatThreadRevisionPayload,
   ): Promise<GetChatThreadRevisionResult>;
-  sendChatMessage(payload: SendChatMessagePayload): Promise<SendChatMessageResult>;
   listChatThreadDecisions(
     payload: ListChatThreadDecisionsPayload,
   ): Promise<ListChatThreadDecisionsResult>;
@@ -7093,19 +7227,10 @@ export interface DohcDesktopBridge
   ): Promise<ListChatChannelsResult>;
   listChatFollows(payload: ListChatFollowsPayload): Promise<ListChatFollowsResult>;
   setChatFollow(payload: SetChatFollowPayload): Promise<SetChatFollowResult>;
-  listPersonalChatFeed(
-    payload: ListPersonalChatFeedPayload,
-  ): Promise<ListPersonalChatFeedResult>;
   markPersonalChatFeedSeen(payload: MarkPersonalChatFeedSeenPayload): Promise<void>;
   createChatChannel(
     payload: CreateChatChannelPayload,
   ): Promise<CreateChatChannelResult>;
-  listChannelThreads(
-    payload: ListChannelThreadsPayload,
-  ): Promise<ListChannelThreadsResult>;
-  startChannelThread(
-    payload: StartChannelThreadPayload,
-  ): Promise<StartChannelThreadResult>;
   markChatThreadRead(
     payload: MarkChatThreadReadPayload,
   ): Promise<MarkChatThreadReadResult>;
@@ -7191,6 +7316,7 @@ export interface DohcDesktopBridge
   // workspace plus global events. The payload is additive context — a
   // subscriber may ignore it. Returns an unsubscribe function.
   onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
+  onCaptureHolds(listener: (event: CaptureHoldsEvent) => void): () => void;
   // Live push: automation runs finished, an Undo put records back, a claim
   // failed, or a retry queued one, so run history and dataset records may
   // have changed. A poke, not the

@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
-import { createApp, deleteWorkspacePath, importData, moveWorkspacePath, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
+import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { executeCli } from "@dohc/cli";
 import {
   CLI_PROTOCOL_VERSION,
@@ -493,7 +493,7 @@ describe("CLI socket server", () => {
   it("confines Access to the registered workspace and schema-parses every answer without secret fields", async () => {
     const secret = { credentials: "secret", bearerUrl: "secret", invitationUrl: "secret", shareCode: "secret" };
     const answer = { ...secret, ref: { kind: "path", path: "Notes/a.md", versionId: null }, rows: [], visibility: "visible",
-      coverage: { kind: "granted", complete: true, observation: "interval", ...secret }, checkedAtMs: 1, freshness: "stale", nextCursor: null };
+      unknownReason: null, coverage: { kind: "granted", complete: true, observation: "interval", ...secret }, checkedAtMs: 1, freshness: "stale", nextCursor: null };
     const object = vi.fn(async () => answer as never), sharing = vi.fn(async () => ({ ...answer, ref: null }) as never);
     context.access = { object, sharing }; context.readOnly = true;
     const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessObject",
@@ -2367,6 +2367,42 @@ describe("CLI socket server", () => {
     }]);
   });
 
+  it.each([false, true])("lists document chats over the desktop socket with MCP fields in a read-only view=%s", async readOnly => {
+    const thread = await store!.createThread({
+      workspaceId: WORKSPACE_ID, title: "File review",
+      linkedFile: { objectId: "object_tracked", pathHint: "old-name.md" },
+    });
+    await store!.createThread({
+      workspaceId: WORKSPACE_ID, title: "Other file",
+      linkedFile: { objectId: "object_other", pathHint: "other.md" },
+    });
+    registryWorkspace.readOnly = readOnly;
+    context.readOnly = readOnly;
+    const mcp = await listFileChats({ root: workspaceRoot, home: stateDir, ...(readOnly ? { shareAccess: "view" as const } : {}) }, { path: "tracked.md" });
+    expect(mcp).toEqual({
+      ok: true, path: "tracked.md", fileObjectId: "object_tracked",
+      threads: [{ id: thread.id, title: thread.title, createdAtMs: thread.createdAtMs, updatedAtMs: thread.updatedAtMs, linkedPathHint: "old-name.md" }],
+    });
+    const result = await executeCli({ argv: ["document", "chats", "tracked.md", "--json"], cwd: workspaceRoot, env: {}, client: { stateDir } });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 3, ...mcp });
+    expect(calls.writes).toBe(0);
+  });
+
+  it("does not count a successful document chats list through either door in the usage record", async () => {
+    const usage = createUsageStore({ stateDir: () => stateDir, appVersion: "0.1.0", coverage: DESKTOP_USAGE_COVERAGE });
+    try {
+      await usage.load();
+      serverOptions.recordSuccess = invocation => usage.recordSuccess(invocation);
+      const mcp = await listFileChats({ root: workspaceRoot, home: stateDir }, { path: "tracked.md" });
+      expect(mcp).toEqual({ ok: true, path: "tracked.md", fileObjectId: "object_tracked", threads: [] });
+      const result = await executeCli({ argv: ["document", "chats", "tracked.md", "--json"], cwd: workspaceRoot, env: {}, client: { stateDir } });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 3, ...mcp });
+      expect((await usage.read()).counts).toEqual([]);
+    } finally { await usage.close(); }
+  });
+
   it("comments on a file through the chat write path a person's comment takes", async () => {
     if (!store) throw new Error("Store is not available");
     const comment = (path: string, title: string, body: string, flags: string[] = []) => executeCli({
@@ -2376,7 +2412,7 @@ describe("CLI socket server", () => {
     const output = await comment("tracked.md", "Budget", "Is 400 enough for food?", ["--agent", "claude-code"]);
     expect(output.exitCode, output.stderr).toBe(0);
     const { schemaVersion, ...startedResult } = JSON.parse(output.stdout);
-    expect(schemaVersion).toBe(2);
+    expect(schemaVersion).toBe(3);
     const started = parseCliResult("fileChatStart", startedResult);
     if (!started.ok) throw new Error(started.reason);
     expect(started.path).toBe("tracked.md");
@@ -2417,7 +2453,7 @@ describe("CLI socket server", () => {
     const firstOutput = await comment(once.path, once.title, once.body, retryFlags);
     expect(firstOutput.exitCode, firstOutput.stderr).toBe(0);
     const { schemaVersion: retrySchemaVersion, ...firstResult } = JSON.parse(firstOutput.stdout);
-    expect(retrySchemaVersion).toBe(2);
+    expect(retrySchemaVersion).toBe(3);
     const first = parseCliResult("fileChatStart", firstResult);
     if (!first.ok) throw new Error(first.reason);
     await expect(comment(once.path, once.title, once.body, retryFlags)).resolves.toEqual(firstOutput);

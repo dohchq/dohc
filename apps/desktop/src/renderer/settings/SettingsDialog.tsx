@@ -1,5 +1,7 @@
+import { shortcutKeys } from "../../shortcuts/shortcutRegistry";
 import { desktopPins, settingsSectionPin } from "../../testPins";
 import { useRequestSequence } from "../useRequestSequence";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
 import { AlertTriangle, RefreshCw, X } from "lucide-react";
 import { WORKSPACE_PREVIEW_MODES } from "@dohc/workspace-contracts/workspace-settings-values";
@@ -36,6 +38,7 @@ import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { applyLookSettings } from "../theme";
 import { palette } from "../tokens";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { ownPresentation, ownAgentPresentation } from "../workbench/actorPresentation";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
 import { AskAgentButton, type AskAgent } from "../askAgent";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
@@ -107,6 +110,8 @@ export function SettingsDialog(props: {
   /** Each workspace settings answer, so the shell can say what the file ignored. */
   onWorkspaceSettingsRead?: (read: WorkspaceSettingsResult) => void;
   workspaceId: string;
+  workspaceIsReady: boolean;
+  workspaceOpenFailed?: boolean;
   workspacePath: string;
   /**
    * True when this workspace is a shared view. See the Advanced
@@ -266,7 +271,7 @@ export function SettingsDialog(props: {
     setWorkspaceResult(null);
     void Promise.all([
       bridge().getUserSettings(),
-      bridge().getWorkspaceSettings({ workspaceId: props.workspaceId }),
+      props.workspaceIsReady ? bridge().getWorkspaceSettings({ workspaceId: props.workspaceId }) : undefined,
     ])
       .then(([nextUser, nextWorkspace]) => {
         if (cancelled) return;
@@ -274,7 +279,7 @@ export function SettingsDialog(props: {
         // read and each change. Applying this read again could undo a change
         // that arrived while it was in flight.
         if (!settingsEventFiredRef.current) setUserResult(nextUser);
-        if (!workspaceTokenRef.isCurrent(token)) return;
+        if (!workspaceTokenRef.isCurrent(token) || !nextWorkspace) return;
         setWorkspaceResult(nextWorkspace);
         onWorkspaceSettingsRead?.(nextWorkspace);
       })
@@ -286,13 +291,13 @@ export function SettingsDialog(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.workspaceId]);
+  }, [props.workspaceId, props.workspaceIsReady]);
 
   const filteredSections = useMemo(
     () => SETTINGS_SECTIONS.filter((section) => sectionMatches(section, query)),
     [query],
   );
-  const sharingResults = useSharingSearch(props.workspaceId, !!props.sharedView, props.onOpenSharing ? query : "");
+  const sharingResults = useSharingSearch(props.workspaceId, !!props.sharedView, props.workspaceIsReady && props.onOpenSharing ? query : "");
 
   useEffect(() => {
     if (
@@ -520,7 +525,7 @@ export function SettingsDialog(props: {
     DEFAULT_USER_SETTINGS.appearance.zoomLevel,
   );
   const editorSizeModified = isModified(userSettings.editor.fontSize, DEFAULT_USER_SETTINGS.editor.fontSize);
-  const modifierKey = window.dohcDesktop?.platform === "darwin" ? "⌘" : "Ctrl";
+  const shortcutPlatform = window.dohcDesktop?.platform;
 
   const warnings = [
     userResult?.warning,
@@ -567,6 +572,13 @@ export function SettingsDialog(props: {
       );
     }
 
+    if (!props.workspaceIsReady && activeMeta.scope !== "User") {
+      if (props.workspaceOpenFailed) {
+        return <p className="text-sm text-muted">Couldn’t open this workspace. Close Settings to try again.</p>;
+      }
+      return <SkeletonRows layout="panel" label="Loading settings..." />;
+    }
+
     switch (activeSection) {
       case "appearance":
         return (
@@ -609,21 +621,21 @@ export function SettingsDialog(props: {
                 value={`${zoomPercent(userSettings.appearance.zoomLevel)}%`}
                 decrease={{
                   label: "Zoom out",
-                  keys: [modifierKey, "-"],
+                  keys: shortcutKeys("zoom-out", shortcutPlatform),
                   disabled: userSettings.appearance.zoomLevel <= MIN_ZOOM_LEVEL,
                   onClick: () => void stepZoomSetting("out"),
                 }}
                 reset={{
                   label: `Reset to ${zoomPercent(DEFAULT_USER_SETTINGS.appearance.zoomLevel)}%`,
                   to: `${zoomPercent(DEFAULT_USER_SETTINGS.appearance.zoomLevel)}%`,
-                  keys: [modifierKey, "0"],
+                  keys: shortcutKeys("zoom-reset", shortcutPlatform),
                   onClick: () => {
                     if (zoomModified) void stepZoomSetting("reset");
                   },
                 }}
                 increase={{
                   label: "Zoom in",
-                  keys: [modifierKey, "="],
+                  keys: shortcutKeys("zoom-in", shortcutPlatform),
                   disabled: userSettings.appearance.zoomLevel >= MAX_ZOOM_LEVEL,
                   onClick: () => void stepZoomSetting("in"),
                 }}
@@ -649,7 +661,7 @@ export function SettingsDialog(props: {
               testId="settings-row-your-color"
               {...customizeRow("settings-row-your-color")}
             >
-              <ChatAvatar name={userSettings.profile.preferredName ?? "You"} kind="human" own size="comment" />
+              <ChatAvatar presentation={ownPresentation} name={userSettings.profile.preferredName ?? "You"} kind="human" size="comment" />
               <HueControl
                 label="Your color"
                 shape="person"
@@ -663,7 +675,7 @@ export function SettingsDialog(props: {
               onReset={() => void saveAppearance({ yourAgentColor: null })}
               testId="settings-row-your-agent-color"
             >
-              <ChatAvatar name={userSettings.profile.agentName ?? "Agent"} kind="agent" own size="comment" />
+              <ChatAvatar presentation={ownAgentPresentation} name={userSettings.profile.agentName ?? "Agent"} kind="agent" size="comment" />
               <HueControl
                 label="Your agent's color"
                 shape="agent"

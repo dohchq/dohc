@@ -38,6 +38,7 @@ import {
   processCreation,
   verificationLanes,
 } from "../tools/rust-engine-program/build-slot.mjs";
+import { pauseQueue, resumeQueue } from "./verification/queue.mjs";
 
 const buildSlotUrl = new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).href;
 
@@ -71,7 +72,7 @@ test("exclusive local ownership recovers a dead PID but protects incomplete clai
   assert.equal(existsSync(dir), false);
 });
 
-function queueProbe(root, script) {
+function queueProbe(root, script, timeout = 5000) {
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
     import assert from "node:assert/strict";
     import fs from "node:fs";
@@ -81,7 +82,7 @@ function queueProbe(root, script) {
     import { acquireBuildSlot } from ${JSON.stringify(new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).href)};
     const root = process.argv[1];
     ${script}
-  `, root], { encoding: "utf8", timeout: 5000 });
+  `, root], { encoding: "utf8", timeout });
   assert.equal(result.error, undefined, result.stderr);
   assert.equal(result.status, 0, result.stderr);
 }
@@ -89,33 +90,41 @@ function queueProbe(root, script) {
 test("transient sweep and ticket-read errors retry without ending the wait", () => {
   const root = slotRoot();
   try {
-    for (const code of ["EPERM", "EBUSY", "EACCES", "ENOENT"]) {
-      for (const operation of ["lock", "queue", "ticket"]) {
-        queueProbe(root, `
+    // One process runs every case, since each new process started Node and a
+    // PowerShell identity lookup. The 20 s waits and the 120 s process bound only
+    // stop a hang: a busy host can spend over a second on the file work before a retry.
+    queueProbe(root, `
+      for (const code of ["EPERM", "EBUSY", "EACCES", "ENOENT"]) {
+        for (const operation of ["lock", "queue", "ticket"]) {
           // Antivirus can fail a first claim for a moment, so the holder retries too.
-          const holder = await acquireBuildSlot({ root, slots: 1, waitMs: 1000, pollMs: 1 });
-          const method = ${JSON.stringify(operation)} === "lock" ? "mkdirSync"
-            : ${JSON.stringify(operation)} === "queue" ? "readdirSync" : "readFileSync";
+          const holder = await acquireBuildSlot({ root, slots: 1, waitMs: 20_000, pollMs: 1 });
+          const method = operation === "lock" ? "mkdirSync" : operation === "queue" ? "readdirSync" : "readFileSync";
           const original = fs[method];
           let failed = false;
           fs[method] = (path, ...args) => {
-            const target = ${JSON.stringify(operation)} === "lock" ? path === join(root, "reclaim.lock")
-              : ${JSON.stringify(operation)} === "queue" ? path === join(root, "build-slot-queue")
+            const target = operation === "lock" ? path === join(root, "reclaim.lock")
+              : operation === "queue" ? path === join(root, "build-slot-queue")
               : path.includes("build-slot-queue") && path.endsWith(".json");
             if (!failed && target) {
               failed = true;
               holder.release();
-              throw Object.assign(new Error("busy file"), { code: ${JSON.stringify(code)} });
+              throw Object.assign(new Error("busy file"), { code });
             }
             return original(path, ...args);
           };
           syncBuiltinESMExports();
-          const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 1000, pollMs: 1 });
-          assert.equal(failed, true);
-          slot.release();
-        `);
+          try {
+            const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 20_000, pollMs: 1 });
+            assert.equal(failed, true, code + " " + operation);
+            slot.release();
+          } finally {
+            // A failed case must not leave its stand-in for the next one.
+            fs[method] = original;
+            syncBuiltinESMExports();
+          }
+        }
       }
-    }
+    `, 120_000);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -404,8 +413,13 @@ function queueHarness(t) {
         else process.emit(command);
       });
       console.log = message => process.send({ type: "waiting", message });
-      const { observe, ...options } = JSON.parse(process.argv[2]);
+      const { observe, pausedQueue, ...options } = JSON.parse(process.argv[2]);
       if (observe) options.observeTicket = ticket => { process.send({ type: "observed", ...ticket, text: readFileSync(ticket.path, "utf8") }); };
+      if (pausedQueue) {
+        // The hold an inline PR gate uses, reporting each look at the queue.
+        const hold = (await import(${JSON.stringify(new URL("./verification/queue.mjs", import.meta.url).href)})).pauseHold(pausedQueue);
+        options.hold = () => { const held = hold(); process.send({ type: "checked", held: Boolean(held) }); return held; };
+      }
       try {
         slot = await (${JSON.stringify(kind)} !== "build-slot"
           ? acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: process.argv[1] }, { entry: ${JSON.stringify(verifier)}, ...options })
@@ -801,6 +815,33 @@ test("observed verification waiters keep FIFO order, lane counts, and cancellati
   }
 });
 
+test("an inline gate takes no lane while the queue is paused, says so once, and continues after resume", async t => {
+  const { root, start, message, acquired } = queueHarness(t);
+  const queue = mkdtempSync(join(tmpdir(), "dohc-queue-pause-"));
+  t.after(() => rmSync(queue, { recursive: true, force: true }));
+  await pauseQueue(queue, { reason: "the computer restarted" });
+  const looks = child => child.messages.filter(item => item.type === "checked" && item.held).length;
+  const cancelled = start("cancelled", { kind: "verification-slot", pausedQueue: queue });
+  const waiting = start("waiting", { kind: "verification-slot", pausedQueue: queue });
+  // A waiter that looked three times waited between its looks.
+  await waitFor(() => looks(waiting) >= 3 && looks(cancelled) >= 1, "held waiters must keep looking");
+  assert.equal(existsSync(join(root, "verification-slot-1")), false, "a held waiter takes no lane");
+  assert.deepEqual(tickets(root, "verification-slot"), [], "nor a ticket, so it reserves none");
+  const said = waiting.messages.filter(item => item.type === "waiting");
+  assert.equal(said.length, 1, "the pause is said once");
+  assert.match(said[0].message, /the verification queue is paused since \S+ \(the computer restarted\); this gate starts after pnpm verify:queue resume$/u);
+  // Ctrl+C stops a held wait like any other.
+  cancelled.send("SIGINT");
+  await waitFor(() => cancelled.closed, "a cancelled held waiter must exit");
+  assert.equal(cancelled.exitCode, 130, cancelled.stderrText);
+  assert.ok(cancelled.messages.some(item => item.type === "rejected"));
+  await resumeQueue(queue);
+  await message(waiting, "acquired");
+  assert.deepEqual(acquired, ["waiting"]);
+  waiting.send("release");
+  await waitFor(() => waiting.closed, "released waiter must exit");
+});
+
 test("Windows CI is uncapped unless an explicit slot root requests the workstation budget", () => {
   const host = { platform: "win32", cores: 32 };
   for (const CI of ["true", "1"]) {
@@ -1112,6 +1153,25 @@ test("a waiting ticket's heartbeat restores its freshness", async () => {
     holder.release();
     const slot = await pending;
     slot.release();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a waiter's own sweep keeps its ticket when a busy host delays the heartbeat", () => {
+  const root = slotRoot();
+  try {
+    queueProbe(root, `
+      // Block the event loop past three 20 ms ticket heartbeats before the sweep.
+      const mkdir = fs.mkdirSync;
+      fs.mkdirSync = (path, ...args) => {
+        if (path === join(root, "reclaim.lock")) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        return mkdir(path, ...args);
+      };
+      syncBuiltinESMExports();
+      const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 0, heartbeatMs: 20 });
+      slot.release();
+    `);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
