@@ -80,6 +80,7 @@ export async function spawnSyncRelay(input: {
               DOHC_RELAY_LINK_KEY: input.linkBoundary.linkKey,
               DOHC_RELAY_EXCHANGE_KEY: input.linkBoundary.relayExchangeKey,
               DOHC_RELAY_SHARE_WEB_ORIGIN: input.linkBoundary.publicViewerOrigin,
+              DOHC_RELAY_SHARE_WEB_URL: input.linkBoundary.publicViewerOrigin,
             }
           : {}),
         ...(deployment && input.editLinks

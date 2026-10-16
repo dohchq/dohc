@@ -119,7 +119,6 @@ test('sign-up stays open by default and asks the relay about invites on the inte
   assert.equal(api.DOHC_SIGN_UP_EMAILS, '${DOHC_SIGN_UP_EMAILS:-}');
   assert.equal(api.WORKSPACE_API_RELAY_URL, `http://sync-relay:${compose.services['sync-relay'].environment.SYNC_RELAY_PORT}`);
   assert.equal(api.BETTER_AUTH_SECRET, compose.services['sync-relay'].environment.BETTER_AUTH_SECRET);
-  assert.doesNotMatch(readFileSync('tools/self-host/Caddyfile', 'utf8'), /\/internal/);
 });
 
 test('private mode selects the private-only gateway overlay and the real env file', () => {
@@ -253,6 +252,17 @@ test('the data directory must be an absolute folder without parent segments', ()
   for (const value of ['relative/dohc', '/', '/mnt/disk/', '/mnt/../etc', '/mnt/./disk', '/mnt/disk,dohc', '/mnt/disk dohc', 'C:/dohc']) {
     assert.ok(validateSettings({...settings(), DOHC_DATA_DIRECTORY: value}).some(error => error.includes('DOHC_DATA_DIRECTORY')), value);
   }
+});
+
+test('both gateways refuse internal paths before proxy handles', () => {
+  for (const file of ['Caddyfile', 'Caddyfile.private']) {
+    const config = readFileSync(`tools/self-host/${file}`, 'utf8');
+    assert.match(config, /@internal path \/internal\/\*\s+handle @internal \{\s+respond 404\s+\}/);
+    assert.ok(config.indexOf('handle @internal') < config.indexOf('handle @account'));
+    assert.ok(config.indexOf('handle @internal') < config.indexOf('handle @relay'));
+    assert.ok(config.indexOf('handle @internal') < config.indexOf('handle {'));
+  }
+  assert.equal(compose.services['share-web'].environment.DOHC_SHARE_WEB_INTERNAL_HOSTS, 'share-web:1790');
 });
 
 test('automatic initialization cannot overwrite orphaned data or continuity', () => {
