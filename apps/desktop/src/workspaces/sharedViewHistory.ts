@@ -16,7 +16,7 @@ export function sharedViewHistory(store: HistoryStore, workspaceId: string):
     async listMoments(input = {}) {
       const history = await store.listHistoryPage({
         workspaceId,
-        ...(input.cursor !== undefined ? { versionId: input.cursor.versionId } : {}),
+        ...(input.versionId !== undefined || input.cursor !== undefined ? { versionId: input.versionId ?? input.cursor!.versionId } : {}),
         ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
         ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),

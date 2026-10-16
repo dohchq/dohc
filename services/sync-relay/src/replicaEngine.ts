@@ -1,3 +1,4 @@
+import {decodeReplicaCurrentView} from "@dohc/workspace-engine-client/daemon";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { stat } from "node:fs/promises";
@@ -71,7 +72,10 @@ export function createReplicaEngineStarter(options: ReplicaEngineOptions) {
           previous = page.nextCursor;
         } while (page.hasMore);
       };
-      return { pid: child.pid, exited: termination, close, async pull() {
+      return { pid: child.pid, exited: termination, close,
+        async currentView(selectors,knownTextShas,position,cursor) {
+          return decodeReplicaCurrentView(await request("replica.cut",{selectors,knownTextShas:knownTextShas.join(""),position:position??null,cursor:cursor??null}));
+        }, async pull() {
         await pullOrdinary();
         const frontiers = replicaFrontiers(await request("replica.frontiers", {}));
         await drainReplicaJournal(frontiers.journalCursor, async after => {
