@@ -3,14 +3,13 @@ import { isChatShareAccessValue } from "@dohc/security-contract/share-grant";
 import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
 import { jsonResponse } from "@dohc/service-http";
 import type {PublicEditRelease} from "@dohc/security-contract";
-import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, RELAY_ERRORS, relayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
 import { hashLinkBearer, isPublicLinkAccess } from "./linkSecurity";
 import { parseShareId, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import { selectorTargetsBlockedChannel } from "./shareAuthorization";
-import { fileHalfOfGroup, parseStoredAnyShareSelectorJson, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateGroupShareSelector, validateShareSelector } from "./shareFilter";
+import { fileHalfOfGroup, linkAccessLevels, parseStoredAnyShareSelectorJson, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateGroupShareSelector, validateShareSelector } from "./shareFilter";
 import type { createShareSummaries } from "./shareSummaries";
 import type { SyncRelayShareGrantRow, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./storage";
 import { MAX_ORIGIN_ID_CHARS, MAX_SHARE_ID_CHARS } from "./wireLimits";
@@ -234,15 +233,15 @@ export function createShareGrantRoutes(
         actor,
       );
       requireShareWorkspace(share, workspaceId);
-      if (!["view", "comment", "edit"].includes(grant.access)) throw notFound();
+      const levels = linkAccessLevels(parseStoredAnyShareSelectorJson(share.selectorJson));
+      if (!levels.includes(grant.access)) throw notFound();
       const expectedDependentGrantIds = parseExpectedDependentGrantIds(input, [
         "workspaceId",
         "access",
         "expectedDependentGrantIds",
       ]);
-      const access = validatePublicLinkAccess(input.access, publicEditRelease);
-      requireEditableSelector(access, share.selectorJson);
-      const widening = shareAccessRank(access) > shareAccessRank(grant.access);
+      const access = validateShareLinkAccess(input.access, share.selectorJson);
+      const widening = levels.indexOf(access) > levels.indexOf(grant.access);
       if (widening && (!linkKey || !shareWebOrigin)) throw notFound();
       let secret: string | null = null;
       const result = storage.retuneShareGrant({

@@ -112,6 +112,28 @@ function readChat(f: Fixture, capability: string, path: string, init: RequestIni
 
 const history = `messages?channelWireId=${channelWireId}`;
 
+function retune(f: Fixture, grantId: string, access: string, shareId = f.shareId) {
+  return f.h(request(OWNER, `/sync/shares/${shareId}/links/${grantId}/retune`, jsonBody({
+    workspaceId, access, expectedDependentGrantIds: [],
+  })));
+}
+
+// A follow from the latest message, returned once it is waiting for the next.
+async function parkFollow(f: Fixture, capability: string) {
+  const latest = (await json(await readChat(f, capability, history))).nextCursor;
+  const entered = deferred(), wait = f.activity.wait.bind(f.activity);
+  const spy = vi.spyOn(f.activity, "wait").mockImplementation((group, actor, options) => {
+    const pending = wait(group, actor, options);
+    entered.resolve();
+    return pending;
+  });
+  const poll = readChat(f, capability, `${history}&since=${String(latest)}&hold=30000`);
+  await entered.promise;
+  spy.mockRestore();
+  expect(f.activity.stats().waiters).toBe(1);
+  return { poll };
+}
+
 function setChannelKind(storage: SyncRelayStorage, kind: string) {
   const db = inspectDatabase(storagePath(storage));
   try {
@@ -192,16 +214,7 @@ describe("link chat on a Group share", () => {
     const f = await fixture();
     const link = await groupLink(f);
     const capability = String(link.exchanged.capabilityToken);
-    const latest = (await json(await readChat(f, capability, history))).nextCursor;
-    const entered = deferred(), wait = f.activity.wait.bind(f.activity);
-    vi.spyOn(f.activity, "wait").mockImplementation((group, actor, options) => {
-      const pending = wait(group, actor, options);
-      entered.resolve();
-      return pending;
-    });
-    const poll = readChat(f, capability, `${history}&since=${String(latest)}&hold=30000`);
-    await entered.promise;
-    expect(f.activity.stats().waiters).toBe(1);
+    const { poll } = await parkFollow(f, capability);
 
     const changed = await f.h(request(OWNER, change === "rotate"
       ? `/sync/shares/${f.shareId}/links/${link.grantId}/rotate`
@@ -219,6 +232,106 @@ describe("link chat on a Group share", () => {
       const fresh = String((await json(rotated)).capabilityToken);
       expect((await readChat(f, fresh, "channels")).status).toBe(200);
     }
+  });
+
+  it("lowers a read-write link to read-only on the same credential, and its open long-poll still reads", async () => {
+    const f = await fixture();
+    const link = await groupLink(f, "read-write");
+    const capability = String(link.exchanged.capabilityToken);
+    const credential = f.storage.getCurrentLinkCredential(link.grantId);
+    const { poll } = await parkFollow(f, capability);
+
+    const lowered = await retune(f, link.grantId, "read-only");
+    expect(lowered.status, await lowered.clone().text()).toBe(200);
+    const body = await json(lowered);
+    expect(body).toMatchObject({ grantId: link.grantId, access: "read-only", generation: 1 });
+    expect(body).not.toHaveProperty("url");
+    expect(f.storage.getCurrentLinkCredential(link.grantId)).toEqual(credential);
+
+    appendOwnerOps(f.storage, "owner-later", [
+      chatMessageAppend("owner-later", "thread-team", "still here", { authorUserId: OWNER, authorDisplayName: "Ada" }),
+    ]);
+    f.activity.wakeLog(workspaceId);
+    const followed = await poll;
+    expect(followed.status).toBe(200);
+    expect((await json(followed)).messages).toEqual([expect.objectContaining({ messageId: "owner-later", body: "still here" })]);
+    expect(await json(await readChat(f, capability, "channels"))).toMatchObject({ channels: [{ access: "read-only" }] });
+    expect(authorizeLinkChatAction({ storage: f.storage, grantId: link.grantId, action: "append" })).toMatchObject({ ok: false });
+    expect(await json(await exchange(f, link.secret))).toMatchObject({ access: "view", generation: 1 });
+  });
+
+  it("raises a read-only link to read-write on a new credential and ends its open long-poll", async () => {
+    const f = await fixture();
+    const link = await groupLink(f);
+    const capability = String(link.exchanged.capabilityToken);
+    const { poll } = await parkFollow(f, capability);
+
+    const raised = await retune(f, link.grantId, "read-write");
+    expect(raised.status, await raised.clone().text()).toBe(200);
+    const body = await json(raised);
+    expect(body).toMatchObject({ grantId: link.grantId, access: "read-write", generation: 2 });
+    expect((await poll).status).toBe(404);
+    expect(f.activity.stats().waiters).toBe(0);
+    for (const path of ["channels", history]) expect((await readChat(f, capability, path)).status, path).toBe(404);
+    expect((await exchange(f, link.secret)).status).toBe(404);
+
+    const rotated = await exchange(f, linkSecret(body.url));
+    expect(rotated.status).toBe(200);
+    const fresh = await json(rotated);
+    expect(fresh).toMatchObject({ access: "edit", generation: 2 });
+    expect(await json(await readChat(f, String(fresh.capabilityToken), "channels"))).toMatchObject({ channels: [{ access: "read-write" }] });
+  });
+
+  it("raises a link to read-write only where Edit links are released", async () => {
+    const f = await fixture({ relayExchangeKey: RELAY_EXCHANGE_KEY });
+    const link = await groupLink(f);
+    const before = f.storage.getShareGrant(link.grantId);
+    const refused = await retune(f, link.grantId, "read-write");
+    expect(refused.status).toBe(400);
+    expect(await json(refused)).toMatchObject({ code: "invalid_access" });
+    expect(f.storage.getShareGrant(link.grantId)).toEqual(before);
+  });
+
+  it("keeps Group and file levels apart", async () => {
+    const f = await fixture();
+    const link = await groupLink(f, "read-write");
+    const fileCreated = await json(await f.h(request(OWNER, `/sync/${workspaceId}/shares/links`, jsonBody({ paths: ["team"], access: "comment" }))));
+    const fileLink = { shareId: String(fileCreated.shareId), grantId: String(fileCreated.grantId) };
+    const before = [f.storage.getShareGrant(link.grantId), f.storage.getShareGrant(fileLink.grantId)];
+
+    for (const access of ["view", "comment", "edit"]) {
+      const refused = await retune(f, link.grantId, access);
+      expect(refused.status, access).toBe(400);
+      expect(await json(refused)).toMatchObject({ code: "invalid_access" });
+    }
+    for (const access of ["read-only", "read-write"]) {
+      expect((await retune(f, fileLink.grantId, access, fileLink.shareId)).status, access).toBe(400);
+    }
+
+    const mintCredential = vi.fn(() => ({ credentialId: "mixed-replacement", secretHash: "h".repeat(64) }));
+    const input = { changedAtMs: 3000, expectedDependentGrantIds: [], guard: () => undefined };
+    expect(f.storage.retuneShareGrant({ ...input, shareId: f.shareId, grantId: link.grantId, access: "view" })).toEqual({ ok: false });
+    expect(f.storage.retuneShareGrant({ ...input, shareId: f.shareId, grantId: link.grantId, access: "edit", mintCredential })).toEqual({ ok: false });
+    expect(f.storage.retuneShareGrant({ ...input, ...fileLink, access: "read-only" })).toEqual({ ok: false });
+    expect(f.storage.retuneShareGrant({ ...input, ...fileLink, access: "read-write", mintCredential })).toEqual({ ok: false });
+    expect(mintCredential).not.toHaveBeenCalled();
+    expect([f.storage.getShareGrant(link.grantId), f.storage.getShareGrant(fileLink.grantId)]).toEqual(before);
+  });
+
+  it("refuses to retune a Group link holding a file level before storage runs", async () => {
+    const f = await fixture();
+    const grantId = "group-link-file-level";
+    expect(f.storage.createLinkGrant({
+      grant: { grantId, shareId: f.shareId, principalKind: "link", principalUserId: null, principalEmail: null,
+        access: "view", generation: 1, status: "active", createdAtMs: 2, revokedAtMs: null, parentGrantId: null },
+      credential: { credentialId: "group-link-file-level-credential", grantId, secretHash: "s".repeat(64),
+        generation: 1, mintedAtMs: 2, retiredAtMs: null },
+    })).toBe(true);
+    const retuneShareGrant = vi.spyOn(f.storage, "retuneShareGrant");
+    const refused = await retune(f, grantId, "read-only");
+    expect(refused.status).toBe(404);
+    expect(retuneShareGrant).not.toHaveBeenCalled();
+    expect(f.storage.getShareGrant(grantId)).toMatchObject({ access: "view", generation: 1 });
   });
 
   it("caps link follows per link and per workspace", async () => {

@@ -8,6 +8,7 @@ import {
   MAX_SHARE_PATH_CHARS,
   isShareablePathList,
   MAX_SHARE_VERSION_ID_CHARS,
+  SHARE_ACCESS_VALUES,
   type ShareAccess,
   isShareAccessValue,
   isValidShareVersionId,
@@ -134,6 +135,16 @@ export function fileHalfOfGroup(selector: GroupShareSelector): ShareSelector {
     versionId: null,
     access: selector.access === "read-write" ? "edit" : "view",
   };
+}
+
+// The levels a link on this share can hold, lowest first. A Group link holds
+// the Group's levels and a file link the file levels; neither takes the
+// other's. A chat-only share has no links.
+const GROUP_LINK_ACCESS_LEVELS: readonly ChatShareAccess[] = ["read-only", "read-write"];
+export function linkAccessLevels(selector: StoredAnyShareSelector | null): readonly string[] {
+  if (!selector) return [];
+  if (!("kind" in selector)) return SHARE_ACCESS_VALUES;
+  return selector.kind === "group" ? GROUP_LINK_ACCESS_LEVELS : [];
 }
 
 // A selector with a file side: a path grant, or a group's folder.
