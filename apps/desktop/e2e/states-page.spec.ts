@@ -110,6 +110,12 @@ function mismatch(expected: Pixels, actual: Pixels): string | null {
   return differing === 0 ? null : `differs in ${differing} pixels`;
 }
 
+// The same comparison from the encoded files. Equal files are equal images,
+// so the common case skips decoding both.
+function pngMismatch(expected: Buffer, actual: Buffer): string | null {
+  return expected.equals(actual) ? null : mismatch(decode(expected), decode(actual));
+}
+
 // Among the others, a part sits elsewhere on the raster's tiles than alone,
 // and the rounded corners and icons a tile's edge crosses antialias a little
 // differently. Across four page positions, at most 21 pixels of a capture
@@ -155,7 +161,7 @@ async function captureStill(page: Page, clip: Box): Promise<{ pixels: Buffer; un
   let unsettled: string | null = null;
   for (let captures = 1; captures < STILL_CAPTURES; captures += 1) {
     const next = await page.screenshot({ ...CSS_PIXELS, clip });
-    unsettled = mismatch(decode(pixels), decode(next));
+    unsettled = pngMismatch(pixels, next);
     pixels = next;
     if (unsettled === null) break;
   }
@@ -187,7 +193,7 @@ async function compareWithBaseline(name: string, actual: Buffer): Promise<string
   const path = info.snapshotPath(`${name}.png`);
   const mode = info.config.updateSnapshots;
   const baseline = existsSync(path) ? readFileSync(path) : null;
-  const difference = baseline ? mismatch(decode(baseline), decode(actual)) : null;
+  const difference = baseline ? pngMismatch(baseline, actual) : null;
   const write = baseline === null ? mode !== "none" : mode === "all" || (mode === "changed" && difference !== null);
   if (write) {
     mkdirSync(dirname(path), { recursive: true });
@@ -228,21 +234,24 @@ async function forceMarkedStates(cdp: Cdp, scope: string): Promise<void> {
     nodeId: root.nodeId,
     selector: `${scope} [data-force-state]`,
   });
-  for (const nodeId of nodeIds) {
+  // Each command waits a round trip on a page this tall, so they go out
+  // together; the browser still runs them in order.
+  const forced = await Promise.all(nodeIds.map(async (nodeId) => {
     const { attributes } = await cdp.send("DOM.getAttributes", { nodeId });
     const marks = new Map<string, string>();
     for (let index = 0; index < attributes.length; index += 2) {
       marks.set(attributes[index] ?? "", attributes[index + 1] ?? "");
     }
     const state = marks.get("data-force-state");
-    if (!state) continue;
+    if (!state) return null;
     const target = marks.get("data-force-target");
     const targetId = target
       ? (await cdp.send("DOM.querySelector", { nodeId, selector: target })).nodeId
       : nodeId;
     if (!targetId) throw new Error(`no element matches data-force-target="${target}"`);
-    await cdp.send("CSS.forcePseudoState", { nodeId: targetId, forcedPseudoClasses: state.split(" ") });
-  }
+    return { nodeId: targetId, forcedPseudoClasses: state.split(" ") };
+  }));
+  await Promise.all(forced.map((force) => force && cdp.send("CSS.forcePseudoState", force)));
 }
 
 // Opened from the keyboard, so no pointer is left over the trigger or lands
