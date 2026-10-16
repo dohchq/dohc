@@ -3241,6 +3241,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_OWNER_LIVE_STOPS_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 55,
+        id: "v2-history-operation-correlation",
+        sql: "CREATE INDEX idx_moments_operation_correlation ON moments(workspace_id, metadata_correlation_id);",
+        sets_user_version: None,
+    },
 ];
 
 const V2_REPLICA_FRONTIERS_DDL: &str = "\
@@ -3991,6 +3997,10 @@ mod tests {
             (
                 "v2-owner-live-stops",
                 "fd9a692216dd5b73e9c3f08bee04b16dbcd313084e370a3592db4c8bc59d9adb",
+            ),
+            (
+                "v2-history-operation-correlation",
+                "c0f4d24b926a03be07f0999f3aab707da566b2de18654243031f0cb1b80a4819",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5899,6 +5909,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn history_operation_index_upgrades_across_reserved_ordinals() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("history-operation-index.db"));
+        let ctx = MigrationContext::current(1100);
+        let index = migration_index("v2-history-operation-correlation");
+        assert_eq!(BASELINE_MIGRATIONS[index].ordinal, 55);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..index], &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=index], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let plan: Vec<String> = conn.prepare("EXPLAIN QUERY PLAN SELECT moment_id FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2")
+            .unwrap().query_map(rusqlite::params!["ws", "dohc-operation:one"], |row| row.get(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("idx_moments_operation_correlation")),
+            "{plan:?}"
+        );
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=index], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+        // The real migration before 55 can arrive after it: it applies once,
+        // 55 doesn't apply twice, and the index survives it.
+        let late_dir = tempdir();
+        let mut late = open_bare(&late_dir.join("history-operation-late.db"));
+        let mut early = BASELINE_MIGRATIONS[..=index].to_vec();
+        early.remove(index - 1);
+        run_migrations(&mut late, &early, &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            run_migrations(&mut late, &BASELINE_MIGRATIONS[..=index], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(
+            run_migrations(&mut late, &BASELINE_MIGRATIONS[..=index], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+        let late_plan: Vec<String> = late.prepare("EXPLAIN QUERY PLAN SELECT moment_id FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2")
+            .unwrap().query_map(rusqlite::params!["ws", "dohc-operation:one"], |row| row.get(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert!(
+            late_plan
+                .iter()
+                .any(|line| line.contains("idx_moments_operation_correlation")),
+            "{late_plan:?}"
+        );
+    }
     #[test]
     fn collection_history_index_serves_newest_first_record_reads() {
         let dir = tempdir();

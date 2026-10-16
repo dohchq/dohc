@@ -1691,7 +1691,7 @@ export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
 export const HistoryMomentPosition = z.object({ recordedAtMs: z.number().int(), momentOrder: z.number().int().nonnegative() }).strict();
 export const HistoryCursor = z.object({
   format: z.literal(1), engineUuid: z.string().min(1), workspaceId: WORKSPACE_ID, versionId: OPAQUE_ID,
-  objectId: OPAQUE_ID.nullable(), textFence: z.number().int().min(-1), protectedFence: z.number().int().min(-1),
+  operationId: OPAQUE_ID.nullable(), objectId: OPAQUE_ID.nullable(), textFence: z.number().int().min(-1), protectedFence: z.number().int().min(-1),
   markerFence: z.number().int().min(-1), text: HistoryMomentPosition.nullable(), protected: HistoryMomentPosition.nullable(),
   marker: z.object({ createdAtMs: z.number().int(), versionId: OPAQUE_ID }).strict().nullable(),
 }).strict();
