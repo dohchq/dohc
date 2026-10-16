@@ -1872,3 +1872,43 @@ async fn fix1_no_hold_placement_replay_cost() {
         samples[28]
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lease_release_reoffers_quarantined_outside_writes() {
+    let harness = Harness::new();
+    std::fs::write(harness.root.join(NEW_FILE), "Written outside the editor.\n").unwrap();
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
+    let lease = harness.leases.acquire(&harness.key(&object_id)).unwrap();
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .unwrap();
+    let files = FilesActorCloseGuard::new(files);
+    for _ in 0..dohc_engine_files::DEGRADED_RESCAN_BACKOFF {
+        assert!(!harness.capture(&files.handle()).await);
+    }
+    let parked = files.handle().stats().await.unwrap();
+    assert!(!parked.dirty);
+    assert_eq!((parked.deferred, parked.quarantined), (0, 1));
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+    drop(lease);
+    offer_deferred_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    let offered = files.handle().stats().await.unwrap().dirty;
+    let clean = harness.capture(&files.handle()).await;
+    let captured = head_count(&harness.db, NEW_FILE);
+    let recovered = files.handle().stats().await.unwrap();
+    files.close().await;
+    harness.close();
+    assert!(
+        offered,
+        "releasing the lease must wake its quarantined write"
+    );
+    assert!(clean);
+    assert_eq!(captured, 1);
+    assert_eq!((recovered.deferred, recovered.quarantined), (0, 0));
+}
