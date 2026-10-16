@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
 import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
-import { attemptOutcome, lastNightlyPass, listRequests, monitorPort, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, lastNightlyPass, lineOrder, listRequests, monitorPort, nextRequest, orderOf, parseMove, placeMove, placeSubmission, position, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
 import { startMonitor } from "./queue-monitor.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
@@ -175,7 +175,7 @@ export async function runService({
 
   const statusPath = id => join(paths.request(id), "status.json");
   const setStatus = (id, status) => writeJson(statusPath(id), { ...status, updatedAt: new Date().toISOString() });
-  const history = event => { try { appendFileSync(paths.history, JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n"); } catch { /* History informs estimates only. */ } };
+  const history = event => { try { appendFileSync(paths.history, JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n"); } catch { /* History informs estimates and records moves; losing a line must not stop the queue. A request keeps its last move in its status. */ } };
   const beat = () => writeJson(paths.service, {
     protocol, pid: process.pid, commit, startedAt, heartbeatAt: new Date().toISOString(), lanes: laneCount,
     running: [...running.values()].map(current => ({ id: current.id, attempt: current.attempt, checkout: current.checkout, phase: current.phase, startedAt: current.startedAt, awakeMs: current.awakeMs })),
@@ -276,6 +276,8 @@ export async function runService({
         place.sequence = requests.find(candidate => candidate.id === place.supersede[0])?.request.sequence ?? null;
       }
       if (place.attach) { await answer({ id: place.attach }); return; }
+      // A newer commit takes the place of the request it replaces that is furthest ahead, and the record of any move that put it there.
+      const ahead = requests.filter(candidate => place.supersede.includes(candidate.id)).sort(lineOrder)[0];
       const order = place.sequence ?? ++sequence;
       const id = `${String(order).padStart(9, "0")}-${randomBytes(3).toString("hex")}`;
       // Pin both commits before accepting, so an accepted request can always be verified.
@@ -284,12 +286,58 @@ export async function runService({
       const { key: _key, protocol: _protocol, ...fields } = submission;
       await writeJson(join(paths.request(id), "request.json"), { ...fields, id, sequence: order, acceptedAt: new Date().toISOString(), supersedes: place.supersede });
       try {
-        await setStatus(id, { state: "queued", attempts: [] });
+        await setStatus(id, { state: "queued", attempts: [], order: ahead && orderOf(ahead), moved: ahead?.status.moved });
         for (const old of place.supersede) await setStatus(old, { ...requests.find(entry => entry.id === old).status, state: "superseded", supersededBy: id });
         await answer({ id });
       } catch (error) { error.acceptedId = id; throw error; }
       history({ event: "accepted", id, head: submission.head, scope: submission.scope, supersedes: place.supersede });
     }
+  }
+
+  // A move changes only the order of queued requests. One this service has started cannot move, even before its status says so.
+  async function applyMoves() {
+    for (const name of names(paths.moves).filter(name => name.startsWith("move-") && name.endsWith(".json")).sort()) {
+      try { await applyMove(name); }
+      catch (error) {
+        // Like a submission, a move that fails here is answered and removed, so it never stops the tick again.
+        log(`move ${name} could not be applied: ${error.stack ?? error.message}`);
+        const key = join(paths.keys, name.slice(0, -5));
+        try { if (!existsSync(key)) await writeJson(key, { rejected: `The service could not apply it: ${error.message}` }); rmSync(join(paths.moves, name), { force: true }); }
+        catch { /* It stays and is tried again. */ }
+      }
+    }
+  }
+
+  async function applyMove(name) {
+    const path = join(paths.moves, name);
+    const key = join(paths.keys, name.slice(0, -5));
+    // A later tick removes an answered move that antivirus held.
+    const discard = () => { try { rmSync(path, { force: true }); } catch { /* Removed later. */ } };
+    const answer = async value => { await writeJson(key, value); discard(); };
+    if (existsSync(key)) { discard(); return; }
+    const raw = readJson(path);
+    if (raw === null) {
+      // Antivirus can hold a new file for a moment. One that stays unreadable for a minute is answered and removed.
+      const age = (() => { try { return Date.now() - statSync(path).mtimeMs; } catch { return 0; } })();
+      if (age > 60_000) await answer({ rejected: "The service could not read the move." });
+      return;
+    }
+    const move = parseMove(raw);
+    const requests = load();
+    const placed = move.rejected ? move : placeMove(requests, move, new Set(running.keys()));
+    if (placed.rejected) { log(`move ${name} refused: ${placed.rejected}`); await answer({ rejected: placed.rejected }); return; }
+    const moved = { at: new Date().toISOString(), before: move.before, reason: move.reason, by: move.by };
+    const after = requests.map(entry => {
+      const order = placed.orders.get(entry.id) ?? orderOf(entry);
+      return entry.id === move.id ? { ...entry, status: { ...entry.status, order, moved } }
+        : order === orderOf(entry) ? entry : { ...entry, status: { ...entry.status, order } };
+    });
+    // Each request whose order changed is rewritten, in one pass. Moves are rare and the line is about 50 requests.
+    for (const [index, entry] of after.entries()) if (entry !== requests[index]) await setStatus(entry.id, entry.status);
+    const from = position(requests, move.id);
+    const to = position(after, move.id);
+    history({ event: "moved", id: move.id, from, to, before: moved.before, reason: moved.reason, by: moved.by });
+    await answer({ moved: move.id, from, to });
   }
 
   async function attempt(entry) {
@@ -461,6 +509,7 @@ export async function runService({
       for (const entry of load().filter(entry => entry.status.state === "queued" && existsSync(join(paths.request(entry.id), "cancel")))) {
         await finish(entry, null, { outcome: "cancelled", cause: "cancelled" });
       }
+      await applyMoves();
       const requests = load();
       // An attempt can finish during the status write below, so each check keeps its own reference.
       for (const current of [...running.values()].filter(current => !current.stopped)) {

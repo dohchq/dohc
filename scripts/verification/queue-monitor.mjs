@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildQueueStatus, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
-import { lastNightlyPass, listRequests, monitorPort, position, queuePaths, readJson, serviceState, terminalStates, writeJson } from "./queue.mjs";
+import { lastNightlyPass, listRequests, monitorPort, movedNote, position, queuePaths, readJson, serviceState, terminalStates, writeJson } from "./queue.mjs";
 
 const assets = {
   "/": ["index.html", "text/html; charset=utf-8"],
@@ -29,6 +29,8 @@ const median = values => {
 };
 const clip = (text, length) => typeof text === "string" && text.length > length ? `${text.slice(0, length)}…` : text ?? null;
 const names = path => { try { return readdirSync(path); } catch { return []; } };
+// A request's last move for its mark's tooltip: who moved it on the first line, why on the second.
+const noteOf = status => status.moved ? movedNote(status.moved, "\n") : null;
 const plain = text => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/gu, "");
 
 /** Finished events from the history in the last `days`, read again only when the file changes. */
@@ -193,7 +195,7 @@ export function monitorState(root, { now = Date.now(), days = 7, finished = new 
       id: entry.id, attempt: row.n, branch: branchOf(entry.request), thread: threadFor(entry.request), nightly: Boolean(entry.request.nightly), scope: entry.request.scope,
       head: entry.request.head.slice(0, 12), lane: row.lane ?? (live ? live.checkout.endsWith("-2") ? 2 : 1 : null), startedAt: row.startedAt, endedAt, outcome,
       cause: row.cause ?? null, reason: clip(row.reason, 300), awakeMs: live?.awakeMs ?? row.awakeMs ?? null, flaky: row.flaky?.length ?? 0,
-      ...(live ? { phase: live.phase, ...progress(root, entry.id, row.n) } : {}),
+      ...(live ? { phase: live.phase, moved: noteOf(entry.status), ...progress(root, entry.id, row.n) } : {}),
     }];
   })).sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
   const typicalMs = median(runs.filter(run => run.outcome === "passed").slice(-20).map(run => run.awakeMs));
@@ -203,6 +205,7 @@ export function monitorState(root, { now = Date.now(), days = 7, finished = new 
       id: entry.id, branch: branchOf(entry.request), thread: threadFor(entry.request), nightly: Boolean(entry.request.nightly), scope: entry.request.scope, head: entry.request.head.slice(0, 12),
       submittedAt: entry.request.submittedAt ?? entry.request.acceptedAt, retry: entry.status.attempts.length > 0,
       notBefore: entry.status.notBefore ?? null, waiting: clip(entry.status.waiting, 200),
+      moved: noteOf(entry.status),
     }));
   const events = history(days, now);
   const tests = new Map();
