@@ -257,6 +257,7 @@ describe("link chat on a Group share", () => {
     expect((await json(followed)).messages).toEqual([expect.objectContaining({ messageId: "owner-later", body: "still here" })]);
     expect(await json(await readChat(f, capability, "channels"))).toMatchObject({ channels: [{ access: "read-only" }] });
     expect(authorizeLinkChatAction({ storage: f.storage, grantId: link.grantId, action: "append" })).toMatchObject({ ok: false });
+    expect(authorizeLinkShareAction({ storage: f.storage, grantId: link.grantId, action: "direct-write" })).toMatchObject({ ok: false });
     expect(await json(await exchange(f, link.secret))).toMatchObject({ access: "view", generation: 1 });
   });
 
