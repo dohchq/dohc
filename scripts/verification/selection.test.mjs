@@ -47,7 +47,8 @@ test("a change to a file that the repository tests read selects all of them, and
     "apps/desktop/electron-builder.yml", "apps/desktop/src/shutdownBudgets.ts", "apps/desktop/src/renderer/styles.css",
     "packages/app-backend-runtime/scripts/build.mjs", "apps/desktop/.gitignore", "crates/yrs-interop/scripts/rustPeer.ts",
     "crates/dohc-engine-storage/src/migration.rs", "apps/desktop/src/renderer/workbench/quick-open-rank.ts",
-    "apps/desktop/src/renderer/path.ts", "packages/security-contract/src/visibilityPolicy.ts", "packages/workspace-contracts/src/kinds.ts"]) {
+    "apps/desktop/src/renderer/path.ts", "packages/security-contract/src/visibilityPolicy.ts", "packages/workspace-contracts/src/kinds.ts",
+    "apps/desktop/tsconfig.json", "packages/security-contract/tsconfig.json", "packages/workspace-contracts/tsconfig.json"]) {
     assert.equal(selectsRepositoryTests([file], workflow), true, file);
   }
   for (const file of ["apps/desktop/src/main.ts", "apps/desktop/scripts/stage-app-compiler.mjs", "apps/site/src/index.ts",
