@@ -90,6 +90,7 @@ import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { useCloudPresence } from "./shell/useCloudPresence";
+import type { AccountDeletion } from "./shell/useAccountDeletion";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { reportInstallationFailure, useInstallationNotices } from "./shell/installationNotices";
 import type { CloudSettings } from "./settings/CloudSyncSettings";
@@ -524,6 +525,8 @@ export function DesktopWorkspaceShell(props: {
   onShareHandoffOpened?: () => void;
   // Notices sent to this person, owned above the shell.
   sentNotices?: SentNotices;
+  // The account deletion review, owned above the shell.
+  accountDeletion: AccountDeletion;
   openOnReady?: OpenOnSwitch;
 }) {
   const workspaceShareMounts = props.workspace.shareMounts ?? EMPTY_SHARE_MOUNTS;
@@ -633,12 +636,6 @@ export function DesktopWorkspaceShell(props: {
   }, []);
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
 
-  const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
-    props.workspace.workspaceId,
-    props.userSettings,
-    settingsSection,
-  );
-
   const workspaceId = props.workspace.workspaceId;
   const focusRoot = useRef<HTMLDivElement>(null);
   useFocusReturn(true, focusRoot, () => document.querySelector<HTMLElement>('[data-focus-surface="workspace"]'));
@@ -739,6 +736,13 @@ export function DesktopWorkspaceShell(props: {
   const workspaceIsReady =
     workspaceReadyFor?.workspaceId === workspaceId &&
     workspaceReadyFor.selectionGeneration === workspaceSelectionGeneration;
+  const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
+    workspaceId,
+    props.userSettings,
+    settingsSection,
+    workspaceIsReady,
+  );
+
   const [workspaceOpenFailedFor, setWorkspaceOpenFailedFor] = useState<{
     workspaceId: string;
     selectionGeneration: number;
@@ -920,7 +924,9 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError],
   );
   const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
-    useCloudPresence(workspaceId, reportCloudStatusUnavailable);
+    useCloudPresence(workspaceId, reportCloudStatusUnavailable, workspaceIsReady);
+  const { start: startAccountDeletion, reviewing: reviewingAccountDeletion, attach: attachAccountDeletion } =
+    props.accountDeletion;
   // Closing Settings reads the status again, as the old Cloud dialog did on
   // close. The page's own refresh after an enable covers only its own
   // change: another window's Try again can make main adopt this account's
@@ -944,12 +950,15 @@ export function DesktopWorkspaceShell(props: {
   // A failure from the Cloud dialog or the Sync and sharing page. The notice
   // outlives both, so its Try again reopens the dialog with the address that
   // failed, or whichever of the two now applies, once the source has closed.
+  // An open deletion review holds the account until it ends, so a Try again
+  // then does nothing: no sign-in, Disconnect, or new review starts under it.
   const reportConnectionError = useCallback(
     (error: ConnectionErrorReport) => {
       reportShellFailure({
         message: error.message,
         cause: error.cause,
         retry: () => {
+          if (reviewingAccountDeletion()) return;
           if (error.retry?.()) return;
           if (error.serverUrl === null) return openCloud();
           setCloudRetryServerUrl(error.serverUrl);
@@ -957,7 +966,20 @@ export function DesktopWorkspaceShell(props: {
         },
       });
     },
-    [openCloud, reportShellFailure],
+    [reviewingAccountDeletion, openCloud, reportShellFailure],
+  );
+  // After useShellError's, so this shell attaches with its notices started:
+  // an answer to a delete sent from the previous workspace's shell reports here.
+  useEffect(
+    () =>
+      attachAccountDeletion({
+        cloudStatus,
+        report: reportConnectionError,
+        showSuccess: showSuccessNotice,
+        showWarning: showWarningNotice,
+        onEnded: refreshCloudStatus,
+      }),
+    [attachAccountDeletion, cloudStatus, refreshCloudStatus, reportConnectionError, showSuccessNotice, showWarningNotice],
   );
   // Unguarded by workspace: an installation-wide failure is news here.
   useInstallationNotices(reportConnectionError);
@@ -980,8 +1002,9 @@ export function DesktopWorkspaceShell(props: {
         if (current()) reportConnectionError(error);
       },
       onAccountError: reportInstallationFailure,
+      onDeleteAccount: startAccountDeletion,
     };
-  }, [closeSettings, cloudStatus, cloudStatusUnreadable, refreshCloudStatus, reportConnectionError, workspaceId]);
+  }, [startAccountDeletion, closeSettings, cloudStatus, cloudStatusUnreadable, refreshCloudStatus, reportConnectionError, workspaceId]);
   // About's section reads report through this shell's notices, one row per
   // section and file. A repeat keeps an existing row's toast state only for
   // an unchanged message. A changed message, or a missing row, toasts again.
@@ -1770,6 +1793,7 @@ export function DesktopWorkspaceShell(props: {
   // by the same rule as every other answer, and issued after the observation,
   // so it is the freshest thing available.
   const refreshAgentLane = useCallback(() => {
+    if (!workspaceIsReady) return;
     const token = ++engineHistoryToken.current;
     agentActiveLane.settle(
       token,
@@ -1780,7 +1804,7 @@ export function DesktopWorkspaceShell(props: {
           refreshAgentLane(),
         ),
     );
-  }, [agentActiveLane, reportLaneFailure, workspaceId]);
+  }, [agentActiveLane, reportLaneFailure, workspaceId, workspaceIsReady]);
   const onSettingsAgentActiveChange = useCallback(
     ({ active, mutated }: { active: boolean; mutated: boolean }) => {
       if (!mutated) {
@@ -6224,6 +6248,8 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
+            workspaceIsReady={workspaceIsReady}
+            workspaceOpenFailed={!!workspaceOpenFailure}
             onError={reportSettingsFailure}
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}

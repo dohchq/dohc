@@ -54,6 +54,19 @@ describe("cloud credential store", () => {
     expect(await store.load()).toEqual(credentials);
   });
 
+  it("keeps deleted accounts across restart, apart from the session", async () => {
+    const deleted = [{ serverUrl: credentials.serverUrl, userId: credentials.userId }];
+    const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
+    expect(await store.loadDeletedAccounts()).toEqual([]);
+    await store.save(credentials);
+    await store.saveDeletedAccounts(deleted);
+    await store.clear();
+    expect(await createCloudCredentialStore({ dir, cipher: fakeCipher }).loadDeletedAccounts()).toEqual(deleted);
+
+    await writeFile(join(dir, "dohc-cloud-deleted.json"), "{not json");
+    expect(await store.loadDeletedAccounts()).toEqual([]);
+  });
+
   it("round-trips credentials through the injected cipher", async () => {
     const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
     await store.save(credentials);

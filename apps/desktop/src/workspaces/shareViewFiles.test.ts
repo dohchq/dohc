@@ -29,6 +29,7 @@ import {
   withShareViewRefreshLifecycleLock,
 } from "./sharedView";
 import { SharePinInvalidError } from "./shareViewRecords";
+import { resolveRegisteredShareViewFilesTarget } from "./shareViewFilesTarget";
 import {
   mountRootFor,
   shareViewFilesMountProjection,
@@ -137,6 +138,7 @@ function target(
     schedulingRootPath: rootPath,
     rootPath,
     shareId: "share-a",
+    recipientUserId: "recipient-a",
     granterEmail: "granter@example.com",
     grantedSelector: { paths: [], versionId: "main", access },
     ended: false,
@@ -2234,6 +2236,52 @@ describe("ShareViewFiles", () => {
         files.reconcile(lease, requested, "refresh"),
       ),
     ).rejects.toBeInstanceOf(SharePinInvalidError);
+  });
+
+  // The renderer presents these markers as damaged; an Edit grant on one must
+  // not reach the local store either. The intact row proves the refusal comes
+  // from the damage, not from the setup.
+  it.each([
+    ["intact", {}, null],
+    ["no share id", { shareId: undefined }, SharePinInvalidError],
+    ["a share id past the wire bound", { shareId: "s".repeat(201) }, SharedFileReadOnlyError],
+    ["no recipient", { recipientUserId: undefined }, SharedFileReadOnlyError],
+    ["an empty recipient", { recipientUserId: "" }, SharedFileReadOnlyError],
+  ] as const)("admits an Edit write through a registry marker only when it is %s", async (_name, damage, refusal) => {
+    const rootPath = await workspaceRoot();
+    const store = mutableTextStore();
+    const workspace = {
+      workspaceId: "workspace-a",
+      rootPath,
+      shareView: {
+        shareId: "share-a",
+        recipientUserId: "recipient-a",
+        granterEmail: "granter@example.com",
+        grantedSelector: { paths: [], versionId: "main", access: "edit" },
+        ...damage,
+      },
+    };
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: (requested) =>
+        resolveRegisteredShareViewFilesTarget(workspace, requested),
+      openStore: () => store,
+    });
+
+    const created = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "create", path: "notes/new.md", initialText: "new\n" },
+      ),
+    );
+
+    if (refusal === null) {
+      await expect(created).resolves.toMatchObject({ status: "committed" });
+      return;
+    }
+    await expect(created).rejects.toBeInstanceOf(refusal);
+    expect(store.writeTextFile).not.toHaveBeenCalled();
   });
 
   it("refuses a dynamically chosen import path outside the pinned grant", async () => {

@@ -77,6 +77,7 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
 
   /** One verified and one unverified account, each signed in while sign-up was open. */
   async function signedInAccounts(): Promise<{ verified: string; unverified: string }> {
+    await pool.query(await readFile(new URL("../../../packages/workspace-postgres/src/db/migrations/0004_account_deletion.sql", import.meta.url), "utf8"));
     const auth = createWorkspaceAuth({ pool, baseURL: "http://localhost:1786", secret: SECRET, sendEmail: async () => undefined });
     const signUp = (name: string) =>
       auth.api.signUpEmail({ body: { email: `${name}-${Date.now()}@dohc.test`, password: "a-real-password-123", name } });

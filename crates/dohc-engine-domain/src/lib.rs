@@ -36,7 +36,12 @@ pub mod normalize;
 pub mod records;
 pub mod secrets;
 pub mod store;
-pub use store::{FileResolution, FileResolveTarget};
+pub use store::{
+    FileResolution, FileResolveTarget, OPERATION_ID_PREFIX, OperationMoment,
+    ensure_operation_published_in, operation_moments_in, preflight_undo_operation_in,
+    replayed_undo_operation_in, undo_correlation_id, undo_operation_in_tx,
+    undo_request_is_replay_in, validate_operation_id,
+};
 
 pub use automations::{
     AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_GROUP_COVERAGE_MS,
@@ -134,7 +139,7 @@ pub use conflicts::{
     live_state_matches_conflict_current, load_text_conflict_in_tx, select_snapshot_by_path_in_tx,
     update_text_conflict_row, write_binary_file_in_tx,
 };
-pub use error::DomainError;
+pub use error::{DomainError, HOSTED_REPLICA_WRITE_REFUSED};
 pub use merge::{
     BinaryMergeWrite, CompareTextFileVersions, ComparisonSide, ComparisonStatus, MAX_MERGE_LINES,
     MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason,
@@ -176,7 +181,7 @@ pub use store::{
     derive_capture_object_id, derive_capture_retire_moment_id, ensure_capture_object_in_tx,
     ensure_main_version_in_tx, finish_checked_delete_in_tx, is_capture_recovery_origin,
     normalize_tracked_workspace_path, object_has_live_alias, prepare_checked_delete_in_tx,
-    record_capture_recovery_in_tx, rollback_compensating_moment_id,
+    record_capture_recovery_in_tx, rename_text_in_tx, rollback_compensating_moment_id,
     validate_addressable_plaintext_path, validate_delete_input, validate_plaintext_storable_path,
     validate_write_input, write_binary_in_tx, write_history_text_in_tx, write_projected_text_in_tx,
     write_published_binary_in_tx, write_published_history_text_in_tx, write_published_text_in_tx,

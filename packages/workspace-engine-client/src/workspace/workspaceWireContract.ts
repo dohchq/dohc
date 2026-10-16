@@ -463,7 +463,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureReconcile]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureRetryHeld]: WorkspaceJsonObject & { path: string };
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
-  [WORKSPACE_METHOD.captureHold]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureHold]: WorkspaceJsonObject & { operationId?: string };
   [WORKSPACE_METHOD.captureRenew]: WorkspaceJsonObject & { holdId: string };
   [WORKSPACE_METHOD.captureRelease]: WorkspaceJsonObject & { holdId: string };
   [WORKSPACE_METHOD.captureMoveFile]: WorkspaceJsonObject & { holdId: string; fromPath: string; toPath: string };

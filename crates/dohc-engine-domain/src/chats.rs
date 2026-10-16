@@ -6720,11 +6720,26 @@ fn ensure_thread_structure_exported(
 /// must never be able to forge either half of it (`ensureOriginId` /
 /// `nextOriginSeq`). SQLite supplies the random bytes so the domain needs no
 /// caller-controlled or process-global identity seam.
+///
+/// A session host's hosted replica holds no chat: the relay accepts only its
+/// hosted documents' writes, and its sequences come from `hosted_replicas`.
 fn local_replication_coordinate(
     tx: &Transaction<'_>,
     workspace_id: &str,
     now_ms: i64,
 ) -> Result<(String, i64), DomainError> {
+    let hosted: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM hosted_replicas WHERE workspace_id = ?1)",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    if hosted {
+        return Err(DomainError::InvalidInput {
+            reason: crate::HOSTED_REPLICA_WRITE_REFUSED,
+        });
+    }
     tx.execute(
         "INSERT OR IGNORE INTO sync_identity \
          (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms, claim_state) \

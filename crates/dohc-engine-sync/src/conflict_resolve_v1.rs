@@ -1778,20 +1778,54 @@ fn unbound_receiver_lineages_match_reviewed_sides(
     Ok(true)
 }
 
+/// The origin sequence of the `conflict.resolve` whose effect `effect_index`
+/// the conflict child `envelope` is.
+fn conflict_parent_seq(
+    envelope: &ReplicationEnvelope,
+    effect_index: usize,
+) -> Result<i64, SyncError> {
+    i64::try_from(effect_index)
+        .ok()
+        .and_then(|index| index.checked_add(1))
+        .and_then(|offset| envelope.origin_seq.checked_sub(offset))
+        .ok_or(SyncError::CoordinateDiverged)
+}
+
+/// The conflict a conflict child on a hosted replica resolves, when no
+/// imported `conflict.resolve` stands where the child names its parent: the
+/// feed withheld it. `None` for any other op.
+pub(crate) fn withheld_parent_conflict(
+    conn: &rusqlite::Connection,
+    envelope: &ReplicationEnvelope,
+) -> Result<Option<String>, SyncError> {
+    if envelope.op_kind != "moment.append" {
+        return Ok(None);
+    }
+    let Ok(owner) = crate::moment_apply::validate_tagged_shadow_payload(&envelope.payload) else {
+        return Ok(None);
+    };
+    let Ok(parent_seq) = conflict_parent_seq(envelope, owner.effect_index) else {
+        return Ok(None);
+    };
+    let parent_present: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM replication_log \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 \
+               AND op_kind='conflict.resolve' AND imported=1)",
+            params![envelope.workspace_id, envelope.origin_id, parent_seq],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok((!parent_present).then_some(owner.conflict_id))
+}
+
 pub(crate) fn verify_imported_conflict_effect_in_tx(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
 ) -> Result<MomentApplyResult, SyncError> {
     let owner = crate::moment_apply::validate_tagged_shadow_payload(&envelope.payload)
         .map_err(|_| SyncError::CoordinateDiverged)?;
-    let offset = i64::try_from(owner.effect_index)
-        .ok()
-        .and_then(|index| index.checked_add(1))
-        .ok_or(SyncError::CoordinateDiverged)?;
-    let parent_seq = envelope
-        .origin_seq
-        .checked_sub(offset)
-        .ok_or(SyncError::CoordinateDiverged)?;
+    let parent_seq = conflict_parent_seq(envelope, owner.effect_index)?;
     let parent: Option<(String, i64, String)> = tx
         .query_row(
             "SELECT payload_json,recorded_at_ms,apply_disposition FROM replication_log \
@@ -1803,6 +1837,13 @@ pub(crate) fn verify_imported_conflict_effect_in_tx(
         .optional()
         .map_err(SyncError::corrupt)?;
     let Some((parent_json, parent_recorded_at_ms, parent_disposition)) = parent else {
+        // A hosted replica is never served the parent, so its absence proves
+        // nothing there; the child waits instead of applying half a resolution.
+        if crate::hosted::is_hosted(tx, &envelope.workspace_id)? {
+            return Err(SyncError::RetryableState {
+                reason: crate::hosted::CONFLICT_PARENT_WITHHELD,
+            });
+        }
         return Err(SyncError::CoordinateDiverged);
     };
     let parent_value: Value =

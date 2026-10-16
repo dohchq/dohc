@@ -1,4 +1,4 @@
-import { LogOut, Network } from "lucide-react";
+import { LogOut, Network, Trash2 } from "lucide-react";
 import { useId, useRef, useState, type ReactNode } from "react";
 import { canonicalCloudOrigin } from "../../workspaces/cloudConfiguration";
 import { bridge } from "../bridge";
@@ -18,10 +18,11 @@ export const DISCONNECT_EXPLANATION =
 
 // Sign-ins this window has heard of, counted by one listener for the life of
 // the window. Main announces a logout with no session, and every sign-in
-// with its session from the first announcement on, before it finishes.
+// with its session from the first announcement on, before it finishes. A
+// retry held across a sign-in declines when the count moved.
 let signIns = 0;
 let watchingSignIns = false;
-function signInCount(): number {
+export function signInCount(): number {
   if (!watchingSignIns) {
     watchingSignIns = true;
     bridge().onCloudSessionChanged((event) => {
@@ -70,6 +71,9 @@ export function CloudAccountRow(props: {
   // the session again once Disconnect settles.
   onSettled: (failed: boolean) => void;
   onError: (error: ConnectionErrorReport) => void;
+  // Opens the review of what deleting this account on its server removes.
+  // Only Settings offers it.
+  onDelete?: (account: { email: string; server: string }) => void;
 }) {
   const [busy, setBusy] = useState(false);
   // Bumped when the row unmounts, so an answer after that paints nothing.
@@ -133,6 +137,19 @@ export function CloudAccountRow(props: {
           </SecondaryButton>
         )}
       </Explained>
+      {props.onDelete ? (
+        // The compact secondary recipe in the danger color: it ends the account.
+        <button
+          type="button"
+          data-testid="cloud-delete-account"
+          disabled={busy}
+          onClick={() => props.onDelete?.({ email: props.email, server })}
+          className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md border border-line px-2.5 text-[11px] text-danger hover:bg-hover dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50"
+        >
+          <Trash2 size={12} aria-hidden />
+          Delete account…
+        </button>
+      ) : null}
     </SettingRow>
   );
 }
