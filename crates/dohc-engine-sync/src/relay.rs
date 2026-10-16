@@ -2012,11 +2012,17 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 reads.insert(object_id.clone(), (cursor, has_more));
             }
             // A held document's own read covers these rows. It reads after
-            // the main feed, so its read reaches at least as far.
+            // the main feed, and its document is not ready until that read
+            // reaches the end of its rows.
             None => ops.retain(|op| {
                 crate::hosted::hosted_document(op).is_none_or(|id| !unready.contains(id))
             }),
         }
+        // Held reads share what the pass has left. A stopped document needs
+        // only the row it stopped at, and a read cut short goes on next pass.
+        let per_held = (crate::model::MAX_PULL_OPS_PER_PASS.saturating_sub(fetched)
+            / held.len().max(1))
+        .clamp(1, crate::MAX_PULL_OPS);
         for (object_id, from) in &held {
             let Some(response) = self.hosted_page(
                 store,
@@ -2025,7 +2031,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 &replica,
                 Some(object_id),
                 *from,
-                crate::MAX_PULL_OPS,
+                per_held,
                 faults,
             )?
             else {
