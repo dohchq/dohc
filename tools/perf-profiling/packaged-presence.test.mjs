@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { summarizePresence, comparePresence } from './packaged-presence.mjs';
 import { compareSummaries } from './compare-packaged-benchmark.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
@@ -8,6 +9,12 @@ const settings = { scenario: 'presence', runCount: 5, keystrokes: 3, presencePee
 const task = (name, value) => ({ name, mode: 'rich', supported: true, samples: [value, value, value].map(inputToNextPaintMs => ({ inputToNextPaintMs })), longTasks: [], trace: { validation: { pass: true, matchedKeys: 3 } }, workload: { pass: true, peers: 2 } });
 const receipt = values => ({ status: 'complete', settings, runs: values.map((value, index) => ({ index: index + 1, presence: Object.fromEntries(['solo', 'peers'].map(arm => [arm, ['small.md', 'large.md'].map(name => task(name, value))])) })) });
 const compare = (before, after) => comparePresence(summarizePresence(before.runs), summarizePresence(after.runs), settings);
+
+test('packaged presence protects peer typing failures with withPresencePeers', async () => {
+  const source = await readFile(new URL('./packaged-benchmark.mjs', import.meta.url), 'utf8');
+  assert.ok(/const peers = await presenceFixture\.peers\(name, presencePeers\);\s+await withPresencePeers\(peers, async \(\) => \{\s+const typed = await typing\(/.test(source),
+    'Presence peer typing must use withPresencePeers to preserve workload failures');
+});
 
 test('presence defaults to five runs and requires two to eight peers', () => {
   const args = ['--binary', 'app.exe', '--package-commit', 'a'.repeat(40), '--output', 'out', '--label', 'baseline', '--scenario', 'presence'];

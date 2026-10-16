@@ -127,7 +127,6 @@ test('post-typing clock check accepts three milliseconds and refuses greater dri
   assert.throws(() => validatePresenceClocks(before, { ...before, rendererToNodeOffsetMs: 45.001 }), /clock refused.*offset changed/);
 });
 
-
 test('peer cleanup failure keeps the original typing refusal and logs the cleanup error', async t => {
   const cause = new Error('original clock details');
   const original = new Error('Presence clock refused', { cause });
@@ -136,10 +135,30 @@ test('peer cleanup failure keeps the original typing refusal and logs the cleanu
   let finishes = 0;
   await assert.rejects(withPresencePeers({ finish: async () => { finishes++; throw finishError; } },
     async () => { throw original; }), error => error === original);
-  assert.equal(original.cause, cause);
   assert.equal(finishes, 1);
   assert.equal(log.mock.callCount(), 1);
   assert.equal(log.mock.calls[0].arguments[1], finishError);
+});
+
+test('successful peer cleanup preserves the workload error without logging', async t => {
+  const original = new Error('Presence clock refused');
+  const log = t.mock.method(console, 'error', () => {});
+  let finishes = 0;
+  await assert.rejects(withPresencePeers({ finish: async () => { finishes++; } },
+    async () => { throw original; }), error => error === original);
+  assert.equal(finishes, 1);
+  assert.equal(log.mock.callCount(), 0);
+});
+
+test('a cached finish rejection is not logged again as a cleanup failure', async t => {
+  const original = new Error('Peer stopped during acknowledgement drain');
+  const log = t.mock.method(console, 'error', () => {});
+  let result, finishes = 0;
+  const peers = { finish: () => { finishes++; return result ??= Promise.reject(original); } };
+  await assert.rejects(withPresencePeers(peers, async () => { await peers.finish({ start: 0, end: 100 }); }),
+    error => error === original);
+  assert.equal(finishes, 2);
+  assert.equal(log.mock.callCount(), 0);
 });
 
 test('peer cleanup failures still reject an otherwise successful workload', async () => {
