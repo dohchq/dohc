@@ -403,13 +403,18 @@ it("drops upload proof when the workspace stops being hosted", async () => {
   expect(await (await f.push([edit])).json()).toMatchObject({code: "share_op_rejected"});
   await f.upload(kept);
   expect((await f.push([edit])).status).toBe(200);
-  expect(uploads()).toBe(1);
-  // A Stop of the last hosted document retires it at once, with no release.
-  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 32, guard() {}});
-  expect(uploads()).toBe(0);
   // A new workspace identity leaves every enrollment behind.
   expect(f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 40})).toBe("rotated");
   expect(uploads()).toBe(0);
+});
+
+it("drops upload proof when Stop retires the last hosted document", async () => {
+  const f = await fixture();
+  await f.upload(blob("stopped upload"));
+  expect(f.uploads()).toBe(1);
+  // Stop retires at once, with no release.
+  f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1", enabled: false, retire: true, nowMs: 30, guard() {}});
+  expect(f.uploads()).toBe(0);
 });
 
 it("reads only the current scope with the workspace's one credential as documents join and leave", async () => {
