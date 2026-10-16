@@ -132,13 +132,168 @@ fn prepared_push_uploads_four_blobs_in_one_transport_round() {
 }
 
 #[test]
+fn prepared_push_sends_blobs_above_the_byte_cap_in_separate_rounds() {
+    check_upload_rounds_by_bytes(1024 * 1024 + 1, 4);
+    check_upload_rounds_by_bytes(400 * 1024, 2);
+}
+
+fn check_upload_rounds_by_bytes(bytes: usize, expected_rounds: usize) {
+    let (_scratch, _path, mut store) = fixture_with_files(0);
+    for index in 0..4 {
+        append_file_bytes(
+            &mut store,
+            index,
+            &format!("large-{index}"),
+            vec![index as u8; bytes],
+        );
+    }
+    let transport = DeferredRelayTransport::default();
+    let mut cache = WriterDocCache::new();
+    let mut relay = Relay::default();
+    let mut rounds = 0;
+    for _ in 0..20 {
+        if let Some(outcome) = step(&mut store, &mut cache, &transport) {
+            assert_eq!(outcome, (4, false));
+            assert_eq!(rounds, expected_rounds);
+            assert_eq!(relay.uploads.len(), 4);
+            return;
+        }
+        let request = transport.take_pending().unwrap();
+        match &request {
+            RelayIoRequest::UploadBlob(_) => rounds += 1,
+            RelayIoRequest::UploadBlobs(uploads) => {
+                assert!(
+                    uploads
+                        .iter()
+                        .map(|upload| upload.bytes.len())
+                        .sum::<usize>()
+                        <= 1024 * 1024,
+                    "batch exceeds the byte cap"
+                );
+                rounds += 1;
+            }
+            _ => {}
+        }
+        let response = relay.answer(&request);
+        transport.complete(request, Ok(response));
+    }
+    panic!("push did not finish");
+}
+
+fn finish_initial_uploads(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    transport: &DeferredRelayTransport,
+    relay: &mut Relay,
+) {
+    for _ in 0..20 {
+        assert_eq!(step(store, cache, transport), None);
+        let request = transport.take_pending().unwrap();
+        let uploaded = matches!(
+            request,
+            RelayIoRequest::UploadBlob(_) | RelayIoRequest::UploadBlobs(_)
+        );
+        let response = relay.answer(&request);
+        transport.complete(request, Ok(response));
+        if uploaded {
+            return;
+        }
+    }
+    panic!("no upload");
+}
+
+#[test]
+fn prepared_push_rechecks_rewritten_ops_after_upload() {
+    // The first four ops finish before the fifth upload yields. Rewriting op 0
+    // must reset uploaded_ops as well as inventory the replacement blob.
+    let (_scratch, _path, mut store) = fixture_with_files(5);
+    let transport = DeferredRelayTransport::default();
+    let mut cache = WriterDocCache::new();
+    let mut relay = Relay::default();
+    finish_initial_uploads(&mut store, &mut cache, &transport, &mut relay);
+    assert_eq!(step(&mut store, &mut cache, &transport), None);
+    let pending = transport.take_pending().unwrap();
+    assert!(matches!(pending, RelayIoRequest::UploadBlob(_)));
+    let response = relay.answer(&pending);
+    transport.complete(pending, Ok(response));
+    let mut rewritten = dohc_engine_sync::list_replication_ops(&store, WORKSPACE, ORIGIN, -1, 1)
+        .unwrap()
+        .remove(0);
+    let TxnOutcome::Committed(sha) = store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_storage::put_binary_blob(tx, b"rewritten bytes")
+        })
+        .unwrap()
+    else {
+        panic!("crash")
+    };
+    rewritten.payload["payloadAfterBlobSha256"] = serde_json::json!(sha);
+    rewritten.payload["payloadAfterByteLength"] = serde_json::json!(15);
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_log SET payload_json=?1 WHERE origin_seq=0",
+                [rewritten.payload.to_string()],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    let mut asked = false;
+    for _ in 0..20 {
+        if let Some(outcome) = step(&mut store, &mut cache, &transport) {
+            assert_eq!(outcome, (5, false));
+            assert!(asked);
+            assert_eq!(relay.uploads.get(&sha), Some(&1));
+            assert_eq!(relay.ops.get(&0), Some(&rewritten));
+            return;
+        }
+        let request = transport.take_pending().unwrap();
+        if let RelayIoRequest::BlobsHave(have) = &request {
+            assert_eq!(have.sha256s, vec![sha.clone()]);
+            asked = true;
+        }
+        let response = relay.answer(&request);
+        transport.complete(request, Ok(response));
+    }
+    panic!("push did not finish");
+}
+
+#[test]
 fn prepared_push_rechecks_an_identity_changed_during_upload() {
     identity_change_during_upload("stream_identity", "replacement", "replacement");
 }
 
 #[test]
-fn prepared_push_rechecks_an_origin_identity_changed_during_upload() {
-    identity_change_during_upload("origin_id", "replacement", "stream");
+fn prepared_push_keeps_confirmations_and_pushed_count_across_origin_changes() {
+    let (_scratch, _path, mut store) = fixture_with_files(1);
+    let transport = DeferredRelayTransport::default();
+    let mut cache = WriterDocCache::new();
+    let mut relay = Relay::default();
+    finish_initial_uploads(&mut store, &mut cache, &transport, &mut relay);
+    for origin in ["replacement", "replacement-again"] {
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE sync_identity SET origin_id=?1", [origin])
+                    .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        if origin == "replacement" {
+            assert_eq!(step(&mut store, &mut cache, &transport), None);
+            let request = transport.take_pending().unwrap();
+            assert!(
+                matches!(request, RelayIoRequest::Push(_)),
+                "origin-only changes preserve blob confirmations"
+            );
+            let response = relay.answer(&request);
+            transport.complete(request, Ok(response));
+        }
+    }
+    assert_eq!(step(&mut store, &mut cache, &transport), Some((1, false)));
+    assert_eq!(relay.inventories, 1);
+    assert_eq!(relay.inserted, 1);
+    assert_eq!(read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(), 0);
 }
 
 fn identity_change_during_upload(column: &str, value: &str, stream: &str) {
@@ -212,7 +367,7 @@ fn prepared_push_missing_blob_at_append_fails_without_advancing_then_retries() {
         let request = transport.take_pending().unwrap();
         if matches!(request, RelayIoRequest::Push(_)) {
             relay.blobs.clear();
-            transport.complete(request, Err(RelayError::BlobMissing));
+            transport.complete(request, Err(RelayError::BlobReferenceMissing));
             break;
         }
         let response = relay.answer(&request);
@@ -228,7 +383,7 @@ fn prepared_push_missing_blob_at_append_fails_without_advancing_then_retries() {
     );
     assert!(matches!(
         result,
-        Err(RuntimeError::Relay(RelayError::BlobMissing))
+        Err(RuntimeError::Relay(RelayError::BlobReferenceMissing))
     ));
     assert_eq!(read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(), -1);
     assert!(relay.ops.is_empty());

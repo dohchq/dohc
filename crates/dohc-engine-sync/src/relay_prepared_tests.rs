@@ -2,7 +2,11 @@ use super::*;
 use dohc_engine_storage::{NoFaults, TxnOutcome};
 
 #[derive(Default)]
-struct PausedRelay(crate::tests::FakeRelay);
+struct PausedRelay(
+    crate::tests::FakeRelay,
+    std::sync::atomic::AtomicBool,
+    std::sync::atomic::AtomicUsize,
+);
 
 macro_rules! delegate {
     ($method:ident, $request:ty, $response:ty) => {
@@ -23,7 +27,14 @@ impl RelayTransport for PausedRelay {
     delegate!(probe, ProbeRequest, ProbeResponse);
     delegate!(claim_workspace, ClaimRequest, ClaimResponse);
     delegate!(rotate_epoch, EpochRequest, EpochResponse);
-    delegate!(upload_blob, BlobUploadRequest, ());
+    fn upload_blob(&self, request: BlobUploadRequest) -> Result<(), RelayError> {
+        assert_eq!(
+            dohc_engine_storage::hex_sha256(&request.bytes),
+            request.sha256
+        );
+        self.2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
     delegate!(
         download_blobs,
         BlobDownloadBatchRequest,
@@ -54,8 +65,14 @@ impl RelayTransport for PausedRelay {
         ShareCollectionWriteRequest,
         ShareCollectionWriteResponse
     );
-    fn blobs_have(&self, _: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError> {
-        Err(RelayError::Local("prepared-page-test-pause".into()))
+    fn blobs_have(&self, request: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError> {
+        if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+            Ok(BlobHaveResponse {
+                missing: request.sha256s,
+            })
+        } else {
+            Err(RelayError::Local("prepared-page-test-pause".into()))
+        }
     }
 }
 
@@ -80,6 +97,84 @@ fn acknowledge_seed(store: &mut EngineStore) {
         tx.execute("INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES ('ws','local',0)", []).map_err(SyncError::persist)?;
         Ok::<_, SyncError>(())
     }).unwrap();
+}
+
+#[test]
+fn prepared_owner_prefix_rechecks_a_restore_after_upload_progress() {
+    let (_scratch, mut store, observed, checkpoint) = crate::tests::owner_publication::fixture();
+    acknowledge_seed(&mut store);
+    for (kind, payload) in [
+        ("chat.message.append", serde_json::json!({})),
+        (
+            "ydoc.update",
+            serde_json::json!({"versionId":"main","objectId":"owner","path":"owner.md","contentKind":"richdoc","lineageClaimId":observed.binding.lineage_claim_id,"updateBlobSha256":dohc_engine_storage::hex_sha256(&checkpoint)}),
+        ),
+    ] {
+        crate::journal_local_replication_op(
+            &mut store, "ws", "local", "epoch-1", "stream-1", kind, &payload, 10, &NoFaults,
+        )
+        .unwrap();
+    }
+    let client = RelaySyncClient::new(PausedRelay::default());
+    let mut progress = PushWorkspaceProgress::default();
+    assert!(matches!(
+        resume(&client, &mut store, &mut progress),
+        Err(RelayError::Local(_))
+    ));
+    // Finish the actual upload phase before resuming the ordinary entry point.
+    // This exposes the boundary before sending, without an in-flight append.
+    client
+        .transport()
+        .1
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut page = progress.page.take().unwrap();
+    assert_eq!(page.ops.len(), 2);
+    assert_eq!(
+        client
+            .upload_push_prefix(
+                &store,
+                "ws",
+                &page.identity.clone(),
+                &mut page,
+                progress.started,
+                &mut progress.confirmed_blobs
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(page.uploaded_ops, 2);
+    assert_eq!(
+        client
+            .transport()
+            .2
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(page.inventory.is_empty() && page.missing.is_empty());
+    let held = page.ops[1].origin_seq;
+    progress.page = Some(page);
+    store.write_with(&NoFaults, |tx| {
+        let input = serde_json::json!({"oldBinding":observed.binding,"newFence":1});
+        tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','owner','relay','restore',?1,'{}')", [input.to_string()]).unwrap();
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    let outcome = resume(&client, &mut store, &mut progress).unwrap();
+    assert!(
+        client
+            .transport()
+            .0
+            .pushed_requests()
+            .iter()
+            .all(|request| request.ops.iter().all(|op| op.origin_seq != held)),
+        "held owner operation was appended"
+    );
+    assert!(
+        matches!(outcome, SyncPassOutcome::Complete { pushed:1, ref owner_admission_pending, .. } if owner_admission_pending.len()==1 && owner_admission_pending[0].origin_seq==held)
+    );
+    assert_eq!(
+        crate::read_pushed_seq(&store, "ws", "local").unwrap(),
+        held - 1
+    );
 }
 
 #[test]

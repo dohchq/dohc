@@ -211,6 +211,18 @@ pub struct BlobHaveResponse {
     pub missing: Vec<String>,
 }
 
+impl BlobHaveResponse {
+    /// Reject duplicate or unrequested digests before using a presence answer.
+    pub fn validated_missing(&self, requested: &[String]) -> Result<BTreeSet<&String>, RelayError> {
+        let missing = self.missing.iter().collect::<BTreeSet<_>>();
+        if missing.len() != self.missing.len() || missing.iter().any(|sha| !requested.contains(sha))
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        Ok(missing)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobUploadRequest {
     pub workspace_id: String,
@@ -621,8 +633,6 @@ pub struct ShareViewPullOutcome {
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
 /// dependency; production adapters live in separate crates.
 pub trait RelayTransport {
-    /// Discard cached responses when the store identity changes during a push.
-    fn invalidate_push_responses(&self) {}
     /// The native replica publishes settlement proofs; the relay derives their authors.
     fn publishes_native_settlements(&self) -> bool {
         false
@@ -754,6 +764,7 @@ pub struct RelaySyncClient<T> {
 mod prepared_tests;
 
 pub const MAX_BLOB_UPLOAD_BATCH: usize = 4;
+const MAX_BLOB_UPLOAD_BATCH_BYTES: usize = 1024 * 1024;
 
 const MAX_PUSH_OPS_PER_PASS: usize = crate::MAX_PUSH_OPS_PER_BATCH;
 // Soft limit on preparation and blob uploads, reserving 10 seconds of the
@@ -1433,10 +1444,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .ok_or(RelayError::InvalidResponse)?;
             return Err(RelayError::ClaimRefused(Box::new(refusal.clone())));
         }
-        if progress.confirmed_identity.as_ref() != Some(&identity) {
-            if progress.confirmed_identity.is_some() {
-                self.transport.invalidate_push_responses();
-            }
+        if !progress
+            .confirmed_identity
+            .as_ref()
+            .is_some_and(|confirmed| {
+                confirmed.workspace_id == identity.workspace_id
+                    && confirmed.replication_epoch == identity.replication_epoch
+                    && confirmed.stream_identity == identity.stream_identity
+            })
+        {
             progress.confirmed_blobs.clear();
             progress.confirmed_identity = Some(identity.clone());
         }
@@ -1590,37 +1606,35 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
                         .map_err(local)?;
                     let blob_refs = collect_blob_refs(&ops[..prefix.allowed_ops])?;
-                    let inventory = blob_refs
-                        .keys()
-                        .filter(|sha| !progress.confirmed_blobs.contains(*sha))
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .chunks(crate::MAX_BLOB_HAVE_BATCH)
-                        .map(<[String]>::to_vec)
-                        .collect();
+                    let retained =
+                        previous.is_some_and(|page| page.ops == ops && page.prefix == prefix);
                     let mut page = PreparedPushPage {
                         identity: identity.clone(),
                         origin_id: origin_id.clone(),
                         cursor,
                         revision,
                         blob_refs,
-                        inventory,
+                        inventory: VecDeque::new(),
                         ops,
                         prefix,
                         missing: BTreeSet::new(),
                         uploaded_ops: 0,
                         sending: None,
                     };
-                    if let Some(previous) = progress.page.take()
-                        && previous.identity == page.identity
-                        && previous.origin_id == page.origin_id
-                        && previous.cursor == page.cursor
-                        && previous.ops == page.ops
-                        && previous.prefix == page.prefix
-                    {
+                    if retained && let Some(previous) = progress.page.take() {
                         page.missing = previous.missing;
                         page.inventory = previous.inventory;
                         page.uploaded_ops = previous.uploaded_ops;
+                    } else {
+                        page.inventory = page
+                            .blob_refs
+                            .keys()
+                            .filter(|sha| !progress.confirmed_blobs.contains(*sha))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .chunks(crate::MAX_BLOB_HAVE_BATCH)
+                            .map(<[String]>::to_vec)
+                            .collect();
                     }
                     progress.page = Some(page);
                 }
@@ -3509,12 +3523,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 stream_identity: identity.stream_identity.clone(),
                 sha256s: chunk.clone(),
             })?;
-            let returned = response.missing.iter().collect::<BTreeSet<_>>();
-            if returned.len() != response.missing.len()
-                || returned.iter().any(|sha| !chunk.contains(sha))
-            {
-                return Err(RelayError::InvalidResponse);
-            }
+            let returned = response.validated_missing(chunk)?;
             confirmed.extend(chunk.iter().filter(|sha| !returned.contains(sha)).cloned());
             missing.extend(response.missing);
             page.inventory.pop_front();
@@ -3531,6 +3540,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             };
             let end = (page.uploaded_ops + width).min(ops.len());
             let mut uploads = Vec::new();
+            let mut upload_bytes = 0;
             for sha256 in collect_blob_refs(&ops[page.uploaded_ops..end])?.keys() {
                 if !missing.contains(sha256) {
                     continue;
@@ -3546,14 +3556,21 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         break;
                     }
                 }
+                let bytes = bytes.ok_or(RelayError::BlobInvalid)?;
+                if !uploads.is_empty() && upload_bytes + bytes.len() > MAX_BLOB_UPLOAD_BATCH_BYTES {
+                    break;
+                }
+                upload_bytes += bytes.len();
                 uploads.push(BlobUploadRequest {
                     workspace_id: workspace_id.to_owned(),
                     replication_epoch: identity.replication_epoch.clone(),
                     stream_identity: identity.stream_identity.clone(),
                     sha256: sha256.clone(),
-                    bytes: bytes.ok_or(RelayError::BlobInvalid)?,
+                    bytes,
                 });
-                if uploads.len() == MAX_BLOB_UPLOAD_BATCH {
+                if uploads.len() == MAX_BLOB_UPLOAD_BATCH
+                    || upload_bytes >= MAX_BLOB_UPLOAD_BATCH_BYTES
+                {
                     break;
                 }
             }
