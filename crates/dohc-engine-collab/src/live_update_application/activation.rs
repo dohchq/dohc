@@ -58,7 +58,7 @@ fn committed_position(
         .map_err(read_sql)?;
     if let Some((state, cursor, epoch, stream)) = hosted {
         if state.as_deref() != Some("ready") {
-            return Err(ApplicationError::Conflict);
+            return Err(ApplicationError::HostedDocumentUnready);
         }
         return Ok((cursor, epoch, stream));
     }
@@ -261,6 +261,9 @@ pub fn resume_imported_owner_activation(
         let json:String=conn.query_row("SELECT descriptor_json FROM ydoc_owner_activation_sources WHERE activation_id=?1",[activation_id],|r|r.get(0)).map_err(read_sql)?;
         if format!("ordinary-activation-{}",hex_sha256(json.as_bytes()))!=activation_id { return Err(ApplicationError::Corrupt); }
         let source:ImportedOwnerSource=serde_json::from_str(&json).map_err(|_|ApplicationError::Corrupt)?;
+        // A document that is not ready may still be changing, so readiness is
+        // decided before its state is compared with the retained activation.
+        let (cursor,epoch,stream)=committed_position(conn,key)?;
         let marker=durable::read_marker_in(conn,key)?.ok_or(ApplicationError::Conflict)?;
         if marker.content_kind!=ContentKind::Richdoc || marker.regime!=Regime::Replicated
             || marker.lineage_claim_status!=durable::LineageClaimStatus::Exact
@@ -275,7 +278,6 @@ pub fn resume_imported_owner_activation(
         let verified=adoption::read_adoption_source(conn,namespace,activation_id,&binding)?
             .and_then(|(_,_,_,_,source)|source).ok_or(ApplicationError::Corrupt)?;
         if verified!=source { return Err(ApplicationError::Corrupt); }
-        let (cursor,epoch,stream)=committed_position(conn,key)?;
         if cursor<source.committed_cursor || epoch!=source.replication_epoch || stream!=source.stream_identity {
             return Err(ApplicationError::Conflict);
         }

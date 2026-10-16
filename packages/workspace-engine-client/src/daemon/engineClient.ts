@@ -602,6 +602,16 @@ export class EngineRequestError extends EngineClientError {
 }
 
 /**
+ * The engine refused a hosted document that is not ready: its hosted replica
+ * holds, backfills or parked it, or it left the scope. A later pull may make
+ * it ready. Any other CONFLICT on the same request is a divergence.
+ */
+export function isHostedDocumentUnready(error: unknown): boolean {
+  return error instanceof EngineRequestError && error.wireError?.code === "CONFLICT" &&
+    error.wireError.message === "hosted-document-unready";
+}
+
+/**
  * A request the caller deadlined ran out of time before the daemon answered.
  *
  * Expiry can precede transmission. The code remains `transport-error` for

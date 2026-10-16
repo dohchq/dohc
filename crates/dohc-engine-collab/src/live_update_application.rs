@@ -81,6 +81,11 @@ pub enum ApplicationError {
     Corrupt,
     #[error("live application delivery or cursor conflicts with retained evidence")]
     Conflict,
+    /// A hosted replica holds the document, is backfilling it, parked it, or
+    /// it left the scope. Unlike [`Conflict`](Self::Conflict), nothing
+    /// diverged: it may be ready on a later pull.
+    #[error("the hosted replica's document is not ready")]
+    HostedDocumentUnready,
     #[error("owner outbox configured budget is below the persisted adoption budget")]
     ConfiguredBudgetMismatch,
     #[error("live application exceeds its configured byte budget")]
@@ -1198,7 +1203,7 @@ fn require_hosted_ready(tx: &Connection, key: &DocKey) -> Result<(), Application
         )
         .map_err(read_sql)?;
     if unready {
-        return Err(ApplicationError::Conflict);
+        return Err(ApplicationError::HostedDocumentUnready);
     }
     Ok(())
 }

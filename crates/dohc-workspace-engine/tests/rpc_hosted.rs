@@ -2607,12 +2607,13 @@ async fn a_document_held_while_live_loses_its_registration_and_session_in_the_sa
     assert_eq!(outbox, 1);
 
     // Held, it registers nowhere until a commit settles it ready, and a
-    // commit that leaves it held closes a session opened since its pass.
+    // commit that leaves it held closes a session opened since its pass. The
+    // refusal says it is not ready, so the session host waits rather than stops.
     assert_eq!(
         live.register("doc-a", "moved.txt")
             .await
-            .map_err(|error| error.code),
-        Err(ErrorCode::Conflict)
+            .map_err(|error| (error.code, error.message)),
+        Err((ErrorCode::Conflict, "hosted-document-unready".to_owned()))
     );
     let still_held = host.pull().await;
     let reopened = host

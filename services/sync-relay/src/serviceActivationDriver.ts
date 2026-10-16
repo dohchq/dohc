@@ -1,7 +1,7 @@
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
 import {isDeepStrictEqual} from "node:util";
-import {EngineRequestError,type EngineClient,type NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
+import {EngineRequestError,isHostedDocumentUnready,type EngineClient,type NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
 import {parseLiveDocumentKey,parseLiveUpdateIdentifier,type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import {validateUserWritePath} from "@dohc/workspace-core";
 import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
@@ -17,6 +17,7 @@ import type {SyncRelayStorage,LiveHostConnectionCoordinate} from "./storage";
 import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
+import type {ServiceHostedHold} from "./serviceHostedReplication";
 
 const positive=(value:unknown)=>{
   if(typeof value!=="number" || !Number.isSafeInteger(value) || value<1 || value>2_147_483_647)throw new Error("Invalid service activation budget.");
@@ -66,8 +67,11 @@ export class ServiceActivationDriver {
   readonly #loaded=new Set<string>();
   // Hosted targets the engine unloaded while idle, with their documents. Passes skip them until they wake.
   readonly #dormant=new Map<string,string>();
-  // Targets a hosted pass left held, until the engine captures them again.
-  readonly #held=new Set<string>();
+  // Targets a hosted pass left held, with the reason, until the engine captures them again.
+  readonly #held=new Map<string,ServiceHostedHold["reason"]>();
+  // Targets that cannot progress: held for an unadmitted live edit, or whose resume diverged.
+  // Each failed its one capture; passes skip it until `unblock` allows one more.
+  readonly #blocked=new Set<string>();
   // Each target's document, once known, so a hold applies before the target has an owner, as after a restart.
   readonly #objects=new Map<string,string>();
   constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
@@ -98,7 +102,7 @@ export class ServiceActivationDriver {
   removeTarget(target:ServiceActivationTarget){
     const key=targetKey(target);
     this.#targets=this.#targets.filter(row=>targetKey(row)!==key);
-    this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);this.#held.delete(key);this.#objects.delete(key);
+    this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);this.#held.delete(key);this.#blocked.delete(key);this.#objects.delete(key);
     for(const [document,owner] of this.#owners)if(owner.target===key)this.#owners.delete(document);
   }
   /**
@@ -107,12 +111,24 @@ export class ServiceActivationDriver {
    * succeeds. Until then they do not hold back their workspace's pulls,
    * which bring what they wait for.
    */
-  hold(workspaceId:string,objectIds:readonly string[]){
+  hold(workspaceId:string,holds:readonly ServiceHostedHold[]){
     for(const [key,objectId] of this.#objects){
-      if(JSON.parse(key)[0]!==workspaceId || !objectIds.includes(objectId))continue;
-      this.#completedTargets.delete(key);this.#dormant.delete(key);this.#held.add(key);
+      const hold=JSON.parse(key)[0]===workspaceId?holds.find(row=>row.objectId===objectId):undefined;
+      if(!hold)continue;
+      this.#completedTargets.delete(key);this.#dormant.delete(key);this.#held.set(key,hold.reason);
       for(const [document,owner] of this.#owners)if(owner.target===key){owner.completed=false;this.#owners.delete(document);}
     }
+  }
+  /** Whether the target failed the one capture it gets while it cannot progress. Activation skips it. */
+  blocked(target:ServiceActivationTarget){return this.#blocked.has(targetKey(target));}
+  /** Allows a blocked target one more capture. Returns whether it was blocked. */
+  unblock(target:ServiceActivationTarget){return this.#blocked.delete(targetKey(target));}
+  // A held document whose live edit was never admitted cannot become ready, and a
+  // retained activation the engine refuses as diverged cannot resume. Either one
+  // blocks after its failed capture. A document that is only not ready waits.
+  #refused(key:string,resuming:boolean,error:unknown){
+    const diverged=resuming && error instanceof EngineRequestError && error.wireError?.code==="CONFLICT" && !isHostedDocumentUnready(error);
+    if(diverged || this.#held.get(key)==="hosted-live-edit-unadmitted")this.#blocked.add(key);
   }
   /**
    * Forgets a document the engine unloaded while it stays a target, and ends
@@ -185,7 +201,7 @@ export class ServiceActivationDriver {
     return owner.consumer;
   }
   workspaceReady(workspaceId:string){
-    return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target) && !this.#held.has(targetKey(target)))
+    return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target) && !this.#held.has(targetKey(target)) && !this.blocked(target))
       .every(target=>this.#completedTargets.has(targetKey(target)));
   }
   consumer(value:LiveDocumentKey){
@@ -208,6 +224,7 @@ export class ServiceActivationDriver {
     const request=()=>({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs});
     check();
     const key=targetKey(target);
+    if(this.#blocked.has(key))return {kind:"pending" as const,reason:"Hosted document is blocked until the owner tries again."};
     const releaseStale=async()=>{
       const lease=this.#staleLeases.get(key);
       if(!lease)return;
@@ -234,7 +251,10 @@ export class ServiceActivationDriver {
         if(pulled.hasMore)return {kind:"pending" as const,reason:"Hosted replication has more pages."};
       }
       this.#loaded.add(key);
-      const capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,saved?.activationId);check();
+      let capture:NativeOwnerActivation;
+      try{capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,saved?.activationId);}
+      catch(error){this.#refused(key,saved!==null,error);throw error;}
+      check();
       this.#held.delete(key);this.#objects.set(key,capture.source.objectId);
       if(capture.source.workspaceId!==target.workspaceId || capture.source.relayDatabaseNamespace!==o.history.namespace ||
         (saved && (capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source)))) {

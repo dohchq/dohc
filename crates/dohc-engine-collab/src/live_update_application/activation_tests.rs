@@ -306,7 +306,7 @@ fn hosted_activation_waits_for_its_document_backfill_not_the_ordinary_cursor() {
     );
     assert!(matches!(
         capture_imported(&mut f, 1_000_000),
-        Err(ApplicationError::Conflict)
+        Err(ApplicationError::HostedDocumentUnready)
     ));
     set(&mut f, "UPDATE hosted_documents SET state='ready'");
     let captured = capture_imported(&mut f, 1_000_000).unwrap();
@@ -319,6 +319,52 @@ fn hosted_activation_waits_for_its_document_backfill_not_the_ordinary_cursor() {
     );
     // A document that left the scope stops activating, ready or not.
     set(&mut f, "UPDATE hosted_replicas SET scope_generation=2");
+    assert!(matches!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000),
+        Err(ApplicationError::HostedDocumentUnready)
+    ));
+}
+
+/// The relay waits for a document that is not ready and stops resuming one
+/// that diverged, so a held document's resume says it is unready even when
+/// its state no longer matches the retained activation, and a ready
+/// document whose state diverged keeps the conflict.
+#[test]
+fn a_held_documents_resume_is_unready_and_a_ready_divergence_conflicts() {
+    let mut f = imported_fixture();
+    let set = |f: &mut Fixture, sql: &str| {
+        f.store
+            .write_with(&NoFaults, |tx| tx.execute(sql, []).map_err(write_sql))
+            .unwrap();
+    };
+    set(&mut f, "DELETE FROM sync_relay_cursors");
+    set(
+        &mut f,
+        "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+         VALUES ('workspace','service-host:host','epoch','stream',1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_replicas (workspace_id,scope_token,scope_generation,main_cursor,created_at_ms) \
+         VALUES ('workspace','scope',1,9,1)",
+    );
+    set(
+        &mut f,
+        "INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
+         VALUES ('workspace','object','object.md','ready',1)",
+    );
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    // The document's base no longer matches the activation's.
+    set(&mut f, "UPDATE ydoc_docs SET base_relay_seq=8");
+    set(
+        &mut f,
+        "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting'",
+    );
+    assert!(matches!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000),
+        Err(ApplicationError::HostedDocumentUnready)
+    ));
+    set(&mut f, "UPDATE hosted_documents SET state='ready',held_reason=NULL");
     assert!(matches!(
         resume_imported(&mut f, &captured.activation_id, 1_000_000),
         Err(ApplicationError::Conflict)

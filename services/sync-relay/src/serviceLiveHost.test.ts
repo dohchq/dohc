@@ -634,6 +634,9 @@ it("keeps damaged evidence and caller cancellation visible for public delivery",
 
 const stopLookup = {operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"};
 const conflictOpen = () => new EngineRequestError(1, {code: "INVALID_PARAMS", message: "ydoc-conflict-open", retry: "no"} as never);
+// The engine's refusals of a capture: a hosted document that is not ready, and a retained activation that diverged.
+const unready = () => new EngineRequestError(1, {code: "CONFLICT", message: "hosted-document-unready", retry: "no"} as never);
+const diverged = () => new EngineRequestError(1, {code: "CONFLICT", message: "live-application-conflict", retry: "no"} as never);
 
 // Proves: after a restart, restore steps that send no registration never load
 // the native session, so an open sync conflict cannot block them.
@@ -832,13 +835,13 @@ it("clears a held document's readiness until its next capture succeeds", async (
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   const captures = o.client().captureOwnerActivation.mock.calls.length;
-  o.refuseCapture(new EngineRequestError(1, {code: "INVALID_PARAMS", message: "hosted-document-held", retry: "afterBackoff"} as never));
+  o.refuseCapture(unready());
   vi.spyOn(console, "error").mockImplementation(() => {});
   o.replies.pass = {held: [{objectId: o.sibling.objectId, reason: "hosted-backfill-work-waiting"}]};
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(false));
-  // Pulls go on, and every capture is refused while the engine holds it.
+  // Pulls go on, and the document waits: every pass captures it again while the engine holds it.
+  await vi.waitFor(() => expect(o.client().captureOwnerActivation.mock.calls.length).toBeGreaterThan(captures + 2));
   await o.nextPull();
-  expect(o.client().captureOwnerActivation.mock.calls.length).toBeGreaterThan(captures);
   expect(o.host.isDocumentReady(o.document)).toBe(false);
   o.replies.pass = {};
   o.refuseCapture(undefined);
@@ -855,7 +858,6 @@ async function restartEmpty(o: Awaited<ReturnType<typeof emptyServiceHost>>) {
   const count = (method: string) => requests().filter(request => request.method === method).length;
   return {restarted, requests, count};
 }
-const held = () => new EngineRequestError(1, {code: "INVALID_PARAMS", message: "hosted-document-held", retry: "afterBackoff"} as never);
 
 // Proves: after a restart while the engine holds a document, its catch-up pull
 // marks it held before it has an owner, so its workspace keeps pushing and
@@ -865,7 +867,7 @@ it("keeps pushing and pulling after a restart while the engine holds a document,
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   vi.spyOn(console, "error").mockImplementation(() => {});
-  o.refuseCapture(held());
+  o.refuseCapture(unready());
   o.replies.pass = {held: [{objectId: o.sibling.objectId, reason: "hosted-backfill-work-waiting"}]};
   const {restarted, count} = await restartEmpty(o);
   await restarted.update({workspaces, documents: [o.sibling], ...stay});
@@ -905,22 +907,104 @@ it("resumes a departing document after a restart before any pull, then settles, 
   await vi.waitFor(() => expect(restarted.retains(o.sibling)).toBe(false));
 });
 
-// The engine captures only a document in its replica's current scope. Once a
-// pull adopted the scope a departing document left, its unsettled work stays
-// in the store: it stays retained and its workspace does not drain.
-it("keeps a departing document retained when the engine refuses to resume it after a restart", async () => {
+// Proves: a departing document whose retained activation diverged keeps its
+// unsettled work in the store. It resumes once, then no more: it stays
+// retained and its workspace does not drain.
+it("keeps a departing document retained, resuming it once, when its retained activation diverged after a restart", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
   vi.spyOn(console, "error").mockImplementation(() => {});
-  o.refuseCapture(new EngineRequestError(1, {code: "CONFLICT", message: "conflict", retry: "no"} as never));
+  o.refuseCapture(diverged());
   const {restarted} = await restartEmpty(o);
   await restarted.update({workspaces, documents: [], departing: [o.sibling]});
   await o.nextPull(); await o.nextPull();
-  expect(o.client().captureOwnerActivation.mock.calls.length).toBeGreaterThan(1);
+  expect(o.client().captureOwnerActivation).toHaveBeenCalledTimes(1);
   expect(restarted.retains(o.sibling)).toBe(true);
   expect(restarted.drained("workspace")).toBe(false);
   expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toEqual([]);
+});
+
+// Proves: after a restart, a departing document the engine already parked is
+// not ready to resume and has nothing here to settle or unload. It is
+// forgotten, never captured again, and released once a pull no longer lists it.
+it("releases a departing document that already parked after a restart, capturing it only once", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(unready());
+  const {restarted} = await restartEmpty(o);
+  await restarted.update({workspaces, documents: [], departing: [o.sibling]});
+  await vi.waitFor(() => expect(restarted.drained("workspace")).toBe(true));
+  expect(restarted.retains(o.sibling)).toBe(false);
+  await o.nextPull(); await o.nextPull();
+  expect(o.client().captureOwnerActivation).toHaveBeenCalledTimes(1);
+  expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toEqual([]);
+  await expect(restarted.detachDrained("workspace")).resolves.toBe(true);
+});
+
+// Proves: a document held for a live edit its session never admitted cannot
+// become ready, so it gets one capture and then none. Its workspace keeps
+// pushing and pulling, and a sibling keeps its passes. Unblocking allows
+// exactly one more capture, which makes it ready once the hold clears.
+it("captures a document held for an unadmitted live edit once, then not again until it is unblocked", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const captures = () => o.client().captureOwnerActivation.mock.calls.length, before = captures();
+  const pushes = () => o.client().sendRequest.mock.calls.filter(call => ((call as unknown[])[0] as {method: string}).method === "sync.push").length;
+  const visits = () => vi.mocked(ServiceActivationDriver.prototype.activate).mock.calls.filter(call => call[0].path === o.other.path).length;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(unready());
+  o.replies.pass = {held: [{objectId: o.sibling.objectId, reason: "hosted-live-edit-unadmitted"}]};
+  await vi.waitFor(() => expect(captures()).toBe(before + 1));
+  const pushed = pushes();
+  await o.nextPull(); await o.nextPull();
+  expect(pushes()).toBeGreaterThan(pushed);
+  expect(captures()).toBe(before + 1);
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
+  const visited = visits();
+  await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));
+  expect(captures()).toBe(before + 1);
+  expect(o.host.unblock(o.sibling)).toBe(true);
+  await vi.waitFor(() => expect(captures()).toBe(before + 2));
+  const retried = visits();
+  await vi.waitFor(() => expect(visits()).toBeGreaterThan(retried + 2));
+  expect(captures()).toBe(before + 2);
+  o.replies.pass = {};
+  o.refuseCapture(undefined);
+  expect(o.host.unblock(o.sibling)).toBe(true);
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  expect(captures()).toBe(before + 3);
+  expect(o.host.unblock(o.sibling)).toBe(false);
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+// Proves: a retained activation the engine refuses as diverged resumes once
+// after a restart and then no more, while its workspace keeps pushing and
+// pulling. Unblocking resumes it exactly once more.
+it("resumes a document whose retained activation diverged once, then not again until it is unblocked", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(diverged());
+  const {restarted, count} = await restartEmpty(o), captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  await restarted.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(captures()).toBe(1));
+  expect(o.client().captureOwnerActivation).toHaveBeenLastCalledWith(expect.anything(), "docs/a.md", 1_000_000, expect.any(AbortSignal), `ordinary-activation-${"a".repeat(64)}`);
+  const pushed = count("sync.push");
+  await o.nextPull(); await o.nextPull();
+  expect(count("sync.push")).toBeGreaterThan(pushed);
+  expect(captures()).toBe(1);
+  expect(restarted.isDocumentReady(o.document)).toBe(false);
+  expect(restarted.unblock(o.sibling)).toBe(true);
+  await vi.waitFor(() => expect(captures()).toBe(2));
+  await o.nextPull(); await o.nextPull();
+  expect(captures()).toBe(2);
+  expect(restarted.retains(o.sibling)).toBe(true);
 });
 
 // Proves: a diverged replica stops and detaches, its documents stay retained,

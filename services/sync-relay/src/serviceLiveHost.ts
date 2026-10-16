@@ -16,7 +16,7 @@ import { isDeepStrictEqual } from "node:util";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
-import { createEngineClient, EngineRequestError } from "@dohc/workspace-engine-client/daemon";
+import { createEngineClient, EngineRequestError, isHostedDocumentUnready } from "@dohc/workspace-engine-client/daemon";
 import { VersionedLiveAdapter, type Event, type JsonValue } from "@dohc/workspace-engine-client";
 import type { LiveClaimLedger } from "./automationLiveClaims.js";
 import { parseLiveDocumentKey, parseLiveUpdateIdentifier, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
@@ -337,7 +337,7 @@ export async function startServiceLiveHost(options: {
     const pull = async (attached: HostedAttachment, joined: AbortSignal) => {
       const number = ++attached.pulls, workspaceId = attached.hosted.connection.workspaceId;
       const result = await attached.hosted.pull(joined, page => {
-        if (page.held.length) activation?.hold(workspaceId, page.held.map(row => row.objectId));
+        if (page.held.length) activation?.hold(workspaceId, page.held);
       });
       attached.confirmed = number;
       return result;
@@ -424,8 +424,15 @@ export async function startServiceLiveHost(options: {
       if (!row) return undefined;
       const fenced = !storage.serviceHostDocumentEnabled({workspaceId: row.target.workspaceId, objectId: row.objectId});
       // Resuming loads what an earlier daemon left, and delivers and settles it, as for a document that left this one.
+      // One the engine no longer has ready, as once it parked, has nothing here to resume or unload.
       if (recovering.has(key) && !fenced && activation!.retained(row.target)) {
-        const outcome = await activation!.activate(row.target, joined, settleTarget, false);
+        let outcome;
+        try {outcome = await activation!.activate(row.target, joined, settleTarget, false);}
+        catch (error) {
+          if (!isHostedDocumentUnready(error)) throw error;
+          forget(key);
+          return undefined;
+        }
         if (outcome.kind !== "done") return outcome.reason;
       }
       recovering.delete(key);
@@ -731,6 +738,14 @@ export async function startServiceLiveHost(options: {
       /** The workspaces whose replica diverged from the relay, with their stores. Each stays detached on this daemon. */
       diverged(): readonly {readonly workspaceId: string; readonly root: string}[] {
         return [...diverged].map(([workspaceId, root]) => ({workspaceId, root}));
+      },
+      /**
+       * Lets a blocked hosted document try one more capture on the next pass,
+       * as when its owner tries again. Returns whether it was blocked.
+       */
+      unblock(document: {workspaceId: string; objectId: string}): boolean {
+        const key = hostedKey(document);
+        return key !== undefined && activation!.unblock(hosted.get(key)!.target);
       },
       /** Whether the document can be opened now. A dormant document reloads when it is opened. */
       isDocumentReady(document: LiveDocumentKey): boolean {
