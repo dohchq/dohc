@@ -107,10 +107,17 @@ describe("the rule that gives a desktop test file a worker of its own", () => {
     ["src/legendList.ts", 'import { vi } from "vitest";\nvi.mock("@legendapp/list");\n'],
     ["src/e.editor-fixture.ts", 'import { vi } from "vitest";\nexport function shim() {\n  Object.defineProperty(Range.prototype, "getClientRects", { value: vi.fn() });\n}\n'],
     ["src/polyfill.ts", 'Object.defineProperty(window, "requestIdleCallback", { value: () => 0 });\n'],
+    ["src/support/index.ts", 'import { beforeEach } from "vitest";\nbeforeEach(() => {});\n'],
+    ["src/bridgeMock.ts", 'import { vi } from "vitest";\nexport const bridge = {\n  read: vi.fn(),\n};\n'],
+    ["src/hoistedMock.ts", 'import { vi } from "vitest";\nexport const { read } = vi.hoisted(() => ({ read: vi.fn() }));\n'],
+    ["src/bridgeFactory.ts", 'import { vi } from "vitest";\nexport const makeBridge = () => ({ read: vi.fn() });\nexport function makeOther() {\n  return vi.fn();\n}\n'],
+    ["src/reporters.ts", 'import { vi } from "vitest";\nexport function listen() {\n  window.addEventListener("error", vi.fn());\n}\n'],
   ]));
 
-  it("finds the test helpers that register hooks or mocks or define shared properties, through any import", () => {
-    expect([...helpers].sort()).toEqual(["a.testHarness", "b.testSupport", "c", "e.editor-fixture", "legendList"]);
+  it("finds the test helpers that leave something behind or keep top-level mocks, through any import", () => {
+    expect([...helpers].sort()).toEqual([
+      "a.testHarness", "b.testSupport", "bridgeMock", "c", "e.editor-fixture", "hoistedMock", "legendList", "reporters", "support",
+    ]);
   });
 
   it.each([
@@ -130,6 +137,23 @@ describe("the rule that gives a desktop test file a worker of its own", () => {
     ['Object.defineProperty(list, "clientHeight", { configurable: true, value: 500 });', false],
     ['import { shim } from "./e.editor-fixture";', true],
     ['import "./polyfill";', false],
+    ['vi.mock ("./store");', true],
+    ['vi\n  .doMock("./store");', true],
+    ['import "./support";', true],
+    ['import { setup } from "../support/index";', true],
+    ['import { bridge } from "./bridgeMock";', true],
+    ['import { read } from "./hoistedMock";', true],
+    ['import { makeBridge } from "./bridgeFactory";', false],
+    ['import { listen } from "./reporters";', true],
+    ['window.addEventListener("error", report);', true],
+    ['globalThis.addEventListener("unhandledrejection", report);', true],
+    ['image.addEventListener("error", report);', false],
+    ['window.addEventListener("keydown", onKey);', false],
+    ['Range.prototype.getClientRects = () => [];', true],
+    ['Element.prototype.scrollIntoView = vi.fn();', false],
+    ['HTMLElement.prototype.hasPointerCapture = () => true;', false],
+    ['window.dohcDesktop = bridge;', false],
+    ['expect(Range.prototype.getClientRects === original).toBe(true);', false],
   ])("decides whether %j needs its own worker: %s", (source, own) => {
     expect(needsOwnWorker(source, helpers)).toBe(own);
   });

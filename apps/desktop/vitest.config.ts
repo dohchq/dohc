@@ -66,8 +66,9 @@ export default defineConfig({
     projects: [
       { ...common, test: { ...desktop, name: "desktop", include: tests.isolated } },
       // Files in a shared project run one after another in the same worker.
-      // Each file leaves the next one its environment variables, globals, and
-      // real timers, and in jsdom an empty document and empty storage.
+      // Each file starts from the worker's baseline: its environment
+      // variables, globals, and real timers, and in jsdom an empty document,
+      // empty storage, and its DOM prototypes.
       {
         ...common,
         test: {
