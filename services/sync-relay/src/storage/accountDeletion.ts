@@ -117,7 +117,14 @@ export function purgeAccountRows(storage: StorageContext, userId: string, email:
       }
       if (columns.includes("principal_key")) for (const grant of received) {
         const principalKey = datasetPrincipalKey(String(grant.workspace_id),String(grant.grant_id),userId);
-        storage.db.prepare("DELETE FROM " + identifier(table) + " WHERE principal_key=?" + (table === "sync_relay_dataset_files" ? " AND attached_revision IS NULL" : "")).run(principalKey);
+        // Pending uploads and attempts in a surviving workspace give their charge back.
+        const charged = columns.includes("storage_bytes") && columns.includes("dataset_id");
+        const removed = storage.db.prepare("DELETE FROM " + identifier(table) + " WHERE principal_key=?" + (table === "sync_relay_dataset_files" ? " AND attached_revision IS NULL" : "") +
+          (charged ? " RETURNING workspace_id,dataset_id,storage_bytes" : "")).all(principalKey);
+        for (const row of charged ? removed : []) {
+          storage.db.prepare("UPDATE sync_relay_dataset_usage SET storage_bytes=storage_bytes-? WHERE workspace_id=? AND dataset_id=?").run(Number(row.storage_bytes),String(row.workspace_id),String(row.dataset_id));
+          storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=?").run(Number(row.storage_bytes),String(row.workspace_id));
+        }
       }
       if (RETAINED_ACCOUNT_HISTORY.has(table)) continue;
       if (columns.includes("notice_id")) {

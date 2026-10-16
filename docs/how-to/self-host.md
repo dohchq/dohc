@@ -153,7 +153,7 @@ The server resumes pending deletion after a restart.
 The response reports `finished: true` only after the relay purge and account cleanup finish.
 
 Account deletion does not edit backups.
-Backups remain until the 30-day retention period ends.
+Backups keep the account's data until you delete them.
 Remove the person's email from `DOHC_SIGN_UP_EMAILS` yourself; the API does not change operator configuration.
 An empty list opens sign-up; keep at least one address if you want sign-up closed.
 
@@ -189,8 +189,7 @@ The server checks eligibility when it creates the account.
 Removing an address from the list later does not remove its account.
 Revoking an invite after its account exists does not remove that account either.
 Stop and start the deployment to apply a changed list.
-An empty `DOHC_SIGN_UP_EMAILS` allows only pending invites.
-For open sign-up, remove the `DOHC_SIGN_UP_EMAILS` environment entry from your deployment configuration.
+Leave `DOHC_SIGN_UP_EMAILS` empty to open sign-up again.
 
 `workspace-api` asks `sync-relay` about pending invites over the internal Docker network.
 If the relay does not answer, an address outside the list gets a message to try again.
