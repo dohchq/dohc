@@ -3130,16 +3130,10 @@ fn relay_pull_rejects_a_tampered_own_ydoc_echo() {
             ..
         })
     ));
-    engine
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "UPDATE replication_peers SET acked_seq=1 WHERE workspace_id='ws' AND origin_id='local'",
-                [],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .expect("restore acknowledgement");
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "local").unwrap(),
+        1
+    );
 
     let tampered_doc = dohc_engine_collab::Ydoc::wire();
     tampered_doc.plaintext_insert(0, "tampered");

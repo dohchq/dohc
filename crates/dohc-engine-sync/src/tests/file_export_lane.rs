@@ -807,13 +807,7 @@ fn lane_prune_reenrollment_and_epoch_reset_never_leak_intermediate_settles() {
                     [],
                 )
                 .map_err(SyncError::persist)?;
-                crate::enrolment::backfill_enrolment_window_in_tx(
-                    tx,
-                    "ws",
-                    &NoLiveLeases,
-                    200,
-                    &mut false,
-                )?;
+                crate::enrolment::backfill_enrolment_window_in_tx(tx, "ws", &NoLiveLeases, 200)?;
                 Ok::<_, SyncError>(())
             })
             .unwrap();
@@ -1025,13 +1019,7 @@ fn ordinary_trimmed_lineage_backfills_after_a_published_ydoc_moment() {
     write(&mut source, "doc", "b", "doc.md", "B", "ydoc", 20);
     source
         .write_with(&NoFaults, |tx| {
-            crate::enrolment::backfill_enrolment_window_in_tx(
-                tx,
-                "ws",
-                &NoLiveLeases,
-                30,
-                &mut false,
-            )
+            crate::enrolment::backfill_enrolment_window_in_tx(tx, "ws", &NoLiveLeases, 30)
         })
         .unwrap();
     assert_eq!(exports(&source).len(), 2);
@@ -1125,13 +1113,7 @@ fn former_lane_delete_restore_never_backfills_intermediate_settles() {
     );
     source
         .write_with(&NoFaults, |tx| {
-            crate::enrolment::backfill_enrolment_window_in_tx(
-                tx,
-                "ws",
-                &NoLiveLeases,
-                60,
-                &mut false,
-            )
+            crate::enrolment::backfill_enrolment_window_in_tx(tx, "ws", &NoLiveLeases, 60)
         })
         .unwrap();
     let all = exports(&source);
@@ -1424,7 +1406,7 @@ fn lane_divergence_uses_existing_conflict_and_never_echoes_imports() {
     assert!(matches!(result.primary, ApplyDisposition::Applied(1)));
 
     peer.write_with(&NoFaults, |tx| {
-        crate::enrolment::backfill_enrolment_window_in_tx(tx, "ws", &NoLiveLeases, 110, &mut false)
+        crate::enrolment::backfill_enrolment_window_in_tx(tx, "ws", &NoLiveLeases, 110)
     })
     .unwrap();
     assert!(
@@ -1601,7 +1583,7 @@ fn lane_skips_every_retry_until_a_fresh_seed_then_claims_once() {
             assert_eq!(originate_appended_ydoc_base_in_tx(tx,&key,"doc.md",None,None,false,30)?,BaseOrigination::NothingToDo);
             assert_eq!(crate::enrolment::originate_closing_ydoc_base_in_tx(tx,&key,30)?,BaseOrigination::NothingToDo);
             assert_eq!(crate::enrolment::originate_live_ydoc_base_in_tx(tx,&key,30)?,BaseOrigination::NothingToDo);
-            crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(tx,"ws",&NoLiveLeases,30, &mut false)?;
+            crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(tx,"ws",&NoLiveLeases,30)?;
         }
         tx.execute("DELETE FROM ydoc_updates",[]).map_err(SyncError::persist)?;tx.execute("UPDATE ydoc_docs SET head_update_seq=0",[]).map_err(SyncError::persist)?;Ok::<_,SyncError>(())
     }).unwrap();

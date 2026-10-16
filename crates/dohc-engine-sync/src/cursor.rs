@@ -133,22 +133,25 @@ pub fn commit_relay_cursor(
             let sharing_declined = if passive {
                 Vec::new()
             } else if was_enrolled {
+                // Count writes, including triggers, so ABA changes still invalidate.
+                let before_origination = tx.total_changes();
                 let declined = crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(
                     tx,
                     workspace_id,
                     leases,
                     now_ms,
-                    &mut writer_cache_changed,
                 )?;
+                writer_cache_changed |= tx.total_changes() != before_origination;
                 crate::enrolment::export_covered_heads_in_tx(tx, workspace_id, leases)?;
                 declined
             } else {
+                // Enrollment can claim lineages until it completes.
+                writer_cache_changed = true;
                 crate::enrolment::backfill_enrolment_window_in_tx(
                     tx,
                     workspace_id,
                     leases,
                     now_ms,
-                    &mut writer_cache_changed,
                 )?
             };
             if let Some(report_id) = &cursor.settlement_report_id {
@@ -261,7 +264,7 @@ pub(crate) fn write_pushed_seq_with_refusals(
                 // update must not repeat that full-state work.
                 Ok(Vec::new())
             } else {
-                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, leases, now_ms, &mut false)
+                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, leases, now_ms)
             }
         })
 }

@@ -48,18 +48,11 @@ pub(crate) fn backfill_enrolment_window_in_tx(
     workspace_id: &str,
     leases: &dyn LeaseProbe,
     now_ms: i64,
-    writer_cache_changed: &mut bool,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     backfill_versions(tx, workspace_id)?;
     crate::live_audit::enrollment::queue_history_in_tx(tx, workspace_id)?;
     let sharing_declined = if !crate::live_audit::enrollment::pending_in_tx(tx, workspace_id)? {
-        let declined = originate_unclaimed_ydoc_bases_in_tx(
-            tx,
-            workspace_id,
-            leases,
-            now_ms,
-            writer_cache_changed,
-        )?;
+        let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms)?;
         export_covered_heads_in_tx(tx, workspace_id, leases)?;
         backfill_moments_and_conflict_bundles(tx, workspace_id)?;
         declined
@@ -76,8 +69,7 @@ pub(crate) fn finish_live_history_enrolment_in_tx(
     leases: &dyn LeaseProbe,
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
-    let declined =
-        originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms, &mut false)?;
+    let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms)?;
     export_covered_heads_in_tx(tx, workspace_id, leases)?;
     backfill_moments_and_conflict_bundles(tx, workspace_id)?;
     Ok(declined)
@@ -95,7 +87,6 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
     workspace_id: &str,
     leases: &dyn LeaseProbe,
     now_ms: i64,
-    writer_cache_changed: &mut bool,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
         return Ok(Vec::new());
@@ -126,15 +117,11 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
         if leases.is_live(&key) {
             continue;
         }
-        // Count writes so an ABA change cannot look unchanged. Export and
-        // journal bookkeeping outside this call do not change replay state.
-        let before_origination = tx.total_changes();
         if let BaseOrigination::Declined(declined) =
             originate_ydoc_base_in_tx(tx, &key, &path, None, None, now_ms)?
         {
             sharing_declined.push(declined);
         }
-        *writer_cache_changed |= tx.total_changes() != before_origination;
     }
     // Stored facts include leased and pruned lineages; reading them never claims a base.
     for declined in crate::ydoc_origination::current_sharing_declines_in_tx(tx, workspace_id)? {
@@ -1008,7 +995,7 @@ mod tests {
                 [],
             )
             .map_err(SyncError::persist)?;
-            backfill_enrolment_window_in_tx(tx, "ws", &crate::NoLiveLeases, 1_000, &mut false)
+            backfill_enrolment_window_in_tx(tx, "ws", &crate::NoLiveLeases, 1_000)
         })? {
             dohc_engine_storage::TxnOutcome::Committed(_) => Ok(()),
             dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
@@ -2051,7 +2038,7 @@ mod tests {
                     [],
                 )
                 .map_err(SyncError::persist)?;
-                backfill_enrolment_window_in_tx(tx, "ws", &leases, 1_000, &mut false)
+                backfill_enrolment_window_in_tx(tx, "ws", &leases, 1_000)
             })
             .expect("enroll")
         {
@@ -2162,7 +2149,7 @@ mod tests {
                     [],
                 )
                 .map_err(SyncError::persist)?;
-                backfill_enrolment_window_in_tx(tx, "ws", &leases, 1_000, &mut false)
+                backfill_enrolment_window_in_tx(tx, "ws", &leases, 1_000)
             })
             .expect("enroll")
         {
@@ -2246,7 +2233,7 @@ mod tests {
                     [],
                 )
                 .map_err(SyncError::persist)?;
-                backfill_enrolment_window_in_tx(tx, "ws", &leases, 100, &mut false)?;
+                backfill_enrolment_window_in_tx(tx, "ws", &leases, 100)?;
                 originate_live_ydoc_base_in_tx(tx, &key, 101)
             })
             .expect("originate live base");
@@ -2483,7 +2470,7 @@ mod tests {
 
         store
             .write_with(&NoFaults, |tx| {
-                backfill_enrolment_window_in_tx(tx, "ws", &crate::NoLiveLeases, 1_001, &mut false)
+                backfill_enrolment_window_in_tx(tx, "ws", &crate::NoLiveLeases, 1_001)
             })
             .expect("repeat enrollment");
         assert_eq!(local_ops(&store), ops);
@@ -2624,7 +2611,7 @@ mod tests {
                         [],
                     )
                     .map_err(SyncError::persist)?;
-                    backfill_enrolment_window_in_tx(tx, "ws", &leases, 100, &mut false)
+                    backfill_enrolment_window_in_tx(tx, "ws", &leases, 100)
                 })
                 .expect("enroll leased document");
             assert!(
@@ -2907,7 +2894,7 @@ mod tests {
         store.write_with(&NoFaults, |tx| {
             tx.execute("INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES ('ws','local',-1)", [])
                 .map_err(SyncError::persist)?;
-            originate_unclaimed_ydoc_bases_in_tx(tx, "ws", &crate::NoLiveLeases, 100, &mut false)?;
+            originate_unclaimed_ydoc_bases_in_tx(tx, "ws", &crate::NoLiveLeases, 100)?;
             tx.execute("UPDATE moments SET author_json='invalid' WHERE moment_id='seed-moment'", [])
                 .map_err(SyncError::persist)?;
             export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases)
@@ -3580,7 +3567,7 @@ mod tests {
                         [],
                     )
                     .map_err(SyncError::persist)?;
-                    backfill_enrolment_window_in_tx(tx, "ws", &leases, 100, &mut false)
+                    backfill_enrolment_window_in_tx(tx, "ws", &leases, 100)
                 })
                 .expect("enroll leased document");
             store

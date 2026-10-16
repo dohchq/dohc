@@ -872,26 +872,44 @@ async fn own_moment_materialization_recovery_invalidates_writer_cache() {
         let id=format!("sync-materialization:{}",hex_sha256(b"ws\0local\x000"));
         store.write_with(&NoFaults,|tx|{tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES (?1,?2,0,1000,'sync-materialization')",rusqlite::params![id,r#"[{"versionId":"main","path":"files/0.bin","operation":"write","contentKind":"binary"}]"#]).map_err(StorageError::persist_public)?;Ok::<_,StorageError>(())})?;Ok(())
     }).await.unwrap();
-    actor
-        .run(|store, cache| {
+    let own = actor
+        .run(|store, _| {
             let mut own =
                 dohc_engine_sync::list_replication_ops(store, WORKSPACE, ORIGIN, -1, 1)?.remove(0);
             own.relay_seq = Some(1);
-            let result = dohc_engine_sync::apply_replication_envelope(
-                store,
-                cache,
-                &own,
-                &NoFaults,
-                &dohc_engine_sync::NoLiveLeases,
-            )?;
-            assert!(matches!(
-                result.primary,
-                dohc_engine_sync::ApplyDisposition::Skipped
-            ));
-            Ok(())
+            Ok(own)
         })
         .await
         .unwrap();
+    let outcome = actor
+        .relay_with_io(
+            false,
+            RelayOperation::Pull {
+                workspace_id: WORKSPACE.into(),
+                now_ms: 2000,
+            },
+            LeaseRegistry::default(),
+            CancellationToken::new(),
+            None,
+            move |request, _| {
+                let own = own.clone();
+                async move {
+                    match request {
+                        RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
+                            ops: vec![own],
+                            next_cursor: 1,
+                            has_more: false,
+                        })),
+                        other => panic!("unexpected recovery I/O {other:?}"),
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, RelayOperationOutcome::Sync(SyncPassOutcome::Complete { applied: 0, changed_paths, .. }) if !changed_paths.is_empty())
+    );
     assert!(actor.ydoc_cache_stats_for_test().await.unwrap().removes > before.removes);
     let after = append(&actor, producer.plaintext_insert(101, "c")).await;
     assert_eq!(after.misses, before.misses + 1);
@@ -907,6 +925,42 @@ async fn cursor_settlement_report_invalidates_writer_cache_even_without_rows() {
     let mut cursor = cycle_cursor();
     cursor.settlement_report_id = Some("already-consumed-report".into());
     commit_cycle(&actor, cursor).await.unwrap();
+    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
+    assert_eq!(after.misses, before.misses + 1);
+    supervisor.close(&path).unwrap();
+}
+
+#[tokio::test]
+async fn skipped_moment_committed_crash_clears_before_next_envelope() {
+    let (_scratch, path, producer) = document_fixture(true, true, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1000).unwrap().actor;
+    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    actor
+        .run(|store, cache| {
+            let mut own =
+                dohc_engine_sync::list_replication_ops(store, WORKSPACE, ORIGIN, -1, 1)?.remove(0);
+            own.relay_seq = Some(1);
+            CRASH_CURSOR.set(true);
+            let result = dohc_engine_sync::apply_replication_envelope(
+                store,
+                cache,
+                &own,
+                &CursorFaults,
+                &dohc_engine_sync::NoLiveLeases,
+            )?;
+            assert!(matches!(
+                result.primary,
+                dohc_engine_sync::ApplyDisposition::Crashed { committed: true }
+            ));
+            assert!(
+                cache.doc_full_state_for_test(&key()).is_none(),
+                "clear before another envelope can use the cache"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
     let after = append(&actor, producer.plaintext_insert(101, "c")).await;
     assert_eq!(after.misses, before.misses + 1);
     supervisor.close(&path).unwrap();
