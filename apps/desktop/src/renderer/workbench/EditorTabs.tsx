@@ -85,6 +85,53 @@ const ACTIVE_GROUP_LINE =
   "border-t-2 border-accent forced-colors:border-[Highlight] [[data-split]_[data-editor-group-id][data-active]_&]:block";
 const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-muted";
 
+// An edge the strip can still scroll past fades over this width. A revealed
+// tab stops clear of the fade, its joins included, where the strip has room
+// for both.
+const EDGE_FADE = 24;
+const REVEAL_MARGIN = EDGE_FADE + CORNER_RADIUS + 1;
+// The fade is the chrome's own fill drawn over the tab names, w-6 being
+// EDGE_FADE. It starts under the strip's top band, where the split's accent
+// line runs, and stops above the hairline; it sits above the other tabs and
+// under the active one (z-10), and takes no clicks.
+const STRIP_FADE = "pointer-events-none absolute top-1 bottom-px z-[6] w-6 from-panel to-transparent";
+
+// Scrolls only the strip, and only when the tab is not already clear of the
+// fades: scrollIntoView would also scroll every scrolling ancestor, the
+// window included. A tab's offsetLeft is its position in the strip's
+// content, because the strip starts at its frame's left edge. An edge the
+// strip reaches does not fade, so the tab needs no margin there.
+function revealTab(strip: HTMLElement, tab: HTMLElement, behavior: ScrollBehavior) {
+  const view = strip.clientWidth;
+  const max = strip.scrollWidth - view;
+  const start = tab.offsetLeft;
+  const end = start + tab.offsetWidth;
+  const now = strip.scrollLeft;
+  const nearest = (low: number, high: number) => Math.min(high, Math.max(low, now));
+  // The latest scroll that keeps the tab's start clear, and the earliest
+  // that keeps its end clear.
+  const latest = Math.max(0, start - REVEAL_MARGIN);
+  const earliest = Math.min(max, end + REVEAL_MARGIN - view);
+  let target: number;
+  if (earliest <= latest) {
+    target = nearest(earliest, latest);
+  } else if (end - start > view) {
+    // A tab wider than the strip shows its start.
+    target = latest;
+  } else {
+    // The tab and its margins do not fit, so the whole tab shows: at an edge
+    // the strip reaches, where it shows there, or else as clear of both
+    // fades as the room allows.
+    const edges = [0, max].filter((edge) => edge >= end - view && edge <= start);
+    const inset = Math.min(EDGE_FADE, (view - end + start) / 2);
+    target =
+      edges.length > 0
+        ? edges.reduce((best, edge) => (Math.abs(edge - now) < Math.abs(best - now) ? edge : best))
+        : nearest(end + inset - view, start - inset);
+  }
+  if (Math.abs(target - now) >= 1) strip.scrollTo({ left: target, behavior });
+}
+
 // Memoized so the dirty flips while typing (saveState ticks every autosave)
 // re-render only the active tab, not the whole strip (FileRow precedent —
 // typingLongTaskMs budget). All callbacks must be referentially stable.
@@ -102,27 +149,8 @@ const Tab = memo(function Tab(props: {
   onDragStart: (event: ReactPointerEvent<HTMLDivElement>, path: string) => void;
 }) {
   const name = fileName(props.path, props.label);
-  // Reveal on activation, however it happened (sidebar click, open-file,
-  // Ctrl+Tab, close-neighbor). Only the strip scrolls, and only when the tab
-  // is out of its view: scrollIntoView would also scroll every scrolling
-  // ancestor, the window included. A tab's offsetLeft is its position in the
-  // strip's content, because the strip starts at its frame's left edge.
-  const ref = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const tab = ref.current;
-    const strip = tab?.parentElement;
-    if (!props.active || !tab || !strip) return;
-    const left = tab.offsetLeft;
-    const right = left + tab.offsetWidth;
-    const target =
-      left < strip.scrollLeft ? left
-      : right > strip.scrollLeft + strip.clientWidth ? right - strip.clientWidth
-      : null;
-    if (target !== null) strip.scrollTo({ left: target, behavior: prefersReducedMotion() ? "auto" : "smooth" });
-  }, [props.active]);
   return (
     <div
-      ref={ref}
       role="tab"
       tabIndex={props.active ? 0 : -1}
       aria-selected={props.active}
@@ -699,6 +727,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   // shown on hover, draggable. Positioned imperatively (scroll fires every
   // frame; no reason to re-render the whole strip per tick).
   const thumbRef = useRef<HTMLDivElement | null>(null);
+  // The active tab and the strip width the last reveal answered.
+  const revealed = useRef<{ tab: string | null; width: number }>({ tab: null, width: 0 });
   useEffect(() => {
     if (props.tabs.length === 0) setListOpen(false);
   }, [props.tabs.length]);
@@ -798,10 +828,30 @@ export const EditorTabs = memo(function EditorTabs(props: {
     const strip = stripRef.current;
     const thumb = thumbRef.current;
     if (!strip || !thumb) return;
+    // Reveal the active tab when it changes, however it changed (sidebar
+    // click, open-file, Ctrl+Tab, close-neighbor), and when the strip's width
+    // changes under it (a split, a pane resize, the window narrowing). A
+    // resize reveals at once, so it never animates frame by frame. Scrolling
+    // reveals nothing: a strip scrolled by hand stays where it was put.
+    const reveal = () => {
+      const tab = latest.current.activeTab;
+      const width = strip.clientWidth;
+      const activated = tab !== revealed.current.tab;
+      if (!activated && width === revealed.current.width) return;
+      revealed.current = { tab, width };
+      const active = strip.querySelector<HTMLElement>('[role="tab"][data-active]');
+      if (!active || drag.active()) return;
+      revealTab(strip, active, activated && !prefersReducedMotion() ? "smooth" : "auto");
+    };
     const measure = () => {
       drag.scrolled();
       syncCorners.current();
       const maxScroll = strip.scrollWidth - strip.clientWidth;
+      // The strip fades an edge it can still scroll past (styles.css), by
+      // more than the pixel that rounding scrollWidth can add. Written here,
+      // not rendered: scrolling must not re-render the strip.
+      strip.toggleAttribute("data-overflow-left", strip.scrollLeft > 1);
+      strip.toggleAttribute("data-overflow-right", maxScroll - strip.scrollLeft > 1);
       if (maxScroll <= 0) {
         thumb.style.display = "none";
         return;
@@ -813,6 +863,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         (strip.scrollLeft / maxScroll) * (strip.clientWidth - width)
       }px)`;
     };
+    reveal();
     measure();
     strip.addEventListener("scroll", measure, { passive: true });
     // Tab opens/closes re-run this effect (deps), as does a dirty dot changing
@@ -823,6 +874,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         ? null
         : new ResizeObserver(() => {
             drag.refresh();
+            reveal();
             measure();
           });
     resize?.observe(strip);
@@ -886,6 +938,13 @@ export const EditorTabs = memo(function EditorTabs(props: {
             tab interrupts it. */}
         <div aria-hidden className="min-w-4 flex-1 border-b border-line" />
       </div>
+      {/* The fades at the strip's edges, shown by styles.css at an edge it
+          can still scroll past. The strip starts at the frame's left edge;
+          the right fade hangs from a zero-width item at its right edge. */}
+      <span aria-hidden data-strip-fade="left" className={`${STRIP_FADE} left-0 bg-linear-to-r`} />
+      <span aria-hidden data-strip-fade="right" className="relative w-0 shrink-0">
+        <span className={`${STRIP_FADE} right-0 bg-linear-to-l`} />
+      </span>
       {/* The open document's actions, after the tabs in the keyboard order
           as they were after the tab row. Empty for a tab with none. When
           room runs out they give way before the tab names (a far higher
