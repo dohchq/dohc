@@ -180,9 +180,12 @@ it("withholds a hidden host path from Go to while Explorer retains it", async ()
   expect(screen.getByTestId("names").textContent).not.toContain("private.md");
 });
 it.each(["degraded", "unavailable"] as const)("withholds host names when visibility is %s", async status => {
-  listWorkspaceFiles.mockResolvedValueOnce({ ...answer("private.md"), files: [{ path: "private.md", kind: "file" }, { path: "public.md", kind: "file" }], visibility: { status, rules: [] } });
+  const update = vi.spyOn(GoToIndex.prototype, "update");
+  const listing: ListWorkspaceFilesResult = { ...answer("private.md"), files: [{ path: "private.md", kind: "file" }, { path: "public.md", kind: "file" }], visibility: { status, rules: [] } };
+  listWorkspaceFiles.mockResolvedValueOnce(listing);
   render(<Root workspaceId="A" />);
   await waitFor(() => expect(screen.getByTestId("explorer").textContent).toBe("private.md,public.md"));
+  await waitFor(() => expect(update).toHaveBeenLastCalledWith({ listing: expect.objectContaining({ files: listing.files, visibility: listing.visibility }) }, context));
   await waitFor(() => expect(screen.getByTestId("preparing").textContent).toBe("ready"));
   expect(screen.getByTestId("names").textContent).not.toContain("private.md");
   expect(screen.getByTestId("names").textContent).not.toContain("public.md");
