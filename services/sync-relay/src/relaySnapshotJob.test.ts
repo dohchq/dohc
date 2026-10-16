@@ -104,6 +104,7 @@ describe("snapshot job notifications", () => {
     await j.pass();
     await j.pass();
     expect(j.emails.map(email => email.subject.split(" ")[3])).toEqual(["failing", "again"]);
+    expect(j.emails[1]!.text).toContain("failed since 2026-10-17T01:00:00.000Z");
   });
 
   it("pings the heartbeat only after a successful snapshot", async () => {

@@ -89,7 +89,8 @@ export function createSnapshotJob(options: SnapshotJobOptions, deps: SnapshotJob
           text: `The hourly relay snapshot succeeded at ${at}.\nSnapshots had failed since ${current.failingSince ?? "an unknown time"}.\n` },
         "The recovery email could not be sent. The next successful snapshot tries again.");
       }
-      current.failingSince = null;
+      // An unsent recovery email keeps the start time for its retry.
+      if (!current.recoveryEmailOwed) current.failingSince = null;
       current.lastSuccessAt = at;
       if (options.heartbeatUrl) {
         try { await deps.ping(options.heartbeatUrl); }

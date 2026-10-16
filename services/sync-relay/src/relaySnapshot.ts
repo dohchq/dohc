@@ -1,9 +1,9 @@
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
 import { copyFile, mkdir, open, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -238,48 +238,53 @@ export async function filesystemSpace(path: string): Promise<FilesystemSpace> {
 const fileSize = (path: string) => stat(path).then(stats => stats.size, error => { if (error.code === "ENOENT") return 0; throw error; });
 
 /**
- * Staging shares the relay's disk. At its peak it holds the copy and the sealed package, and the
- * copy's read lock makes the relay's WAL grow, so a snapshot leaves the larger of 1 GiB and a tenth
- * of the disk for the relay's own commits.
+ * At its peak a snapshot holds the copy and the sealed package, and the copy's read lock makes the
+ * relay's WAL grow. The relay's commits get headroom of its own size, between 1 GiB and a tenth of the disk.
  */
 export function relaySnapshotSpaceNeeded(databaseBytes: number, filesystemBytes: number): number {
-  return 2 * databaseBytes + Math.max(gib, Math.ceil(filesystemBytes / 10));
+  return 2 * databaseBytes + Math.max(gib, Math.min(Math.ceil(filesystemBytes / 10), databaseBytes));
 }
+
+const sqliteBusy = 5;
 
 /**
- * Each command stages in its own folder, so the hourly job never removes a manual snapshot in
- * progress. A folder only holds its command's unfinished copies, and an interrupted run leaves
- * plaintext behind, so each start clears it.
+ * Captures and seals one snapshot in the state directory's staging folder, then removes it. One
+ * snapshot runs at a time across processes and containers: an exclusive transaction on a lock
+ * database holds SQLite's file lock, which the kernel drops when its process dies.
  */
-export async function clearRelaySnapshotStaging(stateDirectory: string, command: "hourly" | "manual"): Promise<string> {
-  const directory = join(stateDirectory, "staging", command);
-  await rm(directory, { recursive: true, force: true });
-  return directory;
-}
-
-/** Captures and seals one snapshot in a private staging directory, then removes the staging copy. */
-export async function withRelaySnapshot<T>(options: { relayPath: string; stagingDirectory: string; key: Buffer; release: string;
+export async function withRelaySnapshot<T>(options: { relayPath: string; stateDirectory: string; key: Buffer; release: string;
   space?: (path: string) => Promise<FilesystemSpace> }, deliver: (snapshot: SealedRelaySnapshot) => Promise<T>): Promise<T> {
-  await mkdir(options.stagingDirectory, { recursive: true, mode: 0o700 });
-  const databaseBytes = await fileSize(options.relayPath) + await fileSize(`${options.relayPath}-wal`);
-  const { free, total } = await (options.space ?? filesystemSpace)(options.stagingDirectory);
-  const needed = relaySnapshotSpaceNeeded(databaseBytes, total);
-  if (free < needed) {
-    throw new Error(`A snapshot needs ${gibText(needed)} free on the relay's disk and ${gibText(free)} is free. ` +
-      "No snapshot was taken, so the relay keeps that space. Free space on the disk or move the data to a larger one.");
-  }
-  const run = join(options.stagingDirectory, randomUUID());
-  await mkdir(run, { mode: 0o700 });
+  await mkdir(options.stateDirectory, { recursive: true, mode: 0o700 });
+  const lock = new DatabaseSync(join(options.stateDirectory, "snapshot.lock"));
   try {
-    const plain = join(run, "relay.sqlite");
-    const manifest = await captureRelaySnapshot(options.relayPath, plain, options.release);
-    const time = manifest.createdAt.replace(/[-:]|\.\d{3}/g, "");
-    const name = `dohc-relay-${time}-${manifest.stamp}-${randomBytes(4).toString("hex")}.dohc-snapshot`;
-    const path = join(run, name);
-    await sealRelaySnapshot(plain, manifest, options.key, path);
-    await rm(plain);
-    return await deliver({ path, name, manifest });
-  } finally { await rm(run, { recursive: true, force: true }); }
+    try { lock.exec("BEGIN EXCLUSIVE"); } catch (error) {
+      if ((error as { errcode?: number }).errcode !== sqliteBusy) throw error;
+      throw new Error("Another snapshot is running, so no snapshot was taken. Try again after it finishes.");
+    }
+    // Only an unfinished copy can be here, and an interrupted run leaves plaintext behind.
+    const staging = join(options.stateDirectory, "staging");
+    await rm(staging, { recursive: true, force: true });
+    await mkdir(staging, { mode: 0o700 });
+    try {
+      const databaseBytes = await fileSize(options.relayPath) + await fileSize(`${options.relayPath}-wal`);
+      for (const [path, disk] of [[dirname(options.relayPath), "the relay's disk"], [staging, "the snapshots folder's disk"]] as const) {
+        const { free, total } = await (options.space ?? filesystemSpace)(path);
+        const needed = relaySnapshotSpaceNeeded(databaseBytes, total);
+        if (free < needed) {
+          throw new Error(`A snapshot needs ${gibText(needed)} free on ${disk} and ${gibText(free)} is free. ` +
+            "No snapshot was taken, so the relay keeps that space. Free space on that disk or move the data to a larger one.");
+        }
+      }
+      const plain = join(staging, "relay.sqlite");
+      const manifest = await captureRelaySnapshot(options.relayPath, plain, options.release);
+      const time = manifest.createdAt.replace(/[-:]|\.\d{3}/g, "");
+      const name = `dohc-relay-${time}-${manifest.stamp}-${randomBytes(4).toString("hex")}.dohc-snapshot`;
+      const path = join(staging, name);
+      await sealRelaySnapshot(plain, manifest, options.key, path);
+      await rm(plain);
+      return await deliver({ path, name, manifest });
+    } finally { await rm(staging, { recursive: true, force: true }); }
+  } finally { lock.close(); }
 }
 
 /** Writes the sealed package under its unique name. A partial copy never carries that name. */
@@ -342,13 +347,13 @@ export async function uploadRelaySnapshot(snapshot: SealedRelaySnapshot, storage
   if (size > RELAY_SNAPSHOT_UPLOAD_LIMIT) throw new Error("The sealed snapshot is larger than 5 GB, the single upload limit. Save it with --directory instead.");
   const objectKey = `${snapshot.manifest.namespace}/${snapshot.name}`;
   const path = `/${encodeSegment(storage.bucket)}/${objectKey.split("/").map(encodeSegment).join("/")}`;
-  const md5 = createHash("md5");
-  for await (const chunk of createReadStream(snapshot.path)) md5.update(chunk);
+  const sha256 = createHash("sha256"), md5 = createHash("md5");
+  for await (const chunk of createReadStream(snapshot.path)) { sha256.update(chunk); md5.update(chunk); }
   const headers: Record<string, string> = {
     // S3 refuses uploads to a bucket with Object Lock retention without Content-MD5.
     "content-md5": md5.digest("base64"),
     host: storage.endpoint.host,
-    "x-amz-content-sha256": await digest(snapshot.path),
+    "x-amz-content-sha256": sha256.digest("hex"),
     "x-amz-date": now.toISOString().replace(/[-:]|\.\d{3}/g, ""),
   };
   const authorization = signS3Request({ method: "PUT", path, headers, ...storage });

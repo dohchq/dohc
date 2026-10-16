@@ -1,7 +1,7 @@
 import { isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createSmtpSender, smtpSettingsFromEnv } from "@dohc/workspace-auth/smtp";
-import { clearRelaySnapshotStaging, openRelaySnapshot, relayRelease, relaySnapshotKey, saveRelaySnapshot, snapshotStorageFromEnv,
+import { openRelaySnapshot, relayRelease, relaySnapshotKey, saveRelaySnapshot, snapshotStorageFromEnv,
   uploadRelaySnapshot, withRelaySnapshot } from "./relaySnapshot";
 import { createSnapshotJob, pingHeartbeat, saveSnapshotJobState } from "./relaySnapshotJob";
 
@@ -49,8 +49,7 @@ async function main(args: string[]): Promise<void> {
   }
   if (action === "snapshot") {
     const values = fields(rest, ["--database", "--state-directory", "--directory"]);
-    const stagingDirectory = await clearRelaySnapshotStaging(values.get("--state-directory")!, "manual");
-    const saved = await withRelaySnapshot({ relayPath: values.get("--database")!, stagingDirectory, key, release: relayRelease() },
+    const saved = await withRelaySnapshot({ relayPath: values.get("--database")!, stateDirectory: values.get("--state-directory")!, key, release: relayRelease() },
       snapshot => saveRelaySnapshot(snapshot, values.get("--directory")!));
     console.log(`Relay snapshot saved: ${saved}`);
     console.log("Keep DOHC_SNAPSHOT_KEY in escrow away from this host. Without it, the snapshot cannot be opened.");
@@ -66,10 +65,10 @@ async function main(args: string[]): Promise<void> {
   if (!smtp) throw new Error("Configure DOHC_SMTP_* so snapshot failures can reach the operator.");
   const heartbeatUrl = process.env.DOHC_SNAPSHOT_HEARTBEAT_URL?.trim() || undefined;
   if (heartbeatUrl && new URL(heartbeatUrl).protocol !== "https:") throw new Error("Set DOHC_SNAPSHOT_HEARTBEAT_URL to an HTTPS URL.");
-  const stateDirectory = values.get("--state-directory")!, stagingDirectory = await clearRelaySnapshotStaging(stateDirectory, "hourly");
+  const stateDirectory = values.get("--state-directory")!;
   const pass = createSnapshotJob({ statePath: join(stateDirectory, "notifications.json"), alertEmail, heartbeatUrl,
     serverName: process.env.DOHC_SERVER_NAME?.trim() || "your dohc server" }, {
-    snapshot: () => withRelaySnapshot({ relayPath: values.get("--database")!, stagingDirectory, key, release: relayRelease() },
+    snapshot: () => withRelaySnapshot({ relayPath: values.get("--database")!, stateDirectory, key, release: relayRelease() },
       snapshot => uploadRelaySnapshot(snapshot, storage)),
     sendEmail: createSmtpSender(smtp),
     ping: pingHeartbeat,

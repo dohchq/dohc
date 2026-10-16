@@ -3,7 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -21,7 +21,7 @@ vi.mock("node:fs/promises", async importOriginal => {
 
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment";
 import { checkRelayBackup, restoreRelayDeployment } from "./relayDeploymentRecovery";
-import { captureRelaySnapshot, clearRelaySnapshotStaging, filesystemSpace, openRelaySnapshot, relaySnapshotKey, relaySnapshotSpaceNeeded, saveRelaySnapshot,
+import { captureRelaySnapshot, filesystemSpace, openRelaySnapshot, relaySnapshotKey, relaySnapshotSpaceNeeded, saveRelaySnapshot,
   sealRelaySnapshot, signS3Request, snapshotStorageFromEnv, uploadRelaySnapshot, withRelaySnapshot, type SnapshotStorage } from "./relaySnapshot";
 
 const cleanups: (() => void | Promise<void>)[] = [];
@@ -31,11 +31,13 @@ function fixture() {
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const input = { configPath: join(root, "control", "deployment.json"), relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") };
   initializeRelayDeployment(input);
-  const staging = join(root, "staging"), key = randomBytes(32);
+  const state = join(root, "snapshots"), key = randomBytes(32);
   // The free-space check reads the real disk only in its own tests, so a full development disk does not fail the others.
-  const options = { relayPath: input.relayPath, stagingDirectory: staging, key, release: "r", space: async () => ({ free: 1024 * gib, total: 1024 * gib }) };
-  return { ...input, root, staging, key, options };
+  const options = { relayPath: input.relayPath, stateDirectory: state, key, release: "r", space: async () => ({ free: 1024 * gib, total: 1024 * gib }) };
+  return { ...input, root, state, key, options };
 }
+/** After a run, the state directory keeps only the lock database: the staging folder is gone. */
+const afterRun = ["snapshot.lock"];
 const gib = 1024 ** 3;
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
@@ -133,7 +135,7 @@ describe("online relay snapshots", () => {
       const evidence = copy.prepare("SELECT count(*) AS count, max(stamp) AS latest FROM evidence").get();
       expect(evidence).toEqual({ count: manifest.stamp, latest: manifest.stamp });
     } finally { copy.close(); }
-    expect(readdirSync(f.staging)).toEqual([]);
+    expect(readdirSync(f.state)).toEqual(afterRun);
   });
 
   it("restores through today's restore when continuity matches, and refuses once it advances", async () => {
@@ -160,35 +162,66 @@ describe("online relay snapshots", () => {
   it("refuses a stopped relay and leaves no staging copy behind", async () => {
     const f = fixture();
     await expect(withRelaySnapshot(f.options, async () => "unused")).rejects.toThrow(/running relay/);
-    expect(readdirSync(f.staging)).toEqual([]);
+    expect(readdirSync(f.state)).toEqual(afterRun);
   });
 
-  it("refuses before copying unless the disk holds two copies plus the relay's headroom", async () => {
-    expect(relaySnapshotSpaceNeeded(3 * gib, 100 * gib)).toBe(16 * gib);
+  it("refuses before copying unless both disks hold two copies plus the relay's headroom", async () => {
+    // Headroom is the relay's own size, at least 1 GiB and at most a tenth of the disk.
+    expect(relaySnapshotSpaceNeeded(3 * gib, 1800 * gib)).toBe(9 * gib);
+    expect(relaySnapshotSpaceNeeded(3 * gib, 20 * gib)).toBe(8 * gib);
+    expect(relaySnapshotSpaceNeeded(gib / 4, 1800 * gib)).toBe(1.5 * gib);
     expect(relaySnapshotSpaceNeeded(3 * gib, 5 * gib)).toBe(7 * gib);
     const f = fixture(), live = openRelayDeployment(f.configPath);
     try {
       live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
-      const database = statSync(f.relayPath).size + statSync(`${f.relayPath}-wal`).size, total = 100 * gib;
-      const attempt = (free: number) => withRelaySnapshot({ ...f.options, space: async () => ({ free, total }) }, async snapshot => snapshot.manifest.stamp);
-      await expect(attempt(2 * database + 10 * gib - 1)).rejects.toThrow(/No snapshot was taken, so the relay keeps that space/);
-      expect(readdirSync(f.staging)).toEqual([]);
-      expect(await attempt(2 * database + 10 * gib)).toBeGreaterThan(0);
+      const needed = 2 * (statSync(f.relayPath).size + statSync(`${f.relayPath}-wal`).size) + gib, total = 100 * gib;
+      const attempt = (relayFree: number, snapshotsFree: number) => withRelaySnapshot({ ...f.options,
+        space: async path => ({ free: path === dirname(f.relayPath) ? relayFree : snapshotsFree, total }) }, async snapshot => snapshot.manifest.stamp);
+      await expect(attempt(needed - 1, needed)).rejects.toThrow(/free on the relay's disk.*No snapshot was taken/);
+      expect(readdirSync(f.state)).toEqual(afterRun);
+      await expect(attempt(needed, needed - 1)).rejects.toThrow(/free on the snapshots folder's disk.*No snapshot was taken/);
+      expect(readdirSync(f.state)).toEqual(afterRun);
+      expect(await attempt(needed, needed)).toBeGreaterThan(0);
     } finally { live.storage.close(); }
     const space = await filesystemSpace(f.root);
     expect(space.free).toBeGreaterThan(0);
     expect(space.total).toBeGreaterThanOrEqual(space.free);
   });
 
-  it("gives the hourly job and a manual snapshot separate staging, each cleared on start", async () => {
-    const f = fixture();
-    const manual = await clearRelaySnapshotStaging(f.root, "manual");
-    mkdirSync(join(manual, "in-progress"), { recursive: true });
-    const hourly = await clearRelaySnapshotStaging(f.root, "hourly");
-    mkdirSync(join(hourly, "interrupted"), { recursive: true });
-    expect(await clearRelaySnapshotStaging(f.root, "hourly")).toBe(hourly);
-    expect(readdirSync(join(f.root, "staging")).sort()).toEqual(["manual"]);
-    expect(readdirSync(manual)).toEqual(["in-progress"]);
+  it("runs one snapshot at a time, and a refused run leaves the running one's staging alone", async () => {
+    const f = fixture(), live = openRelayDeployment(f.configPath);
+    try {
+      live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
+      await withRelaySnapshot(f.options, async snapshot => {
+        await expect(withRelaySnapshot(f.options, async () => "unused")).rejects
+          .toThrow("Another snapshot is running, so no snapshot was taken. Try again after it finishes.");
+        expect(existsSync(snapshot.path)).toBe(true);
+      });
+      // The lock frees when its holder finishes.
+      expect(await withRelaySnapshot(f.options, async snapshot => snapshot.manifest.stamp)).toBeGreaterThan(0);
+    } finally { live.storage.close(); }
+  });
+
+  it("frees the lock when a killed process held it", async () => {
+    const f = fixture(), live = openRelayDeployment(f.configPath);
+    const unfinished = join(f.state, "staging", "relay.sqlite");
+    mkdirSync(dirname(unfinished), { recursive: true });
+    writeFileSync(unfinished, "a killed run's copy");
+    const holder = spawn(process.execPath, ["-e", `const { DatabaseSync } = require("node:sqlite");
+      globalThis.lock = new DatabaseSync(process.argv[1]); lock.exec("BEGIN EXCLUSIVE"); console.log("held"); setInterval(() => {}, 60_000);`, join(f.state, "snapshot.lock")],
+      { stdio: ["ignore", "pipe", "inherit"], windowsHide: true });
+    const exited = new Promise(resolve => holder.on("exit", resolve));
+    cleanups.push(async () => { if (holder.exitCode === null && holder.signalCode === null) { holder.kill("SIGKILL"); await exited; } });
+    await new Promise<void>(resolve => createInterface({ input: holder.stdout! }).on("line", line => { if (line === "held") resolve(); }));
+    try {
+      live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
+      await expect(withRelaySnapshot(f.options, async () => "unused")).rejects.toThrow(/Another snapshot is running/);
+      expect(readFileSync(unfinished, "utf8")).toBe("a killed run's copy");
+      holder.kill("SIGKILL");
+      await exited;
+      expect(await withRelaySnapshot(f.options, async snapshot => snapshot.manifest.stamp)).toBeGreaterThan(0);
+      expect(readdirSync(f.state)).toEqual(afterRun);
+    } finally { live.storage.close(); }
   });
 });
 

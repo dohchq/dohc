@@ -20,9 +20,20 @@ db.exec("PRAGMA busy_timeout=5000; CREATE TABLE evidence(id INTEGER PRIMARY KEY,
 const step = db.prepare("UPDATE tally SET n = n + 1 RETURNING n"), insert = db.prepare("INSERT INTO evidence VALUES (?, randomblob(512))");
 for (;;) { db.exec("BEGIN IMMEDIATE"); const { n } = step.get(); insert.run(n); db.exec("COMMIT"); if (n % 100 === 0) console.log(n); }`;
 
-test("online snapshots of a relay under constant writes, verified offline with only the key", { skip, timeout: 900_000 }, () => {
+/** Polls until `read` returns a value. A stalled container fails the test instead of hanging it. */
+function waitFor(what, read, limit = 120_000) {
+  const deadline = Date.now() + limit;
+  for (;;) {
+    const value = read();
+    if (value !== undefined) return value;
+    assert.ok(Date.now() < deadline, `${what} made no progress in ${limit / 1000} s.`);
+  }
+}
+
+test("online snapshots of a relay under constant writes, verified offline with only the key", { skip, timeout: 900_000 }, t => {
   const owner = `dohc-snapshot-proof-${randomUUID().slice(0, 8)}`;
   const containers = [], volumes = [];
+  let failed = true;
   const scratch = mkdtempSync(join(tmpdir(), `${owner}-`));
   const key = randomBytes(32).toString("base64url");
   function docker(args, { allowFailure = false, snapshotKey } = {}) {
@@ -63,25 +74,42 @@ test("online snapshots of a relay under constant writes, verified offline with o
     node(["/proof/relay-deployment.js", "initialize", "--config", "/continuity/deployment.json", "--database", "/data/sync-relay.sqlite",
       "--continuity-directory", "/continuity/history"], { mounts: [mount("relay", "/data"), mount("continuity", "/continuity"), proof] });
     const writer = node(["-e", writerScript], { mounts: [mount("relay", "/data")], detach: true }).name;
-    function writesPast(above) {
-      for (;;) {
-        const state = JSON.parse(docker(["inspect", "--format", "{{json .State}}", writer]).stdout);
-        assert.equal(state.Running, true, `The writer stopped: ${docker(["logs", writer]).stderr}`);
-        const latest = Math.max(0, ...docker(["logs", writer]).stdout.split("\n").filter(Boolean).map(Number));
-        if (latest > above) return latest;
-      }
-    }
+    const writesPast = above => waitFor("The writer", () => {
+      const state = JSON.parse(docker(["inspect", "--format", "{{json .State}}", writer]).stdout);
+      assert.equal(state.Running, true, `The writer stopped: ${docker(["logs", writer]).stderr}`);
+      const latest = Math.max(0, ...docker(["logs", writer]).stdout.split("\n").filter(Boolean).map(Number));
+      return latest > above ? latest : undefined;
+    });
 
     // The relay volume is read-only here, as in Compose; SQLite reads the live WAL beside the writer.
+    const snapshot = () => node(["/proof/relay-snapshot.js", "snapshot", "--database", "/data/sync-relay.sqlite", "--state-directory", "/snapshots",
+      "--directory", "/backup/saved"], { mounts: [mount("relay", "/data", true), mount("staging", "/snapshots"), mount("out", "/backup"), proof],
+      snapshotKey: key, allowFailure: true });
+    const savedName = result => {
+      assert.equal(result.status, 0, result.stderr);
+      return /Relay snapshot saved: \/backup\/saved\/(\S+\.dohc-snapshot)/.exec(result.stdout)?.[1];
+    };
     const names = [];
-    for (let seen = writesPast(0), index = 0; index < 3; index++, seen = writesPast(seen + 200)) {
-      const saved = node(["/proof/relay-snapshot.js", "snapshot", "--database", "/data/sync-relay.sqlite", "--state-directory", "/snapshots",
-        "--directory", "/backup/saved"], { mounts: [mount("relay", "/data", true), mount("staging", "/snapshots"), mount("out", "/backup"), proof], snapshotKey: key });
-      names.push(/Relay snapshot saved: \/backup\/saved\/(\S+\.dohc-snapshot)/.exec(saved.stdout)?.[1]);
-    }
+    for (let seen = writesPast(0), index = 0; index < 3; index++, seen = writesPast(seen + 200)) names.push(savedName(snapshot()));
     assert.ok(names.every(Boolean), "every snapshot reports its file");
     assert.deepEqual(listing("/backup/saved"), [...names].sort());
-    assert.deepEqual(listing("/snapshots/staging/manual"), []);
+    assert.deepEqual(listing("/snapshots"), ["snapshot.lock"]);
+
+    // One snapshot at a time across containers. The holder takes the lock like a run, then stages an unfinished copy.
+    const holder = node(["-e", `const { DatabaseSync } = require("node:sqlite");
+      globalThis.lock = new DatabaseSync("/snapshots/snapshot.lock"); lock.exec("BEGIN EXCLUSIVE");
+      require("node:fs").mkdirSync("/snapshots/staging/unfinished", { recursive: true }); console.log("held"); setInterval(() => {}, 60_000);`],
+      { mounts: [mount("staging", "/snapshots")], detach: true }).name;
+    waitFor("The lock holder", () => docker(["logs", holder]).stdout.includes("held") || undefined);
+    const refused = snapshot();
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /Another snapshot is running/);
+    assert.deepEqual(listing("/snapshots/staging"), ["unfinished"]);
+    // A killed holder frees the lock; the next run clears its staging.
+    docker(["kill", holder]);
+    docker(["wait", holder]);
+    assert.ok(savedName(snapshot()));
+    assert.deepEqual(listing("/snapshots"), ["snapshot.lock"]);
 
     // No network and no deployment volume: only the package and the key.
     const verify = (file, output, snapshotKey = key) => node(["/proof/relay-snapshot.js", "verify", "--file", file, "--output", output],
@@ -112,10 +140,21 @@ test("online snapshots of a relay under constant writes, verified offline with o
     assert.notEqual(changed.status, 0);
     assert.match(changed.stderr, /could not be decrypted/);
     assert.deepEqual(listing("/backup"), ["changed.dohc-snapshot", "saved", "verified-0", "verified-1", "verified-2"]);
+    failed = false;
   } finally {
+    // Cleanup failures fail a passing test; after a failure they are reported beside its error.
+    const problems = [];
     for (const name of containers) docker(["rm", "--force", name], { allowFailure: true });
     for (const name of volumes) docker(["volume", "rm", name], { allowFailure: true });
-    rmSync(scratch, { recursive: true, force: true });
+    for (const [kind, args] of [["containers", ["ps", "--all", "--quiet", "--filter", `name=${owner}`]],
+      ["volumes", ["volume", "ls", "--quiet", "--filter", `label=dohc.snapshot-proof=${owner}`]]]) {
+      const left = docker(args, { allowFailure: true });
+      if (left.status !== 0 || left.stdout.trim()) problems.push(`${kind} left behind: ${left.stdout.trim() || left.stderr.trim()}`);
+    }
+    try { rmSync(scratch, { recursive: true, force: true }); } catch (error) { problems.push(`${scratch}: ${error.message}`); }
+    if (problems.length) {
+      const message = `Cleanup failed:\n${problems.join("\n")}`;
+      if (failed) t.diagnostic(message); else assert.fail(message);
+    }
   }
-  assert.equal(docker(["volume", "ls", "--quiet", "--filter", `label=dohc.snapshot-proof=${owner}`]).stdout.trim(), "");
 });

@@ -83,8 +83,12 @@ The service stays off until you configure the bucket.
 1. Create a private bucket for snapshots.
 2. Add a bucket lifecycle rule that deletes objects 30 days after creation.
    The job never deletes snapshots, so the lifecycle rule controls retention.
-3. Lock the bucket's objects for at least 30 days.
-   On Cloudflare R2, add a bucket lock rule. On Amazon S3, turn on Object Lock with a default retention.
+   On Amazon S3, Object Lock turns on versioning, and that action alone keeps each snapshot as a noncurrent version.
+   Add two actions to the same rule: permanently delete noncurrent versions 1 day after they become noncurrent, and delete expired object delete markers.
+3. Lock the bucket's objects for 30 days, the same length as the lifecycle rule.
+   On Cloudflare R2, add a bucket lock rule.
+   On Amazon S3, turn on Object Lock with a default retention in compliance mode.
+   Governance mode also works if the snapshot credentials lack `s3:BypassGovernanceRetention`.
    R2 tokens cannot be limited to writing, and S3 write access can replace an object.
    The host holds these credentials, so without a lock an attacker who controls the host can delete or replace your snapshots.
 4. Create credentials that can write objects to that bucket.
@@ -122,11 +126,15 @@ If a snapshot fails, the job emails `DOHC_SNAPSHOT_ALERT_EMAIL` through the serv
 It sends at most one failure email a day, and one email when snapshots work again.
 It keeps this record in the `dohc_self_host_snapshots` volume, so restarts do not repeat the email.
 With a [data disk](self-host.md#keep-server-data-on-an-attached-disk), that volume is the `snapshots` folder on the disk.
+If the job cannot save the record, for example because that disk is full, each restart of the job can send one more failure email.
 
-Each snapshot is copied there before it is encrypted, on the same disk as the relay database.
-Before it copies, the job checks the disk's free space.
-It needs twice the relay database's size, plus 1 GiB or a tenth of the disk, whichever is larger.
+Each snapshot is copied there before it is encrypted, usually on the same disk as the relay database.
+Before it copies, the job checks free space on the relay's disk and on the disk that holds the snapshots folder.
+Each disk needs twice the relay database's size, plus headroom for the relay's own writes.
+The headroom is the database's size, capped at a tenth of the disk and never less than 1 GiB.
 With less, the job takes no snapshot and sends the failure email, so a snapshot never takes the relay's space.
+Only one snapshot runs at a time.
+If a `snapshot` command is running when the hourly snapshot starts, that hour's snapshot fails like any other.
 
 The job cannot email you when it stops.
 A setting it refuses also stops it before the first snapshot, and Docker restarts it again and again without an email.
@@ -161,6 +169,7 @@ node scripts/self-host/recovery.mjs snapshot /srv/dohc-backups/offsite
 The command writes the same encrypted package that the hourly job uploads.
 The services keep running.
 It makes the same free-space check as the hourly job.
+If the hourly job is taking a snapshot, the command refuses. Run it again after that snapshot finishes.
 The directory can already exist; each run adds a new file and never replaces one.
 A file ending in `.partial` is an incomplete copy.
 The directory parent needs the same UID 1000 write access as a relay snapshot.
@@ -442,4 +451,5 @@ The snapshot test runs on any Docker host with Linux containers and needs no doh
 It uses the bundles that `pnpm --filter @dohc/app-backend-runtime build` and `pnpm --filter @dohc/sync-relay build` write.
 It takes online snapshots through a read-only relay mount while another container keeps writing.
 It checks that each snapshot holds one complete transaction and passes `check-backup`'s check.
+It checks that a snapshot refuses while another container holds the snapshot lock, and runs once that container is killed.
 It checks that verification without network access or deployment volumes refuses a wrong key and a changed byte, and leaves no output.
