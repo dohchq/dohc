@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants, createReadStream } from "node:fs";
-import { copyFile, link, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, unlink } from "node:fs/promises";
-import { basename, dirname, join, sep } from "node:path";
+import { createReadStream } from "node:fs";
+import { link, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, unlink } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { HistoryOperationsStore, MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
@@ -18,11 +18,11 @@ const UndoResult = z.object({
 export type DeleteUndoResult = { ok: false; reason: string } | z.infer<typeof UndoResult>;
 const Record = z.object({
   operationId: z.string(), staged: z.string().optional(), base: z.string(), paths: z.array(z.string()),
-  emptyFolders: z.array(z.string()), tracked: z.boolean(), noUndo: z.string().optional(),
+  emptyFolders: z.array(z.string()), tracked: z.boolean(),
   engine: z.object({ materialized: z.boolean(), momentCount: z.number() }).optional(), result: UndoResult.optional(),
 });
 type RecoveryRecord = z.infer<typeof Record>;
-export type DeleteRecoveryPlan = { operationId: string; record?: RecoveryRecord };
+export type DeleteRecoveryPlan = { operationId: string; record?: RecoveryRecord; noUndo?: string };
 const code = (error: unknown) => error && typeof error === "object" && "code" in error ? error.code : undefined;
 const info = async (path: string) => lstat(path).catch(error => { if (code(error) === "ENOENT") return null; throw error; });
 const recordName = (id: string) => `delete-${createHash("sha256").update(id).digest("hex")}.json`;
@@ -39,19 +39,20 @@ async function trashDir(root: string): Promise<string> {
   return dir;
 }
 // Only metadata expires. Existing fallback trash contents keep their lifetime.
-async function prune(dir: string): Promise<void> {
+const pruned = new Set<string>();
+function schedulePrune(root: string): void {
+  if (pruned.has(root)) return;
+  pruned.add(root);
+  setImmediate(() => { void prune(root).catch(() => undefined); });
+}
+async function prune(root: string): Promise<void> {
+  const dir = await trashDir(root);
   for (const name of await readdir(dir)) {
     if (!/^delete-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name)) continue;
-    const path = join(dir, name);
-    const entry = await info(path);
-    if (!entry?.isFile()) continue;
-    let remove = Date.now() - entry.mtimeMs > MAX_RECORD_AGE;
-    if (!remove && name.endsWith(".json")) {
-      const parsed = Record.safeParse(await readFile(path, "utf8").then(body => { try { return JSON.parse(body) as unknown; } catch { return null; } }));
-      // A final receipt remains replayable until expiry, even after source cleanup.
-      if (parsed.success && parsed.data.staged && basename(parsed.data.staged) === parsed.data.staged && !parsed.data.result) remove = !await info(join(dir, parsed.data.staged));
-    }
-    if (remove) await unlink(path);
+    try {
+      const path = join(dir, name), entry = await lstat(path);
+      if (entry.isFile() && Date.now() - entry.mtimeMs > MAX_RECORD_AGE) await unlink(path);
+    } catch { /* Cleanup cannot affect another delete or its Undo. */ }
   }
 }
 async function save(root: string, record: RecoveryRecord): Promise<void> {
@@ -88,20 +89,20 @@ export async function stageDeleteRecovery(operationId: string, staged: string, b
       for (let parent = dirname(file); parent !== "."; parent = dirname(parent)) parents.add(parent.split(sep).join("/"));
     }
     let invalid: string | undefined;
-    const walk = async (sub: string, covered = false): Promise<void> => {
+    const walk = async (sub: string): Promise<void> => {
       const path = sub ? `${base}/${sub}` : base;
       if (!validPath(path, base)) invalid ??= path;
       const entry = await lstat(join(staged, sub));
       if (entry.isDirectory()) {
         const entries = await readdir(join(staged, sub));
-        if (!entries.length && !covered) emptyFolders.push(path);
-        else if (entries.length && !covered && !parents.has(path)) { paths.push(path); covered = true; }
-        for (const name of entries) await walk(sub ? `${sub}/${name}` : name, covered);
-      } else if (!covered && !recorded.has(path)) paths.push(path);
+        if (!entries.length) emptyFolders.push(path);
+        else if (!parents.has(path)) paths.push(path);
+        else for (const name of entries) await walk(sub ? `${sub}/${name}` : name);
+      } else if (!recorded.has(path)) paths.push(path);
     };
     await walk("");
-    return { operationId, record: { operationId, base, paths, emptyFolders, tracked: tracked.length > 0,
-      ...(invalid ? { noUndo: `Cannot undo the delete. Invalid recovery path: ${invalid}. Restore it from the trash.` } : {}) } };
+    return { operationId, record: { operationId, base, paths, emptyFolders, tracked: tracked.length > 0 },
+      ...(invalid ? { noUndo: `Cannot undo the delete. Invalid recovery path: ${invalid}. Restore it from the trash.` } : {}) };
   } catch { return { operationId }; }
 }
 export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPlan, trashed: boolean, staged?: string): Promise<DeleteRecovery> {
@@ -109,13 +110,14 @@ export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPla
   try {
     if (!record) throw new Error("Recovery collection failed");
     record.staged = trashed || staged === undefined ? undefined : basename(staged);
-    if (trashed && record.paths.length) {
+    if (!plan.noUndo && trashed && record.paths.length) {
       const where = process.platform === "win32" ? "in the Recycle Bin" : "in the Trash";
-      record.noUndo = `Cannot undo the delete. ${record.paths.join(", ")} ${record.paths.length === 1 ? "is" : "are"} ${where}. Restore ${record.paths.length === 1 ? "it" : "them"} there.`;
+      plan.noUndo = `Cannot undo the delete. ${record.paths.join(", ")} ${record.paths.length === 1 ? "is" : "are"} ${where}. Restore ${record.paths.length === 1 ? "it" : "them"} there.`;
     }
-    await prune(await trashDir(root));
-    if (!record.noUndo) await save(root, record);
-    return { operationId, undo: record.noUndo ? { available: false, reason: record.noUndo, paths: record.paths } : { available: true } };
+    if (plan.noUndo) return { operationId, undo: { available: false, reason: plan.noUndo, paths: record.paths } };
+    await save(root, record);
+    schedulePrune(root);
+    return { operationId, undo: { available: true } };
   } catch {
     return { operationId, undo: { available: false, paths: record?.paths ?? [],
       reason: "Delete finished. dohc could not save Undo information. Restore files from History or the trash." } };
@@ -151,22 +153,18 @@ async function alreadyPlaced(source: string, target: string): Promise<boolean> {
   if (a.isSymbolicLink()) return b.isSymbolicLink() && await readlink(source) === await readlink(target);
   return b.isFile() && a.size === b.size && (a.ino !== 0 && a.ino === b.ino && a.dev === b.dev || await fingerprint(source) === await fingerprint(target));
 }
-async function flushFile(path: string): Promise<void> {
-  const file = await open(path, "r+");
-  try { await file.sync(); } finally { await file.close(); }
-}
-
 export async function undoDeleteRecovery(root: string, input: { operationId: string; requestId: string }, author: MomentWriteAuthor,
   history: Pick<HistoryOperationsStore, "undoHistoryOperation">, workspaceId: string,
   assertCurrent: () => void, markChanged: () => void): Promise<DeleteUndoResult> {
   const record = await load(root, input.operationId);
-  if (record.noUndo) return { ok: false, reason: record.noUndo };
   const engineUndo = () => history.undoHistoryOperation({ workspaceId, operationId: input.operationId,
     requestId: `delete-undo:${input.operationId}`, author });
   if (record.result) {
     if (record.result.tracked.state === "restoring") {
-      const current = await engineUndo();
-      if (current.materialized) { record.result.tracked.state = "restored"; await save(root, record); }
+      try {
+        const current = await engineUndo();
+        if (current.materialized) { record.result.tracked.state = "restored"; await save(root, record); }
+      } catch { /* A finished Undo keeps its saved result when refresh is unavailable. */ }
     }
     return record.result;
   }
@@ -174,10 +172,11 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
   if (!record.engine) {
     for (const path of [...record.paths, ...record.emptyFolders]) {
       const target = await checkedTarget(root, path, record.base);
-      if (await info(target)) return { ok: false, reason: `Cannot undo the delete. ${path} now occupies the old path. Move it first.` };
+      const occupant = await info(target);
+      if (occupant && !(record.emptyFolders.includes(path) && occupant.isDirectory())) return { ok: false, reason: `Cannot undo the delete. ${path} now occupies the old path. Move it first.` };
       if (record.paths.includes(path)) {
-        const source = await sourcePath(root, record, path).catch(error => { if (code(error) === "ENOENT") throw new Error(unavailable); throw error; });
-        if (!await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in the workspace trash. Restore it from History or the trash.` };
+        const source = await sourcePath(root, record, path).catch(error => { if (code(error) === "ENOENT") return undefined; throw error; });
+        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in the workspace trash. Restore it from History or the trash.` };
       }
     }
     assertCurrent();
@@ -188,6 +187,7 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
   }
   const result: z.infer<typeof UndoResult> = { ok: true,
     tracked: { state: record.engine.materialized ? "restored" : "restoring", momentCount: record.engine.momentCount }, restored: [], remaining: [] };
+  const keepSource = new Set<string>();
   const place = async (path: string, empty = false): Promise<void> => {
     assertCurrent();
     const trashPath = `.dohc/trash/${record.staged}${path.slice(record.base.length)}`;
@@ -197,24 +197,36 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
       const entry = source === undefined ? undefined : await lstat(source);
       if (empty || entry?.isDirectory()) {
         await mkdir(dirname(target), { recursive: true });
-        if (!resuming || !(await info(target))?.isDirectory()) await mkdir(target);
+        if (!(empty || resuming) || !(await info(target))?.isDirectory()) await mkdir(target);
         const start = result.restored.length, failures = result.remaining.length;
         for (const name of source === undefined ? [] : await readdir(source)) await place(`${path}/${name}`);
-        if (result.remaining.length === failures) result.restored.splice(start, result.restored.length - start, path);
+        if (result.remaining.length === failures && ![...keepSource].some(child => child.startsWith(`${path}/`))) result.restored.splice(start, result.restored.length - start, path);
         return;
       }
       if (!resuming || !await alreadyPlaced(source!, target)) {
         await mkdir(dirname(target), { recursive: true });
         await checkedTarget(root, path, record.base);
         if (entry?.isSymbolicLink()) {
-          const directory = await stat(source!).then(value => value.isDirectory(), () => false);
-          await symlink(await readlink(source!), target, directory ? process.platform === "win32" ? "junction" : "dir" : "file");
+          const destination = await readlink(source!);
+          const original = resolve(root, dirname(path), destination);
+          const base = join(root, record.base);
+          const referent = isInside(base, original) ? join(await trashDir(root), record.staged!, relative(base, original)) : original;
+          const directory = await stat(referent).then(value => value.isDirectory(), () => false);
+          await symlink(destination, target, directory ? process.platform === "win32" && isAbsolute(destination) ? "junction" : "dir" : "file");
         } else {
-          await link(source!, target).catch(async error => { if (code(error) === "EEXIST") throw error; await copyFile(source!, target, constants.COPYFILE_EXCL); });
+          await link(source!, target).catch(async error => {
+            if (code(error) === "EEXIST") throw error;
+            const file = await open(target, "wx", entry!.mode);
+            try {
+              await file.writeFile(createReadStream(source!));
+              await file.sync().catch(() => { keepSource.add(path); });
+            } finally { await file.close(); }
+          });
         }
+      } else {
+        // A resumed copy may have missed its flush. Keep the private source.
+        keepSource.add(path);
       }
-      // Flush even on replay: a crash can interrupt a prior copy before its fsync.
-      if (!entry?.isSymbolicLink()) await flushFile(target);
       result.restored.push(path);
       markChanged();
     } catch (error) {
@@ -229,7 +241,7 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
   for (const path of record.emptyFolders) await place(path, true);
   record.result = result;
   await save(root, record);
-  for (const path of result.restored.filter(path => !record.emptyFolders.includes(path))) {
+  for (const path of result.restored.filter(path => !record.emptyFolders.includes(path) && !keepSource.has(path))) {
     await sourcePath(root, record, path).then(source => rm(source, { recursive: true, force: true })).catch(() => undefined);
   }
   return result;

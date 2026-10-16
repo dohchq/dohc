@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, readlink, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
@@ -6,15 +6,25 @@ import { createTestScratch } from "./testTemp";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, undoWorkspaceDelete, type PathChangeOptions } from "./workspaceFileMoves";
 
-const faults = vi.hoisted(() => ({ failRecord: false, copyOnly: false, failFlush: false, flushed: [] as string[] }));
+const faults = vi.hoisted(() => ({ failRecord: false, copyOnly: false, failFlush: false, readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[] }));
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
   return { ...actual,
+    lstat: async (path: string) => { faults.visited.push(String(path)); return actual.lstat(path); },
+    unlink: async (path: string) => {
+      if (String(path) === faults.blockedPrune) { faults.pruneAttempts++; throw Object.assign(new Error("record held open"), { code: "EPERM" }); }
+      return actual.unlink(path);
+    },
     link: async (from: string, to: string) => {
+      if (faults.failPlace && to.endsWith("rowless.txt")) throw new Error("placement refused");
       if (faults.copyOnly) throw Object.assign(new Error("no links"), { code: "EXDEV" });
       return actual.link(from, to);
     },
     open: async (...args: Parameters<typeof actual.open>) => {
+      if (faults.failPlace && String(args[0]).endsWith("rowless.txt")) throw new Error("placement refused");
+      if (faults.readOnly && String(args[0]).endsWith("rowless.txt") && args[1] === "r+") {
+        throw Object.assign(new Error("read-only file"), { code: "EPERM" });
+      }
       const file = await actual.open(...args);
       const sync = file.sync.bind(file);
       file.sync = async () => {
@@ -32,7 +42,7 @@ vi.mock("node:fs/promises", async original => {
 });
 const person = { kind: "human", humanId: "local:test" } as const;
 async function fixture(systemAccepts = false, tracked = ["folder/tracked.txt"]) {
-  const root = await createTestScratch("delete-review-");
+  const root = await createTestScratch("delete-recovery-faults-");
   await mkdir(join(root, ".dohc"));
   const write = async (path: string, body: string) => { await mkdir(join(root, "folder"), { recursive: true }); await writeFile(join(root, path), body); };
   await write("folder/tracked.txt", "tracked");
@@ -58,7 +68,44 @@ async function deleted(f: Awaited<ReturnType<typeof fixture>>) {
   return result.operationId!;
 }
 
-describe("review regressions", () => {
+describe("delete recovery failures", () => {
+  it.each([false, true])("restores a read-only rowless file without reopening it for writing (copy=%s)", async copyOnly => {
+    const f = await fixture();
+    await chmod(join(f.root, "folder/rowless.txt"), 0o444);
+    const id = await deleted(f);
+    faults.readOnly = true; faults.copyOnly = copyOnly;
+    try {
+      expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"], remaining: [] });
+      expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("not retained");
+    } finally { faults.readOnly = false; faults.copyOnly = false; }
+  });
+  it("keeps a delete's Undo when an expired record cannot be pruned", async () => {
+    const f = await fixture();
+    const trash = join(f.root, ".dohc/trash");
+    await mkdir(trash);
+    const expired = join(trash, `delete-${"a".repeat(64)}.json`);
+    await writeFile(expired, "old record");
+    await utimes(expired, new Date(0), new Date(0));
+    faults.pruneAttempts = 0;
+    faults.blockedPrune = expired;
+    try {
+      const id = await deleted(f);
+      await vi.waitFor(() => expect(faults.pruneAttempts).toBe(1));
+      expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"], remaining: [] });
+      await f.write("folder/tracked.txt", "new");
+      await f.write("folder/rowless.txt", "new");
+      await deleted(f);
+      expect(faults.pruneAttempts).toBe(1);
+    } finally { faults.blockedPrune = ""; }
+  });
+  it("does not walk a rowless subtree during a person's delete", async () => {
+    const f = await fixture(true);
+    await mkdir(join(f.root, "folder/node_modules/package"), { recursive: true });
+    await writeFile(join(f.root, "folder/node_modules/package/index.js"), "dependency");
+    faults.visited = [];
+    expect(await f.remove(true)).toMatchObject({ trashed: true });
+    expect(faults.visited.filter(path => path.includes("node_modules") && path.endsWith("index.js"))).toEqual([]);
+  });
   it("retries a refused engine Undo with a fresh caller id", async () => {
     const f = await fixture();
     const id = await deleted(f);
@@ -103,32 +150,30 @@ describe("review regressions", () => {
   it("a healthy OS trash does not require healthy workspace trash", async () => {
     const f = await fixture(true);
     await writeFile(join(f.root, ".dohc/trash"), "unavailable");
-    expect(await f.remove(true)).toMatchObject({ trashed: true, undo: { available: false } });
+    expect(await f.remove(true)).toMatchObject({ trashed: true, undo: { available: false, reason: expect.stringMatching(/in the (Recycle Bin|Trash)\. Restore it there\.$/) } });
     expect(f.recordDelete).toHaveBeenCalledWith("folder/tracked.txt");
     expect(existsSync(join(f.root, "folder"))).toBe(false);
   });
-  it("removes orphaned records and crash temps without removing fallback bytes", async () => {
+  it("prunes expired metadata once without reading records or removing fallback bytes", async () => {
     const f = await fixture();
-    await deleted(f);
     const trash = join(f.root, ".dohc/trash");
-    const names = await readdir(trash);
-    const record = names.find(name => name.endsWith(".json"))!;
-    const staged = names.find(name => name.endsWith("-folder"))!;
+    await mkdir(trash);
+    const record = `delete-${"b".repeat(64)}.json`;
     const temp = `${record}.00000000-0000-4000-8000-000000000000.tmp`;
+    await writeFile(join(trash, record), "invalid old record");
     await writeFile(join(trash, temp), "crash");
-    await utimes(join(trash, temp), new Date(0), new Date(0));
-    await rm(join(trash, staged), { recursive: true });
-    await f.write("folder/tracked.txt", "tracked");
-    await f.write("folder/rowless.txt", "new fallback");
+    await writeFile(join(trash, "fallback.txt"), "fallback bytes");
+    for (const name of [record, temp]) await utimes(join(trash, name), new Date(0), new Date(0));
     await deleted(f);
-    expect(await readdir(trash)).not.toContain(record);
-    expect(await readdir(trash)).not.toContain(temp);
-    const remaining = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
-    expect(await readFile(join(trash, remaining, "rowless.txt"), "utf8")).toBe("new fallback");
+    await vi.waitFor(async () => {
+      expect(await readdir(trash)).not.toContain(record);
+      expect(await readdir(trash)).not.toContain(temp);
+    });
+    expect(await readFile(join(trash, "fallback.txt"), "utf8")).toBe("fallback bytes");
   });
   it("restores through a noncanonical workspace root", async () => {
     const f = await fixture();
-    const aliasParent = await createTestScratch("delete-review-alias-");
+    const aliasParent = await createTestScratch("delete-recovery-faults-alias-");
     const alias = join(aliasParent, "workspace");
     await symlink(f.root, alias, process.platform === "win32" ? "junction" : "dir");
     f.operation.workspace.rootPath = alias;
@@ -139,7 +184,7 @@ describe("review regressions", () => {
 });
 
 
-describe("review details", () => {
+describe("delete recovery placement and receipts", () => {
   it.each([false, true])("flushes copied bytes before removing the private source (flush refuses=%s)", async failFlush => {
     const f = await fixture();
     const id = await deleted(f);
@@ -150,13 +195,13 @@ describe("review details", () => {
       const result = await f.undo(id);
       expect(faults.flushed).toEqual([join(f.root, "folder/rowless.txt")]);
       expect(existsSync(join(trash, staged, "rowless.txt"))).toBe(failFlush);
-      expect(result).toMatchObject(failFlush ? { restored: [], remaining: [{ path: "folder/rowless.txt" }] } : { restored: ["folder/rowless.txt"], remaining: [] });
+      expect(result).toMatchObject({ restored: ["folder/rowless.txt"], remaining: [] });
     } finally { faults.copyOnly = false; faults.failFlush = false; }
   });
   it("reports placed children when a rowless folder is only partly placed", async () => {
     const f = await fixture(false, []);
     const id = await deleted(f);
-    faults.failFlush = true;
+    faults.failPlace = true;
     try {
       const result = await f.undo(id);
       expect(result).toMatchObject({ ok: true, restored: ["folder/tracked.txt"], remaining: [{ path: "folder/rowless.txt" }] });
@@ -164,7 +209,7 @@ describe("review details", () => {
       const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
       expect(existsSync(join(trash, staged, "tracked.txt"))).toBe(false);
       expect(existsSync(join(trash, staged, "rowless.txt"))).toBe(true);
-    } finally { faults.failFlush = false; }
+    } finally { faults.failPlace = false; }
   });
   it("recreates an empty folder after OS trash accepts", async () => {
     const f = await fixture(true, []);
@@ -172,6 +217,7 @@ describe("review details", () => {
     await mkdir(join(f.root, "folder"));
     const result = await f.remove(true);
     expect(result.undo).toEqual({ available: true });
+    await mkdir(join(f.root, "folder"));
     expect(await f.undo(result.operationId!)).toMatchObject({ ok: true, restored: ["folder"], remaining: [] });
     expect(await readdir(join(f.root, "folder"))).toEqual([]);
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
@@ -189,6 +235,26 @@ describe("review details", () => {
     const result = await f.remove(true);
     expect(result.undo).toMatchObject({ available: false, reason: expect.stringMatching(/another\.txt, folder\/rowless\.txt are in the (Recycle Bin|Trash)\. Restore them there\.$/) });
   });
+  it("replays the saved result when the engine cannot refresh it", async () => {
+    const f = await fixture();
+    const id = await deleted(f);
+    const first = await f.undo(id);
+    f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("engine down or author mismatch"));
+    expect(await f.undo(id, "next")).toEqual(first);
+  });
+  it("restores a relative directory link from its original location", async () => {
+    const f = await fixture();
+    await mkdir(join(f.root, "destination"));
+    await writeFile(join(f.root, "destination/original.txt"), "original target");
+    await symlink("../destination", join(f.root, "folder/link"), "dir");
+    const destination = await readlink(join(f.root, "folder/link"));
+    const removed = await f.remove(true);
+    expect(removed.undo).toEqual({ available: true });
+    const id = removed.operationId!;
+    expect(await f.undo(id)).toMatchObject({ ok: true, remaining: [] });
+    expect(await readlink(join(f.root, "folder/link"))).toBe(destination);
+    expect(await readFile(join(f.root, "folder/link/original.txt"), "utf8")).toBe("original target");
+  });
   it("refreshes the tracked placement status on replay", async () => {
     const f = await fixture();
     const id = await deleted(f);
@@ -197,12 +263,12 @@ describe("review details", () => {
       compensationOperationId: "undo", deduped: true, materialized: true });
     expect(await f.undo(id, "next")).toMatchObject({ tracked: { state: "restored", momentCount: 1 } });
   });
-  it("names a missing staged source before engine commit", async () => {
+  it.each([false, true])("names a missing staged source before engine commit (whole folder=%s)", async whole => {
     const f = await fixture();
     const id = await deleted(f);
     const trash = join(f.root, ".dohc/trash");
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
-    await rm(join(trash, staged, "rowless.txt"));
+    await rm(whole ? join(trash, staged) : join(trash, staged, "rowless.txt"), { recursive: true });
     expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining("no longer in the workspace trash") });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
@@ -228,7 +294,7 @@ describe("review details", () => {
   });
   it("restores a directory link with its original destination", async () => {
     const f = await fixture();
-    const outside = await createTestScratch("delete-review-link-");
+    const outside = await createTestScratch("delete-recovery-faults-link-");
     await symlink(outside, join(f.root, "folder/link"), process.platform === "win32" ? "junction" : "dir");
     const result = await f.remove(true);
     expect(result.undo).toEqual({ available: true });
