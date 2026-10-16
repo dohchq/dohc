@@ -21,10 +21,20 @@ const machine = o => o === "environment" || o === "error";
 const prLink = branch => branch === "main (nightly)" ? "https://github.com/dohchq/dohc/commits/main" : `https://github.com/dohchq/dohc/pulls?q=is%3Apr+head%3A${encodeURIComponent(branch)}`;
 const runKey = run => `${run.id}/${run.attempt}`;
 
-const ui = { data: null, load: { 1: null, 7: null }, loadRange: 1, tab: "now", range: 1, filter: "all", search: "", shown: 25, pinned: new Map(), logMeta: new Map(), drawer: null, failures: 0 };
+// `offline` holds the state refresh's failure and when failures began. `action` is a pause or resume in flight,
+// and `actionError` says why the last one failed. A state request numbered `staleBefore` or lower began before a write.
+const ui = { data: null, load: { 1: null, 7: null }, loadRange: 1, tab: "now", range: 1, filter: "all", search: "", shown: 25, pinned: new Map(), logMeta: new Map(), drawer: null,
+  offline: null, action: null, actionError: null, asked: 0, staleBefore: 0 };
 
 // Set an element's HTML only when it changed, so unchanged parts keep focus, hover, and scroll.
-function patch(el, html) { if (el && el._html !== html) { el.innerHTML = html; el._html = html; } }
+// A focused mark that carries data-focus-key keeps the focus when its part is redrawn.
+function patch(el, html) {
+  if (!el || el._html === html) return;
+  const key = el.contains(document.activeElement) ? document.activeElement.dataset.focusKey : undefined;
+  el.innerHTML = html;
+  el._html = html;
+  if (key) el.querySelector(`[data-focus-key="${CSS.escape(key)}"]`)?.focus();
+}
 // Run an async job one at a time. A call during a run asks for one more run after it, so the newest request always lands last.
 function singleFlight(job) {
   let running = null, again = false;
@@ -35,11 +45,21 @@ function singleFlight(job) {
   };
 }
 
-async function getJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
+// One request to the dashboard server. It gives up after 15 seconds, so a request left hanging by an
+// outage never holds up the next refresh. A failure says what went wrong in words, never a browser's error.
+async function call(url, options = {}) {
+  let response, text;
+  try {
+    response = await fetch(url, { cache: "no-store", ...options, signal: AbortSignal.timeout(15_000) });
+    text = await response.text();
+  } catch (error) {
+    throw Object.assign(new Error(error.name === "TimeoutError" ? "the dashboard server did not answer in 15 seconds" : "can't reach the dashboard server"), { offline: true });
+  }
+  if (!response.ok) throw new Error(text.trim() || `the dashboard server answered ${response.status}`);
+  return JSON.parse(text);
 }
+const getJson = url => call(url);
+const postJson = (url, body) => call(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
 /* Theme: follow the system, or keep the person's choice. */
 const THEMES = ["system", "light", "dark"];
@@ -97,6 +117,9 @@ function startTimes(data, running) {
   });
 }
 
+// A paused queue starts nothing, so its estimates count from the resume instead of naming a time.
+const startText = (data, t) => !data.pause ? `≈ ${at(t)}` : t - data.now < MIN ? "on resume" : `${dur(t - data.now)} after resume`;
+
 function derived() {
   const data = ui.data;
   const runs = withLanes(data.runs);
@@ -109,15 +132,88 @@ function derived() {
 function renderHeader({ data }) {
   const svc = data.service;
   const beat = svc ? Date.parse(svc.heartbeatAt) : null;
-  patch($("#service"), !svc ? '<span class="dot bad"></span>The service has never started'
+  patch($("#service"), ui.offline ? '<span class="dot bad"></span>Not connected' : !svc ? '<span class="dot bad"></span>The service has never started'
     : svc.alive ? `<span class="dot ok"></span>Service running <span class="mono muted">${esc(svc.commit ?? "")}</span>`
     : `<span class="dot bad"></span>Service silent since ${esc(at(beat))}`);
   $("#updated").textContent = `Updated ${at(data.now)}`;
   $("#queue-count").textContent = data.queued.length || "";
+}
+
+// A time today as its clock time, an earlier one with its day.
+const when = t => new Date(t).toDateString() === new Date().toDateString() ? at(t) : `${dayFormat.format(new Date(t))} ${at(t)}`;
+
+// The pause in the words pnpm verify:queue status uses. A hold after the computer restarted says so plainly.
+function pauseBanner(pause) {
+  if (!pause) return "";
+  const since = pause.at ? ` since ${when(Date.parse(pause.at))}` : "";
+  const why = pause.reason ? ` (${pause.reason})` : "";
+  const busy = `${pause.running} running, no new runs start`;
+  if (pause.restart) return `<div class="banner">Held${esc(since)} after the computer restarted${pause.idle ? "" : `: ${esc(busy)}`}. Resume to start the line.</div>`;
+  if (pause.idle) return `<div class="banner info"><b>Paused and idle: safe to restart.</b> Paused${esc(since + why)}.</div>`;
+  return `<div class="banner">Paused${esc(since + why)}: ${esc(busy)}.</div>`;
+}
+
+// Banners on every tab: a server the page cannot reach, a failed pause or resume, the pause, and the service's own trouble.
+function renderBanners() {
+  const data = ui.data, svc = data?.service;
   const banners = [];
-  if (svc && !svc.alive) banners.push(`<div class="banner bad">The service has not checked in for ${esc(dur(data.now - beat))}, so nothing new starts. Task Scheduler restarts it within five minutes. If it stays down, run <span class="mono">pnpm verify:queue restart</span> on the host.</div>`);
-  if (svc?.health?.reason) banners.push(`<div class="banner">${esc(svc.health.reason)}</div>`);
+  if (ui.offline) banners.push(`<div class="banner bad">${ui.offline.unreachable ? `Can't reach the dashboard server since ${esc(when(ui.offline.since))}, retrying.`
+    : `The dashboard server has failed since ${esc(when(ui.offline.since))} (${esc(ui.offline.message.replace(/\.$/, ""))}), retrying.`}</div>`);
+  if (ui.actionError) banners.push(`<div class="banner bad">${esc(ui.actionError)}</div>`);
+  if (data) {
+    banners.push(pauseBanner(data.pause));
+    if (svc && !svc.alive) banners.push(`<div class="banner bad">The service has not checked in for ${esc(dur(data.now - Date.parse(svc.heartbeatAt)))}, so nothing new starts. Task Scheduler restarts it within five minutes. If it stays down, run <span class="mono">pnpm verify:queue restart</span> on the host.</div>`);
+    if (svc?.health?.reason) banners.push(`<div class="banner">${esc(svc.health.reason)}</div>`);
+  }
   patch($("#banners"), banners.join(""));
+}
+
+/* Pause and resume. Both can be undone, so neither asks twice; the banner shows the result. */
+const pauseIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3h2.4v10H4.5zM9.1 3h2.4v10H9.1z" fill="currentColor"/></svg>';
+const resumeIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2.8v10.4L13.2 8z" fill="currentColor"/></svg>';
+function renderPauseControl() {
+  const button = $("#pause");
+  const paused = Boolean(ui.data?.pause);
+  const label = ui.action === "pause" ? "Pausing" : ui.action === "resume" ? "Resuming" : paused ? "Resume" : "Pause";
+  button.hidden = !ui.data;
+  patch(button, `${paused ? resumeIcon : pauseIcon}<span>${label}</span>`);
+  button.classList.toggle("resume", paused && !ui.action);
+  // Unavailable rather than disabled, so a keyboard keeps its focus on the button while a write runs.
+  button.setAttribute("aria-disabled", String(Boolean(ui.action || ui.offline)));
+  button.setAttribute("aria-label", `${label} the queue`);
+}
+
+async function act(action, body) {
+  ui.action = action;
+  ui.actionError = null;
+  renderPauseControl();
+  renderBanners();
+  try {
+    await postJson(`api/${action}`, body);
+    // A state request that began before the write would show the queue as it was.
+    ui.staleBefore = ui.asked;
+    await refresh();
+  } catch (error) {
+    ui.actionError = `Could not ${action} the queue: ${error.message.replace(/\.$/, "")}.`;
+  } finally {
+    ui.action = null;
+    renderPauseControl();
+    renderBanners();
+  }
+}
+
+function openPause() {
+  if (ui.action || ui.offline || !ui.data) return;
+  if (ui.data.pause) return act("resume", {});
+  $("#pause-reason").value = "";
+  $("#pause-dialog").showModal();
+  $("#pause-reason").focus();
+}
+
+function confirmPause() {
+  const reason = $("#pause-reason").value.trim();
+  $("#pause-dialog").close();
+  act("pause", { reason: reason || null });
 }
 
 function renderStrip({ data, running, finished, starts }) {
@@ -135,7 +231,7 @@ function renderStrip({ data, running, finished, starts }) {
   patch($("#strip"), `
     <div class="stat"><div class="label">Running</div><div class="value">${busy} of ${lanes}</div><div class="sub">${busy >= lanes ? "every lane busy" : `${lanes - busy} lane free`}${data.lanes?.holders.some(h => h.kind === "inline") ? ", with an inline gate" : ""}</div></div>
     <div class="stat"><div class="label">Waiting</div><div class="value${data.queued.length > 2 * lanes ? " warn" : ""}">${data.queued.length}</div><div class="sub">${data.queued.length ? `oldest waited ${esc(dur(data.now - oldest))}` : "nothing waiting"}</div></div>
-    <div class="stat"><div class="label">Line clears</div><div class="value${clears && clears - data.now > 2 * HOUR ? " warn" : ""}">${clears ? `≈ ${esc(at(clears))}` : "Now"}</div><div class="sub">${clears ? `in ${esc(dur(clears - data.now))} if nothing new arrives` : "no backlog"}</div></div>
+    <div class="stat"><div class="label">Line clears</div><div class="value${clears && clears - data.now > 2 * HOUR ? " warn" : ""}">${clears ? (data.pause ? esc(dur(clears - data.now)) : `≈ ${esc(at(clears))}`) : "Now"}</div><div class="sub">${clears ? (data.pause ? "after resume" : `in ${esc(dur(clears - data.now))} if nothing new arrives`) : "no backlog"}</div></div>
     <div class="stat"><div class="label">Last 24 hours</div><div class="value">${day.length ? Math.round(passed / day.length * 100) : 0}% <span class="muted" style="font-size:14px">passed</span></div>
       <div class="mini" title="${passed} passed, ${failed} failed, ${machines} machine failures"><i class="passed" style="width:${pct(passed, day.length)}"></i><i class="failed" style="width:${pct(failed, day.length)}"></i><i class="environment" style="width:${pct(machines, day.length)}"></i></div>
       <div class="sub">${passed} passed, ${failed} failed, ${machines} machine</div></div>
@@ -154,7 +250,7 @@ function laneShell(n) {
   el = document.createElement("article");
   el.id = `lane-${n}`;
   el.className = "lane";
-  el.innerHTML = `<div class="lane-no" aria-hidden="true">${n}</div><div class="lane-head"></div><div class="lane-track"></div><div class="lane-steps"></div>
+  el.innerHTML = `<div class="lane-no" aria-hidden="true">${n}</div><div class="lane-head"><div class="lane-who"></div><div class="lane-clock"></div></div><div class="lane-track"></div><div class="lane-steps"></div>
     <div class="terminal" hidden>
       <div class="term-head"><select class="term-select" aria-label="Log to show"></select>
         <div class="term-actions"><button class="term-follow" type="button" hidden>Follow the running step</button><button class="term-open" type="button">Run details</button></div></div>
@@ -213,19 +309,20 @@ function renderLanes(d) {
     el.dataset.key = view.run ? runKey(view.run) : "";
     if (!busy) {
       const next = data.queued[0];
-      patch($(".lane-head", el), `<div class="lane-who"><div class="lane-idle">Idle</div></div>`);
+      patch($(".lane-who", el), `<div class="lane-idle">Idle</div>`);
+      patch($(".lane-clock", el), "");
       patch($(".lane-track", el), "");
       patch($(".lane-steps", el), "");
       $(".terminal", el).hidden = true;
-      patch($(".lane-next", el), next ? `Next up: <b>${esc(titleOf(next))}</b>, starts ≈ ${esc(at(starts[0]))}` : "Nothing is waiting.");
+      patch($(".lane-next", el), next ? `Next up: <b>${esc(titleOf(next))}</b>, starts ${esc(startText(data, starts[0]))}` : "Nothing is waiting.");
       continue;
     }
     const left = view.run && data.typicalMs ? data.typicalMs - (view.clockMs ?? 0) : null;
     const clockNote = view.inline ? "in its own checkout" : left == null ? "no typical time yet" : left >= 0 ? `≈ ${dur(left)} left of ${stopwatch(data.typicalMs)}` : `${dur(-left)} over typical`;
-    patch($(".lane-head", el), `
-      <div class="lane-who"><a class="lane-branch" href="${esc(prLink(view.branch ?? ""))}" target="_blank" rel="noreferrer" title="${esc(view.title)}">${esc(view.title)}</a>
-        <div class="lane-meta">${view.inline ? '<span class="tag inline">inline gate</span>' : ""}${view.sub ? `<span class="mono" title="${esc(view.sub)}">${esc(view.sub)}</span>` : ""}<span>Since ${esc(at(Date.parse(view.since)))}</span>${view.attempt > 1 ? `<span>Attempt ${view.attempt}</span>` : ""}<span class="mono">${esc(view.head ?? "")}</span>${view.scope && view.scope !== "all" ? `<span>${esc(view.scope)} only</span>` : ""}${view.phase && !["verifying", "tests"].includes(view.phase) ? `<span>${esc(view.phase)}</span>` : ""}</div></div>
-      <div class="lane-clock"><b>${esc(stopwatch(view.clockMs))}</b><span class="${late ? "warn" : ""}">${esc(clockNote)}</span></div>`);
+    // The name and the clock are patched apart, so the clock's tick never redraws the moved mark.
+    patch($(".lane-who", el), `<a class="lane-branch" href="${esc(prLink(view.branch ?? ""))}" target="_blank" rel="noreferrer" title="${esc(view.title)}">${esc(view.title)}</a>
+        <div class="lane-meta">${view.inline ? '<span class="tag inline">inline gate</span>' : ""}${view.sub ? `<span class="mono" title="${esc(view.sub)}">${esc(view.sub)}</span>` : ""}<span>Since ${esc(at(Date.parse(view.since)))}</span>${view.attempt > 1 ? `<span>Attempt ${view.attempt}</span>` : ""}<span class="mono">${esc(view.head ?? "")}</span>${view.scope && view.scope !== "all" ? `<span>${esc(view.scope)} only</span>` : ""}${view.phase && !["verifying", "tests"].includes(view.phase) ? `<span>${esc(view.phase)}</span>` : ""}${view.run ? movedTag(view.run) : ""}</div>`);
+    patch($(".lane-clock", el), `<b>${esc(stopwatch(view.clockMs))}</b><span class="${late ? "warn" : ""}">${esc(clockNote)}</span>`);
     // The step track: each finished or running step is as wide as its time; the mark is the typical gate.
     const steps = (view.steps ?? []).filter(step => step.verdict);
     const elapsed = step => step.seconds ?? (step.startedAt ? (data.now - Date.parse(step.startedAt)) / 1000 : 0);
@@ -298,6 +395,9 @@ function renderConsole(el, view) {
   patch(select, groups || '<option value="">No logs yet</option>');
   select.disabled = !groups;
   if (file && select.value !== file) select.value = file;
+  // A newly chosen log says it is loading, so the last log's text never shows under the new log's name.
+  const pre = $(".term-body", el);
+  if (file && pre._source !== `${view.source}:${file}`) writeTerminal(pre, `Loading ${stepOfLog(view, file)?.name ?? logLabel(file)}.`, `${view.source}:${file}`, true);
   $(".term-follow", el).hidden = !ui.pinned.has(view.source);
   renderConsoleStatus(el, view);
 }
@@ -355,10 +455,16 @@ function writeTerminal(pre, text, source, message = false) {
   if (following) pre.scrollTop = pre.scrollHeight;
 }
 
+// How the service found a request's owner, for the owner's tooltip.
+const OWNER_SOURCE = { thread: "The T3 thread a person started", flag: "Named with --owner", checkout: "Named by its checkout" };
+
+// A request someone moved in line. Its tooltip, shown on hover and on keyboard focus, says who moved it and why.
+const movedTag = entry => entry.moved ? `<span class="tag moved" tabindex="0" role="note" data-focus-key="moved:${esc(entry.id)}" aria-label="${esc(entry.moved.replace("\n", ": "))}" data-tip="${esc(entry.moved)}">moved</span>` : "";
+
 function renderTower({ data, starts }) {
   const rows = data.queued.slice(0, 10).map((entry, i) => `<li>
       <span class="pos">${i + 1}</span>
-      <span class="tower-branch" title="${esc(`${titleOf(entry)}\n${entry.branch}`)}">${esc(titleOf(entry))}${entry.nightly ? '<span class="tag nightly">nightly</span>' : ""}${entry.retry ? '<span class="tag retry">retry</span>' : ""}</span>
+      <span class="tower-branch" title="${esc(`${titleOf(entry)}\n${entry.branch}`)}">${esc(titleOf(entry))}${entry.nightly ? '<span class="tag nightly">nightly</span>' : ""}${entry.retry ? '<span class="tag retry">retry</span>' : ""}${movedTag(entry)}</span>
       <span class="tower-time">${data.typicalMs ? `≈ ${esc(at(starts[i]))}` : ""}</span>
       <span class="tower-sub"><span class="mono">${esc(entry.thread ? entry.branch : "")}</span><span>waited ${esc(dur(data.now - Date.parse(entry.submittedAt)))}</span></span>
     </li>`);
@@ -433,13 +539,15 @@ function renderNow(d) {
 function renderQueue({ data, starts }) {
   lineChart($("#chart-queue"), ui.load[ui.loadRange], "queued", { cls: "ink", days: ui.loadRange });
   const longest = Math.max(1, ...data.queued.map(q => data.now - Date.parse(q.submittedAt)));
-  patch($("#queue-summary"), data.queued.length ? `${data.queued.length} waiting. Start times assume each run takes the typical ${esc(dur(data.typicalMs))}.` : "");
-  patch($("#queue-table"), data.queued.length ? `<thead><tr><th class="n">#</th><th>Thread</th><th>Waited</th><th class="n">Starts</th><th>Note</th></tr></thead><tbody>${data.queued.map((q, i) => {
+  const owners = new Set(data.queued.filter(q => !q.nightly).map(q => q.owner?.title)).size;
+  patch($("#queue-summary"), data.queued.length ? `${data.queued.length} waiting.${owners > 1 ? ` ${owners} owners take turns.` : ""} Start times assume each run takes the typical ${esc(dur(data.typicalMs))}.` : "");
+  patch($("#queue-table"), data.queued.length ? `<thead><tr><th class="n">#</th><th>Thread</th><th>Owner</th><th>Waited</th><th class="n">Starts</th><th>Note</th></tr></thead><tbody>${data.queued.map((q, i) => {
     const waited = data.now - Date.parse(q.submittedAt);
     return `<tr><td class="n">${i + 1}</td>
-      <td><a class="b" href="${esc(prLink(q.branch))}" target="_blank" rel="noreferrer">${esc(titleOf(q))}</a>${q.thread ? `<div class="sub mono">${esc(q.branch)}</div>` : ""}${q.nightly ? '<span class="tag nightly">nightly, goes first</span>' : ""}${q.retry ? '<span class="tag retry">retry</span>' : ""}${q.scope !== "all" ? `<span class="tag scope">${esc(q.scope)} only</span>` : ""}<div class="sub mono">${esc(q.head)}</div></td>
+      <td><a class="b" href="${esc(prLink(q.branch))}" target="_blank" rel="noreferrer">${esc(titleOf(q))}</a>${q.thread ? `<div class="sub mono">${esc(q.branch)}</div>` : ""}${q.nightly ? '<span class="tag nightly">nightly, goes first</span>' : ""}${q.retry ? '<span class="tag retry">retry</span>' : ""}${movedTag(q)}${q.scope !== "all" ? `<span class="tag scope">${esc(q.scope)} only</span>` : ""}<div class="sub mono">${esc(q.head)}</div></td>
+      <td>${q.owner && !q.nightly ? `<span title="${esc(OWNER_SOURCE[q.owner.source] ?? "")}">${esc(q.owner.title)}</span><div class="sub">${q.owner.waiting} waiting</div>` : ""}</td>
       <td style="min-width:140px"><span class="num">${esc(dur(waited))}</span><div class="waitbar" style="width:${(waited / longest * 100).toFixed(1)}%"></div></td>
-      <td class="n">${data.typicalMs ? `≈ ${esc(at(starts[i]))}` : "unknown"}</td>
+      <td class="n">${data.typicalMs ? esc(startText(data, starts[i])) : "unknown"}</td>
       <td class="muted">${esc(q.waiting ?? "")}</td></tr>`;
   }).join("")}</tbody>` : '<tbody><tr><td class="empty">Nothing is waiting.</td></tr></tbody>');
 }
@@ -515,12 +623,19 @@ function renderThreads({ data }) {
 }
 
 function renderTests({ data }) {
+  const shared = data.sharedFailures ?? [];
+  const nightly = failed => failed ? '<span class="result failed">Nightly failed it too</span>' : `<span class="muted">${failed === false ? "Nightly did not fail it" : "No nightly in 24 h"}</span>`;
+  patch($("#shared-table"), shared.length ? `<thead><tr><th>Test</th><th>Branches</th><th class="n">Last failed</th><th>Main's nightly</th></tr></thead><tbody>${shared.map(t => `<tr>
+      <td><div class="mono" style="font-size:12px">${esc(t.test)}</div><div class="sub">${esc(t.step)}</div></td>
+      <td>${t.branches.map(branch => `<div><a class="mono" style="font-size:12px" href="${esc(prLink(branch))}" target="_blank" rel="noreferrer">${esc(branch)}</a></div>`).join("")}</td>
+      <td class="n">${esc(ago(Date.parse(t.last)))}</td><td>${nightly(t.nightly)}</td></tr>`).join("")}</tbody>`
+    : '<tbody><tr><td class="empty">No test failed on more than one branch in the last 24 hours.</td></tr></tbody>');
   const steps = data.stepTimes ?? [];
   const most = Math.max(1, ...steps.map(step => step.medianSeconds));
   patch($("#step-times"), steps.length ? `<div class="bars">${steps.slice(0, 18).map(step => `<div class="bar-row"><span class="b-name" title="${esc(step.name)}">${esc(step.name)}</span><span class="b-track"><i style="width:${(step.medianSeconds / most * 100).toFixed(1)}%" data-tip="${esc(`${step.name}\nmedian ${seconds(step.medianSeconds)} over ${step.runs} passing runs`)}"></i></span><span class="b-value">${esc(seconds(step.medianSeconds))}</span></div>`).join("")}</div>`
     : '<div class="chart-empty">Step times appear after the first passing runs are recorded.</div>');
-  patch($("#flaky-table"), data.flaky.length ? `<thead><tr><th>Test</th><th class="n">Runs</th><th class="n">Last</th></tr></thead><tbody>${data.flaky.map(t => `<tr><td><div class="mono" style="font-size:12px">${esc(t.test)}</div><div class="sub">${esc(t.step)}</div></td><td class="n">${t.flaky}</td><td class="n">${esc(ago(Date.parse(t.last)))}</td></tr>`).join("")}</tbody>`
-    : '<tbody><tr><td class="empty">No test passed only on retry this week.</td></tr></tbody>');
+  patch($("#flaky-table"), data.flaky.length ? `<thead><tr><th>Test</th><th class="n">On retry</th><th class="n">Alone</th><th class="n">Last</th></tr></thead><tbody>${data.flaky.map(t => `<tr><td><div class="mono" style="font-size:12px">${esc(t.test)}</div><div class="sub">${esc(t.step)}</div></td><td class="n">${t.flaky || ""}</td><td class="n">${t.passedAlone || ""}</td><td class="n">${esc(ago(Date.parse(t.last)))}</td></tr>`).join("")}</tbody>`
+    : '<tbody><tr><td class="empty">No test passed only on retry or alone this week.</td></tr></tbody>');
   patch($("#slow-table"), data.slowest.length ? `<thead><tr><th>Test</th><th class="n">Median</th><th class="n">Runs</th></tr></thead><tbody>${data.slowest.map(t => `<tr><td><div class="mono" style="font-size:12px">${esc(t.test)}</div><div class="sub">${esc(t.step)}</div></td><td class="n">${esc(seconds(t.medianSeconds))}</td><td class="n">${t.runs}</td></tr>`).join("")}</tbody>`
     : '<tbody><tr><td class="empty">No test times recorded yet.</td></tr></tbody>');
 }
@@ -539,6 +654,8 @@ function renderNightly({ data, runs }) {
 }
 
 function render() {
+  renderBanners();
+  renderPauseControl();
   if (!ui.data) return;
   const d = derived();
   renderHeader(d);
@@ -553,13 +670,18 @@ function render() {
 
 const refresh = singleFlight(() => refreshOnce());
 async function refreshOnce() {
+  const asked = ui.asked += 1;
   try {
-    ui.data = await getJson("api/state");
-    ui.failures = 0;
+    const data = await getJson("api/state");
+    if (asked <= ui.staleBefore) return;
+    ui.data = data;
+    ui.offline = null;
     render();
   } catch (error) {
-    ui.failures += 1;
-    patch($("#service"), `<span class="dot bad"></span>This page cannot reach the service (${esc(error.message)})`);
+    ui.offline = { since: ui.offline?.since ?? Date.now(), unreachable: Boolean(error.offline), message: error.message };
+    patch($("#service"), '<span class="dot bad"></span>Not connected');
+    renderBanners();
+    renderPauseControl();
   }
 }
 
@@ -625,7 +747,7 @@ function renderDrawer() {
       ${d.stopped ? `<div class="banner">The run stopped after ${esc(d.stopped.after)} failed. Not run: ${esc(d.stopped.notRun.join(", "))}.</div>` : ""}
       ${failing.map(step => `<details open><summary>${esc(step.group === "javascript" ? `tests › ${step.name}` : step.name)} <span class="muted">failed${step.seconds != null ? ` after ${esc(seconds(step.seconds))}` : ""}</span></summary>${step.error ? `<div class="muted" style="font-size:12px;margin-top:4px">${esc(step.error)}</div>` : ""}${step.excerpt ? `<pre class="excerpt">${esc(step.excerpt)}</pre>` : ""}</details>`).join("")}
       ${!failing.length && outcome === "passed" ? '<div class="banner" style="background:var(--pass-soft);border-left-color:var(--pass)">Every selected check passed.</div>' : ""}
-      ${d.flaky.length ? `<div><h2>Passed only on retry</h2>${d.flaky.map(f => `<div style="font-size:13px;margin-top:6px"><span class="mono">${esc(f.test)}</span> <span class="muted">${esc(f.step)}</span></div>`).join("")}</div>` : ""}
+      ${d.flaky.length ? `<div><h2>Passed only on retry</h2>${d.flaky.map(f => `<div style="font-size:13px;margin-top:6px"><span class="mono">${esc(f.test)}</span> <span class="muted">${esc(f.step)}${f.passedAlone ? ", passed alone" : ""}</span></div>`).join("")}</div>` : ""}
       ${d.slowest.length ? `<div><h2>Slowest tests</h2><div class="bars" style="margin-top:8px">${d.slowest.map(t => `<div class="bar-row"><span class="b-name" title="${esc(t.test)}">${esc(t.test)}</span><span class="b-track"><i style="width:${(t.seconds / d.slowest[0].seconds * 100).toFixed(1)}%"></i></span><span class="b-value">${esc(seconds(t.seconds))}</span></div>`).join("")}</div></div>` : ""}`);
   } else if (drawer.pane === "steps") {
     const timed = d.steps.filter(step => step.startedAt);
@@ -671,8 +793,11 @@ function showTip(event) {
   tip.replaceChildren(Object.assign(document.createElement("b"), { textContent: head }), ...rest.flatMap((line, i) => [...(i ? [document.createElement("br")] : []), document.createTextNode(line)]));
   tip.hidden = false;
   const box = tip.getBoundingClientRect();
-  tip.style.left = `${Math.min(event.clientX + 14, innerWidth - box.width - 8)}px`;
-  tip.style.top = `${Math.min(event.clientY + 16, innerHeight - box.height - 8)}px`;
+  // A focused mark has no pointer, so its tip sits below the mark.
+  const anchor = event.type === "focusin" ? target.getBoundingClientRect() : null;
+  const [x, y] = anchor ? [anchor.left, anchor.bottom + 6] : [event.clientX + 14, event.clientY + 16];
+  tip.style.left = `${Math.max(8, Math.min(x, innerWidth - box.width - 8))}px`;
+  tip.style.top = `${Math.max(8, Math.min(y, innerHeight - box.height - 8))}px`;
 }
 
 /* Wiring */
@@ -726,17 +851,25 @@ document.addEventListener("DOMContentLoaded", () => {
     render();
     refreshTerminals();
   });
+  $("#pause").addEventListener("click", openPause);
+  $("#pause-confirm").addEventListener("click", confirmPause);
+  $("#pause-cancel").addEventListener("click", () => $("#pause-dialog").close());
+  $("#pause-reason").addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); confirmPause(); } });
+  // Escape, Cancel, and Pause all close the dialog, and the keyboard returns to the button that opened it.
+  $("#pause-dialog").addEventListener("close", () => $("#pause").focus());
   $("#drawer-close").addEventListener("click", closeRun);
   $("#scrim").addEventListener("click", closeRun);
   $("#search").addEventListener("input", event => { ui.search = event.target.value.trim(); ui.shown = 25; render(); });
   document.addEventListener("keydown", event => {
     if (event.key === "Escape" && ui.drawer) return closeRun();
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName);
-    if (!typing && !ui.drawer && !event.ctrlKey && !event.metaKey && !event.altKey && /^[1-6]$/.test(event.key)) return showTab(TABS[Number(event.key) - 1]);
+    if (!typing && !ui.drawer && !$("#pause-dialog").open && !event.ctrlKey && !event.metaKey && !event.altKey && /^[1-6]$/.test(event.key)) return showTab(TABS[Number(event.key) - 1]);
     const row = event.target.closest?.("tr[data-id], tr[data-thread]");
     if (row && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); row.click(); }
   });
   document.addEventListener("mousemove", showTip);
+  document.addEventListener("focusin", showTip);
+  document.addEventListener("focusout", () => { $("#tip").hidden = true; });
   document.addEventListener("mouseleave", () => { $("#tip").hidden = true; });
   window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
   let resized;

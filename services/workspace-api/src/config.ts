@@ -31,6 +31,7 @@ export interface ClosedSignUp {
 }
 
 export interface WorkspaceApiConfig {
+  internalRelayUrl: string | null;
   port: number;
   /** Loopback whenever a test seam is on, so a seam is never reachable off-host. */
   bindHost: string;
@@ -116,6 +117,7 @@ export function readConfig(env: NodeJS.ProcessEnv): WorkspaceApiConfig {
   const seamActive = testAuthSeam || emailTransport === "capture";
 
   return {
+    internalRelayUrl: env.WORKSPACE_API_RELAY_URL ? readInternalRelayOrigin(env.WORKSPACE_API_RELAY_URL) : null,
     port,
     bindHost: seamActive ? "127.0.0.1" : "0.0.0.0",
     baseURL,
@@ -143,6 +145,10 @@ function readSignUp(emails: string | undefined, relayUrl: string | undefined): C
   if (!relayUrl?.trim()) {
     throw new ConfigError("DOHC_SIGN_UP_EMAILS requires WORKSPACE_API_RELAY_URL, so people with a pending invite can sign up.");
   }
+  return {emails: new Set(listed), relayUrl: readInternalRelayOrigin(relayUrl)};
+}
+
+function readInternalRelayOrigin(relayUrl: string): string {
   let url: URL;
   try {
     url = new URL(relayUrl);
@@ -152,7 +158,7 @@ function readSignUp(emails: string | undefined, relayUrl: string | undefined): C
   if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
     throw new ConfigError(`WORKSPACE_API_RELAY_URL must be an http(s) origin with no path or credentials, got "${relayUrl}".`);
   }
-  return { emails: new Set(listed), relayUrl: url.origin };
+  return url.origin;
 }
 
 function readTrustedProxies(value: string | undefined): Set<string> {

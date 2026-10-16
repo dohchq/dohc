@@ -327,9 +327,11 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
   [VERSIONED_METHOD.publicationApplied]: { requiredStrings: ["requestId", "momentId"] },
+  [VERSIONED_METHOD.historyOperations]: {requiredStrings: ["operationId"]},
+  [VERSIONED_METHOD.historyUndo]: {requiredStrings: ["operationId"], optionalJson: ["author"]},
   [VERSIONED_METHOD.historyPage]: {
     requiredStrings: ["workspaceId"],
-    optionalStrings: ["versionId", "objectId"],
+    optionalStrings: ["versionId", "objectId", "operationId"],
     optionalI64: ["limit"],
     optionalJson: ["cursor"],
   },
@@ -2671,21 +2673,22 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const versionId = optionalString(params, "versionId") ?? state.activeVersionId;
     if (!state.versioned || versionId === undefined) throw new Error("workspace-not-found");
     const objectId = optionalString(params, "objectId") ?? null;
+    const operationId = optionalString(params, "operationId") ?? null;
     if (objectId === "") throw new Error("invalid-input");
     const limit = Math.max(1, Math.min(50, optionalNumber(params, "limit") ?? 50));
-    const text = [...state.moments.values()].map(m => m.wire).filter(m => m.versionId === versionId && (objectId === null || m.objectId === objectId));
-    const protectedRows = objectId === null ? [...state.secretMoments.values()].map(m => m.wire).filter(m => m.versionId === versionId) : [];
+    const text = [...state.moments.values()].map(m => m.wire).filter(m => m.versionId === versionId && (objectId === null || m.objectId === objectId) && (operationId === null || m.metadataCorrelationId === operationId));
+    const protectedRows = objectId === null && operationId === null ? [...state.secretMoments.values()].map(m => m.wire).filter(m => m.versionId === versionId) : [];
     const versions = [...state.versions.values()].map(v => this.versionJson(v) as unknown as VersionRecord);
     const startCursor: HistoryCursor = params.cursor as HistoryCursor | undefined ?? {
       format: 1, engineUuid: this.engineUuid, workspaceId: versions[0]!.workspaceId,
-      versionId, objectId, textFence: Math.max(-1, ...text.map(m => m.momentOrder)),
-      protectedFence: Math.max(-1, ...protectedRows.map(m => m.momentOrder)), markerFence: objectId === null ? versions.length : -1,
+      versionId, objectId, operationId, textFence: Math.max(-1, ...text.map(m => m.momentOrder)),
+      protectedFence: Math.max(-1, ...protectedRows.map(m => m.momentOrder)), markerFence: objectId === null && operationId === null ? versions.length : -1,
       text: null, protected: null, marker: null,
     };
     const validPosition = (position: HistoryCursor["text"], fence: number) => position === null || (position.momentOrder >= 0 && position.momentOrder <= fence);
-    const objectStreamsEmpty = objectId === null || (startCursor.protectedFence === -1 && startCursor.markerFence === -1 && startCursor.protected === null && startCursor.marker === null);
+    const objectStreamsEmpty = (objectId === null && operationId === null) || (startCursor.protectedFence === -1 && startCursor.markerFence === -1 && startCursor.protected === null && startCursor.marker === null);
     if (startCursor.format !== 1 || startCursor.engineUuid !== this.engineUuid || startCursor.workspaceId !== versions[0]!.workspaceId ||
-      startCursor.versionId !== versionId || startCursor.objectId !== objectId || startCursor.textFence < -1 || startCursor.protectedFence < -1 || startCursor.markerFence < -1 ||
+      startCursor.versionId !== versionId || startCursor.objectId !== objectId || startCursor.operationId !== operationId || startCursor.textFence < -1 || startCursor.protectedFence < -1 || startCursor.markerFence < -1 ||
       !validPosition(startCursor.text, startCursor.textFence) || !validPosition(startCursor.protected, startCursor.protectedFence) || !objectStreamsEmpty) throw new Error("invalid-input");
     const cursor = structuredClone(startCursor);
     const afterPosition = (m: {recordedAtMs: number; momentOrder: number}, p: HistoryCursor["text"]) => p === null || m.recordedAtMs < p.recordedAtMs || (m.recordedAtMs === p.recordedAtMs && m.momentOrder < p.momentOrder);
@@ -2700,7 +2703,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       let value: JsonValue = row.value;
       if (row.kind === 0) {
         const m = row.value as MomentRecord;
-        value = Object.fromEntries(["momentOrder","momentId","versionId","objectId","path","recordedAtMs","operation","afterContentKind","afterByteLength","metadataOrigin","metadataSummary","metadataCorrelationId","authors","syncRecordOnly"].filter(k => k in m).map(k => [k,(m as unknown as JsonObject)[k]!])) as JsonObject;
+        value = {beforePath: m.beforePath ?? null, ...Object.fromEntries(["momentOrder","momentId","versionId","objectId","path","beforePath","recordedAtMs","operation","afterContentKind","afterByteLength","metadataOrigin","metadataSummary","metadataCorrelationId","authors","syncRecordOnly"].filter(k => k in m).map(k => [k,(m as unknown as JsonObject)[k]!]))} as JsonObject;
       }
       const bytes = utf8Length(JSON.stringify(value));
       if (included >= limit || (included > 0 && used+bytes > 256*1024)) break;

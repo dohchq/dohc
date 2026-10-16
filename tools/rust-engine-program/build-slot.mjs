@@ -854,8 +854,9 @@ export function verificationLanes(env = process.env) {
  * A gate can wait behind several others, so this waits up to six hours.
  * Only this checkout's PR verifier may hold it; `entry` is the caller's script.
  * `lanes` replaces the host setting for a caller that has already read it, such as the queue service.
+ * `hold()` returns why the caller must not take a lane now, such as a paused queue, or null.
  */
-export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1], signal, lanes } = {}) {
+export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1], signal, lanes, hold } = {}) {
   if (!entry || canonical(entry) !== canonical(verifierEntry)) {
     throw new Error(`Only the PR verifier (${verifierEntry}) may hold a verification lane. Run pnpm verify:pr, or take a build slot for other Cargo work.`);
   }
@@ -865,7 +866,7 @@ export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 
   // Verifiers older than the lane setting used one slot and record no count.
   return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots, legacySlots: 1,
     kind: "verification-slot", lanes: "verification runs", metadata,
-    waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket, signal });
+    waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket, signal, hold });
 }
 
 /** A ticket observer failed, so acquisition stopped before admission instead of retrying. */
@@ -883,6 +884,8 @@ export class TicketEvidenceError extends Error {}
  * admission removes its ticket within milliseconds, so no later reader can
  * rely on seeing it. A throwing or Promise-returning observer rejects
  * acquisition with TicketEvidenceError.
+ * While `hold()` returns a reason, the waiter says it once and waits without a
+ * ticket, so it reserves no slot. Its wait limit starts again when the hold ends.
  */
 async function acquireSlot({
   root,
@@ -900,10 +903,12 @@ async function acquireSlot({
   identityDelayMs,
   goneMs,
   signal,
+  hold,
 }) {
   mkdirSync(root, { recursive: true });
   const label = kind.replace("-", " ");
-  const deadline = Date.now() + waitMs;
+  let deadline = Date.now() + waitMs;
+  let holding = false;
   let denied = false;
   let nextMessageAt = 0;
   let lastSweepAt = -Infinity;
@@ -936,6 +941,17 @@ async function acquireSlot({
   process.on("SIGTERM", onSigterm);
   try { for (;;) {
     cancellation.signal.throwIfAborted();
+    const held = hold?.();
+    if (held) {
+      removeTicket();
+      ticket = undefined;
+      if (!holding) console.log(`  ${held}`);
+      holding = true;
+      deadline = Date.now() + waitMs;
+      await sleep(Math.min(pollMs, 1000), undefined, { signal: cancellation.signal });
+      continue;
+    }
+    holding = false;
     let ahead = -1;
     let free = [];
     let slot;
@@ -983,6 +999,8 @@ async function acquireSlot({
         } catch (error) {
           if (error.code !== "EEXIST") throw error;
         }
+        // A hold that began during this pass gets the slot back before anything runs in it.
+        if (created && hold?.()) { rmSync(dir, { recursive: true, force: true }); continue; }
         if (created) return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata, identityDelayMs);
       }
     } catch (error) {

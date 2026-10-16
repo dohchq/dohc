@@ -14,7 +14,8 @@ Both procedures follow these rules:
 - Follow `AGENTS.md`. Keep one concern per PR.
 - Create worktrees with `~/dev/garage/tools/worktree.mjs`. Remove your worktrees and processes when you finish.
 - Verify each PR with `pnpm verify:pr --base origin/main` through the queue.
-- Do not cancel, kill, or edit another request under `C:\w\_verification` or `C:\w\_locks`.
+- Owners take turns in the queue. You may move a waiting request with `pnpm verify:queue move` and a `--reason`: `--before` to order one owner's requests, and `--first` only to unblock other work, as [the procedure](../../../docs/engineering/verify-agent-work.md#move-a-waiting-request) describes.
+- Do not cancel, kill, or edit another request, or its files under `C:\w\_verification` or `C:\w\_locks`.
 - Do not stop another agent's run.
 
 ## Run a nightly by hand
@@ -51,6 +52,7 @@ If the `dohc-verification-nightly` task is missing, run `pnpm verify:queue insta
 The queue appends one line with `"event": "finished"` to `C:\w\_verification\history.jsonl` for each run. Each line has these fields:
 
 - `flaky`: the tests that passed only on retry.
+- `failed`: the tests that failed on their last try.
 - `slowest`: the run's ten slowest tests, with seconds.
 - `steps`: each step's seconds.
 - `load`: the lanes, peak concurrent runs, lowest free memory, and mean CPU.

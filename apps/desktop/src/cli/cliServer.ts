@@ -324,6 +324,9 @@ export interface CliRunMessageLink {
 
 export interface CliServerOptions {
   recordSuccess?(invocation: CliUsageInvocation): unknown;
+  // The server account this computer is connected to. Its verbs need no
+  // workspace.
+  serverAccount?: Pick<import("../workspaces/serverAccountDeletion").ServerAccountDeletion, "preview" | "delete">;
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
   openWorkspace(workspace: CliRegistryWorkspace): Promise<CliWorkspaceContext>;
@@ -3410,6 +3413,16 @@ async function dispatchWorkspace(
   }
 }
 
+async function dispatchAccount(
+  request: Extract<CliRequest, { verb: "accountDeletePreview" | "accountDelete" }>,
+  options: CliServerOptions,
+): Promise<unknown> {
+  if (!options.serverAccount) throw new CliCommandError("Server accounts are unavailable.");
+  if (request.verb === "accountDeletePreview") return options.serverAccount.preview();
+  const { server, previewToken, password } = request.args;
+  return options.serverAccount.delete({ server, previewToken, password });
+}
+
 async function workspaceContextForRequest(
   request: CliRequest,
   options: CliServerOptions,
@@ -3498,8 +3511,9 @@ export async function handleCliRequestLine(
     // The caller's door labels counting only; authority never receives it.
     const { door: _door, ...request } = parsed.data;
     const completion = { replayed: false };
-    const context = await workspaceContextForRequest(request, options);
-    const unvalidated = await dispatch(request, context, options, completion);
+    const unvalidated = request.verb === "accountDeletePreview" || request.verb === "accountDelete"
+      ? await dispatchAccount(request, options)
+      : await dispatch(request, await workspaceContextForRequest(request, options), options, completion);
     const result = parseCliResult(parsed.data.verb, unvalidated);
     const response = cliTransportResponseSchema.parse({
       protocolVersion: CLI_PROTOCOL_VERSION,
