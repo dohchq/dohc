@@ -1,0 +1,894 @@
+"use strict";
+// The verification queue dashboard. It polls the service's read-only API and redraws only what changed,
+// so a terminal keeps its scroll position and a table keeps its hover while the numbers move.
+
+const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const clockFormat = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
+const dayFormat = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric" });
+const at = t => clockFormat.format(new Date(t));
+const dur = ms => ms == null || !Number.isFinite(ms) ? "unknown" : ms >= HOUR ? `${Math.floor(ms / HOUR)} h ${String(Math.round(ms % HOUR / MIN)).padStart(2, "0")} m` : `${Math.max(0, Math.round(ms / MIN))} min`;
+const stopwatch = ms => { const s = Math.max(0, Math.floor((ms ?? 0) / 1000)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = s % 60; return h ? `${h}:${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}` : `${m}:${String(r).padStart(2, "0")}`; };
+const ago = t => `${dur(Date.now() - t)} ago`;
+// How fresh a log is: seconds while it is recent, then minutes.
+const freshness = t => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 5 ? "just now" : s < 60 ? `${s} s ago` : ago(t); };
+const seconds = s => s == null ? "" : s >= 60 ? `${Math.floor(s / 60)}m ${String(Math.round(s % 60)).padStart(2, "0")}s` : `${Math.round(s)}s`;
+const OUTCOME = { passed: "Passed", failed: "Failed", environment: "Machine failure", error: "Host gave up", cancelled: "Cancelled", superseded: "Replaced", interrupted: "Interrupted", running: "Running", queued: "Waiting" };
+const outcomeName = o => OUTCOME[o] ?? o;
+const machine = o => o === "environment" || o === "error";
+const prLink = branch => branch === "main (nightly)" ? "https://github.com/dohchq/dohc/commits/main" : `https://github.com/dohchq/dohc/pulls?q=is%3Apr+head%3A${encodeURIComponent(branch)}`;
+const runKey = run => `${run.id}/${run.attempt}`;
+
+// `offline` holds the state refresh's failure and when failures began. `action` is a pause or resume in flight,
+// and `actionError` says why the last one failed. A state request numbered `staleBefore` or lower began before a write.
+const ui = { data: null, load: { 1: null, 7: null }, loadRange: 1, tab: "now", range: 1, filter: "all", search: "", shown: 25, pinned: new Map(), logMeta: new Map(), drawer: null,
+  offline: null, action: null, actionError: null, asked: 0, staleBefore: 0 };
+
+// Set an element's HTML only when it changed, so unchanged parts keep focus, hover, and scroll.
+// A focused mark that carries data-focus-key keeps the focus when its part is redrawn.
+function patch(el, html) {
+  if (!el || el._html === html) return;
+  const key = el.contains(document.activeElement) ? document.activeElement.dataset.focusKey : undefined;
+  el.innerHTML = html;
+  el._html = html;
+  if (key) el.querySelector(`[data-focus-key="${CSS.escape(key)}"]`)?.focus();
+}
+// Run an async job one at a time. A call during a run asks for one more run after it, so the newest request always lands last.
+function singleFlight(job) {
+  let running = null, again = false;
+  return () => {
+    if (running) { again = true; return running; }
+    running = (async () => { do { again = false; await job(); } while (again); })().finally(() => { running = null; });
+    return running;
+  };
+}
+
+// One request to the dashboard server. It gives up after 15 seconds, so a request left hanging by an
+// outage never holds up the next refresh. A failure says what went wrong in words, never a browser's error.
+async function call(url, options = {}) {
+  let response, text;
+  try {
+    response = await fetch(url, { cache: "no-store", ...options, signal: AbortSignal.timeout(15_000) });
+    text = await response.text();
+  } catch (error) {
+    throw Object.assign(new Error(error.name === "TimeoutError" ? "the dashboard server did not answer in 15 seconds" : "can't reach the dashboard server"), { offline: true });
+  }
+  if (!response.ok) throw new Error(text.trim() || `the dashboard server answered ${response.status}`);
+  return JSON.parse(text);
+}
+const getJson = url => call(url);
+const postJson = (url, body) => call(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+/* Theme: follow the system, or keep the person's choice. */
+const THEMES = ["system", "light", "dark"];
+const themeIcon = {
+  system: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 1.8a6.2 6.2 0 0 1 0 12.4z" fill="currentColor"/></svg>',
+  light: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.2" fill="currentColor"/><g stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 1v1.6M8 13.4V15M1 8h1.6M13.4 8H15M3 3l1.1 1.1M11.9 11.9 13 13M3 13l1.1-1.1M11.9 4.1 13 3"/></g></svg>',
+  dark: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 10.2A6 6 0 0 1 5.8 2.5a6 6 0 1 0 7.7 7.7z" fill="currentColor"/></svg>',
+};
+function applyTheme(theme) {
+  if (theme === "system") delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = theme;
+  $("#theme").innerHTML = themeIcon[theme];
+  $("#theme").setAttribute("aria-label", `Theme: ${theme}. Change theme`);
+  $("#theme").title = `Theme: ${theme}`;
+}
+let theme = localStorage.getItem("queue-theme") ?? "system";
+if (!THEMES.includes(theme)) theme = "system";
+
+/* Tabs, kept in the address so a reload or a bookmark returns to the same view. */
+const TABS = ["now", "queue", "history", "threads", "tests", "nightly"];
+function showTab(tab) {
+  ui.tab = TABS.includes(tab) ? tab : "now";
+  for (const button of $$(".topbar [data-tab]")) button.setAttribute("aria-selected", String(button.dataset.tab === ui.tab));
+  for (const name of TABS) $(`#view-${name}`).hidden = name !== ui.tab;
+  if (location.hash.slice(1) !== ui.tab) history.replaceState(null, "", `#${ui.tab}`);
+  render();
+  if (ui.tab === "now") refreshTerminals();
+  if (ui.tab === "queue" && !ui.load[ui.loadRange]) refreshLoad(ui.loadRange);
+}
+
+/* Lanes for attempts recorded before the service stored them: the first lane free at the start. */
+function withLanes(runs) {
+  const free = [0, 0];
+  return runs.map(run => ({ ...run })).map(run => {
+    const end = run.endedAt ? Date.parse(run.endedAt) : Infinity;
+    if (!run.lane) {
+      const start = Date.parse(run.startedAt);
+      run.lane = free[0] <= start ? 1 : free[1] <= start ? 2 : free[0] <= free[1] ? 1 : 2;
+    }
+    free[run.lane - 1] = end;
+    return run;
+  });
+}
+
+// Each lane frees when its run reaches the typical time; each waiting request then takes the typical time.
+function startTimes(data, running) {
+  const lanes = data.service?.lanes ?? 1;
+  const typical = data.typicalMs ?? 0;
+  const free = running.map(run => data.now + Math.max(typical - (run.awakeMs ?? 0), 5 * MIN));
+  while (free.length < lanes) free.push(data.now);
+  return data.queued.map(entry => {
+    free.sort((a, b) => a - b);
+    const starts = Math.max(free[0], entry.notBefore ? Date.parse(entry.notBefore) : 0);
+    free[0] = starts + typical;
+    return starts;
+  });
+}
+
+// A paused queue starts nothing, so its estimates count from the resume instead of naming a time.
+const startText = (data, t) => !data.pause ? `≈ ${at(t)}` : t - data.now < MIN ? "on resume" : `${dur(t - data.now)} after resume`;
+
+function derived() {
+  const data = ui.data;
+  const runs = withLanes(data.runs);
+  const running = runs.filter(run => run.outcome === "running");
+  const finished = runs.filter(run => run.endedAt).sort((a, b) => Date.parse(a.endedAt) - Date.parse(b.endedAt));
+  return { data, runs, running, finished, starts: startTimes(data, running) };
+}
+
+/* Header, banners, and the key numbers. */
+function renderHeader({ data }) {
+  const svc = data.service;
+  const beat = svc ? Date.parse(svc.heartbeatAt) : null;
+  patch($("#service"), ui.offline ? '<span class="dot bad"></span>Not connected' : !svc ? '<span class="dot bad"></span>The service has never started'
+    : svc.alive ? `<span class="dot ok"></span>Service running <span class="mono muted">${esc(svc.commit ?? "")}</span>`
+    : `<span class="dot bad"></span>Service silent since ${esc(at(beat))}`);
+  $("#updated").textContent = `Updated ${at(data.now)}`;
+  $("#queue-count").textContent = data.queued.length || "";
+}
+
+// A time today as its clock time, an earlier one with its day.
+const when = t => new Date(t).toDateString() === new Date().toDateString() ? at(t) : `${dayFormat.format(new Date(t))} ${at(t)}`;
+
+// The pause in the words pnpm verify:queue status uses. A hold after the computer restarted says so plainly.
+function pauseBanner(pause) {
+  if (!pause) return "";
+  const since = pause.at ? ` since ${when(Date.parse(pause.at))}` : "";
+  const why = pause.reason ? ` (${pause.reason})` : "";
+  const busy = `${pause.running} running, no new runs start`;
+  if (pause.restart) return `<div class="banner">Held${esc(since)} after the computer restarted${pause.idle ? "" : `: ${esc(busy)}`}. Resume to start the line.</div>`;
+  if (pause.idle) return `<div class="banner info"><b>Paused and idle: safe to restart.</b> Paused${esc(since + why)}.</div>`;
+  return `<div class="banner">Paused${esc(since + why)}: ${esc(busy)}.</div>`;
+}
+
+// Banners on every tab: a server the page cannot reach, a failed pause or resume, the pause, and the service's own trouble.
+function renderBanners() {
+  const data = ui.data, svc = data?.service;
+  const banners = [];
+  if (ui.offline) banners.push(`<div class="banner bad">${ui.offline.unreachable ? `Can't reach the dashboard server since ${esc(when(ui.offline.since))}, retrying.`
+    : `The dashboard server has failed since ${esc(when(ui.offline.since))} (${esc(ui.offline.message.replace(/\.$/, ""))}), retrying.`}</div>`);
+  if (ui.actionError) banners.push(`<div class="banner bad">${esc(ui.actionError)}</div>`);
+  if (data) {
+    banners.push(pauseBanner(data.pause));
+    if (svc && !svc.alive) banners.push(`<div class="banner bad">The service has not checked in for ${esc(dur(data.now - Date.parse(svc.heartbeatAt)))}, so nothing new starts. Task Scheduler restarts it within five minutes. If it stays down, run <span class="mono">pnpm verify:queue restart</span> on the host.</div>`);
+    if (svc?.health?.reason) banners.push(`<div class="banner">${esc(svc.health.reason)}</div>`);
+  }
+  patch($("#banners"), banners.join(""));
+}
+
+/* Pause and resume. Both can be undone, so neither asks twice; the banner shows the result. */
+const pauseIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3h2.4v10H4.5zM9.1 3h2.4v10H9.1z" fill="currentColor"/></svg>';
+const resumeIcon = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 2.8v10.4L13.2 8z" fill="currentColor"/></svg>';
+function renderPauseControl() {
+  const button = $("#pause");
+  const paused = Boolean(ui.data?.pause);
+  const label = ui.action === "pause" ? "Pausing" : ui.action === "resume" ? "Resuming" : paused ? "Resume" : "Pause";
+  button.hidden = !ui.data;
+  patch(button, `${paused ? resumeIcon : pauseIcon}<span>${label}</span>`);
+  button.classList.toggle("resume", paused && !ui.action);
+  // Unavailable rather than disabled, so a keyboard keeps its focus on the button while a write runs.
+  button.setAttribute("aria-disabled", String(Boolean(ui.action || ui.offline)));
+  button.setAttribute("aria-label", `${label} the queue`);
+}
+
+async function act(action, body) {
+  ui.action = action;
+  ui.actionError = null;
+  renderPauseControl();
+  renderBanners();
+  try {
+    await postJson(`api/${action}`, body);
+    // A state request that began before the write would show the queue as it was.
+    ui.staleBefore = ui.asked;
+    await refresh();
+  } catch (error) {
+    ui.actionError = `Could not ${action} the queue: ${error.message.replace(/\.$/, "")}.`;
+  } finally {
+    ui.action = null;
+    renderPauseControl();
+    renderBanners();
+  }
+}
+
+function openPause() {
+  if (ui.action || ui.offline || !ui.data) return;
+  if (ui.data.pause) return act("resume", {});
+  $("#pause-reason").value = "";
+  $("#pause-dialog").showModal();
+  $("#pause-reason").focus();
+}
+
+function confirmPause() {
+  const reason = $("#pause-reason").value.trim();
+  $("#pause-dialog").close();
+  act("pause", { reason: reason || null });
+}
+
+function renderStrip({ data, running, finished, starts }) {
+  const lanes = data.lanes?.slots ?? data.service?.lanes ?? 1;
+  const busy = data.lanes ? data.lanes.holders.length : running.length;
+  const day = finished.filter(run => Date.parse(run.endedAt) > data.now - DAY);
+  const count = test => day.filter(test).length;
+  const passed = count(run => run.outcome === "passed"), failed = count(run => run.outcome === "failed"), machines = count(run => machine(run.outcome));
+  const oldest = Math.min(...data.queued.map(q => Date.parse(q.submittedAt)));
+  const clears = data.queued.length && data.typicalMs ? starts.at(-1) + data.typicalMs : null;
+  const health = data.service?.health ?? {};
+  const pct = (n, total) => total ? `${(n / total * 100).toFixed(1)}%` : "0%";
+  const meter = (label, value, fill, cls = "") => `<div class="meter"><span class="m-label">${label}</span><b>${value}</b><div class="m-bar"><i class="${cls}" style="width:${Math.max(0, Math.min(100, fill))}%"></i></div></div>`;
+  const cpu = health.cpuBusyPercent, mem = health.freeMemGb, disk = health.diskFreeGb;
+  patch($("#strip"), `
+    <div class="stat"><div class="label">Running</div><div class="value">${busy} of ${lanes}</div><div class="sub">${busy >= lanes ? "every lane busy" : `${lanes - busy} lane free`}${data.lanes?.holders.some(h => h.kind === "inline") ? ", with an inline gate" : ""}</div></div>
+    <div class="stat"><div class="label">Waiting</div><div class="value${data.queued.length > 2 * lanes ? " warn" : ""}">${data.queued.length}</div><div class="sub">${data.queued.length ? `oldest waited ${esc(dur(data.now - oldest))}` : "nothing waiting"}</div></div>
+    <div class="stat"><div class="label">Line clears</div><div class="value${clears && clears - data.now > 2 * HOUR ? " warn" : ""}">${clears ? (data.pause ? esc(dur(clears - data.now)) : `≈ ${esc(at(clears))}`) : "Now"}</div><div class="sub">${clears ? (data.pause ? "after resume" : `in ${esc(dur(clears - data.now))} if nothing new arrives`) : "no backlog"}</div></div>
+    <div class="stat"><div class="label">Last 24 hours</div><div class="value">${day.length ? Math.round(passed / day.length * 100) : 0}% <span class="muted" style="font-size:14px">passed</span></div>
+      <div class="mini" title="${passed} passed, ${failed} failed, ${machines} machine failures"><i class="passed" style="width:${pct(passed, day.length)}"></i><i class="failed" style="width:${pct(failed, day.length)}"></i><i class="environment" style="width:${pct(machines, day.length)}"></i></div>
+      <div class="sub">${passed} passed, ${failed} failed, ${machines} machine</div></div>
+    <div class="stat"><div class="label">Typical passing gate</div><div class="value">${data.typicalMs ? esc(stopwatch(data.typicalMs)) : "—"}</div><div class="sub">${(day.length / 24).toFixed(1)} runs an hour</div></div>
+    <div class="stat"><div class="label">Host</div><div class="meters">
+      ${meter("CPU", cpu != null ? `${cpu}%` : "?", cpu ?? 0, cpu >= 90 ? "bad" : cpu >= 75 ? "warn" : "")}
+      ${meter("Free memory", mem != null ? `${mem} GB` : "?", mem != null ? mem / 64 * 100 : 0, mem != null && mem < 10 ? "warn" : "")}
+      ${meter("Free disk", disk != null ? `${Math.round(disk)} GB` : "?", disk != null ? Math.min(100, disk / 200 * 100) : 0, disk != null && disk < 40 ? "warn" : "")}
+    </div><div class="sub">Docker ${health.dockerOk === false ? "not responding" : "responding"}</div></div>`);
+}
+
+/* Lanes are the host's verification slots. Each keeps its own elements so its terminal survives refreshes. */
+function laneShell(n) {
+  let el = $(`#lane-${n}`);
+  if (el) return el;
+  el = document.createElement("article");
+  el.id = `lane-${n}`;
+  el.className = "lane";
+  el.innerHTML = `<div class="lane-no" aria-hidden="true">${n}</div><div class="lane-head"><div class="lane-who"></div><div class="lane-clock"></div></div><div class="lane-track"></div><div class="lane-steps"></div>
+    <div class="terminal" hidden>
+      <div class="term-head"><select class="term-select" aria-label="Log to show"></select>
+        <div class="term-actions"><button class="term-follow" type="button" hidden>Follow the running step</button><button class="term-open" type="button">Run details</button></div></div>
+      <div class="term-status" aria-live="polite"></div>
+      <pre class="term-body" tabindex="0" aria-label="Lane ${n} output"></pre></div>
+    <div class="lane-next"></div>`;
+  $("#lanes").append(el);
+  return el;
+}
+
+// A log's short name: its package or step, or "verifier" for the verifier's own output.
+const logLabel = file => file === "worker.log" ? "verifier" : file.replace(/\.log$/, "").replace(/^js-tests\//, "").replace(/^_dohc_/, "");
+// What names a piece of work: its T3 thread when known, else its branch.
+const titleOf = item => item?.thread?.title ?? item?.branch ?? "unknown";
+const subOf = item => item?.thread ? item.branch : null;
+
+function defaultLog(logs) {
+  return ((logs ?? []).find(log => log.file !== "worker.log") ?? (logs ?? [])[0])?.file ?? null;
+}
+
+// One lane's content: a queued request's run, an agent's inline gate, or nothing.
+function laneViews({ data, running }) {
+  const slots = data.lanes?.slots ?? Math.max(data.service?.lanes ?? 1, ...running.map(run => run.lane));
+  const views = [];
+  for (let n = 1; n <= slots; n += 1) {
+    const holder = data.lanes?.holders.find(h => h.slot === n);
+    if (data.lanes && !holder) { views.push({ n }); continue; }
+    if (holder?.kind === "inline") {
+      views.push({ n, source: `slot:${n}:${holder.startedAt}`, inline: true, item: holder, title: titleOf(holder), sub: subOf(holder) ?? holder.checkout, branch: holder.branch,
+        clockMs: holder.elapsedMs, since: holder.startedAt, head: holder.head, steps: holder.steps, packages: holder.packages, logs: holder.logs, phase: holder.phase });
+      continue;
+    }
+    const run = holder ? running.find(r => r.id === holder.requestId) : running.find(r => r.lane === n);
+    if (!run) { views.push({ n, waitingFor: holder?.requestId ?? null }); continue; }
+    views.push({ n, source: `run:${runKey(run)}`, run, item: run, title: titleOf(run), sub: subOf(run), branch: run.branch, clockMs: run.awakeMs, since: run.startedAt,
+      head: run.head, attempt: run.attempt, scope: run.scope, steps: run.steps, packages: run.packages, logs: run.logs, phase: run.phase });
+  }
+  return views;
+}
+
+function renderLanes(d) {
+  const { data, starts, running } = d;
+  const views = laneViews(d);
+  // Forget the log choices and log facts of gates that have left their lanes, so a lane's next gate starts by following.
+  const live = new Set(views.map(view => view.source).filter(Boolean));
+  for (const source of ui.pinned.keys()) if (!live.has(source)) ui.pinned.delete(source);
+  for (const key of ui.logMeta.keys()) if (![...live].some(source => key.startsWith(`${source}:`))) ui.logMeta.delete(key);
+  for (const el of $$("#lanes > .lane")) if (Number(el.id.slice(5)) > views.length) el.remove();
+  const stepTimes = new Map((data.stepTimes ?? []).map(step => [step.name, step.medianSeconds]));
+  for (const view of views) {
+    const el = laneShell(view.n);
+    const busy = Boolean(view.source);
+    const late = view.run && data.typicalMs && view.clockMs > data.typicalMs * 1.2;
+    el.className = `lane${busy ? " running" : ""}${late ? " late" : ""}`;
+    el.dataset.source = view.source ?? "";
+    el.dataset.key = view.run ? runKey(view.run) : "";
+    if (!busy) {
+      const next = data.queued[0];
+      patch($(".lane-who", el), `<div class="lane-idle">Idle</div>`);
+      patch($(".lane-clock", el), "");
+      patch($(".lane-track", el), "");
+      patch($(".lane-steps", el), "");
+      $(".terminal", el).hidden = true;
+      patch($(".lane-next", el), next ? `Next up: <b>${esc(titleOf(next))}</b>, starts ${esc(startText(data, starts[0]))}` : "Nothing is waiting.");
+      continue;
+    }
+    const left = view.run && data.typicalMs ? data.typicalMs - (view.clockMs ?? 0) : null;
+    const clockNote = view.inline ? "in its own checkout" : left == null ? "no typical time yet" : left >= 0 ? `≈ ${dur(left)} left of ${stopwatch(data.typicalMs)}` : `${dur(-left)} over typical`;
+    // The name and the clock are patched apart, so the clock's tick never redraws the moved mark.
+    patch($(".lane-who", el), `<a class="lane-branch" href="${esc(prLink(view.branch ?? ""))}" target="_blank" rel="noreferrer" title="${esc(view.title)}">${esc(view.title)}</a>
+        <div class="lane-meta">${view.inline ? '<span class="tag inline">inline gate</span>' : ""}${view.sub ? `<span class="mono" title="${esc(view.sub)}">${esc(view.sub)}</span>` : ""}<span>Since ${esc(at(Date.parse(view.since)))}</span>${view.attempt > 1 ? `<span>Attempt ${view.attempt}</span>` : ""}<span class="mono">${esc(view.head ?? "")}</span>${view.scope && view.scope !== "all" ? `<span>${esc(view.scope)} only</span>` : ""}${view.phase && !["verifying", "tests"].includes(view.phase) ? `<span>${esc(view.phase)}</span>` : ""}${view.run ? movedTag(view.run) : ""}</div>`);
+    patch($(".lane-clock", el), `<b>${esc(stopwatch(view.clockMs))}</b><span class="${late ? "warn" : ""}">${esc(clockNote)}</span>`);
+    // The step track: each finished or running step is as wide as its time; the mark is the typical gate.
+    const steps = (view.steps ?? []).filter(step => step.verdict);
+    const elapsed = step => step.seconds ?? (step.startedAt ? (data.now - Date.parse(step.startedAt)) / 1000 : 0);
+    const total = Math.max((data.typicalMs ?? 0) / 1000, steps.reduce((sum, step) => sum + elapsed(step), 0), 1);
+    const typicalMark = data.typicalMs ? `<span class="typical" style="left:${Math.min(100, data.typicalMs / 1000 / total * 100)}%" data-tip="Typical passing gate\n${stopwatch(data.typicalMs)}"></span>` : "";
+    patch($(".lane-track", el), `<div class="steptrack">${steps.map(step => {
+      const cls = step.verdict === "NOT RUN" ? "NOT" : step.verdict;
+      const typical = stepTimes.get(step.name);
+      return `<i class="seg-${esc(cls)}"${step.log ? ` data-console-log="${esc(step.log)}"` : ""} style="flex:0 0 ${(elapsed(step) / total * 100).toFixed(2)}%" data-tip="${esc(`${step.name}\n${step.verdict === "RUNNING" ? "running for" : step.verdict.toLowerCase()} ${seconds(elapsed(step))}${typical ? `, typically ${seconds(typical)}` : ""}${step.log ? "\nSelect to show its log" : ""}`)}"></i>`;
+    }).join("")}${typicalMark}</div>${packageTrack(view, data.now)}`);
+    const active = steps.filter(step => step.verdict === "RUNNING");
+    const done = steps.filter(step => step.verdict !== "RUNNING");
+    const failed = steps.filter(step => step.verdict === "FAIL");
+    patch($(".lane-steps", el), `${active.map(step => `<span class="chip">${esc(step.name)}</span>`).join("")}
+      <span>${done.length} step${done.length === 1 ? "" : "s"} done</span>${failed.length ? `<span class="result failed">${esc(failed.map(step => step.name).join(", "))} failed</span>` : ""}`);
+    $(".terminal", el).hidden = false;
+    $(".term-open", el).hidden = !view.run;
+    renderConsole(el, view);
+    patch($(".lane-next", el), "");
+  }
+  // Requests the queue has prepared, and agents' inline gates, waiting for a free lane.
+  const holding = new Set((data.lanes?.holders ?? []).map(h => h.requestId).filter(Boolean));
+  const ready = running.filter(run => !holding.has(run.id) && data.lanes).map(run => ({ title: titleOf(run), sub: run.thread ? run.branch : null, note: run.phase ?? "preparing", since: Date.parse(run.startedAt) }));
+  const inlineWaiting = (data.lanes?.waiters ?? []).filter(w => w.kind === "inline").map(w => ({ title: titleOf(w), sub: w.checkout, note: "inline gate, waiting for a lane", since: data.now - (w.waitedMs ?? 0) }));
+  const waiting = [...ready, ...inlineWaiting];
+  patch($("#lanes-waiting"), waiting.length ? `<div class="panel ready"><div class="panel-head"><h2>Waiting for a free lane</h2><span class="muted">Prepared and ready to start</span></div>
+    <ul class="ready-list">${waiting.map(item => `<li><b>${esc(item.title)}</b>${item.sub ? `<span class="mono muted">${esc(item.sub)}</span>` : ""}<span class="muted">${esc(item.note)}, since ${esc(at(item.since))}</span></li>`).join("")}</ul></div>` : "");
+}
+
+const byStart = (a, b) => (Date.parse(a.startedAt ?? "") || 0) - (Date.parse(b.startedAt ?? "") || 0);
+// The log the console follows: the newest running test package, else the newest running step that writes a log, else the log written last.
+function followLog(view) {
+  const newestRunning = list => (list ?? []).filter(step => step.verdict === "RUNNING" && step.log).sort(byStart).at(-1);
+  return newestRunning(view.packages)?.log ?? newestRunning(view.steps)?.log ?? defaultLog(view.logs);
+}
+const consoleFile = view => ui.pinned.get(view.source) ?? followLog(view);
+const stepOfLog = (view, file) => [...(view.steps ?? []), ...(view.packages ?? [])].find(step => step.log === file) ?? null;
+const stepState = (step, now) => !step ? "" : step.verdict === "RUNNING" ? `running for ${seconds(step.startedAt ? (now - Date.parse(step.startedAt)) / 1000 : 0)}`
+  : step.verdict === "PASS" ? `passed in ${seconds(step.seconds)}` : step.verdict === "FAIL" ? `failed after ${seconds(step.seconds)}` : "not run";
+const sizeText = bytes => bytes == null ? "" : bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+const verdictMark = verdict => verdict === "PASS" ? "passed" : verdict === "FAIL" ? "failed" : verdict === "RUNNING" ? "running" : "idle";
+
+// The test packages under the gate's steps: each as wide as its time, and selecting one shows its log.
+function packageTrack(view, now) {
+  const packages = (view.packages ?? []).filter(step => step.verdict && step.name !== "inventory");
+  if (!packages.length) return "";
+  const elapsed = step => step.seconds ?? (step.startedAt ? (now - Date.parse(step.startedAt)) / 1000 : 0);
+  const total = Math.max(1, packages.reduce((sum, step) => sum + elapsed(step), 0));
+  return `<div class="pkgtrack"><span class="pkg-label">tests</span><div class="steptrack thin">${packages.map(step => {
+    const cls = step.verdict === "NOT RUN" ? "NOT" : step.verdict;
+    return `<i class="seg-${esc(cls)}"${step.log ? ` data-console-log="${esc(step.log)}"` : ""} style="flex:0 0 ${(elapsed(step) / total * 100).toFixed(2)}%" data-tip="${esc(`${step.name}\n${stepState(step, now)}${step.log ? "\nSelect to show its log" : ""}`)}"></i>`;
+  }).join("")}</div></div>`;
+}
+
+// The console's picker: every log in run order, grouped into gate steps, test packages, and other logs. Selecting one keeps showing it.
+function renderConsole(el, view) {
+  const file = consoleFile(view);
+  const mark = verdict => verdict === "PASS" ? "✓" : verdict === "FAIL" ? "✕" : verdict === "RUNNING" ? "●" : verdict === "NOT RUN" ? "–" : " ";
+  const option = (log, label) => `<option value="${esc(log)}"${log === file ? " selected" : ""}>${esc(label)}</option>`;
+  const steps = (view.steps ?? []).filter(step => step.log);
+  const packages = (view.packages ?? []).filter(step => step.log);
+  const known = new Set([...steps, ...packages].map(step => step.log));
+  const others = (view.logs ?? []).map(log => log.file).filter(name => !known.has(name)).sort((a, b) => (a === "worker.log") - (b === "worker.log") || a.localeCompare(b));
+  const groups = [
+    steps.length ? `<optgroup label="Gate steps">${steps.map(step => option(step.log, `${mark(step.verdict)} ${step.name}`)).join("")}</optgroup>` : "",
+    packages.length ? `<optgroup label="Tests by package">${packages.map(step => option(step.log, `${mark(step.verdict)} ${logLabel(step.log)}`)).join("")}</optgroup>` : "",
+    others.length ? `<optgroup label="Other logs">${others.map(name => option(name, logLabel(name))).join("")}</optgroup>` : "",
+  ].join("");
+  const select = $(".term-select", el);
+  patch(select, groups || '<option value="">No logs yet</option>');
+  select.disabled = !groups;
+  if (file && select.value !== file) select.value = file;
+  // A newly chosen log says it is loading, so the last log's text never shows under the new log's name.
+  const pre = $(".term-body", el);
+  if (file && pre._source !== `${view.source}:${file}`) writeTerminal(pre, `Loading ${stepOfLog(view, file)?.name ?? logLabel(file)}.`, `${view.source}:${file}`, true);
+  $(".term-follow", el).hidden = !ui.pinned.has(view.source);
+  renderConsoleStatus(el, view);
+}
+
+// What the console shows and its state, so an empty console is never a mystery.
+function renderConsoleStatus(el, view) {
+  const file = consoleFile(view);
+  const meta = ui.logMeta.get(`${view.source}:${file}`);
+  const step = stepOfLog(view, file);
+  const mode = ui.pinned.has(view.source) ? "Showing" : "Following";
+  patch($(".term-status", el), !file ? `<span class="mode">Waiting</span> <span>${esc(waitingWords(view))}</span>`
+    : `<span class="mode">${mode}</span> <b>${esc(step?.name ?? logLabel(file))}</b>${step ? ` <span>${esc(stepState(step, ui.data.now))}</span>` : ""}${meta?.size != null ? ` <span>${esc(sizeText(meta.size))}</span>` : ""}${meta?.modifiedAt ? ` <span>updated ${esc(freshness(Date.parse(meta.modifiedAt)))}</span>` : ""}${meta?.error ? ` <span class="warn">could not refresh: ${esc(meta.error)}, retrying</span>` : ""}`);
+}
+
+const waitingWords = view => view.phase === "preparing" ? "Getting the lane ready: checking out the branch and installing. Output appears when the first step starts."
+  : view.phase === "waiting for the host lane" ? "Prepared and waiting for a free verification lane." : "Waiting for the first step to write output.";
+
+const refreshTerminals = singleFlight(() => refreshTerminalsOnce());
+async function refreshTerminalsOnce() {
+  if (ui.tab !== "now" || document.hidden || !ui.data) return;
+  const views = laneViews(derived());
+  await Promise.all($$("#lanes > .lane.running").map(async el => {
+    const view = views.find(v => v.source === el.dataset.source);
+    if (!view) return;
+    const file = consoleFile(view);
+    const pre = $(".term-body", el);
+    if (!file) { writeTerminal(pre, waitingWords(view), `${view.source}:none`, true); renderConsoleStatus(el, view); return; }
+    const url = view.inline ? `api/log?slot=${view.n}&file=${encodeURIComponent(file)}`
+      : `api/log?id=${encodeURIComponent(view.run.id)}&attempt=${encodeURIComponent(view.run.attempt)}&file=${encodeURIComponent(file)}`;
+    const key = `${view.source}:${file}`;
+    try {
+      const log = await getJson(url);
+      if (el.dataset.source !== view.source || consoleFile(view) !== file) return;
+      ui.logMeta.set(key, { size: log?.size ?? null, modifiedAt: log?.modifiedAt ?? null });
+      const step = stepOfLog(view, file);
+      const empty = step?.verdict === "RUNNING" ? `${step.name} has written nothing yet. It started ${seconds((Date.now() - Date.parse(step.startedAt)) / 1000)} ago.`
+        : step ? `${step.name} wrote no output.` : "This log is empty.";
+      writeTerminal(pre, log?.text?.trim() ? log.text : empty, key, !log?.text?.trim());
+    } catch (error) {
+      // Keep what is on screen and say why it is not moving.
+      ui.logMeta.set(key, { ...(ui.logMeta.get(key) ?? {}), error: error.message });
+    }
+    renderConsoleStatus(el, view);
+  }));
+}
+
+// Replace a terminal's text, and follow its end only if the reader was already at the end.
+function writeTerminal(pre, text, source, message = false) {
+  const following = pre._source !== source || pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 24;
+  if (pre._text === text && pre._source === source) return;
+  pre.textContent = text;
+  pre.classList.toggle("empty", message || !text.trim());
+  pre._text = text;
+  pre._source = source;
+  if (following) pre.scrollTop = pre.scrollHeight;
+}
+
+// How the service found a request's owner, for the owner's tooltip.
+const OWNER_SOURCE = { thread: "The T3 thread a person started", flag: "Named with --owner", checkout: "Named by its checkout" };
+
+// A request someone moved in line. Its tooltip, shown on hover and on keyboard focus, says who moved it and why.
+const movedTag = entry => entry.moved ? `<span class="tag moved" tabindex="0" role="note" data-focus-key="moved:${esc(entry.id)}" aria-label="${esc(entry.moved.replace("\n", ": "))}" data-tip="${esc(entry.moved)}">moved</span>` : "";
+
+function renderTower({ data, starts }) {
+  const rows = data.queued.slice(0, 10).map((entry, i) => `<li>
+      <span class="pos">${i + 1}</span>
+      <span class="tower-branch" title="${esc(`${titleOf(entry)}\n${entry.branch}`)}">${esc(titleOf(entry))}${entry.nightly ? '<span class="tag nightly">nightly</span>' : ""}${entry.retry ? '<span class="tag retry">retry</span>' : ""}${movedTag(entry)}</span>
+      <span class="tower-time">${data.typicalMs ? `≈ ${esc(at(starts[i]))}` : ""}</span>
+      <span class="tower-sub"><span class="mono">${esc(entry.thread ? entry.branch : "")}</span><span>waited ${esc(dur(data.now - Date.parse(entry.submittedAt)))}</span></span>
+    </li>`);
+  patch($("#tower"), rows.length ? rows.join("") + (data.queued.length > 10 ? `<li class="tower-more">and ${data.queued.length - 10} more, the last starting ≈ ${esc(at(starts.at(-1)))}</li>` : "") : '<li class="tower-more">Nothing is waiting.</li>');
+}
+
+/* The lanes' runs over a day or a week. */
+function renderTrack(el, { data, runs }, days, { matches = () => true, tall = false } = {}) {
+  const span = days * DAY, start = data.now - span;
+  const pos = t => `${Math.max(0, (t - start) / span * 100).toFixed(3)}%`;
+  const lanes = Math.max(data.service?.lanes ?? 1, ...runs.map(run => run.lane));
+  let html = "";
+  for (let lane = 1; lane <= lanes; lane += 1) {
+    html += `<div class="row"><span class="row-label">Lane ${lane}</span>` + runs.filter(run => run.lane === lane && (run.endedAt ? Date.parse(run.endedAt) : data.now) > start).map(run => {
+      const from = Math.max(Date.parse(run.startedAt), start), to = run.endedAt ? Date.parse(run.endedAt) : data.now;
+      const tip = `${run.branch}\n${outcomeName(run.outcome)}, ${dur(to - Date.parse(run.startedAt))}\n${at(Date.parse(run.startedAt))} to ${run.endedAt ? at(to) : "now"}${run.attempt > 1 ? `, attempt ${run.attempt}` : ""}${run.flaky ? `\n${run.flaky} flaky test${run.flaky > 1 ? "s" : ""} passed on retry` : ""}${run.cause && !["pass", "check"].includes(run.cause) ? `\n${run.cause}` : ""}`;
+      return `<button class="run ${esc(run.outcome)}${matches(run) ? "" : " dim"}" data-id="${esc(run.id)}" data-attempt="${run.attempt}" data-tip="${esc(tip)}" aria-label="${esc(`${run.branch}: ${outcomeName(run.outcome)}`)}" style="left:${pos(from)};width:calc(${((to - from) / span * 100).toFixed(3)}% - 2px)"></button>`;
+    }).join("") + "</div>";
+  }
+  const step = days === 1 ? (el.clientWidth && el.clientWidth < 640 ? 6 * HOUR : 3 * HOUR) : DAY;
+  const offset = new Date(data.now).getTimezoneOffset() * MIN;
+  let ticks = "";
+  for (let t = Math.ceil((start - offset) / step) * step + offset; t <= data.now; t += step) ticks += `<span style="left:${pos(t)}">${esc(days === 1 ? at(t) : dayFormat.format(new Date(t)))}</span>`;
+  el.classList.toggle("tall", tall);
+  patch(el, `${html}<div class="axis">${ticks}</div>`);
+}
+
+const legendHtml = ["passed", "failed", "environment", "running", "cancelled"].map(o => `<span><i class="${o}"></i>${esc(outcomeName(o))}</span>`).join("") + "<span>Select a run for its steps and logs.</span>";
+
+/* A line chart of one load field, sized to its container. */
+function lineChart(el, samples, field, { max, unit = "", cls = "run", days = 1 }) {
+  if (!samples) { patch(el, '<div class="chart-empty">Loading</div>'); return; }
+  const points = samples.filter(row => row[field] != null);
+  if (points.length < 2) { patch(el, '<div class="chart-empty">The service records the host once a minute. The chart fills in as it does.</div>'); return; }
+  const width = Math.max(280, Math.round(el.clientWidth || 600)), height = el.closest("#view-queue") ? 180 : 120, pad = { l: 34, r: 6, t: 8, b: 18 };
+  const now = Date.now(), from = now - days * DAY;
+  const top = max ?? Math.max(4, Math.ceil(Math.max(...points.map(row => row[field])) * 1.15));
+  const x = t => pad.l + (t - from) / (now - from) * (width - pad.l - pad.r);
+  const y = v => pad.t + (1 - v / top) * (height - pad.t - pad.b);
+  const coords = points.map(row => [x(Date.parse(row.at)), y(row[field])]);
+  const line = coords.map(([cx, cy], i) => `${i ? "L" : "M"}${cx.toFixed(1)},${cy.toFixed(1)}`).join("");
+  const area = `${line}L${coords.at(-1)[0].toFixed(1)},${y(0)}L${coords[0][0].toFixed(1)},${y(0)}Z`;
+  const grid = [0, top / 2, top].map(v => `<line class="grid-line" x1="${pad.l}" x2="${width - pad.r}" y1="${y(v)}" y2="${y(v)}"/><text class="axis-text" x="${pad.l - 6}" y="${y(v) + 4}" text-anchor="end">${Math.round(v)}${unit}</text>`).join("");
+  const step = days === 1 ? 6 * HOUR : DAY, offset = new Date().getTimezoneOffset() * MIN;
+  let ticks = "";
+  for (let t = Math.ceil((from - offset) / step) * step + offset; t <= now; t += step) ticks += `<text class="axis-text" x="${x(t)}" y="${height - 2}" text-anchor="middle">${esc(days === 1 ? at(t) : dayFormat.format(new Date(t)))}</text>`;
+  const slot = (width - pad.l - pad.r) / Math.max(points.length, 1);
+  const hits = points.map((row, i) => `<rect class="hit" x="${(coords[i][0] - slot / 2).toFixed(1)}" y="${pad.t}" width="${Math.max(slot, 2).toFixed(1)}" height="${height - pad.t - pad.b}" data-tip="${esc(`${at(Date.parse(row.at))}\n${row[field]}${unit}${field === "queued" ? " waiting" : ""}`)}"/>`).join("");
+  patch(el, `<svg class="chart" viewBox="0 0 ${width} ${height}" style="height:${height}px" role="img" aria-label="${esc(field)} over time">${grid}<path class="area-${cls}" d="${area}"/><path class="line-${cls}" d="${line}"/>${ticks}${hits}</svg>`);
+}
+
+/* Views */
+function renderJustFinished({ data, finished }) {
+  const recent = finished.slice(-4).reverse();
+  patch($("#just-finished"), recent.length ? `<div class="panel"><div class="panel-head"><h2>Just finished</h2><button class="link" data-goto="history">All runs</button></div>
+    <ul class="finished-list">${recent.map(run => `<li><span class="result ${esc(run.outcome)}">${esc(outcomeName(run.outcome))}</span>
+      <span class="f-title"><b>${esc(titleOf(run))}</b>${run.thread ? `<span class="mono muted">${esc(run.branch)}</span>` : ""}</span>
+      <span class="muted">${esc(stopwatch(Date.parse(run.endedAt) - Date.parse(run.startedAt)))}, ${esc(ago(Date.parse(run.endedAt)))}</span>
+      <span class="f-actions"><button type="button" class="link" data-id="${esc(run.id)}" data-attempt="${run.attempt}">Summary</button><button type="button" class="link" data-id="${esc(run.id)}" data-attempt="${run.attempt}" data-pane="logs">Logs</button></span></li>`).join("")}</ul></div>` : "");
+}
+
+function renderNow(d) {
+  renderLanes(d);
+  renderJustFinished(d);
+  renderTower(d);
+  renderTrack($("#track-now"), d, 1);
+  patch($("#legend-now"), legendHtml);
+  lineChart($("#chart-cpu"), ui.load[1], "cpu", { max: 100, unit: "%" });
+  lineChart($("#chart-queue-now"), ui.load[1], "queued", { cls: "ink" });
+}
+
+function renderQueue({ data, starts }) {
+  lineChart($("#chart-queue"), ui.load[ui.loadRange], "queued", { cls: "ink", days: ui.loadRange });
+  const longest = Math.max(1, ...data.queued.map(q => data.now - Date.parse(q.submittedAt)));
+  const owners = new Set(data.queued.filter(q => !q.nightly).map(q => q.owner?.title)).size;
+  patch($("#queue-summary"), data.queued.length ? `${data.queued.length} waiting.${owners > 1 ? ` ${owners} owners take turns.` : ""} Start times assume each run takes the typical ${esc(dur(data.typicalMs))}.` : "");
+  patch($("#queue-table"), data.queued.length ? `<thead><tr><th class="n">#</th><th>Thread</th><th>Owner</th><th>Waited</th><th class="n">Starts</th><th>Note</th></tr></thead><tbody>${data.queued.map((q, i) => {
+    const waited = data.now - Date.parse(q.submittedAt);
+    return `<tr><td class="n">${i + 1}</td>
+      <td><a class="b" href="${esc(prLink(q.branch))}" target="_blank" rel="noreferrer">${esc(titleOf(q))}</a>${q.thread ? `<div class="sub mono">${esc(q.branch)}</div>` : ""}${q.nightly ? '<span class="tag nightly">nightly, goes first</span>' : ""}${q.retry ? '<span class="tag retry">retry</span>' : ""}${movedTag(q)}${q.scope !== "all" ? `<span class="tag scope">${esc(q.scope)} only</span>` : ""}<div class="sub mono">${esc(q.head)}</div></td>
+      <td>${q.owner && !q.nightly ? `<span title="${esc(OWNER_SOURCE[q.owner.source] ?? "")}">${esc(q.owner.title)}</span><div class="sub">${q.owner.waiting} waiting</div>` : ""}</td>
+      <td style="min-width:140px"><span class="num">${esc(dur(waited))}</span><div class="waitbar" style="width:${(waited / longest * 100).toFixed(1)}%"></div></td>
+      <td class="n">${data.typicalMs ? esc(startText(data, starts[i])) : "unknown"}</td>
+      <td class="muted">${esc(q.waiting ?? "")}</td></tr>`;
+  }).join("")}</tbody>` : '<tbody><tr><td class="empty">Nothing is waiting.</td></tr></tbody>');
+}
+
+function historyMatch(run) {
+  const filter = ui.filter === "all" || (ui.filter === "machine" ? machine(run.outcome) : run.outcome === ui.filter);
+  const needle = ui.search.toLowerCase();
+  return filter && (!needle || run.branch.toLowerCase().includes(needle) || (run.thread?.title ?? "").toLowerCase().includes(needle));
+}
+
+function renderHistory(d) {
+  const { data, finished } = d;
+  $("#history-title").textContent = ui.range === 1 ? "Last 24 hours" : "Last 7 days";
+  renderTrack($("#track-history"), d, ui.range, { matches: historyMatch, tall: true });
+  patch($("#legend-history"), legendHtml);
+  // Runs per day, for the week.
+  const today = new Date(data.now); today.setHours(0, 0, 0, 0);
+  const days = [];
+  for (let i = 6; i >= 0; i -= 1) {
+    const from = new Date(today); from.setDate(today.getDate() - i);
+    const to = new Date(from); to.setDate(from.getDate() + 1);
+    const rows = finished.filter(run => Date.parse(run.endedAt) >= from && Date.parse(run.endedAt) < to);
+    const passing = rows.filter(run => run.outcome === "passed").map(run => run.awakeMs).sort((a, b) => a - b);
+    days.push({ label: dayFormat.format(from), passed: rows.filter(run => run.outcome === "passed").length, failed: rows.filter(run => run.outcome === "failed").length,
+      machine: rows.filter(run => machine(run.outcome)).length, typical: passing.length ? passing[Math.floor(passing.length / 2)] : null });
+  }
+  const most = Math.max(1, ...days.map(day => day.passed + day.failed + day.machine));
+  const block = (n, cls, name, label) => n ? `<i class="${cls}" style="height:${n / most * 130}px" data-tip="${esc(`${label}\n${n} ${name}`)}"></i>` : "";
+  patch($("#days"), `<div class="days">${days.map(day => `<div class="day"><div class="total">${day.passed + day.failed + day.machine || ""}</div><div class="stack">${block(day.passed, "passed", "passed", day.label)}${block(day.failed, "failed", "failed", day.label)}${block(day.machine, "environment", "machine failures", day.label)}</div></div>`).join("")}</div>
+    <div class="day-labels">${days.map(day => `<span>${esc(day.label)}</span>`).join("")}</div>
+    <div class="day-labels typical" title="Median passing gate">${days.map(day => `<span>${day.typical ? esc(stopwatch(day.typical)) : ""}</span>`).join("")}</div>
+    <div class="legend" style="margin-top:8px"><span><i class="passed"></i>Passed</span><span><i class="failed"></i>Failed</span><span><i class="environment"></i>Machine failure</span><span>Bottom row: median passing gate</span></div>`);
+  // Results in the selected range, as a ring.
+  const inRange = finished.filter(run => Date.parse(run.endedAt) > data.now - ui.range * DAY);
+  const parts = [["passed", inRange.filter(run => run.outcome === "passed").length], ["failed", inRange.filter(run => run.outcome === "failed").length],
+    ["environment", inRange.filter(run => machine(run.outcome)).length], ["other", inRange.filter(run => ["cancelled", "interrupted"].includes(run.outcome)).length]];
+  const total = parts.reduce((sum, [, n]) => sum + n, 0);
+  const r = 60, c = 2 * Math.PI * r;
+  let offset = 0;
+  const arcs = total ? parts.filter(([, n]) => n).map(([name, n]) => {
+    const length = n / total * c;
+    const arc = `<circle class="d-${name}" cx="75" cy="75" r="${r}" stroke-dasharray="${Math.max(0, length - 2).toFixed(2)} ${c.toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}" transform="rotate(-90 75 75)"/>`;
+    offset += length;
+    return arc;
+  }).join("") : "";
+  const label = { passed: "Passed", failed: "Failed", environment: "Machine failure", other: "Cancelled or interrupted" };
+  patch($("#outcomes"), `<div class="donut-wrap"><svg class="donut" viewBox="0 0 150 150" role="img" aria-label="Results"><circle class="d-track" cx="75" cy="75" r="${r}"/>${arcs}
+      <text class="donut-center" x="75" y="78" text-anchor="middle">${total ? Math.round(parts[0][1] / total * 100) : 0}%</text><text class="donut-sub" x="75" y="98" text-anchor="middle">passed</text></svg>
+    <div class="outcome-list">${parts.map(([name, n]) => `<div><i class="${name === "other" ? "" : name}" style="display:inline-block;width:10px;height:10px;border-radius:3px;${name === "other" ? "background:var(--other)" : ""}"></i><b>${n}</b>${esc(label[name])}</div>`).join("")}
+      <div class="muted">${total} runs ${ui.range === 1 ? "in the last 24 hours" : "in the last 7 days"}</div></div></div>`);
+  // The runs themselves.
+  const rows = finished.filter(run => Date.parse(run.endedAt) > data.now - ui.range * DAY && historyMatch(run)).reverse();
+  patch($("#runs-summary"), `${rows.length} shown`);
+  patch($("#runs-table"), rows.length ? `<thead><tr><th>Ended</th><th>Thread</th><th>Result</th><th class="n">Took</th><th class="n">Lane</th><th class="n">Flaky</th></tr></thead><tbody>${rows.slice(0, ui.shown).map(run => `
+    <tr data-id="${esc(run.id)}" data-attempt="${run.attempt}" tabindex="0"><td class="num">${esc(ui.range === 1 ? at(Date.parse(run.endedAt)) : `${dayFormat.format(new Date(Date.parse(run.endedAt)))} ${at(Date.parse(run.endedAt))}`)}</td>
+      <td><span class="b">${esc(titleOf(run))}</span>${run.attempt > 1 ? `<span class="tag scope">attempt ${run.attempt}</span>` : ""}${run.thread ? `<div class="sub mono">${esc(run.branch)}</div>` : ""}</td>
+      <td><span class="result ${esc(run.outcome)}">${esc(outcomeName(run.outcome))}</span>${run.outcome !== "passed" && run.cause && run.cause !== "check" ? `<div class="sub">${esc(run.cause)}</div>` : ""}</td>
+      <td class="n">${esc(stopwatch(Date.parse(run.endedAt) - Date.parse(run.startedAt)))}</td><td class="n">${run.lane}</td><td class="n">${run.flaky || ""}</td></tr>`).join("")}</tbody>`
+    : '<tbody><tr><td class="empty">No runs match.</td></tr></tbody>');
+  patch($("#runs-more"), rows.length > ui.shown ? `<button class="more" type="button" data-more>Show ${Math.min(25, rows.length - ui.shown)} more of ${rows.length - ui.shown}</button>` : "");
+}
+
+function renderThreads({ data }) {
+  const rows = data.threads ?? [];
+  const pct = (n, total) => total ? `${(n / total * 100).toFixed(1)}%` : "0%";
+  patch($("#threads-table"), rows.length ? `<thead><tr><th>Thread</th><th class="n">Running</th><th class="n">Waiting</th><th class="n">Runs</th><th>Results</th><th class="n">Passed</th><th class="n">Failed</th><th class="n">Machine</th><th class="n">Time in gates</th><th>Last result</th></tr></thead><tbody>${rows.map(t => `
+    <tr data-thread="${esc(t.title)}" tabindex="0"><td><span class="b">${esc(t.title)}</span><div class="sub mono"${t.thread ? "" : " hidden"}>${esc(t.branches.slice(0, 3).join(", "))}${t.branches.length > 3 ? `, and ${t.branches.length - 3} more` : ""}</div></td>
+      <td class="n">${t.running + t.inline || ""}</td><td class="n">${t.waiting || ""}</td><td class="n">${t.runs}</td>
+      <td><div class="rate" data-tip="${esc(`${t.title}\n${t.passed} passed, ${t.failed} failed, ${t.machine} machine failures`)}"><i class="passed" style="width:${pct(t.passed, t.runs)}"></i><i class="failed" style="width:${pct(t.failed, t.runs)}"></i><i class="environment" style="width:${pct(t.machine, t.runs)}"></i></div></td>
+      <td class="n">${t.passed}</td><td class="n">${t.failed}</td><td class="n">${t.machine}</td><td class="n">${t.gateMs ? esc(dur(t.gateMs)) : ""}</td>
+      <td>${t.lastOutcome ? `<span class="result ${esc(t.lastOutcome)}">${esc(outcomeName(t.lastOutcome))}</span> <span class="muted">${esc(ago(Date.parse(t.lastAt)))}</span>` : '<span class="muted">none yet</span>'}</td></tr>`).join("")}</tbody>`
+    : '<tbody><tr><td class="empty">No thread has used the queue this week.</td></tr></tbody>');
+}
+
+function renderTests({ data }) {
+  const shared = data.sharedFailures ?? [];
+  const nightly = failed => failed ? '<span class="result failed">Nightly failed it too</span>' : `<span class="muted">${failed === false ? "Nightly did not fail it" : "No nightly in 24 h"}</span>`;
+  patch($("#shared-table"), shared.length ? `<thead><tr><th>Test</th><th>Branches</th><th class="n">Last failed</th><th>Main's nightly</th></tr></thead><tbody>${shared.map(t => `<tr>
+      <td><div class="mono" style="font-size:12px">${esc(t.test)}</div><div class="sub">${esc(t.step)}</div></td>
+      <td>${t.branches.map(branch => `<div><a class="mono" style="font-size:12px" href="${esc(prLink(branch))}" target="_blank" rel="noreferrer">${esc(branch)}</a></div>`).join("")}</td>
+      <td class="n">${esc(ago(Date.parse(t.last)))}</td><td>${nightly(t.nightly)}</td></tr>`).join("")}</tbody>`
+    : '<tbody><tr><td class="empty">No test failed on more than one branch in the last 24 hours.</td></tr></tbody>');
+  const steps = data.stepTimes ?? [];
+  const most = Math.max(1, ...steps.map(step => step.medianSeconds));
+  patch($("#step-times"), steps.length ? `<div class="bars">${steps.slice(0, 18).map(step => `<div class="bar-row"><span class="b-name" title="${esc(step.name)}">${esc(step.name)}</span><span class="b-track"><i style="width:${(step.medianSeconds / most * 100).toFixed(1)}%" data-tip="${esc(`${step.name}\nmedian ${seconds(step.medianSeconds)} over ${step.runs} passing runs`)}"></i></span><span class="b-value">${esc(seconds(step.medianSeconds))}</span></div>`).join("")}</div>`
+    : '<div class="chart-empty">Step times appear after the first passing runs are recorded.</div>');
+  patch($("#flaky-table"), data.flaky.length ? `<thead><tr><th>Test</th><th class="n">On retry</th><th class="n">Alone</th><th class="n">Last</th></tr></thead><tbody>${data.flaky.map(t => `<tr><td><div class="mono" style="font-size:12px">${esc(t.test)}</div><div class="sub">${esc(t.step)}</div></td><td class="n">${t.flaky || ""}</td><td class="n">${t.passedAlone || ""}</td><td class="n">${esc(ago(Date.parse(t.last)))}</td></tr>`).join("")}</tbody>`
+    : '<tbody><tr><td class="empty">No test passed only on retry or alone this week.</td></tr></tbody>');
+  patch($("#slow-table"), data.slowest.length ? `<thead><tr><th>Test</th><th class="n">Median</th><th class="n">Runs</th></tr></thead><tbody>${data.slowest.map(t => `<tr><td><div class="mono" style="font-size:12px">${esc(t.test)}</div><div class="sub">${esc(t.step)}</div></td><td class="n">${esc(seconds(t.medianSeconds))}</td><td class="n">${t.runs}</td></tr>`).join("")}</tbody>`
+    : '<tbody><tr><td class="empty">No test times recorded yet.</td></tr></tbody>');
+}
+
+function renderNightly({ data, runs }) {
+  const last = data.nightly, pass = data.lastNightlyPass;
+  const tone = state => state === "passed" ? "passed" : state === "failed" ? "failed" : machine(state) ? "environment" : "running";
+  patch($("#nightly-hero"), last ? `<div class="nightly-mark result ${tone(last.state)}">${esc(outcomeName(last.state))}</div>
+      <div class="facts"><span>Main at <b class="mono">${esc(last.head)}</b></span>${last.at ? `<span>Updated <b>${esc(ago(Date.parse(last.at)))}</b></span>` : ""}<span>Last pass <b class="mono">${pass ? esc(pass.head) : "none yet"}</b>${pass?.at ? ` ${esc(ago(Date.parse(pass.at)))}` : ""}</span></div>`
+    : '<div class="nightly-mark muted">No nightly run yet</div><div class="facts">The first one runs tonight at 03:07.</div>');
+  const nightly = runs.filter(run => run.nightly).reverse();
+  patch($("#nightly-table"), nightly.length ? `<thead><tr><th>Started</th><th>Commit</th><th>Result</th><th class="n">Took</th><th class="n">Flaky</th></tr></thead><tbody>${nightly.map(run => `
+    <tr data-id="${esc(run.id)}" data-attempt="${run.attempt}" tabindex="0"><td class="num">${esc(`${dayFormat.format(new Date(Date.parse(run.startedAt)))} ${at(Date.parse(run.startedAt))}`)}</td><td class="mono">${esc(run.head)}</td>
+      <td><span class="result ${esc(run.outcome)}">${esc(outcomeName(run.outcome))}</span></td><td class="n">${run.endedAt ? esc(stopwatch(Date.parse(run.endedAt) - Date.parse(run.startedAt))) : "running"}</td><td class="n">${run.flaky || ""}</td></tr>`).join("")}</tbody>`
+    : '<tbody><tr><td class="empty">No nightly runs this week.</td></tr></tbody>');
+}
+
+function render() {
+  renderBanners();
+  renderPauseControl();
+  if (!ui.data) return;
+  const d = derived();
+  renderHeader(d);
+  renderStrip(d);
+  if (ui.tab === "now") renderNow(d);
+  if (ui.tab === "queue") renderQueue(d);
+  if (ui.tab === "history") renderHistory(d);
+  if (ui.tab === "threads") renderThreads(d);
+  if (ui.tab === "tests") renderTests(d);
+  if (ui.tab === "nightly") renderNightly(d);
+}
+
+const refresh = singleFlight(() => refreshOnce());
+async function refreshOnce() {
+  const asked = ui.asked += 1;
+  try {
+    const data = await getJson("api/state");
+    if (asked <= ui.staleBefore) return;
+    ui.data = data;
+    ui.offline = null;
+    render();
+  } catch (error) {
+    ui.offline = { since: ui.offline?.since ?? Date.now(), unreachable: Boolean(error.offline), message: error.message };
+    patch($("#service"), '<span class="dot bad"></span>Not connected');
+    renderBanners();
+    renderPauseControl();
+  }
+}
+
+const loadFetchers = {};
+const refreshLoad = (days = 1) => (loadFetchers[days] ??= singleFlight(() => refreshLoadOnce(days)))();
+async function refreshLoadOnce(days = 1) {
+  try { ui.load[days] = (await getJson(`api/load?days=${days}`)).samples; render(); }
+  catch { /* The next refresh tries again. */ }
+}
+
+/* The run drawer: a summary, the steps on a timeline, and every log. */
+async function openRun(id, attempt, opener, pane = "summary") {
+  ui.drawer = { id, attempt: String(attempt), pane, file: null, data: null, opener: opener ?? document.activeElement };
+  $("#tip").hidden = true;
+  $("#drawer").hidden = false;
+  $("#scrim").hidden = false;
+  $("#drawer-title").textContent = "Loading";
+  patch($("#drawer-facts"), "");
+  patch($("#drawer-body"), "");
+  $("#drawer-close").focus();
+  await loadRun();
+}
+
+function closeRun() {
+  const opener = ui.drawer?.opener;
+  ui.drawer = null;
+  $("#drawer").hidden = true;
+  $("#scrim").hidden = true;
+  if (opener?.isConnected) opener.focus();
+}
+
+const loadRun = singleFlight(() => loadRunOnce());
+async function loadRunOnce() {
+  const drawer = ui.drawer;
+  if (!drawer) return;
+  try {
+    const data = await getJson(`api/run?id=${encodeURIComponent(drawer.id)}&attempt=${encodeURIComponent(drawer.attempt)}`);
+    if (ui.drawer !== drawer) return;
+    drawer.data = data;
+    renderDrawer();
+    if (drawer.pane === "logs") await loadDrawerLog();
+  } catch {
+    if (ui.drawer === drawer) { $("#drawer-title").textContent = "This run is no longer recorded."; patch($("#drawer-body"), ""); }
+  }
+}
+
+function renderDrawer() {
+  const drawer = ui.drawer, d = drawer?.data;
+  if (!d) return;
+  const outcome = d.outcome ?? (d.state === "running" ? "running" : d.state);
+  const known = ui.data?.runs.find(r => r.id === d.id);
+  $("#drawer-title").textContent = known?.thread?.title ?? d.branch;
+  const took = d.startedAt ? (d.endedAt ? Date.parse(d.endedAt) : Date.now()) - Date.parse(d.startedAt) : null;
+  patch($("#drawer-facts"), `<span class="result ${esc(outcome)}">${esc(outcomeName(outcome))}</span><span>Attempt <b>${d.attempt}</b></span>${known?.thread ? `<span class="mono">${esc(d.branch)}</span>` : ""}${d.lane ? `<span>Lane <b>${d.lane}</b></span>` : ""}
+    <span><b class="mono">${esc(d.head)}</b> against <b class="mono">${esc(d.base)}</b></span>${d.startedAt ? `<span>${esc(at(Date.parse(d.startedAt)))} to ${d.endedAt ? esc(at(Date.parse(d.endedAt))) : "now"}</span>` : ""}
+    ${took != null ? `<span>Took <b>${esc(stopwatch(took))}</b></span>` : ""}<span class="mono">${esc(d.id)}</span><a href="${esc(prLink(d.branch))}" target="_blank" rel="noreferrer">Open PR</a>`);
+  for (const button of $$("#drawer [data-pane]")) button.setAttribute("aria-selected", String(button.dataset.pane === drawer.pane));
+  const body = $("#drawer-body");
+  if (drawer.pane === "summary") {
+    const failing = d.steps.filter(step => step.verdict === "FAIL");
+    patch(body, `
+      ${d.reason || d.error ? `<div class="banner${outcome === "failed" ? " bad" : ""}">${esc(d.reason ?? d.error)}</div>` : ""}
+      ${d.stopped ? `<div class="banner">The run stopped after ${esc(d.stopped.after)} failed. Not run: ${esc(d.stopped.notRun.join(", "))}.</div>` : ""}
+      ${failing.map(step => `<details open><summary>${esc(step.group === "javascript" ? `tests › ${step.name}` : step.name)} <span class="muted">failed${step.seconds != null ? ` after ${esc(seconds(step.seconds))}` : ""}</span></summary>${step.error ? `<div class="muted" style="font-size:12px;margin-top:4px">${esc(step.error)}</div>` : ""}${step.excerpt ? `<pre class="excerpt">${esc(step.excerpt)}</pre>` : ""}</details>`).join("")}
+      ${!failing.length && outcome === "passed" ? '<div class="banner" style="background:var(--pass-soft);border-left-color:var(--pass)">Every selected check passed.</div>' : ""}
+      ${d.flaky.length ? `<div><h2>Passed only on retry</h2>${d.flaky.map(f => `<div style="font-size:13px;margin-top:6px"><span class="mono">${esc(f.test)}</span> <span class="muted">${esc(f.step)}${f.passedAlone ? ", passed alone" : ""}</span></div>`).join("")}</div>` : ""}
+      ${d.slowest.length ? `<div><h2>Slowest tests</h2><div class="bars" style="margin-top:8px">${d.slowest.map(t => `<div class="bar-row"><span class="b-name" title="${esc(t.test)}">${esc(t.test)}</span><span class="b-track"><i style="width:${(t.seconds / d.slowest[0].seconds * 100).toFixed(1)}%"></i></span><span class="b-value">${esc(seconds(t.seconds))}</span></div>`).join("")}</div></div>` : ""}`);
+  } else if (drawer.pane === "steps") {
+    const timed = d.steps.filter(step => step.startedAt);
+    const start = Math.min(...timed.map(step => Date.parse(step.startedAt)));
+    const end = Math.max(...timed.map(step => Date.parse(step.startedAt) + (step.seconds ?? (Date.now() - Date.parse(step.startedAt)) / 1000) * 1000));
+    const span = Math.max(1, end - start);
+    patch(body, timed.length ? `<div class="gantt">${d.steps.map(step => {
+      const from = step.startedAt ? Date.parse(step.startedAt) : null;
+      const length = step.seconds != null ? step.seconds * 1000 : from ? Date.now() - from : 0;
+      const cls = step.verdict === "NOT RUN" ? "NOT" : step.verdict ?? "NOT";
+      return `<div class="g-row"><span class="g-name${step.group === "javascript" ? " sub" : ""}" title="${esc(step.name)}">${esc(step.name)}</span>
+        <span class="g-track">${from ? `<i class="seg-${esc(cls)}" style="left:${((from - start) / span * 100).toFixed(2)}%;width:${(length / span * 100).toFixed(2)}%" data-tip="${esc(`${step.name}\n${(step.verdict ?? "").toLowerCase()} ${seconds(length / 1000)}`)}"></i>` : ""}</span>
+        <span class="g-time">${step.verdict === "NOT RUN" ? "not run" : esc(seconds(length / 1000))}</span></div>`;
+    }).join("")}</div>` : '<div class="muted">No steps recorded.</div>');
+  } else {
+    const files = d.logs ?? [];
+    drawer.file ??= files.find(log => log.file !== "worker.log")?.file ?? files[0]?.file ?? null;
+    if (!files.length) { patch(body, '<div class="muted">This attempt wrote no logs.</div>'); return; }
+    // The viewer stays while the list of logs refreshes, so a growing log keeps its scroll position.
+    if (!$("#drawer-log")) patch(body, '<div class="log-files" id="drawer-files" role="group" aria-label="Logs"></div><pre class="excerpt full" id="drawer-log" tabindex="0"></pre>');
+    patch($("#drawer-files"), files.map(log => `<button type="button" data-drawer-log="${esc(log.file)}" aria-pressed="${log.file === drawer.file}" title="${esc(`${Math.round(log.size / 1024)} KB, written ${at(Date.parse(log.modifiedAt))}`)}">${esc(log.file)}</button>`).join(""));
+  }
+}
+
+async function loadDrawerLog() {
+  const drawer = ui.drawer;
+  const file = drawer?.file;
+  if (!file) return;
+  const pre = $("#drawer-log");
+  if (!pre) return;
+  try {
+    const log = await getJson(`api/log?id=${encodeURIComponent(drawer.id)}&attempt=${encodeURIComponent(drawer.attempt)}&file=${encodeURIComponent(file)}`);
+    if (ui.drawer === drawer && drawer.file === file) writeTerminal(pre, log?.text || "This log is empty.", `${drawer.id}/${drawer.attempt}:${file}`);
+  } catch { /* The next refresh tries again. */ }
+}
+
+/* Tooltips for anything that carries data-tip: a first line in bold, the rest plain. */
+function showTip(event) {
+  const target = event.target.closest?.("[data-tip]");
+  const tip = $("#tip");
+  if (!target) { tip.hidden = true; return; }
+  const [head, ...rest] = target.dataset.tip.split("\n");
+  tip.replaceChildren(Object.assign(document.createElement("b"), { textContent: head }), ...rest.flatMap((line, i) => [...(i ? [document.createElement("br")] : []), document.createTextNode(line)]));
+  tip.hidden = false;
+  const box = tip.getBoundingClientRect();
+  // A focused mark has no pointer, so its tip sits below the mark.
+  const anchor = event.type === "focusin" ? target.getBoundingClientRect() : null;
+  const [x, y] = anchor ? [anchor.left, anchor.bottom + 6] : [event.clientX + 14, event.clientY + 16];
+  tip.style.left = `${Math.max(8, Math.min(x, innerWidth - box.width - 8))}px`;
+  tip.style.top = `${Math.max(8, Math.min(y, innerHeight - box.height - 8))}px`;
+}
+
+/* Wiring */
+document.addEventListener("DOMContentLoaded", () => {
+  applyTheme(theme);
+  $("#theme").addEventListener("click", () => {
+    theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
+    localStorage.setItem("queue-theme", theme);
+    applyTheme(theme);
+  });
+  document.addEventListener("click", event => {
+    const tab = event.target.closest(".topbar [data-tab]");
+    if (tab) return showTab(tab.dataset.tab);
+    const goto = event.target.closest("[data-goto]");
+    if (goto) return showTab(goto.dataset.goto);
+    const consoleLog = event.target.closest(".lane [data-console-log]");
+    if (consoleLog) {
+      ui.pinned.set(consoleLog.closest(".lane").dataset.source, consoleLog.dataset.consoleLog);
+      render();
+      return refreshTerminals();
+    }
+    const follow = event.target.closest(".term-follow");
+    if (follow) { ui.pinned.delete(follow.closest(".lane").dataset.source); render(); return refreshTerminals(); }
+    const open = event.target.closest(".term-open");
+    if (open) { const [id, attempt] = open.closest(".lane").dataset.key.split("/"); return openRun(id, attempt, open); }
+    const pane = event.target.closest("#drawer [data-pane]");
+    if (pane && ui.drawer) { ui.drawer.pane = pane.dataset.pane; renderDrawer(); if (ui.drawer.pane === "logs") loadDrawerLog(); return; }
+    const drawerLog = event.target.closest("[data-drawer-log]");
+    if (drawerLog && ui.drawer) { ui.drawer.file = drawerLog.dataset.drawerLog; renderDrawer(); return loadDrawerLog(); }
+    if (event.target.closest("[data-more]")) { ui.shown += 25; return render(); }
+    const range = event.target.closest("[data-range]");
+    if (range) { ui.range = Number(range.dataset.range); ui.shown = 25; for (const b of $$("[data-range]")) b.setAttribute("aria-pressed", String(b === range)); return render(); }
+    const filter = event.target.closest("[data-filter]");
+    if (filter) { ui.filter = filter.dataset.filter; ui.shown = 25; for (const b of $$("[data-filter]")) b.setAttribute("aria-pressed", String(b === filter)); return render(); }
+    const loadRange = event.target.closest("[data-load-range]");
+    if (loadRange) {
+      ui.loadRange = Number(loadRange.dataset.loadRange);
+      for (const b of $$("[data-load-range]")) b.setAttribute("aria-pressed", String(b === loadRange));
+      render();
+      return refreshLoad(ui.loadRange);
+    }
+    const thread = event.target.closest("[data-thread]");
+    if (thread) { ui.search = thread.dataset.thread; $("#search").value = ui.search; ui.shown = 25; return showTab("history"); }
+    const run = event.target.closest("[data-id][data-attempt]");
+    if (run) return openRun(run.dataset.id, run.dataset.attempt, run, run.dataset.pane ?? "summary");
+  });
+  document.addEventListener("change", event => {
+    const select = event.target.closest(".term-select");
+    if (!select || !select.value) return;
+    ui.pinned.set(select.closest(".lane").dataset.source, select.value);
+    render();
+    refreshTerminals();
+  });
+  $("#pause").addEventListener("click", openPause);
+  $("#pause-confirm").addEventListener("click", confirmPause);
+  $("#pause-cancel").addEventListener("click", () => $("#pause-dialog").close());
+  $("#pause-reason").addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); confirmPause(); } });
+  // Escape, Cancel, and Pause all close the dialog, and the keyboard returns to the button that opened it.
+  $("#pause-dialog").addEventListener("close", () => $("#pause").focus());
+  $("#drawer-close").addEventListener("click", closeRun);
+  $("#scrim").addEventListener("click", closeRun);
+  $("#search").addEventListener("input", event => { ui.search = event.target.value.trim(); ui.shown = 25; render(); });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && ui.drawer) return closeRun();
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName);
+    if (!typing && !ui.drawer && !$("#pause-dialog").open && !event.ctrlKey && !event.metaKey && !event.altKey && /^[1-6]$/.test(event.key)) return showTab(TABS[Number(event.key) - 1]);
+    const row = event.target.closest?.("tr[data-id], tr[data-thread]");
+    if (row && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); row.click(); }
+  });
+  document.addEventListener("mousemove", showTip);
+  document.addEventListener("focusin", showTip);
+  document.addEventListener("focusout", () => { $("#tip").hidden = true; });
+  document.addEventListener("mouseleave", () => { $("#tip").hidden = true; });
+  window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+  let resized;
+  window.addEventListener("resize", () => { clearTimeout(resized); resized = setTimeout(() => { for (const el of $$("[id^=chart-]")) el._html = null; render(); }, 150); });
+
+  // Poll while the page is visible: the state every four seconds, the lanes' output every three, the load every minute.
+  let timers = [];
+  const schedule = () => {
+    for (const timer of timers) clearInterval(timer);
+    timers = document.hidden ? [] : [
+      setInterval(refresh, 4000),
+      setInterval(refreshTerminals, 3000),
+      setInterval(() => refreshLoad(1), 60_000),
+      setInterval(() => { if (ui.drawer && (ui.drawer.data?.state === "running" || !ui.drawer.data?.endedAt)) { loadRun(); } }, 3000),
+    ];
+  };
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { refresh(); refreshTerminals(); } schedule(); });
+  showTab(location.hash.slice(1));
+  refresh().then(refreshTerminals);
+  refreshLoad(1);
+  schedule();
+});

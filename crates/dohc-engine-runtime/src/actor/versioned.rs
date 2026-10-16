@@ -1796,7 +1796,15 @@ pub(super) fn delete_owned_scene_assets_in_tx(
                 request_id: None,
                 metadata_origin: "ydoc".to_owned(),
                 metadata_summary: Some("Deleted drawing asset".to_owned()),
-                metadata_correlation_id: Some(drawing_delete.moment.moment_id.clone()),
+                metadata_correlation_id: Some(
+                    drawing_delete
+                        .moment
+                        .metadata_correlation_id
+                        .as_ref()
+                        .filter(|id| id.starts_with(dohc_engine_domain::OPERATION_ID_PREFIX))
+                        .cloned()
+                        .unwrap_or_else(|| drawing_delete.moment.moment_id.clone()),
+                ),
                 author_json: drawing_delete.moment.author_json.clone(),
                 now_ms: drawing_delete.moment.recorded_at_ms,
             },
@@ -1873,7 +1881,7 @@ fn scene_asset_delete_moments(
             .query_row(
                 "SELECT recorded_at_ms FROM moments WHERE workspace_id=?1 AND version_id=?2 \
                  AND moment_id=?3 AND operation='delete' AND before_content_kind='binary' \
-                 AND metadata_origin IN ('ydoc','local-file') AND metadata_correlation_id=?4 \
+                 AND metadata_origin IN ('ydoc','local-file') AND (metadata_correlation_id=?4 OR metadata_correlation_id=(SELECT metadata_correlation_id FROM moments WHERE workspace_id=?1 AND moment_id=?4 AND metadata_correlation_id LIKE 'dohc-operation:%')) \
                  AND path=?5 AND before_binary_sha256=?6",
                 params![
                     workspace_id,
@@ -1924,7 +1932,7 @@ fn scene_asset_deletes_ready_for_rollback(
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?2 \
                  AND moment_id=?3 AND operation='delete' AND before_content_kind='binary' \
-                 AND metadata_origin IN ('ydoc','local-file') AND metadata_correlation_id=?4 \
+                 AND metadata_origin IN ('ydoc','local-file') AND (metadata_correlation_id=?4 OR metadata_correlation_id=(SELECT metadata_correlation_id FROM moments WHERE workspace_id=?1 AND moment_id=?4 AND metadata_correlation_id LIKE 'dohc-operation:%')) \
                  AND path=?5 AND before_binary_sha256=?6)",
                 params![
                     workspace_id,

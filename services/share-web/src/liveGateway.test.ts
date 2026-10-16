@@ -686,3 +686,11 @@ it("contains stalled writes across two links in one workspace while another work
   } finally {completions.forEach(complete => complete());}
   await vi.waitFor(() => expect(budget.usage()).toBe(0));
 }, 60_000);
+
+it("keeps an unrelated connection while its account is resolving",async()=>{
+  const entered=deferred<void>(),resolved=deferred<typeof session>();
+  const state=await fixture({resolveSession:async()=>{entered.resolve();return resolved.promise;}});
+  const socket=state.browser();await entered.promise;
+  state.gateway.deleteAccount("unrelated",["unrelated-workspace"]);resolved.resolve(session);
+  expect(await socket.status).toBe(101);expect(socket.socket.readyState).toBe(WebSocket.OPEN);
+});

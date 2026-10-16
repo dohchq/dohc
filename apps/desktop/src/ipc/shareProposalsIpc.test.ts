@@ -83,7 +83,8 @@ async function harness() {
     delete workspace.remote;
     workspace.shareView = {
       shareId: "pinned-share", granterEmail: "granter@example.test", genericChatWritable: false,
-      grantedSelector: { paths: ["docs"], versionId: null, access }, relayUrl: credentials.relayUrl, ended,
+      grantedSelector: { paths: ["docs"], versionId: null, access }, relayUrl: credentials.relayUrl,
+      recipientUserId: credentials.userId, ended,
     };
   };
   return { workspace, authorities, attachmentId, cache, warm, list, read, readOp, settle, listMine, withdraw,

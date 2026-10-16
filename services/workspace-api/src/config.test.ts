@@ -106,10 +106,10 @@ describe("readConfig", () => {
     expect(() => readConfig(env({ DOHC_SMTP_HOST: "smtp.example.com" }))).toThrow(ConfigError);
   });
 
-  it("keeps sign-up open when no approved address is listed", () => {
+  it("opens sign-up when the allowlist is omitted or empty", () => {
     expect(readConfig(env()).signUp).toBeNull();
-    expect(readConfig(env({ DOHC_SIGN_UP_EMAILS: "" })).signUp).toBeNull();
-    expect(readConfig(env({ DOHC_SIGN_UP_EMAILS: " , " })).signUp).toBeNull();
+    expect(readConfig(env({ DOHC_SIGN_UP_EMAILS: "", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" })).signUp).toBeNull();
+    expect(readConfig(env({ DOHC_SIGN_UP_EMAILS: " , ", WORKSPACE_API_RELAY_URL: "http://sync-relay:1788" })).signUp).toBeNull();
   });
 
   it("closes sign-up to the normalized approved list and the relay's pending invites", () => {

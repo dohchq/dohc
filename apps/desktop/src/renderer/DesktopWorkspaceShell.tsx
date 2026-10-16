@@ -7,6 +7,7 @@ import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
+import { matchShellShortcut } from "../shortcuts/shortcutRegistry";
 import { hasBlockingModal } from "./modalFocus";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
@@ -89,6 +90,7 @@ import { useCrashReport } from "./shell/useCrashReport";
 import { useAutomationHolds } from "./shell/useAutomationHolds";
 import { CollectionFieldMarksProvider } from "./collections/collectionFieldMarks";
 import { useCloudPresence } from "./shell/useCloudPresence";
+import type { AccountDeletion } from "./shell/useAccountDeletion";
 import type { ConnectionErrorReport } from "./shell/connectionNotices";
 import { reportInstallationFailure, useInstallationNotices } from "./shell/installationNotices";
 import type { CloudSettings } from "./settings/CloudSyncSettings";
@@ -523,6 +525,8 @@ export function DesktopWorkspaceShell(props: {
   onShareHandoffOpened?: () => void;
   // Notices sent to this person, owned above the shell.
   sentNotices?: SentNotices;
+  // The account deletion review, owned above the shell.
+  accountDeletion: AccountDeletion;
   openOnReady?: OpenOnSwitch;
 }) {
   const workspaceShareMounts = props.workspace.shareMounts ?? EMPTY_SHARE_MOUNTS;
@@ -632,12 +636,6 @@ export function DesktopWorkspaceShell(props: {
   }, []);
   const openAgentSettings = useCallback(() => openSettings("agents"), [openSettings]);
 
-  const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
-    props.workspace.workspaceId,
-    props.userSettings,
-    settingsSection,
-  );
-
   const workspaceId = props.workspace.workspaceId;
   const focusRoot = useRef<HTMLDivElement>(null);
   useFocusReturn(true, focusRoot, () => document.querySelector<HTMLElement>('[data-focus-surface="workspace"]'));
@@ -738,6 +736,13 @@ export function DesktopWorkspaceShell(props: {
   const workspaceIsReady =
     workspaceReadyFor?.workspaceId === workspaceId &&
     workspaceReadyFor.selectionGeneration === workspaceSelectionGeneration;
+  const { agentSetup, readAgentStatusForHistory } = useAgentSetup(
+    workspaceId,
+    props.userSettings,
+    settingsSection,
+    workspaceIsReady,
+  );
+
   const [workspaceOpenFailedFor, setWorkspaceOpenFailedFor] = useState<{
     workspaceId: string;
     selectionGeneration: number;
@@ -792,6 +797,7 @@ export function DesktopWorkspaceShell(props: {
     shellErrors,
     hideShellError,
     reportShellError,
+    reportButtonError,
     reportShellFailure,
     reportShareCapture,
     clearKind,
@@ -918,7 +924,9 @@ export function DesktopWorkspaceShell(props: {
     [reportShellError],
   );
   const { chatCollaboration, refreshCloudStatus, workspaceSynced, cloudStatus, cloudStatusUnreadable } =
-    useCloudPresence(workspaceId, reportCloudStatusUnavailable);
+    useCloudPresence(workspaceId, reportCloudStatusUnavailable, workspaceIsReady);
+  const { start: startAccountDeletion, reviewing: reviewingAccountDeletion, attach: attachAccountDeletion } =
+    props.accountDeletion;
   // Closing Settings reads the status again, as the old Cloud dialog did on
   // close. The page's own refresh after an enable covers only its own
   // change: another window's Try again can make main adopt this account's
@@ -942,12 +950,15 @@ export function DesktopWorkspaceShell(props: {
   // A failure from the Cloud dialog or the Sync and sharing page. The notice
   // outlives both, so its Try again reopens the dialog with the address that
   // failed, or whichever of the two now applies, once the source has closed.
+  // An open deletion review holds the account until it ends, so a Try again
+  // then does nothing: no sign-in, Disconnect, or new review starts under it.
   const reportConnectionError = useCallback(
     (error: ConnectionErrorReport) => {
       reportShellFailure({
         message: error.message,
         cause: error.cause,
         retry: () => {
+          if (reviewingAccountDeletion()) return;
           if (error.retry?.()) return;
           if (error.serverUrl === null) return openCloud();
           setCloudRetryServerUrl(error.serverUrl);
@@ -955,7 +966,20 @@ export function DesktopWorkspaceShell(props: {
         },
       });
     },
-    [openCloud, reportShellFailure],
+    [reviewingAccountDeletion, openCloud, reportShellFailure],
+  );
+  // After useShellError's, so this shell attaches with its notices started:
+  // an answer to a delete sent from the previous workspace's shell reports here.
+  useEffect(
+    () =>
+      attachAccountDeletion({
+        cloudStatus,
+        report: reportConnectionError,
+        showSuccess: showSuccessNotice,
+        showWarning: showWarningNotice,
+        onEnded: refreshCloudStatus,
+      }),
+    [attachAccountDeletion, cloudStatus, refreshCloudStatus, reportConnectionError, showSuccessNotice, showWarningNotice],
   );
   // Unguarded by workspace: an installation-wide failure is news here.
   useInstallationNotices(reportConnectionError);
@@ -978,8 +1002,9 @@ export function DesktopWorkspaceShell(props: {
         if (current()) reportConnectionError(error);
       },
       onAccountError: reportInstallationFailure,
+      onDeleteAccount: startAccountDeletion,
     };
-  }, [closeSettings, cloudStatus, cloudStatusUnreadable, refreshCloudStatus, reportConnectionError, workspaceId]);
+  }, [startAccountDeletion, closeSettings, cloudStatus, cloudStatusUnreadable, refreshCloudStatus, reportConnectionError, workspaceId]);
   // About's section reads report through this shell's notices, one row per
   // section and file. A repeat keeps an existing row's toast state only for
   // an unchanged message. A changed message, or a missing row, toasts again.
@@ -1768,6 +1793,7 @@ export function DesktopWorkspaceShell(props: {
   // by the same rule as every other answer, and issued after the observation,
   // so it is the freshest thing available.
   const refreshAgentLane = useCallback(() => {
+    if (!workspaceIsReady) return;
     const token = ++engineHistoryToken.current;
     agentActiveLane.settle(
       token,
@@ -1778,7 +1804,7 @@ export function DesktopWorkspaceShell(props: {
           refreshAgentLane(),
         ),
     );
-  }, [agentActiveLane, reportLaneFailure, workspaceId]);
+  }, [agentActiveLane, reportLaneFailure, workspaceId, workspaceIsReady]);
   const onSettingsAgentActiveChange = useCallback(
     ({ active, mutated }: { active: boolean; mutated: boolean }) => {
       if (!mutated) {
@@ -3794,88 +3820,6 @@ export function DesktopWorkspaceShell(props: {
     invalidateVisibility,
   ]);
 
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      // A stopped workspace answers no workspace shortcut.
-      if (storeUpdateRequiredRef.current) return;
-      const mod = event.metaKey || event.ctrlKey;
-      if (!mod) return;
-      if (event.metaKey && event.ctrlKey) return;
-      if (event.defaultPrevented) return;
-      if (event.repeat || event.isComposing) return;
-      const key = event.key.toLowerCase();
-      const secondarySidebarKey =
-        event.altKey &&
-        (key === "b" || (event.metaKey && event.code === "KeyB"));
-      if (event.key === "," && !event.shiftKey && !event.altKey) {
-        if (!hasBlockingModal()) {
-          event.preventDefault();
-          openSettings();
-        }
-        return;
-      }
-      if (
-        key === "z" &&
-        !event.shiftKey &&
-        !event.altKey
-      ) {
-        const activeUndo = undoForEditor(wbRef.current.activeEditorGroup);
-        if (activeUndo?.acceptsEvent(event)) {
-          event.preventDefault();
-          void activeUndo.run().catch((error) =>
-            reportShellError("Could not undo the last history restore.", error),
-          );
-        }
-        return;
-      }
-      // Zoom chords are deliberately absent here: they are native menu
-      // accelerators (applicationMenu.ts), so they work on windows that
-      // never mount this shell.
-      // This handler owns main-frame shortcuts. On Windows/Linux the menu only
-      // displays them. On macOS it is the unhandled fallback, so preventing a
-      // claimed keydown also prevents a duplicate menu command. Shift and Caps
-      // Lock affect key casing, so routing uses modifiers and a normalized key.
-      if (event.shiftKey && key !== "p") return;
-      if (event.altKey && !secondarySidebarKey) return;
-      if (key === "n") {
-        event.preventDefault();
-        setNewFileOpen(true);
-      } else if (key === "k" || (key === "p" && event.shiftKey)) {
-        event.preventDefault();
-        setPaletteOpen((open) => !open);
-      } else if (key === "p") {
-        event.preventDefault();
-        setQuickOpenOpen((open) => !open);
-      } else if (secondarySidebarKey) {
-        // CommandOrControl+Alt+B mirrors VS Code's secondary-sidebar toggle,
-        // which is the About rail.
-        event.preventDefault();
-        mutateWb(toggleAbout);
-      } else if (key === "b") {
-        event.preventDefault();
-        toggleSidePanel();
-      } else if (key === "w") {
-        // CommandOrControl+W closes the tab. Close Window keeps the separate
-        // CommandOrControl+Shift+W native accelerator.
-        event.preventDefault();
-        closeActiveTab();
-      } else if (key === "\\") {
-        event.preventDefault();
-        openEditorGroupRight();
-      }
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [
-    closeActiveTab,
-    openEditorGroupRight,
-    mutateWb,
-    openSettings,
-    reportShellError,
-    toggleSidePanel,
-    undoForEditor,
-  ]);
-
   const openWorkspaceFolder = useCallback(async function openWorkspaceFolder() {
     try {
       const picked = await bridge().pickWorkspaceRoot();
@@ -3969,6 +3913,45 @@ export function DesktopWorkspaceShell(props: {
     () => paletteCommandRows(commandContext).map((row) => ({ ...row, run: commandHandlers[row.id] })),
     [commandContext, commandHandlers],
   );
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      // A stopped workspace answers no workspace shortcut.
+      if (storeUpdateRequiredRef.current) return;
+      const command = matchShellShortcut(event);
+      if (!command) return;
+      if (command === "settings") {
+        if (!hasBlockingModal()) {
+          event.preventDefault();
+          openSettings();
+        }
+        return;
+      }
+      if (command === "history-restore-undo") {
+        const activeUndo = undoForEditor(wbRef.current.activeEditorGroup);
+        if (activeUndo?.acceptsEvent(event)) {
+          event.preventDefault();
+          void activeUndo.run().catch((error) =>
+            reportShellError("Could not undo the last history restore.", error),
+          );
+        }
+        return;
+      }
+      // Editors see the key first. preventDefault keeps the macOS native
+      // fallback from dispatching the same command a second time.
+      event.preventDefault();
+      if (command === "command-palette") setPaletteOpen((open) => !open);
+      else if (command === "quick-open") setQuickOpenOpen((open) => !open);
+      else commandHandlers[command]();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    commandHandlers,
+    openSettings,
+    reportShellError,
+    undoForEditor,
+  ]);
 
   useEffect(() => {
     return bridge().onMenuCommand((command) => {
@@ -5679,7 +5662,7 @@ export function DesktopWorkspaceShell(props: {
                 knownMarkdownFiles={markdownWikilinkFiles}
                 appFolder={appEntries.get(tabPath) ?? null}
                 onRunApp={openAppTab}
-                onButtonError={reportShellError}
+                onButtonError={reportButtonError}
                 onButtonNotice={showSuccessNotice}
                 onOpenRecordHistory={recordHistory.open}
                 accessEnded={shareViewEnded}
@@ -5697,6 +5680,9 @@ export function DesktopWorkspaceShell(props: {
                 <span className="text-sm text-muted">
                   Select a file, or create one
                 </span>
+                {/* Known exceptions to the shortcut registry, pinned in
+                    DesktopWorkspaceShell.shortcuts.test.tsx until macOS
+                    shows its own keys here. */}
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -6262,6 +6248,8 @@ export function DesktopWorkspaceShell(props: {
       {settingsSection ? (
         <Overlay onClose={closeSettings}>
           <LazyDesktopSettings
+            workspaceIsReady={workspaceIsReady}
+            workspaceOpenFailed={!!workspaceOpenFailure}
             onError={reportSettingsFailure}
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}

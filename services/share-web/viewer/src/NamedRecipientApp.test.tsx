@@ -3,7 +3,8 @@ import {act} from "react";
 import {createRoot, type Root} from "react-dom/client";
 import {afterEach, beforeEach, expect, it, vi} from "vitest";
 import {markdownToYDoc, getDohcYDocBodyFragment} from "@dohc/ydoc-projection";
-import type {NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
+import {createNamedLiveBrowserTransport, type NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
+import {SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER} from "@dohc/workspace-contracts/relay-values";
 import NamedRecipientApp from "./NamedRecipientApp";
 import {jsonResponse, settle, setControlValue} from "./testing";
 
@@ -64,6 +65,23 @@ it("signs in through the account endpoint, opens current files, and waits for li
   await act(async () => {sessions[0]!.state = {...sessions[0]!.state, status: "live"}; sessions[0]!.notify();});
   expect(container.querySelector('[role="textbox"]')?.getAttribute("contenteditable")).toBe("true");
   expect(fetch.mock.calls.every(([, init]) => init?.credentials === "same-origin")).toBe(true);
+});
+it("stamps the compiled share-web version on every request, including live admission", async () => {
+  const transport = await vi.importActual<typeof import("@dohc/ydoc-projection/named-live-browser-transport")>("@dohc/ydoc-projection/named-live-browser-transport");
+  // The real transport requires an HTTPS origin; jsdom serves the page over HTTP.
+  vi.mocked(createNamedLiveBrowserTransport).mockImplementationOnce(options =>
+    transport.createNamedLiveBrowserTransport({...options, publicOrigin: "https://share.example.test"}));
+  const path = (input: RequestInfo | URL) => new URL(String(input), "https://share.example.test").pathname;
+  const fetch = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    if (path(input) === "/api/account/session") return jsonResponse({user: {id: "alice", name: "Alice"}});
+    if (path(input) === "/api/live/named-documents") return jsonResponse(files());
+    if (path(input) === "/api/live/named-session") return jsonResponse({discriminator: "d".repeat(12), expiresAtMs: Date.now() + 60_000});
+    return jsonResponse({});
+  });
+  vi.stubGlobal("fetch", fetch); await render(); await click("docs/a.md");
+  await settle(() => fetch.mock.calls.some(([input]) => path(input) === "/api/live/named-ticket"));
+  expect(fetch.mock.calls.map(([input]) => path(input))).toEqual(expect.arrayContaining(["/api/live/named-session", "/api/live/named-ticket"]));
+  for (const [input, init] of fetch.mock.calls) expect(new Headers(init?.headers).get(SHARE_WEB_API_VERSION_HEADER), path(input)).toBe(String(SHARE_WEB_API_VERSION));
 });
 it("keeps a quarantined draft until explicit discard, then opens a fresh session without merging its old state", async () => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input) === "/api/account/session" ? jsonResponse({user: {id: "alice", name: "Alice"}}) : jsonResponse(files())));

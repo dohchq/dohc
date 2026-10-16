@@ -9,10 +9,23 @@ describe("share-web configuration", () => {
     DOHC_SHARE_WEB_RELAY_URL: "http://relay:1788",
     DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
     DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+    DOHC_SHARE_WEB_INTERNAL_HOSTS: "share-web:1790",
     DOHC_SHARE_WEB_PUBLIC_ORIGIN: "https://share.example.test",
     DOHC_SHARE_WEB_AUTH_URL: "http://workspace-api:1786",
   };
 
+  it("keeps internal deletion hosts separate from public hosts",()=>{
+    expect(loadShareWebConfig({...accountEnvironment,DOHC_SHARE_WEB_INTERNAL_HOSTS:undefined}).internalHosts.size).toBe(0);
+    const config=loadShareWebConfig({...accountEnvironment,DOHC_SHARE_WEB_INTERNAL_HOSTS:"share-web:1790"});
+    expect([...config.internalHosts]).toEqual(["share-web:1790"]);
+    expect(config.publicHosts.has("share-web:1790")).toBe(false);
+    expect(()=>loadShareWebConfig({...accountEnvironment,DOHC_SHARE_WEB_INTERNAL_HOSTS:"share-web:1790,"})).toThrow(/INTERNAL_HOSTS/);
+  });
+  it.each(["test", "production"])("requires internal deletion hosts with an exchange key in %s",nodeEnv=>{
+    const env={...accountEnvironment,NODE_ENV:nodeEnv,DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY:"x".repeat(32)};
+    for(const hosts of [undefined, ""]) expect(()=>loadShareWebConfig({...env,DOHC_SHARE_WEB_INTERNAL_HOSTS:hosts})).toThrow("DOHC_SHARE_WEB_INTERNAL_HOSTS must be set");
+    expect(loadShareWebConfig(env).internalHosts).toEqual(new Set(["share-web:1790"]));
+  });
   it("uses the supported self-host live profile while retaining explicit deployment requirements", () => {
     const env = {...accountEnvironment, DOHC_SELF_HOST_LIVE: "1", DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32)};
     const config = loadShareWebConfig(env);
@@ -245,6 +258,7 @@ describe("share-web configuration", () => {
         DOHC_SHARE_WEB_RELAY_URL: "https://relay.example.test",
         DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
         DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: relayExchangeKey,
+        DOHC_SHARE_WEB_INTERNAL_HOSTS: "share-web:1790",
         DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
       });
 

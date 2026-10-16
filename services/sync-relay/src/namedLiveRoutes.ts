@@ -106,6 +106,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
   const server = new WebSocketServer(wsOptions);
   const connections = new Set<() => void>(), admission = options.admission ?? createLiveConnectionAdmission();
   const buffers = admission.buffers(limits.maxBufferedBytes), validationBuffers = admission.validationBuffers(limits.maxBufferedBytes);
+  const connectionScopes = new Map<() => void, {userId?: string; workspaceId: string}>();
   const shutdown = new AbortController();
   const storage = options.storage, editors = liveEditors(storage);
   const captureNative = options.captureNative.bind(options), validate = options.validate;
@@ -220,6 +221,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
       if (opening || !done) return;
       await session?.settled();
       if (closingForLimit && ws && ws.readyState !== WebSocket.CLOSED) await new Promise<void>(resolve => ws!.once("close", resolve));
+      connectionScopes.delete(stop);
       if (!connections.delete(stop)) return;
       releaseEditor?.(); releaseAuthority?.(); releaseConnection?.(); releaseRefusal?.();
     }
@@ -277,6 +279,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
       if (options.kind === "owner") {
         const {document, shareId} = ownerTarget!;
         const actor = await options.resolveActor(authenticated, document.workspaceId); signal.throwIfAborted(); check();
+        connectionScopes.set(stop, {userId: actor.userId, workspaceId: document.workspaceId});
         if (actor.workspaceId !== document.workspaceId || !storage.workspaceIsOwnedBy(document.workspaceId, actor.userId)) throw new Error();
         const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: actor.userId, shareId}});
         if (current.kind !== "current") throw new Error();
@@ -296,6 +299,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
       } else {
         const context = await options.sessions.resolve(authenticated, discriminator); signal.throwIfAborted(); check();
         if (!context || context.kind !== kind) { stop(); return; }
+        connectionScopes.set(stop, {workspaceId: context.workspaceId, ...(context.kind === "named" ? {userId: context.userId} : {})});
         const principalKey = context.kind === "named" ? context.userId : context.profileTokenHash;
         const reservations: [string, number, LiveConnectionLimitCode][] = [
           [JSON.stringify(["session", context.kind, principalKey, context.workspaceId, context.grantId, discriminator]), limits.maxConnectionsPerSession, "live_session_limit"],
@@ -338,6 +342,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
           failed(error) { if (error instanceof LiveConnectionLimitError) refuseLimit(error.code); }, transport: {
           send(bytes) {
             if (done || accepted.readyState !== WebSocket.OPEN || accepted.bufferedAmount > limits.maxPendingBytes - bytes.length) return Promise.reject(new Error("Named transport unavailable."));
+            host!.assertCurrent();
             let releaseBytes: () => void;
             try { releaseBytes = reserveBytes(bytes.length); } catch (error) { return Promise.reject(error); }
             return new Promise<void>((resolve, reject) => {
@@ -358,6 +363,12 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     finally { opening = false; void release(); }
   }
   return { handle, handleUpgrade,
+    deleteAccount(userId: string, workspaceIds: readonly string[]) {
+      for (const stop of connections) {
+        const scope = connectionScopes.get(stop);
+        if (scope && (scope.userId === userId || workspaceIds.includes(scope.workspaceId))) stop();
+      }
+    },
     close() { if (closed) return; closed = true; shutdown.abort(); for (const stop of [...connections]) stop(); server.close(); },
   };
 }
