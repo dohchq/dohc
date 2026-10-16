@@ -51,6 +51,13 @@ describe("named share chat author names", () => {
     }
   });
 
+  it("names a post Unnamed when the account name lookup fails", async () => {
+    const f = await fixture(() => Promise.reject(new Error("accounts unavailable")));
+    expect(await json(await f.push(sequenced([message("human")])))).toMatchObject({inserted: 1, skipped: 0});
+    expect(JSON.parse(f.coordinate(0)!.payloadJson)).toMatchObject({authorDisplayName: "Unnamed"});
+    expect(f.coordinate(0)?.admittedAuthorSnapshot).toEqual([{kind: "human", humanId: "recipient", humanName: "Unnamed"}]);
+  });
+
   it.each(["human", "agent", "automation"] as const)("stores and serves the account name for a %s reaction and reuses it after a rename", async authorKind => {
     let name = "Recipient";
     const f = await fixture(() => name);

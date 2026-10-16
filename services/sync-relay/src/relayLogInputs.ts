@@ -95,7 +95,8 @@ export async function parseNamedShareLogOps(
   lookupUserDisplayName?: LogAuthorNameLookup,
 ): Promise<SyncRelayLogInput[]> {
   let lookup: Promise<string | null> | undefined;
-  const accountName = () => lookup ??= Promise.resolve(lookupUserDisplayName?.(actorUserId) ?? null);
+  // A failed lookup leaves the post unnamed rather than refusing it.
+  const accountName = () => lookup ??= Promise.resolve().then(() => lookupUserDisplayName?.(actorUserId) ?? null).catch(() => null);
   const ops = await parseAuthenticatedLogOps(values, actorUserId, accountName);
   const chatOps = ops.filter(op => op.opKind === "chat.message.append" || op.opKind === "chat.reaction.set");
   if (chatOps.length === 0) return ops;
