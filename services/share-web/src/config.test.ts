@@ -296,7 +296,7 @@ it.each(["named", "link"])("rejects a %s browser credit window larger than the g
   const env = {NODE_ENV: "test", DOHC_SELF_HOST_LIVE: "1", DOHC_SHARE_WEB_RELAY_URL: "http://relay:1788",
     DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test", DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
     DOHC_SHARE_WEB_PUBLIC_ORIGIN: "https://share.example.test", DOHC_SHARE_WEB_AUTH_URL: "http://workspace-api:1786",
-    DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32)};
+    DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_SHARE_WEB_INTERNAL_HOSTS: "share-web:1790"};
   const override = mode === "named" ? {DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS: JSON.stringify(editor)} :
     {DOHC_SHARE_WEB_LINK_LIVE_LIMITS: JSON.stringify({requests: profile.requests, gateway: profile.gateway, editor})};
   expect(() => loadShareWebConfig({...env, ...override})).toThrow("browser frames exceed gateway capacity");
