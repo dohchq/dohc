@@ -1,8 +1,26 @@
 // @vitest-environment jsdom
 import { execFileSync } from "node:child_process";
+import { globSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { getConfig } from "@testing-library/dom";
 import { describe, expect, it, vi } from "vitest";
+import { leakingHelpers, needsOwnWorker } from "../vitest.projects.ts";
+
+const desktopRoot = resolve(import.meta.dirname, "..");
+const sourcePaths = (pattern: string) => globSync(pattern, { cwd: desktopRoot }).map((path) => path.replaceAll("\\", "/"));
+const readSource = (path: string) => readFileSync(resolve(desktopRoot, path), "utf8");
+
+interface ResolvedProject { name: string; maxWorkers: number; isolate: boolean; files: string[] }
+
+let resolved: ResolvedProject[] | undefined;
+function resolvedProjects(): ResolvedProject[] {
+  resolved ??= JSON.parse(execFileSync(process.execPath, [resolve(import.meta.dirname, "vitestProjects.fixture.mjs")], {
+    cwd: desktopRoot,
+    encoding: "utf8", timeout: 20_000, stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, VITEST_MAX_WORKERS: "" },
+  }).trim().split(/\r?\n/u).at(-1)!) as ResolvedProject[];
+  return resolved;
+}
 
 // Guards that `vitest.setup.ts` is registered, not what it does.
 //
@@ -19,32 +37,6 @@ import { describe, expect, it, vi } from "vitest";
 // Setup files run per test file, so the method being present here is the same
 // registration that puts it in every other file.
 describe("apps/desktop vitest setup", () => {
-  it("honors an explicit CLI worker limit in every resolved project", () => {
-    const output = execFileSync(process.execPath, ["--input-type=module", "--eval", `
-      import { createVitest, parseCLI } from "vitest/node";
-      const { options } = parseCLI("vitest run --maxWorkers=1");
-      const context = await createVitest("test", {
-        ...options, config: "./vitest.config.ts", watch: false,
-      });
-      try {
-        console.log(JSON.stringify(context.projects.map(project => ({
-          name: project.name,
-          maxWorkers: project.config.maxWorkers ?? context.config.maxWorkers,
-        }))));
-      } finally {
-        await context.close();
-      }
-    `], {
-      cwd: resolve(import.meta.dirname, ".."),
-      encoding: "utf8", timeout: 20_000, stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, VITEST_MAX_WORKERS: "" },
-    });
-    expect(JSON.parse(output.trim().split(/\r?\n/u).at(-1)!)).toEqual([
-      { name: "desktop", maxWorkers: 1 },
-      { name: "file-inspector-helpers", maxWorkers: 1 },
-    ]);
-  });
-
   it("is registered, so jsdom has the document.elementFromPoint ProseMirror calls", () => {
     expect(typeof document.elementFromPoint).toBe("function");
   });
@@ -75,5 +67,62 @@ describe("apps/desktop vitest setup", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// The desktop tests run in an isolated project and in shared projects, one per
+// environment. vitest.projects.ts decides which files may share a worker.
+describe("apps/desktop vitest projects", () => {
+  it("honors an explicit CLI worker limit in every resolved project", () => {
+    const projects = resolvedProjects();
+    expect(projects.length).toBeGreaterThan(1);
+    expect(projects.filter((project) => project.maxWorkers !== 1)).toEqual([]);
+  });
+
+  it("runs every desktop test file in exactly one project", () => {
+    const runs = resolvedProjects().flatMap((project) => project.files).sort();
+    expect(runs).toEqual(sourcePaths("src/**/*.test.{ts,tsx}").sort());
+  });
+
+  it("shares a worker only among files of one environment that the rule lets share", () => {
+    const helpers = leakingHelpers(new Map(sourcePaths("src/**/*.{ts,tsx}")
+      .filter((path) => !/\.test\.tsx?$/u.test(path))
+      .map((path) => [path, readSource(path)])));
+    const shared = resolvedProjects().filter((project) => !project.isolate);
+    expect(shared.length).toBeGreaterThan(0);
+    for (const project of shared) {
+      const sources = project.files.map(readSource);
+      expect(new Set(sources.map((source) => source.includes("@vitest-environment jsdom"))).size, project.name).toBe(1);
+      expect(project.files.filter((_, index) => needsOwnWorker(sources[index], helpers)), project.name).toEqual([]);
+    }
+  });
+});
+
+describe("the rule that gives a desktop test file a worker of its own", () => {
+  const helpers = leakingHelpers(new Map([
+    ["src/a.testHarness.tsx", 'import { afterEach } from "vitest";\nafterEach(() => {});\n'],
+    ["src/b.testSupport.tsx", 'import { vi } from "vitest";\nimport "./a.testHarness";\n'],
+    ["src/c.ts", 'export * from "./b.testSupport.tsx";\n'],
+    ["src/d.testSupport.ts", 'import { afterEach, vi } from "vitest";\nexport function track() {\n  afterEach(() => {});\n  return vi.fn();\n}\n'],
+    ["src/legendList.ts", 'import { vi } from "vitest";\nvi.mock("@legendapp/list");\n'],
+  ]));
+
+  it("finds the helpers that register hooks or mocks when imported, through any import", () => {
+    expect([...helpers].sort()).toEqual(["a.testHarness", "b.testSupport", "c", "legendList"]);
+  });
+
+  it.each([
+    ['vi.mock("./store");', true],
+    ['vi.doMock("./store");', true],
+    ["vi.resetModules();", true],
+    ['import "./a.testHarness";', true],
+    ['import { render } from "../c";', true],
+    ['const { mount } = await import("./b.testSupport");', true],
+    ['import { track } from "./d.testSupport";', false],
+    ['vi.stubGlobal("dohcDesktop", bridge);', true],
+    ['vi.stubGlobal("dohcDesktop", bridge);\nafterEach(() => vi.unstubAllGlobals());', false],
+    ['vi.spyOn(console, "error");', false],
+  ])("decides whether %j needs its own worker: %s", (source, own) => {
+    expect(needsOwnWorker(source, helpers)).toBe(own);
   });
 });

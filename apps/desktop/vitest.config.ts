@@ -1,7 +1,9 @@
 import { availableParallelism } from "node:os";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
-import { configDefaults, defineConfig } from "vitest/config";
+import { fileURLToPath } from "node:url";
+import { defineConfig } from "vitest/config";
+import { desktopTestFiles } from "./vitest.projects.ts";
 
 // At most 8 concurrent workers. Fifteen of these suites open their own temp
 // `.dohc/engine/engine.db`, and past roughly eight the filesystem is the
@@ -10,6 +12,20 @@ import { configDefaults, defineConfig } from "vitest/config";
 const WORKER_CAP = Math.min(8, Math.max(2, Math.floor(availableParallelism() / 4)));
 const require = createRequire(import.meta.url);
 const PURE_INSPECTOR_TEST = "src/renderer/FileInspector.test.tsx";
+const tests = desktopTestFiles(dirname(fileURLToPath(import.meta.url)), {
+  exclude: [PURE_INSPECTOR_TEST],
+  // vitest.projects.ts chooses most isolated files from their source. These
+  // files need their own worker for a reason their source does not show.
+  isolated: [
+    // The report bound lasts as long as the window, and the module holds the
+    // count. An earlier file in a shared worker would spend part of it.
+    "src/renderer/rendererErrorReport.bound.test.ts",
+    // datasetAddress.ts keeps dataset identities by content hash for the life
+    // of the process. After an earlier file reads the same descriptor, this
+    // file's publication no longer captures it.
+    "src/workspaces/ownerAppPublication.test.ts",
+  ],
+});
 
 const common = {
   // Source-backed examples outside this package use the same React instance as their desktop tests.
@@ -36,6 +52,13 @@ const common = {
   },
 };
 
+const desktop = {
+  ...common.test,
+  // Renderer hit testing and waits, plus scratch-directory cleanup.
+  setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
+  globalSetup: ["./src/testGlobalSetup.ts"],
+};
+
 // e2e/ runs under Playwright (playwright.config.ts), never vitest.
 export default defineConfig({
   ...common,
@@ -44,18 +67,20 @@ export default defineConfig({
     // Keep the cap global so --maxWorkers also controls each inline project.
     maxWorkers: WORKER_CAP,
     projects: [
+      { ...common, test: { ...desktop, name: "desktop", include: tests.isolated } },
+      // Files in a shared project run one after another in the same worker.
       {
         ...common,
         test: {
-          ...common.test,
-          name: "desktop",
-          include: ["src/**/*.test.{ts,tsx}"],
-          exclude: [...configDefaults.exclude, PURE_INSPECTOR_TEST],
-          // Renderer hit testing and waits, plus scratch-directory cleanup.
-          setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
-          globalSetup: ["./src/testGlobalSetup.ts"],
+          ...desktop,
+          name: "desktop-shared-dom",
+          include: tests.sharedDom,
+          isolate: false,
+          // Each file leaves the next one an empty document, empty storage, and real globals.
+          setupFiles: [...desktop.setupFiles, "./src/testSharedDomSetup.ts"],
         },
       },
+      { ...common, test: { ...desktop, name: "desktop-shared-node", include: tests.sharedNode, isolate: false } },
       {
         ...common,
         test: {
