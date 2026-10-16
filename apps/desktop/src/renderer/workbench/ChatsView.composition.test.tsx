@@ -3,8 +3,9 @@ import "../../testing/legendListMock";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
+import type { ChatDispatchStateForThreadResult, ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
+import { deferred } from "../../testing/deferred";
 import {
   NOW,
   channel,
@@ -117,6 +118,7 @@ describe("ChatsView My agent", () => {
     });
     renderView(vi.fn(), vi.fn(), {
       agentSetup: {
+        workspaceId: "workspace-a",
         preferredName: "Sam",
         agentName: "Nova",
         runnerConfigured: true,
@@ -221,6 +223,7 @@ describe("ChatsView My agent", () => {
     // An active agent run is not a set-up agent.
     renderView(vi.fn(), vi.fn(), {
       agentSetup: {
+        workspaceId: "workspace-a",
         runnerConfigured: false,
         runnerEnabled: false,
         agentRunActive: true,
@@ -671,5 +674,88 @@ describe("group details", () => {
     fireEvent.click(screen.getByTestId("chats-new-channel"));
     expect((screen.getByTestId("chats-new-channel-purpose") as HTMLInputElement).value).toBe("");
     expect(screen.getByRole("radio", { name: "Posts" }).getAttribute("aria-checked")).toBe("true");
+  });
+});
+
+describe("ChatsView agent offer", () => {
+  const ready = {
+    workspaceId: "workspace-a", agentName: "Nova", runnerConfigured: true, runnerEnabled: true, agentRunActive: false,
+  };
+  const withAgent = (agentSetup = ready, onSetupAgent = vi.fn()) => ({
+    mentionCandidates: mentionRoster, agentSetup, onSetupAgent, workspacePath: "C:\\people\\ice\\work",
+  });
+  async function pickAgent(user: ReturnType<typeof userEvent.setup>, prefix: string) {
+    await user.type(screen.getByTestId(`${prefix}-composer`), "@ag");
+    await user.click(screen.getAllByTestId(`${prefix}-mention-option`)[0]!);
+    return screen.getByTestId("composer-agent-offer");
+  }
+
+  it("says a group's new post runs the agent, and leaves when the post starts", async () => {
+    const user = userEvent.setup();
+    bridgeMock.startChannelThread.mockResolvedValue({
+      thread: thread({ id: "thread-new" }), message: message({ threadId: "thread-new", body: "@agent check it" }), viewerAuthorId: "you",
+    });
+    renderView(vi.fn(), vi.fn(), withAgent());
+    await user.click(await screen.findByTestId("chats-channel"));
+    const offer = await pickAgent(user, "chats-new-thread");
+    expect(offer.dataset.state).toBe("runs");
+    expect(screen.getByTestId("composer-agent-offer-reach").textContent).toBe("reaches work");
+    await user.type(screen.getByTestId("chats-new-thread-composer"), "check it{Enter}");
+    await screen.findByTestId("chats-thread-view");
+    expect(screen.queryByTestId("composer-agent-offer")).toBeNull();
+  });
+
+  it("names dispatch's cause and opens Settings → Agents when no runner command is set", async () => {
+    const user = userEvent.setup();
+    const onSetupAgent = vi.fn();
+    renderView(vi.fn(), vi.fn(), withAgent({ ...ready, runnerConfigured: false }, onSetupAgent));
+    await user.click(await screen.findByTestId("chats-channel"));
+    expect((await pickAgent(user, "chats-new-thread")).dataset.state).toBe("no-command");
+    await user.click(screen.getByTestId("composer-agent-offer-setup"));
+    expect(onSetupAgent).toHaveBeenCalledOnce();
+  });
+
+  it("follows a thread's dispatch once read, and leaves when another thread opens", async () => {
+    const user = userEvent.setup();
+    const dispatch = deferred<ChatDispatchStateForThreadResult>();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread(), thread({ id: "thread-2", title: "Second" })] });
+    bridgeMock.chatDispatchStateForThread.mockReturnValueOnce(dispatch.promise);
+    renderView(vi.fn(), vi.fn(), withAgent());
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click((await screen.findAllByTestId("chats-thread"))[0]!);
+    expect((await pickAgent(user, "chats")).dataset.state).toBe("unknown");
+    await act(async () => { dispatch.resolve({ liveRunId: null, pendingCount: 0, paused: true }); });
+    expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("paused");
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await user.click((await screen.findAllByTestId("chats-thread"))[1]!);
+    await screen.findByTestId("chats-thread-view");
+    expect(screen.queryByTestId("composer-agent-offer")).toBeNull();
+  });
+
+  it("says nothing about running in a group's chat, whose dispatch it does not read", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({ channels: [channel({ type: "chat" })], fileThreads: [] });
+    renderView(vi.fn(), vi.fn(), withAgent());
+    await user.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-lane");
+    await waitFor(() => expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).disabled).toBe(false));
+    expect((await pickAgent(user, "chats-lane")).dataset.state).toBe("unknown");
+    expect(screen.getByTestId("composer-agent-offer-reach").textContent).toBe("Reaches work");
+  });
+
+  it("keeps the comment's reply bar clear: the offer floats above the bar", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message(), message({ id: "comment-1", body: "Friday works." })] });
+    renderView(vi.fn(), vi.fn(), withAgent());
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click((await screen.findAllByTestId("chats-comment-reply"))[0]!);
+    const bar = await screen.findByTestId("chats-replying-mode");
+    const offer = await pickAgent(user, "chats");
+    expect(offer.parentElement!.firstElementChild).toBe(bar);
+    await user.click(screen.getByTestId("chats-replying-cancel"));
+    expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
+    expect(screen.getByTestId("composer-agent-offer").dataset.state).toBe("runs");
   });
 });
