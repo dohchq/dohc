@@ -274,11 +274,11 @@ describe("missing sources", () => {
     const names = new Map([["a", "Budget"]]);
     expect(missingSourcesWords([{ datasetId: "a" }, { datasetId: "b" }], 3, (id) => names.get(id))).toEqual({
       unavailable: "dohc could not load changes from Budget and 1 more.",
-      omitted: "History includes up to 128 Collections. 3 more are left out.",
+      omitted: "History includes up to 128 Collections. 3 more are left out. To see a Collection's changes, open it and choose History.",
     });
     expect(missingSourcesWords([], 1, () => undefined)).toEqual({
       unavailable: null,
-      omitted: "History includes up to 128 Collections. 1 more is left out.",
+      omitted: "History includes up to 128 Collections. 1 more is left out. To see a Collection's changes, open it and choose History.",
     });
     expect(missingSourcesWords([], 0, () => undefined)).toEqual({ unavailable: null, omitted: null });
   });

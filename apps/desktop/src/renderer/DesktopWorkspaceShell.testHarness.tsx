@@ -916,12 +916,13 @@ export async function enterMarkdownSource(
   });
 }
 
-// A history page that never lands. The editor-boundary suites measure draft
+// History reads that never land. The editor-boundary suites measure draft
 // flushes and editor identity across renames, deletes, and close-all; the
-// first history commit bumps the inspector's refresh key, which is a
+// first newest-moment answer bumps the inspector's refresh key, which is a
 // different behavior with its own tests.
 export function holdHistory(bridge: ReturnType<typeof makeBridge>) {
   bridge.listHistory = vi.fn(() => new Promise<never>(() => {}));
+  bridge.listEngineMoments = vi.fn(() => new Promise<never>(() => {}));
   return bridge;
 }
 

@@ -157,23 +157,39 @@ describe("history page ordering", () => {
     expect(it0.markReady).toHaveBeenCalledTimes(1);
   });
 
-  // A failed newer refresh has answered nothing, so the older answer is the
-  // only one there is. The failure is the newest refresh's to report, and the
-  // commit does not reset the read state it left behind.
-  it("commits an older page when the newer refresh failed", async () => {
+  // A refresh someone asked again is superseded. Its answer commits neither
+  // while the newer read is in flight nor after that read failed; the rows on
+  // screen stay, and the failure is the newest refresh's to report.
+  it("drops an older page while a newer refresh is in flight", async () => {
     const it0 = mount();
+    await committed(it0, page("shown"));
+    const older = it0.refresh();
+    const newer = it0.refresh();
+    await settle(reads[1]!, page("older"));
+    await older;
+    expect(it0.ids()).toEqual(["shown"]);
+
+    await settle(reads[2]!, page("newer"));
+    await newer;
+    expect(it0.ids()).toEqual(["newer"]);
+  });
+
+  it("keeps the rows on screen when the newer refresh failed, and drops the older page", async () => {
+    const it0 = mount();
+    await committed(it0, page("shown"));
     const older = it0.refresh();
     const newer = it0.refresh();
     const newerFailed = expect(newer).rejects.toThrow("newer failed");
-    await fail(reads[1]!, "newer failed");
+    await fail(reads[2]!, "newer failed");
     await newerFailed;
     expect(it0.hook().readState).toBe("failed");
-    expect(it0.hook().page).toBeNull();
+    expect(it0.ids()).toEqual(["shown"]);
 
-    await settle(reads[0]!, page("older"));
+    await settle(reads[1]!, page("older"));
     await older;
-    expect(it0.ids()).toEqual(["older"]);
+    expect(it0.ids()).toEqual(["shown"]);
     expect(it0.hook().readState).toBe("failed");
+    expect(it0.markReady).toHaveBeenCalledTimes(1);
   });
 
   it("keeps an older failure quiet while a newer refresh is in flight", async () => {
@@ -230,7 +246,6 @@ describe("history page entries and sources", () => {
     const version: TimelineEntry = { kind: "version", version: { id: "draft", workspaceId: "ws-1", kind: "named", name: "Draft", createdAtMs: 95 } };
     await committed(it0, timelinePage([...files({ ...moment("m-2"), momentOrder: 7 }), version, collection, ...files(moment("m-1"))], { workspaceId: "ws-1" }));
     expect(it0.ids()).toEqual(["m-2", "version", "collection", "m-1"]);
-    expect(it0.hook().page?.latestMomentOrder).toBe(7);
   });
 
   // The cursor is main's. The hook hands back the very object it received.
@@ -271,7 +286,7 @@ describe("history page entries and sources", () => {
     const it0 = mount();
     const budget = { datasetId: "00000000-0000-4000-8000-000000000001", reason: "deadline" as const };
     await committed(it0, timelinePage([], { workspaceId: "ws-1", unavailableSources: [budget], completeness: "partial" }));
-    expect(it0.hook().page).toEqual({ entries: [], nextCursor: null, unavailableSources: [budget], omittedSources: 0, latestMomentOrder: -1 });
+    expect(it0.hook().page).toEqual({ entries: [], nextCursor: null, unavailableSources: [budget], omittedSources: 0 });
   });
 
   // A received share has only its imported file History.
@@ -952,6 +967,42 @@ it.each(["failure", "updating"])("retries a %s naming scan once and consumes onl
   expect(fileMoment(it0.hook().page?.entries[0])?.namedAuthor?.label).toContain("ben@test.example");
   await committed(it0, page("refreshed"));
   expect(reads).toHaveLength(4);
+});
+
+const UNREADABLE_RULES = { status: "policy-unreadable" as const, unreadable: [".dohc/files.toml" as const], policyErrors: ["files.toml"] };
+
+// The rules can turn unreadable under rows already shown. A names refresh
+// that finds that hides History the way a refresh would, without a retry.
+it("hides History when a names refresh finds the rules unreadable, and recovers on refresh", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  await committed(it0, page("first"));
+  act(() => notify({ workspaceId: "ws-1" }));
+  await settle(reads[1]!, UNREADABLE_RULES);
+  expect(reads).toHaveLength(2);
+  expect(it0.hook().page).toBeNull();
+  expect(it0.hook().policyError).toEqual(UNREADABLE_RULES);
+  expect(it0.hook().readState).toBe("failed");
+
+  await committed(it0, page("fixed"));
+  expect(it0.hook().policyError).toBeNull();
+  expect(it0.ids()).toEqual(["fixed"]);
+});
+
+it("leaves a names refusal to a newer refresh that is already asking", async () => {
+  let notify!: (event: { workspaceId: string }) => void;
+  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  const it0 = mount();
+  await committed(it0, page("first"));
+  act(() => notify({ workspaceId: "ws-1" }));
+  const refresh = it0.refresh();
+  await settle(reads[1]!, UNREADABLE_RULES);
+  expect(it0.ids()).toEqual(["first"]);
+  expect(it0.hook().policyError).toBeNull();
+  await settle(reads[2]!, page("refreshed"));
+  await refresh;
+  expect(it0.ids()).toEqual(["refreshed"]);
 });
 
 it("renames file rows across a names page that holds only a version marker, and keeps the other rows", async () => {

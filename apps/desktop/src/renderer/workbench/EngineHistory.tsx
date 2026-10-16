@@ -2,7 +2,7 @@ import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
 import { ChevronDown, ChevronRight, Database, FileArchive, FileText, History, Info, Layers, Lock, RotateCcw, Search, TriangleAlert, X, Zap } from "lucide-react";
 import { EmptyState } from "../ui/controls";
-import { useId, useMemo, useState } from "react";
+import { useCallback, useId, useMemo, useState } from "react";
 import { LegendList } from "@legendapp/list/react";
 import { HISTORY_MAX_SOURCES, type EngineMomentRecord, type TimelineEntry } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./chatMessages";
@@ -30,9 +30,13 @@ export type TimelineItem =
   | { kind: "version"; key: string; version: VersionEntry["version"] }
   | { kind: "collection"; key: string; entry: CollectionEntry };
 
-// The Collections a timeline can name and open. A Collection this computer
-// cannot open has no `open`.
-export type HistoryCollections = ReadonlyMap<string, { name: string; open?: () => void }>;
+// The Collections a timeline can name and open, with each operation's label
+// by its name. A Collection this computer cannot open has no `open`.
+export type HistoryCollections = ReadonlyMap<string, {
+  name: string;
+  operationLabels?: ReadonlyMap<string, string>;
+  open?: () => void;
+}>;
 
 // The list label for one moment: its real engine summary when it has one,
 // else calm product copy derived from the operation.
@@ -197,11 +201,29 @@ function automationName(automation: NonNullable<CollectionEntry["change"]["autom
   return automation.name ?? automation.automationId.slice(automation.automationId.lastIndexOf("#") + 1);
 }
 
-function timelineSearchText(item: TimelineItem): string {
-  if (item.kind === "version") return `Created version ${item.version.name}`.toLowerCase();
+// Main is where the workspace starts, not a version someone created.
+export function versionMarkerTitle(version: VersionEntry["version"]): string {
+  return version.kind === "main" ? "Workspace created" : `Created version ${version.name}`;
+}
+
+// A Collection change in the person's words: its operation's label when the
+// Collection's definition names it, else the Collection it changed.
+export function collectionChangeTitle(entry: CollectionEntry, label: string | undefined): string {
+  return label ?? `Changed ${entry.name}`;
+}
+
+// The agent that approved a Collection's rules, if one did.
+function approvalAgentName(change: CollectionEntry["change"]): string | undefined {
+  const agent = change.approvalAgent;
+  return agent ? chatAuthorLabel({ authorKind: "agent", authorDisplayName: agent.label ?? "Agent" }) : undefined;
+}
+
+function timelineSearchText(item: TimelineItem, labelOf: (entry: CollectionEntry) => string | undefined): string {
+  if (item.kind === "version") return versionMarkerTitle(item.version).toLowerCase();
   if (item.kind === "collection") {
     const { name, change } = item.entry;
-    return [name, change.operation, change.automation ? automationName(change.automation) : ""].join("\n").toLowerCase();
+    return [collectionChangeTitle(item.entry, labelOf(item.entry)), name, change.operation,
+      approvalAgentName(change) ?? "", change.automation ? automationName(change.automation) : ""].join("\n").toLowerCase();
   }
   return [
     item.group.summary,
@@ -216,12 +238,14 @@ function timelineSearchText(item: TimelineItem): string {
     .toLowerCase();
 }
 
-// When the item happened. A Collection change main could not date has null:
-// its place in the list borrows a neighbour's time, but it states no date.
-function itemTime(item: TimelineItem): number | null {
+// Which day heading an item sits under. A Collection change main could not
+// date sits where main placed it, under its neighbours' day; its row says
+// the date is unknown. Only an item with no placement time either gets the
+// "Date unknown" heading.
+function itemPlacement(item: TimelineItem): number | null {
   if (item.kind === "files") return item.group.recordedAtMs;
   if (item.kind === "version") return item.version.createdAtMs;
-  return item.entry.change.recordedAtMs;
+  return item.entry.sortAtMs;
 }
 
 function dayKey(recordedAtMs: number): string {
@@ -269,7 +293,7 @@ export function missingSourcesWords(
       ? `dohc could not load changes from ${collectionListPhrase(names, unavailable.length)}.`
       : null,
     omitted: omitted > 0
-      ? `History includes up to ${HISTORY_MAX_SOURCES} Collections. ${omitted} more ${omitted === 1 ? "is" : "are"} left out.`
+      ? `History includes up to ${HISTORY_MAX_SOURCES} Collections. ${omitted} more ${omitted === 1 ? "is" : "are"} left out. To see a Collection's changes, open it and choose History.`
       : null,
   };
 }
@@ -433,15 +457,16 @@ function GroupRow(props: {
   );
 }
 
-// A version starting, as a marker between changes. It opens nothing.
-export function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
+// A version starting, as a marker between changes. It opens nothing, so it
+// reads lighter than the changes around it.
+function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
   const createdAt = formatChatTime(props.version.createdAtMs);
   return (
     <div className="flex min-w-0 items-start gap-2 px-3 py-2">
       <Layers size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[13px] font-medium text-ink">
-          Created version {props.version.name}
+        <span className="block truncate text-[13px] text-muted">
+          {versionMarkerTitle(props.version)}
         </span>
         <span className="mt-0.5 block truncate text-[11px] text-subtle">
           <time dateTime={createdAt.iso} title={createdAt.iso} className="font-mono">
@@ -454,16 +479,27 @@ export function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
 }
 
 // One saved Collection change. It opens its Collection when this computer
-// can; Undo stays in the Collection's own History.
-export function CollectionChangeRow(props: { entry: CollectionEntry; open?: () => void }) {
+// can; the change and its Undo are in that Collection's History.
+function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; open?: () => void }) {
   const { name, change } = props.entry;
   const recordedAt = change.recordedAtMs === null ? null : formatChatTime(change.recordedAtMs);
+  const agent = approvalAgentName(change);
+  // The row's name says what it opens, so the change is its description.
+  const metaId = useId();
   const body = (
     <span className="flex min-w-0 items-start gap-2">
       <Database size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[13px] font-medium text-ink">{change.operation}</span>
-        <span className="mt-0.5 block truncate text-[11px] text-subtle">
+        <span className="block truncate text-[13px] font-medium text-ink">
+          {collectionChangeTitle(props.entry, props.label)}
+        </span>
+        <span id={metaId} className="mt-0.5 block truncate text-[11px] text-subtle">
+          {agent !== undefined ? (
+            <>
+              <span data-testid="history-collection-agent" className="text-agent">{agent}</span>
+              {" · "}
+            </>
+          ) : null}
           {change.automation ? (
             <>
               <span className="inline-flex items-center gap-1 text-muted">
@@ -483,6 +519,12 @@ export function CollectionChangeRow(props: { entry: CollectionEntry; open?: () =
           )}
           {" · "}
           <span>{name}</span>
+          {props.label === undefined ? (
+            <>
+              {" · "}
+              <span className="font-mono">{change.operation}</span>
+            </>
+          ) : null}
         </span>
       </span>
     </span>
@@ -491,6 +533,7 @@ export function CollectionChangeRow(props: { entry: CollectionEntry; open?: () =
     <button
       type="button"
       data-testid="history-collection-open"
+      aria-describedby={metaId}
       aria-label={`Open Collection ${name}`}
       title={`Open Collection ${name}`}
       onClick={props.open}
@@ -506,7 +549,7 @@ export function CollectionChangeRow(props: { entry: CollectionEntry; open?: () =
 // What a partial timeline is missing, above its rows. Try again starts a new
 // source chain; a source left out by the limit stays out, so only the
 // Collections that did not load offer it.
-export function HistorySourcesNotice(props: {
+function HistorySourcesNotice(props: {
   words: { unavailable: string | null; omitted: string | null };
   onRetry: () => void;
 }) {
@@ -557,13 +600,18 @@ export function EngineHistoryView(props: {
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(new Set());
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const normalizedQuery = query.trim().toLowerCase();
+  const { collections, entries } = props;
   const items = useMemo(() => groupTimeline(props.entries), [props.entries]);
+  const labelOf = useCallback(
+    (entry: CollectionEntry) => collections?.get(entry.datasetId)?.operationLabels?.get(entry.change.operation),
+    [collections],
+  );
   const filteredItems = useMemo(
     () =>
       normalizedQuery
-        ? items.filter((item) => timelineSearchText(item).includes(normalizedQuery))
+        ? items.filter((item) => timelineSearchText(item, labelOf).includes(normalizedQuery))
         : items,
-    [items, normalizedQuery],
+    [items, normalizedQuery, labelOf],
   );
   const rows = useMemo(() => {
     const result: Array<
@@ -572,14 +620,13 @@ export function EngineHistoryView(props: {
     > = [];
     let previousDay: string | null | undefined;
     for (const item of filteredItems) {
-      const day = formatDay(itemTime(item));
+      const day = formatDay(itemPlacement(item));
       if (previousDay !== day.dateTime) result.push({ key: `day:${item.key}`, day });
       result.push({ key: item.key, item });
       previousDay = day.dateTime;
     }
     return result;
   }, [filteredItems]);
-  const { collections, entries } = props;
   const words = useMemo(
     () => missingSourcesWords(props.unavailableSources ?? [], props.omittedSources ?? 0, (datasetId) =>
       collections?.get(datasetId)?.name ??
@@ -727,6 +774,7 @@ export function EngineHistoryView(props: {
             ) : item.item.kind === "collection" ? (
               <CollectionChangeRow
                 entry={item.item.entry}
+                label={labelOf(item.item.entry)}
                 open={collections?.get(item.item.entry.datasetId)?.open}
               />
             ) : item.item.group.moments.length > 1 ? (

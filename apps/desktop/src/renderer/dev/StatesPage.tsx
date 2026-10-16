@@ -17,6 +17,7 @@ import type {
   HistoryPolicyUnreadableResult,
   SitePackageInfo,
   SyncStatusResult,
+  TimelineEntry,
   UsageRecordResult,
   UsageRecordRow,
 } from "../../ipc/bridgeContract";
@@ -70,7 +71,7 @@ import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
-import { CollectionChangeRow, EngineHistoryView, HistorySourcesNotice, MomentRow, VersionMarkerRow, missingSourcesWords } from "../workbench/EngineHistory";
+import { EngineHistoryView, MomentRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
   AboutAccessView,
@@ -469,26 +470,41 @@ const RECOVERY_MOMENT: EngineMomentRecord = {
   momentOrder: 7,
 };
 
-// One History timeline: a file change, a version starting, and two
-// Collection changes, one main could not date. Local times, as above.
+// One History timeline across two days: a file change, a version starting,
+// Collection changes (one by an automation, one whose rules an agent
+// approved and main could not date), the workspace starting, and a change
+// with no date or place. Local times, as above.
 const TIMELINE_BUDGET = "00000000-0000-4000-8000-0000000000b1";
 const TIMELINE_GUESTS = "00000000-0000-4000-8000-0000000000b2";
-const TIMELINE_FILE: EngineMomentRecord = {
+const TIMELINE_FILE: TimelineEntry = { kind: "file", moment: {
   id: "moment-timeline-plan", versionId: "main", path: "trip/plan.md", recordedAtMs: new Date(2026, 6, 8, 10, 12).getTime(),
   operation: "write", origin: "local-file", momentOrder: 9, summary: "Added the ferry times",
-};
-const TIMELINE_VERSION = { id: "version-draft", workspaceId: "states", kind: "named" as const, name: "Draft itinerary", createdAtMs: new Date(2026, 6, 8, 9, 58).getTime() };
-function timelineChange(datasetId: string, name: string, revision: number, recordedAtMs: number | null, automation?: string) {
-  return { kind: "collection" as const, datasetId, name, sortAtMs: recordedAtMs ?? new Date(2026, 6, 8, 9, 30).getTime(), change: {
+} };
+function timelineVersion(id: string, kind: "main" | "named", name: string, createdAtMs: number): TimelineEntry {
+  return { kind: "version", version: { id, workspaceId: "states", kind, name, createdAtMs } };
+}
+function timelineChange(datasetId: string, name: string, revision: number, recordedAtMs: number | null, sortAtMs: number | null,
+  by?: { automation?: string; agent?: string }): TimelineEntry {
+  return { kind: "collection", datasetId, name, sortAtMs, change: {
     revision, operation: "addGuest", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64), changesetBytes: 120, attachmentCount: 0,
-    ...(automation ? { automation: { automationId: `automations.yaml#${automation}`, depth: 1, name: automation } } : {}),
+    ...(by?.automation ? { automation: { automationId: `automations.yaml#${by.automation}`, depth: 1, name: by.automation } } : {}),
+    ...(by?.agent ? { approvalAgent: { kind: "agent" as const, label: by.agent, labelSource: "agent-declared" as const } } : {}),
   } };
 }
-const TIMELINE_DATED = timelineChange(TIMELINE_BUDGET, "Budget", 12, new Date(2026, 6, 8, 9, 44).getTime(), "Stamp the date");
-const TIMELINE_UNDATED = timelineChange(TIMELINE_GUESTS, "Guests", 3, null);
-const TIMELINE_COLLECTIONS = new Map([[TIMELINE_BUDGET, { name: "Budget", open: noop }], [TIMELINE_GUESTS, { name: "Guests" }]]);
-const TIMELINE_PARTIAL = missingSourcesWords([{ datasetId: TIMELINE_GUESTS }], 0, (id) => TIMELINE_COLLECTIONS.get(id)?.name);
-const TIMELINE_OMITTED = missingSourcesWords([], 14, () => undefined);
+const TIMELINE_DATED = timelineChange(TIMELINE_BUDGET, "Budget", 12, new Date(2026, 6, 8, 9, 44).getTime(), new Date(2026, 6, 8, 9, 44).getTime(), { automation: "Stamp the date" });
+const TIMELINE_MIXED: TimelineEntry[] = [
+  TIMELINE_FILE,
+  timelineVersion("version-draft", "named", "Draft itinerary", new Date(2026, 6, 8, 9, 58).getTime()),
+  TIMELINE_DATED,
+  timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { agent: "trip-agent" }),
+  timelineVersion("main", "main", "Main", new Date(2026, 6, 7, 18, 0).getTime()),
+  timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null),
+];
+// Budget's definition labels its operation; Guests' is not loaded here.
+const TIMELINE_COLLECTIONS = new Map([
+  [TIMELINE_BUDGET, { name: "Budget", operationLabels: new Map([["addGuest", "Add guest"]]), open: noop }],
+  [TIMELINE_GUESTS, { name: "Guests" }],
+]);
 
 // The About tab on the drawing's document: who wrote what, who has it.
 const ABOUT_PATH = "notes/product-plan.md";
@@ -1518,29 +1534,22 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="history-timeline" title="History timeline">
-        <Specimen label="files, a version and Collections in one list">
-          <ul className="m-0 w-[300px] list-none rounded-lg border border-line bg-panel p-0">
-            <li className="border-b border-line"><MomentRow moment={TIMELINE_FILE} onOpenMoment={noop} /></li>
-            <li className="border-b border-line"><VersionMarkerRow version={TIMELINE_VERSION} /></li>
-            <li className="border-b border-line"><CollectionChangeRow entry={TIMELINE_DATED} open={noop} /></li>
-            <li><CollectionChangeRow entry={TIMELINE_UNDATED} /></li>
-          </ul>
+        <Specimen label="files, versions and Collections, with day headings">
+          <div className="flex h-[500px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={TIMELINE_MIXED} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
         </Specimen>
         <Specimen label="partial: a Collection did not load">
-          <div className="flex w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
-            <HistorySourcesNotice words={TIMELINE_PARTIAL} onRetry={noop} />
-            <ul className="m-0 list-none p-0">
-              <li className="border-b border-line"><MomentRow moment={TIMELINE_FILE} onOpenMoment={noop} /></li>
-              <li><CollectionChangeRow entry={TIMELINE_DATED} open={noop} /></li>
-            </ul>
+          <div className="flex h-[260px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[TIMELINE_FILE, TIMELINE_DATED]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              unavailableSources={[{ datasetId: TIMELINE_GUESTS }]} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
           </div>
         </Specimen>
         <Specimen label="Collections left out by the limit">
-          <div className="flex w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
-            <HistorySourcesNotice words={TIMELINE_OMITTED} onRetry={noop} />
-            <ul className="m-0 list-none p-0">
-              <li><MomentRow moment={TIMELINE_FILE} onOpenMoment={noop} /></li>
-            </ul>
+          <div className="flex h-[240px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[TIMELINE_FILE]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              omittedSources={14} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
           </div>
         </Specimen>
         <Specimen label="one Collection, unavailable">

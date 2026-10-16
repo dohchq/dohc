@@ -1749,6 +1749,10 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [captureDecidedFor, syncStatus, workspaceId]);
   const [agentActive, agentActiveLane] = useSnapshotLane(engineHistoryToken, false);
+  // The engine's newest file moment, whatever the History page holds: 50
+  // newer Collection changes, or a moment that arrived with an old date,
+  // can keep a changed file off the first page.
+  const [latestMomentOrder, latestMomentLane] = useSnapshotLane(engineHistoryToken, -1);
   // "Try it in a version" (PR 0N-2): the workspace's live try session —
   // running banner or the run's review card. Refreshed with history (the
   // manager pings the same workspace-activity channel on every transition).
@@ -1863,6 +1867,14 @@ export function DesktopWorkspaceShell(props: {
       // Each is handed whole to the lane rule, which judges both ways it can
       // settle.
       const pageRead = refreshHistoryPage(token);
+      // The page read on this refresh reports its own failure, so this one
+      // keeps the order it had. A shared view re-reads no open file.
+      if (!shareView) latestMomentLane.settle(
+        token,
+        bridge().listEngineMoments({ workspaceId, limit: 1 }),
+        (answer) => ("status" in answer ? latestMomentLane.latest() : answer.latestMomentOrder),
+        () => undefined,
+      );
       // Asking again IS this refresh: it re-reads all four, so the lane that
       // failed is read again. Same control the History surface offers for its
       // own read, and the same one the caller runs on any activity.
@@ -1933,6 +1945,7 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [
     agentActiveLane,
+    latestMomentLane,
     !!shareView,
     markHistoryReady,
     readAgentStatusForHistory,
@@ -2546,10 +2559,15 @@ export function DesktopWorkspaceShell(props: {
   const selectedChatsNav = focusedTabPath && (parseTab(focusedTabPath)?.kind === "chat")
     ? chatEditors.get(focusedTabPath).nav : undefined;
   const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, datasetPath: dataset.datasetPath, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
-  // The Collections History can name, each opening on its first table.
+  // The Collections History can name, with their operations' labels, each
+  // opening on its first table.
   const historyCollections = useMemo<HistoryCollections>(() => new Map(datasets.map(dataset => {
     const path = dataset.datasetPath, table = dataset.tables[0];
-    return [dataset.datasetId, { name: dataset.name, ...(path !== null && table ? { open: () => openDataCollection(path, table.tableId) } : {}) }];
+    return [dataset.datasetId, {
+      name: dataset.name,
+      operationLabels: new Map(dataset.operations.map(operation => [operation.name, operation.label])),
+      ...(path !== null && table ? { open: () => openDataCollection(path, table.tableId) } : {}),
+    }];
   })), [datasets, openDataCollection]);
   const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
@@ -4499,12 +4517,12 @@ export function DesktopWorkspaceShell(props: {
   const historyRefreshFloor = useRef(0);
   historyRefreshFloor.current = Math.max(
     historyRefreshFloor.current,
-    engineHistory ? engineHistory.latestMomentOrder + 1 : 0,
+    latestMomentOrder + 1,
   );
   const historyRefreshCounter = shareView ? 0 : historyRefreshFloor.current;
   const graphKey = shareView
     ? graphRefreshKey
-    : `${graphRefreshKey}\0${engineHistory?.latestMomentOrder ?? -1}`;
+    : `${graphRefreshKey}\0${latestMomentOrder}`;
 
   const explorerView = (
     <>

@@ -391,6 +391,40 @@ describe("history page", () => {
     expect(bridge.listHistory).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: timelineCursor(80) }));
   });
 
+  // History's first page can be all Collection changes, or miss a moment that
+  // arrived with an old date. The open file still re-reads when the engine
+  // records a newer file moment.
+  it("re-reads the open file for a new file moment that History's first page does not show", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["b.md"], "b.md")));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "b.md", kind: "file" as const }], folders: [] }));
+    const collectionChange = { kind: "collection" as const, datasetId: "00000000-0000-4000-8000-000000000001", name: "Guests", sortAtMs: 200, change: {
+      revision: 1, operation: "records.create", callerReference: null, recordedAtMs: 200, approvedRevisionHash: "a".repeat(64), changesetBytes: 1, attachmentCount: 0,
+    } };
+    bridge.listHistory = vi.fn(async () => timelinePage([collectionChange], { workspaceId: WORKSPACE.workspaceId }));
+    let latestMomentOrder = 3;
+    bridge.listEngineMoments = vi.fn(async () => ({
+      moments: [], nextCursor: null, latestMomentOrder, activeVersionId: "main", ...historyPageFields,
+    }));
+    renderShell(bridge);
+    await settleShareView();
+    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalledWith(expect.objectContaining({ relativePath: "b.md" })));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, limit: 1 }));
+    await act(async () => {});
+    const reads = bridge.readWorkspaceText.mock.calls.length;
+
+    // Activity with no new file moment re-reads nothing.
+    const asked = bridge.listEngineMoments.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() => expect(bridge.listEngineMoments.mock.calls.length).toBeGreaterThan(asked));
+    await act(async () => {});
+    expect(bridge.readWorkspaceText.mock.calls.length).toBe(reads);
+
+    latestMomentOrder = 4;
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
+  });
+
   it("says History is hidden while its rules can't be read, and shows it again once they can", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listHistory = vi.fn()
@@ -1134,13 +1168,14 @@ describe("history page", () => {
   });
 
   // The other side of that boundary. Main notifies the renderer before the
-  // switch invoke resolves, so an activity refresh can be issued — and answer
-  // — for the new version before the shell hears about the switch at all.
-  // Rejecting by arrival order threw that valid answer away and left the panel
-  // on the version the user had just left.
-  it("keeps a new-version answer that raced the switch it belongs to", async () => {
+  // switch invoke resolves, so an activity refresh can be issued for the new
+  // version before the shell hears about the switch at all. The switch's own
+  // refresh supersedes it: only the newest refresh may answer, so when that
+  // one fails the panel says so and Try again reads Main.
+  it("lets the switch's own refresh supersede an earlier one, and recovers through Try again", async () => {
     const first = deferred<TimelinePage>();
     const earlyRefresh = deferred<TimelinePage>();
+    const retry = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
@@ -1149,6 +1184,7 @@ describe("history page", () => {
       first.promise,
       earlyRefresh.promise,
       switchRefresh,
+      retry.promise,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
@@ -1196,7 +1232,7 @@ describe("history page", () => {
     await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
 
     // The switch resolves, the shell runs its boundary, and its own refresh
-    // fails — so the early answer is the only one that will ever describe Main.
+    // fails.
     await act(async () => {
       switchInvoke.resolve();
       await switchInvoke.promise;
@@ -1207,16 +1243,22 @@ describe("history page", () => {
       await Promise.resolve();
     });
 
-    // It answers last, describing the version the user is now on.
+    // The superseded early refresh answers last. It paints nothing.
     await act(async () => {
       earlyRefresh.resolve(
         historyPage([historyMoment("m-early", "Back on main")], "main"),
       );
       await earlyRefresh.promise;
     });
-
-    expect(await screen.findByText("Back on main")).toBeTruthy();
+    expect(screen.queryByText("Back on main")).toBeNull();
     expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
+    await user.click(within(screen.getByTestId("history-load-failed")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(4));
+    await act(async () => {
+      retry.resolve(historyPage([historyMoment("m-main", "Back on main")], "main"));
+      await retry.promise;
+    });
+    expect(await screen.findByText("Back on main")).toBeTruthy();
   });
 
   // The boundary has to name the version the user left, and before the first
@@ -1382,15 +1424,12 @@ describe("history page", () => {
   });
 
   // The residual window: a switch that failed, whose recovery re-read
-  // also failed, leaves the shell asking which version is active. That lookup
-  // is a boundary arriving after the answers it must judge — an old-version
-  // answer landing first meets a guard that knows nothing and paints. The
-  // lookup cannot stop the paint, so it judges the committed page when it
-  // settles: naming a version the lookup contradicts, the page is dropped and
-  // the timeline asked again.
-  it("drops an old-version answer the failed-switch lookup contradicts", async () => {
+  // also failed, leaves the shell asking which version is active. The
+  // old-version answer lands before that lookup does, but the switch's own
+  // refresh superseded it, so it paints nothing even though that refresh
+  // failed. The lookup then finds no page to drop and asks nothing.
+  it("never paints an old-version answer the switch's failed refresh superseded", async () => {
     const stranded = deferred<TimelinePage>();
-    const repaint = deferred<TimelinePage>();
     let failSwitchRefresh!: (error: Error) => void;
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
@@ -1398,7 +1437,6 @@ describe("history page", () => {
     const responses: Promise<TimelinePage>[] = [
       stranded.promise,
       switchRefresh,
-      repaint.promise,
     ];
     let issued = 0;
     const bridge = makeBridge(Promise.resolve(null));
@@ -1465,8 +1503,7 @@ describe("history page", () => {
       await Promise.resolve();
     });
 
-    // The old version's answer lands while the lookup is still in flight. The
-    // guard knows nothing yet, so it paints — this is the window itself.
+    // The old version's answer lands while the lookup is still in flight.
     await act(async () => {
       stranded.resolve(
         historyPage(
@@ -1476,23 +1513,15 @@ describe("history page", () => {
       );
       await stranded.promise;
     });
-    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
+    expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
+    expect(screen.getByTestId("history-load-failed")).toBeTruthy();
 
-    // The lookup settles and contradicts the committed page: dropped, and the
-    // timeline is asked again.
     await act(async () => {
       lookup.resolve({ versions: versionList, activeVersionId: "main" });
       await lookup.promise;
     });
-    await waitFor(() =>
-      expect(screen.queryByText("Wrote the note in the try version")).toBeNull(),
-    );
-    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(3));
-    await act(async () => {
-      repaint.resolve(historyPage([historyMoment("m-main", "Back on main")], "main"));
-      await repaint.promise;
-    });
-    expect(await screen.findByText("Back on main")).toBeTruthy();
+    expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
+    expect(bridge.listHistory).toHaveBeenCalledTimes(2);
   });
 
   // The other verdict the lookup can reach: it agrees with the committed page
@@ -1550,6 +1579,16 @@ describe("history page", () => {
 
     await user.click(screen.getByTestId("activity-history"));
     await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      stranded.resolve(
+        historyPage(
+          [historyMoment("m-stranded", "Wrote the note in the try version")],
+          "try-1",
+        ),
+      );
+      await stranded.promise;
+    });
+    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
 
     await user.click(await screen.findByTestId("version-menu-button"));
     const mainItem = (await screen.findAllByTestId("version-item")).find(
@@ -1561,18 +1600,10 @@ describe("history page", () => {
       expect(bridge.listWorkspaceVersions.mock.calls.length).toBeGreaterThanOrEqual(3),
     );
     await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(2));
+    // A failed refresh keeps the rows on screen.
     await act(async () => {
       failSwitchRefresh(new Error("history failed"));
       await Promise.resolve();
-    });
-    await act(async () => {
-      stranded.resolve(
-        historyPage(
-          [historyMoment("m-stranded", "Wrote the note in the try version")],
-          "try-1",
-        ),
-      );
-      await stranded.promise;
     });
     expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
 
@@ -1882,10 +1913,9 @@ describe("history page", () => {
   });
 
   // the vector, the double failure the review found: a switch fails, its
-  // recovery read fails, the lookup contradicts the stranded page, and the
-  // re-fetch that drop owes fails too. The surface then has no page and no
-  // way to get one — and it used to answer that by telling a workspace with
-  // real history that it had no changes.
+  // recovery read fails, and the switch's own refresh fails too. The surface
+  // then has no page and no way to get one on its own — and it used to answer
+  // that by telling a workspace with real history that it had no changes.
   it("never says 'No changes yet' for a read that failed", async () => {
     const stranded = deferred<TimelinePage>();
     const retry = deferred<TimelinePage>();
@@ -1893,14 +1923,9 @@ describe("history page", () => {
     const switchRefresh = new Promise<never>((_resolve, reject) => {
       failSwitchRefresh = reject;
     });
-    let failRefetch!: (error: Error) => void;
-    const refetch = new Promise<never>((_resolve, reject) => {
-      failRefetch = reject;
-    });
     const responses: Promise<TimelinePage>[] = [
       stranded.promise,
       switchRefresh,
-      refetch,
       retry.promise,
     ];
     let issued = 0;
@@ -1968,16 +1993,9 @@ describe("history page", () => {
       );
       await stranded.promise;
     });
-    expect(await screen.findByText("Wrote the note in the try version")).toBeTruthy();
-
     await act(async () => {
       lookup.resolve({ versions: versionList, activeVersionId: "main" });
       await lookup.promise;
-    });
-    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(3));
-    await act(async () => {
-      failRefetch(new Error("re-fetch failed"));
-      await Promise.resolve();
     });
 
     // No page, and no read on the way. The surface says what happened.
@@ -1989,8 +2007,9 @@ describe("history page", () => {
     );
 
     // The Next has to work on this surface (copy.md): the control reads again.
+    expect(bridge.listHistory).toHaveBeenCalledTimes(2);
     await user.click(screen.getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(3));
     await act(async () => {
       retry.resolve(historyPage([historyMoment("m-main", "Back on main")], "main"));
       await retry.promise;
@@ -2307,13 +2326,11 @@ describe("history page", () => {
     expect(screen.queryByText("Edited the note in the try version")).toBeNull();
   });
 
-  // Statements about the active version are ordered by the ISSUE counter, and
-  // main serves these calls concurrently — so a request issued earlier can
-  // answer later. A late answer restating a version the workspace has already
-  // moved past must not lower what the workspace said: doing so would leave a
-  // watermark below the answers still in flight, and the next one describing
-  // the version the user left would read as fresh and paint it.
-  it("keeps a late answer from lowering what the workspace already said", async () => {
+  // Main serves these calls concurrently, so a request issued earlier can
+  // answer later. Two activity refreshes are both superseded by the switch's
+  // own refresh. When that one fails, neither answer paints, whichever
+  // version it describes; the rows the switch dropped stay gone.
+  it("paints no superseded answer after the switch's own refresh failed", async () => {
     const opening = deferred<TimelinePage>();
     const late = deferred<TimelinePage>();
     const stale = deferred<TimelinePage>();
@@ -2395,17 +2412,14 @@ describe("history page", () => {
       await Promise.resolve();
     });
 
-    // The earlier of the two refreshes answers first, and it is right about
-    // Main — it just says nothing the workspace has not already said.
+    // The earlier of the two refreshes answers first, about Main.
     await act(async () => {
       late.resolve(historyPage([historyMoment("m-late", "Back on main")], "main"));
       await late.promise;
     });
-    expect(await screen.findByText("Back on main")).toBeTruthy();
+    expect(screen.queryByText("Back on main")).toBeNull();
 
-    // The later one describes the version the user left. It is newer than that
-    // Main answer and older than the workspace's statement, and it loses to the
-    // statement.
+    // The later one describes the version the user left.
     await act(async () => {
       stale.resolve(
         historyPage(
@@ -2417,15 +2431,17 @@ describe("history page", () => {
     });
 
     expect(screen.queryByText("Edited the note in the try version")).toBeNull();
-    expect(screen.getByText("Back on main")).toBeTruthy();
+    expect(screen.queryByText("Wrote the note in the try version")).toBeNull();
+    expect(screen.getByTestId("history-load-failed")).toBeTruthy();
   });
 
   // The same callback runs for merges, conflict resolutions, and a "Set aside"
-  // that was already on Main — none of which change the active version. Clearing
-  // the held refresh on every one of them threw away a good answer, and when the
-  // pagination holding it and the replacement refresh both failed, the timeline
-  // never got it.
-  it("keeps a held refresh when the version state changed without a switch", async () => {
+  // that was already on Main — none of which change the active version. Its
+  // refresh supersedes the one a pagination was holding. When that refresh and
+  // the pagination both fail, the rows on screen stay; the held answer, asked
+  // again since, does not paint. (useHistoryPage.test.tsx pins that a version
+  // statement alone keeps a held refresh.)
+  it("keeps the rows on screen when the refresh that superseded a held one fails", async () => {
     const first = deferred<TimelinePage>();
     const refreshed = deferred<TimelinePage>();
     let failPage!: (error: Error) => void;
@@ -2472,8 +2488,7 @@ describe("history page", () => {
     });
 
     // Set aside while already on Main: no switch runs, but the shell hears the
-    // version state changed. Its refresh fails, so the held answer is still the
-    // only one anyone has.
+    // version state changed and refreshes. That refresh fails.
     await user.click(screen.getByTestId("try-review-set-aside"));
     await waitFor(() => expect(bridge.listHistory).toHaveBeenCalledTimes(4));
     expect(bridge.switchWorkspaceVersion).not.toHaveBeenCalled();
@@ -2487,7 +2502,8 @@ describe("history page", () => {
       await Promise.resolve();
     });
 
-    expect(await screen.findByText("Rewrote the plan")).toBeTruthy();
+    expect(await screen.findByText("Added the launch checklist")).toBeTruthy();
+    expect(screen.queryByText("Rewrote the plan")).toBeNull();
   });
 
   // A failure is an answer for the version rule: it answers about somewhere
