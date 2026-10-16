@@ -163,6 +163,9 @@ describe("online relay snapshots", () => {
     const f = fixture();
     await expect(withRelaySnapshot(f.options, async () => "unused")).rejects.toThrow(/running relay/);
     expect(readdirSync(f.state)).toEqual(afterRun);
+    // A relay folder that isn't there reads as a stopped relay, not a failed disk check.
+    await expect(withRelaySnapshot({ ...f.options, relayPath: join(f.state, "missing", "sync-relay.sqlite"), space: undefined }, async () => "unused"))
+      .rejects.toThrow(/running relay/);
   });
 
   it("refuses before copying unless both disks hold two copies plus the relay's headroom", async () => {

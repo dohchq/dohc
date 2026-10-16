@@ -97,15 +97,19 @@ export async function describeRelaySnapshot(path: string, release: string): Prom
     sha256: await digest(path), createdAt: new Date().toISOString() });
 }
 
+/** A read-only mount cannot create SQLite's WAL index; a stopped relay uses the cold backup instead. */
+async function requireRunningRelay(relayPath: string) {
+  if (!(await exists(relayPath + "-wal"))) {
+    throw new Error("Online snapshots need the running relay. Use backup while the relay is stopped.");
+  }
+}
+
 /**
  * Copies a running relay through a separate read-only connection. VACUUM INTO reads one
  * transaction, so the marker in the copy matches the data beside it.
  */
 export async function captureRelaySnapshot(relayPath: string, output: string, release: string): Promise<RelaySnapshotManifest> {
-  // A read-only mount cannot create SQLite's WAL index; a stopped relay uses the cold backup instead.
-  if (!(await exists(relayPath + "-wal"))) {
-    throw new Error("Online snapshots need the running relay. Use backup while the relay is stopped.");
-  }
+  await requireRunningRelay(relayPath);
   const uri = pathToFileURL(relayPath);
   uri.searchParams.set("mode", "ro");
   const source = new DatabaseSync(uri.href, { readOnly: true });
@@ -266,6 +270,7 @@ export async function withRelaySnapshot<T>(options: { relayPath: string; stateDi
     await rm(staging, { recursive: true, force: true });
     await mkdir(staging, { mode: 0o700 });
     try {
+      await requireRunningRelay(options.relayPath);
       const databaseBytes = await fileSize(options.relayPath) + await fileSize(`${options.relayPath}-wal`);
       for (const [path, disk] of [[dirname(options.relayPath), "the relay's disk"], [staging, "the snapshots folder's disk"]] as const) {
         const { free, total } = await (options.space ?? filesystemSpace)(path);
