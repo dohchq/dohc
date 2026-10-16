@@ -821,12 +821,12 @@ mod tests {
         bytes
     }
 
-    #[tokio::test]
-    async fn a_restore_settlement_cancelled_after_it_committed_answers_settled() {
-        let mut f = Fixture::new().await;
-        let header = f.prepare_admitted().await;
-        drop(f.restore("liveApplication.applyRestore", &header).await);
-        let bytes = framed(&header);
+    /// Settle `header`'s restore and cancel it once the settlement committed.
+    async fn settle_cancelled_after_commit(
+        f: &mut Fixture,
+        header: &Value,
+    ) -> dohc_engine_protocol::transport::ServiceResponse {
+        let bytes = framed(header);
         let stream = f.id + 10;
         let request = f.request(
             "liveApplication.settleRestore",
@@ -865,11 +865,76 @@ mod tests {
             .await
             .expect("a committed restore settlement answers settled");
         assert_eq!(settled.response.result["status"], "settled");
+        assert!(!settled.output_guard.as_ref().unwrap().is_current());
+        settled
+    }
+
+    #[tokio::test]
+    async fn a_restore_settlement_cancelled_after_it_committed_answers_settled() {
+        let mut f = Fixture::new().await;
+        let header = f.prepare_admitted().await;
+        drop(f.restore("liveApplication.applyRestore", &header).await);
+        let settled = settle_cancelled_after_commit(&mut f, &header).await;
         let receipt: Value =
             serde_json::from_slice(&settled.blob_egress.as_ref().unwrap().bytes).unwrap();
         assert_eq!(receipt["materialized"], true);
-        assert!(!settled.output_guard.as_ref().unwrap().is_current());
         drop(settled);
+        f.close().await;
+    }
+
+    /// The restored document is a Collection record whose schema went away,
+    /// so the committed settlement reconciles, under a fresh token, though
+    /// the request was cancelled.
+    #[tokio::test]
+    async fn a_cancelled_restore_settlement_still_reconciles_its_collection() {
+        let mut f = Fixture::new().await;
+        let db = f._scratch.path().join(".dohc/engine/engine.db");
+        let mut raw = rusqlite::Connection::open(&db).unwrap();
+        let tx = raw.transaction().unwrap();
+        dohc_engine_domain::write_projected_text_in_tx(
+            &tx,
+            dohc_engine_domain::ProjectedWriteText {
+                workspace_id: "workspace",
+                version_id: "main",
+                object_id: "schema",
+                path: std::borrow::Cow::Borrowed("notes/.collection.json"),
+                text: std::borrow::Cow::Borrowed("{\"fields\":[],\"views\":[]}"),
+                moment_id: "schema",
+                metadata_origin: "test",
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+            },
+        )
+        .unwrap();
+        tx.execute("INSERT INTO collections VALUES ('workspace','main','notes','notes/.collection.json','valid','[]')",[]).unwrap();
+        tx.execute("INSERT INTO collection_records (workspace_id,version_id,record_id,collection_path,file_path,object_id,adoption_state) VALUES ('workspace','main','rec_00000000000000000000000000','notes','notes/a.md','object','adopted')",[]).unwrap();
+        tx.commit().unwrap();
+        drop(raw);
+        f.edit("---\nid: rec_00000000000000000000000000\nstatus: later\n---\n# Later\n")
+            .await;
+        let header = f.prepare_admitted().await;
+        drop(f.restore("liveApplication.applyRestore", &header).await);
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        raw.execute("DELETE FROM snapshots WHERE object_id='schema'", [])
+            .unwrap();
+        drop(raw);
+        let settled = settle_cancelled_after_commit(&mut f, &header).await;
+        let result: Value =
+            serde_json::from_slice(&settled.blob_egress.as_ref().unwrap().bytes).unwrap();
+        assert_eq!(result["collectionReconcileRequired"], true);
+        drop(settled);
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        assert_eq!(
+            raw.query_row("SELECT COUNT(*) FROM collections", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "the reconcile ran though the request was cancelled"
+        );
+        drop(raw);
         f.close().await;
     }
 

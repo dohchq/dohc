@@ -4,6 +4,7 @@ use crate::lock;
 use crate::rpc::dispatch::initial_capture_phase_requires_fence;
 use crate::rpc::error::map_runtime;
 use crate::rpc::request::OperationCancellation;
+use crate::rpc::request::after_landing;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::request::validated_author;
@@ -276,7 +277,13 @@ impl EngineService {
             driver.request_manifest_refresh();
         }
         drop(gate);
-        let mut response = self.capture_flush(ctx, handle).await?;
+        // A committed retry hands its flush to the driver whatever the caller does.
+        let flush_ctx = if retried {
+            after_landing(ctx)
+        } else {
+            ctx.clone()
+        };
+        let mut response = self.capture_flush(&flush_ctx, handle).await?;
         response["retried"] = json!(retried);
         Ok(response)
     }
@@ -440,6 +447,7 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
     ) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
+        let mut flush_ctx = ctx.clone();
         if dohc_engine_files::workspace_recovery_unavailable(&open.root) {
             let cancellation = OperationCancellation::new(ctx);
             let _capture = tokio::select! {
@@ -461,11 +469,12 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
+            flush_ctx = after_landing(ctx);
         }
         if let Some(driver) = lock(&open.capture).as_ref() {
             driver.request_manifest_refresh();
         }
-        self.capture_flush(ctx, handle).await
+        self.capture_flush(&flush_ctx, handle).await
     }
 
     pub(super) async fn capture_set_author(
@@ -785,6 +794,112 @@ mod tests {
             .await
             .expect("a flush the driver holds answers with its outcome");
         assert_eq!(flushed["settled"], json!(true));
+        service.workspace_close(Some(handle)).await.expect("close");
+    }
+
+    /// The retry is cancelled while it waits for the actor, so it commits
+    /// before it reaches its flush.
+    #[tokio::test]
+    async fn a_retry_cancelled_after_it_commits_answers_with_its_flush() {
+        use dohc_engine_domain::{VersionedTextStore, WriteText};
+        use dohc_engine_storage::capture_file_holds::{CaptureFileHold, NOT_REPRESENTABLE};
+        use dohc_engine_storage::{EngineStore, NoFaults};
+        let scratch = ScratchDir::new().expect("scratch");
+        let workspace_id = "retry-held-cancel";
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        crate::root_binding::write_root_binding(scratch.path(), token).expect("root binding");
+        {
+            let mut store =
+                EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1)
+                    .expect("store");
+            store.bind_root_token(token, &NoFaults).expect("bind root");
+            let mut domain = VersionedTextStore::new(&mut store);
+            domain
+                .ensure_main_version(workspace_id, "main", 1, &NoFaults)
+                .expect("main");
+            domain
+                .write_text(
+                    &WriteText {
+                        workspace_id: workspace_id.into(),
+                        version_id: "main".into(),
+                        object_id: "held".into(),
+                        path: "held.txt".into(),
+                        text: "Before".into(),
+                        moment_id: "held-seed".into(),
+                        request_id: None,
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                    },
+                    &NoFaults,
+                )
+                .expect("head");
+            store
+                .write_with(&NoFaults, |tx| {
+                    dohc_engine_storage::capture_file_holds::record_in(
+                        tx,
+                        &CaptureFileHold {
+                            workspace_id: workspace_id.into(),
+                            source_version_id: "main".into(),
+                            object_id: "held".into(),
+                            path: "held.txt".into(),
+                            observed_sha256: dohc_engine_storage::hex_sha256(b"Held outside"),
+                            observed_size: 12,
+                            reason: NOT_REPRESENTABLE.into(),
+                            observed_at_ms: 3,
+                            attempt_count: 1,
+                            retry_requested: false,
+                        },
+                    )
+                })
+                .expect("hold");
+        }
+        std::fs::write(scratch.path().join("held.txt"), "Held outside").expect("held file");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": workspace_id }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while service
+            .capture_flush(&RequestContext::unbounded(), Some(handle.clone()))
+            .await
+            .expect("flush")["settled"]
+            != json!(true)
+        {
+            assert!(tokio::time::Instant::now() < deadline, "capture settles");
+            tokio::task::yield_now().await;
+        }
+        let hold = service.hold_actor(&handle).await;
+        let ctx = RequestContext::unbounded();
+        let mut retrying = Box::pin(service.capture_retry_held(
+            &ctx,
+            Some(handle.clone()),
+            json!({ "path": "held.txt" }),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(retrying.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        ctx.cancel.cancel();
+        // Let the cancellation reach the request's token.
+        tokio::task::yield_now().await;
+        drop(hold);
+        let retried = retrying
+            .await
+            .expect("a committed retry answers with its flush");
+        assert_eq!(retried["retried"], json!(true));
+        assert!(retried.get("settled").is_some());
         service.workspace_close(Some(handle)).await.expect("close");
     }
 

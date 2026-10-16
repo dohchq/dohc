@@ -243,6 +243,83 @@ async fn one_page_turns_a_file_into_a_directory() {
     );
 }
 
+/// Cancels its token when the page places its first file.
+struct CancelOnFirstPlacement(CancellationToken);
+
+impl dohc_engine_runtime::SelfWriteRecorder for CancelOnFirstPlacement {
+    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {
+        self.0.cancel();
+    }
+    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+}
+
+/// The page's first batch removes `notes`, so cancelling there must not
+/// leave `notes/work.md` unwritten behind a cancelled answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_cancelled_after_its_first_batch_lands_runs_to_its_end() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        let mut domain = VersionedTextStore::new(&mut store);
+        domain
+            .ensure_main_version("workspace", "main", 0, &NoFaults)
+            .unwrap();
+        domain
+            .write_text(&write_at("notes", "o-notes", "old", "m1", 1), &NoFaults)
+            .unwrap();
+        domain
+            .delete_text_file(&delete_at("notes", "m2", 2), &NoFaults)
+            .unwrap();
+        domain
+            .write_text(
+                &write_at("notes/work.md", "o-work", "work", "m3", 3),
+                &NoFaults,
+            )
+            .unwrap();
+        domain
+            .write_text(
+                &write_at("other/a.md", "o-other", "other", "m4", 4),
+                &NoFaults,
+            )
+            .unwrap();
+        domain
+            .set_active_version("workspace", "main", &NoFaults)
+            .unwrap();
+    }
+    std::fs::write(scratch.path().join("notes"), "old").unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 10).unwrap().actor;
+    let token = CancellationToken::new();
+    // `other/a.md` sorts after `notes/work.md`, so it is planned after the
+    // first batch lands.
+    actor
+        .materialize_relay_page(
+            "workspace".into(),
+            scratch.path().to_path_buf(),
+            vec![
+                change("notes/work.md", "write"),
+                change("notes", "delete"),
+                change("other/a.md", "write"),
+            ],
+            Arc::new(CancelOnFirstPlacement(token.clone())),
+            11,
+            token.clone(),
+        )
+        .await
+        .expect("a page that changed files answers with its outcome");
+    assert!(token.is_cancelled());
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes").join("work.md")).unwrap(),
+        "work"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("other").join("a.md")).unwrap(),
+        "other"
+    );
+    supervisor.close(&db).expect("close actor");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_only_page_removes_file_before_probing_descendant() {
     for reverse in [false, true] {

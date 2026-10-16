@@ -118,6 +118,9 @@ pub struct Request {
     /// Relative deadline. The engine clamps it to its maximum. When it
     /// elapses, a request whose work did not happen fails with
     /// `DEADLINE_EXCEEDED`; one whose work landed answers with its result.
+    /// A live acknowledgement stopped after its work landed gets no answer,
+    /// so `liveApplication.settle` and `liveApplication.fenceRestore` require
+    /// a deadline, and the caller treats its expiry as an unknown outcome.
     #[cfg_attr(feature = "bindings", ts(optional = nullable))]
     pub deadline_ms: Option<u32>,
     /// Required on retryable mutations: the engine deduplicates replays of

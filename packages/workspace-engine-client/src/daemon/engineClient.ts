@@ -1680,6 +1680,10 @@ export class EngineClient implements EngineTransport {
    * Ask the daemon to stop a request. The request still settles with the
    * daemon's answer: `CANCELLED` or `DEADLINE_EXCEEDED` means the work did not
    * happen, and a result means the work landed before the daemon could stop it.
+   * A live application acknowledgement (apply, settle, restore fence, native
+   * restore, owner activation capture) stopped after its work landed gets no
+   * answer. It ends at its own deadline with `EngineRequestDeadlineError`, and
+   * the outcome is unknown.
    */
   async cancelRequest(callerId: number): Promise<void> {
     const pending = [...this.pending.entries()].find(

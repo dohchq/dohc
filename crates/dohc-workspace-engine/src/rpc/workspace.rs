@@ -87,6 +87,13 @@ pub(crate) struct OpenWorkspace {
     /// Version fences retain this gate through their destructive continuation,
     /// without stalling editor traffic in unrelated open workspaces.
     pub(super) session_ops: Arc<tokio::sync::Mutex<()>>,
+    /// How many pending cursors of each kind this handle has issued, counted
+    /// under the pending-cursor lock. A commit that did not land restores its
+    /// token only if no newer cursor of its kind was issued since.
+    pub(super) cursors_issued: [std::sync::atomic::AtomicU64; 3],
+    /// A landed sync step changed what this workspace's Collections hold and
+    /// the update has not run yet. The next push or commit runs it.
+    pub(super) collections_owed: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +146,8 @@ impl OpenWorkspace {
             capture_apply_gate: Arc::clone(&self.capture_apply_gate),
             capture_holds: Arc::clone(&self.capture_holds),
             session_ops: Arc::clone(&self.session_ops),
+            cursors_issued: Default::default(),
+            collections_owed: Default::default(),
         }
     }
 
@@ -506,11 +515,23 @@ impl EngineService {
             return Ok(());
         }
         let cancellation = OperationCancellation::new(ctx);
-        let _apply = tokio::select! {
+        let apply = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => return Err(cancellation.interruption("collection reconcile")),
             guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
         };
+        self.reconcile_collections_under(apply, open, &cancellation)
+            .await
+    }
+
+    /// Reconcile a workspace that keeps its Collections itself, holding the
+    /// capture gate `_apply`.
+    pub(super) async fn reconcile_collections_under(
+        &self,
+        _apply: tokio::sync::OwnedMutexGuard<()>,
+        open: &OpenWorkspace,
+        cancellation: &OperationCancellation,
+    ) -> Result<(), WireError> {
         let version_id = match open
             .actor
             .active_version_id(open.workspace_id.clone())
@@ -1175,6 +1196,8 @@ impl EngineService {
                 capture_apply_gate,
                 capture_holds: CaptureHolds::default(),
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
+                cursors_issued: Default::default(),
+                collections_owed: Default::default(),
             }),
         );
         open_guard.disarm();
@@ -3568,6 +3591,7 @@ mod tests {
                 materialization_paths: Vec::new(),
                 materialized: false,
                 reconcile_collections: false,
+                issue: 1,
                 cursor: IssuedCursor::Relay(dohc_engine_sync::RelayCursor {
                     bootstrap_complete: true,
                     cursor: 7,

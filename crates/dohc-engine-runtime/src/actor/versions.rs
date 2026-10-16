@@ -1119,11 +1119,15 @@ impl ActorHandle {
             let mut projections: Vec<SwitchProjection> = Vec::new();
             let mut batch_aliases = HashSet::new();
             let mut deleted: Vec<String> = Vec::new();
+            // Cancellation stops the page only until its first change lands;
+            // after that the page runs to its end.
+            let mut changed = false;
             for (key, change) in keyed {
-                if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+                if !changed && token.is_cancelled() { return Err(RuntimeError::Cancelled); }
                 if batch_aliases.iter().any(|planned: &Vec<String>| {
                     planned.starts_with(&key) || key.starts_with(planned)
                 }) {
+                    changed |= !projections.is_empty();
                     run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &holds, &mut projections, &mut deleted, now_ms)?;
                     batch_aliases.clear();
                 }
@@ -1131,6 +1135,7 @@ impl ActorHandle {
                 // deleted: the empty directory gives way.
                 if root_dir.join(&change.path).is_dir() {
                     for path in deleted.iter().filter(|path| is_inside(path, &change.path)) {
+                        changed = true;
                         let mut parent = path.as_str();
                         while let Some((directory, _)) = parent.rsplit_once('/') {
                             remove_empty_directory_target(&root_dir, directory)?;
@@ -1183,9 +1188,8 @@ impl ActorHandle {
                 projections.push(planned_projection(&workspace_id, &active, change.path, operation, sha,
                     preimage, now_ms, now_ms, secret, inline));
             }
-            if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+            if !changed && token.is_cancelled() { return Err(RuntimeError::Cancelled); }
             run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &holds, &mut projections, &mut deleted, now_ms)?;
-            if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
             Ok(())
         }).await
     }

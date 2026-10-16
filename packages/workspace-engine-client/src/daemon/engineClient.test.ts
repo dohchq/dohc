@@ -2431,6 +2431,30 @@ describe("EngineClient", () => {
     transport.close();
   });
 
+  it("ends a cancelled settlement the daemon withholds at its own deadline", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const envelopes: Envelope[] = [];
+    peer.onEnvelope = (envelope) => envelopes.push(envelope);
+
+    const settlement = transport.sendRequest({
+      ...request(4_244, "liveApplication.settle"),
+      deadlineMs: 25,
+    });
+    await transport.cancelRequest(4_244);
+    expect(envelopes).toMatchObject([
+      { type: "request", id: 1, method: "liveApplication.settle", deadlineMs: 25 },
+      { type: "cancel", id: 1 },
+    ]);
+
+    // The settlement landed, so the daemon withholds its stale answer and the
+    // caller's own deadline is what ends the wait.
+    await expect(settlement).rejects.toBeInstanceOf(EngineRequestDeadlineError);
+    transport.close();
+  });
+
   it("times out only the expired request and ignores its late reply", async () => {
     vi.useFakeTimers();
     try {

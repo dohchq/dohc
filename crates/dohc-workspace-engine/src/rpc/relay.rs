@@ -26,6 +26,11 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+/// How long a landed sync step waits for the capture gate before it leaves
+/// its Collections update to the next push or commit.
+const OWED_COLLECTIONS_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Clone)]
 pub(super) enum IssuedCursor {
@@ -45,6 +50,8 @@ pub(crate) struct PendingCursor {
     /// itself: they reconcile once this cursor commits, after the page's files
     /// landed, as a capture pass reconciles after it applies what it scanned.
     pub(super) reconcile_collections: bool,
+    /// Its place in its handle's `cursors_issued` count for its kind.
+    pub(super) issue: u64,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -629,9 +636,10 @@ impl EngineService {
     fn issue_pending_cursor(
         &self,
         handle: &WorkspaceHandle,
-        workspace_id: &str,
+        open: &OpenWorkspace,
         cursor: IssuedCursor,
     ) -> Result<Value, WireError> {
+        let workspace_id = open.workspace_id.as_str();
         for _ in 0..4 {
             let mut bytes = [0_u8; 32];
             getrandom::fill(&mut bytes)
@@ -651,6 +659,7 @@ impl EngineService {
                     || issued.workspace_id != workspace_id
                     || !issued_as(&issued.cursor, kind)
             });
+            let issue = open.cursors_issued[kind as usize].fetch_add(1, Ordering::Relaxed) + 1;
             pending.insert(
                 token.clone(),
                 PendingCursor {
@@ -660,6 +669,7 @@ impl EngineService {
                     materialization_paths: Vec::new(),
                     materialized: false,
                     reconcile_collections: false,
+                    issue,
                 },
             );
             return Ok(json!({ "kind": wire_kind, "token": token }));
@@ -695,8 +705,9 @@ impl EngineService {
     }
 
     /// A commit answered CANCELLED or DEADLINE_EXCEEDED did not land, so its
-    /// token stays usable for the retry. A closed workspace or a newer
-    /// cursor of the same kind leaves nothing to restore.
+    /// token stays usable for the retry. A closed workspace, or a cursor of
+    /// the same kind issued since, even one already committed, leaves
+    /// nothing to restore.
     fn restore_pending_cursor(
         &self,
         open: &Arc<OpenWorkspace>,
@@ -712,13 +723,49 @@ impl EngineService {
             return;
         }
         let mut pending = lock(&self.pending_cursors);
-        let superseded = pending.values().any(|issued| {
-            issued.handle == cursor.handle
-                && issued.workspace_id == cursor.workspace_id
-                && issued_as(&issued.cursor, kind)
-        });
-        if !superseded {
+        if open.cursors_issued[kind as usize].load(Ordering::Relaxed) == cursor.issue {
             pending.insert(token, cursor);
+        }
+    }
+
+    /// A landed sync step changed what the Collections hold. A workspace that
+    /// keeps them itself owes the update until it runs; one with capture asks
+    /// its driver.
+    fn collections_landed(&self, open: &OpenWorkspace) {
+        if self.reconciles_collections_itself(open) {
+            open.collections_owed.store(true, Ordering::SeqCst);
+        } else {
+            open.request_collection_reconcile();
+        }
+    }
+
+    /// Run an owed Collections update after a landed step, which answers with
+    /// what landed either way. A renewed `capture.hold` can keep the gate
+    /// forever, so the wait for it is bounded. An update that cannot run now
+    /// stays owed to the next push or commit.
+    async fn settle_owed_collections(&self, ctx: &RequestContext, open: &OpenWorkspace) {
+        if !open.collections_owed.load(Ordering::SeqCst) {
+            return;
+        }
+        let Ok(apply) = tokio::time::timeout(
+            OWED_COLLECTIONS_GATE_WAIT,
+            Arc::clone(&open.capture_apply_gate).lock_owned(),
+        )
+        .await
+        else {
+            return;
+        };
+        // Another step took the update under the gate after this one landed.
+        if !open.collections_owed.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let cancellation = OperationCancellation::new(&after_landing(ctx));
+        if let Err(error) = self
+            .reconcile_collections_under(apply, open, &cancellation)
+            .await
+        {
+            open.collections_owed.store(true, Ordering::SeqCst);
+            eprintln!("engine: Collections update deferred after sync: {error:?}");
         }
     }
 
@@ -795,6 +842,7 @@ impl EngineService {
         {
             sharing_declined.extend(declined);
         }
+        self.settle_owed_collections(ctx, &open).await;
         relay_outcome_json(outcome)
     }
 
@@ -967,7 +1015,7 @@ impl EngineService {
         };
         let mut result = relay_outcome_json(outcome)?;
         if let Some(cursor) = pending {
-            let issued = self.issue_pending_cursor(bound_handle, &open.workspace_id, cursor)?;
+            let issued = self.issue_pending_cursor(bound_handle, &open, cursor)?;
             let token = issued["token"]
                 .as_str()
                 .ok_or_else(|| WireError::new(ErrorCode::Internal, "invalid issued cursor"))?;
@@ -982,7 +1030,8 @@ impl EngineService {
             result["pendingCursor"] = issued;
         } else if reconcile_at_commit {
             // Nothing to materialize or commit: the page's changes are in place.
-            self.collections_changed(&after_landing(ctx), &open).await?;
+            self.collections_landed(&open);
+            self.settle_owed_collections(ctx, &open).await;
         }
         Ok(result)
     }
@@ -1075,20 +1124,20 @@ impl EngineService {
             () = cancellation.token.cancelled() => return Err(cancellation.interruption("sync.materializePendingCursor")),
             guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
         };
-        open.actor
-            .materialize_relay_page(
+        // The page stops for cancellation only before it changes anything.
+        Self::read_under_ctx(
+            &cancellation,
+            "sync.materializePendingCursor",
+            open.actor.materialize_relay_page(
                 open.workspace_id.clone(),
                 open.root.clone(),
                 paths,
                 Arc::new(self.self_writes.scoped(&open.root)),
                 now_ms()?,
                 cancellation.token(),
-            )
-            .await
-            .map_err(crate::rpc::error::map_runtime)?;
-        if cancellation.token.is_cancelled() {
-            return Err(cancellation.interruption("sync.materializePendingCursor"));
-        }
+            ),
+        )
+        .await?;
         if !Arc::ptr_eq(&open, &self.open(Some(bound_handle))?) {
             return Err(workspace_unavailable());
         }
@@ -1179,15 +1228,20 @@ impl EngineService {
         if share_view && reconcile_collections {
             open.request_collection_reconcile();
         }
+        if reconcile_collections
+            && !share_view
+            && matches!(outcome, RelayOperationOutcome::CursorCommitted { .. })
+        {
+            self.collections_landed(&open);
+        }
         // A cursor commit can be what makes enrollment ready, as a push can.
-        let landed = after_landing(ctx);
-        let (_, declined) = self.originate_live_sessions(&landed, &open).await?;
+        let (_, declined) = self
+            .originate_live_sessions(&after_landing(ctx), &open)
+            .await?;
         if let RelayOperationOutcome::CursorCommitted { sharing_declined } = &mut outcome {
             sharing_declined.extend(declined);
-            if reconcile_collections && !share_view {
-                self.collections_changed(&landed, &open).await?;
-            }
         }
+        self.settle_owed_collections(ctx, &open).await;
         relay_outcome_json(outcome)
     }
 
@@ -1443,11 +1497,8 @@ impl EngineService {
         let materialization_paths = pass.changed_paths.clone();
         let mut result = hosted_pass_json(pass, departed);
         if let Some(cursor) = pending {
-            let issued = self.issue_pending_cursor(
-                bound_handle,
-                &open.workspace_id,
-                IssuedCursor::Hosted(cursor),
-            )?;
+            let issued =
+                self.issue_pending_cursor(bound_handle, &open, IssuedCursor::Hosted(cursor))?;
             let token = issued["token"]
                 .as_str()
                 .ok_or_else(|| WireError::new(ErrorCode::Internal, "invalid issued cursor"))?;
@@ -1612,7 +1663,7 @@ impl EngineService {
         };
         let mut result = relay_outcome_json(outcome)?;
         if let Some((cursor, applied)) = pending {
-            let issued = self.issue_pending_cursor(bound_handle, &open.workspace_id, cursor)?;
+            let issued = self.issue_pending_cursor(bound_handle, &open, cursor)?;
             if let Some(token) = issued["token"].as_str()
                 && let Some(entry) = lock(&self.pending_cursors).get_mut(token)
             {
@@ -2018,79 +2069,124 @@ mod tests {
         ));
     }
 
-    /// Stop a commit through the real supervisor while it waits for the actor,
-    /// before its cursor lands. It changed nothing, so its token commits on
-    /// retry; once that lands, the token is spent.
-    async fn commit_stopped_before_landing_keeps_its_token(expire: bool) {
-        use dohc_engine_protocol::supervisor::{Supervisor, SupervisorConfig};
-        use rusqlite::OptionalExtension;
-        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
-        let workspaces: &'static dohc_engine_runtime::WorkspaceSupervisor =
-            Box::leak(Box::new(dohc_engine_runtime::WorkspaceSupervisor::new()));
-        let service = Arc::new(EngineService::with_supervisor(workspaces));
-        let workspace_id = "commit-before-landing";
-        let opened = service
-            .workspace_open(
-                &RequestContext::unbounded(),
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_id,
-                    "captureMode": "none",
-                    "relay": { "baseUrl": "https://relay.example", "bearerToken": "test-token" },
-                }),
-            )
-            .await
-            .expect("workspace open");
-        let handle: WorkspaceHandle =
-            serde_json::from_value(opened["workspace"].clone()).expect("handle");
-        let open = service.open(Some(&handle)).expect("open");
-        lock(&service.pending_cursors).insert(
-            "pending".to_owned(),
-            PendingCursor {
-                handle: handle.clone(),
-                workspace_id: workspace_id.to_owned(),
-                cursor: IssuedCursor::Relay(RelayCursor {
-                    cursor: 7,
-                    replication_epoch: "epoch".to_owned(),
-                    stream_identity: "stream".to_owned(),
-                    bootstrap_complete: true,
-                    settlement_report_id: None,
-                }),
-                materialization_paths: Vec::new(),
-                materialized: false,
-                reconcile_collections: false,
-            },
-        );
-        let stored_cursor = || {
+    /// A relay workspace with no capture driver and a fake relay address, for
+    /// RPCs that only touch the local store.
+    struct CursorFixture {
+        _scratch: dohc_engine_testkit::ScratchDir,
+        service: Arc<EngineService>,
+        handle: WorkspaceHandle,
+        open: Arc<OpenWorkspace>,
+        workspace_id: &'static str,
+    }
+
+    impl CursorFixture {
+        async fn new(workspace_id: &'static str, reconcile_collections: bool) -> Self {
+            let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+            let workspaces: &'static dohc_engine_runtime::WorkspaceSupervisor =
+                Box::leak(Box::new(dohc_engine_runtime::WorkspaceSupervisor::new()));
+            let service = Arc::new(EngineService::with_supervisor(workspaces));
+            let opened = service
+                .workspace_open(
+                    &RequestContext::unbounded(),
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": workspace_id,
+                        "captureMode": "none",
+                        "reconcileCollections": reconcile_collections,
+                        "relay": { "baseUrl": "https://relay.example", "bearerToken": "test-token" },
+                    }),
+                )
+                .await
+                .expect("workspace open");
+            let handle: WorkspaceHandle =
+                serde_json::from_value(opened["workspace"].clone()).expect("handle");
+            let open = service.open(Some(&handle)).expect("open");
+            CursorFixture {
+                _scratch: scratch,
+                service,
+                handle,
+                open,
+                workspace_id,
+            }
+        }
+
+        /// Issue a relay cursor as a pull does, and return its token.
+        fn issue(&self, cursor: i64) -> String {
+            let issued = self
+                .service
+                .issue_pending_cursor(
+                    &self.handle,
+                    &self.open,
+                    IssuedCursor::Relay(RelayCursor {
+                        cursor,
+                        replication_epoch: "epoch".to_owned(),
+                        stream_identity: "stream".to_owned(),
+                        bootstrap_complete: true,
+                        settlement_report_id: None,
+                    }),
+                )
+                .expect("issue a cursor");
+            issued["token"].as_str().expect("token").to_owned()
+        }
+
+        fn stored_cursor(&self) -> Option<String> {
+            use rusqlite::OptionalExtension;
             rusqlite::Connection::open_with_flags(
-                &open.db_path,
+                &self.open.db_path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )
             .expect("engine db")
             .query_row(
                 "SELECT cursor FROM sync_relay_cursors WHERE workspace_id=?1",
-                [workspace_id],
+                [self.workspace_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()
             .expect("read relay cursor")
-        };
-        let commit = |id| dohc_engine_protocol::wire::Request {
-            id,
-            method: "sync.commitCursor".into(),
-            workspace: Some(handle.clone()),
-            deadline_ms: Some(60_000),
-            idempotency_key: None,
-            progress: false,
-            params: json!({
-                "workspaceId": workspace_id,
-                "pendingCursor": { "kind": "relay", "token": "pending" },
-            }),
-        };
-        let supervisor = Supervisor::new(SupervisorConfig::default(), Arc::clone(&service));
-        let hold = service.hold_actor(&handle).await;
+        }
+
+        fn request(
+            &self,
+            id: u64,
+            method: &str,
+            token: &str,
+        ) -> dohc_engine_protocol::wire::Request {
+            dohc_engine_protocol::wire::Request {
+                id,
+                method: method.into(),
+                workspace: Some(self.handle.clone()),
+                deadline_ms: Some(60_000),
+                idempotency_key: None,
+                progress: false,
+                params: json!({
+                    "workspaceId": self.workspace_id,
+                    "pendingCursor": { "kind": "relay", "token": token },
+                }),
+            }
+        }
+
+        async fn close(self) {
+            self.service
+                .workspace_close(Some(self.handle))
+                .await
+                .expect("close");
+        }
+    }
+
+    /// Stop a commit through the real supervisor while it waits for the actor,
+    /// before its cursor lands. It changed nothing, so its token commits on
+    /// retry; once that lands, the token is spent.
+    async fn commit_stopped_before_landing_keeps_its_token(expire: bool) {
+        use dohc_engine_protocol::supervisor::{Supervisor, SupervisorConfig};
+        let f = CursorFixture::new("commit-before-landing", false).await;
+        let (service, handle) = (&f.service, &f.handle);
+        let token = f.issue(7);
+        let stored_cursor = || f.stored_cursor();
+        let commit = |id| f.request(id, "sync.commitCursor", &token);
+        let supervisor = Supervisor::new(SupervisorConfig::default(), Arc::clone(service));
+        let hold = service.hold_actor(handle).await;
         let answer = supervisor.try_submit(commit(1)).expect("admitted");
-        while lock(&service.pending_cursors).contains_key("pending") {
+        while lock(&service.pending_cursors).contains_key(&token) {
             tokio::task::yield_now().await;
         }
         if expire {
@@ -2134,7 +2230,322 @@ mod tests {
             .expect("answered")
             .expect_err("a landed commit spends its token");
         assert_eq!(spent.message, "invalid-pending-cursor");
-        service.workspace_close(Some(handle)).await.expect("close");
+        drop(supervisor);
+        f.close().await;
+    }
+
+    /// Commit A is stopped before it lands while a pull issues B and another
+    /// commit spends B. A's token is obsolete, so it is not restored.
+    #[tokio::test]
+    async fn a_commit_stopped_before_it_lands_does_not_restore_a_superseded_token() {
+        use dohc_engine_protocol::supervisor::{Supervisor, SupervisorConfig};
+        let f = CursorFixture::new("commit-superseded", false).await;
+        let older = f.issue(7);
+        let supervisor = Supervisor::new(SupervisorConfig::default(), Arc::clone(&f.service));
+        let hold = f.service.hold_actor(&f.handle).await;
+        let answer = supervisor
+            .try_submit(f.request(1, "sync.commitCursor", &older))
+            .expect("admitted");
+        while lock(&f.service.pending_cursors).contains_key(&older) {
+            tokio::task::yield_now().await;
+        }
+        let newer = f.issue(8);
+        f.service
+            .consume_pending_cursor(&f.handle, f.workspace_id, PendingCursorKind::Relay, &newer)
+            .expect("another commit takes the newer token");
+        assert!(supervisor.cancel(1));
+        tokio::task::yield_now().await;
+        drop(hold);
+        let refused = answer
+            .await
+            .expect("answered")
+            .expect_err("a commit stopped before it lands is refused");
+        assert_eq!(refused.code, ErrorCode::Cancelled);
+        let retry = supervisor
+            .try_submit(f.request(2, "sync.commitCursor", &older))
+            .expect("admitted")
+            .await
+            .expect("answered")
+            .expect_err("a superseded token is not restored");
+        assert_eq!(retry.message, "invalid-pending-cursor");
+        assert_eq!(f.stored_cursor(), None);
+        drop(supervisor);
+        f.close().await;
+    }
+
+    /// Materialization is stopped after its page placed its file, so it
+    /// answers that it materialized.
+    #[tokio::test]
+    async fn a_materialization_cancelled_after_its_page_lands_answers_materialized() {
+        let f = CursorFixture::new("materialize-cancelled", false).await;
+        let ctx = RequestContext::unbounded();
+        f.open
+            .actor
+            .ensure_main_version(
+                f.workspace_id.into(),
+                1,
+                Arc::new(dohc_engine_storage::NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .expect("main");
+        f.open
+            .actor
+            .versioned_text_write(
+                dohc_engine_domain::WriteText {
+                    workspace_id: f.workspace_id.into(),
+                    version_id: "main".into(),
+                    object_id: "pulled".into(),
+                    path: "pulled.md".into(),
+                    text: "pulled".into(),
+                    moment_id: "pulled".into(),
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                Arc::new(dohc_engine_storage::NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .expect("pulled head");
+        let token = f.issue(7);
+        lock(&f.service.pending_cursors)
+            .get_mut(&token)
+            .expect("issued")
+            .materialization_paths = vec![dohc_engine_sync::MomentMaterializationChange {
+            version_id: "main".into(),
+            path: "pulled.md".into(),
+            operation: "write",
+            content_kind: "text",
+        }];
+        let request = f.request(1, "sync.materializePendingCursor", &token);
+        let mut materializing = Box::pin(f.service.sync_materialize_pending_cursor(
+            &ctx,
+            request.workspace,
+            request.params,
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(materializing.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // The page reached the actor first, so it has landed once the hold
+        // enters.
+        let hold = f.service.hold_actor(&f.handle).await;
+        ctx.cancel.cancel();
+        tokio::task::yield_now().await;
+        drop(hold);
+        let materialized = materializing
+            .await
+            .expect("a page that landed answers materialized");
+        assert_eq!(materialized, json!({ "materialized": true }));
+        assert_eq!(
+            std::fs::read_to_string(f.open.root.join("pulled.md")).expect("pulled file"),
+            "pulled"
+        );
+        f.close().await;
+    }
+
+    /// A landed commit whose Collections update cannot run answers committed,
+    /// and the next commit runs the update. A held capture gate keeps it from
+    /// starting; a held record lease stops it partway.
+    async fn landed_commit_keeps_its_collections_update(lease: bool) {
+        let f = CursorFixture::new(
+            if lease {
+                "owed-collections-lease"
+            } else {
+                "owed-collections-gate"
+            },
+            true,
+        )
+        .await;
+        let ctx = RequestContext::unbounded();
+        f.open
+            .actor
+            .ensure_main_version(
+                f.workspace_id.into(),
+                1,
+                Arc::new(dohc_engine_storage::NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .expect("main");
+        // A chat change gives the workspace its local sync identity, which a
+        // cursor commit needs once the workspace holds files.
+        f.service
+            .chats_channels_create(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({ "channelId": "identity", "name": "Identity", "kind": "channel", "nowMs": 1 }),
+            )
+            .await
+            .expect("local identity");
+        // A source record relates to a target, and an editor's session holds
+        // the source, as in the replica's lease-deferred cleanup.
+        const SOURCE: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const TARGET: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let target_markdown = format!("---\nid: {TARGET}\n---\n\nTarget\n");
+        let markdown = format!("---\nid: {SOURCE}\nrelated: {TARGET}\n---\n\nSource\n");
+        for (object, path, text) in [
+            (
+                "schema",
+                "tasks/collection.yaml",
+                "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+            ),
+            ("source", "tasks/source.md", markdown.as_str()),
+            ("target", "tasks/target.md", target_markdown.as_str()),
+        ] {
+            f.open
+                .actor
+                .versioned_text_write(
+                    dohc_engine_domain::WriteText {
+                        workspace_id: f.workspace_id.into(),
+                        version_id: "main".into(),
+                        object_id: object.into(),
+                        path: path.into(),
+                        text: text.into(),
+                        moment_id: object.into(),
+                        metadata_origin: "sync".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    Arc::new(dohc_engine_storage::NoFaults),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+                .expect("pulled file");
+        }
+        std::fs::create_dir_all(f.open.root.join("tasks")).expect("folder");
+        std::fs::write(f.open.root.join("tasks/source.md"), &markdown).expect("source");
+        std::fs::write(f.open.root.join("tasks/target.md"), &target_markdown).expect("target");
+        let state = f
+            .open
+            .actor
+            .ydoc_open_state(
+                f.workspace_id.into(),
+                3,
+                false,
+                None,
+                "main".into(),
+                "tasks/source.md".into(),
+                Some(dohc_engine_collab::ContentKind::Richdoc),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .expect("source state");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&state.initial_update).expect("apply");
+        doc.rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, &markdown)
+            .expect("rewrite");
+        f.open
+            .actor
+            .ydoc_record_update(
+                state.key,
+                "tasks/source.md".into(),
+                dohc_engine_collab::ContentKind::Richdoc,
+                state.regime,
+                doc.encode_full_state(),
+                None,
+                None,
+                state.lineage_claim_id,
+                true,
+                state.owner_seed_source,
+                None,
+                4,
+                Arc::new(dohc_engine_storage::NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("source lineage");
+        let edges = || {
+            rusqlite::Connection::open_with_flags(
+                &f.open.db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("engine db")
+            .query_row(
+                "SELECT COUNT(*) FROM collection_relation_edges",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read edges")
+        };
+        let commit = |cursor: i64, reconcile: bool| {
+            let token = f.issue(cursor);
+            lock(&f.service.pending_cursors)
+                .get_mut(&token)
+                .expect("issued")
+                .reconcile_collections = reconcile;
+            let request = f.request(0, "sync.commitCursor", &token);
+            f.service
+                .sync_commit_cursor(&ctx, request.workspace, request.params)
+        };
+        commit(7, true).await.expect("the first commit");
+        assert_eq!(edges(), 1, "the first commit reconciles the relation");
+        assert!(!f.open.collections_owed.load(Ordering::SeqCst));
+
+        let gate = (!lease).then(|| f.open.capture_apply_gate.try_lock().expect("free gate"));
+        let leased = lease.then(|| {
+            f.service
+                .leases
+                .scoped(&f.open.root)
+                .acquire(&DocKey::new(f.workspace_id, "main", "source").expect("key"))
+                .expect("source lease")
+        });
+        // A pulled page deletes the target, so the relation must be cleaned.
+        f.open
+            .actor
+            .versioned_text_delete(
+                dohc_engine_domain::DeleteTextFile {
+                    workspace_id: f.workspace_id.into(),
+                    version_id: "main".into(),
+                    path: "tasks/target.md".into(),
+                    moment_id: "delete-target".into(),
+                    request_id: None,
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 5,
+                },
+                f.open.root.clone(),
+                Arc::new(f.service.self_writes.scoped(&f.open.root)),
+                Arc::new(dohc_engine_storage::NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .expect("delete the target");
+        let committed = tokio::time::timeout(std::time::Duration::from_secs(30), commit(8, true))
+            .await
+            .expect("a landed commit answers")
+            .expect("a landed commit answers committed");
+        assert_eq!(committed["committed"], json!(true));
+        assert_eq!(f.stored_cursor().as_deref(), Some("8"));
+        assert!(f.open.collections_owed.load(Ordering::SeqCst));
+        assert_eq!(edges(), 1, "the cleanup has not run");
+        drop(gate);
+        drop(leased);
+        commit(9, false).await.expect("the next commit");
+        assert!(!f.open.collections_owed.load(Ordering::SeqCst));
+        assert_eq!(edges(), 0, "the next commit runs the owed cleanup");
+        f.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_landed_commit_leaves_its_collections_update_when_the_gate_stays_held() {
+        landed_commit_keeps_its_collections_update(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_landed_commit_keeps_its_collections_update_when_a_lease_stops_it() {
+        landed_commit_keeps_its_collections_update(true).await;
     }
 
     #[tokio::test]

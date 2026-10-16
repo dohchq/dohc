@@ -240,6 +240,18 @@ fn map_application_read(error: dohc_engine_runtime::RuntimeError) -> WireError {
     }
 }
 
+/// A settlement or fence that is stopped after it lands has its answer
+/// withheld, so only the caller's own deadline can end the caller's wait.
+fn require_caller_deadline(request: &Request) -> Result<(), WireError> {
+    if request.deadline_ms.is_none() {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "live-deadline-required",
+        ));
+    }
+    Ok(())
+}
+
 fn read_owner_outbox(
     conn: &rusqlite::Connection,
     binding: &LiveObjectBinding,
@@ -480,6 +492,7 @@ impl EngineService {
                 "invalid-live-settlement",
             ));
         }
+        require_caller_deadline(&request)?;
         let params: Params = serde_json::from_value(request.params)
             .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-live-settlement"))?;
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
@@ -593,6 +606,7 @@ impl EngineService {
                 "invalid-native-restore-fence",
             ));
         }
+        require_caller_deadline(&request)?;
         let params: Params = serde_json::from_value(request.params).map_err(|_| {
             WireError::new(ErrorCode::InvalidParams, "invalid-native-restore-fence")
         })?;
@@ -1314,7 +1328,7 @@ mod tests {
             id: 81,
             method: "liveApplication.fenceRestore".into(),
             workspace: Some(workspace.clone()),
-            deadline_ms: None,
+            deadline_ms: Some(60_000),
             idempotency_key: None,
             progress: false,
             params: json!({"operation":{"operationId":"restore-rpc","relayDatabaseNamespace":namespace,"oldBinding":binding,"hostId":"host","newFence":binding.restore_fence_generation+1,"origin":{"kind":"bootstrap","id":"bootstrap"},"terminal":null,"appliedSequence":0}}),
@@ -1678,7 +1692,7 @@ mod tests {
             id: 71,
             method: "liveApplication.settle".into(),
             workspace: Some(workspace.clone()),
-            deadline_ms: None,
+            deadline_ms: Some(60_000),
             idempotency_key: None,
             progress: false,
             params: json!({"registrationId": registration, "terminalReceipt": null}),
@@ -1742,7 +1756,7 @@ mod tests {
             id: 73,
             method: "liveApplication.settle".into(),
             workspace: Some(workspace.clone()),
-            deadline_ms: None,
+            deadline_ms: Some(60_000),
             idempotency_key: None,
             progress: false,
             params: json!({"registrationId": registration, "terminalReceipt": null}),
@@ -1760,6 +1774,51 @@ mod tests {
                 .live_application_registration(&owner.handle(), Some(&workspace), registration)
                 .is_ok()
         );
+        service.workspace_close(Some(workspace)).await.unwrap();
+    }
+
+    /// A stopped settlement or fence that landed has its answer withheld, so
+    /// a caller without its own deadline would wait forever.
+    #[tokio::test]
+    async fn settle_and_fence_require_the_callers_deadline() {
+        let (_scratch, service, owner, workspace, registration, _) = fixture().await;
+        let workspace = WorkspaceHandle(workspace);
+        let mut ctx = RequestContext::unbounded();
+        ctx.connection = Some(owner.handle());
+        let request = |id, method: &str, params| Request {
+            id,
+            method: method.into(),
+            workspace: Some(workspace.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            progress: false,
+            params,
+        };
+        let settled = service
+            .live_application_settle(
+                ctx.clone(),
+                request(
+                    75,
+                    "liveApplication.settle",
+                    json!({"registrationId": registration, "terminalReceipt": null}),
+                ),
+            )
+            .await;
+        let fenced = service
+            .live_application_fence_restore(
+                ctx.clone(),
+                request(
+                    76,
+                    "liveApplication.fenceRestore",
+                    json!({"operation": {"terminal": null}}),
+                ),
+            )
+            .await;
+        for refused in [settled.err(), fenced.err()] {
+            let refused = refused.expect("a call without a deadline is refused");
+            assert_eq!(refused.code, ErrorCode::InvalidParams);
+            assert_eq!(refused.message, "live-deadline-required");
+        }
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 
@@ -1910,7 +1969,7 @@ mod tests {
                 id: 72,
                 method: "liveApplication.settle".into(),
                 workspace: Some(workspace.clone()),
-                deadline_ms: None,
+                deadline_ms: Some(60_000),
                 idempotency_key: None,
                 progress: false,
                 params: json!({"registrationId":registration,"terminalReceipt":null}),
@@ -2055,7 +2114,7 @@ mod tests {
                 id: 74,
                 method: "liveApplication.settle".into(),
                 workspace: Some(workspace.clone()),
-                deadline_ms: None,
+                deadline_ms: Some(60_000),
                 idempotency_key: None,
                 progress: false,
                 params: json!({"registrationId":registration,"terminalReceipt":null}),
@@ -2646,7 +2705,7 @@ mod tests {
                     id: 97,
                     method: "liveApplication.settle".into(),
                     workspace: Some(workspace.clone()),
-                    deadline_ms: None,
+                    deadline_ms: Some(60_000),
                     idempotency_key: None,
                     progress: false,
                     params: json!({"registrationId":document,"terminalReceipt":null}),

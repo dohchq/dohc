@@ -10,6 +10,7 @@ use crate::rpc::error::map_runtime;
 use crate::rpc::error::workspace_unavailable;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
 use crate::rpc::request::OperationCancellation;
+use crate::rpc::request::after_landing;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::workspace::OpenWorkspace;
@@ -1050,8 +1051,8 @@ impl EngineService {
         for facts in &state.record_facts {
             emit_record_events(&self.events, &open.workspace_id, facts);
         }
-        let (serial, lease) = if state.seed_materialization_jobs.is_empty() {
-            (serial, lease)
+        let (serial, lease, cancellation) = if state.seed_materialization_jobs.is_empty() {
+            (serial, lease, cancellation)
         } else {
             let actor = open.actor.clone();
             let root = open.root.clone();
@@ -1075,7 +1076,12 @@ impl EngineService {
             if !materialization.materialized {
                 return Err(scene_seed_materialization_error(materialization));
             }
-            (serial, lease)
+            // The scene's assets landed, so the open runs to its answer.
+            (
+                serial,
+                lease,
+                OperationCancellation::new(&after_landing(ctx)),
+            )
         };
         let sequence = self
             .next_session
@@ -2996,6 +3002,128 @@ mod tests {
         })
         .await
         .expect("completion released serial and lease");
+    }
+
+    /// The open is stopped at its egress reservation, after the scene's assets
+    /// landed, so it answers with the session it opened.
+    #[tokio::test]
+    async fn a_scene_open_cancelled_after_its_assets_land_answers_with_its_session() {
+        use dohc_engine_protocol::supervisor::{Supervisor, SupervisorConfig};
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let ctx = RequestContext::unbounded();
+        let opened = service
+            .workspace_open(
+                &ctx,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "scene-open-cancel",
+                    "captureMode": "none"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        service
+            .versions_ensure_main(
+                &ctx,
+                Some(handle.clone()),
+                json!({ "workspaceId": "scene-open-cancel" }),
+            )
+            .await
+            .expect("ensure main");
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let scene = json!({
+            "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+            "elements": [{
+                "id": "image-element", "type": "image", "version": 1, "versionNonce": 1,
+                "isDeleted": false, "index": "a0", "fileId": "image-file"
+            }],
+            "appState": {},
+            "files": { "image-file": {
+                "id": "image-file", "mimeType": "image/png",
+                "dataURL": format!("data:image/png;base64,{png}"), "created": 12
+            }}
+        });
+        service
+            .versioned_text_write(
+                &ctx,
+                dohc_engine_protocol::wire::Request {
+                    id: 1,
+                    method: "versionedText.write".into(),
+                    workspace: Some(handle.clone()),
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    progress: false,
+                    params: json!({
+                        "versionId": "main", "path": "drawings/a.excalidraw",
+                        "text": scene.to_string(), "origin": "api"
+                    }),
+                },
+            )
+            .await
+            .expect("write the scene");
+        let budget = super::super::reads::BLOB_EGRESS_BYTE_BUDGET;
+        let held = service
+            .blob_egress_budget
+            .reserve(
+                i64::try_from(budget).expect("budget"),
+                &OperationCancellation::new(&ctx),
+                "test",
+            )
+            .await
+            .expect("hold the whole egress budget");
+        let requests = Supervisor::new(SupervisorConfig::default(), Arc::clone(&service));
+        let answer = requests
+            .try_submit_with(
+                dohc_engine_protocol::wire::Request {
+                    id: 2,
+                    method: "ydoc.open".into(),
+                    workspace: Some(handle.clone()),
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    progress: false,
+                    params: json!({
+                        "versionId": "main", "path": "drawings/a.excalidraw",
+                        "contentKind": "scene", "seedFromArtifact": true
+                    }),
+                },
+                Arc::from(["blobs".to_owned()]),
+                dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes,
+                |_| {},
+            )
+            .expect("admitted");
+        let assets = scratch.path().join("assets").join("excalidraw");
+        let waiting = std::time::Instant::now();
+        while std::fs::read_dir(&assets).map_or(true, |mut entries| entries.next().is_none()) {
+            assert!(
+                waiting.elapsed() < Duration::from_secs(10),
+                "the scene's assets never landed"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(requests.cancel(2));
+        // Let the cancellation reach the open's token before the budget frees.
+        tokio::task::yield_now().await;
+        drop(held);
+        let opened = answer
+            .await
+            .expect("answered")
+            .expect("an open whose assets landed answers with its session");
+        assert_eq!(opened.response.result["contentKind"], json!("scene"));
+        let session = opened.response.result["sessionId"].clone();
+        drop(opened);
+        service
+            .ydoc_evict(&ctx, Some(handle.clone()), json!({ "sessionId": session }))
+            .await
+            .expect("evict the session");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
     }
 
     #[test]
