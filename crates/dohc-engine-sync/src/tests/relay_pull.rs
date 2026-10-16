@@ -2455,7 +2455,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
         } => cursor,
         other => panic!("unexpected retry outcome: {other:?}"),
     };
-    assert_eq!(
+    assert!(matches!(
         client
             .commit_pull_cursor(
                 &mut reopened,
@@ -2466,8 +2466,8 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
                 1_000
             )
             .expect("commit"),
-        TxnOutcome::Committed(Vec::new())
-    );
+        TxnOutcome::Committed(ref commit) if commit.sharing_declined.is_empty()
+    ));
 }
 
 #[test]
@@ -3043,6 +3043,148 @@ fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
             "dropping non-moment durable-intent reconstruction loses the owed path"
         );
     }
+}
+
+#[test]
+fn relay_pull_rejects_a_tampered_own_ydoc_echo() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO replication_peers (workspace_id, origin_id, acked_seq) \
+                 VALUES ('ws','local',0) \
+                 ON CONFLICT(workspace_id,origin_id) DO UPDATE SET acked_seq=0",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed local frontier");
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES ('ws','own-echo-tamper',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+
+    let local_doc = dohc_engine_collab::Ydoc::wire();
+    local_doc.plaintext_insert(0, "local");
+    let local_bytes = local_doc.encode_full_state();
+    let local_sha = engine.put_binary_blob(&local_bytes).expect("local blob");
+    let local = envelope(
+        "local",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "own-echo-tamper",
+            "path": "notes/own-echo-tamper.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": local_sha,
+            "lineageClaimId": local_sha,
+            "isBaseState": true
+        }),
+    );
+    apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &local,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("seed durable local coordinate");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_peers SET acked_seq=0 WHERE workspace_id='ws' AND origin_id='local'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("rewind acknowledgement for first-delivery proof");
+    assert!(
+        crate::apply::is_acknowledged_envelope(&engine, &local)
+            .expect("first delivery exact durable row"),
+        "the durable row matches at acked_seq + 1"
+    );
+    assert!(matches!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &local,
+            &NoFaults,
+            &NoLiveLeases,
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            ..
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "local").unwrap(),
+        1
+    );
+
+    let tampered_doc = dohc_engine_collab::Ydoc::wire();
+    tampered_doc.plaintext_insert(0, "tampered");
+    let tampered_bytes = tampered_doc.encode_full_state();
+    let tampered_sha = engine
+        .put_binary_blob(&tampered_bytes)
+        .expect("tampered blob");
+    let mut tampered = local.clone();
+    tampered.payload["updateBlobSha256"] = json!(tampered_sha.clone());
+    tampered.payload["lineageClaimId"] = json!(tampered_sha.clone());
+    tampered.relay_seq = Some(2);
+
+    assert!(matches!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &tampered,
+            &NoFaults,
+            &NoLiveLeases,
+        ),
+        Err(SyncError::CoordinateDiverged)
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "local").expect("local ack after direct tamper"),
+        1,
+        "direct tampering must leave the acknowledgement unchanged"
+    );
+
+    let mut relay = PagedRelay::new([(
+        0,
+        PullResponse {
+            ops: vec![tampered],
+            next_cursor: 2,
+            has_more: false,
+        },
+    )]);
+    relay.blobs.insert(tampered_sha, tampered_bytes);
+    let result = RelaySyncClient::new(relay).pull_chat_workspace(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        "ws",
+        &NoFaults,
+        &NoLiveLeases,
+        2_000,
+    );
+    assert!(matches!(result, Err(RelayError::OriginDiverged)));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "local").expect("local ack"),
+        1,
+        "a changed payload at the acknowledged coordinate must not advance it"
+    );
 }
 
 #[test]
@@ -3843,7 +3985,7 @@ fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
 
     assert!(matches!(
         crate::cursor::write_pushed_seq(&mut engine, "ws", "local", -1, &NoFaults, &crate::NoLiveLeases, 7_001),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.is_empty()
     ));
     let after_first: i64 = engine
         .read_with(|conn| {
@@ -3861,7 +4003,7 @@ fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
 
     assert!(matches!(
         crate::cursor::write_pushed_seq(&mut engine, "ws", "local", 0, &NoFaults, &crate::NoLiveLeases, 7_002),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.is_empty()
     ));
     let after_second: i64 = engine
         .read_with(|conn| {
@@ -4479,11 +4621,11 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults, &crate::NoLiveLeases, 1_000),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.sharing_declined.is_empty()
     ));
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(4), &NoFaults, &crate::NoLiveLeases, 1_000),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.sharing_declined.is_empty()
     ));
     assert_eq!(
         read_relay_cursor(&engine, "ws")
@@ -5306,7 +5448,7 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults, &crate::NoLiveLeases, 1_000),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.sharing_declined.is_empty()
     ));
     let stored = engine
         .read_with(|conn| {
@@ -6521,6 +6663,55 @@ fn deferred_relay_work_rejects_divergence_gaps_identity_changes_and_limit_overfl
         "limit overflow rolls back the entire new retention"
     );
     assert!(read_relay_cursor(&engine, "ws").unwrap().is_none());
+}
+
+#[test]
+fn deferred_relay_work_charges_a_blob_it_names_twice_once() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+    let blob = vec![7; 1_000];
+    let sha = engine.put_binary_blob(&blob).unwrap();
+    // One digest as both a Y.Doc update and a binary chunk.
+    let twice = |origin: &str| {
+        envelope(
+            origin,
+            0,
+            "live.audit.application",
+            json!({"updateBlobSha256": sha, "manifest": {"chunks": [{"sha256": sha}]}}),
+        )
+    };
+    let charged = |op: &ReplicationEnvelope| {
+        serde_json::to_string(op).unwrap().len() as i64 + blob.len() as i64
+    };
+    let retained = |engine: &EngineStore, origin: &str| -> i64 {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT retained_bytes FROM relay_deferred_ops WHERE workspace_id='ws' AND origin_id=?1",
+                    [origin],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    };
+    let first = twice("a-held");
+    crate::deferred::retain(&mut engine, &identity, &[&first], &NoFaults).unwrap();
+    assert_eq!(retained(&engine, "a-held"), charged(&first));
+    let next = twice("b-held");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE relay_deferred_ops SET retained_bytes=?1",
+                [536_870_912 - charged(&next)],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    crate::deferred::retain(&mut engine, &identity, &[&next], &NoFaults)
+        .expect("work that exactly fills the limit is retained");
+    assert_eq!(retained(&engine, "b-held"), charged(&next));
 }
 
 #[test]

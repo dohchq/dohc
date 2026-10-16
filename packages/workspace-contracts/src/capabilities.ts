@@ -102,7 +102,7 @@ export const CAPABILITIES = {
   "chat.react": capability("Add your reaction to a message, or remove it if it is already there.", {}),
   "chat.search": capability("Search message text and thread titles.", {}),
   "chat.export": capability("Save threads as Markdown files, one file per thread.", {}),
-  "history.list": capability("List changes to files, newest first.", {mcp: {owner: ["dohc_list_changes"], view: ["dohc_list_changes"], comment: ["dohc_list_changes"], edit: ["dohc_list_changes"]}}),
+  "history.list": capability("List changes to files, newest first.", {ipc: ["listHistory"], mcp: {owner: ["dohc_list_changes"], view: ["dohc_list_changes"], comment: ["dohc_list_changes"], edit: ["dohc_list_changes"]}}),
   "history.read": capability("Print a file's text as one change left it.", {mcp: {owner: ["dohc_read_change"], view: ["dohc_read_change"], comment: ["dohc_read_change"], edit: ["dohc_read_change"]}}),
   "file.chats.list": capability("List chats linked to a workspace file.", {mcp: {owner: ["dohc_list_file_chats"], view: ["dohc_list_file_chats"], comment: ["dohc_list_file_chats"], edit: ["dohc_list_file_chats"]}}),
   "chat.read": capability("Read a chat thread.", {ipc: ["listChatMessages", "listChatFileMentions"], mcp: {owner: ["dohc_read_chat"], view: ["dohc_read_chat"], comment: ["dohc_read_chat"], edit: ["dohc_read_chat"]}}),
@@ -188,6 +188,8 @@ export const CAPABILITIES = {
   "document.draft.list": capability("Read saved live drafts for review.", {ipc: ["listLiveDraftRecovery"]}),
   "document.save.retry": capability("Try again to save an open document to its file.", {ipc: ["retryEngineYDocSave"]}),
   "device.motion.read": capability("Read this computer's reduced-motion preference.", {ipc: ["getSystemReducedMotion"]}),
+  "account.delete.preview": capability("Review what deleting the connected server account removes.", {ipc: ["previewServerAccountDeletion"], mcpReason: "No desktop MCP tool; account deletion needs the account password."}),
+  "account.delete": capability("Delete the connected server account with its password.", {ipc: ["deleteServerAccount", "retryServerAccountDisconnect"], mcpReason: "No desktop MCP tool; account deletion needs the account password."}),
 } as const;
 
 export type CapabilityId = keyof typeof CAPABILITIES;

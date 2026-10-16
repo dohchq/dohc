@@ -2780,6 +2780,26 @@ impl RecoveryEntry {
     }
 }
 
+/// Remove the regular file at `rel` when its bytes hash to `sha256`, so the
+/// path is free. `true` when `rel` is free afterwards, absent before or
+/// removed; `false`, removing nothing, when it holds anything else.
+pub fn remove_file_holding(root: &Path, rel: &str, sha256: &str) -> Result<bool, MaterializeError> {
+    match probe_projection_target(root, rel, ProjectionTargetKind::Plaintext) {
+        ProjectionTargetState::Absent => return Ok(true),
+        ProjectionTargetState::Text { sha256: held }
+        | ProjectionTargetState::Binary { sha256: held }
+            if held == sha256 => {}
+        _ => return Ok(false),
+    }
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let target = resolve_target(&canonical_root, rel)?;
+    ensure_target_symlink_free(&canonical_root, &target)?;
+    std::fs::remove_file(&target).map_err(|err| MaterializeError::io(&target, &err))?;
+    sync_parent_dir(target.parent(), DurabilityPolicy::per_os())?;
+    Ok(true)
+}
+
 /// Remove the directory at `rel` when it is empty, so a file can take its
 /// name. Used when a sync page deletes the last tracked files under a path
 /// and then writes a file there. Only a real, empty directory below the
@@ -4852,6 +4872,29 @@ mod tests {
         );
         assert!(!super::remove_empty_directory_target(root, "d/sub").unwrap());
         assert!(super::remove_empty_directory_target(root, "../d").is_err());
+    }
+
+    #[test]
+    fn a_file_is_removed_only_while_it_holds_the_expected_bytes() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("file-holding").unwrap();
+        let root = scratch.path();
+        let held = dohc_engine_storage::hex_sha256(b"held");
+        std::fs::write(root.join("a.md"), "edited").unwrap();
+        assert!(!super::remove_file_holding(root, "a.md", &held).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.md")).unwrap(),
+            "edited"
+        );
+        std::fs::write(root.join("a.md"), "held").unwrap();
+        assert!(super::remove_file_holding(root, "a.md", &held).unwrap());
+        assert!(!root.join("a.md").exists());
+        assert!(
+            super::remove_file_holding(root, "a.md", &held).unwrap(),
+            "already free"
+        );
+        std::fs::create_dir(root.join("d.md")).unwrap();
+        assert!(!super::remove_file_holding(root, "d.md", &held).unwrap());
+        assert!(root.join("d.md").is_dir());
     }
 
     #[cfg(unix)]

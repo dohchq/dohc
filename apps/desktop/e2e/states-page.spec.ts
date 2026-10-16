@@ -18,9 +18,10 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 // change pass. The captures are made deterministic by construction:
 // software rendering, no animations or backdrop filters, a viewport as tall
 // as the page so nothing scrolls, a pinned color scheme, states forced
-// through the browser instead of pointer events, a paused clock so
-// acknowledged copies hold, fonts checked, each part captured alone at the
-// top of its pane, and each capture repeated until two in a row are equal.
+// through the browser instead of pointer events, the pointer parked outside
+// every part, a paused clock so acknowledged copies hold, fonts checked,
+// each part captured alone at the top of its pane, and each capture
+// repeated until two in a row are equal.
 // So the baselines do not cover a backdrop blur, an animation's end state,
 // anything only the GPU draws, or how a part looks at a display scale other
 // than 100%. The baselines were taken on Windows; Playwright names them per
@@ -71,6 +72,7 @@ const PARTS = [
   "page-identity",
   "settings-sync",
   "data-grid",
+  "tab-strip-overflow",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and
@@ -273,6 +275,20 @@ async function press(page: Page, button: Locator): Promise<void> {
   await page.keyboard.press("Enter");
 }
 
+// Playwright opens the window on the real desktop, so Chromium hovers what
+// lies under the OS pointer, which can rest on a part. A pointer moved
+// through the page takes its place, here on the page's header, outside
+// every part. An OS pointer that moves over the window still reaches it.
+const PARKED = { x: 2, y: 2 };
+async function parkPointer(page: Page): Promise<void> {
+  await page.mouse.move(PARKED.x, PARKED.y);
+  const clear = await page.evaluate(({ x, y }) => {
+    const under = document.elementFromPoint(x, y);
+    return under !== null && under.closest("[data-part], a, button, input, [tabindex]") === null;
+  }, PARKED);
+  expect(clear, "the parked pointer must rest outside every part and control").toBe(true);
+}
+
 // The gate requires this test by its own tag: the route check below shares
 // @states-page and must not stand in for the pixels.
 test("@states-page @states-baselines every shared part matches its baseline in both themes", async () => {
@@ -398,6 +414,30 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         failures.push(`the narrow tab row's save state (${theme}) is not cut short`);
       }
     }
+    // An overflowing strip fades only the edges it can still scroll past,
+    // 24px each, and its active tab sits clear of them. Each specimen must
+    // really overflow the way its label says, or its capture proves nothing.
+    for (const theme of THEMES) {
+      for (const [at, left, right] of [["start", false, true], ["middle", true, true], ["end", true, false]] as const) {
+        const strip = page.getByTestId(`states-tab-strip-overflow-${at}-${theme}`).getByRole("tablist");
+        const shown = await strip.evaluate((el) => {
+          const list = el.getBoundingClientRect();
+          const tab = el.querySelector('[role="tab"][data-active]')?.getBoundingClientRect();
+          return {
+            left: el.hasAttribute("data-overflow-left"),
+            right: el.hasAttribute("data-overflow-right"),
+            before: tab ? tab.left - list.left : -1,
+            after: tab ? list.right - tab.right : -1,
+          };
+        });
+        if (shown.left !== left || shown.right !== right) {
+          failures.push(`the strip at the ${at} (${theme}) fades left ${shown.left} and right ${shown.right}`);
+        }
+        if (shown.before < (left ? 24 : 0) || shown.after < (right ? 24 : 0)) {
+          failures.push(`the strip at the ${at} (${theme}) shows its active tab under a fade or cut`);
+        }
+      }
+    }
 
     const cdp = await page.context().newCDPSession(page);
     await cdp.send("DOM.enable");
@@ -450,6 +490,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
 
     // A part shown alone must equal its baseline. It must keep its box while
     // it settles, or the capture would be cut to the box it had before.
+    await parkPointer(page);
     await checkEvery(true, async (name, theme) => {
       const box = await partIn(theme, name).boundingBox();
       if (!box) throw new Error(`${name} (${theme}) has no box on the page`);
@@ -482,6 +523,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       return document.documentElement.scrollHeight;
     });
     await page.setViewportSize({ width: WIDTH, height: roundedHeight });
+    await parkPointer(page);
     await checkEvery(false, async (name, theme) => {
       const path = test.info().snapshotPath(`${name}-${theme}.png`);
       if (!existsSync(path)) return;

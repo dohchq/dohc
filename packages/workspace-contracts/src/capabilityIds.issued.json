@@ -155,5 +155,7 @@
   "file.text.write",
   "file.asset.write",
   "file.image.pick",
-  "file.external.open"
+  "file.external.open",
+  "account.delete.preview",
+  "account.delete"
 ]

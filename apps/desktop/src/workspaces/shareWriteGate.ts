@@ -1,5 +1,11 @@
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
-import { shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
+import { isRecord } from "@dohc/workspace-core/records";
+import {
+  readableShareLevel,
+  shareViewGranterEmail,
+  shareViewIdentityIsIntact,
+  shareViewIsPresent,
+} from "./shareViewMarker";
 
 // The LOCAL-WRITE gate for a share view, as one rule in one place.
 //
@@ -20,7 +26,8 @@ import { shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
 // rule: a hand-copied re-implementation in a test proves only that the copy
 // behaves.
 export interface ShareViewWriteScope {
-  // The level the PINNED grant names, or null when the grant cannot be read.
+  // The level the PINNED grant names, or null when the grant cannot be read
+  // or the marker lost its identity.
   access: ShareAccess | null;
   // The granter ended this share.
   ended: boolean;
@@ -69,6 +76,28 @@ export function workspaceCreateOffers(shareView: ShareViewWriteScope | null): {
     // takes writes can make one: the schema file is the Collection's first
     // file, and the folder comes with it (ADR 0013).
     collection: write,
+  };
+}
+
+/**
+ * The share view a registry marker describes, or null for an ordinary
+ * workspace. `main`'s `sharedViewOf` is one line over this.
+ *
+ * PRESENCE decides whether it is a share view. The level comes only from an
+ * intact marker: one that lost its share id or recipient is damaged, names no
+ * level, and so offers and admits no write.
+ */
+export function shareViewWriteScopeOf(
+  shareView: unknown,
+): (ShareViewWriteScope & { granterEmail: string | null }) | null {
+  if (!shareViewIsPresent(shareView)) return null;
+  const marker = isRecord(shareView) ? shareView : {};
+  return {
+    granterEmail: shareViewGranterEmail(marker),
+    access: shareViewIdentityIsIntact(marker)
+      ? readableShareLevel(marker.grantedSelector)
+      : null,
+    ended: marker.ended === true,
   };
 }
 
