@@ -95,7 +95,8 @@ export const UsageSnapshot = z.strictObject({
 export type UsageSnapshot = z.infer<typeof UsageSnapshot>;
 
 // Validate the aggregate shape before separating unknown and retired ids.
-// The store keeps these rows until they age out. Unknown fields remain errors.
+// The store keeps these rows until they age out, except unknown pairs filed
+// under its own app version. Unknown fields remain errors.
 const StoredCapabilityId = z.string().max(128).regex(/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/);
 export const StoredSnapshot = z.strictObject({
   version: z.literal(1), enabled: z.boolean(), cleanExit: z.boolean().default(false),
