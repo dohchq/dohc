@@ -75,7 +75,17 @@ export function CommandPalette(props: {
   }
 
   return (
-    <Overlay onClose={props.onClose}>
+    <Overlay
+      onClose={props.onClose}
+      panelProps={{
+        onKeyDown: (event) => {
+          if (matchShellShortcut(event.nativeEvent) === (props.toggleShortcut ?? "command-palette")) {
+            event.preventDefault();
+            props.onClose();
+          }
+        },
+      }}
+    >
       <div
         data-testid={props.testId ?? "command-palette"}
         className="dohc-popover w-135 max-w-[80vw] overflow-hidden rounded-xl border border-line bg-panel"
@@ -97,10 +107,7 @@ export function CommandPalette(props: {
               setSelectedIndex(0);
             }}
             onKeyDown={(event) => {
-              if (matchShellShortcut(event.nativeEvent) === (props.toggleShortcut ?? "command-palette")) {
-                event.preventDefault();
-                props.onClose();
-              } else if (event.key === "Escape") props.onClose();
+              if (event.key === "Escape") props.onClose();
               else if (event.key === "ArrowDown") {
                 event.preventDefault();
                 moveSelection(1);

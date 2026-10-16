@@ -29,20 +29,28 @@ function selectedLabel(): string | null {
 }
 
 describe("CommandPalette keyboard selection", () => {
-  it.each(["win32", "darwin"])("handles its own toggle shortcuts on %s", (platform) => {
+  it.each(["win32", "darwin"].flatMap((platform) =>
+    ["input", "result row", "panel"].flatMap((focus) =>
+      SHORTCUTS["command-palette"].accelerators.map((binding) => ({ platform, focus, binding })),
+    ),
+  ))("handles $binding on $platform with focus on the $focus", ({ platform, focus, binding }) => {
     const { ran, onClose } = setup();
-    const input = screen.getByRole("textbox", { name: "Command" });
-    for (const binding of SHORTCUTS["command-palette"].accelerators) {
-      const parts = binding.split("+");
-      const event = new KeyboardEvent("keydown", {
-        key: parts.at(-1)!, shiftKey: parts.includes("Shift"),
-        ctrlKey: platform === "win32", metaKey: platform === "darwin",
-        bubbles: true, cancelable: true,
-      });
-      fireEvent(input, event);
-      expect(event.defaultPrevented).toBe(true);
-    }
-    expect(onClose).toHaveBeenCalledTimes(SHORTCUTS["command-palette"].accelerators.length);
+    const target = focus === "input"
+      ? screen.getByRole("textbox", { name: "Command" })
+      : focus === "result row"
+        ? screen.getByRole("button", { name: "alpha" })
+        : screen.getByTestId("command-palette").closest<HTMLElement>('[data-focus-surface="dialog"]')!;
+    target.focus();
+    expect(document.activeElement).toBe(target);
+    const parts = binding.split("+");
+    const event = new KeyboardEvent("keydown", {
+      key: parts.at(-1)!, shiftKey: parts.includes("Shift"),
+      ctrlKey: platform === "win32", metaKey: platform === "darwin",
+      bubbles: true, cancelable: true,
+    });
+    fireEvent(target, event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(onClose).toHaveBeenCalledOnce();
     expect(ran).toEqual([]);
   });
 

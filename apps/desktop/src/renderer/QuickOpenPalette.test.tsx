@@ -56,15 +56,24 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-it.each(["win32", "darwin"])("handles its own Go to toggle shortcut on %s", (platform) => {
+it.each(["win32", "darwin"].flatMap((platform) =>
+  ["input", "result row", "panel"].map((focus) => ({ platform, focus })),
+))("handles its own Go to toggle shortcut on $platform with focus on the $focus", ({ platform, focus }) => {
   const close = vi.fn();
   render(palette({ onClose: close }));
+  const target = focus === "input"
+    ? screen.getByRole("textbox", { name: "File" })
+    : focus === "result row"
+      ? screen.getAllByRole("button")[0]
+      : screen.getByTestId("quick-open").closest<HTMLElement>('[data-focus-surface="dialog"]')!;
+  target.focus();
+  expect(document.activeElement).toBe(target);
   const event = new KeyboardEvent("keydown", {
     key: SHORTCUTS["quick-open"].accelerators[0].split("+").at(-1)!,
     ctrlKey: platform === "win32", metaKey: platform === "darwin",
     bubbles: true, cancelable: true,
   });
-  fireEvent(screen.getByRole("textbox", { name: "File" }), event);
+  fireEvent(target, event);
   expect(event.defaultPrevented).toBe(true);
   expect(close).toHaveBeenCalledOnce();
 });
