@@ -2548,6 +2548,7 @@ export function DesktopWorkspaceShell(props: {
   const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
   ]), [knownTabLabels, chatEditors.titles, dataCollections]);
+  const fileEntries = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
   // The chat list lives in the left side panel's Chats view.
   const openChatsNavigator = useCallback(() => {
     mutateWb((state) => showView(state, "chats"));
@@ -5330,6 +5331,7 @@ export function DesktopWorkspaceShell(props: {
                       activeTab={tabPath}
                       activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
                       tabLabels={tabLabels}
+                      files={fileEntries}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}
                       onActivate={activateEditorTab}

@@ -19,6 +19,7 @@ import type {
   SyncStatusResult,
   UsageRecordResult,
   UsageRecordRow,
+  WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
@@ -44,6 +45,7 @@ import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
+import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -54,7 +56,7 @@ import { Titlebar } from "../Titlebar";
 import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AppRows } from "../workbench/AppsView";
-import { siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
+import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
@@ -425,7 +427,94 @@ function KindRows(props: { label: string; selected: boolean }) {
   );
 }
 
-const RELAY_ERROR = "dohc could not reach the sync relay. Check your connection.";
+// Every object that is not a file, by the name its tab shows, each glyph in
+// a row the way a list draws it. A `Record` over the kinds, so a new kind is
+// a compile error here until the page shows it.
+const OBJECT_SAMPLES: Record<ObjectKind, string> = {
+  app: "trip-planner",
+  collection: "Registrations",
+  group: "trip",
+  chat: "Home",
+  compare: "Compare with Main",
+  change: "Diff: plan.md",
+  graph: "Graph",
+  history: "History",
+};
+const OBJECTS = Object.keys(OBJECT_SAMPLES) as ObjectKind[];
+// The kind and object name columns share one width, wider than the longest
+// name, so the rows beside each start at the same place on both lines.
+const KIND_NAMES = "m-0 w-36 list-none border border-transparent py-1 font-mono text-[11px] text-subtle";
+
+function ObjectRows(props: { label: string; selected: boolean }) {
+  return (
+    <ul aria-label={props.label} className="m-0 w-52 list-none rounded-lg border border-line bg-panel py-1">
+      {OBJECTS.map((kind) => (
+        <li key={kind} className="px-1">
+          <span
+            className={`flex h-7 items-center gap-1.5 rounded-md pl-7 pr-2 text-[13px] ${
+              props.selected ? "bg-selected text-ink" : "text-muted"
+            }`}
+          >
+            <ObjectGlyph kind={kind} size={15} className={props.selected ? "text-ink" : "text-subtle"} />
+            <span className="min-w-0 flex-1 truncate">{OBJECT_SAMPLES[kind]}</span>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// Tabs of every kind, as the listing describes their files: a database by
+// its header, whatever its name, and a page with an emoji.
+const STRIP_GROUP = chatTabPath({ kind: "channel", id: "trip" });
+const STRIP_COLLECTION = collectionTabPath("registrations");
+const STRIP_LONG = "notes/offsite-retrospective-and-next-quarter-planning.md";
+const STRIP_FILES: ReadonlyMap<string, WorkspaceFileEntry> = new Map(
+  [
+    { path: "trip/plan.md", kind: "file" as const },
+    { path: "budget.csv", kind: "file" as const },
+    { path: "map.excalidraw", kind: "file" as const },
+    { path: "ledger.db", kind: "database" as const },
+    { path: "launch.md", kind: "file" as const, icon: "🚀" },
+    { path: STRIP_LONG, kind: "file" as const },
+  ].map((entry) => [entry.path, entry]),
+);
+const STRIP_LABELS: ReadonlyMap<string, string> = new Map([[STRIP_GROUP, "trip"]]);
+
+// One group's strip over a strip of paper, its tab list at rest.
+function GlyphStrip(props: { groupId: string; groupNumber: number; tabs: string[]; active: string; dirty?: boolean }) {
+  return (
+    <>
+      <EditorTabs
+        groupId={props.groupId}
+        groupNumber={props.groupNumber}
+        tabs={props.tabs.map((path) => ({ path }))}
+        activeTab={props.active}
+        activeTabDirty={props.dirty ?? false}
+        tabLabels={STRIP_LABELS}
+        files={STRIP_FILES}
+        recoveryPaths={NO_RECOVERY}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />
+      <div className="h-4 bg-bg" />
+    </>
+  );
+}
+
+function GlyphStripBox(props: { tabs: string[]; active: string; dirty?: boolean }) {
+  return (
+    <div className="w-full overflow-hidden rounded-lg border border-line">
+      <GlyphStrip groupId="states" groupNumber={1} {...props} />
+    </div>
+  );
+}
+
+const RELAY_ERROR ="dohc could not reach the sync relay. Check your connection.";
 const FOLDER = "C:\\Users\\ice\\Research";
 
 function toast(tone: "danger" | "success") {
@@ -1475,7 +1564,7 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       <Section part="kind-glyph" title="Kind glyph">
         <Specimen label="kind">
-          <ul className="m-0 list-none border border-transparent py-1 font-mono text-[11px] text-subtle">
+          <ul className={KIND_NAMES}>
             {KINDS.map((kind) => (
               <li key={kind.displayKind} className="flex h-7 items-center">
                 {kind.displayKind} · {kind.name}
@@ -1488,6 +1577,21 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="selected">
           <KindRows label="Kinds, selected" selected />
+        </Specimen>
+        <Specimen label="object">
+          <ul className={KIND_NAMES}>
+            {OBJECTS.map((kind) => (
+              <li key={kind} className="flex h-7 items-center">
+                {kind}
+              </li>
+            ))}
+          </ul>
+        </Specimen>
+        <Specimen label="object, rest">
+          <ObjectRows label="Objects" selected={false} />
+        </Specimen>
+        <Specimen label="object, selected">
+          <ObjectRows label="Objects, selected" selected />
         </Specimen>
       </Section>
 
@@ -2407,6 +2511,33 @@ function Pane(props: { theme: "light" | "dark" }) {
               groups={[
                 { id: "first", size: 1, content: <OverflowStripSpecimen groupId="first" groupNumber={1} active="packing-list.md" /> },
                 { id: "second", size: 1, content: <OverflowStripSpecimen groupId="second" groupNumber={2} active="flights.md" /> },
+              ]}
+              activeGroupId="first"
+              onFocusGroup={noop}
+              onResizeGroups={noop}
+            />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. Each strip holds a tab
+          list, so the part holds them at rest. */}
+      <Section part="tab-glyphs" title="Tab glyphs" menusAtRest>
+        <Specimen label="files: a document, active and unsaved; a CSV; a drawing; a database" className="w-full">
+          <GlyphStripBox tabs={["trip/plan.md", "budget.csv", "map.excalidraw", "ledger.db"]} active="trip/plan.md" dirty />
+        </Specimen>
+        <Specimen label="objects: a group, active; an app; a Collection; History" className="w-full">
+          <GlyphStripBox tabs={[STRIP_GROUP, siteTabPath("trip-planner"), STRIP_COLLECTION, HISTORY_TAB_PATH]} active={STRIP_GROUP} />
+        </Specimen>
+        <Specimen label="a page with an emoji, active; a long name, cut off" className="w-full">
+          <GlyphStripBox tabs={["launch.md", STRIP_LONG]} active="launch.md" />
+        </Specimen>
+        <Specimen label="split: the active group, then one whose active tab recedes" className="w-full">
+          <div className="flex w-full overflow-hidden rounded-lg border border-line">
+            <EditorGroupLayout
+              groups={[
+                { id: "first", size: 1, content: <GlyphStrip groupId="first" groupNumber={1} tabs={["trip/plan.md", "ledger.db"]} active="trip/plan.md" /> },
+                { id: "second", size: 1, content: <GlyphStrip groupId="second" groupNumber={2} tabs={[STRIP_GROUP, siteTabPath("trip-planner")]} active={STRIP_GROUP} /> },
               ]}
               activeGroupId="first"
               onFocusGroup={noop}

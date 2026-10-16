@@ -73,6 +73,7 @@ const PARTS = [
   "settings-sync",
   "data-grid",
   "tab-strip-overflow",
+  "tab-glyphs",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and
