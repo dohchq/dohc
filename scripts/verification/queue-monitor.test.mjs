@@ -2,14 +2,16 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { connect } from "node:net";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadSampler, monitorState, runDetails, runLog, slotLog, startMonitor, threadDirectory, waitingIntervals } from "./queue-monitor.mjs";
-import { listRequests, pauseQueue, queuePaths, readJson, readPause, resumeQueue, writeJson } from "./queue.mjs";
+import { listRequests, nextRequest, pauseQueue, position, queuePaths, readJson, readPause, resumeQueue, writeJson } from "./queue.mjs";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
 const iso = minutesAgo => new Date(now - minutesAgo * 60_000).toISOString();
@@ -198,25 +200,32 @@ test("the server answers reads only on this host's names and the tailnet", async
   assert.equal(JSON.parse((await get(port, "/api/load?days=7")).body).samples.length, 288);
 });
 
-test("a request is named by the T3 thread whose worktree, linked pull request, or branch it uses", async t => {
+test("a request is named by the T3 thread whose worktree, linked pull request, or branch it uses, and by the thread a person started above it", async t => {
   const dir = mkdtempSync(join(tmpdir(), "dohc-t3-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const sqlite = process.getBuiltinModule("node:sqlite");
   const path = join(dir, "statev2.sqlite");
   const db = new sqlite.DatabaseSync(path);
   db.exec("create table orchestration_v2_projection_threads (thread_id text, title text, payload_json text, updated_at text, deleted_at text)");
-  const add = (id, title, payload, deleted = null) => db.prepare("insert into orchestration_v2_projection_threads values (?, ?, ?, ?, ?)").run(id, title, JSON.stringify(payload), new Date().toISOString(), deleted);
+  const add = (id, title, payload, deleted = null, updated = new Date().toISOString()) => db.prepare("insert into orchestration_v2_projection_threads values (?, ?, ?, ?, ?)").run(id, title, JSON.stringify(payload), updated, deleted);
+  const subagentOf = root => ({ parentThreadId: root, relationshipToParent: "subagent", rootThreadId: root });
   add("t1", "Fix the share page", { worktreePath: "C:/w/share-page", branch: "main" });
   add("t2", "Agent review", { createdBy: "agent", pullRequests: [{ number: 7, snapshot: { headBranch: "feat/sync" } }] });
-  add("t3", "Make sync faster", { createdBy: "user", pullRequests: [{ number: 7, snapshot: { headBranch: "feat/sync" } }] });
+  add("t3", "Make sync faster", { createdBy: "user", pullRequests: [{ number: 7, snapshot: { headBranch: "feat/sync" } }], lineage: { parentThreadId: null, rootThreadId: "t3" } });
   add("t4", "Old thread", { branch: "feat/gone" }, new Date().toISOString());
   add("t5", "Tidy styles", { branch: "fix/styles" });
   add("t6", "A later shape", { worktreePath: 5, pullRequests: 3 });
+  add("t7", "Check sync tests", { createdBy: "agent", pullRequests: [{ number: 8, snapshot: { headBranch: "fix/sync-tests" } }], lineage: subagentOf("t3") });
+  // A thread a person started a month ago, with a subagent working now.
+  add("t8", "Plan the launch", { createdBy: "user" }, null, new Date(Date.now() - 30 * 1440 * 60_000).toISOString());
+  add("t9", "Draft the launch post", { createdBy: "agent", branch: "docs/launch", lineage: subagentOf("t8") });
   db.close();
   const threadOf = threadDirectory({ path });
-  assert.deepEqual(threadOf("anything", "c:/w/share-page"), { id: "t1", title: "Fix the share page" }, "by the thread's own worktree, whatever the case");
-  assert.deepEqual(threadOf("feat/sync", "C:/w/elsewhere"), { id: "t3", title: "Make sync faster", pr: 7 }, "by a linked pull request, preferring the thread a person started");
-  assert.deepEqual(threadOf("fix/styles", null), { id: "t5", title: "Tidy styles" }, "a row in a shape this reader does not know costs only its own name");
+  assert.deepEqual(threadOf("anything", "c:/w/share-page"), { id: "t1", title: "Fix the share page", root: { id: "t1", title: "Fix the share page" } }, "by the thread's own worktree, whatever the case");
+  assert.deepEqual(threadOf("feat/sync", "C:/w/elsewhere"), { id: "t3", title: "Make sync faster", pr: 7, root: { id: "t3", title: "Make sync faster" } }, "by a linked pull request, preferring the thread a person started");
+  assert.deepEqual(threadOf("fix/sync-tests", null), { id: "t7", title: "Check sync tests", pr: 8, root: { id: "t3", title: "Make sync faster" } }, "a subagent's thread names the thread a person started above it");
+  assert.deepEqual(threadOf("docs/launch", null).root, { id: "t8", title: "Plan the launch" }, "however long ago that thread last changed");
+  assert.deepEqual(threadOf("fix/styles", null), { id: "t5", title: "Tidy styles", root: { id: "t5", title: "Tidy styles" } }, "a row in a shape this reader does not know costs only its own name");
   assert.equal(threadOf("feat/gone", null), null, "a deleted thread names nothing");
   assert.equal(threadDirectory({ path: join(dir, "missing.sqlite") })("feat/sync", null), null, "without T3 every lookup is null");
 });
@@ -250,6 +259,49 @@ test("the lanes show the gate holding each verification slot, an agent's inline 
   assert.equal(slotLog(status, 2, "rust.log").text, "compiling\n");
   for (const file of ["../../../secret.log", "result.json"]) assert.equal(slotLog(status, 2, file), null, file);
   assert.equal(slotLog(status, 1, "rust.log"), null, "a queued request's logs are read by its id, not its slot");
+});
+
+test("status, positions, and the dashboard show the line in the order the service starts it, with each request's owner", async t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-monitor-turns-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const paths = queuePaths(root);
+  const owner = name => ({ key: `flag:${name}`, title: name, source: "flag" });
+  const add = async (n, request, status = { state: "queued", attempts: [] }) => {
+    const id = `${String(n).padStart(9, "0")}-abcdef`;
+    await writeJson(join(paths.request(id), "request.json"), { head, base, scope: "all", checkout: "C:\\w\\x", branch: `refs/heads/b${n}`, submittedAt: iso(60), sequence: n, ...request, id });
+    await writeJson(join(paths.request(id), "status.json"), status);
+    return id;
+  };
+  await add(1, { owner: owner("bob") }, { state: "passed", attempts: [{ n: 1, startedAt: iso(300), endedAt: iso(270), outcome: "passed" }] });
+  const running = await add(2, { owner: owner("ann") }, { state: "running", attempts: [{ n: 1, startedAt: iso(10) }] });
+  const [a3, a4] = [await add(3, { owner: owner("ann") }), await add(4, { owner: owner("ann") })];
+  const [b5, b6] = [await add(5, { owner: owner("bob") }), await add(6, { owner: owner("bob") })];
+  const c7 = await add(7, { owner: owner("cat") });
+  // Accepted before owners existed: it belongs to its checkout.
+  const legacy = await add(8, { checkout: "C:\\w\\legacy" });
+  const nightly = await add(9, { nightly: true, checkout: "nightly", branch: "refs/heads/main" });
+  // Cat and the legacy checkout never started, Bob started five hours ago, and Ann runs now.
+  const line = [running, nightly, c7, legacy, b5, a3, b6, a4];
+  const requests = listRequests(root);
+  // The service starts one request a minute, every run still going.
+  let queue = requests;
+  const picked = [];
+  for (let at = now, next; picked.length < requests.length && (next = nextRequest(queue, { diskOk: true, dockerOk: true }, at)); at += 60_000) {
+    picked.push(next.id);
+    queue = queue.map(row => row === next ? { ...row, status: { ...row.status, state: "running", attempts: [{ n: 1, startedAt: new Date(at).toISOString() }] } } : row);
+  }
+  assert.deepEqual(picked, line.slice(1), "the service starts the line in this order");
+  assert.deepEqual(line.map(id => position(requests, id)), line.map((_, index) => index + 1));
+  const state = monitorState(root, { now });
+  assert.deepEqual(state.queued.map(entry => entry.id), line.slice(1), "the dashboard draws the same line");
+  assert.deepEqual(state.queued.map(entry => [entry.owner.title, entry.owner.source, entry.owner.waiting]), [
+    ["nightly", "checkout", 1], ["cat", "flag", 1], ["C:\\w\\legacy", "checkout", 1], ["bob", "flag", 2], ["ann", "flag", 2], ["bob", "flag", 2], ["ann", "flag", 2]],
+    "each request names its owner and how many requests that owner has waiting");
+  const status = spawnSync(process.execPath, [fileURLToPath(new URL("./queue.mjs", import.meta.url)), "status"], { env: { ...process.env, DOHC_VERIFICATION_QUEUE_ROOT: root }, encoding: "utf8", windowsHide: true });
+  assert.equal(status.status, 0, status.stderr);
+  const rows = status.stdout.split(/\r?\n/u).filter(row => row.includes("  owner: "));
+  assert.deepEqual(rows.map(row => row.slice(0, 16)), line, status.stdout);
+  assert.match(rows.find(row => row.startsWith(c7)), /  b7  owner: cat$/u, "status shows the owner beside each request");
 });
 
 async function monitor(t, root, options = {}) {
