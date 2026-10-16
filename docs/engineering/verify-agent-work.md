@@ -120,17 +120,25 @@ Read the service's verdict from the request's `status.json`, or from the last li
 Run `pnpm verify:queue status` to see the service, a pause, the running requests, the line, and wait estimates.
 Run `pnpm verify:queue cancel <id>` to stop one of your own requests. Never cancel a request another agent submitted. A finished request keeps its verdict.
 
-The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows what holds each verification lane, a queued request or an agent's inline gate, with its steps and its live output, then the requests ready and waiting for a lane, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Threads, Tests, and Nightly tabs show the whole line, every run this week, each thread's runs and results, the slowest and flaky tests, and the nightly runs.
+The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows what holds each verification lane, a queued request or an agent's inline gate, with its steps and its live output, then the requests ready and waiting for a lane, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Threads, Tests, and Nightly tabs show the whole line, every run this week, each thread's runs and results, the tests that failed on two or more branches in the last day, the slowest and flaky tests, and the nightly runs.
+A test that fails on several branches and on main's nightly points to a broken main. One that the nightly did not fail is more often flaky.
 When T3 runs on the host, the dashboard names each request by the T3 thread that linked its branch's pull request, or whose worktree or branch it uses. It reads T3's local database read-only once a minute. Without T3 it names requests by their branch.
-Select a run to see its failing step's test summary, its steps on a timeline, and any of its logs. The dashboard refreshes every few seconds and cannot change the queue. It records the host's CPU and free memory once a minute in `monitor-load.json` in the queue root.
-To open it from another device, serve it on the tailnet only:
+Select a run to see its failing step's test summary, its steps on a timeline, and any of its logs. The dashboard refreshes every few seconds. It records the host's CPU and free memory once a minute in `monitor-load.json` in the queue root.
+When the page cannot reach the dashboard server, it says so and since when, keeps what it last showed, and tries again. It waits at most 15 seconds for each answer.
+
+The dashboard's only change to the queue is its Pause and Resume button. Pause asks for an optional reason and does what `pnpm verify:queue pause` does. Resume does what `pnpm verify:queue resume` does, without asking first.
+While the queue is paused, every tab shows a banner with the words `pnpm verify:queue status` uses, such as `Paused and idle: safe to restart`. A hold after a computer restart says so.
+The pause records `by` as `{ "name": "dashboard", "host": "<host name the page used>" }`, and the service log records each pause and resume from the dashboard.
+
+To open the dashboard from another device, serve it on the tailnet only:
 
 ```powershell
 tailscale serve --bg --https=8446 http://127.0.0.1:4250
 ```
 
-Then open `https://<host>.<tailnet>.ts.net:8446`. Do not use Tailscale Funnel: the page shows branch names and test output.
+Then open `https://<host>.<tailnet>.ts.net:8446`. Do not use Tailscale Funnel: the page shows branch names and test output, and anyone who can open it can pause the queue.
 The page answers only to the host's own names and to tailnet names.
+Pause and resume accept only a JSON `POST` whose `Origin` header names the host the request was sent to. A page on another site cannot send that request, so it cannot pause or resume the queue.
 
 The `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
 A supervisor runs the service in a Windows job object. When the service exits or its heartbeat stops for two minutes, the supervisor stops it and everything it started, then starts it again.
@@ -193,12 +201,14 @@ A computer restart stops every run in progress, and each one later starts again 
 3. Restart the computer.
 4. Run `pnpm verify:queue resume`.
 
+The dashboard can do steps 1, 2, and 4: select Pause, wait for the banner `Paused and idle: safe to restart`, and select Resume after the restart.
+
 While the queue is paused, runs in progress finish and no new run starts, the nightly run included. The line keeps its order.
 An inline run that holds a verification lane counts as running. An inline run without a lane waits, says once that the queue is paused, and starts after the resume.
 The pause lasts until you resume it, through service and computer restarts.
 
 If the computer restarts while the queue is not paused, the service pauses it when it starts, with the reason `the computer restarted`.
-No run starts until you run `pnpm verify:queue resume`, and `pnpm verify:queue status` shows the reason. A service restart within one boot, such as an upgrade, does not pause the queue.
+No run starts until you run `pnpm verify:queue resume` or select Resume on the dashboard. `pnpm verify:queue status` shows the reason, and the dashboard shows the hold. A service restart within one boot, such as an upgrade, does not pause the queue.
 Windows fast startup hibernates the system at shutdown, so the next start continues the same boot and the service sees no restart. Pause the queue before you shut down.
 
 ### Flaky tests

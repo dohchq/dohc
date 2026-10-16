@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
 import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
-import { attemptOutcome, lastNightlyPass, lineOrder, listRequests, monitorPort, nextRequest, orderOf, parseMove, pauseQueue, placeMove, placeSubmission, position, protocol, queueLanePurpose, queuePaths, readJson, readPause, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, lastNightlyPass, lineOrder, listRequests, monitorPort, nextRequest, orderOf, parseMove, pauseQueue, placeMove, placeSubmission, position, protocol, queueLanePurpose, queuePaths, readJson, readPause, restartReason, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
 import { startMonitor } from "./queue-monitor.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
@@ -150,7 +150,7 @@ export async function runService({
   // A computer restart since that heartbeat holds the line until someone resumes it, so no run starts
   // by itself after logon. A service restart within one boot, or a first start, holds nothing.
   if (previous?.heartbeatAt && bootedAt > Date.parse(previous.heartbeatAt)) {
-    await pauseQueue(root, { reason: "the computer restarted" });
+    await pauseQueue(root, { reason: restartReason });
     log("the computer restarted since the last heartbeat; no run starts until pnpm verify:queue resume");
   }
   const health = { diskFreeGb: null, diskOk: true, dockerOk: true, dockerCheckedAt: 0, pausedUntil: 0, environmentStreak: 0, reason: null };
