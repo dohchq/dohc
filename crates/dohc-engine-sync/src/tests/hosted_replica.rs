@@ -4543,12 +4543,12 @@ fn no_stored_decision_names_a_parked_path() {
     assert_eq!(standing, [change("x.md", "delete")]);
 }
 
-/// Opus's third park review: only a stored decision at exactly a document's
-/// own head was set apart. One there still wrote while the document was
-/// held, and one at the same path in another case, or a path inside or above
-/// it, counted as free: on a case-insensitive disk the delete of `p.md`
-/// removed `P.md`, and one of `d` against `d/x.md` failed its page. None
-/// stands now; the pass that makes the document ready writes its heads.
+/// Opus's third park review: a stored decision at a document's own head
+/// still wrote while the document was held. None stands there; the pass that
+/// makes it ready writes its heads. Round four: the fix also dropped paths in
+/// another case, inside or above a head, and their deletes are what clear a
+/// stale file or folder in the way of the head's write, or rename its file's
+/// case, so the page failed or kept the old name. Those stand.
 #[test]
 fn no_stored_decision_names_a_path_of_its_documents_own_head() {
     let change = |path: &str, operation: &'static str| crate::MomentMaterializationChange {
@@ -4558,15 +4558,16 @@ fn no_stored_decision_names_a_path_of_its_documents_own_head() {
         content_kind: "text",
     };
     for (head, near) in [
-        ("P.md", ["P.md", "p.md", "P.md/x.md"]),
-        ("d/x.md", ["d", "D", "d/X.md"]),
+        ("P.md", ["p.md", "P.md/x.md", "p.md/x.md"]),
+        ("d/x.md", ["d/X.md", "d", "D"]),
     ] {
         let (_scratch, _path, store, _client) = departing_b_at(head);
-        let stored = near
-            .iter()
-            .map(|path| change(path, "delete"))
-            .chain([change(head, "write"), change("free.md", "delete")]);
-        let standing = store
+        let mut standing = near.map(|path| change(path, "delete")).to_vec();
+        standing.push(change("free.md", "delete"));
+        let stored = [change(head, "write"), change(head, "delete")]
+            .into_iter()
+            .chain(standing.clone());
+        let read = store
             .read_with(|conn| {
                 crate::hosted::redelivered_unready(
                     &mut crate::hosted::Occupancy::new(conn, "ws"),
@@ -4575,7 +4576,7 @@ fn no_stored_decision_names_a_path_of_its_documents_own_head() {
                 )
             })
             .unwrap();
-        assert_eq!(standing, [change("free.md", "delete")], "{head}");
+        assert_eq!(read, standing, "{head}");
     }
 }
 

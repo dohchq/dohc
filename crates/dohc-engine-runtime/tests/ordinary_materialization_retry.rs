@@ -2,7 +2,7 @@ use dohc_engine_domain::{DeleteTextFile, RenameTextFile, VersionedTextStore, Wri
 use dohc_engine_runtime::{CancellationToken, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
 use dohc_engine_sync::MomentMaterializationChange;
-use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use dohc_engine_testkit::{ScratchDir, engine_db_path, try_make_dir_alias};
 use std::sync::Arc;
 
 fn write(text: &str, moment: &str, now_ms: i64) -> WriteText {
@@ -216,13 +216,13 @@ async fn materialize_pages(
 }
 
 /// A delete means no tracked file at its path. A folder there already holds
-/// none, even named before the files inside it, and a delete takes the
-/// folders it leaves empty with it, so a later file can take their name. A
-/// folder with anything else in it stays. A delete whose file is already
-/// gone still clears the empty folders a stopped page left above it.
+/// none, even named before the files inside it. On a desktop replica the
+/// folders a delete leaves empty stay, since the person may have made them,
+/// unless the page writes a file at their name. A stopped page may have
+/// removed the folders below that name already: the write still clears it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_delete_at_a_folder_is_done_and_leaves_no_empty_folder() {
-    const GONE: [&str; 3] = ["x.md/child.md", "d/a/b.md", "kept.md/gone.md"];
+async fn a_delete_at_a_folder_is_done_and_its_folder_gives_way_only_to_a_write() {
+    const GONE: [&str; 3] = ["x.md/child.md", "d/a/b.md", "w.md/sub/child.md"];
     let scratch = materialize_page(
         |domain| {
             for (step, path) in (1..).zip(GONE) {
@@ -235,33 +235,88 @@ async fn a_delete_at_a_folder_is_done_and_leaves_no_empty_folder() {
                     .delete_text_file(&delete_at(path, &deleted, step), &NoFaults)
                     .unwrap();
             }
+            domain
+                .write_text(&write_at("w.md", "o-w", "file w", "w4", 4), &NoFaults)
+                .unwrap();
         },
         |root| {
-            for path in GONE {
+            for path in &GONE[..2] {
                 std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
                 std::fs::write(root.join(path), "left").unwrap();
             }
-            std::fs::write(root.join("kept.md/other.txt"), "untracked").unwrap();
-            std::fs::create_dir_all(root.join("y.md/sub")).unwrap();
+            std::fs::create_dir(root.join("w.md")).unwrap();
         },
         vec![
             change("x.md", "delete"),
             change("x.md/child.md", "delete"),
             change("d/a/b.md", "delete"),
-            change("kept.md", "delete"),
-            change("kept.md/gone.md", "delete"),
-            change("y.md/sub/child.md", "delete"),
+            change("w.md/sub/child.md", "delete"),
+            change("w.md", "write"),
         ],
     )
     .await;
     let root = scratch.path();
-    for gone in ["x.md", "d", "kept.md/gone.md", "y.md"] {
-        assert!(!root.join(gone).exists(), "{gone}");
+    assert!(!root.join("x.md/child.md").exists());
+    assert!(!root.join("d/a/b.md").exists());
+    for kept in ["x.md", "d/a"] {
+        assert!(root.join(kept).is_dir(), "{kept}");
     }
     assert_eq!(
-        std::fs::read_to_string(root.join("kept.md/other.txt")).unwrap(),
-        "untracked"
+        std::fs::read_to_string(root.join("w.md")).unwrap(),
+        "file w"
     );
+}
+
+/// A link to a folder at a path with no head is not a folder of the
+/// workspace: the page refuses it rather than counting the delete as done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_at_a_link_to_a_folder_is_refused() {
+    let scratch = ScratchDir::new().unwrap();
+    let elsewhere = ScratchDir::new().unwrap();
+    std::fs::write(elsewhere.path().join("outside.md"), "outside").unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        let mut domain = VersionedTextStore::new(&mut store);
+        domain
+            .ensure_main_version("workspace", "main", 0, &NoFaults)
+            .unwrap();
+        domain
+            .write_text(&write_at("x.md", "o-x", "x", "m1", 1), &NoFaults)
+            .unwrap();
+        domain
+            .delete_text_file(&delete_at("x.md", "m2", 2), &NoFaults)
+            .unwrap();
+        domain
+            .set_active_version("workspace", "main", &NoFaults)
+            .unwrap();
+    }
+    assert!(
+        try_make_dir_alias(elsewhere.path(), &scratch.path().join("x.md")).unwrap(),
+        "host must create the folder link; this regression cannot skip"
+    );
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    let refused = actor
+        .materialize_relay_page(
+            "workspace".into(),
+            scratch.path().to_path_buf(),
+            vec![change("x.md", "delete")],
+            Arc::new(()),
+            4,
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.path().join("outside.md")).unwrap(),
+        "outside"
+    );
+    supervisor.close(&db).unwrap();
+    #[cfg(windows)]
+    std::fs::remove_dir(scratch.path().join("x.md")).unwrap();
+    #[cfg(not(windows))]
+    std::fs::remove_file(scratch.path().join("x.md")).unwrap();
 }
 
 /// One page turns the file `notes` into a directory holding `work.md`.
@@ -523,16 +578,13 @@ async fn directory_replacement_retries_after_the_delete_batch() {
             std::fs::create_dir_all(root.join("d/sub")).unwrap();
             std::fs::write(root.join("d/sub/a.md"), "a").unwrap();
         },
+        // Stop at the crash boundary: the delete batch has committed, but
+        // the next batch has not removed the directory or written its file.
         vec![change("d/sub/a.md", "delete")],
     )
     .await;
-    assert!(
-        !scratch.path().join("d").exists(),
-        "the delete takes the folders it emptied"
-    );
-    // Stop at the crash boundary: the delete batch has committed, but its
-    // folders have not gone and the next batch has not written its file.
-    std::fs::create_dir_all(scratch.path().join("d/sub")).unwrap();
+    assert!(scratch.path().join("d/sub").is_dir());
+    assert!(!scratch.path().join("d/sub/a.md").exists());
 
     let db = engine_db_path(&scratch).unwrap();
     let supervisor = WorkspaceSupervisor::new();

@@ -165,6 +165,53 @@ impl HostedRelay {
         text: &str,
         before_moment_id: &str,
     ) {
+        self.own_head_change(
+            "rename",
+            origin,
+            seq,
+            object_id,
+            from,
+            to,
+            text,
+            before_moment_id,
+        );
+    }
+
+    /// A delete of `object_id`, holding `text`, at `path`.
+    fn delete(
+        &mut self,
+        origin: &str,
+        seq: i64,
+        object_id: &str,
+        path: &str,
+        text: &str,
+        before_moment_id: &str,
+    ) {
+        self.own_head_change(
+            "delete",
+            origin,
+            seq,
+            object_id,
+            path,
+            path,
+            text,
+            before_moment_id,
+        );
+    }
+
+    /// A change of `object_id` whose before side is its own head at `from`.
+    #[allow(clippy::too_many_arguments)]
+    fn own_head_change(
+        &mut self,
+        operation: &str,
+        origin: &str,
+        seq: i64,
+        object_id: &str,
+        from: &str,
+        to: &str,
+        text: &str,
+        before_moment_id: &str,
+    ) {
         let sha256 = hex_sha256(text.as_bytes());
         self.write(
             origin,
@@ -173,7 +220,7 @@ impl HostedRelay {
             to,
             text,
             json!({
-                "operation": "rename",
+                "operation": operation,
                 "payloadBeforeBlobSha256": sha256,
                 "payloadBeforePath": from,
                 "beforePresent": "present",
@@ -567,7 +614,8 @@ impl Host {
     /// Pass, materialize and commit until neither the feed nor a commit has
     /// anything more.
     async fn sync(&mut self) {
-        for _ in 0..16 {
+        // A pass backfills one document, so a scope of many takes a pass each.
+        for _ in 0..64 {
             let pass = self.pull().await;
             let mut more = pass["hasMore"] == true;
             if pass["pendingCursor"].is_object() {
@@ -1590,6 +1638,483 @@ async fn a_held_returns_nested_history_clears_its_files_and_their_folder() {
     assert_eq!(document_state(&scratch, "doc-d").as_deref(), Some("ready"));
     assert_eq!(read("x.md").as_deref(), Some("hosted d"));
     assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("held"));
+}
+
+/// One step of a document's history on the relay.
+#[derive(Clone, Copy)]
+enum Step {
+    Create(&'static str),
+    Move(&'static str, &'static str),
+    Delete(&'static str),
+}
+
+/// Each history a returning document runs through: into a child path, out
+/// of one, out of two levels, a case-only rename, a delete then a recreate,
+/// and a plain move. The first step is synced before the rest.
+const HISTORIES: [&[Step]; 6] = [
+    &[Step::Create("x.md"), Step::Move("x.md", "x.md/child.md")],
+    &[
+        Step::Create("x.md/child.md"),
+        Step::Move("x.md/child.md", "x.md"),
+    ],
+    &[
+        Step::Create("x.md/sub/child.md"),
+        Step::Move("x.md/sub/child.md", "x.md"),
+    ],
+    &[Step::Create("p.md"), Step::Move("p.md", "P.md")],
+    &[
+        Step::Create("x.md"),
+        Step::Delete("x.md"),
+        Step::Create("x.md"),
+    ],
+    &[Step::Create("x.md"), Step::Move("x.md", "y.md")],
+];
+
+/// Where the host stops in the matrix.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Stop {
+    None,
+    /// After applying the rest of the history, before materializing it. The
+    /// pass after the restart finishes it.
+    BeforeLastMaterialized,
+    /// The same, having removed the file the history left but not the
+    /// folders above it.
+    BetweenFileAndFolder,
+    /// After applying the return's first pass, before materializing it.
+    InReturn,
+}
+
+/// What holds a returning document's path when it returns.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Occupant {
+    Free,
+    /// Another document's file.
+    File,
+    /// Another document's folder.
+    Folder,
+    /// A retired file of another document whose folder cannot go yet.
+    #[cfg(windows)]
+    Retired,
+}
+
+const OCCUPANTS: &[Occupant] = &[
+    Occupant::Free,
+    Occupant::File,
+    Occupant::Folder,
+    #[cfg(windows)]
+    Occupant::Retired,
+];
+
+/// One returning document, `b-<prefix>`, and what holds its path, `o-<prefix>`,
+/// under their own folder.
+struct Row {
+    prefix: String,
+    history: &'static [Step],
+    occupant: Occupant,
+}
+
+impl Row {
+    fn doc(&self) -> String {
+        format!("b-{}", self.prefix)
+    }
+
+    fn other(&self) -> String {
+        format!("o-{}", self.prefix)
+    }
+
+    fn at(&self, path: &str) -> String {
+        format!("{}/{path}", self.prefix)
+    }
+
+    fn start(&self) -> String {
+        match self.history[0] {
+            Step::Create(path) => self.at(path),
+            _ => unreachable!("a history starts with its creation"),
+        }
+    }
+
+    fn end(&self) -> String {
+        self.history
+            .iter()
+            .rev()
+            .find_map(|step| match step {
+                Step::Create(path) | Step::Move(_, path) => Some(self.at(path)),
+                Step::Delete(_) => None,
+            })
+            .expect("a history ends at a path")
+    }
+
+    /// Where its occupant's file sits while it holds the path.
+    fn occupant_at(&self) -> Option<String> {
+        match self.occupant {
+            Occupant::Free => None,
+            Occupant::File => Some(self.end()),
+            Occupant::Folder => Some(format!("{}/child.md", self.end())),
+            #[cfg(windows)]
+            Occupant::Retired => Some(format!("{}/r/c.md", self.end())),
+        }
+    }
+
+    fn moved(&self) -> String {
+        self.at("moved.md")
+    }
+}
+
+/// The owner's writes to the relay, with each document's text and latest
+/// moment.
+#[derive(Default)]
+struct Owner {
+    seq: i64,
+    latest: HashMap<String, (String, String)>,
+}
+
+impl Owner {
+    fn step(&mut self, relay: &mut HostedRelay, object_id: &str, prefix: &str, step: Step) {
+        let at = |path: &str| format!("{prefix}/{path}");
+        match step {
+            Step::Create(path) => self.create(relay, object_id, &at(path)),
+            Step::Move(from, to) => self.rename(relay, object_id, &at(from), &at(to)),
+            Step::Delete(path) => {
+                self.seq += 1;
+                let (text, before) = &self.latest[object_id];
+                relay.delete("owner", self.seq, object_id, &at(path), text, before);
+            }
+        }
+    }
+
+    fn create(&mut self, relay: &mut HostedRelay, object_id: &str, path: &str) {
+        self.seq += 1;
+        let text = format!("{object_id} {}", self.seq);
+        relay.create("owner", self.seq, object_id, path, &text);
+        self.latest.insert(
+            object_id.to_owned(),
+            (text, format!("moment-owner-{}", self.seq)),
+        );
+    }
+
+    fn rename(&mut self, relay: &mut HostedRelay, object_id: &str, from: &str, to: &str) {
+        self.seq += 1;
+        let (text, before) = self.latest[object_id].clone();
+        relay.rename("owner", self.seq, object_id, from, to, &text, &before);
+        self.latest.insert(
+            object_id.to_owned(),
+            (text, format!("moment-owner-{}", self.seq)),
+        );
+    }
+
+    fn text(&self, object_id: &str) -> String {
+        self.latest[object_id].0.clone()
+    }
+
+    /// Each row's document at the end of its history, with its text.
+    fn heads<'r>(&self, rows: impl IntoIterator<Item = &'r Row>) -> BTreeMap<String, String> {
+        rows.into_iter()
+            .map(|row| (row.end(), self.text(&row.doc())))
+            .collect()
+    }
+}
+
+/// Every file under the root but the engine's own, with its text, and every
+/// empty folder.
+fn disk(root: &std::path::Path) -> (BTreeMap<String, String>, Vec<String>) {
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        files: &mut BTreeMap<String, String>,
+        empty: &mut Vec<String>,
+    ) {
+        let relative = |path: &std::path::Path| {
+            path.strip_prefix(root)
+                .expect("under the root")
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+        let mut any = false;
+        for entry in std::fs::read_dir(dir).expect("read folder") {
+            let path = entry.expect("entry").path();
+            any = true;
+            if dir == root && relative(&path).starts_with('.') {
+                continue;
+            }
+            if std::fs::symlink_metadata(&path).expect("metadata").is_dir() {
+                walk(root, &path, files, empty);
+            } else {
+                files.insert(
+                    relative(&path),
+                    std::fs::read_to_string(&path).expect("text"),
+                );
+            }
+        }
+        if !any {
+            empty.push(relative(dir));
+        }
+    }
+    let (mut files, mut empty) = (BTreeMap::new(), Vec::new());
+    walk(root, root, &mut files, &mut empty);
+    empty.sort();
+    (files, empty)
+}
+
+async fn reopen(host: Host, scratch: &ScratchDir, relay: &FakeRelay) -> Host {
+    let mut host = host;
+    host.call("workspace.close", json!({})).await;
+    drop(host);
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, scratch, relay).await;
+    Host {
+        transport,
+        handle,
+        id: 1,
+    }
+}
+
+/// The fourth park review: each round found another edge in replaying a
+/// returning document's stored decisions. Every history above runs, beside
+/// every occupant, through one stop. Each pass commits, a document is ready
+/// only once its path is free, the disk holds exactly the heads, and no file
+/// or empty folder of a history stays at a free path.
+async fn returning_document_matrix(stop: Stop) {
+    let rows: Vec<Row> = HISTORIES
+        .iter()
+        .enumerate()
+        .flat_map(|(h, history)| {
+            OCCUPANTS.iter().map(move |occupant| Row {
+                prefix: format!("h{h}-{occupant:?}").to_lowercase(),
+                history,
+                occupant: *occupant,
+            })
+        })
+        .collect();
+    let mut owner = Owner::default();
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    for row in &rows {
+        owner.step(&mut relay, &row.doc(), &row.prefix, row.history[0]);
+        relay.share(&row.doc(), &row.start());
+    }
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    let started = rows
+        .iter()
+        .map(|row| (row.start(), owner.text(&row.doc())))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(disk(scratch.path()), (started, vec![]));
+
+    {
+        let mut relay = relay.relay();
+        for row in &rows {
+            for step in &row.history[1..] {
+                owner.step(&mut relay, &row.doc(), &row.prefix, *step);
+            }
+            relay.share(&row.doc(), &row.end());
+        }
+    }
+    let ended = owner.heads(&rows);
+    if stop == Stop::BeforeLastMaterialized || stop == Stop::BetweenFileAndFolder {
+        assert!(
+            host.pull().await["pendingCursor"].is_null(),
+            "adopts the scope"
+        );
+        assert!(host.pull().await["pendingCursor"].is_object());
+        if stop == Stop::BetweenFileAndFolder {
+            // The file the history left is gone, and each folder above it
+            // but the outermost.
+            for row in &rows {
+                let left = row.history[1..]
+                    .iter()
+                    .find_map(|step| match step {
+                        Step::Move(from, _) | Step::Delete(from) => Some(*from),
+                        Step::Create(_) => None,
+                    })
+                    .expect("a history leaves a path");
+                let path = row.at(left);
+                std::fs::remove_file(scratch.path().join(&path)).expect("remove the left file");
+                let mut folder = path.as_str();
+                while let Some((parent, _)) = folder.rsplit_once('/')
+                    && parent.matches('/').count() > 1
+                {
+                    std::fs::remove_dir(scratch.path().join(parent)).expect("remove its folder");
+                    folder = parent;
+                }
+            }
+        }
+        host = reopen(host, &scratch, &relay).await;
+    }
+    host.sync().await;
+    for row in &rows {
+        assert_eq!(
+            document_state(&scratch, &row.doc()).as_deref(),
+            Some("ready"),
+            "{}",
+            row.prefix
+        );
+    }
+    assert_eq!(disk(scratch.path()), (ended.clone(), vec![]));
+
+    {
+        let mut relay = relay.relay();
+        for row in &rows {
+            relay.unshare(&row.doc());
+        }
+    }
+    host.sync().await;
+    for row in &rows {
+        assert_eq!(
+            document_state(&scratch, &row.doc()).as_deref(),
+            Some("parked"),
+            "{}",
+            row.prefix
+        );
+    }
+    assert_eq!(disk(scratch.path()), (BTreeMap::new(), vec![]));
+
+    {
+        let mut relay = relay.relay();
+        for row in &rows {
+            if let Some(at) = row.occupant_at() {
+                owner.create(&mut relay, &row.other(), &at);
+                relay.share(&row.other(), &at);
+            }
+        }
+    }
+    host.sync().await;
+    #[cfg(windows)]
+    let locks = {
+        use std::os::windows::fs::OpenOptionsExt;
+        let locks = rows
+            .iter()
+            .filter(|row| row.occupant == Occupant::Retired)
+            .map(|row| {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS, to open a folder
+                    .share_mode(0x1 | 0x2) // read | write, no delete
+                    .open(scratch.path().join(format!("{}/r", row.end())))
+                    .expect("lock folder")
+            })
+            .collect::<Vec<_>>();
+        {
+            let mut relay = relay.relay();
+            for row in rows.iter().filter(|row| row.occupant == Occupant::Retired) {
+                relay.unshare(&row.other());
+            }
+        }
+        host.sync().await;
+        locks
+    };
+    // Another document's file or folder stays where it is; a retired file's
+    // folder stays empty while it cannot go.
+    let mut stuck = Vec::new();
+    let mut returned = owner.heads(rows.iter().filter(|row| row.occupant == Occupant::Free));
+    for row in &rows {
+        match row.occupant {
+            Occupant::Free => {}
+            Occupant::File | Occupant::Folder => {
+                returned.insert(row.occupant_at().unwrap(), owner.text(&row.other()));
+            }
+            #[cfg(windows)]
+            Occupant::Retired => stuck.push(format!("{}/r", row.end())),
+        }
+    }
+    stuck.sort();
+
+    {
+        let mut relay = relay.relay();
+        for row in &rows {
+            relay.share(&row.doc(), &row.end());
+        }
+    }
+    if stop == Stop::InReturn {
+        assert!(
+            host.pull().await["pendingCursor"].is_null(),
+            "adopts the scope"
+        );
+        assert!(host.pull().await["pendingCursor"].is_object());
+        host = reopen(host, &scratch, &relay).await;
+    }
+    host.sync().await;
+    for row in &rows {
+        let state = if row.occupant == Occupant::Free {
+            "ready"
+        } else {
+            "held"
+        };
+        assert_eq!(
+            document_state(&scratch, &row.doc()).as_deref(),
+            Some(state),
+            "{}",
+            row.prefix
+        );
+    }
+    assert_eq!(disk(scratch.path()), (returned, stuck));
+
+    {
+        let mut relay = relay.relay();
+        for row in &rows {
+            if matches!(row.occupant, Occupant::File | Occupant::Folder) {
+                let at = row.occupant_at().unwrap();
+                owner.rename(&mut relay, &row.other(), &at, &row.moved());
+                relay.share(&row.other(), &row.moved());
+            }
+        }
+    }
+    #[cfg(windows)]
+    drop(locks);
+    host.sync().await;
+    for row in &rows {
+        assert_eq!(
+            document_state(&scratch, &row.doc()).as_deref(),
+            Some("ready"),
+            "{}",
+            row.prefix
+        );
+    }
+    let mut settled = ended;
+    settled.extend(
+        rows.iter()
+            .filter(|row| matches!(row.occupant, Occupant::File | Occupant::Folder))
+            .map(|row| (row.moved(), owner.text(&row.other()))),
+    );
+    assert_eq!(disk(scratch.path()), (settled, vec![]));
+    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let retired: i64 = conn
+        .query_row("SELECT COUNT(*) FROM hosted_retired_files", [], |row| {
+            row.get(0)
+        })
+        .expect("count");
+    assert_eq!(retired, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_returning_document_settles_with_no_stop() {
+    returning_document_matrix(Stop::None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_returning_document_settles_after_a_stop_before_its_last_change_materialized() {
+    returning_document_matrix(Stop::BeforeLastMaterialized).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_returning_document_settles_after_a_stop_between_a_file_and_its_folder() {
+    returning_document_matrix(Stop::BetweenFileAndFolder).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_returning_document_settles_after_a_stop_in_its_return() {
+    returning_document_matrix(Stop::InReturn).await;
 }
 
 /// The durability review of parking, on disk: a return held at its path

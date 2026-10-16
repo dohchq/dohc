@@ -1084,11 +1084,13 @@ const HEADS_SQL: &str = "SELECT s.version_id,s.path,s.content_kind FROM versions
 /// that is not ready, recorded when they applied, its pass materializes
 /// again. Materializing a path brings its file to the head there. Its history
 /// since may have left those paths to another document or a retired file, so
-/// one stands only where nothing holds its path now ([`park::Occupancy`]),
-/// and never at a path that collides with one of its own heads, current or
-/// parked: the pass that makes it ready writes those, and a document still
-/// held writes nothing. The delete of a path it left that is free still
-/// removes its file.
+/// one stands only where nothing holds its path now ([`park::Occupancy`]).
+/// None stands at a path that collides with a parked head, which comes back
+/// with its own writes once nothing holds it, nor at a current head's own
+/// path: the pass that makes it ready writes that, and a document still held
+/// writes nothing. One at a current head's path in another case, or inside
+/// or above it, stands: its delete clears what is in the way of that head's
+/// write, and the page runs deletes first.
 pub(crate) fn redelivered_unready(
     occupancy: &mut Occupancy<'_>,
     object_id: &str,
@@ -1096,19 +1098,19 @@ pub(crate) fn redelivered_unready(
 ) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
     use dohc_engine_storage::capture_file_holds::path_is_held;
     let (conn, workspace_id) = (occupancy.conn, occupancy.workspace_id);
-    let mut own = park::parked_paths(conn, workspace_id, object_id)?;
-    own.extend(
-        head_writes(conn, workspace_id, object_id)?
-            .into_iter()
-            .map(|head| (head.version_id, head.path)),
-    );
+    let parked = park::parked_paths(conn, workspace_id, object_id)?;
+    let heads = head_writes(conn, workspace_id, object_id)?;
     let mut standing = Vec::new();
     for change in stored {
-        let own_at = own.iter().any(|(version_id, path)| {
+        let parked_at = parked.iter().any(|(version_id, path)| {
             *version_id == change.version_id
                 && (path_is_held(path, &change.path) || path_is_held(&change.path, path))
         });
-        if !own_at
+        let head_at = heads
+            .iter()
+            .any(|head| head.version_id == change.version_id && head.path == change.path);
+        if !parked_at
+            && !head_at
             && occupancy
                 .hold(object_id, &change.version_id, &change.path)?
                 .is_none()

@@ -1920,7 +1920,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 skipped,
                 conflicts_opened,
                 pending_cursor,
-                changed_paths: changed_paths.into_values().collect(),
+                changed_paths: materialization_page(changed_paths),
                 refusals,
                 sharing_declined,
                 record_facts,
@@ -1936,7 +1936,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             skipped,
             conflicts_opened,
             pending_cursor: Some(pending_cursor),
-            changed_paths: changed_paths.into_values().collect(),
+            changed_paths: materialization_page(changed_paths),
             refusals,
             sharing_declined,
             record_facts,
@@ -2223,7 +2223,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 reads,
                 settlement_report_id: pass.settlement_report_id,
             }),
-            changed_paths: pass.changed_paths.into_values().collect(),
+            changed_paths: materialization_page(pass.changed_paths),
             refusals: pass.refusals,
             sharing_declined: pass.sharing_declined,
             record_facts: pass.record_facts,
@@ -6039,6 +6039,18 @@ fn accumulate_pull_outcome(
 /// A pass's materialization decisions, by version and path.
 type ChangedPaths = BTreeMap<(String, String), crate::MomentMaterializationChange>;
 
+/// A pass's decisions as the page that materializes them, deletes first. The
+/// materializer keeps page order only between paths that alias, and there a
+/// case-only rename's delete must run before its write: after it, on a disk
+/// that ignores case, the delete would remove the file the write just named.
+fn materialization_page(changed_paths: ChangedPaths) -> Vec<crate::MomentMaterializationChange> {
+    let (mut page, writes): (Vec<_>, Vec<_>) = changed_paths
+        .into_values()
+        .partition(|change| change.operation == "delete");
+    page.extend(writes);
+    page
+}
+
 fn insert_changed_path(
     changed_paths: &mut ChangedPaths,
     change: crate::MomentMaterializationChange,
@@ -6465,6 +6477,30 @@ mod changed_path_tests {
         assert_eq!(changed.len(), 2);
         assert!(changed.contains_key(&("main".to_owned(), ".env".to_owned())));
         assert!(changed.contains_key(&("feature".to_owned(), ".env".to_owned())));
+    }
+
+    /// The park matrix: `P.md` sorts before `p.md`, so a case-only rename's
+    /// write ran first, and on a disk that ignores case its delete then
+    /// removed the renamed file.
+    #[test]
+    fn a_page_runs_its_deletes_before_its_writes() {
+        let mut changed = BTreeMap::new();
+        for (path, operation) in [("P.md", "write"), ("b.md", "write"), ("p.md", "delete")] {
+            insert_changed_path(
+                &mut changed,
+                crate::MomentMaterializationChange {
+                    version_id: "main".to_owned(),
+                    path: path.to_owned(),
+                    operation,
+                    content_kind: "text",
+                },
+            );
+        }
+        let page = super::materialization_page(changed)
+            .into_iter()
+            .map(|change| change.path)
+            .collect::<Vec<_>>();
+        assert_eq!(page, ["p.md", "P.md", "b.md"]);
     }
 }
 
