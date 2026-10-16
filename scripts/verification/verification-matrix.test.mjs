@@ -74,6 +74,8 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
     ["pr", null, "warm"], ["pr", null, "pre-typecheck"], ["pr", "rust", "pre-clippy"],
     // A package test that another branch also failed in the last day, run inline beside a queue history.
     ["pr", "js", "shared"],
+    // A package test that fails both tries and then passes alone passes the gate.
+    ["pr", "js", "passed-alone"],
     // A failure stops the other job unless the run keeps going.
     ["pr", null, "js", undefined, false, true],
   ]) cases.push(t.test([mode, job, fault, changed ?? "empty diff", full ? "full" : "", keepGoing ? "keep-going" : ""].filter(Boolean).join(" "), async (context) => {
@@ -272,10 +274,18 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
             assert.ok(${JSON.stringify(packages)}.includes(args[1]),'Unknown package executed: '+args[1]);
             assert.equal(options.env.POSTGRES_URL,'postgres://dohc:dohc@127.0.0.1:1234/dohc');
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
-            if(process.env.FIXTURE_FAULT==='shared' && args[1]==='@dohc/fixture') {
-              appendFileSync(options.env.DOHC_TEST_RECORD,JSON.stringify({test:'src/index.test.ts › keeps its value',flaky:false,failed:true,seconds:0.1})+'\\n');
+            if(['shared','passed-alone'].includes(process.env.FIXTURE_FAULT) && args[1]==='@dohc/fixture') {
+              const ended=process.env.FIXTURE_FAULT==='passed-alone'?JSON.stringify({run:'failed',outside:0})+'\\n':'';
+              appendFileSync(options.env.DOHC_TEST_RECORD,JSON.stringify({test:'src/index.test.ts › keeps its value',flaky:false,failed:true,passed:false,seconds:0.1})+'\\n'+ended);
               throw Object.assign(Error('fixture package test failed'),{commandExitFailure:true});
             }
+            return {stdout:''};
+          }
+          if(command==='pnpm' && args[1]==='@dohc/fixture' && args[2]==='exec') {
+            assert.equal(process.env.FIXTURE_FAULT,'passed-alone','Unexpected isolated retry');
+            assert.deepEqual(args.slice(0,10),['--filter','@dohc/fixture','exec','vitest','run','src/index.test.ts','--maxWorkers=1','--no-file-parallelism','--retry=0','--reporter=default']);
+            for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E','DOHC_TEST_RECORD_ALL'])assert.equal(options.env[flag],'1');
+            appendFileSync(options.env.DOHC_TEST_RECORD,[{test:'src/index.test.ts › keeps its value',flaky:false,failed:false,passed:true,seconds:0.1},{run:'passed',outside:0}].map(line=>JSON.stringify(line)+'\\n').join(''));
             return {stdout:''};
           }
           if(command==='pnpm' && args[0]==='exec') {
@@ -386,7 +396,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         assert.equal(existsSync(join(root, ".dohc-dev/queued")), false);
         assert.equal(report.timings.some(phase => phase.name === "queue"), false);
         assert.deepEqual(report.steps.map(({name}) => name), [...(rust ? ["pre-queue-fmt"] : []), ...(js ? ["pre-queue-typecheck"] : []), ...(fault === "pre-clippy" ? ["pre-queue-clippy"] : [])]);
-      } else if (fault && !warm) {
+      } else if (fault && !warm && fault !== "passed-alone") {
         assert.equal(result.status, fault === "rust-cancel" ? 143 : 1, result.stderr);
         assert.equal(report.verdict, "FAIL");
         assert.ok(report.steps.every(step => ["PASS", "FAIL", "NOT RUN"].includes(step.verdict)));
@@ -489,6 +499,11 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         ].sort());
         if (rust && js) assert.equal(readFileSync(join(root, '.dohc-dev/jobs-overlapped'), 'utf8'), 'yes');
         assert.equal(report.verdict, "PASS");
+        if (fault === "passed-alone") {
+          assert.deepEqual(report.flaky, [{ step: "@dohc/fixture", test: "src/index.test.ts › keeps its value", passedAlone: true }]);
+          assert.deepEqual(report.failed, []);
+          assert.match(result.stdout, /\[verification\] 1 flaky test\(s\) passed only on retry\. Each one is a defect to fix:\n {2}@dohc\/fixture: src\/index\.test\.ts › keeps its value \(failed both tries, passed alone\)\n/u);
+        }
         assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);
         assert.ok(report.steps.every(step => step.startedAt && step.finishedAt && step.seconds >= 0));
         assert.ok(report.timings.every(phase => phase.startedAt && phase.finishedAt && phase.seconds >= 0));

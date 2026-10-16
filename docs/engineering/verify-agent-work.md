@@ -206,8 +206,19 @@ Windows fast startup hibernates the system at shutdown, so the next start contin
 The gate runs a failing test once more before it fails the change.
 nextest, vitest, and Playwright retry the failing test itself. The repository and desktop script steps run again when their report names a failed test; a failed check or build is not retried. The self-host proof runs again from an empty evidence folder.
 A test that passes only on that retry does not fail the gate. `result.json` lists it under `flaky`, the verifier prints it, and the queue history records it.
-A flaky test is a defect. Fix the condition it races, or report it to whoever owns it. A test that fails twice still fails the gate.
+A flaky test is a defect. Fix the condition it races, or report it to whoever owns it.
 A repository or desktop script step reruns as a whole, after its first attempt's ignored outputs. A test that fails on a clean tree but passes beside those outputs is recorded as flaky like any other, so treat every entry as a real failure until you have read it.
+
+Both tries run under the same load, so a package test or a repository or desktop script test that fails both tries runs once more, alone, with one worker.
+The gate runs the test's whole file at once, with the step's environment, while other steps continue. A test that fails only after another test in its file still fails alone, and so does a file that fails in a way its report does not name.
+A file passes alone only when it exits cleanly and its report shows, by name, that each of its tests that failed both tries passed. A test that skips itself alone is no pass.
+If every file with a failed test passes alone, the step passes. `result.json` and `js-tests/result.json` list each failed test under `flaky` with `passedAlone: true`, and the verifier marks it "failed both tries, passed alone".
+A test that passes only alone usually depends on timing, a race, or something other tests share. It is a defect like any other flaky test.
+If a file fails alone too, the step fails, and the gate fails the change. `failed` then also lists each test the file failed alone, so the commands under `rerun` cover them. `js-tests/result.json` records each file run alone under its step's `alone`, with its log and its outcome: `passed`, `failed`, `no test ran`, or `interrupted`.
+A step that failed outside its tests gets no isolated retry. That includes a failed check or build and a test with no rerun command. In package tests it also includes a file that failed to load, a failed hook, and an unhandled error.
+In script tests, node:test reports a failed hook as a failed test, and a file that failed to load or threw an unhandled error as a failed file, so their files run alone.
+A script test gets no isolated retry when it failed before the script's last command, because the commands after it never ran. It gets none when it failed only when the step ran again, because it did not fail both tries.
+An interrupted step gets no isolated retry either. The Rust tests and the Playwright proofs have none yet.
 
 ### Failures other branches share
 
@@ -244,7 +255,7 @@ The dashboard marks a moved request in the line and in its lane once it runs. Po
 
 ### A failure stops the run
 
-The first step that fails stops the rest of a PR run. A step fails only after its retry, so a test that passes on retry stops nothing.
+The first step that fails stops the rest of a PR run. A step fails only after its retry and its isolated retry, so a test that passes on either stops nothing.
 The runner interrupts the running Rust job, package tests, and proofs as it does on Ctrl+C. It then removes their processes, Postgres, and containers.
 The verdict is FAIL. `result.json` names the failed step under `stopped.after` and lists each step that did not finish under `stopped.notRun`.
 Each of those steps has the verdict `NOT RUN`. `js-tests/result.json` records the package tests and proofs that did not finish in the same way.
