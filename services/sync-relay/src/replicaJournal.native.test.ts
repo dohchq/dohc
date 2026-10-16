@@ -8,15 +8,15 @@ import {DatabaseSync} from "node:sqlite";
 import * as Y from "yjs";
 import {requireEngineBinaryOrSkip} from "../../../apps/desktop/src/testing/engineBinary";
 import {registered, cleanupLiveDeliveryFixtures, hash} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
-import {yDocToMarkdown} from "../../../packages/ydoc-projection/src/import-export";
+import {yDocToMarkdown,markdownToYDoc} from "../../../packages/ydoc-projection/src/import-export";
 import {createReplicaReadPrincipal} from "./replicaReadPrincipal";
 import {createReplicaEngineStarter} from "./replicaEngine";
 import type {ReplicaChild} from "./replicaSupervisor";
 
 const binary=requireEngineBinaryOrSkip();
 afterEach(cleanupLiveDeliveryFixtures);
-async function fixture(retired=false, retireAuthority=true) {
-  const f=registered({deployment:true});
+async function fixture(retired=false, retireAuthority=true,baselineBytes?:Uint8Array) {
+  const f=registered({deployment:true,baselineBytes});
   f.storage.claimWorkspaceIdentity({workspaceId:"workspace",replicationEpoch:"epoch",streamIdentity:"stream"});
   const root=await mkdtemp(join(tmpdir(),"replica5b-native-"));
   const append={workspaceId:"workspace",originId:"device",ops:[{originSeq:0,opKind:"workspace.init",recordedAtMs:1,payloadJson:"{}"},
@@ -65,7 +65,7 @@ async function fixture(retired=false, retireAuthority=true) {
       expect(Y.encodeStateVector(doc)).toEqual(Y.encodeStateVector(f.doc));expect(yDocToMarkdown(doc)).toBe(yDocToMarkdown(f.doc));
     }finally{doc.destroy();}
   });
-  return {f,lease,commit,get child(){return child;},read,project,retiredCursor,async resetToBaseline(){
+  return {f,root,lease,commit,get child(){return child;},read,project,retiredCursor,async resetToBaseline(){
     await child.close();await rm(join(root,".dohc"),{recursive:true,force:true});
     child=await startChild();journalPaused=true;
     try {await child.pull();}finally{journalPaused=false;}
@@ -126,3 +126,14 @@ it.skipIf(binary.missing || process.env.DOHC_REPLICA_MEASURE!=="1")("measures re
     console.log(`DRIVER_MS rows=${size} median=${samples[10]} p95=${samples[19]} samples=21`);
   }
 },600_000);
+
+it.skipIf(binary.missing)("current views preserve nested-list bytes through the accepted journal lane",async()=>{
+  const original=markdownToYDoc("- one\n  - child\n    - grandchild\n- two"),baselineBytes=Y.encodeStateAsUpdate(original);original.destroy();
+  const f=await fixture(false,true,baselineBytes);try{
+    await f.child.pull();const text=yDocToMarkdown(f.f.doc),sha=hash(Buffer.from(text));
+    const db=new DatabaseSync(join(f.root,".dohc/engine/engine.db"));try{db.exec("BEGIN");db.prepare("INSERT OR IGNORE INTO blobs VALUES(?,?,?)").run(sha,Buffer.byteLength(text),text);db.prepare("INSERT OR IGNORE INTO path_aliases VALUES('workspace','main',?,'object')").run(f.f.input.evidence.currentPath);db.prepare("INSERT OR REPLACE INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES('workspace','main','object',?,?,0,'baseline','test')").run(f.f.input.evidence.currentPath,sha);db.exec("COMMIT");}finally{db.close();}
+    const initial=await f.child.currentView([{versionId:"main",paths:["docs"]}],[]);expect(initial.texts[0]!.text).toBe(text);
+    f.commit("nested-edit");await f.child.pull();
+    const changed=await f.child.currentView([{versionId:"main",paths:["docs"]}],[]);expect(changed.journalCursor).toBe(1);expect(changed.texts[0]!.text).toBe(yDocToMarkdown(f.f.doc));expect(changed.texts[0]!.text).toContain("grandchild");expect(changed.files[0]!.restoreGeneration).toBe(1);
+  }finally{await f.close();}
+},120_000);

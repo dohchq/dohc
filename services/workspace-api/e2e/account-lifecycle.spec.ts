@@ -3,7 +3,9 @@ import { startAccountServer } from "./harness";
 import { mailLinks } from "./smtpCapture";
 
 let server: Awaited<ReturnType<typeof startAccountServer>>;
-test.beforeAll(async () => { server = await startAccountServer(); });
+test.beforeAll(async ({}, testInfo) => {
+  server = await startAccountServer({ signal: AbortSignal.timeout(testInfo.timeout - 10_000) });
+});
 test.afterAll(async () => { await server?.close(); });
 
 test("a new account verifies email, approves desktop, denies another device, and recovers its password", async ({ page, request }) => {

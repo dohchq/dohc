@@ -59,25 +59,30 @@ test("a failed package stops admission and waits for its running sibling", async
   assert.deepEqual(started, ["fail", "sibling"]);
 });
 
-test("a node:test step that failed only in its tests runs once more and records them as flaky", t => {
+test("a node:test step that failed only in its tests runs once more and records them as flaky, or as failed when the retry fails too", t => {
   const root = mkdtempSync(join(tmpdir(), "dohc-js-rerun-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/verification"), { recursive: true });
   for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
   mkdirSync(join(root, "packages/tail"), { recursive: true });
   writeFileSync(join(root, "packages/tail/package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
-  // The fake repository step fails in a test the first time and passes the second; a check failure always fails.
+  // The fake repository step fails in a test the first time and passes the second, or fails both times; a check failure always fails.
+  // The fake vitest package records what the reporter records for a test that passed on retry and one that failed both tries.
   writeFileSync(join(root, "scripts/verification/process.mjs", ), `
     import {appendFileSync,existsSync,writeFileSync} from 'node:fs';
     import {resolve} from 'node:path';
     export const repoRoot=resolve(import.meta.dirname,'../..');
     export const pnpm=args=>['pnpm',args];
     export const calls=[];
-    export async function run(_command,args,{log}){
+    export async function run(_command,args,{log,env}){
       calls.push(args.join(' '));
       if(args.includes('list'))return {stdout:JSON.stringify([{name:'@dohc/tail',path:resolve('packages/tail')}])};
       if(args.includes('test:repo')&&process.env.SCENARIO==='check'){writeFileSync(log,'check-brand: 2 files use the old name');throw Object.assign(Error('check failed'),{commandExitFailure:true});}
-      if(args.includes('test:repo')&&!existsSync('ran')){writeFileSync('ran','');writeFileSync(log,'✖ failing tests:\\n\\n✖ times out under load (30231ms)\\n');throw Object.assign(Error('tests failed'),{commandExitFailure:true});}
+      if(args.includes('test:repo')&&(process.env.SCENARIO==='twice'||process.env.SCENARIO==='flaky'&&!existsSync('ran'))){writeFileSync('ran','');writeFileSync(log,'✖ failing tests:\\n\\n✖ times out under load (30231ms)\\n');throw Object.assign(Error('tests failed'),{commandExitFailure:true});}
+      if(args[1]==='@dohc/tail'&&process.env.SCENARIO==='vitest'){
+        appendFileSync(env.DOHC_TEST_RECORD,JSON.stringify({test:'src/a.test.ts › settles on retry',flaky:true,failed:false,seconds:0.1})+'\\n'+JSON.stringify({test:'src/a.test.ts › fails both tries',flaky:false,failed:true,seconds:0.1})+'\\n');
+        writeFileSync(log,'FAIL src/a.test.ts\\n✖ failing tests:\\n\\n✖ a node:test run a test printed (5ms)\\n');throw Object.assign(Error('tests failed'),{commandExitFailure:true});
+      }
       writeFileSync(log,'ok');return {stdout:''};
     }
   `);
@@ -87,7 +92,7 @@ test("a node:test step that failed only in its tests runs once more and records 
     import {calls} from './scripts/verification/process.mjs';
     await testWorkspace({prepared:true,output:'evidence'}).catch(error=>console.log('ERROR',error.message));
     const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
-    console.log(JSON.stringify({repo:calls.filter(call=>call.includes('test:repo')).length,flaky:report.flaky}));
+    console.log(JSON.stringify({repo:calls.filter(call=>call.includes('test:repo')).length,flaky:report.flaky,failed:report.failed}));
   `);
   const drive = scenario => {
     rmSync(join(root, "ran"), { force: true });
@@ -95,8 +100,11 @@ test("a node:test step that failed only in its tests runs once more and records 
     const result = spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, SCENARIO: scenario } });
     return JSON.parse(result.stdout.trim().split("\n").at(-1));
   };
-  assert.deepEqual(drive("flaky"), { repo: 2, flaky: [{ step: "repository", test: "times out under load" }] });
-  assert.deepEqual(drive("check"), { repo: 1, flaky: [] });
+  assert.deepEqual(drive("flaky"), { repo: 2, flaky: [{ step: "repository", test: "times out under load" }], failed: [] });
+  assert.deepEqual(drive("twice"), { repo: 2, flaky: [], failed: [{ step: "repository", test: "times out under load" }] }, "the retry's report names the failure, with the flaky list's name");
+  assert.deepEqual(drive("check"), { repo: 1, flaky: [], failed: [] });
+  assert.deepEqual(drive("vitest"), { repo: 1, flaky: [{ step: "@dohc/tail", test: "src/a.test.ts › settles on retry" }], failed: [{ step: "@dohc/tail", test: "src/a.test.ts › fails both tries" }] },
+    "a vitest test that failed both tries is failed, not flaky, and node:test output in a vitest log names nothing");
 });
 
 test("a confirmed failure stops the running steps unless the run keeps going, and a retried pass does not", t => {

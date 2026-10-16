@@ -60,7 +60,9 @@ import { ChatAvatar } from "../workbench/ChatAvatar";
 import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
 import { ThreadMessages } from "../workbench/ChatPosts";
 import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
+import { ComposerModeBar } from "../workbench/ChatsControls";
 import { MentionComposer } from "../workbench/MentionComposer";
+import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddressed";
 import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
@@ -113,48 +115,23 @@ const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), 
 
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
-// A floating part draws a shadow up to 38px below and 28px beside itself,
-// and its whole shadow must stay in its own capture. The toasts get this
-// padding; the menus get the same room from their taller boxes.
+// A floating part draws a shadow up to 41px below and 31px beside itself in
+// the dark theme, and its whole shadow must stay in its own capture, which
+// takes 16px around its part. So a part needs at least 25px of its own room
+// below a floating box and 15px beside it. The toasts get this 40px padding;
+// the shell's menus get the room from their taller boxes, and the editor's
+// menus from EDITOR_MENU_BOX's margin and their boxes' heights.
 const SHADOW_ROOM = "p-10";
-
-// A part's pixels depend on where in a pixel it starts, and Chromium lays
-// out in 1/64 px, so a section whose content ends on a fraction would move
-// every section below it off the pixel grid and change their captures. Each
-// section takes the next whole pixel above its content's height; with whole
-// gaps and padding around them, every part then starts on one. The content
-// is measured, not the section: the section's own height is what is set,
-// so measuring it would never let it shrink and would resize inside its own
-// observer's callback.
-function useWholePixelHeight() {
-  const section = useRef<HTMLElement>(null);
-  const content = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const measured = content.current;
-    const sized = section.current;
-    if (!measured || !sized) return;
-    const observer = new ResizeObserver(([entry]) => {
-      const size = entry?.borderBoxSize[0];
-      if (size) sized.style.height = `${Math.ceil(size.blockSize)}px`;
-    });
-    observer.observe(measured, { box: "border-box" });
-    return () => observer.disconnect();
-  }, []);
-  return { section, content };
-}
 
 // A part whose subject is not a menu but which holds one, such as a header
 // with its document menu, is captured with its menus closed (`menusAtRest`).
 function Section(props: { part: string; title: string; children: ReactNode; menusAtRest?: boolean }) {
-  const { section, content } = useWholePixelHeight();
   return (
-    <section ref={section} data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined}>
-      <div ref={content} className="flex flex-col gap-3">
-        <SectionLabel as="h3" className="m-0">
-          {props.title}
-        </SectionLabel>
-        <div className="flex flex-wrap items-start gap-x-6 gap-y-4">{props.children}</div>
-      </div>
+    <section data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined} className="flex flex-col gap-3">
+      <SectionLabel as="h3" className="m-0">
+        {props.title}
+      </SectionLabel>
+      <div className="flex flex-wrap items-start gap-x-6 gap-y-4">{props.children}</div>
     </section>
   );
 }
@@ -618,10 +595,11 @@ const CHAT_THREAD_MESSAGES = [
 const CHAT_THREAD_NAV = { level: "thread", channel: CHAT_CHANNEL, thread: CHAT_POSTS[0]!.thread } as const;
 const NO_BOOKMARKS = new Set<string>();
 
-// A thread at the drawing's column, its second comment hovered.
+// A thread at the drawing's column, its second comment hovered. Its
+// toolbar's shadow takes the room below.
 function ChatThreadSpecimen() {
   return (
-    <div className="w-[560px]" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
+    <div className="w-[560px] pb-6" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
       <ThreadMessages
         nav={CHAT_THREAD_NAV}
         messages={CHAT_THREAD_MESSAGES}
@@ -647,6 +625,50 @@ function ChatThreadSpecimen() {
 }
 
 const COMPOSER_DRAFT = "Can we cut the last paragraph?";
+
+// The agent picked from the roster, in each state its offer says. The
+// specimen agent takes the default agent colour, not a chosen one.
+const AGENT_OFFER_STATES: readonly AgentOfferState[] = ["runs", "working", "paused", "runner-off", "no-command", "unknown"];
+const AGENT_DRAFT = "@agent can you check funnel.csv against last week?";
+function agentOffer(state: AgentOfferState): AgentAddressedOffer {
+  return {
+    kind: "agent-addressed",
+    agent: { id: "agent:default", kind: "agent", handle: "agent", label: "Nova" },
+    presentation: { group: "states-agent", hue: null, self: false },
+    state,
+    working: state === "working",
+    reach: "C:\\Users\\ada\\trip-planner",
+  };
+}
+
+function AgentOfferComposer(props: {
+  state: AgentOfferState;
+  surface: "post" | "stream";
+  id: string;
+  width?: string;
+  focus?: boolean;
+  replying?: boolean;
+}) {
+  const composer = (
+    <MentionComposer testIdPrefix={props.id} composerId={props.id} value={AGENT_DRAFT} sending={false}
+      surface={props.surface} authorName="Ada" authorPresentation={SAMPLE_ADA}
+      placeholder={props.surface === "post" ? "What's happening in #general?" : "Message #general"}
+      sendLabel={props.surface === "post" ? "Start post" : "Send message"} candidates={[]} onChange={noop} onSend={noop}
+      agentOffer={agentOffer(props.state)} onSetUpAgent={noop}
+      above={props.replying ? (
+        <ComposerModeBar testId={`${props.id}-replying-mode`} cancelTestId={`${props.id}-replying-cancel`}
+          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+      ) : undefined} />
+  );
+  const focused = props.focus ? (
+    <div data-force-state="focus-visible" data-force-target='[data-testid="composer-agent-offer-setup"]'>{composer}</div>
+  ) : composer;
+  // A stream composer floats its offer above its top edge, into the room the
+  // end of its conversation keeps, so it gets that room here.
+  return props.surface === "post"
+    ? <div id={`${props.id}-specimen`} className={props.width ?? "w-[560px]"}>{focused}</div>
+    : <div id={`${props.id}-specimen`} className={`${props.width ?? "w-[400px]"} rounded-lg border border-line bg-panel pt-9`}>{focused}</div>;
+}
 
 // The About rail at the drawing's 290px, on the chrome.
 function AboutPanelSpecimen(props: { children: ReactNode }) {
@@ -902,8 +924,9 @@ const dangerMenuItems: MenuEntry[] = [
 
 // The editor's menus draw themselves at fixed places. Laid out inside a box
 // with `contain: layout`, which is the containing block for fixed children,
-// they land in their part. The box leaves room for the shadow.
-const EDITOR_MENU_BOX = "relative [contain:layout]";
+// they land in their part. The box's 24px margin leaves room for the shadow
+// beside; each box's height leaves room below.
+const EDITOR_MENU_BOX = "relative ml-6 [contain:layout]";
 
 const BLOCK_MENU_OPEN = {
   open: true,
@@ -1356,8 +1379,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <DialogSpecimen theme={theme} />
       </Section>
 
-      {/* The shell's menus, one part each, after the dialog so the parts
-          above keep their places. */}
+      {/* The shell's menus, one part each. */}
       <Section part="menu-radio" title="Menu with radio rows">
         <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled">
           <div
@@ -1374,7 +1396,7 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       <Section part="menu-field" title="Menu with a name field">
         <Specimen label="field: focus, hint">
-          <div className="flex h-48 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
+          <div className="flex h-52 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
             <MenuSpecimen label="Versions" items={fieldMenuItems} width={240} testId={`states-menu-field-${theme}`} />
           </div>
         </Specimen>
@@ -1409,8 +1431,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the menus, so the parts above keep their places. The capture
-          opens each part's tab list. */}
+      {/* The capture opens each part's tab list. */}
       <Section part="editor-groups" title="Editor groups">
         <Specimen label="split: the active group with tabs, then an empty one">
           <EditorGroupsSpecimen activeHasTabs />
@@ -1423,7 +1444,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the editor groups, so the parts above keep their places. */}
       <Section part="kind-glyph" title="Kind glyph">
         <Specimen label="kind">
           <ul className="m-0 list-none border border-transparent py-1 font-mono text-[11px] text-subtle">
@@ -1442,9 +1462,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The editor's menus, after the shell's so the parts above keep their
-          places. Their active row is the one Enter acts on, keyboard or
-          pointer, and always draws the outline. */}
+      {/* The editor's menus. Their active row is the one Enter acts on,
+          keyboard or pointer, and always draws the outline. */}
       <Section part="block-menu" title="Block menu">
         <Specimen label="sections; first row active; destructive with Del">
           <div className={`${EDITOR_MENU_BOX} h-[410px] w-[270px]`}>
@@ -1459,7 +1478,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Near the end, so a change here moves only the file header below it. */}
       <Section part="history" title="History held back by its rules">
         <Specimen label="panel: rules can't be read">
           <div className="flex h-64 w-64 flex-col rounded-lg border border-line bg-panel">
@@ -1478,7 +1496,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the history part, so the parts above keep their places. */}
       <Section part="tab-row-actions" title="Document actions in the tab row" menusAtRest>
         {/* One document loading, saved, saving, pending share, held,
             failed, and changed on disk in a narrow pane: Share, the toggle
@@ -1587,22 +1604,20 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The editor's listboxes share these rows, after History so no part
-          above them moves. The editor keeps focus, and the option Enter acts
-          on draws the outline. The page link and emoji pickers are not here:
-          an open picker takes Enter from the whole window, which would take
-          it from this page's other parts. */}
+      {/* The editor's listboxes share these rows. The editor keeps focus,
+          and the option Enter acts on draws the outline. The page link and
+          emoji pickers are not here: an open picker takes Enter from the
+          whole window, which would take it from this page's other parts. */}
       <Section part="slash-menu" title="Slash menu">
         <Specimen label="third option active; the list scrolls">
-          <div className={`${EDITOR_MENU_BOX} h-[272px] w-[330px]`}>
+          <div className={`${EDITOR_MENU_BOX} h-[290px] w-[330px]`}>
             <SlashCommandMenu state={SLASH_MENU_OPEN} onSelect={noop} onHover={noop} />
           </div>
         </Specimen>
       </Section>
 
-      {/* After the file header, so the parts above keep their places. The
-          group a keyboard close leaves empty takes focus, and its ring shows
-          on all four edges above its tab strip. */}
+      {/* The group a keyboard close leaves empty takes focus, and its ring
+          shows on all four edges above its tab strip. */}
       <Section part="editor-group-focus" title="Editor group, focused" menusAtRest>
         <Specimen label="split: the focused active group, empty, then one with tabs">
           <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
@@ -1611,7 +1626,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the parts above, so they keep their places. */}
       <Section part="frontmatter-as-written" title="Frontmatter as written">
         <Specimen label="rename saved">
           <AsWrittenSpecimen name="cost" />
@@ -1621,8 +1635,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the others, so they keep their places. On the title bar's
-          own fill. */}
+      {/* On the title bar's own fill. */}
       <Section part="title-bar-status" title="Title bar status">
         {/* The saved dot alone while nothing needs the person, and its words
             once something does. */}
@@ -1635,7 +1648,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="capture-recovery" title="Typing kept in History">
         <Specimen label="toast">
           <div className={SHADOW_ROOM}>
@@ -1659,7 +1671,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="about" title="About">
         <Specimen label="a document: chats, history, access checked">
           <AboutPanelSpecimen>
@@ -1726,8 +1737,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After About, so the parts above keep their places. Its rows' menus
-          rest; the menu part draws an open one. */}
+      {/* Its rows' menus rest; the menu part draws an open one. */}
       <Section part="sharing" title="Sharing" menusAtRest>
         <Specimen label="both lists, a conflict, and changes waiting">
           <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready(SHARING_RECEIVED)} conflictCount={2} />
@@ -1776,7 +1786,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After Sharing, so the parts above keep their places. */}
       <Section part="usage-record" title="Usage record">
         <Specimen label="counts, with a row and a door this version does not count">
           <UsageRecordSpecimen view={USAGE_RECORD} />
@@ -1814,7 +1823,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After Usage record, so the parts above keep their places. */}
       <Section part="word-diff" title="Word diff">
         {WORD_DIFFS.map((specimen) => (
           <Specimen key={specimen.label} label={specimen.label}>
@@ -1829,8 +1837,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
       </Section>
 
-      {/* After Word diff, so the parts above keep their places. Its empty and loading
-          states are the shared ones above, in Empty ("create") and Loading. */}
+      {/* Its empty and loading states are the shared ones above, in Empty
+          ("create") and Loading. */}
       <Section part="apps-shelf" title="Apps shelf">
         <Specimen label="pinned; selected, with a warning; shared, hovered; low confidence">
           <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover" data-force-target="li:nth-child(3)">
@@ -1873,7 +1881,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After Chat rows, so the parts above keep their places. */}
       <Section part="settings-frame" title="Settings frame">
         <Specimen label="General chosen, Appearance hovered, keyboard focus on Files; a changed row">
           <div
@@ -1949,7 +1956,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="rails" title="Rails">
         <Specimen label="activity bar: Chats beside Files, selected; Search hovered; Graph focused">
           <div className="flex h-[400px] overflow-hidden rounded-lg border border-line">
@@ -1972,8 +1978,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. A send shows only once it
-          has taken a second, so the capture waits for the ring. */}
+      {/* A send shows only once it has taken a second, so the capture waits
+          for the ring. */}
       <Section part="composer-sending" title="Composer sending">
         <Specimen label="at rest">
           <div className="w-[400px] rounded-lg border border-line bg-panel">
@@ -2012,7 +2018,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="about-conversation" title="About a conversation">
         <Specimen label="a Group: who is here, and its access checked">
           <AboutPanelSpecimen>
@@ -2045,9 +2050,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. A CSV and a text file
-          draw their save state, Share and controls in the tab row, as a
-          document does: a calm save state says so only to screen readers. */}
+      {/* A CSV and a text file draw their save state, Share and controls in
+          the tab row, as a document does: a calm save state says so only to
+          screen readers. */}
       <Section part="file-view-actions" title="File view actions" menusAtRest>
         {FILE_VIEW_CSV_STATES.map((specimen) => (
           <Specimen key={specimen.label} label={`CSV ${specimen.label}`} className="w-full">
@@ -2074,9 +2079,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. Offers sit in space
-          already there: a folder row's glyph, the tab row's end, and a row
-          floating under a pasted line. */}
+      {/* Offers sit in space already there: a folder row's glyph, the tab
+          row's end, a row floating under a pasted line, the space before a
+          post's Send, and above a message composer's Send. */}
       <Section part="offers" title="Offers" menusAtRest>
         <Specimen label="an app folder in Files: at rest, selected, focused">
           <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
@@ -2098,10 +2103,34 @@ function Pane(props: { theme: "light" | "dark" }) {
             <UrlOfferSpecimen chosen />
           </div>
         </Specimen>
+        <Specimen label="the agent picked in a new post: runs, working, paused, dispatch off, no runner, unknown">
+          <div className="flex flex-col gap-3">
+            {AGENT_OFFER_STATES.map((state) => (
+              <AgentOfferComposer key={state} state={state} surface="post" id={`states-agent-post-${state}-${theme}`} />
+            ))}
+          </div>
+        </Specimen>
+        <Specimen label="the agent picked in a message or comment: the same states, above Send">
+          <div className="flex flex-col gap-3">
+            {AGENT_OFFER_STATES.map((state) => (
+              <AgentOfferComposer key={state} state={state} surface="stream" id={`states-agent-stream-${state}-${theme}`} />
+            ))}
+          </div>
+        </Specimen>
+        <Specimen label="Set up focused; above a reply bar; then a narrow pane">
+          <div className="flex flex-col gap-3">
+            <AgentOfferComposer state="no-command" surface="post" id={`states-agent-post-focus-${theme}`} focus />
+            <AgentOfferComposer state="runner-off" surface="stream" id={`states-agent-stream-focus-${theme}`} focus />
+            <AgentOfferComposer state="runs" surface="stream" id={`states-agent-stream-replying-${theme}`} replying />
+            <AgentOfferComposer state="runs" surface="post" id={`states-agent-post-narrow-${theme}`} width="w-[300px]" />
+            <AgentOfferComposer state="paused" surface="stream" id={`states-agent-stream-narrow-${theme}`} width="w-[300px]" />
+            <AgentOfferComposer state="no-command" surface="stream" id={`states-agent-stream-narrow-setup-${theme}`} width="w-[300px]" />
+          </div>
+        </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. The body's H1 is the
-          editor's, so the folded specimens show the row above it alone. */}
+      {/* The body's H1 is the editor's, so the folded specimens show the
+          row above it alone. */}
       <Section part="page-identity" title="Page identity">
         <Specimen label="an H1 opens the body: the title folds, at rest">
           <TopmatterSpecimen>
@@ -2198,7 +2227,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="settings-sync" title="Settings: Sync and sharing">
         <Specimen label="signed in, syncing, on a private server; keyboard focus on Disconnect">
           <div className="w-[640px]" data-force-state="focus focus-visible" data-force-target='[data-testid="cloud-disconnect"]'>
@@ -2251,11 +2279,10 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. A CSV's rows and
-          columns: numbers at the right in mono, row numbers in the gutter,
-          and each row's and column's actions only on hover or focus. A
-          database table: each column's type as an icon, the active cell,
-          the editing cell, a sort, and the read-only mark. */}
+      {/* A CSV's rows and columns: numbers at the right in mono, row
+          numbers in the gutter, and each row's and column's actions only on
+          hover or focus. A database table: each column's type as an icon,
+          the active cell, the editing cell, a sort, and the read-only mark. */}
       <Section part="data-grid" title="Data grid" menusAtRest>
         <Specimen label="CSV at rest: numbers, Add row and Add column">
           <CsvGridSpecimen />
