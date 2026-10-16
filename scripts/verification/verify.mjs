@@ -187,6 +187,10 @@ export async function verify(args) {
   const keepGoing = full || args.includes("--keep-going");
   const detach = args.includes("--detach");
   const inline = args.includes("--inline");
+  // Names who a queued run belongs to when T3 does not know its thread.
+  const ownerIndex = args.indexOf("--owner");
+  const ownerName = ownerIndex < 0 ? null : args[ownerIndex + 1];
+  if (ownerIndex >= 0 && (mode !== "pr" || !ownerName?.trim() || ownerName.startsWith("--"))) throw new Error("Use --owner <name> with a PR run.");
   // The queue service runs this verifier in its lane with a grant; it must not queue again.
   const { grant, output: grantOutput } = takeGrant();
   const reuseIndex = args.indexOf("--reuse-rust");
@@ -335,7 +339,7 @@ export async function verify(args) {
         checkoutOwner.release();
         const outcome = await measure("queue", () => verifyThroughQueue({ root: queue, detach, checkpoint: () => cancellation.checkpoint(), submission: {
           head: report.commit, base: report.baseCommit, baseRef: base, scope: report.scope, full,
-          gates, branch, checkout: repoRoot, requester: { pid: process.pid } } }));
+          gates, branch, checkout: repoRoot, ownerName, requester: { pid: process.pid } } }));
         report.queue = outcome;
         try {
           const receipt = JSON.parse(readLog(outcome.result ?? "") || "{}");
@@ -349,6 +353,7 @@ export async function verify(args) {
         report.verdict = "PASS";
         return report;
       }
+      if (inline && hostQueue) console.log("[verification] This inline gate runs outside the queue's turns between owners. pnpm verify:pr without --inline takes a fair turn.");
       // Identify this process before publishing a ticket; no lookup may delay admission.
       const tickets = !grant && resolveBuildBudget() ? ticketEvidence({output, checkout: repoRoot, commit: report.commit,
         producer: await measure("producer-identity", () => processIdentity()), persist: save}) : null;

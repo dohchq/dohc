@@ -9,8 +9,9 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
-import { attemptOutcome, cancel, inlineRuns, lastNightlyPass, listRequests, movedNote, nextRequest, nightlyTaskDefinition, parseMove, pauseQueue, pauseStatus, placeMove, placeSubmission, position, queueLanePurpose, queuePaths, readJson, readPause, requestMove, resumeQueue, serviceRuns, serviceState, sharedFailures, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, cancel, inlineRuns, lastNightlyPass, listRequests, movedNote, nextRequest, nightlyTaskDefinition, ownerFor, parseMove, pauseQueue, pauseStatus, placeMove, placeSubmission, position, queueLanePurpose, queuePaths, readJson, readPause, requestMove, resumeQueue, runOrder, serviceRuns, serviceState, sharedFailures, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
 import { laneTemp, runService, sweepContainers } from "./queue-service.mjs";
+import { threadDirectory } from "./queue-monitor.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
 import { run } from "./process.mjs";
 
@@ -112,6 +113,55 @@ test("a move puts a queued request first or before another, the line follows it,
   assert.equal(refused({ id: c.id, before: a.id }), `Cannot move ${c.id} before ${a.id}: ${c.id} is already ahead of ${a.id}. A move only brings a request forward.`);
   assert.equal(refused({ id: a.id, before: nightly.id }), `Cannot move ${a.id} before ${nightly.id}: the nightly run always goes first. Use --first to put ${a.id} at the front of the rest of the line.`);
   assert.match(placeMove(requests, { id: a.id }, new Set([a.id])).rejected, /it is running/u, "a request the service has started cannot move before its status says so");
+});
+
+// A request that belongs to the owner named by --owner.
+const owned = (id, name, state = "queued", extra = {}) => entry(id, { owner: { key: `flag:${name}`, title: name, source: "flag" } }, state, extra);
+const started = (minutes, outcome) => ({ n: 1, startedAt: new Date(Date.parse("2026-10-16T08:00:00Z") + minutes * 60_000).toISOString(), ...(outcome ? { outcome } : {}) });
+
+test("the nightly run goes first, then a request moved --first, then the owner longest without a start, one request per turn", () => {
+  const running = owned("000000001-aaaaaa", "ann", "running", { attempts: [started(0)] });
+  const [a2, a3] = ["000000002-aaaaaa", "000000003-aaaaaa"].map(id => owned(id, "ann"));
+  const bobRan = owned("000000004-bbbbbb", "bob", "passed", { attempts: [started(-120, "passed")] });
+  const [b5, b6] = ["000000005-bbbbbb", "000000006-bbbbbb"].map(id => owned(id, "bob"));
+  // Cat's only attempt failed because of the machine, which uses no turn, so Cat has never started.
+  const c7 = owned("000000007-cccccc", "cat", "queued", { attempts: [started(-60, "environment")] });
+  const danRan = owned("000000008-dddddd", "dan", "failed", { attempts: [started(-30, "failed")] });
+  const d9 = owned("000000009-dddddd", "dan");
+  const nightly = entry("000000010-nnnnnn", { nightly: true, checkout: "nightly" });
+  const first = owned("000000011-bbbbbb", "bob", "queued", { order: 1, moved: { at: started(-1).startedAt, before: null, reason: "fixes main", by: { name: "Ice" } } });
+  const requests = [running, a2, a3, bobRan, b5, b6, c7, danRan, d9, nightly, first];
+  const line = [running, nightly, first, c7, b5, d9, a2, b6, a3];
+  assert.deepEqual(runOrder(requests).map(row => row.id), line.map(row => row.id),
+    "Cat never started, Bob started longest ago, then Dan, then Ann, who runs now; each owner's second request waits for its next turn");
+  assert.deepEqual(line.map(row => position(requests, row.id)), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  // Admission takes the same line: each pick is the next request in it.
+  const picked = new Set();
+  for (let next, n = 0; n < requests.length && (next = nextRequest(requests, { diskOk: true, dockerOk: true }, Date.now(), picked)); n += 1) picked.add(next.id);
+  assert.deepEqual([...picked], line.slice(1).map(row => row.id));
+});
+
+test("--before orders one owner's requests, and a move before another owner's request is refused", () => {
+  const [a1, a2, a3] = ["000000001-aaaaaa", "000000002-aaaaaa", "000000003-aaaaaa"].map(id => owned(id, "ann"));
+  const b4 = owned("000000004-bbbbbb", "bob");
+  let requests = [a1, a2, a3, b4];
+  const { orders } = placeMove(requests, { id: a3.id, before: a1.id });
+  requests = requests.map(row => orders.has(row.id) ? { ...row, status: { ...row.status, order: orders.get(row.id) } } : row);
+  assert.deepEqual(runOrder(requests).map(row => row.id), [a3.id, b4.id, a1.id, a2.id], "Ann's moved request takes Ann's turn, and Bob's turn comes next");
+  assert.equal(placeMove(requests, { id: b4.id, before: a1.id }).rejected,
+    `Cannot move ${b4.id} before ${a1.id}: ${a1.id} belongs to ann, and owners take turns. --before orders one owner's requests. Use --first only to unblock others.`);
+});
+
+test("a new request's owner is its person's T3 thread, else its --owner name, else its checkout, and a failed lookup names no thread", () => {
+  const threads = { "feat/sync": { id: "t-sub", title: "Review sync", root: { id: "t-person", title: "Ship\nsync" } } };
+  const threadOf = branch => threads[branch] ?? null;
+  const person = { key: "thread:t-person", title: "Ship sync", source: "thread" };
+  assert.deepEqual(ownerFor({ branch: "refs/heads/feat/sync", checkout: "C:\\w\\Sync", ownerName: "Sol" }, threadOf), person, "a thread T3 knows wins over --owner, and its title is one line");
+  assert.deepEqual(ownerFor({ branch: "refs/heads/other", checkout: "C:\\w\\Other", ownerName: " Sol\nReview " }, threadOf), { key: "flag:sol review", title: "Sol Review", source: "flag" });
+  assert.deepEqual(ownerFor({ branch: null, checkout: "C:\\w\\Other", ownerName: " " }, threadOf), { key: "checkout:c:\\w\\other", title: "C:\\w\\Other", source: "checkout" });
+  const locked = () => { throw new Error("database is locked"); };
+  assert.deepEqual(ownerFor({ branch: "refs/heads/feat/sync", checkout: "C:\\w\\Sync", ownerName: "Sol" }, locked), { key: "flag:sol", title: "Sol", source: "flag" }, "a lookup that throws falls back");
+  assert.deepEqual(ownerFor({ nightly: true, branch: "refs/heads/main", checkout: "nightly" }, () => threads["feat/sync"]), { key: "checkout:nightly", title: "nightly", source: "checkout" }, "the nightly run belongs to no thread");
 });
 
 test("a move is checked and cleaned before it is applied, and its note always names the checkout", () => {
@@ -279,7 +329,7 @@ function fixtureRepo() {
 }
 
 /** A service on a private root with a stub verifier: request.checkout names its behavior. */
-function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs, lanes, cleanupRetryMs = 50, freeMemory = () => 32, heartbeatMs, bootedAt } = {}) {
+function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = async () => 0, hostFails = () => {}, holdLane = async () => ({ release() {} }), prepare = async () => {}, prepareLimitMs, lanes, cleanupRetryMs = 50, freeMemory = () => 32, heartbeatMs, bootedAt, threadOf = () => null } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-"));
   const fixture = fixtureRepo();
   const calls = [];
@@ -308,7 +358,7 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
   };
   const serve = (overrides = {}) => runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, timeLimitMs, floorGb: 1,
     freeDisk: () => 100, docker, prepare, sweep, prepareLimitMs, heartbeatMs, bootedAt,
-    holdLane, worker, retryDelay: () => 50, cleanupRetryMs, lanes, freeMemory, stop: stop.signal, log: () => {}, ...overrides });
+    holdLane, worker, retryDelay: () => 50, cleanupRetryMs, lanes, freeMemory, threadOf, stop: stop.signal, log: () => {}, ...overrides });
   let service = serve();
   // Stop the service and start another on the same root, as the supervisor does. Resolves once the new one beats.
   const restart = async overrides => {
@@ -1100,4 +1150,80 @@ test("status says paused and idle only when nothing runs, counting inline gates"
   assert.deepEqual(await resumeQueue(root), pause);
   assert.equal(await resumeQueue(root), null, "resuming a moving queue changes nothing");
   assert.equal(pauseStatus(root, beat([]), 0), null);
+});
+
+/** A T3 database holding `threads`, each [id, title, payload]. */
+function t3Database(t, threads) {
+  const dir = mkdtempSync(join(tmpdir(), "dohc-t3-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "statev2.sqlite");
+  const db = new (process.getBuiltinModule("node:sqlite").DatabaseSync)(path);
+  db.exec("create table orchestration_v2_projection_threads (thread_id text, title text, payload_json text, updated_at text, deleted_at text)");
+  for (const [id, title, payload] of threads) db.prepare("insert into orchestration_v2_projection_threads values (?, ?, ?, ?, null)").run(id, title, JSON.stringify(payload), new Date().toISOString());
+  db.close();
+  return path;
+}
+
+test("the service records each request's owner when it accepts it: the thread a person started, counting a subagent's under it, else --owner, else the checkout", async t => {
+  const path = t3Database(t, [
+    ["t-person", "Ship sync", { createdBy: "user", branch: "feat/sync", lineage: { parentThreadId: null, rootThreadId: "t-person" } }],
+    ["t-sub", "Review sync", { createdBy: "agent", pullRequests: [{ number: 9, snapshot: { headBranch: "fix/sync-review" } }],
+      lineage: { parentThreadId: "t-person", relationshipToParent: "subagent", rootThreadId: "t-person" } }],
+  ]);
+  const queue = harness(t, { threadOf: threadDirectory({ path }) });
+  const recorded = async ({ root, request }, fields) => readJson(join(queuePaths(root).request((await request("pass", fields)).id), "request.json"));
+  const person = { key: "thread:t-person", title: "Ship sync", source: "thread" };
+  assert.deepEqual((await recorded(queue, { branch: "refs/heads/feat/sync" })).owner, person);
+  const sub = await recorded(queue, { branch: "refs/heads/fix/sync-review", ownerName: "Sol" });
+  assert.deepEqual(sub.owner, person, "a subagent's work belongs to the thread a person started, whatever --owner says");
+  assert.equal("ownerName" in sub, false, "the request keeps the owner, not the name it was submitted with");
+  assert.deepEqual((await recorded(queue, { branch: "refs/heads/unknown", ownerName: "Sol" })).owner, { key: "flag:sol", title: "Sol", source: "flag" });
+  assert.deepEqual((await recorded(queue, { branch: "refs/heads/unknown-too" })).owner, { key: "checkout:pass", title: "pass", source: "checkout" });
+  const missing = harness(t, { threadOf: threadDirectory({ path: join(queue.root, "no-t3.sqlite") }) });
+  assert.deepEqual((await recorded(missing, { branch: "refs/heads/feat/sync" })).owner, { key: "checkout:pass", title: "pass", source: "checkout" },
+    "without T3's database the request is still accepted, owned by its checkout");
+});
+
+test("one lane takes turns between two owners with unequal backlogs", async t => {
+  const { root, request, settled, calls } = harness(t);
+  // Paused, so the whole line is waiting before the first run starts.
+  await pauseQueue(root, { reason: "submitting the line" });
+  const owned = async (name, n) => (await request("pass", { branch: `refs/heads/${name}-${n}`, ownerName: name })).id;
+  const ann = [await owned("ann", 1), await owned("ann", 2), await owned("ann", 3)];
+  const bob = [await owned("bob", 1), await owned("bob", 2)];
+  await resumeQueue(root);
+  for (const id of [...ann, ...bob]) assert.equal((await settled(id)).status.verdict, "PASS");
+  assert.deepEqual(calls.map(call => call.id), [ann[0], bob[0], ann[1], bob[1], ann[2]]);
+});
+
+test("two free lanes go to two owners, not to one owner's first two requests", async t => {
+  const { root, request, settled, calls, finishHeld } = harness(t, { lanes: () => 2 });
+  await pauseQueue(root, { reason: "submitting the line" });
+  const owned = async (name, n) => (await request("held", { branch: `refs/heads/${name}-${n}`, ownerName: name })).id;
+  const [a1, a2, b1] = [await owned("ann", 1), await owned("ann", 2), await owned("bob", 1)];
+  await resumeQueue(root);
+  await waitFor(() => calls.length >= 2, "both lanes must start");
+  assert.deepEqual(calls.map(call => call.id).sort(), [a1, b1].sort());
+  finishHeld();
+  await waitFor(() => calls.length >= 3, "Ann's second request must start");
+  finishHeld();
+  for (const id of [a1, a2, b1]) assert.equal((await settled(id)).status.verdict, "PASS");
+});
+
+test("a newer commit keeps the owner and the place of the request it replaces", async t => {
+  const { root, request, settled, calls, finishHeld } = harness(t);
+  // Cat's run holds the lane, so Cat has had a turn and Ann and Bob have not.
+  const running = await request("held", { ownerName: "cat" });
+  await waitFor(() => calls.find(call => call.id === running.id), "Cat's run must start");
+  const old = await request("pass", { branch: "refs/heads/feature", ownerName: "ann" });
+  const other = await request("pass", { branch: "refs/heads/other", ownerName: "bob" });
+  assert.equal(position(listRequests(root), old.id), 2);
+  const newer = await request("pass", { branch: "refs/heads/feature", ownerName: "cat" });
+  assert.equal((await settled(old.id)).status.supersededBy, newer.id);
+  const requests = listRequests(root);
+  assert.deepEqual(requests.find(candidate => candidate.id === newer.id).request.owner, { key: "flag:ann", title: "ann", source: "flag" });
+  assert.equal(position(requests, newer.id), 2, "as Ann's request it goes before Bob's; as Cat's it would wait behind it");
+  finishHeld();
+  for (const id of [newer.id, other.id]) assert.equal((await settled(id)).status.verdict, "PASS");
+  assert.deepEqual(calls.map(call => call.id), [running.id, newer.id, other.id]);
 });

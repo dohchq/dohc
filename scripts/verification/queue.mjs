@@ -137,6 +137,58 @@ export const lineOrder = (a, b) => orderOf(a) - orderOf(b) || a.id.localeCompare
 // One line of text: whitespace and control characters become one space, so a field cannot fake a row in status.
 const oneLine = (value, length) => typeof value === "string" ? [...value.replace(/[\s\p{Cc}\p{Cf}]+/gu, " ").trim()].slice(0, length).join("") : null;
 
+// A request without a checkout, written by hand, must not stop the line.
+const checkoutOwner = (checkout = "unknown checkout") => ({ key: `checkout:${String(checkout).toLowerCase()}`, title: String(checkout), source: "checkout" });
+
+/** Whose turn a request waits for. A request accepted before owners existed belongs to its checkout. */
+export const ownerOf = request => request.owner ?? checkoutOwner(request.checkout);
+
+/**
+ * The owner of a new request: the T3 thread a person started for its work, with a subagent's thread
+ * counted under it, else the name it was submitted with by --owner, else its checkout.
+ * A T3 lookup that fails names no thread.
+ */
+export function ownerFor(submission, threadOf) {
+  let thread = null;
+  try { thread = submission.nightly ? null : threadOf(submission.branch?.replace(/^refs\/heads\//u, "") ?? null, submission.checkout)?.root ?? null; }
+  catch { /* T3's database can be locked or migrating. */ }
+  const name = oneLine(submission.ownerName, 100);
+  return thread ? { key: `thread:${thread.id}`, title: oneLine(thread.title, 200) || thread.id, source: "thread" }
+    : name ? { key: `flag:${name.toLowerCase()}`, title: name, source: "flag" }
+    : checkoutOwner(submission.checkout);
+}
+
+const movedFirst = entry => Boolean(entry.status.moved) && !entry.status.moved.before;
+
+/**
+ * Every live request in the order it runs: the running ones, the nightly run, the requests moved
+ * first to unblock others, then the owners' turns. The owner who has gone longest without a start
+ * goes next, and an owner that never started goes first. Each owner's requests keep line order.
+ * An attempt that failed because of the machine uses no turn.
+ */
+export function runOrder(requests) {
+  const live = requests.filter(entry => !terminalStates.has(entry.status.state)).sort(lineOrder);
+  const ahead = live.filter(entry => entry.status.state !== "running" && (entry.request.nightly || movedFirst(entry)));
+  const lastStart = new Map();
+  for (const entry of requests) {
+    const key = ownerOf(entry.request).key;
+    for (const attempt of entry.status.attempts) {
+      const at = Date.parse(attempt.startedAt);
+      if (attempt.outcome !== "environment" && at > (lastStart.get(key) ?? 0)) lastStart.set(key, at);
+    }
+  }
+  // Each owner's waiting requests, the owners in line order of their first request, which settles a tie.
+  const owners = new Map();
+  for (const entry of live.filter(entry => entry.status.state !== "running" && !ahead.includes(entry))) {
+    const key = ownerOf(entry.request).key;
+    owners.set(key, [...(owners.get(key) ?? []), entry]);
+  }
+  const turns = [...owners].sort(([a], [b]) => (lastStart.get(a) ?? 0) - (lastStart.get(b) ?? 0)).map(([, entries]) => entries);
+  const rounds = Math.max(0, ...turns.map(entries => entries.length));
+  const taken = Array.from({ length: rounds }, (_, round) => turns.flatMap(entries => entries[round] ?? []));
+  return [...live.filter(entry => entry.status.state === "running"), ...ahead.filter(entry => entry.request.nightly), ...ahead.filter(entry => !entry.request.nightly), ...taken.flat()];
+}
+
 /** A move as a client wrote it, checked and cleaned: `{ id, before, reason, by }`, or `{ rejected }`. */
 export function parseMove(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { rejected: "The move is not a JSON object." };
@@ -174,6 +226,10 @@ export function placeMove(requests, { id, before = null }, starting = new Set())
   if (target && !waiting(target)) return { rejected: `Cannot move ${id} before ${before}: ${why(target)}. Move it before a queued request, or use --first.` };
   // The nightly runs first whatever its place in the line, so a move before it would change nothing.
   if (target?.request.nightly) return { rejected: `Cannot move ${id} before ${before}: the nightly run always goes first. Use --first to put ${id} at the front of the rest of the line.` };
+  // Owners take turns, so --before can order only one owner's requests.
+  if (target && ownerOf(target.request).key !== ownerOf(entry.request).key) {
+    return { rejected: `Cannot move ${id} before ${before}: ${before} belongs to ${ownerOf(target.request).title}, and owners take turns. --before orders one owner's requests. Use --first only to unblock others.` };
+  }
   const line = requests.filter(waiting).sort(lineOrder);
   if (target && line.indexOf(entry) < line.indexOf(target)) return { rejected: `Cannot move ${id} before ${before}: ${id} is already ahead of ${before}. A move only brings a request forward.` };
   // The line hands its own order values out again in the new order. They stay whole numbers however many
@@ -186,16 +242,16 @@ export function placeMove(requests, { id, before = null }, starting = new Set())
 }
 
 /**
- * The first request in line that can run now, the nightly run of main first. A
- * request waiting on Docker does not hold back one that needs none.
+ * The first request in run order that can run now. A request waiting on Docker does not hold back
+ * one that needs none. `started` names requests the service has started that may still read as
+ * queued; each keeps its owner's turn.
  */
-export function nextRequest(requests, { diskOk, dockerOk }, now = Date.now()) {
+export function nextRequest(requests, { diskOk, dockerOk }, now = Date.now(), started = new Set()) {
   if (!diskOk) return null;
-  const ready = ({ request, status }) => status.state === "queued"
+  const ready = ({ id, request, status }) => status.state === "queued" && !started.has(id)
     && (!status.notBefore || Date.parse(status.notBefore) <= now)
     && (!request.gates?.js || dockerOk);
-  const line = requests.filter(ready).sort(lineOrder);
-  return line.find(entry => entry.request.nightly) ?? line[0] ?? null;
+  return runOrder(requests).find(ready) ?? null;
 }
 
 /** Backoff after an environment failure: 30 s, 2 min, 5 min, then every 15 min. */
@@ -220,12 +276,9 @@ export function attemptOutcome(result, grant, { stopped } = {}) {
   return { outcome: "environment", cause: "unfinished", reason: "The receipt has no verdict." };
 }
 
-/** Position among live requests in line order, counting the running ones first, then the nightly run. */
+/** Position among live requests in run order, counting the running ones first. */
 export function position(requests, id) {
-  const rank = entry => entry.status.state === "running" ? 0 : entry.request.nightly ? 1 : 2;
-  const live = requests.filter(entry => !terminalStates.has(entry.status.state))
-    .sort((a, b) => rank(a) - rank(b) || lineOrder(a, b));
-  const index = live.findIndex(entry => entry.id === id);
+  const index = runOrder(requests).findIndex(entry => entry.id === id);
   return index < 0 ? null : index + 1;
 }
 
@@ -571,13 +624,13 @@ function printStatus(root) {
   if (record?.health?.reason) console.log(`health: ${record.health.reason}`);
   if (record?.health?.diskFreeGb != null) console.log(`free disk: ${record.health.diskFreeGb.toFixed(1)} GB`);
   if (record) console.log(`host: ${lanes} lane(s), ${record.health?.cpuBusyPercent ?? "unknown"}% CPU, ${record.health?.freeMemGb ?? "unknown"} GB free memory`);
-  const live = requests.filter(entry => !terminalStates.has(entry.status.state));
-  for (const entry of live.sort((a, b) => position(requests, a.id) - position(requests, b.id))) {
-    const place = position(requests, entry.id);
+  const live = runOrder(requests);
+  for (const [index, entry] of live.entries()) {
+    const place = index + 1;
     // The service's heartbeat says what a running attempt is doing, such as waiting for the host lane.
     const phase = runs.find(row => row.id === entry.id)?.phase;
     const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase ? `, ${phase}` : ""}` : `#${place}${typical ? `, starts in about ${minutes(startsInMs(place, typical, lanes))}` : ""}`;
-    console.log(`${entry.id}  ${where}  ${entry.request.scope}  ${entry.request.head.slice(0, 12)}  ${entry.request.branch?.replace("refs/heads/", "") ?? entry.request.checkout}${entry.status.waiting ? `  (${entry.status.waiting})` : ""}${entry.status.moved ? `  (${movedNote(entry.status.moved)})` : ""}`);
+    console.log(`${entry.id}  ${where}  ${entry.request.scope}  ${entry.request.head.slice(0, 12)}  ${entry.request.branch?.replace("refs/heads/", "") ?? entry.request.checkout}  owner: ${ownerOf(entry.request).title}${entry.status.waiting ? `  (${entry.status.waiting})` : ""}${entry.status.moved ? `  (${movedNote(entry.status.moved)})` : ""}`);
   }
   if (!live.length) console.log("no requests waiting");
   const nightly = lastNightlyPass(requests);
@@ -589,7 +642,7 @@ function printStatus(root) {
 
 /** Ask the service to move a queued request, and report where it went once the service applies it. */
 async function move(root, args) {
-  const usage = 'Use move <id> --first, or move <id> --before <other-id>, with --reason "<why>" and optionally --by "<name>". Move a request only to unblock other work.';
+  const usage = 'Use move <id> --first, or move <id> --before <other-id>, with --reason "<why>" and optionally --by "<name>". --before orders one owner\'s requests. Use --first only to unblock other work.';
   let parsed;
   try { parsed = parseArgs({ args, allowPositionals: true, options: { first: { type: "boolean" }, before: { type: "string" }, reason: { type: "string" }, by: { type: "string" } } }); }
   catch { throw new Error(usage); }

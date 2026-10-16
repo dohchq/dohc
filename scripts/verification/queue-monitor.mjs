@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildQueueStatus, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
-import { lastNightlyPass, listRequests, monitorPort, movedNote, position, queuePaths, readJson, serviceState, terminalStates, writeJson } from "./queue.mjs";
+import { lastNightlyPass, listRequests, monitorPort, movedNote, ownerOf, queuePaths, readJson, runOrder, serviceState, terminalStates, writeJson } from "./queue.mjs";
 
 const assets = {
   "/": ["index.html", "text/html; charset=utf-8"],
@@ -88,8 +88,9 @@ function progress(root, id, n) {
 /**
  * The T3 thread behind a branch or checkout, when T3 runs on this host. T3 keeps its
  * threads in a local database, read here read-only once a minute. A thread is found by
- * its own worktree, by a pull request it linked, or by its branch. Without T3 every
- * lookup is null, and the dashboard names work by its branch.
+ * its own worktree, by a pull request it linked, or by its branch. Its `root` is the
+ * thread a person started, which an agent's subagent threads descend from. Without T3
+ * every lookup is null, and the dashboard names work by its branch.
  */
 export function threadDirectory({ path = join(process.env.T3CODE_HOME ?? join(homedir(), ".t3"), "userdata", "statev2.sqlite"), refreshMs = 60_000, sinceDays = 14 } = {}) {
   let loadedAt = -Infinity;
@@ -103,13 +104,16 @@ export function threadDirectory({ path = join(process.env.T3CODE_HOME ?? join(ho
       db = new sqlite.DatabaseSync(path, { readOnly: true });
       const rows = db.prepare("select thread_id, title, payload_json from orchestration_v2_projection_threads where deleted_at is null and updated_at > ?")
         .all(new Date(Date.now() - sinceDays * dayMs).toISOString());
+      // A root thread can be older than the rows above, so its title is read from every row.
+      const titles = new Map(db.prepare("select thread_id, title from orchestration_v2_projection_threads").all().map(row => [row.thread_id, row.title]));
       const next = { paths: new Map(), heads: new Map(), branches: new Map() };
       // A thread a person started names the work better than an agent's child thread on the same branch.
       const put = (map, key, thread) => { const old = map.get(key); if (!old || (old.child && !thread.child)) map.set(key, thread); };
       for (const row of rows) {
         try {
           const payload = JSON.parse(row.payload_json);
-          const thread = { id: row.thread_id, title: row.title, child: payload.createdBy === "agent" };
+          const rootId = typeof payload.lineage?.rootThreadId === "string" ? payload.lineage.rootThreadId : row.thread_id;
+          const thread = { id: row.thread_id, title: row.title, child: payload.createdBy === "agent", root: { id: rootId, title: titles.get(rootId) ?? row.title } };
           if (payload.worktreePath) put(next.paths, resolve(payload.worktreePath).toLowerCase(), thread);
           for (const pr of payload.pullRequests ?? []) if (pr?.snapshot?.headBranch) put(next.heads, pr.snapshot.headBranch, { ...thread, pr: pr.number });
           if (payload.branch && !["main", "master"].includes(payload.branch)) put(next.branches, payload.branch, thread);
@@ -122,7 +126,7 @@ export function threadDirectory({ path = join(process.env.T3CODE_HOME ?? join(ho
   return (branch, checkout) => {
     if (Date.now() - loadedAt > refreshMs) load();
     const thread = (checkout && maps.paths.get(resolve(checkout).toLowerCase())) ?? maps.heads.get(branch) ?? maps.branches.get(branch) ?? null;
-    return thread && { id: thread.id, title: thread.title, ...(thread.pr ? { pr: thread.pr } : {}) };
+    return thread && { id: thread.id, title: thread.title, ...(thread.pr ? { pr: thread.pr } : {}), root: thread.root };
   };
 }
 
@@ -199,14 +203,20 @@ export function monitorState(root, { now = Date.now(), days = 7, finished = new 
     }];
   })).sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
   const typicalMs = median(runs.filter(run => run.outcome === "passed").slice(-20).map(run => run.awakeMs));
-  const queued = requests.filter(entry => entry.status.state === "queued")
-    .sort((a, b) => position(requests, a.id) - position(requests, b.id))
-    .map(entry => ({
+  const line = runOrder(requests).filter(entry => entry.status.state === "queued");
+  // How many requests each owner has waiting.
+  const waitingFor = new Map();
+  for (const { key } of line.map(entry => ownerOf(entry.request))) waitingFor.set(key, (waitingFor.get(key) ?? 0) + 1);
+  const queued = line.map(entry => {
+    const owner = ownerOf(entry.request);
+    return {
       id: entry.id, branch: branchOf(entry.request), thread: threadFor(entry.request), nightly: Boolean(entry.request.nightly), scope: entry.request.scope, head: entry.request.head.slice(0, 12),
+      owner: { title: owner.title, source: owner.source, waiting: waitingFor.get(owner.key) },
       submittedAt: entry.request.submittedAt ?? entry.request.acceptedAt, retry: entry.status.attempts.length > 0,
       notBefore: entry.status.notBefore ?? null, waiting: clip(entry.status.waiting, 200),
       moved: noteOf(entry.status),
-    }));
+    };
+  });
   const events = history(days, now);
   const tests = new Map();
   const steps = new Map();
