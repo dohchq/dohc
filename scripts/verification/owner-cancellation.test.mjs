@@ -61,7 +61,7 @@ for (const kind of ["prepare", "verify"]) for (const signal of ["SIGINT", "SIGTE
           assert.ok(result.report.seconds >= cleanup.seconds);
           assert.ok(Date.parse(result.report.finishedAt) >= Date.parse(cleanup.finishedAt));
           assert.match(result.report.error, new RegExp(`interrupted by ${signal}`));
-          assert.deepEqual(result.commands.at(-1), { command: "docker", args: ["rm", "--force", "a".repeat(64)] });
+          assert.deepEqual(result.commands.at(-1), { command: "docker", args: ["rm", "--force", "--volumes", "a".repeat(64)] });
           assert.equal(result.commands.some(({ args }) => args.includes("test")), false);
           if (cleanupFails) assert.match(result.report.cleanupError, /fixture cleanup rejected/);
           else assert.equal(result.report.cleanupError, undefined);

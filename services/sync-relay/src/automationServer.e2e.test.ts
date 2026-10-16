@@ -182,7 +182,8 @@ it.skipIf(engine.missing)("the server runs a schedule with the owner daemon stop
     startReplicas: async (options) => {
       hooks = options;
       const stop = copy.client.onEvent((event) => options.onEngineEvent?.(event));
-      return { unavailable: false, replica: () => replica, reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => stop() };
+      return { unavailable: false, replica: () => replica, reconcile: () => undefined, deleteWorkspaces: async () => undefined,
+      failedSyncs: () => new Map(), settled: async () => undefined, close: async () => stop() };
     },
   });
   cleanup.push(() => running.close());

@@ -789,6 +789,26 @@ it("projects file-only link sync metadata before it reaches the browser provider
   expect(f.native.client.openLiveAppliedSync).toHaveBeenCalled();
 });
 
+it.each(["named", "link", "owner", "desktop"])("deletion closes a running %s live connection", async kind => {
+  const f = await fixture(limits, kind === "link", undefined, kind === "owner", kind === "desktop");
+  const minted = kind === "owner" ? {token: ""} : await f.mint();
+  const connection = f.connect(minted.token);
+  expect(await connection.status).toBe(101);
+  const closed = once(connection.ws, "close");
+  f.routes.deleteAccount("owner-1", [binding.workspaceId]);
+  await closed;
+  expect(connection.ws.readyState).toBe(WebSocket.CLOSED);
+});
+
+it("keeps an unrelated desktop connection that is still resolving its account",async()=>{
+  const f=await fixture(limits,false,undefined,false,true),ticket=await f.mint();
+  const entered=deferred<void>(),resume=deferred<void>(),resolve=f.actor.getMockImplementation()!;
+  f.actor.mockImplementation(async(...args)=>{entered.resolve();await resume.promise;return resolve(...args);});
+  const socket=f.connect(ticket.token);await entered.promise;
+  f.routes.deleteAccount("unrelated",["unrelated-workspace"]);resume.resolve();
+  expect(await socket.status).toBe(101);
+});
+
 function setNamedGrantKind(f: Awaited<ReturnType<typeof fixture>>, kind: "direct" | "claimed-email" | "link-dependent") {
   if (kind === "claimed-email") {
     f.raw.prepare("UPDATE sync_relay_share_grants SET principal_kind='email', principal_user_id=NULL, principal_email='reader@example.test' WHERE grant_id=?").run(scope.grantId);
