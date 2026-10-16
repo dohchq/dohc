@@ -118,7 +118,7 @@ import { CopyButton } from "./ui/CopyButton";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
-import { useHistoryPage } from "./shell/useHistoryPage";
+import { readNewestMomentOrder, useHistoryPage } from "./shell/useHistoryPage";
 import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
 import {
   fileOpenStartMark,
@@ -1753,6 +1753,8 @@ export function DesktopWorkspaceShell(props: {
   // newer Collection changes, or a moment that arrived with an old date,
   // can keep a changed file off the first page.
   const [latestMomentOrder, latestMomentLane] = useSnapshotLane(engineHistoryToken, -1);
+  // The refresh whose read of that moment may still retry.
+  const latestMomentRequest = useRef(0);
   // "Try it in a version" (PR 0N-2): the workspace's live try session —
   // running banner or the run's review card. Refreshed with history (the
   // manager pings the same workspace-activity channel on every transition).
@@ -1867,14 +1869,6 @@ export function DesktopWorkspaceShell(props: {
       // Each is handed whole to the lane rule, which judges both ways it can
       // settle.
       const pageRead = refreshHistoryPage(token);
-      // The page read on this refresh reports its own failure, so this one
-      // keeps the order it had. A shared view re-reads no open file.
-      if (!shareView) latestMomentLane.settle(
-        token,
-        bridge().listEngineMoments({ workspaceId, limit: 1 }),
-        (answer) => ("status" in answer ? latestMomentLane.latest() : answer.latestMomentOrder),
-        () => undefined,
-      );
       // Asking again IS this refresh: it re-reads all four, so the lane that
       // failed is read again. Same control the History surface offers for its
       // own read, and the same one the caller runs on any activity.
@@ -1883,6 +1877,17 @@ export function DesktopWorkspaceShell(props: {
           reportShellError("Could not refresh history.", error),
         );
       };
+      // Whether an open file changed, read apart from the page, which can
+      // succeed while this fails. A shared view re-reads no open file.
+      latestMomentRequest.current = token;
+      if (!shareView) latestMomentLane.settle(
+        token,
+        readNewestMomentOrder(workspaceId, () =>
+          latestMomentRequest.current === token && !workspaceAdmission.superseded),
+        (order) => order ?? latestMomentLane.latest(),
+        (error) =>
+          reportLaneFailure("dohc could not check whether open files changed.", error, askAgain),
+      );
       syncStatusLane.settle(
         token,
         bridge().getSyncStatus({ workspaceId }),
@@ -1955,6 +1960,7 @@ export function DesktopWorkspaceShell(props: {
     supersedeHistoryPage,
     syncStatusLane,
     tryStateLane,
+    workspaceAdmission,
     workspaceId,
   ]);
 

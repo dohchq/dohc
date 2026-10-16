@@ -471,9 +471,10 @@ const RECOVERY_MOMENT: EngineMomentRecord = {
 };
 
 // One History timeline across two days: a file change, a version starting,
-// Collection changes (one by an automation, one whose rules an agent
-// approved and main could not date), the workspace starting, and a change
-// with no date or place. Local times, as above.
+// a labelled record change by an automation, a rules change an agent
+// approved that main could not date, the workspace starting, and an
+// unlabelled record change with no date or place. Only a rules change can
+// carry its approving agent. Local times, as above.
 const TIMELINE_BUDGET = "00000000-0000-4000-8000-0000000000b1";
 const TIMELINE_GUESTS = "00000000-0000-4000-8000-0000000000b2";
 const TIMELINE_FILE: TimelineEntry = { kind: "file", moment: {
@@ -484,11 +485,16 @@ function timelineVersion(id: string, kind: "main" | "named", name: string, creat
   return { kind: "version", version: { id, workspaceId: "states", kind, name, createdAtMs } };
 }
 function timelineChange(datasetId: string, name: string, revision: number, recordedAtMs: number | null, sortAtMs: number | null,
-  by?: { automation?: string; agent?: string }): TimelineEntry {
+  by?: { automation?: string; rulesApprovedBy?: string }): TimelineEntry {
+  const rules = by?.rulesApprovedBy;
   return { kind: "collection", datasetId, name, sortAtMs, change: {
-    revision, operation: "addGuest", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64), changesetBytes: 120, attachmentCount: 0,
+    revision, operation: rules ? "Fields and rules" : "addGuest", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64),
+    changesetBytes: rules ? 0 : 120, attachmentCount: 0,
     ...(by?.automation ? { automation: { automationId: `automations.yaml#${by.automation}`, depth: 1, name: by.automation } } : {}),
-    ...(by?.agent ? { approvalAgent: { kind: "agent" as const, label: by.agent, labelSource: "agent-declared" as const } } : {}),
+    ...(rules ? {
+      approvalAgent: { kind: "agent" as const, label: rules, labelSource: "agent-declared" as const },
+      schema: { previousRevisionHash: "b".repeat(64), revisionHash: "a".repeat(64) },
+    } : {}),
   } };
 }
 const TIMELINE_DATED = timelineChange(TIMELINE_BUDGET, "Budget", 12, new Date(2026, 6, 8, 9, 44).getTime(), new Date(2026, 6, 8, 9, 44).getTime(), { automation: "Stamp the date" });
@@ -496,7 +502,7 @@ const TIMELINE_MIXED: TimelineEntry[] = [
   TIMELINE_FILE,
   timelineVersion("version-draft", "named", "Draft itinerary", new Date(2026, 6, 8, 9, 58).getTime()),
   TIMELINE_DATED,
-  timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { agent: "trip-agent" }),
+  timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { rulesApprovedBy: "trip-agent" }),
   timelineVersion("main", "main", "Main", new Date(2026, 6, 7, 18, 0).getTime()),
   timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null),
 ];

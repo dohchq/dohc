@@ -425,6 +425,57 @@ describe("history page", () => {
     await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
   });
 
+  // History can answer while the read of the newest file moment does not.
+  // That read retries `updating` by itself, and a failure says so in Notices
+  // with a Try again that reads again.
+  function freshnessShell() {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["b.md"], "b.md")));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
+      files: [{ path: "b.md", kind: "file" as const }], folders: [] }));
+    const state = { latestMomentOrder: 3, queued: [] as Array<"updating" | Error> };
+    bridge.listEngineMoments = vi.fn(async () => {
+      const next = state.queued.shift();
+      if (next instanceof Error) throw next;
+      return next === "updating" ? { status: "updating" as const }
+        : { moments: [], nextCursor: null, latestMomentOrder: state.latestMomentOrder, activeVersionId: "main", ...historyPageFields };
+    });
+    renderShell(bridge);
+    return { bridge, state };
+  }
+  async function settledReads(bridge: ReturnType<typeof makeBridge>) {
+    await settleShareView();
+    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalledWith(expect.objectContaining({ relativePath: "b.md" })));
+    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    await act(async () => {});
+    return bridge.readWorkspaceText.mock.calls.length;
+  }
+
+  it("re-reads the open file once an updating newest-moment read answers, with no new activity", async () => {
+    const { bridge, state } = freshnessShell();
+    const reads = await settledReads(bridge);
+    state.latestMomentOrder = 4;
+    state.queued.push("updating");
+    const asked = bridge.listEngineMoments.mock.calls.length;
+    act(() => bridge.emitWorkspaceActivity());
+    await waitFor(() => expect(bridge.listEngineMoments.mock.calls.length).toBe(asked + 2));
+    await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
+    expect(screen.queryByTestId("history-load-failed")).toBeNull();
+  });
+
+  it("says when the newest-moment read fails while History answers, and Try again re-reads the open file", async () => {
+    const { bridge, state } = freshnessShell();
+    const reads = await settledReads(bridge);
+    state.latestMomentOrder = 4;
+    state.queued.push(new Error("Error invoking remote method 'desktop:list-engine-moments': Error: engine busy"));
+    act(() => bridge.emitWorkspaceActivity());
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not check whether open files changed.");
+    expect(bridge.readWorkspaceText.mock.calls.length).toBe(reads);
+
+    await userEvent.click(within(toast).getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.readWorkspaceText.mock.calls.length).toBeGreaterThan(reads));
+  });
+
   it("says History is hidden while its rules can't be read, and shows it again once they can", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.listHistory = vi.fn()

@@ -206,9 +206,11 @@ export function versionMarkerTitle(version: VersionEntry["version"]): string {
   return version.kind === "main" ? "Workspace created" : `Created version ${version.name}`;
 }
 
-// A Collection change in the person's words: its operation's label when the
-// Collection's definition names it, else the Collection it changed.
+// A Collection change in the person's words. A rules change says so; a
+// record change takes its operation's label when the Collection's
+// definition names it, else the Collection it changed.
 export function collectionChangeTitle(entry: CollectionEntry, label: string | undefined): string {
+  if (entry.change.schema) return "Changed fields and rules";
   return label ?? `Changed ${entry.name}`;
 }
 
@@ -484,6 +486,9 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
   const { name, change } = props.entry;
   const recordedAt = change.recordedAtMs === null ? null : formatChatTime(change.recordedAtMs);
   const agent = approvalAgentName(change);
+  // Only a record change with no label names its Collection in its title,
+  // and only it needs its operation's own name to say which change it was.
+  const unlabelled = !change.schema && props.label === undefined;
   // The row's name says what it opens, so the change is its description.
   const metaId = useId();
   const body = (
@@ -518,13 +523,7 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
             <span data-testid="history-collection-date-unknown">Date unknown</span>
           )}
           {" · "}
-          <span>{name}</span>
-          {props.label === undefined ? (
-            <>
-              {" · "}
-              <span className="font-mono">{change.operation}</span>
-            </>
-          ) : null}
+          {unlabelled ? <span className="font-mono">{change.operation}</span> : <span>{name}</span>}
         </span>
       </span>
     </span>

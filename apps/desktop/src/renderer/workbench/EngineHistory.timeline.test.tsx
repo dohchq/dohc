@@ -34,11 +34,17 @@ function file(id: string, overrides: Partial<EngineMomentRecord> = {}): Timeline
 const version: TimelineEntry = { kind: "version", version: { id: "draft", workspaceId: "workspace", kind: "named", name: "Draft", createdAtMs: DAY - 1_000 } };
 const workspaceStart: TimelineEntry = { kind: "version", version: { id: "main", workspaceId: "workspace", kind: "main", name: "Main", createdAtMs: DAY - 9_000 } };
 function change(revision: number, recordedAtMs: number | null, datasetId = BUDGET, name = "Budget",
-  options: { sortAtMs?: number | null; agent?: string | null } = {}): TimelineEntry {
+  options: { sortAtMs?: number | null; rulesApprovedBy?: string | null } = {}): TimelineEntry {
+  // A rules change has the engine's fixed operation and a schema; only it
+  // can carry the agent that approved it.
+  const rules = options.rulesApprovedBy !== undefined;
   return { kind: "collection", datasetId, name, sortAtMs: options.sortAtMs !== undefined ? options.sortAtMs : recordedAtMs ?? DAY - 5_000, change: {
-    revision, operation: "addRow", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64), changesetBytes: 10, attachmentCount: 0,
-    automation: { automationId: "automations.yaml#stamp", depth: 1, name: "Stamp the date" },
-    ...(options.agent !== undefined ? { approvalAgent: { kind: "agent" as const, label: options.agent, labelSource: "agent-declared" as const } } : {}),
+    revision, operation: rules ? "Fields and rules" : "addRow", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64),
+    changesetBytes: 10, attachmentCount: 0,
+    ...(rules ? {
+      schema: { previousRevisionHash: "b".repeat(64), revisionHash: "a".repeat(64) },
+      approvalAgent: { kind: "agent" as const, label: options.rulesApprovedBy ?? null, labelSource: "agent-declared" as const },
+    } : { automation: { automationId: "automations.yaml#stamp", depth: 1, name: "Stamp the date" } }),
   } };
 }
 
@@ -82,6 +88,8 @@ describe("History timeline rows", () => {
     expect(labelled!.textContent).not.toContain("addRow");
     expect(unlabelled!.querySelector(".font-medium")!.textContent).toBe("Changed Guests");
     expect(unlabelled!.querySelector(".font-mono:last-child")!.textContent).toBe("addRow");
+    // The title already names the Collection, so the meta line does not.
+    expect(unlabelled!.querySelector("[id]")!.textContent).not.toContain("Guests");
     // The row's name says what it opens; the change describes it.
     const button = screen.getByRole("button", { name: "Open Collection Budget" });
     const description = document.getElementById(button.getAttribute("aria-describedby")!);
@@ -90,11 +98,22 @@ describe("History timeline rows", () => {
   });
 
   it("names the agent that approved a Collection's rules first, in the agent's voice", () => {
-    view({ entries: [change(4, DAY - 2_000, BUDGET, "Budget", { agent: "trip-agent" }), change(3, DAY - 3_000, BUDGET, "Budget", { agent: null })] });
+    view({ entries: [change(4, DAY - 2_000, BUDGET, "Budget", { rulesApprovedBy: "trip-agent" }), change(3, DAY - 3_000, BUDGET, "Budget", { rulesApprovedBy: null })] });
     const agents = screen.getAllByTestId("history-collection-agent");
     expect(agents.map((agent) => agent.textContent)).toEqual(["trip-agent", "Agent"]);
     expect(agents[0]!.className).toContain("text-agent");
     expect(agents[0]!.parentElement!.firstElementChild).toBe(agents[0]);
+  });
+
+  // The engine names every rules change "Fields and rules". That is not an
+  // ID to show in mono, and no definition labels it.
+  it("titles a rules change in words and names its Collection, without an operation", () => {
+    view({ entries: [change(4, DAY - 2_000, GUESTS, "Guests", { rulesApprovedBy: "trip-agent" })] });
+    const row = screen.getAllByRole("listitem").find((item) => item.dataset.historyKey)!;
+    expect(row.querySelector(".font-medium")!.textContent).toBe("Changed fields and rules");
+    const meta = row.querySelector("[id]")!;
+    expect(meta.textContent).toContain("Guests");
+    expect(meta.textContent).not.toContain("Fields and rules");
   });
 
   it("marks where the workspace started, not a version someone created", () => {

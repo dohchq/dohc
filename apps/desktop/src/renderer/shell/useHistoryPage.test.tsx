@@ -11,7 +11,7 @@ import type {
 import type { HistoryCursor } from "@dohc/workspace-engine-client";
 import { deferred, type Deferred } from "../../testing/deferred";
 import { historyCursor, timelineCursor, timelinePage, type TimelinePage } from "../../testing/historyPageFixture";
-import { useHistoryPage } from "./useHistoryPage";
+import { readNewestMomentOrder, useHistoryPage } from "./useHistoryPage";
 
 let previousBridge: DohcDesktopBridge | undefined;
 const listHistory =
@@ -670,6 +670,56 @@ describe("history page updating retries", () => {
     expect(it0.hook().readState).toBe("loading");
     await advance(2_000);
     expect(listHistory).toHaveBeenCalledTimes(2);
+  });
+});
+
+// The read that tells the shell an open file may have changed. It retries
+// `updating` on the page's ladder while its refresh is current, and says so
+// when the ladder ends still updating.
+describe("newest moment order", () => {
+  const ready = (latestMomentOrder: number) => ({ moments: [], nextCursor: null, latestMomentOrder, activeVersionId: "main",
+    startCursor: historyCursor(), versionMarkers: [] });
+  function stubMoments(...answers: unknown[]) {
+    const listEngineMoments = vi.fn(async () => answers.shift());
+    window.dohcDesktop = { listEngineMoments } as unknown as DohcDesktopBridge;
+    return listEngineMoments;
+  }
+
+  it("retries an updating answer in the same workspace and returns the order", async () => {
+    vi.useFakeTimers();
+    const listEngineMoments = stubMoments(UPDATING, UPDATING, ready(7));
+    const read = readNewestMomentOrder("ws-1", () => true);
+    await advance(100 + 250);
+    await expect(read).resolves.toBe(7);
+    expect(listEngineMoments).toHaveBeenCalledTimes(3);
+    expect(listEngineMoments).toHaveBeenLastCalledWith({ workspaceId: "ws-1", limit: 1 });
+  });
+
+  it("stops retrying once its refresh is no longer current", async () => {
+    vi.useFakeTimers();
+    let current = true;
+    const listEngineMoments = stubMoments(UPDATING, ready(7));
+    const read = readNewestMomentOrder("ws-1", () => current);
+    await act(async () => { await Promise.resolve(); });
+    current = false;
+    await advance(2_000);
+    await expect(read).resolves.toBeNull();
+    expect(listEngineMoments).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects in words when the ladder ends still updating", async () => {
+    vi.useFakeTimers();
+    const listEngineMoments = stubMoments(UPDATING, UPDATING, UPDATING, UPDATING, UPDATING);
+    const read = readNewestMomentOrder("ws-1", () => true);
+    const rejected = expect(read).rejects.toThrow("Recent changes are still being added to History.");
+    await advance(2_000);
+    await rejected;
+    expect(listEngineMoments).toHaveBeenCalledTimes(5);
+  });
+
+  it("answers nothing while History's rules are unreadable", async () => {
+    stubMoments({ status: "policy-unreadable", unreadable: [".dohc/files.toml"], policyErrors: ["files.toml"] });
+    await expect(readNewestMomentOrder("ws-1", () => true)).resolves.toBeNull();
   });
 });
 

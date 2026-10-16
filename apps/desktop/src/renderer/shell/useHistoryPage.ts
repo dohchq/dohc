@@ -50,6 +50,24 @@ function waitForHistoryRetry(delayMs: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
+// The order of the engine's newest file moment, which tells the shell an
+// open file may have changed, or null while History's rules hide it (the
+// page read on the same refresh shows that). An `updating` answer is retried
+// on the page's ladder while `current` holds. A ladder that ends still
+// updating rejects, so the caller can say so and offer Try again.
+export async function readNewestMomentOrder(workspaceId: string, current: () => boolean): Promise<number | null> {
+  for (let attempt = 0; ; attempt += 1) {
+    const answer = await bridge().listEngineMoments({ workspaceId, limit: 1 });
+    if (!("status" in answer)) return answer.latestMomentOrder;
+    if (answer.status === "policy-unreadable" || !current()) return null;
+    if (attempt === HISTORY_UPDATING_RETRY_DELAYS_MS.length) {
+      throw new Error("Recent changes are still being added to History.");
+    }
+    await waitForHistoryRetry(HISTORY_UPDATING_RETRY_DELAYS_MS[attempt]);
+    if (!current()) return null;
+  }
+}
+
 const fileMoments = (entries: readonly TimelineEntry[]): EngineMomentRecord[] =>
   entries.flatMap((entry) => (entry.kind === "file" ? [entry.moment] : []));
 
