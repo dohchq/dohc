@@ -1,6 +1,7 @@
 import {
   chatOperations,
   systemMotionOperations,
+  serverAccountOperations,
   chatDispatchNoticeOperations,
   crashReportOperations,
   engineYDocAdmissionOperations,
@@ -31,6 +32,7 @@ export const OPERATION_TABLES = [
   chatOperations,
   shareCopyOperations,
   systemMotionOperations,
+  serverAccountOperations,
   accessOperations,
   workspaceVersionOperations,
   historyOperations,

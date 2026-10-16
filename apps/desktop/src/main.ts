@@ -343,8 +343,11 @@ import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationI
 import { createLocalAuthorship } from "./workspaces/localAuthorship";
 import {
   createCloudLogin,
+  runCloudLogoutTransition,
   type CloudLogin,
 } from "./workspaces/cloudLogin";
+import { createServerAccountDeletion } from "./workspaces/serverAccountDeletion";
+import { registerServerAccountIpc } from "./ipc/serverAccountIpc";
 import { createJoinedWorkspaceRunner } from "./workspaces/createJoinedWorkspace";
 import { registerRelaySharesIpcHandlers } from "./ipc/relaySharesIpc";
 import { requireCredentials } from "./workspaces/credentialScopedOperation";
@@ -4571,10 +4574,38 @@ const shareCopyReader = createShareCopyReader<RegistryEntry>({
   remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
   relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
 });
+// The desktop window and the CLI delete the account through this one client.
+// Afterwards this computer forgets every session of the deleted account, even
+// one another window signed in with while deletion ran, and keeps another
+// account's. Local workspaces stay.
+const serverAccountDeletion = createServerAccountDeletion({
+  credentials: loadAndCacheCurrentCredentials,
+  workspaces: listWorkspaces,
+  disconnect: async (deleted) => {
+    if (cachedCredentials?.serverUrl !== deleted.serverUrl || cachedCredentials.userId !== deleted.userId) {
+      try {
+        await cloudLogin().invalidateAccount(deleted);
+      } finally {
+        notifyCloudSessionChanged("ready");
+      }
+      return;
+    }
+    await runCloudLogoutTransition({
+      clearCachedCredentials: () => clearCachedCredentials(),
+      logout: () => cloudLogin().invalidateAccount(deleted),
+      stopEngines: () => activity.stopEngines(),
+      closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces({ accountChanged: true }),
+      notifyWorkspaceActivity: () => notifyRenderer(),
+      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+    });
+  },
+});
+
 const { startDesktopCliServer } = createDesktopCliServer({
   shareCopy: shareCopyReader,
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
+  serverAccount: serverAccountDeletion,
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
     return datasetForCli(input, agent);
@@ -5773,6 +5804,7 @@ async function currentDiagnostics(): Promise<string> {
 
 function registerIpcHandlers(): void {
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
+  registerServerAccountIpc(operationBoundary, serverAccountDeletion);
   shareDirectWriteDelivery.register(operationBoundary);
   const shareCopyHandler = createShareCopyHandler<WebContents, RegistryEntry, DesktopRendererWorkspaceOperation>({
     currentSession: sender => rendererWorkspaceSessions.current(sender) ?? null,
