@@ -77,4 +77,12 @@ describe("CommandPalette keyboard selection", () => {
     await userEvent.keyboard("{Enter}");
     expect(ran).toEqual(["gamma"]);
   });
+
+  it("Escape from the input closes it once, through the overlay", async () => {
+    const { ran, onClose } = setup();
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Command" }));
+    await userEvent.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(ran).toEqual([]);
+  });
 });

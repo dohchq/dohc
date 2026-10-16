@@ -64,7 +64,7 @@ it.each(["win32", "darwin"].flatMap((platform) =>
   const target = focus === "input"
     ? screen.getByRole("textbox", { name: "File" })
     : focus === "result row"
-      ? screen.getAllByRole("button")[0]
+      ? screen.getByRole("button", { name: /notes.md/ })
       : screen.getByTestId("quick-open").closest<HTMLElement>('[data-focus-surface="dialog"]')!;
   target.focus();
   expect(document.activeElement).toBe(target);

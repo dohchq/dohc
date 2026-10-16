@@ -107,8 +107,7 @@ export function CommandPalette(props: {
               setSelectedIndex(0);
             }}
             onKeyDown={(event) => {
-              if (event.key === "Escape") props.onClose();
-              else if (event.key === "ArrowDown") {
+              if (event.key === "ArrowDown") {
                 event.preventDefault();
                 moveSelection(1);
               } else if (event.key === "ArrowUp") {
