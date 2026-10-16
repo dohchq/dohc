@@ -85,7 +85,7 @@ The service stays off until you configure the bucket.
    The job never deletes snapshots, so the lifecycle rule controls retention.
    On Amazon S3, Object Lock turns on versioning, and that action alone keeps each snapshot as a noncurrent version.
    Add a second action to the same rule that permanently deletes noncurrent versions 1 day after they become noncurrent.
-   Add a separate rule that deletes expired object delete markers, because S3 doesn't allow that action in a rule that also expires objects by age.
+   S3 then removes the leftover delete markers itself, so each snapshot is gone about 31 days after it was taken.
 3. Lock the bucket's objects for 30 days, the same length as the lifecycle rule.
    On Cloudflare R2, add a bucket lock rule.
    On Amazon S3, turn on Object Lock with a default retention in compliance mode.
