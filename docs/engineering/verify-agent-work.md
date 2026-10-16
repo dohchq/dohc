@@ -102,8 +102,8 @@ The service verifies the commit in its own checkout, `C:\w\_verification\lane` o
 Stopping `pnpm verify:pr` does not stop the request. Run the same command again to follow it, or to get its result once it has finished.
 Pass `--detach` to submit the request and return at once.
 
-- Requests run in the order the service accepted them, unless someone [moves one](#move-a-waiting-request).
-- A newer commit on the same branch replaces that branch's waiting request and keeps its place, including a place a move gave it. A running request finishes.
+- [Owners take turns](#owners-take-turns). Each owner's requests run in the order the service accepted them, unless someone [moves one](#move-a-waiting-request).
+- A newer commit on the same branch replaces that branch's waiting request and keeps its owner and its place, including a place a move gave it. A running request finishes.
 - The same commit with the same gates joins the existing request, or reuses its pass.
 - A run that fails because of the machine is retried in place, after 30 seconds, 2 minutes, 5 minutes, then every 15 minutes. Machine failures include a program that could not start, too little disk, and Docker or the host tools not responding.
 - A run that fails a check is reported at once. The service never retries it.
@@ -117,7 +117,7 @@ Each attempt records the load it verified under in `status.json` and `C:\w\_veri
 Each attempt has its own evidence folder, `C:\w\_verification\requests\<id>\attempts\<n>`, and its `result.json` names the request and attempt.
 Read the service's verdict from the request's `status.json`, or from the last line `pnpm verify:pr` prints.
 
-Run `pnpm verify:queue status` to see the service, a pause, the running requests, the line, and wait estimates.
+Run `pnpm verify:queue status` to see the service, a pause, the running requests, the line with each request's owner, and wait estimates.
 Run `pnpm verify:queue cancel <id>` to stop one of your own requests. Never cancel a request another agent submitted. A finished request keeps its verdict.
 
 The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows what holds each verification lane, a queued request or an agent's inline gate, with its steps and its live output, then the requests ready and waiting for a lane, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Threads, Tests, and Nightly tabs show the whole line, every run this week, each thread's runs and results, the tests that failed on two or more branches in the last day, the slowest and flaky tests, and the nightly runs.
@@ -148,7 +148,8 @@ A request that was running when the service stopped runs again as a new attempt.
 Install or upgrade the service from a checkout of `origin/main` with `pnpm verify:queue install`. An upgrade takes effect when the current runs end. No new run starts until then.
 
 CI, other platforms, and runs with their own `DOHC_BUILD_SLOT_ROOT` verify inline in their checkout.
-Pass `--inline` to do the same on the shared host when the service is unavailable. Inline runs still wait for the host's verification lane, so they never overlap a queued run.
+On the shared host, pass `--inline` only when the queue cannot do the job: the service is unavailable, or the run needs `--reuse-rust`, or `--keep-going` without `--full`.
+An inline run takes a lane outside the [owners' turns](#owners-take-turns), and it says so when it starts. Inline runs still wait for the host's verification lane, so they never overlap a queued run.
 An inline run owns its checkout until cleanup and receipt writing finish. Another PR run in that checkout fails before installation or queue admission and reports the owner.
 
 Inspect the host's Cargo slots and verification lane without joining them:
@@ -244,22 +245,46 @@ A failure that other branches share often comes from main or from a flaky test, 
 When the gate prints that list, check the test on `origin/main` and in the [last nightly](#nightly-run). Do this before you change your branch for that test.
 Do not add a workaround for that failure to your PR. Fix main or the flaky test in its own PR, or wait for that fix and rebase.
 
+### Owners take turns
+
+The service records an owner for each request when it accepts it:
+
+1. The T3 thread a person started for the work. A subagent's thread counts under the thread a person started above it. The service finds the thread as the dashboard does: by the checkout's worktree, a linked pull request, or the branch.
+2. If T3 does not know the thread, the name given with `pnpm verify:pr --owner <name>`.
+3. Otherwise, the checkout.
+
+`pnpm verify:pr` prints the owner when the service accepts the request.
+If T3 does not know your thread, pass the same `--owner` name for all of your thread's work. A new name for each request makes each request a new owner.
+
+The service starts the nightly run first, then any request [moved with `--first`](#move-a-waiting-request).
+Then the next lane goes to an owner with no run in progress, the one that has gone longest without a start. An owner that has never started goes first.
+An owner with a run in progress waits until every owner without one has had a turn.
+Each turn starts the owner's first request in line, so a thread with 30 waiting requests gets one start per turn, like a thread with one.
+A request that cannot start yet, because it needs Docker while Docker is down or waits for a retry, holds no turn. Its owner's next request can take the turn.
+An attempt that failed because of the machine uses no turn.
+The turns add no capacity. They give each thread quick feedback on its most important request, so put that request first with `move --before`.
+
+`pnpm verify:queue status`, the wait estimates, and the dashboard show the line in the order the service starts it when every request can start.
+The dashboard's Queue tab shows each request's owner and how many requests that owner has waiting.
+An [inline run](#the-verification-queue-on-the-shared-windows-host) takes no turn.
+
 ### Move a waiting request
 
-Move a request only to unblock other work: a fix for a failure that several branches share, a fix for a broken main, or a request the owner asked to hurry.
-Never move a request only to get your own run sooner. Any agent may move any waiting request, including one another thread submitted.
-
 ```sh
-pnpm verify:queue move <id> --first --reason "<why>" [--by "<name>"]
 pnpm verify:queue move <id> --before <other-id> --reason "<why>" [--by "<name>"]
+pnpm verify:queue move <id> --first --reason "<why>" [--by "<name>"]
 ```
 
-`--first` puts the request at the front of the line. `--before` puts it just ahead of another waiting request.
+`--before` orders your own requests. It puts a request just ahead of another waiting request with the same owner, so it runs on that owner's next turn.
+`--first` puts a request at the front of the line, behind only the nightly run and ahead of every owner's turn.
+Use `--first` only to unblock other work: a fix for a failure that several branches share, a fix for a broken main, or a request a person asked to hurry.
+Never use `--first` only to get your own run sooner. Any agent may move any waiting request, including one another thread submitted.
+
 A move only brings a waiting request forward. `--before` needs another waiting request that is ahead of it now.
 A move never stops or starts a run. It changes only which request starts next, and the nightly run still goes first.
 The service applies the move within a few seconds, and the command prints the request's new place. If the service is not running, the move applies when it starts.
 A service installed before this command existed applies no moves. After 30 seconds the command says so. Run `pnpm verify:queue upgrade` from a checkout of `origin/main` to install a service that applies them.
-The command refuses a request that is unknown, running, or finished, or one already ahead of the `--before` request, and says why.
+The command refuses to move a request that is unknown, running, or finished. It refuses `--before` a request with another owner, a request moved with `--first`, or one the request is already ahead of. It says why.
 
 The service records each move in `history.jsonl` with its reason, the `--by` name, the OS user, and the checkout that asked. It keeps the reason to one line of at most 300 characters.
 `pnpm verify:queue status` shows the last move beside the request, such as `moved first by Ice (C:\w\fix-grid): fixes the grid test three branches fail`. Every agent on the host runs as the same OS user, so the checkout always shows.
