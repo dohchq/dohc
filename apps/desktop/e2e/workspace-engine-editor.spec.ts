@@ -1,5 +1,5 @@
-import { test } from "./helpers/systemClipboard";
-import { expect } from "@playwright/test";
+import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { test, expect } from "@playwright/test";
 import { readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -84,9 +84,11 @@ async function restoreRestartTyping(desktop: Awaited<ReturnType<typeof launchDes
   }
   await expect(page.getByTestId("engine-diff-lines")).toContainText(human);
   // A shared live file's way back: Copy your version copies the kept file whole.
-  await page.getByTestId("engine-diff-copy-typing").click();
-  // Windows hands clipboard text back with CRLF line endings.
-  await expect.poll(async () => (await app.evaluate(({clipboard}) => clipboard.readText())).replace(/\r\n/g, "\n")).toBe(detail.moment?.beforeText);
+  await holdSystemClipboard(test.info(), async () => {
+    await page.getByTestId("engine-diff-copy-typing").click();
+    // Windows hands clipboard text back with CRLF line endings.
+    await expect.poll(async () => (await app.evaluate(({clipboard}) => clipboard.readText())).replace(/\r\n/g, "\n")).toBe(detail.moment?.beforeText);
+  });
   // Opening the recovery and copying it keep it listed until Restore.
   const kept = await page.evaluate(async workspaceId => (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}), workspaceId);
   expect(kept.captureRecoveries.map(recovery => recovery.momentId)).toContain(recoveryId);

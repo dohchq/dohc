@@ -8,7 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { cpus, freemem, tmpdir, uptime } from "node:os";
+import { cpus, freemem, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -56,9 +56,6 @@ export async function sweepContainers({ request, command = run } = {}) {
  */
 export const laneTemp = lane => join(dirname(lane), "tmp", basename(lane));
 
-// Clipboard tests share a lock even though each worker has its own temp folder.
-export const laneEnvironment = lane => ({ ...process.env, DOHC_HOST_TMPDIR: process.env.DOHC_HOST_TMPDIR ?? tmpdir(), TEMP: laneTemp(lane), TMP: laneTemp(lane) });
-
 /** Put the lane at `head` with no state from earlier runs except the named caches. */
 export async function prepareLane({ lane, repo, head, signal }) {
   // The temp folder keeps only the coming run's files.
@@ -81,7 +78,7 @@ export async function prepareLane({ lane, repo, head, signal }) {
   if (await laneGit(["status", "--porcelain"]) !== "") throw new Error("The lane has changes after checkout and clean.");
   // Installed while the request waits for the lane, so the verifier's own install has nothing left to do in it.
   await run(process.execPath, ["scripts/verification/setup.mjs"], { cwd: lane, signal, quietStdout: true, timeoutMs: 30 * 60_000,
-    env: laneEnvironment(lane) });
+    env: { ...process.env, TEMP: laneTemp(lane), TMP: laneTemp(lane) } });
 }
 
 export async function dockerResponds(command = run) {
@@ -101,7 +98,7 @@ async function defaultWorker({ lane, request, grant, output, signal }) {
   const args = ["scripts/verification/verify.mjs", "pr", "--base", request.base,
     ...(request.scope === "all" ? [] : ["--job", request.scope]), ...(request.full ? ["--full"] : [])];
   await run(process.execPath, args, { cwd: lane, signal, log: join(output, "worker.log"), quietStdout: true,
-    env: { ...laneEnvironment(lane), DOHC_VERIFICATION_GRANT: JSON.stringify(grant), DOHC_VERIFICATION_OUTPUT: output } })
+    env: { ...process.env, TEMP: laneTemp(lane), TMP: laneTemp(lane), DOHC_VERIFICATION_GRANT: JSON.stringify(grant), DOHC_VERIFICATION_OUTPUT: output } })
     .catch(error => { if (!error.commandExitFailure) throw error; });
 }
 

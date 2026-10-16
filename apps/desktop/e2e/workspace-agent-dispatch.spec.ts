@@ -1,6 +1,6 @@
-import { test } from "./helpers/systemClipboard";
+import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
-import { expect, type Locator, type Page } from "@playwright/test";
+import { test, expect, type Locator, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";
@@ -307,10 +307,16 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
         await page.screenshot({ path: join(process.env.UI_AUDIT_SHOT_DIR, `runner-test-error-${theme}.png`) });
       }
     }
-    // Only what Copy writes here is read; the clipboard is cleared again in finally.
-    await desktop.app.evaluate(({ clipboard }) => clipboard.clear());
-    await page.getByTestId("workspace-shell-error-copy").click();
-    await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toContain(reason);
+    // Keep both clears inside the copy/read span.
+    await holdSystemClipboard(test.info(), async () => {
+      await desktop!.app.evaluate(({ clipboard }) => clipboard.clear());
+      try {
+        await page.getByTestId("workspace-shell-error-copy").click();
+        await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toContain(reason);
+      } finally {
+        await desktop!.app.evaluate(({ clipboard }) => clipboard.clear()).catch(() => undefined);
+      }
+    });
     await expect(settings).toBeVisible();
     await page.getByRole("button", { name: "Dismiss workspace error" }).click();
     await expect(toast).toHaveCount(0);
@@ -320,7 +326,6 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
     await page.getByTestId("notice-center-toggle").click();
     await expect(page.getByTestId("notice-center")).toContainText(reason);
   } finally {
-    await desktop?.app.evaluate(({ clipboard }) => clipboard.clear()).catch(() => undefined);
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });

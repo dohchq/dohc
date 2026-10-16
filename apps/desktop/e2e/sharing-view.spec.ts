@@ -1,6 +1,6 @@
-import { test } from "./helpers/systemClipboard";
+import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { activityPin, settingsNavPin } from "../src/testPins";
-import { expect } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { join } from "node:path";
 import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -89,9 +89,11 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     // The row hands out the share's code from its actions, by keyboard.
     await page.keyboard.press("Tab");
     await expect(row.getByTestId("sharing-granted-actions").locator(":focus")).toHaveCount(1);
-    await row.getByRole("button", { name: "Copy code" }).focus();
-    await page.keyboard.press("Enter");
-    await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(shareCode);
+    await holdSystemClipboard(test.info(), async () => {
+      await row.getByRole("button", { name: "Copy code" }).focus();
+      await page.keyboard.press("Enter");
+      await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(shareCode);
+    });
 
     // The rail button closes and reopens the same view.
     await page.getByTestId(activityPin("sharing")).click();

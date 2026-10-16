@@ -1,6 +1,6 @@
-import { test } from "./helpers/systemClipboard";
+import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { desktopPins, activityPin, settingsNavPin, settingsSectionPin } from "../src/testPins";
-import { expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
@@ -121,10 +121,12 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
     await expect(desktop.page.getByTestId("mcp-config-snippet")).toContainText(
       canonicalRootPath,
     );
-    await desktop.page.getByRole("button", { name: "Copy" }).click();
-    await expect
-      .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()))
-      .toContain(canonicalRootPath);
+    await holdSystemClipboard(test.info(), async () => {
+      await desktop!.page.getByRole("button", { name: "Copy" }).click();
+      await expect
+        .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()))
+        .toContain(canonicalRootPath);
+    });
 
     await desktop.close();
     desktop = await openWorkspace(temp);

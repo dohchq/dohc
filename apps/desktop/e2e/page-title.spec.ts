@@ -1,5 +1,5 @@
-import { test } from "./helpers/systemClipboard";
-import { expect, type Locator } from "@playwright/test";
+import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { test, expect, type Locator } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -70,12 +70,14 @@ test("a wrapped page title keeps ArrowDown, selection, and paste inside the titl
     await expect(page.getByTestId("markdown-editor")).toBeFocused();
 
     // A pasted line break becomes a space, and the caret stays after the paste.
-    await desktop.app.evaluate(({ clipboard }) => clipboard.writeText("short\nand "));
-    await title.click();
-    await title.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(2, 2));
-    await page.keyboard.press("Control+V");
-    await expect(title).toHaveValue(`A short and ${TITLE.slice(2)}`);
-    expect(await caret(title)).toMatchObject({ start: "A short and ".length, focused: true });
+    await holdSystemClipboard(test.info(), async () => {
+      await desktop!.app.evaluate(({ clipboard }) => clipboard.writeText("short\nand "));
+      await title.click();
+      await title.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(2, 2));
+      await page.keyboard.press("Control+V");
+      await expect(title).toHaveValue(`A short and ${TITLE.slice(2)}`);
+      expect(await caret(title)).toMatchObject({ start: "A short and ".length, focused: true });
+    });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

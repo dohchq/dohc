@@ -1,14 +1,15 @@
-import { test as base } from "@playwright/test";
-import { withSystemClipboardLock } from "./systemClipboardLock.mjs";
+import type { TestInfo } from "@playwright/test";
+import { systemClipboardLockPath, withSystemClipboardLock } from "./systemClipboardLock.mjs";
 
-export const test = base.extend<{ systemClipboard: void }>({
-  systemClipboard: [async ({}, use, testInfo) => {
-    const remaining = testInfo.timeout === 0
-      ? Infinity
-      : Math.max(0, testInfo.timeout - 250);
-    await withSystemClipboardLock({
-      timeoutMs: remaining,
-      holder: testInfo.titlePath.join(" > "),
-    }, use);
-  }, { auto: true }],
-});
+/** Hold only the copy/read or write/paste span, including its assertions. */
+export async function holdSystemClipboard<T>(
+  testInfo: TestInfo,
+  use: () => Promise<T>,
+  lockPath = systemClipboardLockPath(),
+): Promise<T> {
+  return withSystemClipboardLock({
+    lockPath,
+    timeoutMs: 20_000,
+    holder: testInfo.titlePath.join(" > "),
+  }, use);
+}

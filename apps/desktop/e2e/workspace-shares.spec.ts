@@ -1,6 +1,6 @@
-import { test } from "./helpers/systemClipboard";
+import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { desktopPins, activityPin } from "../src/testPins";
-import { expect } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
@@ -422,8 +422,10 @@ confidentialTest.describe("View link lifecycle", () => {
       const oldSecret = oldUrl.hash.slice(1);
       expect(/^[A-Za-z0-9_-]{43}$/u.test(oldSecret)).toBe(true);
       const copyButton = dialog.getByRole("button", { name: "Copy", exact: true });
-      await copyButton.click();
-      await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+      await holdSystemClipboard(test.info(), async () => {
+        await copyButton.click();
+        await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+      });
 
       const firstExchange = await exchangeViewLink(
         relay.baseUrl,

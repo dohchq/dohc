@@ -1,7 +1,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { withSystemClipboardLock, systemClipboardLockPath } from "../../apps/desktop/e2e/helpers/systemClipboardLock.mjs";
 
-const [lockPath, holder, register, mode] = process.argv.slice(2);
+const [address, holder, register, mode] = process.argv.slice(2);
+const lockPath = JSON.parse(address);
 if (mode === "path") {
   process.send(systemClipboardLockPath());
   process.disconnect();

@@ -1,6 +1,6 @@
-import { test } from "./helpers/systemClipboard";
+import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { editorTabTestId } from "../src/testPins";
-import { expect } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
@@ -92,8 +92,10 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     await expect(share.getByTestId("share-link-url")).toBeVisible();
     const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
     expect(new URL(linkUrl).origin).toBe(sharedDatasetViewerOrigin);
-    await share.getByRole("button", { name: "Copy", exact: true }).click();
-    await expect(share.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    await holdSystemClipboard(test.info(), async () => {
+      await share.getByRole("button", { name: "Copy", exact: true }).click();
+      await expect(share.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    });
     await share.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByTestId("site-preview-page").getByRole("button", { name: "Open in browser", exact: true })).toBeVisible();
     await page.getByTestId("site-preview-publish").click();
