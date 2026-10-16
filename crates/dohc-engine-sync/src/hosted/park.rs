@@ -8,6 +8,8 @@
 //! file is gone. On its return, its heads come back once nothing holds their
 //! paths, the same gate a replayed row meets.
 
+use std::collections::HashMap;
+
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::{Connection, ToSql, params};
 
@@ -353,61 +355,190 @@ pub(super) fn parked_paths(
 }
 
 /// What holds one of `paths` here against `object_id`: another document's
-/// head or path alias, matched like a capture hold, which names a document of
-/// the scope as holding it, or a retired file.
+/// head or path alias, which names a document of the scope as holding it, or
+/// a retired file.
 pub(super) fn paths_hold(
     conn: &Connection,
     workspace_id: &str,
     object_id: &str,
     paths: &[(String, String)],
 ) -> Result<Option<HostedHold>, SyncError> {
-    use dohc_engine_storage::capture_file_holds::path_is_held;
-    let collides = |held: &str, path: &str| path_is_held(held, path) || path_is_held(path, held);
+    let mut occupancy = Occupancy::new(conn, workspace_id, object_id);
     let mut departed = false;
     for (version_id, path) in paths {
-        let mut statement = conn
-            .prepare_cached(
-                "SELECT o.object_id,o.path,EXISTS(SELECT 1 FROM hosted_documents d \
-                   JOIN hosted_replicas h \
-                     ON h.workspace_id=d.workspace_id AND h.scope_generation=d.scope_generation \
-                   WHERE d.workspace_id=?1 AND d.object_id=o.object_id) \
-                 FROM (SELECT object_id,path FROM snapshots \
-                     WHERE workspace_id=?1 AND version_id=?2 AND object_id<>?3 \
-                   UNION SELECT object_id,path FROM path_aliases \
-                     WHERE workspace_id=?1 AND version_id=?2 AND object_id<>?3) o",
-            )
-            .map_err(SyncError::corrupt)?;
-        let occupants = statement
-            .query_map(params![workspace_id, version_id, object_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, bool>(2)?,
-                ))
-            })
-            .map_err(SyncError::corrupt)?;
-        for occupant in occupants {
-            let (held_by, held, in_scope) = occupant.map_err(SyncError::corrupt)?;
-            if !collides(&held, path) {
-                continue;
-            }
-            if in_scope {
-                return Ok(Some(HostedHold::PathHeld {
-                    path: path.clone(),
-                    held_by,
-                }));
-            }
-            departed = true;
+        match occupancy.hold(version_id, path)? {
+            Some(hold @ HostedHold::PathHeld { .. }) => return Ok(Some(hold)),
+            Some(_) => departed = true,
+            None => {}
         }
-        departed |= strings(
-            conn,
-            "SELECT path FROM hosted_retired_files WHERE workspace_id=?1",
-            &[&workspace_id],
-        )?
-        .iter()
-        .any(|held| collides(held, path));
     }
     Ok(departed.then_some(HostedHold::WorkWaiting))
+}
+
+/// What holds paths here against one document, read once however many paths
+/// are asked about: every other document's head and path alias in each
+/// version asked about, and every retired file. Paths collide as capture
+/// holds match them: the same path in any case, or one inside the other.
+pub(crate) struct Occupancy<'c> {
+    conn: &'c Connection,
+    workspace_id: &'c str,
+    object_id: &'c str,
+    versions: HashMap<String, Holders>,
+    retired: Option<Holders>,
+}
+
+impl<'c> Occupancy<'c> {
+    pub(crate) fn new(conn: &'c Connection, workspace_id: &'c str, object_id: &'c str) -> Self {
+        Self {
+            conn,
+            workspace_id,
+            object_id,
+            versions: HashMap::new(),
+            retired: None,
+        }
+    }
+
+    /// What holds `path` in `version_id`: the first document of the scope
+    /// there by id, or [`HostedHold::WorkWaiting`] for only a departed
+    /// document or a retired file.
+    pub(crate) fn hold(
+        &mut self,
+        version_id: &str,
+        path: &str,
+    ) -> Result<Option<HostedHold>, SyncError> {
+        if self.retired.is_none() {
+            let mut retired = Holders::default();
+            for held in strings(
+                self.conn,
+                "SELECT path FROM hosted_retired_files WHERE workspace_id=?1",
+                &[&self.workspace_id],
+            )? {
+                retired.insert(&held, Holder::Departed);
+            }
+            self.retired = Some(retired);
+        }
+        if !self.versions.contains_key(version_id) {
+            let holders = self.load(version_id)?;
+            self.versions.insert(version_id.to_owned(), holders);
+        }
+        let folded = path.to_lowercase();
+        let holder = Holder::merge(
+            self.versions[version_id].holder(&folded),
+            self.retired
+                .as_ref()
+                .and_then(|retired| retired.holder(&folded)),
+        );
+        Ok(holder.map(|holder| match holder {
+            Holder::Scope(held_by) => HostedHold::PathHeld {
+                path: path.to_owned(),
+                held_by,
+            },
+            Holder::Departed => HostedHold::WorkWaiting,
+        }))
+    }
+
+    fn load(&self, version_id: &str) -> Result<Holders, SyncError> {
+        let mut statement = self
+            .conn
+            .prepare_cached(OCCUPANTS_SQL)
+            .map_err(SyncError::corrupt)?;
+        let occupants = statement
+            .query_map(
+                params![self.workspace_id, version_id, self.object_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
+            )
+            .map_err(SyncError::corrupt)?;
+        let mut holders = Holders::default();
+        for occupant in occupants {
+            let (held_by, held, in_scope) = occupant.map_err(SyncError::corrupt)?;
+            #[cfg(test)]
+            OCCUPANTS_READ.with(|read| read.set(read.get() + 1));
+            let holder = if in_scope {
+                Holder::Scope(held_by)
+            } else {
+                Holder::Departed
+            };
+            holders.insert(&held, holder);
+        }
+        Ok(holders)
+    }
+}
+
+/// Every other document's head and path alias in one version, and whether
+/// that document is of the scope. `?1` is the workspace, `?2` the version
+/// and `?3` the document asking. [`Holders`] merges a path read twice, so
+/// `UNION ALL` reads each table by its version.
+const OCCUPANTS_SQL: &str = "SELECT o.object_id,o.path,EXISTS(SELECT 1 FROM hosted_documents d \
+       JOIN hosted_replicas h \
+         ON h.workspace_id=d.workspace_id AND h.scope_generation=d.scope_generation \
+       WHERE d.workspace_id=?1 AND d.object_id=o.object_id) \
+     FROM (SELECT object_id,path FROM snapshots \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id<>?3 \
+       UNION ALL SELECT object_id,path FROM path_aliases \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id<>?3) o";
+
+#[cfg(test)]
+thread_local! {
+    /// How many heads and path aliases each [`Occupancy`] on this thread read.
+    pub(crate) static OCCUPANTS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Who holds a path: a document of the scope, or only a departed document or
+/// a retired file.
+#[derive(Clone)]
+enum Holder {
+    Scope(String),
+    Departed,
+}
+
+impl Holder {
+    /// The holder a hold names of either: a document of the scope, the first
+    /// by id.
+    fn merge(a: Option<Holder>, b: Option<Holder>) -> Option<Holder> {
+        match (a, b) {
+            (Some(Holder::Scope(a)), Some(Holder::Scope(b))) => Some(Holder::Scope(a.min(b))),
+            (Some(Holder::Departed), b @ Some(_)) => b,
+            (a, b) => a.or(b),
+        }
+    }
+}
+
+/// Held paths, lowercased: each one, and each folder above one.
+#[derive(Default)]
+struct Holders {
+    at: HashMap<String, Holder>,
+    above: HashMap<String, Holder>,
+}
+
+impl Holders {
+    fn insert(&mut self, held: &str, holder: Holder) {
+        fn add(holders: &mut HashMap<String, Holder>, path: &str, holder: Holder) {
+            if let Some(merged) = Holder::merge(holders.remove(path), Some(holder)) {
+                holders.insert(path.to_owned(), merged);
+            }
+        }
+        let held = held.to_lowercase();
+        for (end, _) in held.match_indices('/') {
+            add(&mut self.above, &held[..end], holder.clone());
+        }
+        add(&mut self.at, &held, holder);
+    }
+
+    /// What holds `path`, lowercased: a held path the same, above it or
+    /// inside it.
+    fn holder(&self, path: &str) -> Option<Holder> {
+        let mut holder = Holder::merge(self.at.get(path).cloned(), self.above.get(path).cloned());
+        for (end, _) in path.match_indices('/') {
+            holder = Holder::merge(holder, self.at.get(&path[..end]).cloned());
+        }
+        holder
+    }
 }
 
 fn parkable(conn: &Connection, workspace_id: &str, object_id: &str) -> Result<bool, SyncError> {
@@ -518,4 +649,83 @@ fn execute(conn: &Connection, sql: &str, bound: &[&dyn ToSql]) -> Result<(), Syn
         .execute(&bound[..count])
         .map_err(SyncError::persist)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Holder, Holders};
+    use dohc_engine_storage::capture_file_holds::path_is_held;
+
+    /// A held path holds another as a capture hold matches them, either way
+    /// round: the same path in any case, or one inside the other.
+    #[test]
+    fn held_paths_collide_as_capture_holds_match() {
+        let paths = [
+            "a.md",
+            "A.md",
+            "a.md/b.md",
+            "A.MD/b.md",
+            "a",
+            "a/b",
+            "a/b/c.md",
+            "ab/c.md",
+            "b.md",
+        ];
+        for held in paths {
+            let mut holders = Holders::default();
+            holders.insert(held, Holder::Departed);
+            for path in paths {
+                assert_eq!(
+                    holders.holder(&path.to_lowercase()).is_some(),
+                    path_is_held(held, path) || path_is_held(path, held),
+                    "{held} against {path}"
+                );
+            }
+        }
+    }
+
+    /// A hold names a document of the scope over a departed one or a retired
+    /// file, and the first by id.
+    #[test]
+    fn a_hold_names_the_first_document_of_the_scope() {
+        let mut holders = Holders::default();
+        holders.insert("d/x.md", Holder::Departed);
+        holders.insert("d/b.md", Holder::Scope("doc-b".to_owned()));
+        holders.insert("d/a.md", Holder::Scope("doc-a".to_owned()));
+        assert!(matches!(holders.holder("d"), Some(Holder::Scope(id)) if id == "doc-a"));
+        assert!(matches!(holders.holder("d/x.md"), Some(Holder::Departed)));
+    }
+
+    /// A return reads its own heads, and each version's occupants, through
+    /// their tables' keys, never by scanning the workspace.
+    #[test]
+    fn a_returns_reads_search_by_key() {
+        let (_scratch, _path, store) = dohc_engine_testkit::open_store();
+        for sql in [super::super::HEADS_SQL, super::OCCUPANTS_SQL] {
+            let plan = store
+                .read_with(|conn| {
+                    let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let bound = ["ws", "main", "doc"];
+                    let count = statement.parameter_count();
+                    statement
+                        .query_map(rusqlite::params_from_iter(&bound[..count]), |row| {
+                            row.get::<_, String>(3)
+                        })?
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap();
+            // A head or alias is found by its version, not in every row of
+            // the workspace.
+            let keyed = |step: &String| {
+                let table = step.split_whitespace().nth(1).unwrap_or_default();
+                !["s", "snapshots", "path_aliases"].contains(&table)
+                    || step.contains("version_id=?")
+            };
+            assert!(
+                plan.iter()
+                    .all(|step| (!step.starts_with("SCAN") || step == "SCAN o") && keyed(step)),
+                "{plan:?}"
+            );
+        }
+    }
 }

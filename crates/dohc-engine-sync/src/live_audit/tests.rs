@@ -4543,6 +4543,7 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
             cursor,
             stopped: None,
             complete: true,
+            heads_written: true,
         };
         let committed = crate::commit_hosted_cursor(
             store,

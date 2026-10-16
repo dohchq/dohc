@@ -2114,7 +2114,8 @@ fn a_full_retention_limit_holds_a_document_instead_of_failing_the_pass() {
         HostedRead {
             cursor: other_seq - 1,
             stopped: Some(HostedHold::WorkWaiting),
-            complete: false
+            complete: false,
+            heads_written: false,
         },
         "before its moment"
     );
@@ -2167,6 +2168,7 @@ fn a_read_stopping_before_its_document_position_is_refused() {
             cursor: before.backfill_cursor - 1,
             stopped: Some(parent_withheld()),
             complete: false,
+            heads_written: false,
         },
     );
     assert!(matches!(
@@ -3806,7 +3808,8 @@ fn a_backfill_is_ready_only_once_its_waiting_work_applies() {
         HostedRead {
             cursor: 2,
             stopped: Some(HostedHold::WorkWaiting),
-            complete: false
+            complete: false,
+            heads_written: false,
         },
         "before the rename"
     );
@@ -4417,12 +4420,13 @@ fn a_returning_document_materializes_nothing_while_its_heads_are_parked() {
     assert_eq!(hold(&store, "doc-b"), Some(path_held("a.md", "doc-a")));
 }
 
-/// A parked document's history materializes nothing, even at a path nothing
-/// holds now. `doc-b` was created at `x.md` and moved to `a.md`, where it
-/// parked; `doc-a` took `a.md`. On its return, the decisions its journaled
-/// rows stored at the free `x.md` stay unnamed while its heads are parked.
+/// Sol's second park review: a parked document's history still removes a
+/// file it left at a path nothing holds now, but names none of its parked
+/// paths. `doc-b` was created at `x.md` and moved to `a.md`, where it parked;
+/// `doc-a` took `a.md`. On its return, its stored delete of the free `x.md`
+/// goes out while its heads stay parked, and its write of `a.md` does not.
 #[test]
-fn a_parked_return_names_no_path_of_its_history() {
+fn a_parked_return_clears_only_the_free_paths_of_its_history() {
     let (_scratch, _path, mut store) = hosted_store();
     let client = RelaySyncClient::new(HostedFeed::new());
     let feed = client.transport();
@@ -4454,7 +4458,13 @@ fn a_parked_return_names_no_path_of_its_history() {
     );
     let back = pass(&client, &mut store, &NoFaults).unwrap();
     assert_eq!(back.skipped, 2);
-    assert_eq!(back.changed_paths, []);
+    assert_eq!(
+        back.changed_paths
+            .iter()
+            .map(|change| (change.path.as_str(), change.operation))
+            .collect::<Vec<_>>(),
+        [("x.md", "delete")]
+    );
     assert_eq!(
         back.held,
         BTreeMap::from([("doc-b".to_owned(), path_held("a.md", "doc-a"))])
@@ -4465,6 +4475,105 @@ fn a_parked_return_names_no_path_of_its_history() {
         count(&store, "SELECT COUNT(*) FROM hosted_parked_snapshots"),
         1
     );
+}
+
+/// A stored decision never names a path a document's parked heads come back
+/// to, even one nothing holds yet: those heads bring their own writes. A
+/// pass brings them back first, so this asks before one does.
+#[test]
+fn no_stored_decision_names_a_parked_path() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    client.transport().unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    assert_eq!(retired_hosted_files(&store, "ws").unwrap(), []);
+    let change = |path: &str, operation: &'static str| crate::MomentMaterializationChange {
+        version_id: "main".to_owned(),
+        path: path.to_owned(),
+        operation,
+        content_kind: "text",
+    };
+    let standing = store
+        .read_with(|conn| {
+            crate::hosted::redelivered_unready(
+                conn,
+                "ws",
+                "doc-b",
+                [change("A.md", "write"), change("x.md", "delete")],
+            )
+        })
+        .unwrap();
+    assert_eq!(standing, [change("x.md", "delete")]);
+}
+
+/// Opus's second park review: a return checked each stored decision of each
+/// journaled row against every head, path alias and retired file, so its
+/// cost grew with its history times the workspace. Each document's stored
+/// decisions are checked once a pass, against what the workspace holds read
+/// once. `doc-b` moved along `p0.md` .. `p24.md` and parked at the last;
+/// on its return, beside 24 other documents, the pass reads each of their
+/// heads and aliases a bounded number of times, however long its history.
+#[test]
+fn a_returns_history_is_checked_against_the_workspace_once() {
+    const MOVES: i64 = 24;
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-b", "p0.md", "hosted b");
+    for step in 1..=MOVES {
+        feed.rename(
+            "owner",
+            step + 1,
+            "doc-b",
+            &format!("p{}.md", step - 1),
+            &format!("p{step}.md"),
+            "hosted b",
+            &format!("moment-owner-{step}"),
+        );
+    }
+    let last = format!("p{MOVES}.md");
+    feed.share("doc-b", &last);
+    for other in 0..MOVES {
+        let object_id = format!("doc-{other}");
+        let path = format!("other/{other}.md");
+        feed.create("owner", MOVES + 2 + other, &object_id, &path, "other");
+        feed.share(&object_id, &path);
+    }
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    feed.unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+
+    feed.share("doc-b", &last);
+    assert_eq!(
+        pass(&client, &mut store, &NoFaults).unwrap().pending_cursor,
+        None
+    );
+    let occupants = count(
+        &store,
+        "SELECT (SELECT COUNT(*) FROM snapshots) + (SELECT COUNT(*) FROM path_aliases)",
+    ) as usize;
+    crate::hosted::OCCUPANTS_READ.with(|read| read.set(0));
+    let back = pass(&client, &mut store, &NoFaults).unwrap();
+    let read = crate::hosted::OCCUPANTS_READ.with(|read| read.get());
+    assert_eq!(back.skipped, MOVES as usize + 1);
+    assert!(
+        read <= 4 * occupants,
+        "read {read} occupants of {occupants} for {MOVES} moves"
+    );
+    assert_eq!(
+        back.changed_paths
+            .iter()
+            .map(|change| change.path.clone())
+            .collect::<BTreeSet<_>>(),
+        (0..=MOVES).map(|step| format!("p{step}.md")).collect(),
+        "its history clears every free path it left, and its head comes back"
+    );
+    assert!(commit(&client, &mut store, &back));
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
 }
 
 /// A returning document that never parked replays its journal too. `doc-b`
@@ -4967,7 +5076,56 @@ fn richdoc_edit_made_while_parked(admitted: bool) {
     } else {
         assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
         assert_eq!(refused, 1);
+        // Opus's second park review: a held document's pass writes none of
+        // its heads.
+        let again = pass(&client, &mut store, &NoFaults).unwrap();
+        assert_eq!(
+            again.held,
+            BTreeMap::from([("doc-b".to_owned(), HostedHold::LiveEditUnadmitted)])
+        );
+        assert_eq!(again.changed_paths, []);
+        assert!(!again.pending_cursor.as_ref().unwrap().reads["doc-b"].heads_written);
     }
+}
+
+/// Opus's second park review: a pass writes the heads only of a document
+/// nothing held when it read it, and only that read's commit makes it ready.
+/// What held `doc-b` when its pass read it is gone by its commit: it stays
+/// held, and the next pass writes its heads and makes it ready.
+#[test]
+fn a_hold_gone_by_commit_leaves_its_document_for_the_pass_that_writes_its_heads() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    feed.unshare("doc-b");
+    sync_parking(&client, &mut store);
+    feed.share("doc-b", "a.md");
+    assert_eq!(
+        pass(&client, &mut store, &NoFaults).unwrap().pending_cursor,
+        None
+    );
+    let mut back = pass(&client, &mut store, &NoFaults).unwrap();
+    let read = back
+        .pending_cursor
+        .as_mut()
+        .unwrap()
+        .reads
+        .get_mut("doc-b")
+        .unwrap();
+    assert!(read.complete && read.heads_written);
+    // As if a hold seen when the pass read it, which wrote no heads, went.
+    read.heads_written = false;
+    assert!(commit(&client, &mut store, &back));
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::WorkWaiting));
+
+    let again = pass(&client, &mut store, &NoFaults).unwrap();
+    assert!(
+        again
+            .changed_paths
+            .iter()
+            .any(|change| change.path == "a.md")
+    );
+    assert!(commit(&client, &mut store, &again));
+    assert!(ready(&store, "doc-b"));
 }
 
 #[test]

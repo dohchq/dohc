@@ -1859,6 +1859,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             settlement_report_id,
             has_more: settled_more,
             stopped: _,
+            // Only a hosted pass has documents that are not ready.
+            redelivered: _,
         } = self.apply_pulled(
             store,
             cache,
@@ -2124,19 +2126,31 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         // A read stops before its document's first row that did not apply;
         // nothing of it was retained, so its next read fetches it again.
-        let (reads, held, unparks, heads) = store
+        let redelivered = std::mem::take(&mut pass.redelivered);
+        let (reads, held, unparks, standing, heads) = store
             .read_with(|conn| {
                 let mut held = BTreeMap::new();
                 let mut settled = BTreeMap::new();
                 // A document whose parked heads this pass freed the paths of
                 // comes back on the next pass.
                 let mut unparks = false;
+                // What its history stored that still stands, checked once
+                // per document against what the pass left holding its paths.
+                let mut standing = Vec::new();
+                for (object_id, stored) in redelivered {
+                    standing.extend(crate::hosted::redelivered_unready(
+                        conn,
+                        workspace_id,
+                        &object_id,
+                        stored.into_values(),
+                    )?);
+                }
                 // Readiness never precedes its files, so a pass whose commit
                 // can make a document ready writes each of its heads.
                 let mut heads = Vec::new();
                 for (object_id, (cursor, more)) in reads {
                     unparks |= crate::hosted::unparks_next(conn, workspace_id, &object_id)?;
-                    let read = match pass.stopped.get(&object_id) {
+                    let mut read = match pass.stopped.get(&object_id) {
                         Some(op) => crate::HostedRead {
                             // Commit refuses one below its document's read
                             // that is not explained by work it releases.
@@ -2145,24 +2159,39 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                                 .map_or(0, |seq| cursor.min(seq.saturating_sub(1))),
                             stopped: Some(crate::hosted::stopped_hold(conn, &object_id, op)?),
                             complete: false,
+                            heads_written: false,
                         },
                         None => crate::HostedRead {
                             cursor,
                             stopped: None,
                             complete: !more,
+                            heads_written: false,
                         },
                     };
-                    if read.complete {
-                        heads.extend(crate::hosted::head_writes(conn, workspace_id, &object_id)?);
-                    }
-                    if let Some(hold) = read.hold(conn, workspace_id, &object_id)? {
-                        held.insert(object_id.clone(), hold);
+                    match read.hold(conn, workspace_id, &object_id)? {
+                        Some(hold) => {
+                            held.insert(object_id.clone(), hold);
+                        }
+                        None if read.complete => {
+                            heads.extend(crate::hosted::head_writes(
+                                conn,
+                                workspace_id,
+                                &object_id,
+                            )?);
+                            read.heads_written = true;
+                        }
+                        None => {}
                     }
                     settled.insert(object_id, read);
                 }
-                Ok::<_, SyncError>((settled, held, unparks, heads))
+                Ok::<_, SyncError>((settled, held, unparks, standing, heads))
             })
             .map_err(local)?;
+        for change in standing {
+            pass.changed_paths
+                .entry((change.version_id.clone(), change.path.clone()))
+                .or_insert(change);
+        }
         for change in heads {
             insert_changed_path(&mut pass.changed_paths, change);
         }
@@ -2377,6 +2406,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             &mut pass.skipped,
                             &mut pass.conflicts_opened,
                             &mut pass.changed_paths,
+                            &mut pass.redelivered,
                             &mut pass.refusals,
                             &mut pass.sharing_declined,
                             &mut pass.record_facts,
@@ -4365,7 +4395,11 @@ struct AppliedPass {
     refused: usize,
     skipped: usize,
     conflicts_opened: i64,
-    changed_paths: BTreeMap<(String, String), crate::MomentMaterializationChange>,
+    changed_paths: ChangedPaths,
+    /// The decisions journaled rows of each hosted document that is not
+    /// ready stored, which the pass has yet to check against what holds
+    /// their paths.
+    redelivered: BTreeMap<String, ChangedPaths>,
     refusals: Vec<crate::ReplicationRefusal>,
     sharing_declined: Vec<crate::SharingDeclined>,
     record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
@@ -5920,8 +5954,9 @@ pub(crate) fn replayed_domain(error: DomainError) -> RelayError {
 }
 
 /// Fold one routed op into its pass. `unready` names its hosted document when
-/// that is not ready; a row of it the journal already held materializes only
-/// what still stands of its decisions ([`crate::hosted::redelivered_unready`]).
+/// that is not ready; the decisions a row of it the journal already held
+/// stored go to `redelivered`, by document, for its pass to keep what still
+/// stands of them once it has applied ([`crate::hosted::redelivered_unready`]).
 #[allow(clippy::too_many_arguments)]
 fn accumulate_pull_outcome(
     store: &EngineStore,
@@ -5932,7 +5967,8 @@ fn accumulate_pull_outcome(
     refused: &mut usize,
     skipped: &mut usize,
     conflicts_opened: &mut i64,
-    changed_paths: &mut BTreeMap<(String, String), crate::MomentMaterializationChange>,
+    changed_paths: &mut ChangedPaths,
+    redelivered: &mut BTreeMap<String, ChangedPaths>,
     refusals: &mut Vec<crate::ReplicationRefusal>,
     sharing_declined: &mut Vec<crate::SharingDeclined>,
     record_facts: &mut Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
@@ -5977,22 +6013,14 @@ fn accumulate_pull_outcome(
             if let Some(refusal) = crate::apply::read_replayed_refusal(store, op).map_err(local)? {
                 push_refusal_once(refusals, refusal);
             }
-            let mut changes =
-                crate::router::redelivered_materialization_changes(store, op).map_err(local)?;
-            if let Some(object_id) = unready {
-                changes = store
-                    .read_with(|conn| {
-                        crate::hosted::redelivered_unready(
-                            conn,
-                            &op.workspace_id,
-                            object_id,
-                            changes,
-                        )
-                    })
-                    .map_err(local)?;
-            }
-            for change in changes {
-                insert_changed_path(changed_paths, change);
+            let stored = match unready {
+                Some(object_id) => redelivered.entry(object_id.to_owned()).or_default(),
+                None => &mut *changed_paths,
+            };
+            for change in
+                crate::router::redelivered_materialization_changes(store, op).map_err(local)?
+            {
+                insert_changed_path(stored, change);
             }
             *skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?;
         }
@@ -6003,8 +6031,11 @@ fn accumulate_pull_outcome(
     Ok(())
 }
 
+/// A pass's materialization decisions, by version and path.
+type ChangedPaths = BTreeMap<(String, String), crate::MomentMaterializationChange>;
+
 fn insert_changed_path(
-    changed_paths: &mut BTreeMap<(String, String), crate::MomentMaterializationChange>,
+    changed_paths: &mut ChangedPaths,
     change: crate::MomentMaterializationChange,
 ) {
     changed_paths.insert((change.version_id.clone(), change.path.clone()), change);

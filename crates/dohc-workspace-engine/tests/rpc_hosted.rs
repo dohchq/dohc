@@ -1356,6 +1356,112 @@ async fn a_return_whose_old_path_became_a_folder_holds_only_its_document() {
     assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("held"));
 }
 
+/// Sol's second park review, on disk: the host applied `doc-b`'s move from
+/// `x.md` to `a.md` and closed before materializing it, then `doc-b` left and
+/// parked at `a.md`, which `doc-a` took. On its return, the pass dropped
+/// every decision its history stored, the delete of `x.md` included, so
+/// `x.md` stayed behind once `doc-b` came back at `a.md`, and a document
+/// created at `x.md/child.md` could not materialize. The return's pass now
+/// removes `x.md` while `doc-b` is still held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_interrupted_move_is_finished_by_the_documents_held_return() {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-b", "x.md", "hosted b");
+    relay.share("doc-b", "x.md");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    let read = |path: &str| std::fs::read_to_string(scratch.path().join(path)).ok();
+    assert_eq!(read("x.md").as_deref(), Some("hosted b"));
+
+    {
+        let mut relay = relay.relay();
+        relay.rename(
+            "owner",
+            2,
+            "doc-b",
+            "x.md",
+            "a.md",
+            "hosted b",
+            "moment-owner-1",
+        );
+        relay.share("doc-b", "a.md");
+    }
+    assert!(
+        host.pull().await["pendingCursor"].is_null(),
+        "adopts the scope"
+    );
+    // This pass applies the move; the host closes before materializing it.
+    assert!(host.pull().await["pendingCursor"].is_object());
+    host.call("workspace.close", json!({})).await;
+    drop(host);
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+
+    relay.relay().unshare("doc-b");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
+    assert_eq!(
+        read("x.md").as_deref(),
+        Some("hosted b"),
+        "the move never landed"
+    );
+    {
+        let mut relay = relay.relay();
+        relay.create("owner", 3, "doc-a", "a.md", "hosted a");
+        relay.share("doc-a", "a.md");
+    }
+    host.sync().await;
+    assert_eq!(read("a.md").as_deref(), Some("hosted a"));
+
+    relay.relay().share("doc-b", "a.md");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("held"));
+    assert_eq!(read("x.md"), None, "its history removed the file it left");
+    assert_eq!(read("a.md").as_deref(), Some("hosted a"));
+
+    relay.relay().rename(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "c.md",
+        "hosted a",
+        "moment-owner-3",
+    );
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
+    assert_eq!(read("a.md").as_deref(), Some("hosted b"));
+    assert_eq!(read("c.md").as_deref(), Some("hosted a"));
+    assert!(!scratch.path().join("x.md").exists());
+
+    {
+        let mut relay = relay.relay();
+        relay.create("owner", 5, "doc-c", "x.md/child.md", "hosted c");
+        relay.share("doc-c", "x.md/child.md");
+    }
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-c").as_deref(), Some("ready"));
+    assert_eq!(read("x.md/child.md").as_deref(), Some("hosted c"));
+}
+
 /// The durability review of parking, on disk: a return held at its path
 /// wrote its file only in the pass that unparked it, so a host that stopped
 /// after that pass and before materializing it made `doc-b` ready on the

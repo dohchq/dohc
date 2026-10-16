@@ -25,6 +25,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{ReplicationEnvelope, SyncError};
 
+#[cfg(test)]
+pub(crate) use park::OCCUPANTS_READ;
 pub use park::{
     DepartedDocument, DepartedHead, RetiredFile, departed_hosted_documents,
     departed_hosted_object_ids, forget_retired_hosted_file, hosted_document_parkable,
@@ -828,6 +830,9 @@ pub struct HostedRead {
     pub stopped: Option<HostedHold>,
     /// The read reached the end of its rows, and every row applied.
     pub complete: bool,
+    /// The read was complete and nothing held its document, so the pass
+    /// wrote its heads. Only such a read's commit makes it ready.
+    pub heads_written: bool,
 }
 
 impl HostedRead {
@@ -852,8 +857,9 @@ impl HostedRead {
 /// replica, since it read from a position and states that one replaced: its
 /// caller pulls again. Each document read is settled in the same transaction:
 /// held where its read stopped, ready once its read completes with nothing of
-/// it waiting in deferred work and its head at its scope's path, and still
-/// backfilling otherwise. So readiness never precedes its content. A held
+/// it waiting in deferred work and its head at its scope's path, both when
+/// the pass read it and now, and still backfilling otherwise. So readiness
+/// never precedes its content, nor the pass that wrote its files. A held
 /// document releases the deferred work it still has to apply, and its read
 /// restarts before it.
 pub fn commit_hosted_cursor(
@@ -901,7 +907,12 @@ pub fn commit_hosted_cursor(
         )
         .map_err(SyncError::persist)?;
         for (object_id, read) in &cursor.reads {
-            let hold = read.hold(tx, workspace_id, object_id)?;
+            let hold = match read.hold(tx, workspace_id, object_id)? {
+                // What held it when the pass read it is gone; the next pass
+                // writes its heads.
+                None if read.complete && !read.heads_written => Some(HostedHold::WorkWaiting),
+                hold => hold,
+            };
             let state = match &hold {
                 Some(_) => "held",
                 None if read.complete => "ready",
@@ -1014,58 +1025,71 @@ fn completed_hold(
 }
 
 /// A write of each head `object_id` has, for the pass whose commit can make
-/// it ready: its read reached the end. The files a document that is not ready
-/// left unwritten, after an interrupted pass or a return, come back from its
-/// heads, whichever pass or settlement wrote them.
+/// it ready: its read reached the end with nothing holding it. The files a
+/// document that is not ready left unwritten, after an interrupted pass or a
+/// return, come back from its heads, whichever pass or settlement wrote them.
 pub(crate) fn head_writes(
     conn: &Connection,
     workspace_id: &str,
     object_id: &str,
 ) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
-    conn.prepare_cached(
-        "SELECT version_id,path,content_kind FROM snapshots WHERE workspace_id=?1 AND object_id=?2",
-    )
-    .map_err(SyncError::corrupt)?
-    .query_map(params![workspace_id, object_id], |row| {
-        Ok(crate::MomentMaterializationChange {
-            version_id: row.get(0)?,
-            path: row.get(1)?,
-            operation: "write",
-            content_kind: if row.get::<_, String>(2)? == "binary" {
-                "binary"
-            } else {
-                "text"
-            },
+    conn.prepare_cached(HEADS_SQL)
+        .map_err(SyncError::corrupt)?
+        .query_map(params![workspace_id, object_id], |row| {
+            Ok(crate::MomentMaterializationChange {
+                version_id: row.get(0)?,
+                path: row.get(1)?,
+                operation: "write",
+                content_kind: if row.get::<_, String>(2)? == "binary" {
+                    "binary"
+                } else {
+                    "text"
+                },
+            })
         })
-    })
-    .map_err(SyncError::corrupt)?
-    .collect::<Result<_, _>>()
-    .map_err(SyncError::corrupt)
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(SyncError::corrupt)
 }
 
-/// Which of `stored`, the decisions a journaled row of `object_id`, a
-/// document that is not ready, recorded when it applied, a pass materializes
-/// again. Its history since may have left their paths to another document or
-/// a retired file, so none stands while its heads are parked, nor at a path
-/// anything else holds now ([`park::paths_hold`]). The pass that makes it
-/// ready writes its heads.
+/// Each head of a document, by version, read through the version's key.
+/// `CROSS JOIN` keeps SQLite from reading every head of the workspace first.
+const HEADS_SQL: &str = "SELECT s.version_id,s.path,s.content_kind FROM versions v \
+     CROSS JOIN snapshots s ON s.workspace_id=v.workspace_id AND s.version_id=v.version_id \
+     WHERE v.workspace_id=?1 AND s.object_id=?2";
+
+/// Which of `stored`, the decisions journaled rows of `object_id`, a document
+/// that is not ready, recorded when they applied, its pass materializes
+/// again. Materializing a path brings its file to the head there, so a
+/// decision at one of its own heads stands. Its history since may have left
+/// the others to another document or a retired file, so one stands only
+/// where nothing holds its path now ([`park::Occupancy`]), and never at a
+/// path its parked heads come back to with their own writes. The delete of
+/// a path it left that is free still removes its file.
 pub(crate) fn redelivered_unready(
     conn: &Connection,
     workspace_id: &str,
     object_id: &str,
-    stored: Vec<crate::MomentMaterializationChange>,
+    stored: impl IntoIterator<Item = crate::MomentMaterializationChange>,
 ) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
-    if stored.is_empty() || !park::parked_paths(conn, workspace_id, object_id)?.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut free = Vec::with_capacity(stored.len());
+    use dohc_engine_storage::capture_file_holds::path_is_held;
+    let own = head_writes(conn, workspace_id, object_id)?;
+    let parked = park::parked_paths(conn, workspace_id, object_id)?;
+    let mut occupancy = park::Occupancy::new(conn, workspace_id, object_id);
+    let mut standing = Vec::new();
     for change in stored {
-        let at = [(change.version_id.clone(), change.path.clone())];
-        if park::paths_hold(conn, workspace_id, object_id, &at)?.is_none() {
-            free.push(change);
+        let own_head = own
+            .iter()
+            .any(|head| head.version_id == change.version_id && head.path == change.path);
+        let parked_at = parked.iter().any(|(version_id, path)| {
+            *version_id == change.version_id
+                && (path_is_held(path, &change.path) || path_is_held(&change.path, path))
+        });
+        if own_head || (!parked_at && occupancy.hold(&change.version_id, &change.path)?.is_none()) {
+            standing.push(change);
         }
     }
-    Ok(free)
+    Ok(standing)
 }
 
 /// Whether this replica refused an ordinary `ydoc.update` of `object_id`'s
