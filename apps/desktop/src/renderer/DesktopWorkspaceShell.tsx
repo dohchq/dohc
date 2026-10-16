@@ -204,6 +204,7 @@ import type { SentNotices } from "./shell/useSentNotices";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
+  type HistoryCollections,
 } from "./workbench/EngineHistory";
 import { HistoryHiddenState } from "./workbench/HistoryPolicyStates";
 import {
@@ -1663,7 +1664,7 @@ export function DesktopWorkspaceShell(props: {
     supersede: supersedeHistoryPage,
     loadMore: loadMoreEngineHistory,
     observeVersion: observeEngineVersion,
-  } = useHistoryPage(engineHistoryToken, workspaceId, markHistoryReady);
+  } = useHistoryPage(engineHistoryToken, workspaceId, markHistoryReady, !!shareView);
   // The sync, agent, and try snapshots ride the refresh response but are not
   // the timeline: no pagination competes for them, so they apply as soon as
   // they arrive. Each is its own lane with its own watermark, because a local
@@ -1842,7 +1843,7 @@ export function DesktopWorkspaceShell(props: {
     if (captureDecidedRef.current !== workspaceId) return;
     // The engine fetch runs only when main's status agrees a recorder exists:
     // after a failed capture build the renderer's own read still
-    // says engine-on, and every listEngineMoments call would error.
+    // says engine-on, and every History read would error.
     const token = ++engineHistoryToken.current;
     if (historyReadable(syncStatusLane.latest())) {
       // Four reads ride one refresh, and they answer four different
@@ -2545,6 +2546,11 @@ export function DesktopWorkspaceShell(props: {
   const selectedChatsNav = focusedTabPath && (parseTab(focusedTabPath)?.kind === "chat")
     ? chatEditors.get(focusedTabPath).nav : undefined;
   const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, datasetPath: dataset.datasetPath, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
+  // The Collections History can name, each opening on its first table.
+  const historyCollections = useMemo<HistoryCollections>(() => new Map(datasets.map(dataset => {
+    const path = dataset.datasetPath, table = dataset.tables[0];
+    return [dataset.datasetId, { name: dataset.name, ...(path !== null && table ? { open: () => openDataCollection(path, table.tableId) } : {}) }];
+  })), [datasets, openDataCollection]);
   const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
   ]), [knownTabLabels, chatEditors.titles, dataCollections]);
@@ -4406,7 +4412,7 @@ export function DesktopWorkspaceShell(props: {
     // history had no changes, whenever a read was in flight or had failed.
     engineHistory ? (
       <EngineHistoryView
-        moments={engineHistory.moments}
+        entries={engineHistory.entries}
         hasMore={engineHistory.nextCursor != null}
         loadingMore={engineHistoryLoadingMore}
         onLoadMore={() =>
@@ -4415,6 +4421,14 @@ export function DesktopWorkspaceShell(props: {
           )
         }
         onOpenMoment={openMomentDiffTab}
+        unavailableSources={engineHistory.unavailableSources}
+        omittedSources={engineHistory.omittedSources}
+        collections={historyCollections}
+        onRetry={() =>
+          void refreshHistory().catch((error) =>
+            reportShellError("Could not refresh history.", error),
+          )
+        }
       />
     ) : engineHistoryReadState === "failed" && engineHistoryPolicyError ? (
       <HistoryHiddenState

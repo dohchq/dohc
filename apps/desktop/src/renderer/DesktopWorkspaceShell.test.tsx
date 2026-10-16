@@ -1753,7 +1753,7 @@ describe("workbench render cost", () => {
     vi.useFakeTimers();
     try {
       const listings = bridge.listWorkspaceFiles.mock.calls.length;
-      const moments = bridge.listEngineMoments.mock.calls.length;
+      const moments = bridge.listHistory.mock.calls.length;
       const statuses = bridge.getSyncStatus.mock.calls.length;
       const agents = bridge.getAgentRunStatus.mock.calls.length;
       const tryStates = bridge.getTryInVersionState.mock.calls.length;
@@ -1772,7 +1772,7 @@ describe("workbench render cost", () => {
       expect(bridge.listWorkspaceFiles, "refreshing files for every path-rich event makes the hidden engine and dependency churn pay for a disk walk it cannot change.").toHaveBeenCalledTimes(listings);
       // Path alone cannot prove history harmless. A deleted or retired path
       // may be absent from the current tree and still change these surfaces.
-      expect(bridge.listEngineMoments).toHaveBeenCalledTimes(moments + 1);
+      expect(bridge.listHistory).toHaveBeenCalledTimes(moments + 1);
       expect(bridge.getSyncStatus).toHaveBeenCalledTimes(statuses + 1);
       expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(agents + 1);
       expect(bridge.getTryInVersionState).toHaveBeenCalledTimes(tryStates + 1);

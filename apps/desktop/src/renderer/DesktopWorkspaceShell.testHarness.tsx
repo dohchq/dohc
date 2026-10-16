@@ -1,4 +1,4 @@
-import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
+import { historyCursor, historyPageFields, timelinePage } from "../testing/historyPageFixture";
 import "../testing/legendListMock";
 import {
   act,
@@ -35,6 +35,8 @@ import type {
   FileChatThreadRecord,
   ImportWorkspaceFilesResult,
   ListEngineMomentsResponse,
+  ListHistoryPayload,
+  ListHistoryResult,
   ListFileChatsResult,
   ListKeptCopiesResult,
   ListMyShareChangesResult,
@@ -775,13 +777,17 @@ export function makeBridge(
     ),
     // Typed to the contract, not to this empty default: a test that drives
     // real pages must be able to swap the implementation.
+    listHistory: vi.fn(
+      async (payload: ListHistoryPayload): Promise<ListHistoryResult> =>
+        timelinePage([], { workspaceId: payload.workspaceId }),
+    ),
+    // About's per-file History still reads moments directly.
     listEngineMoments: vi.fn(
       async (): Promise<ListEngineMomentsResponse> => ({
         moments: [],
         nextCursor: null,
         latestMomentOrder: 0,
         activeVersionId: "main", ...historyPageFields,
-
       }),
     ),
     // Typed to the contract, not to these empty defaults: the freshness tests
@@ -915,7 +921,7 @@ export async function enterMarkdownSource(
 // first history commit bumps the inspector's refresh key, which is a
 // different behavior with its own tests.
 export function holdHistory(bridge: ReturnType<typeof makeBridge>) {
-  bridge.listEngineMoments = vi.fn(() => new Promise<never>(() => {}));
+  bridge.listHistory = vi.fn(() => new Promise<never>(() => {}));
   return bridge;
 }
 
@@ -960,7 +966,7 @@ export const SHARE_VIEW: Workspace = {
 // every no-call pin below would pass even after the fix was reverted.
 //
 // History reads answer: main lists and opens the moments the share imported
-// from its own store, so the default listEngineMoments and readEngineMoment
+// from its own store, so the default listHistory and readEngineMoment
 // stand. A shared moment page offers no restore, so the bridge has none to call.
 //
 // `listFileChats` is the one that answers: main resolves a chat

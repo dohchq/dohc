@@ -49,6 +49,7 @@ const PARTS = [
   "kind-glyph",
   "block-menu", "table-menu",
   "history",
+  "history-timeline",
   "tab-row-actions",
   "slash-menu",
   "editor-group-focus",

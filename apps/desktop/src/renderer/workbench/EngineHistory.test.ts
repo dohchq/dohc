@@ -5,7 +5,9 @@ import {
   engineMomentSummary,
   engineOriginLabel,
   groupAgentAuthorName,
-  groupEngineMoments,
+  groupTimeline,
+  collectionListPhrase,
+  missingSourcesWords,
 } from "./EngineHistory";
 import { chatAuthorLabel } from "./chatMessages";
 
@@ -174,7 +176,31 @@ describe("groupAgentAuthorName", () => {
   });
 });
 
-describe("groupEngineMoments", () => {
+// The file groups `groupTimeline` builds, for entries that are all files.
+function groupEngineMoments(moments: EngineMomentRecord[]) {
+  return groupTimeline(moments.map((entry) => ({ kind: "file" as const, moment: entry })))
+    .flatMap((item) => (item.kind === "files" ? [item.group] : []));
+}
+
+describe("groupTimeline", () => {
+  it("keeps every entry kind in the order main merged them", () => {
+    const items = groupTimeline([
+      { kind: "file", moment: moment({ id: "m2", momentOrder: 2, correlationId: "pass" }) },
+      { kind: "version", version: { id: "draft", workspaceId: "workspace", kind: "named", name: "Draft", createdAtMs: 90 } },
+      { kind: "file", moment: moment({ id: "m1", momentOrder: 1, correlationId: "pass" }) },
+      { kind: "collection", datasetId: "00000000-0000-4000-8000-000000000001", name: "Budget", sortAtMs: null, change: {
+        revision: 4, operation: "addRow", callerReference: null, recordedAtMs: null, approvedRevisionHash: "a".repeat(64), changesetBytes: 10, attachmentCount: 0,
+      } },
+    ]);
+    expect(items.map((item) => [item.kind, item.key])).toEqual([
+      ["files", "m2"],
+      ["version", "version:draft"],
+      // A row between two moments of one pass ends their group.
+      ["files", "m1"],
+      ["collection", "collection:00000000-0000-4000-8000-000000000001:4"],
+    ]);
+  });
+
   it("groups consecutive moments sharing a correlationId into one entry", () => {
     const groups = groupEngineMoments([
       moment({
@@ -231,6 +257,30 @@ describe("groupEngineMoments", () => {
     expect(
       groupEngineMoments([...tied].reverse()).map((group) => group.moments[0].id),
     ).toEqual(["earlier", "later"]);
+  });
+});
+
+describe("missing sources", () => {
+  it("names up to three Collections and counts the rest", () => {
+    expect(collectionListPhrase(["Budget"], 1)).toBe("Budget");
+    expect(collectionListPhrase(["Budget", "Guests"], 2)).toBe("Budget and Guests");
+    expect(collectionListPhrase(["Budget", "Guests", "Tasks"], 3)).toBe("Budget, Guests and Tasks");
+    expect(collectionListPhrase(["Budget", "Guests", "Tasks", "Venues"], 5)).toBe("Budget, Guests, Tasks and 2 more");
+    expect(collectionListPhrase(["Budget"], 2)).toBe("Budget and 1 more");
+    expect(collectionListPhrase([], 2)).toBe("2 Collections");
+  });
+
+  it("says which Collections did not load and how many the limit left out", () => {
+    const names = new Map([["a", "Budget"]]);
+    expect(missingSourcesWords([{ datasetId: "a" }, { datasetId: "b" }], 3, (id) => names.get(id))).toEqual({
+      unavailable: "dohc could not load changes from Budget and 1 more.",
+      omitted: "History includes up to 128 Collections. 3 more are left out.",
+    });
+    expect(missingSourcesWords([], 1, () => undefined)).toEqual({
+      unavailable: null,
+      omitted: "History includes up to 128 Collections. 1 more is left out.",
+    });
+    expect(missingSourcesWords([], 0, () => undefined)).toEqual({ unavailable: null, omitted: null });
   });
 });
 
