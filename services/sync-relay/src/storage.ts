@@ -681,6 +681,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return automationWorkspaceStorage.joinAutomationWorkspace(this, input);
   }
 
+  replaceLostAutomationReplica(input: { workspaceId: string; incarnation: number; nowMs: number }) {
+    return automationWorkspaceStorage.replaceLostAutomationReplica(this, input);
+  }
+
   unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }) {
     return automationWorkspaceStorage.unwantAutomationWorkspace(this, input);
   }

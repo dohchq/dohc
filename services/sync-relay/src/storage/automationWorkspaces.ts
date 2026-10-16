@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { AUTOMATION_SERVER_INSTALL_ID } from "@dohc/workspace-contracts/relay";
+import { readAutomationServerSchedules } from "./automationHosts";
 import type { StorageContext } from "./context";
 import { getWorkspaceIdentity } from "./workspaces";
 import type { SqliteDb } from "./types";
@@ -97,27 +98,58 @@ export function joinAutomationWorkspace(storage: StorageContext, input: { worksp
       ).run(workspaceId);
       return read(storage, workspaceId);
     }
-    if (current !== null) {
-      storage.db.prepare(
-        `UPDATE sync_relay_automation_presses SET state = 'settled', accepted_by = NULL, outcome = 'ended', error = ?, updated_at_ms = ?
-         WHERE workspace_id = ? AND state = 'accepted' AND accepted_by = ?`,
-      ).run(REPLICA_REPLACED, nowMs, workspaceId, AUTOMATION_SERVER_INSTALL_ID);
-    }
-    storage.db.prepare(
-      `INSERT INTO sync_relay_automation_workspaces
-         (workspace_id, owner_user_id, replication_epoch, stream_identity, credential_nonce, incarnation, started_at_ms, unwanted_since_ms, left_at_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
-       ON CONFLICT(workspace_id) DO UPDATE SET
-         owner_user_id = excluded.owner_user_id, replication_epoch = excluded.replication_epoch,
-         stream_identity = excluded.stream_identity, credential_nonce = excluded.credential_nonce,
-         incarnation = excluded.incarnation, started_at_ms = excluded.started_at_ms,
-         unwanted_since_ms = NULL, left_at_ms = NULL`,
-    ).run(
-      workspaceId, ownerUserId, identity.replicationEpoch, identity.streamIdentity,
-      randomBytes(32).toString("hex"), (current?.incarnation ?? 0) + 1, nowMs,
-    );
-    return read(storage, workspaceId);
+    return replace(storage, { workspaceId, ownerUserId, ...identity }, current, nowMs);
   });
+}
+
+/**
+ * The folder of this incarnation's replica is gone, as when the server lost
+ * its host data. Once the server began running automations in that replica,
+ * its engine held the claims of the presses it accepted, and they went with
+ * the folder: the row moves to the next incarnation, as for a changed
+ * identity. Returns the row to open, which is the same row when the server
+ * never began this incarnation or the row changed since.
+ */
+export function replaceLostAutomationReplica(
+  storage: StorageContext,
+  input: { workspaceId: string; incarnation: number; nowMs: number },
+): AutomationWorkspace | null {
+  return storage.tx(() => {
+    const current = read(storage, input.workspaceId);
+    if (current === null || current.incarnation !== input.incarnation ||
+      readAutomationServerSchedules(storage, input.workspaceId)?.incarnation !== input.incarnation) return current;
+    return replace(storage, current, current, input.nowMs);
+  });
+}
+
+// The presses the server accepted end, since the new replica has no claim
+// for them and would run them again, and the next incarnation starts now.
+function replace(
+  storage: StorageContext,
+  next: { workspaceId: string; ownerUserId: string; replicationEpoch: string; streamIdentity: string },
+  current: AutomationWorkspace | null,
+  nowMs: number,
+): AutomationWorkspace | null {
+  if (current !== null) {
+    storage.db.prepare(
+      `UPDATE sync_relay_automation_presses SET state = 'settled', accepted_by = NULL, outcome = 'ended', error = ?, updated_at_ms = ?
+       WHERE workspace_id = ? AND state = 'accepted' AND accepted_by = ?`,
+    ).run(REPLICA_REPLACED, nowMs, next.workspaceId, AUTOMATION_SERVER_INSTALL_ID);
+  }
+  storage.db.prepare(
+    `INSERT INTO sync_relay_automation_workspaces
+       (workspace_id, owner_user_id, replication_epoch, stream_identity, credential_nonce, incarnation, started_at_ms, unwanted_since_ms, left_at_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+     ON CONFLICT(workspace_id) DO UPDATE SET
+       owner_user_id = excluded.owner_user_id, replication_epoch = excluded.replication_epoch,
+       stream_identity = excluded.stream_identity, credential_nonce = excluded.credential_nonce,
+       incarnation = excluded.incarnation, started_at_ms = excluded.started_at_ms,
+       unwanted_since_ms = NULL, left_at_ms = NULL`,
+  ).run(
+    next.workspaceId, next.ownerUserId, next.replicationEpoch, next.streamIdentity,
+    randomBytes(32).toString("hex"), (current?.incarnation ?? 0) + 1, nowMs,
+  );
+  return read(storage, next.workspaceId);
 }
 
 const REPLICA_REPLACED = "This server rebuilt its copy of the workspace before this press ran. Press it again.";

@@ -38,6 +38,19 @@ Due times missed while no computer or server runs schedules do not run later.
 Missed schedules produce a skipped-schedule notice; Group triggers start from the rejoin.
 These rules do not make an older relay snapshot safe to restore.
 
+If the server starts with empty host data and keeps its relay data, it rebuilds its copies from the relay.
+The server loses this work with the host data:
+
+- Run history, and Undo for runs on the server.
+- Changes from automation runs that the server had not yet sent to the relay.
+- Button presses that the server accepted but had not finished.
+  Each of these presses ends instead of running again.
+  The person who pressed the button can press it again.
+
+An older host data archive does not get this protection.
+Its copies lack the claims made after the archive, so presses accepted since then can run twice.
+Do not put an older host data archive in place of newer host data.
+
 ## Save a relay snapshot
 
 Choose a private backup parent directory outside the deployment's data volumes.
