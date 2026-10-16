@@ -157,6 +157,19 @@ describe("share-web sessions", () => {
     }
   });
 
+  it("serves each viewer route its own page", async () => {
+    const viewerAssetsDir = await mkdtemp(join(tmpdir(), "dohc-share-web-pages-"));
+    try {
+      for (const page of ["index", "edit", "chat", "apps"]) await writeFile(join(viewerAssetsDir, `${page}.html`), page);
+      const handler = createShareWebHandler({relayUrl: "http://relay.test", publicHosts: new Set([HOST]), fetchRelay: vi.fn(), viewerAssetsDir});
+      const pages = await Promise.all(["/s", "/s/abcdefghijkl", "/s/edit", "/s/edit/grant", "/s/chat/grant", `/s/apps/workspace/${"a".repeat(64)}`]
+        .map(async path => (await handler(request(path))).text()));
+      expect(pages).toEqual(["index", "index", "index", "edit", "chat", "apps"]);
+    } finally {
+      await rm(viewerAssetsDir, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     {
       description: "a mixed-case configured host with a lowercase Host header",

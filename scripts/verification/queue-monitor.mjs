@@ -1,8 +1,8 @@
-// A read-only web dashboard for the verification queue: what each lane runs now and
-// its live output, what waits, and what ran this week. The service serves it on this
-// host only; reach it from other devices through a private Tailscale Serve route. It
-// reads the queue's own files and writes only its load samples, so a fault here can
-// never stop a run.
+// A web dashboard for the verification queue: what each lane runs now and its live
+// output, what waits, and what ran this week. The service serves it on this host only;
+// reach it from other devices through a private Tailscale Serve route. It reads the
+// queue's own files and writes only its load samples and, when asked, the queue's pause,
+// so a fault here can never stop a run.
 
 import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { createServer } from "node:http";
@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildQueueStatus, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
-import { lastNightlyPass, listRequests, monitorPort, movedNote, position, queuePaths, readJson, serviceState, terminalStates, writeJson } from "./queue.mjs";
+import { lastNightlyPass, listRequests, monitorPort, movedNote, pauseQueue, pauseState, position, queuePaths, readJson, restartReason, resumeQueue, serviceState, terminalStates, writeJson } from "./queue.mjs";
 
 const assets = {
   "/": ["index.html", "text/html; charset=utf-8"],
@@ -174,6 +174,36 @@ function slotView(status, threadOf) {
 }
 
 /**
+ * The tests that failed on two or more branches in the last day, main's nightly counting as main:
+ * `[{ step, test, branches, last, nightly }]`, where `branches` leaves the nightly out and `nightly`
+ * says whether a nightly failed the test too, or is null when no nightly finished with a verdict.
+ * Such a failure more often comes from main or a flaky test than from one branch's change.
+ */
+function sharedFailures(requests, events, now) {
+  const requestOf = new Map(requests.map(entry => [entry.id, entry.request]));
+  const tests = new Map();
+  let nightlyRan = false;
+  for (const event of events.filter(event => Date.parse(event.at) >= now - dayMs)) {
+    const request = requestOf.get(event.id);
+    if (!request) continue;
+    if (request.nightly && ["passed", "failed"].includes(event.outcome)) nightlyRan = true;
+    for (const row of event.failed ?? []) {
+      const key = `${row.step}\n${row.test}`;
+      const item = tests.get(key) ?? { step: row.step, test: row.test, branches: new Map(), nightly: false, last: null };
+      if (request.nightly) item.nightly = true;
+      else item.branches.set(branchOf(request).toLowerCase(), branchOf(request));
+      if (!item.last || event.at > item.last) item.last = event.at;
+      tests.set(key, item);
+    }
+  }
+  return [...tests.values()]
+    .filter(item => item.branches.size + (item.nightly && !item.branches.has("main") ? 1 : 0) >= 2)
+    .map(item => ({ step: item.step, test: item.test, branches: [...item.branches.values()].sort(), last: item.last, nightly: item.nightly || (nightlyRan ? false : null) }))
+    .sort((a, b) => b.branches.length - a.branches.length || b.last.localeCompare(a.last))
+    .slice(0, 15);
+}
+
+/**
  * Everything the dashboard shows, from the queue's files. Finished requests are cached
  * by the caller's `finished` map, as the service does, so a refresh reads only live ones.
  * `threadOf` names a request's T3 thread, and `slots` reads who holds the verification slots.
@@ -233,6 +263,7 @@ export function monitorState(root, { now = Date.now(), days = 7, finished = new 
   const pass = lastNightlyPass(requests);
   let lanes;
   try { lanes = slotView(slots(record?.lanes ?? 1), threadOf); } catch { lanes = null; }
+  const pause = pauseState(root, { record, alive }, lanes?.holders.filter(holder => holder.kind === "inline").length ?? 0);
   // Each thread's week: its runs and their results, what it has waiting and running now, and its time in gates.
   const groups = new Map();
   const group = (thread, branch) => {
@@ -261,7 +292,8 @@ export function monitorState(root, { now = Date.now(), days = 7, finished = new 
   return {
     now, days,
     service: record ? { alive, commit: record.commit?.slice(0, 12) ?? null, pid: record.pid, startedAt: record.startedAt, heartbeatAt: record.heartbeatAt, lanes: record.lanes ?? 1, health: record.health ?? null } : null,
-    typicalMs, runs, queued, lanes, threads,
+    pause: pause && { ...pause, restart: pause.reason === restartReason },
+    typicalMs, runs, queued, lanes, threads, sharedFailures: sharedFailures(requests, events, now),
     flaky: all.filter(item => item.flaky || item.passedAlone).sort((a, b) => b.passedAlone - a.passedAlone || b.flaky - a.flaky).slice(0, 15).map(({ slow: _slow, ...item }) => item),
     slowest: all.filter(item => item.slow.length).map(item => ({ step: item.step, test: item.test, runs: item.slow.length, medianSeconds: median(item.slow), totalSeconds: Math.round(item.slow.reduce((sum, seconds) => sum + seconds, 0)) }))
       .sort((a, b) => b.totalSeconds - a.totalSeconds).slice(0, 15),
@@ -423,8 +455,44 @@ export function loadSampler(root, snapshot, { everyMs = 60_000, keepMs = 7 * day
 // Only this host's own names and the tailnet's reach the page, so a web page that rebinds a name to this host cannot read it.
 const allowedHost = host => /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/iu.test(host ?? "") || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net(:\d+)?$/iu.test(host ?? "");
 
+// The dashboard's only writes. A page on another site cannot send JSON without a CORS preflight,
+// which this server never grants, and a browser names the page's origin, which must be this host.
+const writePaths = { "/api/pause": "pause", "/api/resume": "resume" };
+const bodyLimit = 4096;
+// URL drops a scheme's default port, so `Host: pc.ts.net:443` and `Origin: https://pc.ts.net` name one origin.
+const sameHost = (origin, host) => { try { return new URL(`${origin.protocol}//${host}`).host === origin.host; } catch { return false; } };
+
+/**
+ * A write's JSON object, `{ refused: [status, message] }` before anything changes, or `{ gone: true }` when the
+ * client left mid-body. Reads at most `bodyLimit` bytes for at most `waitMs`.
+ */
+async function writeBody(request, waitMs) {
+  if ((request.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase() !== "application/json") return { refused: [415, "Send the write as application/json."] };
+  let origin = null;
+  try { origin = new URL(request.headers.origin); } catch { /* No origin, or not a URL. */ }
+  if (!["http:", "https:"].includes(origin?.protocol) || !sameHost(origin, request.headers.host)) return { refused: [403, "A write must come from the dashboard page on this host."] };
+  if (Number(request.headers["content-length"] ?? 0) > bodyLimit) return { refused: [413, "The request is too large."] };
+  let timer;
+  const raw = await new Promise(done => {
+    const chunks = [];
+    let size = 0;
+    timer = setTimeout(done, waitMs, "slow");
+    request.on("data", chunk => { size += chunk.length; if (size > bodyLimit) done("large"); else chunks.push(chunk); });
+    request.on("end", () => done(Buffer.concat(chunks)));
+    request.on("error", () => done("gone"));
+  }).finally(() => clearTimeout(timer));
+  if (raw === "gone") return { gone: true };
+  if (raw === "slow") return { refused: [408, "The request body did not arrive in time."] };
+  if (raw === "large") return { refused: [413, "The request is too large."] };
+  let body;
+  try { body = JSON.parse(raw.toString("utf8")); } catch { body = null; }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { refused: [400, "The body is not a JSON object."] };
+  if (body.reason != null && typeof body.reason !== "string") return { refused: [400, "The reason must be text."] };
+  return { body };
+}
+
 /** Serve the dashboard and its data on this host. Returns the server; `close()` stops it and its sampler. */
-export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log = () => {}, sampleEveryMs,
+export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log = () => {}, sampleEveryMs, writeWaitMs = 10_000,
   threadOf = threadDirectory(), slotRoot = process.env.DOHC_VERIFICATION_SLOT_ROOT ?? resolveBuildBudget()?.root }) {
   const finished = new Map();
   const history = historyReader(root);
@@ -440,17 +508,47 @@ export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log
     return cached;
   };
   const load = loadSampler(root, () => snapshot().state, { everyMs: sampleEveryMs });
+  // Pause or resume the queue for the dashboard page, and record the host name it used.
+  const write = async (request, action, send) => {
+    const { body, refused, gone } = await writeBody(request, writeWaitMs);
+    if (gone) return;
+    if (refused) return send(refused[0], "text/plain", refused[1]);
+    const host = request.headers.host;
+    let answer;
+    if (action === "pause") {
+      const { pause, changed } = await pauseQueue(root, { reason: body.reason, by: { name: "dashboard", host } });
+      if (changed) log(`the dashboard at ${host} paused the queue${pause.reason ? `: ${pause.reason}` : ""}`);
+      answer = { changed, pause };
+    } else {
+      const ended = await resumeQueue(root);
+      if (ended) log(`the dashboard at ${host} resumed the queue`);
+      answer = { changed: Boolean(ended), pause: null };
+    }
+    // The next poll shows the change, not a snapshot from before it.
+    cached = null;
+    return send(200, "application/json", JSON.stringify(answer));
+  };
   const server = createServer((request, response) => {
-    const send = (code, type, body) => {
+    const send = (code, type, body, headers = {}) => {
       response.writeHead(code, { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
-        "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" });
+        "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        // Closing the connection stops a refused client from streaming the rest of a body.
+        ...(code >= 400 && !["GET", "HEAD"].includes(request.method) ? { connection: "close" } : {}), ...headers });
       response.end(request.method === "HEAD" ? undefined : body);
     };
     const json = value => value ? send(200, "application/json", JSON.stringify(value)) : send(404, "application/json", "null");
+    const failed = error => {
+      log(`monitor request failed: ${error.stack ?? error.message}`);
+      try { send(500, "text/plain", "The monitor could not read or change the queue."); } catch { /* The client is gone. */ }
+    };
     try {
+      // Tailscale sets this header on every Funnel request and removes any copy a client sends.
+      if (request.headers["tailscale-funnel-request"]) return send(403, "text/plain", "This page does not answer through Tailscale Funnel.");
       if (!allowedHost(request.headers.host)) return send(403, "text/plain", "This page answers only on this host and its tailnet name.");
-      if (request.method !== "GET" && request.method !== "HEAD") return send(405, "text/plain", "The monitor is read-only.");
       const url = new URL(request.url, "http://monitor");
+      const action = writePaths[url.pathname];
+      if (action) return request.method === "POST" ? void write(request, action, send).catch(failed) : send(405, "text/plain", "Pause and resume take a POST.", { allow: "POST" });
+      if (request.method !== "GET" && request.method !== "HEAD") return send(405, "text/plain", "Only pause and resume change the queue.", { allow: "GET, HEAD" });
       const query = name => url.searchParams.get(name);
       const asset = assets[url.pathname];
       if (asset) return send(200, asset[1], readFileSync(assetPath(asset[0])));
@@ -459,10 +557,7 @@ export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log
       if (url.pathname === "/api/log") return json(query("slot") ? slotLog(slots(2), query("slot"), query("file")) : runLog(root, query("id"), query("attempt"), query("file")));
       if (url.pathname === "/api/load") return json({ samples: load.read(query("days") === "7" ? 7 : 1, 288, listRequests(root, finished)) });
       return send(404, "text/plain", "Not found.");
-    } catch (error) {
-      log(`monitor request failed: ${error.stack ?? error.message}`);
-      try { send(500, "text/plain", "The monitor could not read the queue."); } catch { /* The client is gone. */ }
-    }
+    } catch (error) { failed(error); }
   });
   server.on("error", error => {
     log(`the monitor could not serve on ${host}:${port}: ${error.message}`);
