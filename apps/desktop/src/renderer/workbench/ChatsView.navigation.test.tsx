@@ -313,7 +313,7 @@ describe("ChatsView expand-to-tab", () => {
         dmDraft: "",
         replyTarget: null,
         resolveTargetMessageId: null,
-        poll: { threadId: "thread-1", choices: ["Thursday", "Friday"] },
+        poll: { threadId: "thread-1", choices: ["Thursday", "Friday"], open: true },
         newThreadPoll: null,
       },
     });
@@ -346,7 +346,7 @@ describe("ChatsView expand-to-tab", () => {
         dmDraft: "",
         replyTarget: null,
         resolveTargetMessageId: null,
-        poll: { threadId: "thread-1", choices: ["Soup", "Salad"] },
+        poll: { threadId: "thread-1", choices: ["Soup", "Salad"], open: true },
         newThreadPoll: null,
       },
     });

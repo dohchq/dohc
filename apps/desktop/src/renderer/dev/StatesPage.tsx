@@ -2359,26 +2359,35 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="/ in a group's chat">
           <ComposerCatalogSpecimen theme={theme} surface="stream" />
         </Specimen>
-        <Specimen label="a new post with a poll; the second and third choices repeat">
+        <Specimen label="a new post with a poll; the second choice repeats the first">
           <div className="w-[560px]">
             <MentionComposer testIdPrefix={`states-poll-post-${theme}`} composerId={`states-poll-post-${theme}`}
               value={POLL_QUESTION} sending={false} surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA}
               placeholder="What's happening in #general?" sendLabel="Start post" candidates={[]} fileCandidates={STATES_FILES}
-              onChange={noop} onSend={noop} poll={["Lisbon", "Porto", "Porto "]} onPollChange={noop} />
+              onChange={noop} onSend={noop} poll={{ choices: ["Porto", "Porto ", "Lisbon"], open: true }} onPollChange={noop} />
           </div>
         </Specimen>
-        <Specimen label="a comment with a poll, replying to a message">
-          <div className="flex w-[400px] flex-col rounded-lg border border-line bg-panel pt-2">
-            <div className="mx-2 flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted">
-              <span className="min-w-0 flex-1">Replying to Sam ·</span>
-              <span aria-hidden className="px-1 text-subtle">×</span>
-            </div>
-            <div className="mx-2 flex flex-col">
-              <MentionComposer testIdPrefix={`states-poll-stream-${theme}`} composerId={`states-poll-stream-${theme}`}
-                value={POLL_QUESTION} sending={false} placeholder="Write a comment…  @ to mention" sendLabel="Send message"
-                candidates={[]} fileCandidates={STATES_FILES} onChange={noop} onSend={noop}
-                poll={["Lisbon", "Porto", "Madeira"]} onPollChange={noop} />
-            </div>
+        <Specimen label="a narrow new post with a poll: Poll without its label">
+          <div className="w-[400px]">
+            <MentionComposer testIdPrefix={`states-poll-narrow-${theme}`} composerId={`states-poll-narrow-${theme}`}
+              value={POLL_QUESTION} sending={false} surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA}
+              placeholder="What's happening in #general?" sendLabel="Start post" candidates={[]} fileCandidates={STATES_FILES}
+              onChange={noop} onSend={noop} poll={{ choices: ["Lisbon", "Porto"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="a comment asking the agent, with a poll, replying to a message: the offer floats over the stack">
+          {/* A stream composer floats its offer above its top edge, into the
+              room the end of its conversation keeps, so it gets that room. */}
+          <div className="w-[400px] rounded-lg border border-line bg-panel pt-9">
+            <MentionComposer testIdPrefix={`states-poll-stream-${theme}`} composerId={`states-poll-stream-${theme}`}
+              value={`@agent ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
+              sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES} onChange={noop} onSend={noop}
+              agentOffer={agentOffer("runs")} onSetUpAgent={noop}
+              above={
+                <ComposerModeBar testId={`states-poll-stream-${theme}-replying-mode`} cancelTestId={`states-poll-stream-${theme}-replying-cancel`}
+                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+              }
+              poll={{ choices: ["Lisbon", "Porto", "Madeira"], open: true }} onPollChange={noop} />
           </div>
         </Specimen>
       </Section>

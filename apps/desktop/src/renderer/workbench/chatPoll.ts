@@ -8,9 +8,22 @@ export type PollDraft = readonly string[];
 
 export const NEW_POLL: PollDraft = ["", ""];
 
+// A poll in a composer. Removing it closes it and keeps its choices, so
+// opening a poll again brings them back. The owner of the draft drops it
+// when the message is sent or its conversation changes.
+export interface ComposerPollDraft {
+  choices: PollDraft;
+  open: boolean;
+}
+
+// The choices of an open poll, the ones Send asks; null when it is closed.
+export function openPollChoices(poll: ComposerPollDraft | null | undefined): PollDraft | null {
+  return poll?.open ? poll.choices : null;
+}
+
 // Trims as the engine's Rust `str::trim` does: Unicode White_Space, which
 // takes U+0085 and keeps U+FEFF, unlike JavaScript's `trim`.
-function trimChoice(choice: string): string {
+export function trimChoice(choice: string): string {
   return choice.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
 }
 

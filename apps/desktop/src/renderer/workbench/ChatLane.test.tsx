@@ -419,6 +419,19 @@ describe("ChatLane", () => {
     expect(bridgeMock.sendChatMessage).not.toHaveBeenCalled();
   });
 
+  it("sends a removed poll's question as a plain message, then forgets its choices", async () => {
+    render(lane());
+    await screen.findByText("Old message");
+    const composer = draftPoll("Lunch?", ["Soup", "Salad"]);
+    fireEvent.click(screen.getByRole("button", { name: "Remove poll" }));
+    bridgeMock.sendChatMessage.mockResolvedValueOnce({ message: message({ id: "plain", body: "Lunch?" }) });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", body: "Lunch?" });
+    await waitFor(() => expect(composer.value).toBe(""));
+    fireEvent.mouseDown(screen.getByTestId("chats-lane-poll-toggle"));
+    expect(choiceValues()).toEqual(["", ""]);
+  });
+
   it("drops the poll with the draft when the group changes", async () => {
     const view = render(lane());
     await screen.findByText("Old message");

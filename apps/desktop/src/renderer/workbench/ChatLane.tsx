@@ -16,7 +16,7 @@ import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
 import { AGENT_OFFER_SPACE, useAgentOffer } from "./AgentOffer";
 import { DecisionStatus } from "./ChatPosts";
 import { ComposerNotice } from "./ChatsControls";
-import { pollChoicesToSend, type PollDraft } from "./chatPoll";
+import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import type { AgentSetupSummary } from "./ChatsView";
 
 type PaintedLane = {
@@ -57,7 +57,7 @@ export function ChatLane(props: {
   const reactions = useReactions();
   const [loading, setLoading] = useState(true);
   const [composer, setComposer] = useState("");
-  const [poll, setPoll] = useState<PollDraft | null>(null);
+  const [poll, setPoll] = useState<ComposerPollDraft | null>(null);
   const [sending, setSending] = useState(false);
   // The first message the reader had not seen when the lane opened.
   const [firstUnreadMessageId, setFirstUnreadMessageId] = useState<string | null>(null);
@@ -203,8 +203,9 @@ export function ChatLane(props: {
   const send = useCallback(async () => {
     const body = composer.trim();
     if (body.length === 0 || sending || loading || props.locked) return;
-    const options = poll ? pollChoicesToSend(poll) : null;
-    if (poll && !options) return;
+    const asked = openPollChoices(poll);
+    const options = asked ? pollChoicesToSend(asked) : null;
+    if (asked && !options) return;
     const asks = options ? { needsDecision: true, options } : {};
     const current = token.current;
     setSending(true);

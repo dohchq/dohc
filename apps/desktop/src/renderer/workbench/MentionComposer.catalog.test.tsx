@@ -5,7 +5,14 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { MentionComposer } from "./MentionComposer";
-import { activeCatalogQuery, pollChoicesToSend, repeatedPollChoices, type PollDraft } from "./chatPoll";
+import {
+  activeCatalogQuery,
+  openPollChoices,
+  pollChoicesToSend,
+  repeatedPollChoices,
+  type ComposerPollDraft,
+  type PollDraft,
+} from "./chatPoll";
 
 const candidates: MentionCandidate[] = [
   { id: "agent:default", kind: "agent", handle: "agent", label: "Your agent", description: "your agent" },
@@ -21,7 +28,9 @@ function Harness(props: {
   onEscape?: () => void;
 }) {
   const [value, setValue] = useState(props.initialValue ?? "");
-  const [poll, setPoll] = useState<PollDraft | null>(props.initialPoll ?? null);
+  const [poll, setPoll] = useState<ComposerPollDraft | null>(
+    props.initialPoll ? { choices: props.initialPoll, open: true } : null,
+  );
   return (
     <>
       <MentionComposer
@@ -39,7 +48,8 @@ function Harness(props: {
         {...(props.onEscape ? { onEscape: props.onEscape } : {})}
         {...(props.offersPoll === false ? {} : { poll, onPollChange: setPoll })}
       />
-      <output data-testid="poll-state">{JSON.stringify(poll)}</output>
+      {/* The open poll's choices, the ones Send would ask. */}
+      <output data-testid="poll-state">{JSON.stringify(openPollChoices(poll))}</output>
     </>
   );
 }
@@ -299,13 +309,51 @@ describe("the poll block", () => {
     expect(send().disabled).toBe(!enabled);
   });
 
-  it("marks a repeated choice beside the block", () => {
-    render(<Harness initialValue="Lunch?" initialPoll={["Soup", ""]} />);
-    expect(screen.queryByText("Each choice appears once.")).toBeNull();
+  it("names a repeated choice under its row, and keeps it red while typing in it", () => {
+    render(<Harness initialValue="Lunch?" initialPoll={["Soup", "", "Salad", "Pie"]} />);
+    expect(screen.queryByTestId("chats-poll-error")).toBeNull();
     fireEvent.change(choices()[1]!, { target: { value: " Soup" } });
+    const error = screen.getByTestId("chats-poll-error");
+    expect(error.textContent).toBe("Soup is already a choice.");
     expect(choices()[1]!.getAttribute("aria-invalid")).toBe("true");
-    expect(screen.getByText("Each choice appears once.").id).toBe(choices()[1]!.getAttribute("aria-describedby"));
+    expect(error.id).toBe(choices()[1]!.getAttribute("aria-describedby"));
+    // Under the repeated row, before the choices that follow it.
+    expect(choices()[1]!.closest("div")!.nextElementSibling).toBe(error);
+    expect(choices()[1]!.className).toContain("focus:border-danger");
+    expect(choices()[2]!.className).not.toContain("border-danger");
     expect(send().disabled).toBe(true);
+  });
+
+  it("brings back a removed poll's choices when a poll is opened again, by either door", () => {
+    render(<Harness surface="post" initialValue="Lunch?" initialPoll={["Soup", "Salad"]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove poll" }));
+    expect(pollState()).toBeNull();
+    fireEvent.mouseDown(screen.getByTestId("chats-poll-toggle"));
+    expect(choices().map((input) => input.value)).toEqual(["Soup", "Salad"]);
+    // The pressed Poll button removes it too, and the catalog brings it back.
+    fireEvent.mouseDown(screen.getByTestId("chats-poll-toggle"));
+    expect(pollState()).toBeNull();
+    fireEvent.change(composer(), { target: { value: "Lunch? /poll", selectionStart: 12, selectionEnd: 12 } });
+    fireEvent.keyDown(composer(), { key: "Enter" });
+    expect(pollState()).toEqual(["Soup", "Salad"]);
+  });
+
+  it("asks for the question while a poll is open, and keeps the box's name", () => {
+    render(<Harness />);
+    expect(composer().placeholder).toBe("Write a message…");
+    fireEvent.mouseDown(screen.getByTestId("chats-poll-toggle"));
+    expect(composer().placeholder).toBe("Ask a question");
+    expect(screen.getByLabelText("Message")).toBe(composer());
+  });
+
+  it("makes a new post's question one line that grows while a poll is open", () => {
+    render(<Harness surface="post" initialValue="Lunch?" />);
+    expect(composer().rows).toBe(2);
+    expect(composer().className).toContain("min-h-16");
+    fireEvent.mouseDown(screen.getByTestId("chats-poll-toggle"));
+    expect(composer().rows).toBe(1);
+    expect(composer().className).toContain("field-sizing-content");
+    expect(composer().className).not.toContain("min-h-16");
   });
 
   it("stops a choice at the engine's 200 characters", () => {

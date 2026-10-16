@@ -181,10 +181,30 @@ describe("ChatsView polls", () => {
       expect(onDraftsChange).toHaveBeenLastCalledWith(
         expect.objectContaining({
           newThreadBody: "Where?",
-          newThreadPoll: { channelId: "channel-1", choices: ["Lisbon", "Porto"] },
+          newThreadPoll: { channelId: "channel-1", choices: ["Lisbon", "Porto"], open: true },
         }),
       ),
     );
+  });
+
+  it("sends a removed poll's question as a plain comment, then forgets its choices", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "message-2", body: "Lunch?" }) });
+    renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.type(screen.getByTestId("chats-composer"), "Lunch?");
+    fillPoll("chats", ["Soup", "Salad"]);
+    fireEvent.click(screen.getByRole("button", { name: "Remove poll" }));
+    fireEvent.keyDown(screen.getByTestId("chats-composer"), { key: "Enter" });
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", body: "Lunch?" }),
+    );
+    await waitFor(() => expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe(""));
+    fireEvent.mouseDown(screen.getByTestId("chats-poll-toggle"));
+    expect(choiceValues("chats")).toEqual(["", ""]);
   });
 
   // The person leaves the thread and comes back while the send is in flight.

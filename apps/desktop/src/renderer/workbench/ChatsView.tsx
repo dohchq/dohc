@@ -106,7 +106,7 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
-import { pollChoicesToSend, type PollDraft } from "./chatPoll";
+import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
 import type { DesktopUserSettings } from "../../settings/userSettings";
@@ -222,15 +222,14 @@ export interface ChatsDrafts {
   newThreadPoll: PostPollDraft | null;
 }
 
-// A poll's choices with the conversation it was drafted in: the thread for a
-// comment's poll and the group for a new post's. Opening another drops it.
-export interface ThreadPollDraft {
+// A drafted poll, open or removed, with the conversation it was drafted in:
+// the thread for a comment's poll and the group for a new post's. Opening
+// another drops it, and sending the message drops it.
+export interface ThreadPollDraft extends ComposerPollDraft {
   threadId: string;
-  choices: PollDraft;
 }
-export interface PostPollDraft {
+export interface PostPollDraft extends ComposerPollDraft {
   channelId: string;
-  choices: PollDraft;
 }
 
 interface ThreadSnapshot {
@@ -2079,8 +2078,9 @@ export function ChatsView(props: {
     if (nav.level !== "channel") return;
     const body = newThreadBody.trim();
     if (body.length === 0 || startingThread || startingThreadRef.current) return;
-    const options = newThreadPoll ? pollChoicesToSend(newThreadPoll.choices) : null;
-    if (newThreadPoll && !options) return;
+    const asked = openPollChoices(newThreadPoll);
+    const options = asked ? pollChoicesToSend(asked) : null;
+    if (asked && !options) return;
     const channel = nav.channel;
     const token = liveToken.current;
     startingThreadRef.current = true;
@@ -2153,8 +2153,9 @@ export function ChatsView(props: {
       return;
     }
     // A poll's question is the message's own words, never a fallback.
-    const options = poll ? pollChoicesToSend(poll.choices) : null;
-    if (poll && (!options || trimmedBody.length === 0)) return;
+    const asked = openPollChoices(poll);
+    const options = asked ? pollChoicesToSend(asked) : null;
+    if (asked && (!options || trimmedBody.length === 0)) return;
     const parentMessageId = replyTarget?.messageId;
     const request = ++sendRequestGeneration.current;
     inFlightSendByContext.current.set(sendContextKey, request);
@@ -4341,8 +4342,8 @@ export function ChatsView(props: {
                   setComposer(value);
                   presence.setTyping(value.trim().length > 0);
                 }}
-                poll={poll?.choices ?? null}
-                onPollChange={(next) => setPoll(next && { threadId: nav.thread.id, choices: next })}
+                poll={poll}
+                onPollChange={(next) => setPoll(next && { ...next, threadId: nav.thread.id })}
                 onEscape={() => {
                   setReplyTarget(null);
                   setResolveTargetMessageId(null);
@@ -4697,8 +4698,8 @@ export function ChatsView(props: {
                   fileCandidates={fileMentionCandidates}
                   loadFileHeadings={loadFileHeadings}
                   onChange={setNewThreadBody}
-                  poll={newThreadPoll?.choices ?? null}
-                  onPollChange={(next) => setNewThreadPoll(next && { channelId: nav.channel.id, choices: next })}
+                  poll={newThreadPoll}
+                  onPollChange={(next) => setNewThreadPoll(next && { ...next, channelId: nav.channel.id })}
                   onSend={() => void startThread()}
                   onRosterPick={agentOffer.onRosterPick}
                   rosterScope={agentOffer.scope}

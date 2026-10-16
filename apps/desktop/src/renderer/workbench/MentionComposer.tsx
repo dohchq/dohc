@@ -14,7 +14,7 @@ import { ChatAvatar } from "./ChatAvatar";
 import { ownPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { ComposerPoll } from "./ComposerPoll";
-import { activeCatalogQuery, NEW_POLL, pollChoicesToSend, type PollDraft } from "./chatPoll";
+import { activeCatalogQuery, NEW_POLL, openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import {
   MENU_ACTIVE_OPTION,
@@ -154,13 +154,16 @@ export function MentionComposer(props: {
   authorPresentation?: ActorPresentation;
   // Takes focus when it mounts, with the caret after its text.
   autoFocus?: boolean;
-  // A poll's choices while one is drafted; the message is its question. Only
-  // a surface that shows a posted poll's choices passes onPollChange.
-  poll?: PollDraft | null;
-  onPollChange?: (poll: PollDraft | null) => void;
+  // A poll drafted in this message; the message is its question. A removed
+  // poll stays closed with its choices. Only a surface that shows a posted
+  // poll's choices passes onPollChange.
+  poll?: ComposerPollDraft | null;
+  onPollChange?: (poll: ComposerPollDraft | null) => void;
 }) {
   const [focused, setFocused] = useState(false);
-  const poll = props.onPollChange ? props.poll ?? null : null;
+  const pollDraft = props.onPollChange ? props.poll ?? null : null;
+  // The open poll's choices; null while no poll is open.
+  const poll = openPollChoices(pollDraft);
   const expanded = props.surface !== "post" || focused || props.value.length > 0 || poll !== null;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
@@ -385,19 +388,20 @@ export function MentionComposer(props: {
     [props.loadFileHeadings],
   );
 
-  // Opens an empty poll. Focus goes to its first choice when the message
+  // Removing a poll keeps its choices, and opening one brings them back, or
+  // starts two empty ones. Focus goes to the first choice when the message
   // already holds the question, and otherwise stays on the question.
   const togglePoll = useCallback(
     (question: string) => {
       if (!props.onPollChange) return;
       if (poll) {
-        props.onPollChange(null);
+        props.onPollChange({ choices: poll, open: false });
         return;
       }
       focusPollOnOpen.current = question.trim().length > 0;
-      props.onPollChange(NEW_POLL);
+      props.onPollChange({ choices: pollDraft?.choices ?? NEW_POLL, open: true });
     },
-    [poll, props.onPollChange],
+    [poll, pollDraft, props.onPollChange],
   );
 
   const pickCatalogRow = useCallback(
@@ -539,7 +543,11 @@ export function MentionComposer(props: {
       choices={poll}
       disabled={locked}
       surface={isPost ? "post" : "stream"}
-      onChange={props.onPollChange}
+      onChange={(choices) => props.onPollChange?.({ choices, open: true })}
+      onRemove={() => {
+        props.onPollChange?.({ choices: poll, open: false });
+        textareaRef.current?.focus();
+      }}
       onFocusQuestion={() => textareaRef.current?.focus()}
     />
   ) : null;
@@ -756,8 +764,9 @@ export function MentionComposer(props: {
         data-testid={`${props.testIdPrefix}-composer`}
         value={props.value}
         disabled={locked}
-        rows={2}
-        placeholder={props.placeholder}
+        rows={isPost && poll ? 1 : 2}
+        // While a poll is open the message is its question.
+        placeholder={poll ? "Ask a question" : props.placeholder}
         role="combobox"
         aria-expanded={showMenu}
         aria-controls={showMenu ? listboxId : undefined}
@@ -808,7 +817,13 @@ export function MentionComposer(props: {
         className={
           isPost
             ? `w-full resize-none bg-transparent text-[15px] leading-relaxed text-ink placeholder:text-subtle dohc-focus-input ${
-                expanded ? "min-h-16 px-0 py-0" : "pointer-events-none absolute inset-0 h-full opacity-0"
+                // Over a poll the question is one line that grows with its text,
+                // so the choices sit right under it.
+                !expanded
+                  ? "pointer-events-none absolute inset-0 h-full opacity-0"
+                  : poll
+                    ? "field-sizing-content px-0 py-0"
+                    : "min-h-16 px-0 py-0"
               }`
             : "min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
         }
