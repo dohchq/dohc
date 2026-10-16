@@ -20,10 +20,6 @@ const tests = desktopTestFiles(dirname(fileURLToPath(import.meta.url)), {
     // The report bound lasts as long as the window, and the module holds the
     // count. An earlier file in a shared worker would spend part of it.
     "src/renderer/rendererErrorReport.bound.test.ts",
-    // datasetAddress.ts keeps dataset identities by content hash for the life
-    // of the process. After an earlier file reads the same descriptor, this
-    // file's publication no longer captures it.
-    "src/workspaces/ownerAppPublication.test.ts",
   ],
 });
 
