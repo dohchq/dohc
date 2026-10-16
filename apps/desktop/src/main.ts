@@ -1547,7 +1547,6 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
       if (!workspace?.remote || workspace.shareView) return null;
       await warmCredentialCache();
       const { credentials } = await remoteForWorkspace(workspace);
-      if (!workspaceRemoteMatchesCredentials(workspace.remote, credentials)) return null;
       return lookupHistoryAccounts(workspaceId, async path => {
         const response = await relayShareResponseWithCredentials(credentials, path, { method: "GET" });
         return { status: response.status, body: await response.json().catch(() => undefined) };

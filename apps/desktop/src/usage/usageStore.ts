@@ -3,10 +3,9 @@ import * as fs from "node:fs/promises";
 import { join } from "node:path";
 import {
   UsageAppVersion, UsageInvocation, UsageVersionCoverage, decodeUsageSnapshot,
-  USAGE_ACTION_IDS, USAGE_DOORS, USAGE_MAX_COUNT, USAGE_RETENTION_DAYS, localUsageDay, queryUsage, usageRowKey,
-  type UsageBuildPair, type UsageCount, type UsageDayRecord, type UsageQuery, type UsageSnapshot,
+  USAGE_MAX_COUNT, USAGE_RETENTION_DAYS, localUsageDay, queryUsage, usageRowKey,
+  type StoredSnapshot, type UsageBuildPair, type UsageCount, type UsageDayRecord, type UsageQuery, type UsageSnapshot,
 } from "@dohc/workspace-contracts/usage";
-import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
 import { INVALID_USAGE_RECORD } from "../ipc/bridgeContract";
 
 export const USAGE_WRITE_INTERVAL_MS = 30_000;
@@ -56,13 +55,7 @@ const nodeFiles: UsageFileSystem = {
 };
 const errorCode = (error: unknown) => (error as NodeJS.ErrnoException | null)?.code;
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
-type UsageDoor = (typeof USAGE_DOORS)[number];
-type UsageCoverageStatus = "covered" | "uncovered" | "unavailable";
-type UnknownUsageCount = { day: string; capabilityId: string; door: UsageDoor; count: number };
-type UnknownUsagePair = { capabilityId: string; door: UsageDoor; status: UsageCoverageStatus };
-type UnknownUsageCoverage = { appVersion: string; pairs: UnknownUsagePair[] };
-type StoredUsageSnapshot = { counts: UnknownUsageCount[]; coverage: UnknownUsageCoverage[] };
-const unknownUsageRowKey = (row: Pick<UnknownUsageCount, "day" | "capabilityId" | "door">) =>
+const unknownUsageRowKey = (row: StoredSnapshot["counts"][number]) =>
   `${row.day}:${row.capabilityId}:${row.door}`;
 
 // Main supplies the fixed coverage mapping for this build.
@@ -86,8 +79,8 @@ export function createUsageStore(deps: {
   const coverage = new Map<string, UsageVersionCoverage>();
   // Older builds cannot interpret newer action ids or capability pairs, but
   // they must carry them through a read-modify-write for a newer build.
-  const unknownCounts = new Map<string, UnknownUsageCount>();
-  const unknownCoverage = new Map<string, UnknownUsageCoverage>();
+  const unknownCounts = new Map<string, StoredSnapshot["counts"][number]>();
+  const unknownCoverage = new Map<string, StoredSnapshot["coverage"][number]>();
   const pending: UsageCount[] = [];
   let pendingOverflow = false;
   let enabled = true;
@@ -234,7 +227,14 @@ export function createUsageStore(deps: {
       enabled = true;
       let restored: UsageSnapshot | undefined;
       if (raw !== undefined) {
-        try { restored = decodeUsageSnapshot(JSON.parse(raw)); }
+        try {
+          const decoded = decodeUsageSnapshot(JSON.parse(raw));
+          restored = decoded.snapshot;
+          for (const row of decoded.dropped.counts) unknownCounts.set(unknownUsageRowKey(row), row);
+          for (const version of decoded.dropped.coverage) {
+            if (version.appVersion !== appVersion) unknownCoverage.set(version.appVersion, version);
+          }
+        }
         catch (error) {
           pause(Object.assign(new Error("Usage record could not be decoded", { cause: error }),
             { code: INVALID_USAGE_RECORD }));
@@ -247,16 +247,6 @@ export function createUsageStore(deps: {
         for (const row of restored.days) days.set(row.day, row);
         for (const row of restored.counts) counts.set(usageRowKey(row), row);
         for (const version of restored.coverage) coverage.set(version.appVersion, version);
-        const stored = JSON.parse(raw!) as StoredUsageSnapshot;
-        const actionIds = new Set<string>(USAGE_ACTION_IDS);
-        const capabilityIds = new Set(Object.keys(CAPABILITIES));
-        for (const row of stored.counts) {
-          if (!actionIds.has(row.capabilityId)) unknownCounts.set(unknownUsageRowKey(row), row);
-        }
-        for (const version of stored.coverage) {
-          const pairs = version.pairs.filter(pair => !capabilityIds.has(pair.capabilityId));
-          if (pairs.length) unknownCoverage.set(version.appVersion, { appVersion: version.appVersion, pairs });
-        }
       }
       coverage.set(appVersion, buildCoverage);
       changed();
@@ -282,15 +272,15 @@ export function createUsageStore(deps: {
         pairs: version.pairs.map(pair => ({ capabilityId: pair.capabilityId, door: pair.door, status: pair.status })) })),
     };
   }
-  function storedSnapshot(cleanExit = false): StoredUsageSnapshot & UsageSnapshot {
-    const current = snapshot(cleanExit);
+  function storedSnapshot(cleanExit = false): StoredSnapshot {
+    const current: StoredSnapshot = snapshot(cleanExit);
     const versions = new Map(current.coverage.map(version => [version.appVersion, version.pairs]));
     for (const version of unknownCoverage.values()) {
       const pairs = versions.get(version.appVersion);
-      if (pairs) pairs.push(...version.pairs as UsageBuildPair[]);
-      else current.coverage.push({ appVersion: version.appVersion, pairs: version.pairs as UsageBuildPair[] });
+      if (pairs) pairs.push(...version.pairs);
+      else current.coverage.push({ appVersion: version.appVersion, pairs: version.pairs });
     }
-    return { ...current, counts: [...current.counts, ...unknownCounts.values()] as UsageCount[] };
+    return { ...current, counts: [...current.counts, ...unknownCounts.values()] };
   }
   // `justRead` skips the check for a file load read a moment ago.
   async function write(cleanExit = false, justRead = false) {
