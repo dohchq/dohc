@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { gateInputMessage, isGateReader, readWorkspacePackages, uncoveredGateInputs } from "./selection.mjs";
+import { affectedPackages, gateInputMessage, isGateReader, packageReferences, readWorkspacePackages, selectsRepositoryTests, uncoveredGateInputs } from "./selection.mjs";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const yaml = createRequire(new URL("../../apps/desktop/package.json", import.meta.url))("js-yaml");
@@ -25,8 +25,44 @@ test("workspace discovery follows declared globs, exclusions, and nested package
   assert.ok(readWorkspacePackages(root).some(pkg => pkg.name === "@dohc/yrs-interop-scripts" && pkg.path === "crates/yrs-interop/scripts"));
 });
 
+// This test reads every package's source, so it runs here, where every JavaScript change runs it.
+test("the real tree's undeclared test imports select their importers", () => {
+  const packages = readWorkspacePackages(root);
+  const references = packageReferences(root, packages);
+  // sync-relay's tests import desktop source, and ydoc-projection's tests import sync-relay's.
+  assert.ok(affectedPackages(["apps/desktop/src/ipc/stopAndRestoreIpc.ts"], packages, references).includes("@dohc/sync-relay"));
+  assert.ok(affectedPackages(["services/sync-relay/src/liveTickets.ts"], packages, references).includes("@dohc/ydoc-projection"));
+  for (const outside of ["pnpm-lock.yaml", "crates/engine/src/lib.rs", "scripts/verification/close-electron.mjs"]) {
+    assert.equal(affectedPackages(["apps/site/src/index.ts", outside], packages), null, `${outside} can affect any package`);
+  }
+});
+
+test("a change to a file that the repository tests read selects all of them, and other code changes select the tree set", () => {
+  const workflow = readFileSync(join(root, ".github/workflows/pr-checks.yml"), "utf8");
+  for (const file of ["scripts/verification/verify.mjs", "tools/perf-profiling/run-profiles.mjs", ".github/workflows/desktop-release.yml",
+    "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".gitignore", ".env.self-host.example", "README.md",
+    "apps/desktop/package.json", "services/sync-relay/package.json", "crates/yrs-interop/scripts/package.json",
+    // The files outside scripts/, tools/, .github/, and the root that a repository test reads.
+    "apps/desktop/scripts/require-e2e-engine.mjs", "apps/desktop/scripts/build-workspace-engine.mjs", "apps/desktop/scripts/dev.mjs",
+    "apps/desktop/electron-builder.yml", "apps/desktop/src/shutdownBudgets.ts", "apps/desktop/src/renderer/styles.css",
+    "packages/app-backend-runtime/scripts/build.mjs", "apps/desktop/.gitignore", "crates/yrs-interop/scripts/rustPeer.ts",
+    "crates/dohc-engine-storage/src/migration.rs"]) {
+    assert.equal(selectsRepositoryTests([file], workflow), true, file);
+  }
+  for (const file of ["apps/desktop/src/main.ts", "apps/desktop/scripts/stage-app-compiler.mjs", "apps/site/src/index.ts",
+    "packages/app-backend-runtime/src/child.ts", "packages/workspace-core/src/paths.ts", "services/sync-relay/src/liveTickets.ts",
+    "crates/dohc-engine-storage/src/lib.rs", "crates/yrs-interop/src/lib.rs", "examples/fundraiser/backend.ts", "docs/guide.md"]) {
+    assert.equal(selectsRepositoryTests([file], workflow), false, file);
+  }
+  assert.equal(selectsRepositoryTests(["apps/desktop/src/main.ts", "scripts/check-brand.mjs"], workflow), true, "one tooling input selects them all");
+});
+
 test("canonical repository checks include every script contract except the Docker proof", () => {
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  // A tooling change runs test:repo instead of test:repo:tree, so test:repo must run every test the tree set runs.
+  const tree = manifest.scripts["test:repo:tree"];
+  assert.ok(tree.startsWith("pnpm test:repo:source && "), tree);
+  for (const [path] of tree.matchAll(/[^\s]+\.test\.mjs/gu)) assert.ok(manifest.scripts["test:repo"].split(/\s+/u).includes(path), `test:repo omits ${path}`);
   const listed = new Set([...manifest.scripts["test:repo"].matchAll(/[^\s]+\.test\.mjs/gu),
     ...manifest.scripts["test:repo:source"].matchAll(/[^\s]+\.test\.mjs/gu)].map(([path]) => path));
   const optIn = new Set(["scripts/self-host/recovery.docker.test.mjs"]);
