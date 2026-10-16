@@ -1,6 +1,6 @@
-import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
+import { AgentBadge } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
-import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, Reply, TriangleAlert, Zap } from "lucide-react";
+import { Bookmark, CircleCheck, CircleHelp, FileText, MessageSquare, Reply, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
@@ -33,12 +33,6 @@ import { buildThreadCommentTree, type ThreadCommentNode } from "./threadCommentT
 function pathBasename(pathHint: string | undefined): string {
   if (!pathHint) return "attachment";
   return basenameOf(pathHint.replace(/\\/g, "/").replace(/\/+$/, "")) || "attachment";
-}
-
-// The dispatcher writes a failure as the agent, so the thread has a record.
-// It reads as a notice from dohc, never as something the agent said.
-function isRunnerFailure(message: ChatMessageRecord): boolean {
-  return message.authorKind === "agent" && message.body.startsWith("⚠ Agent run failed");
 }
 
 // "4s", "1m 20s", "2h 5m".
@@ -458,7 +452,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
   onNavCommand?: (nav: ChatsNav) => void;
   setMessageNode: (messageId: string, element: HTMLElement | null) => void;
 }) {
-  const isOwn = useIsOwnAuthor();
   const {
     nav,
     messages,
@@ -517,9 +510,8 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     const commentDecision = decisionsByMessage.get(comment.id);
     const commentAttachments = attachmentsByMessage.get(comment.id) ?? [];
     const isAgent = comment.authorKind === "agent";
-    const isSystem = isRunnerFailure(comment);
-    const continues = !isSystem && previous !== undefined && previous.replies.length === 0 &&
-      !isRunnerFailure(previous.message) && continuesRun(previous.message, comment);
+    const continues = previous !== undefined && previous.replies.length === 0 &&
+      continuesRun(previous.message, comment);
     const replyCount = node.replies.length;
     const commentBookmark = bookmarkFor("message", comment.id);
     const commentBookmarkKey = `message:${comment.id}`;
@@ -561,7 +553,6 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
         ) : null}
         <div
           data-testid="chats-comment-bubble"
-          data-system={isSystem ? "true" : undefined}
           className="group relative -ml-[46px] -mr-2 rounded-lg py-1 pl-[46px] pr-2 transition-colors duration-75 hover:bg-hover"
         >
           {/* A continued comment's slot runs from the row's edge to the
@@ -580,19 +571,10 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
               >
                 {formatClockDigits(comment.createdAtMs)}
               </time>
-            ) : isSystem ? (
-              <span
-                role="img"
-                aria-label="Run failed"
-                className="grid size-7 place-items-center rounded-full border border-warning/40 bg-bg text-warning"
-              >
-                <TriangleAlert size={12} strokeWidth={1.9} aria-hidden />
-              </span>
             ) : (
-              <ChatAvatar
+              <ChatAvatar presentation={comment.presentation}
                 name={comment.authorDisplayName}
                 kind={comment.authorKind}
-                own={isOwn(comment.authorKind, comment, reactionControls.viewerAuthorId)}
                 size="comment"
               />
             )}
@@ -602,15 +584,15 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
           <div className={continues ? "sr-only" : "flex flex-wrap items-baseline gap-1.5 leading-[18px]"}>
             <span
               data-testid="chats-message-author"
-              data-author-kind={isSystem ? "system" : comment.authorKind}
+              data-author-kind={comment.authorKind}
               className={`text-[13px] font-semibold ${
-                isAgent && !isSystem ? "text-agent" : "text-ink"
+                isAgent ? "text-agent" : "text-ink"
               }`}
             >
-              {isSystem ? "dohc" : chatAuthorLabel(comment)}
+              {chatAuthorLabel(comment)}
             </span>
-            {isAgent && !isSystem && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
-            {comment.authorKind === "automation" && !isSystem && !continues ? (
+            {isAgent && !continues ? <AgentBadge testIdPrefix="chats-comment" author={comment} viewerAuthorId={reactionControls.viewerAuthorId} /> : null}
+            {comment.authorKind === "automation" && !continues ? (
               <AutomationBadge
                 testIdPrefix="chats-comment"
                 author={comment}
@@ -759,10 +741,9 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
             ? "My agent · thread"
             : `#${nav.channel.name} · thread`}
         </p>
-        <ChatAvatar
+        <ChatAvatar presentation={openingMessage.presentation}
           name={openingMessage.authorDisplayName}
           kind={openingMessage.authorKind}
-          own={isOwn(openingMessage.authorKind, openingMessage, reactionControls.viewerAuthorId)}
           size="row"
         />
         <div className="min-w-0 flex-1">

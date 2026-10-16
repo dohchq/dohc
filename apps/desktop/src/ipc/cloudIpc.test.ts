@@ -1,3 +1,4 @@
+import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
@@ -28,6 +29,42 @@ const status: SyncStatusResult = {
   historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0,
 };
 
+it("binds workspace cloud status before reading workspace secrets", async () => {
+  const h = await harness();
+  h.registry.set("other", { ...h.workspace, workspaceId: "other", rootPath: `${h.workspace.rootPath}-other` });
+  await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toMatchObject({ connected: true });
+  const services = [h.readSecrets];
+  services.forEach(service => service.mockClear());
+  await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "other" })).rejects.toThrow("no longer active");
+  services.forEach(service => expect(service).not.toHaveBeenCalled());
+  await expect(h.invoke(CHANNELS.cloudStatus, {})).resolves.toMatchObject({ connected: true });
+});
+
+it.each(["login", "startup"] as const)("does not hold cloud status admission during device %s reads", async stage => {
+  const h = await harness();
+  const entered = deferred();
+  const drain = deferred();
+  if (stage === "login") h.login.status.mockImplementation(async () => {
+    entered.resolve(); await drain.promise; return { connected: true, email: credentials.email };
+  });
+  else h.daemonStartup.mockImplementation(async () => { entered.resolve(); await drain.promise; });
+  const result = h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" });
+  const outcome = result.catch((error: unknown) => error);
+  let retiring: Promise<void> | undefined;
+  try {
+    await entered.promise;
+    retiring = h.authorities.invalidate("existing");
+    await vi.waitFor(() => expect(h.disposed).toHaveBeenCalledOnce());
+    await retiring;
+    h.retireRenderer();
+  } finally {
+    drain.resolve();
+    await Promise.allSettled([outcome, retiring]);
+  }
+  expect(h.readSecrets).not.toHaveBeenCalled();
+  expect(await outcome).toMatchObject({ message: "This workspace is no longer active." });
+});
+
 async function harness() {
   const steps: string[] = [];
   const home = resolve("/cloud-ipc-home").replace(/\\/g, "/");
@@ -36,9 +73,10 @@ async function harness() {
   roots.approveRoot(rootPath);
   const workspace: RegistryEntry = { workspaceId: "existing", rootPath: `${home}/existing`, kind: "personal", mode: "local-first" };
   const registry = new Map([[workspace.workspaceId, workspace]]);
+  const disposed = vi.fn();
   const authorities = createWorkspaceAuthorityOwner({
     findWorkspace: (id: string) => registry.get(id) ?? null,
-    canonicalizeRoot: (root: string) => root, createState: () => ({}),
+    canonicalizeRoot: (root: string) => root, createState: () => ({}), disposeState: disposed,
   });
   const attachmentId = await authorities.withOperation("existing", (operation) => operation.workspace.attachmentId);
   let rendererCurrent = true;
@@ -108,6 +146,7 @@ async function harness() {
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
     assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
     cloudLogin: () => login,
+    localInstallationId: () => "device",
     clearCachedCredentials: () => { steps.push("clear"); cache.clear(); },
     refreshCredentialCache: async () => { steps.push("refresh"); await cache.refresh(login.credentials); },
     warmCredentialCache: async () => { await cache.warm(login.credentials); },
@@ -123,7 +162,7 @@ async function harness() {
     notifyCloudSessionChanged: ready, notifyCloudSessionChangedWithKey: changing, notifyRenderer: notify,
     findWorkspace: (id) => registry.get(id) ?? null,
     engineDaemonStartup: daemonStartup, requireEngineSessions: () => sessions, currentEngineSessions: () => sessions,
-    withPhysicalWorkspaceOperation: (id, work) => authorities.withOperation(id, work), withRendererWorkspaceOperation,
+    withRendererWorkspaceOperation,
     receivedShareEngine: { workspaceForRegistered: (entry) => entry },
     readWorkspaceSecretState: readSecrets, readWorkspaceDataKeyForEnrollment: readDataKey,
     assertWritableWorkspace: (entry) => {
@@ -144,12 +183,21 @@ async function harness() {
   return {
     handlers, invoke, joinPayload, roots, workspace, registry, authorities, cache, login,
     stop, closeRelay, claim, readSecrets, readDataKey, enroll, bootstrap, probe, readdir, mkdir,
-    bindRelay, setRemote, enable, notify, changing, ready, createFolder, cleanup, steps, daemonStartup,
+    bindRelay, setRemote, enable, notify, changing, ready, createFolder, cleanup, steps, daemonStartup, disposed,
     retireRenderer: () => { rendererCurrent = false; },
   };
 }
 
 describe("registered cloud handlers", () => {
+  it.each(["https://account.example.test?query=1", "https://account.example.test#fragment"])("keeps cloud status available with malformed account URL %s", async (serverUrl) => {
+    const h = await harness();
+    h.cache.set({ ...credentials, serverUrl });
+    h.login.status.mockResolvedValue({ connected: true, email: credentials.email, serverUrl });
+    await expect(h.invoke(CHANNELS.cloudStatus)).resolves.toMatchObject({
+      connected: true, email: credentials.email, serverUrl,
+      ownPresentation: ownActorPresentation("device", null),
+    });
+  });
   it("registers the original sequence and rejects untrusted senders before any work", async () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
@@ -233,6 +281,7 @@ describe("registered cloud handlers", () => {
     h.workspace.remote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
     h.login.status.mockResolvedValue({ ...credentials, connected: true });
     await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toEqual({
+      ownPresentation: ownActorPresentation("device", credentials),
       connected: true, email: credentials.email, serverUrl: credentials.serverUrl,
       relayUrl: credentials.relayUrl,
       workspaceSynced: true, workspaceSyncConnected: true, workspaceSecretState: "none",

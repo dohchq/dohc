@@ -29,7 +29,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
   compile(request: ClosedAppBuildRequest, signal: AbortSignal): Promise<ClosedAppBuild>;
   relayJson(credentials: CloudCredentials, path: string, init?: RequestInit): Promise<unknown>;
   upload(credentials: CloudCredentials, workspaceId: string, sha256: string, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
-  localPublication?(input: OwnerAppPublicationRequest, callerKey: string, operation: Operation): Promise<OwnerAppPublicationResult | null>;
+  localPublication?(input: OwnerAppPublicationRequest, callerKey: string, operation: Operation, attribution: ApprovalAgent | null): Promise<OwnerAppPublicationResult | null>;
   beforeSharedPublish?(workspace: Workspace, candidate: AppPublicationCandidate, signal: AbortSignal): Promise<void>;
   /** May resolve local approved rules before an explicit authority transfer at publication. */
   resolveDatasetRevision?(workspace: Workspace, binding: AppDatasetBinding, signal: AbortSignal): Promise<DatasetRevision>;
@@ -52,7 +52,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
     return dependencies.withWorkspaceOperation(caller, input.workspaceId, async operation => {
       operation.assertCurrent();
       if (shareViewIsPresent(operation.workspace.shareView)) throw new Error("Only the original workspace can publish this app.");
-      const local = await dependencies.localPublication?.(input, callerKey, operation);
+      const local = await dependencies.localPublication?.(input, callerKey, operation, agent);
       operation.assertCurrent(); operation.signal.throwIfAborted();
       if (local) return local;
       if (input.action === "prepareLocal" || input.action === "listLocal" || input.action === "launchLocal") throw new Error("Local apps are unavailable. Restart dohc and try again.");

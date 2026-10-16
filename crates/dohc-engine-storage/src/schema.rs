@@ -150,6 +150,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "ydoc_recovery_decisions",
     "owner_ydoc_outboxes",
     "owner_ydoc_outbox_entries",
+    "owner_live_stops",
     "share_view_file_lane",
     "replication_pending_conflict_bundles",
     "replication_pending_conflict_ops",
@@ -199,6 +200,11 @@ const REQUIRED_TABLES: &[&str] = &[
     "shared_channel_peers",
     "shared_channel_push_state",
     "share_view_cursors",
+    "hosted_replicas",
+    "hosted_documents",
+    "hosted_withheld_befores",
+    "hosted_deferred_ops",
+    "hosted_retired_files",
     // #646 PR3a proposal scan position.
     "share_proposal_push_state",
     // Item 12: the direct lane's position and per-file decisions.

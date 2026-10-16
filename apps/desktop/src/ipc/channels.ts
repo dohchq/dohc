@@ -1,5 +1,7 @@
+import type { CommandId } from "../renderer/commands/commandRows";
+
 // Closed tuples and channel names shared by main, the bridge contract, and the
-// preload. This module imports nothing so main-side modules can read a tuple
+// preload. This module has no runtime imports so main-side modules can read a tuple
 // without loading the whole contract.
 
 export const MENU_COMMANDS = [
@@ -20,7 +22,7 @@ export const MENU_COMMANDS = [
   "install-update",
   "new-editor-group-right",
   "close-tab",
-] as const;
+] as const satisfies readonly (CommandId | "command-palette")[];
 
 // Explorer context menu: the renderer names what was right-clicked, main pops
 // a native menu built from main-owned labels over this closed set, and the
@@ -125,26 +127,12 @@ export const CHANNELS = {
   openWorkspaceManager: "desktop:open-workspace-manager",
   closeThisWindow: "desktop:close-this-window",
   revealWorkspaceFolder: "desktop:reveal-workspace-folder",
-  listWorkspaceFiles: "desktop:list-workspace-files",
   createCollectionRecord: "desktop:create-collection-record",
-  createWorkspaceFile: "desktop:create-workspace-file",
-  createWorkspaceFolder: "desktop:create-workspace-folder",
-  moveWorkspacePath: "desktop:move-workspace-path",
-  deleteWorkspacePath: "desktop:delete-workspace-path",
-  exportWorkspaceZip: "desktop:export-workspace-zip",
-  exportDocumentFile: "desktop:export-document-file",
   showExplorerMenu: "desktop:show-explorer-menu",
   showWorkbenchMenu: "desktop:show-workbench-menu",
-  importWorkspaceFiles: "desktop:import-workspace-files",
-  readWorkspaceText: "desktop:read-workspace-text",
-  writeWorkspaceText: "desktop:write-workspace-text",
-  writeWorkspaceAsset: "desktop:write-workspace-asset",
-  pickImageFiles: "desktop:pick-image-files",
-  openFileExternally: "desktop:open-file-externally",
   readWorkspaceGraph: "desktop:read-workspace-graph",
   getBacklinks: "desktop:get-backlinks",
   listWorkspaceHeadings: "desktop:list-workspace-headings",
-  listChatFileMentions: "desktop:list-chat-file-mentions",
   listChatBookmarks: "desktop:list-chat-bookmarks",
   saveChatBookmark: "desktop:save-chat-bookmark",
   archiveChatBookmark: "desktop:archive-chat-bookmark",
@@ -284,9 +272,7 @@ export const CHANNELS = {
   restoreEngineMomentFile: "desktop:restore-engine-moment-file",
   listFileChats: "desktop:list-file-chats",
   createFileChat: "desktop:create-file-chat",
-  listChatMessages: "desktop:list-chat-messages",
   getChatThreadRevision: "desktop:get-chat-thread-revision",
-  sendChatMessage: "desktop:send-chat-message",
   listChatThreadDecisions: "desktop:list-chat-thread-decisions",
   resolveChatDecision: "desktop:resolve-chat-decision",
   listChatThreadAttachments: "desktop:list-chat-thread-attachments",
@@ -294,11 +280,8 @@ export const CHANNELS = {
   listChatChannels: "desktop:list-chat-channels",
   listChatFollows: "desktop:list-chat-follows",
   setChatFollow: "desktop:set-chat-follow",
-  listPersonalChatFeed: "desktop:list-personal-chat-feed",
   markPersonalChatFeedSeen: "desktop:mark-personal-chat-feed-seen",
   createChatChannel: "desktop:create-chat-channel",
-  listChannelThreads: "desktop:list-channel-threads",
-  startChannelThread: "desktop:start-channel-thread",
   markChatThreadRead: "desktop:mark-chat-thread-read",
   listChatReactions: "desktop:list-chat-reactions",
   setChatReaction: "desktop:set-chat-reaction",
@@ -372,6 +355,7 @@ export const CHANNELS = {
   holdQuit: "desktop:hold-quit",
   resumeQuit: "desktop:resume-quit",
   workspaceActivity: "desktop:workspace-activity",
+  captureHolds: "desktop:capture-holds",
   cloudSessionChanged: "desktop:cloud-session-changed",
   firstPaint: "desktop:first-paint",
   // Dev tools (DOHC_DEV_TOOLS=1, unpackaged only): the debug panel's

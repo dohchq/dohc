@@ -172,9 +172,55 @@ impl ObservationWalker {
                 });
             }
         }
+        observe_visibility_policy(root, &mut listing, &mut failed);
         self.feed.publish(listing, &failed, self.bounds.max_files)?;
         Ok(true)
     }
+}
+
+// The listing needs policy edits even though ordinary observation excludes .dohc.
+// Read metadata for this one path without entering or following the metadata directory.
+fn observe_visibility_policy(
+    root: &std::path::Path,
+    listing: &mut Vec<ObservedEntry>,
+    failed: &mut Vec<FailedPath>,
+) {
+    let path = ".dohc/visibility.toml";
+    let metadata = (|| {
+        let parent = std::fs::symlink_metadata(root.join(".dohc"))?;
+        if parent.is_dir() && !parent.file_type().is_symlink() {
+            std::fs::symlink_metadata(root.join(path))
+        } else {
+            // A refused parent still changes the policy verdict. Never follow it.
+            Ok(parent)
+        }
+    })();
+    let metadata = match metadata {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            failed.push(FailedPath {
+                path: path.to_owned(),
+                kind: error.kind(),
+            });
+            return;
+        }
+    };
+    #[cfg(unix)]
+    let changed = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.ctime(), metadata.ctime_nsec())
+    };
+    listing.push(ObservedEntry {
+        path: path.to_owned(),
+        symlink: metadata.file_type().is_symlink(),
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        changed,
+        #[cfg(windows)]
+        key: path.to_owned(),
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -844,6 +890,51 @@ mod tests {
                 .iter()
                 .any(|entry| entry.path == "large.bin" || entry.path.ends_with(".conflict"))
         );
+    }
+
+    #[test]
+    fn observation_tracks_only_visibility_policy_inside_metadata() {
+        let f = Fixture::new();
+        let cursor = f.cursor();
+        f.write(".dohc/visibility.toml", "visible");
+        f.write(".dohc/files.toml", "noise");
+        f.write(".dohc/engine/engine.db-wal", "noise");
+        assert_eq!(
+            f.scan(&cursor),
+            vec![fact(".dohc/visibility.toml", FileChangeKind::Appeared)]
+        );
+        let cursor = f.cursor();
+        f.write(".dohc/visibility.toml", "hidden and longer");
+        f.write(".dohc/engine/engine.db-wal", "more noise");
+        assert_eq!(
+            f.scan(&cursor),
+            vec![fact(".dohc/visibility.toml", FileChangeKind::Changed)]
+        );
+        let cursor = f.cursor();
+        std::fs::remove_file(f.root.path().join(".dohc/visibility.toml")).unwrap();
+        assert_eq!(
+            f.scan(&cursor),
+            vec![fact(".dohc/visibility.toml", FileChangeKind::Disappeared)]
+        );
+    }
+
+    #[test]
+    fn observation_policy_does_not_follow_metadata_symlinks() {
+        let f = Fixture::new();
+        let outside = ScratchDir::new_named("observation-policy-outside").unwrap();
+        std::fs::write(outside.path().join("visibility.toml"), "outside").unwrap();
+        let cursor = f.cursor();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), f.root.path().join(".dohc")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(outside.path(), f.root.path().join(".dohc")).unwrap();
+        assert_eq!(
+            f.scan(&cursor),
+            vec![fact(".dohc/visibility.toml", FileChangeKind::Appeared)]
+        );
+        let cursor = f.cursor();
+        std::fs::write(outside.path().join("visibility.toml"), "outside changed").unwrap();
+        assert!(f.scan(&cursor).is_empty());
     }
 
     #[test]

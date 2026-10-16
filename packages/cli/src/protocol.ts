@@ -4,6 +4,7 @@ import {
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import { AccessAnswer, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
@@ -11,6 +12,7 @@ import { CreationPartial } from "./creation";
 import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
+import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "./account";
 
 export const CLI_PROTOCOL_VERSION = 5;
 export const CLI_JSON_SCHEMA_VERSION = 3;
@@ -380,7 +382,15 @@ const automationPressArgsSchema = z
   })
   .strict();
 
+// The account verbs act on the server account the app is connected to, from
+// any folder. The password travels only in this request, never in argv.
+const accountDeletePreviewArgsSchema = z.object(argsBase).strict();
+const accountDeleteArgsSchema = ServerAccountDeleteRequest.extend(argsBase).strict();
+
 export const cliRequestSchema = z.discriminatedUnion("verb", [
+  z.object({ ...requestBase, verb: z.literal("shareCopy"), args: ShareCopyInput.extend(argsBase).strict() }).strict(),
+  z.object({ ...requestBase, verb: z.literal("accountDeletePreview"), args: accountDeletePreviewArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("accountDelete"), args: accountDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessObject"), args: ObjectAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accessSharing"), args: SharingAccessInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationButtons"), args: z.object({ ...argsBase, collectionPath: collectionPathArg, table: z.string().min(1).max(256).optional() }).strict() }).strict(),
@@ -503,6 +513,9 @@ export const APP_RESPONSE_CAPABILITIES = {
 } as const satisfies Record<OwnerAppResponsesRequest["action"], CapabilityId>;
 
 export const CLI_CAPABILITIES = {
+  shareCopy: ["share.copy.read"],
+  accountDeletePreview: ["account.delete.preview"],
+  accountDelete: ["account.delete"],
   accessObject: ["access.object.read"],
   accessSharing: ["access.sharing.read"],
   groups: ["group.list"],
@@ -1347,6 +1360,9 @@ const automationPressResultSchema = z.union([
 ]);
 
 export const cliResultSchemas = {
+  shareCopy: ShareCopyResult,
+  accountDeletePreview: ServerAccountDeletionPreview,
+  accountDelete: ServerAccountDeleteResult,
   accessObject: AccessAnswer,
   accessSharing: AccessAnswer,
   automationList: z.discriminatedUnion("ok", [

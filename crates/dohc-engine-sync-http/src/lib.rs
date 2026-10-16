@@ -8,6 +8,7 @@ use std::time::Duration;
 use dohc_engine_sync::{
     BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobHaveRequest,
     BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
+    HostedPullRequest, HostedPullResponse, HostedScope, HostedScopeDocument,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH,
     MAX_INGEST_BLOB_BYTES, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, ObservedBytes, ProbeRequest,
@@ -136,6 +137,8 @@ pub struct HttpRelayTransport {
     base_url: String,
     token: String,
     agent: Agent,
+    /// Serves a hosted replica through the session host's scoped feed.
+    hosted: bool,
 }
 
 impl std::fmt::Debug for HttpRelayTransport {
@@ -144,6 +147,7 @@ impl std::fmt::Debug for HttpRelayTransport {
             .debug_struct("HttpRelayTransport")
             .field("base_url", &self.base_url)
             .field("token", &"[redacted]")
+            .field("hosted", &self.hosted)
             .finish_non_exhaustive()
     }
 }
@@ -210,7 +214,21 @@ impl HttpRelayTransport {
             base_url,
             token,
             agent: configured_agent(Duration::from_secs(30), allow_insecure_loopback, None),
+            hosted: false,
         })
+    }
+
+    /// This transport for a hosted replica. Its log, blob and coordinate
+    /// requests go to the session host's scoped feed, under `/hosted/`.
+    #[must_use]
+    pub fn hosted(mut self) -> Self {
+        self.hosted = true;
+        self
+    }
+
+    /// The route prefix of the feed this transport's replica reads and writes.
+    fn feed(&self) -> &'static str {
+        if self.hosted { "/hosted" } else { "" }
     }
 
     /// Look up a coordinate while cooperatively observing request cancellation.
@@ -233,14 +251,19 @@ impl HttpRelayTransport {
         if req.origin_seq < 0 || req.origin_seq > dohc_engine_sync::MAX_WIRE_INTEGER {
             return Err(RelayError::InvalidResponse);
         }
-        let suffix = format!("/log/{}/{}", encode_segment(&req.origin_id), req.origin_seq);
+        let suffix = format!(
+            "{}/log/{}/{}",
+            self.feed(),
+            encode_segment(&req.origin_id),
+            req.origin_seq
+        );
         let url = self.workspace_url(
             &req.workspace_id,
             &suffix,
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let request = self
             .agent
             .get(&url)
@@ -308,11 +331,11 @@ impl HttpRelayTransport {
                     .ok_or(RelayError::InvalidResponse)?;
                 let url = self.workspace_url(
                     &req.workspace_id,
-                    &format!("/blobs/{}", encode_segment(&blob.sha256)),
+                    &format!("{}/blobs/{}", self.feed(), encode_segment(&blob.sha256)),
                     &req.replication_epoch,
                     &req.stream_identity,
                     &[],
-                );
+                )?;
                 if cancelled() {
                     return Err(cancelled_relay_request());
                 }
@@ -376,8 +399,23 @@ impl HttpRelayTransport {
         format!("Bearer {}", self.token)
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}{}", self.base_url, path)
+    /// The URL of a relay route. A hosted transport reaches only the session
+    /// host's scoped feed, `/sync/:ws/hosted/`, and no other transport does.
+    fn url(&self, path: &str) -> Result<String, RelayError> {
+        let hosted_route = path
+            .strip_prefix("/sync/")
+            .and_then(|route| route.split_once('/'))
+            .is_some_and(|(workspace, route)| {
+                workspace != "shares" && route.starts_with("hosted/")
+            });
+        if hosted_route != self.hosted {
+            return Err(if self.hosted {
+                dohc_engine_sync::hosted_feed_only()
+            } else {
+                dohc_engine_sync::no_hosted_feed()
+            });
+        }
+        Ok(format!("{}{}", self.base_url, path))
     }
 
     fn workspace_path(&self, workspace_id: &str, suffix: &str) -> String {
@@ -391,7 +429,7 @@ impl HttpRelayTransport {
         replication_epoch: &str,
         stream_identity: &str,
         extra_query: &[(&str, String)],
-    ) -> String {
+    ) -> Result<String, RelayError> {
         let mut query = vec![
             (
                 "replicationEpoch",
@@ -416,7 +454,12 @@ impl HttpRelayTransport {
         ))
     }
 
-    fn share_url(&self, share_id: &str, suffix: &str, query: &[(&str, String)]) -> String {
+    fn share_url(
+        &self,
+        share_id: &str,
+        suffix: &str,
+        query: &[(&str, String)],
+    ) -> Result<String, RelayError> {
         let mut path = format!("/sync/shares/{}{}", encode_segment(share_id), suffix);
         if !query.is_empty() {
             path.push('?');
@@ -695,34 +738,7 @@ impl RelayTransport for HttpRelayTransport {
     }
 
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
-        validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
-        let body = WirePushRequest {
-            replication_epoch: &req.replication_epoch,
-            stream_identity: &req.stream_identity,
-            origin_id: &req.origin_id,
-            ops: req.ops.iter().map(WireLogInput::from).collect(),
-        };
-        let url = self.workspace_url(
-            &req.workspace_id,
-            "/log",
-            &req.replication_epoch,
-            &req.stream_identity,
-            &[],
-        );
-        let wire: WirePushResponse = self.json(
-            self.agent
-                .post(&url)
-                .header("authorization", &self.authorization())
-                .send_json(body),
-            RequestContext::Workspace,
-        )?;
-        Ok(PushResponse {
-            settlement_refusals: wire.settlement_refusals,
-            accepted: wire.accepted,
-            inserted: wire.inserted,
-            skipped: wire.skipped,
-            current_max_origin_seq: wire.current_max_origin_seq,
-        })
+        self.push_log("/log", req)
     }
 
     fn pull(&self, req: PullRequest) -> Result<PullResponse, RelayError> {
@@ -735,7 +751,7 @@ impl RelayTransport for HttpRelayTransport {
                 ("since", req.cursor.to_string()),
                 ("limit", req.limit.to_string()),
             ],
-        );
+        )?;
         let wire: WireLogPage = self.json(
             self.agent
                 .get(&url)
@@ -743,25 +759,60 @@ impl RelayTransport for HttpRelayTransport {
                 .call(),
             RequestContext::Workspace,
         )?;
-        let mut ops = Vec::with_capacity(wire.ops.len());
-        for mut row in wire.ops {
-            let workspace_id = row.workspace_id.take().ok_or(RelayError::InvalidResponse)?;
-            if workspace_id != req.workspace_id {
-                return Err(RelayError::InvalidResponse);
-            }
-            let envelope = row.into_workspace_envelope(workspace_id);
-            if envelope.relay_seq.is_none_or(|relay_seq| {
-                !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq)
-            }) {
-                return Err(RelayError::InvalidResponse);
-            }
-            ops.push(envelope);
-        }
         Ok(PullResponse {
-            ops,
+            ops: workspace_envelopes(wire.ops, &req.workspace_id)?,
             next_cursor: wire.next_cursor,
             has_more: wire.has_more,
         })
+    }
+
+    fn pull_hosted(&self, req: HostedPullRequest) -> Result<HostedPullResponse, RelayError> {
+        // The feed serves the scope it holds to a request without `scope`.
+        let mut query = vec![
+            ("since", req.cursor.to_string()),
+            ("limit", req.limit.to_string()),
+        ];
+        query.extend(req.scope_token.iter().map(|token| ("scope", token.clone())));
+        query.extend(
+            req.object_id
+                .iter()
+                .map(|object_id| ("object", object_id.clone())),
+        );
+        let url = self.workspace_url(
+            &req.workspace_id,
+            "/hosted/log",
+            &req.replication_epoch,
+            &req.stream_identity,
+            &query,
+        )?;
+        let wire: WireHostedLogPage = self.json(
+            self.agent
+                .get(&url)
+                .header("authorization", &self.authorization())
+                .call(),
+            RequestContext::Workspace,
+        )?;
+        Ok(HostedPullResponse {
+            scope: HostedScope {
+                token: wire.scope.token,
+                documents: wire
+                    .scope
+                    .documents
+                    .into_iter()
+                    .map(|document| HostedScopeDocument {
+                        object_id: document.object_id,
+                        path: document.path,
+                    })
+                    .collect(),
+            },
+            ops: workspace_envelopes(wire.ops, &req.workspace_id)?,
+            next_cursor: wire.next_cursor,
+            has_more: wire.has_more,
+        })
+    }
+
+    fn push_hosted(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
+        self.push_log("/hosted/log", req)
     }
 
     fn lookup_log_coordinate(
@@ -792,7 +843,7 @@ impl RelayTransport for HttpRelayTransport {
         };
         let _: WireOk = self.json(
             self.agent
-                .post(&self.url("/sync/workspaces"))
+                .post(&self.url("/sync/workspaces")?)
                 .header("authorization", &self.authorization())
                 .send_json(body),
             RequestContext::Claim,
@@ -811,7 +862,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let wire: WireEpochResponse = self.json(
             self.agent
                 .post(&url)
@@ -834,11 +885,11 @@ impl RelayTransport for HttpRelayTransport {
         };
         let url = self.workspace_url(
             &req.workspace_id,
-            "/blobs/have",
+            &format!("{}/blobs/have", self.feed()),
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let wire: WireBlobHaveResponse = self.json(
             self.agent
                 .post(&url)
@@ -854,11 +905,11 @@ impl RelayTransport for HttpRelayTransport {
     fn upload_blob(&self, req: BlobUploadRequest) -> Result<(), RelayError> {
         let url = self.workspace_url(
             &req.workspace_id,
-            &format!("/blobs/{}", encode_segment(&req.sha256)),
+            &format!("{}/blobs/{}", self.feed(), encode_segment(&req.sha256)),
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let _: WireOk = self.json(
             self.agent
                 .put(&url)
@@ -886,7 +937,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let mut request = self
             .agent
             .put(&url)
@@ -925,7 +976,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.replication_epoch,
             &req.stream_identity,
             &[],
-        );
+        )?;
         let (bytes, etag) = self.bytes(
             self.agent
                 .get(&url)
@@ -972,12 +1023,12 @@ impl RelayTransport for HttpRelayTransport {
     }
 
     fn share_log_push(&self, req: ShareLogPushRequest) -> Result<PushResponse, RelayError> {
+        let url = self.share_url(&req.share_id, "/log", &[])?;
         validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
         let body = WireSharePushRequest {
             origin_id: &req.origin_id,
             ops: req.ops.iter().map(WireShareLogInput::from).collect(),
         };
-        let url = self.share_url(&req.share_id, "/log", &[]);
         let wire: WirePushResponse = self.json(
             self.agent
                 .post(&url)
@@ -1013,7 +1064,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.share_id,
             &format!("/blobs/{}", encode_segment(&req.sha256)),
             &[],
-        );
+        )?;
         let (bytes, _) = self.bytes(
             self.agent
                 .get(&url)
@@ -1031,7 +1082,7 @@ impl RelayTransport for HttpRelayTransport {
             &req.share_id,
             &format!("/blobs/{}", encode_segment(&req.sha256)),
             &[],
-        );
+        )?;
         let _: WireOk = self.json(
             self.agent
                 .put(&url)
@@ -1050,7 +1101,7 @@ impl RelayTransport for HttpRelayTransport {
             submit_id: &req.submit_id,
             ops: &req.ops,
         };
-        let url = self.share_url(&req.share_id, "/proposals", &[]);
+        let url = self.share_url(&req.share_id, "/proposals", &[])?;
         let wire: WireShareProposalSubmitResponse = self.json(
             self.agent
                 .post(&url)
@@ -1072,7 +1123,7 @@ impl RelayTransport for HttpRelayTransport {
             submit_id: &req.submit_id,
             changes: &req.changes,
         };
-        let url = self.share_url(&req.share_id, "/collection-writes", &[]);
+        let url = self.share_url(&req.share_id, "/collection-writes", &[])?;
         let mut response = self
             .agent
             .post(&url)
@@ -1136,6 +1187,37 @@ fn collection_write_answer(
 }
 
 impl HttpRelayTransport {
+    fn push_log(&self, suffix: &str, req: PushRequest) -> Result<PushResponse, RelayError> {
+        let url = self.workspace_url(
+            &req.workspace_id,
+            suffix,
+            &req.replication_epoch,
+            &req.stream_identity,
+            &[],
+        )?;
+        validate_outbound_payloads(req.ops.iter().map(|op| &op.payload))?;
+        let body = WirePushRequest {
+            replication_epoch: &req.replication_epoch,
+            stream_identity: &req.stream_identity,
+            origin_id: &req.origin_id,
+            ops: req.ops.iter().map(WireLogInput::from).collect(),
+        };
+        let wire: WirePushResponse = self.json(
+            self.agent
+                .post(&url)
+                .header("authorization", &self.authorization())
+                .send_json(body),
+            RequestContext::Workspace,
+        )?;
+        Ok(PushResponse {
+            settlement_refusals: wire.settlement_refusals,
+            accepted: wire.accepted,
+            inserted: wire.inserted,
+            skipped: wire.skipped,
+            current_max_origin_seq: wire.current_max_origin_seq,
+        })
+    }
+
     fn read_share_log(
         &self,
         share_id: &str,
@@ -1145,7 +1227,7 @@ impl HttpRelayTransport {
     ) -> Result<WireLogPage, RelayError> {
         let mut query = vec![("since", cursor.to_string()), ("limit", limit.to_string())];
         query.extend_from_slice(extra_query);
-        let url = self.share_url(share_id, "/log", &query);
+        let url = self.share_url(share_id, "/log", &query)?;
         let wire: WireLogPage = self.json(
             self.agent
                 .get(&url)
@@ -1204,6 +1286,28 @@ fn names_ip_loopback(base_url: &str) -> bool {
     };
     let host = uri.host().unwrap_or_default().trim_matches(['[', ']']);
     host.parse().is_ok_and(|ip: IpAddr| ip.is_loopback())
+}
+
+/// A workspace log page's rows, each of `workspace_id` and at a relay position.
+fn workspace_envelopes(
+    rows: Vec<WireLogRow>,
+    workspace_id: &str,
+) -> Result<Vec<ReplicationEnvelope>, RelayError> {
+    rows.into_iter()
+        .map(|mut row| {
+            let row_workspace_id = row.workspace_id.take().ok_or(RelayError::InvalidResponse)?;
+            if row_workspace_id != workspace_id {
+                return Err(RelayError::InvalidResponse);
+            }
+            let envelope = row.into_workspace_envelope(row_workspace_id);
+            if envelope.relay_seq.is_none_or(|relay_seq| {
+                !(0..=dohc_engine_sync::MAX_WIRE_INTEGER).contains(&relay_seq)
+            }) {
+                return Err(RelayError::InvalidResponse);
+            }
+            Ok(envelope)
+        })
+        .collect()
 }
 
 fn validate_outbound_payloads<'a>(
@@ -1305,6 +1409,7 @@ define_server_error_codes! {
     "blob_not_found" => |_| RelayError::BlobMissing,
     "collection_write_rate_limited" => |_| RelayError::HttpStatus(429),
     "conflict" => |_| RelayError::Conflict,
+    "restore-in-progress" => |_| RelayError::Conflict,
     "dependents_changed" => |_| RelayError::Conflict,
     "discussion_limit_reached" => |_| RelayError::QuotaExceeded,
     "discussion_rate_limited" => |_| RelayError::DiscussionRateLimited,
@@ -1529,6 +1634,28 @@ struct WireLogPage {
     ops: Vec<WireLogRow>,
     next_cursor: i64,
     has_more: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireHostedLogPage {
+    scope: WireHostedScope,
+    ops: Vec<WireLogRow>,
+    next_cursor: i64,
+    has_more: bool,
+}
+
+#[derive(Deserialize)]
+struct WireHostedScope {
+    token: String,
+    documents: Vec<WireHostedScopeDocument>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireHostedScopeDocument {
+    object_id: String,
+    path: String,
 }
 
 #[derive(Deserialize)]
@@ -2184,6 +2311,7 @@ mod tests {
             base_url: format!("https://localhost:{port}"),
             token: "token".to_owned(),
             agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
+            hosted: false,
         };
 
         let error = transport
@@ -2248,6 +2376,7 @@ mod tests {
             base_url: format!("https://localhost:{port}"),
             token: "token".to_owned(),
             agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
+            hosted: false,
         };
         let (outcome_tx, outcome_rx) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -2347,6 +2476,7 @@ mod tests {
             base_url: format!("https://localhost:{port}"),
             token: "token".to_owned(),
             agent: configured_agent(Duration::from_secs(5), false, Some(tls_config)),
+            hosted: false,
         };
         let (mid_body_tx, mid_body_rx) = mpsc::channel();
         let (outcome_tx, outcome_rx) = mpsc::channel();

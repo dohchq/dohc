@@ -715,6 +715,7 @@ async function startShareWeb(
   delete env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR;
   delete env.DOHC_SHARE_WEB_TRUSTED_PROXIES;
   delete env.DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY;
+  delete env.DOHC_SHARE_WEB_INTERNAL_HOSTS;
   if (options.devMode !== false) env.DOHC_SHARE_WEB_DEV = "1";
   if (options.shutdownGracePeriodMs !== undefined) {
     env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS = String(
@@ -726,6 +727,7 @@ async function startShareWeb(
   }
   if (options.relayExchangeKey !== undefined) {
     env.DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY = options.relayExchangeKey;
+    env.DOHC_SHARE_WEB_INTERNAL_HOSTS = "share-web:1790";
   }
   env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR = viewerAssetsDir;
   const mainUrl = new URL("./main.ts", import.meta.url);

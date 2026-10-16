@@ -984,6 +984,7 @@ const heldFile = {
   retryRequested: false,
 };
 const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
+  ["capture.retryHeld" as WorkspaceMethod, { settled: true, running: true, degraded: false, retried: true }],
   [WORKSPACE_METHOD.captureFlush, { settled: true, running: true, degraded: false }],
   [WORKSPACE_METHOD.captureReconcile, { settled: true, running: true, degraded: false }],
   [WORKSPACE_METHOD.watcherStatus, {
@@ -1009,6 +1010,7 @@ for (const [method, base] of holdReplies) {
     },
   );
   it(`rejects malformed ${method} held files`, () => {
+    expect(decodeWorkspaceResult(method, { ...base, heldFiles: [] })).toEqual({ ...base, heldFiles: [] });
     for (const heldFiles of [
       null,
       [{}],
@@ -1024,3 +1026,10 @@ for (const [method, base] of holdReplies) {
     expect(() => decodeWorkspaceResult(method, base)).toThrow(ProtocolShapeError);
   });
 }
+
+it("decodes the passive current view manifest and rejects a frontier-only placeholder",()=>{
+  const file={versionId:"main",objectId:"a",path:"docs/a.md",contentKind:"text",sha256:"a".repeat(64),byteLength:4,lineageClaimId:null,restoreGeneration:null};
+  const view={workspaceId:"w",revision:1,logCursor:3,journalCursor:5,moved:false,nextCursor:null,refusedFiles:[],files:[file],texts:[{sha256:file.sha256,text:"text"}]};
+  expect(decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut,view)).toEqual(view);
+  expect(()=>decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut,{revision:1,logCursor:3,journalCursor:5})).toThrow(ProtocolShapeError);
+});

@@ -1,3 +1,4 @@
+import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { CHANNELS } from "./channels";
 import {
   CloudEnableSyncPayload, CloudJoinWorkspacePayload, CloudJoinWorkspaceResult,
@@ -40,6 +41,7 @@ export function registerCloudIpcHandlers<
   refreshCredentialCache(): Promise<void>;
   warmCredentialCache(): Promise<void>;
   currentCredentials(): CloudCredentials | null;
+  localInstallationId(): string;
   loadAndCacheCurrentCredentials(): Promise<CloudCredentials | null>;
   closeAllRelayTransportWorkspaces(options?: { accountChanged?: boolean }): Promise<void>;
   activity: {
@@ -55,10 +57,6 @@ export function registerCloudIpcHandlers<
   engineDaemonStartup(): Promise<unknown>;
   requireEngineSessions(): EngineWorkspaceSessions;
   currentEngineSessions(): EngineWorkspaceSessions | null;
-  withPhysicalWorkspaceOperation<Result>(
-    workspaceId: string,
-    work: (operation: { readonly workspace: RegistryEntry & { readonly attachmentId: symbol }; assertCurrent(): void }) => Result | Promise<Result>,
-  ): Promise<Result>;
   withRendererWorkspaceOperation<Result>(
     sender: Sender, workspaceId: string, inactiveMessage: string,
     work: (operation: Operation) => Result | Promise<Result>,
@@ -92,7 +90,7 @@ export function registerCloudIpcHandlers<
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
     reconcileCloud, notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
     notifyRenderer, findWorkspace, engineDaemonStartup,
-    requireEngineSessions, currentEngineSessions, withPhysicalWorkspaceOperation,
+    requireEngineSessions, currentEngineSessions,
     withRendererWorkspaceOperation, receivedShareEngine, readWorkspaceSecretState,
     readWorkspaceDataKeyForEnrollment, assertWritableWorkspace, relayClientForWorkspace,
     enrollWorkspaceKeyEnvelope, installWorkspaceDataKey, setWorkspaceRemote,
@@ -144,24 +142,29 @@ export function registerCloudIpcHandlers<
     const input = CloudStatusPayload.parse(payload ?? {});
     const status = await cloudLogin().status();
     await warmCredentialCache();
-    const workspace = input.workspaceId ? findWorkspace(input.workspaceId) : undefined;
+    let workspace: RegistryEntry | undefined;
     let workspaceSecretState: WorkspaceSecretState | undefined;
-    if (workspace) {
+    if (input.workspaceId) {
       // The shell asks at mount, which can precede the daemon handshake now
       // that the window loads during it.
       await engineDaemonStartup();
       const sessions = requireEngineSessions();
-      workspaceSecretState = await withPhysicalWorkspaceOperation(
-        workspace.workspaceId,
-        async (operation) =>
-          await readWorkspaceSecretState(
-            receivedShareEngine.workspaceForRegistered(operation.workspace),
-            sessions,
-          ),
-      );
+      ({ workspace, workspaceSecretState } = await withRendererWorkspaceOperation(
+        event.sender, input.workspaceId, "This workspace is no longer active.",
+        async (operation) => {
+          return {
+            workspace: operation.workspace,
+            workspaceSecretState: await readWorkspaceSecretState(
+              receivedShareEngine.workspaceForRegistered(operation.workspace),
+              sessions,
+            ),
+          };
+        },
+      ));
     }
     return CloudStatusResult.parse({
       ...status,
+      ownPresentation: ownActorPresentation(dependencies.localInstallationId(), currentCredentials()),
       ...(input.workspaceId
         ? {
             workspaceSynced: !!workspace?.remote,

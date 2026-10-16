@@ -95,6 +95,7 @@ impl ActorHandle {
                 &workspace_id,
                 displacement_id,
                 &MaterializeOptions {
+                    holds: None,
                     policy: DurabilityPolicy::per_os(),
                     replacer: &StdReplacer,
                     backoff: &StdBackoff,
@@ -136,6 +137,7 @@ impl ActorHandle {
                 store,
                 &root_dir,
                 MaterializationReplayScope {
+                    holds: None,
                     workspace_id: &workspace_id,
                     self_writes: None,
                     progress: progress.as_deref(),
@@ -168,6 +170,7 @@ impl ActorHandle {
                 store,
                 &root_dir,
                 MaterializationReplayScope {
+                    holds: None,
                     workspace_id: &workspace_id,
                     self_writes: Some(self_writes.as_ref()),
                     progress: None,
@@ -208,6 +211,7 @@ impl ActorHandle {
                 store,
                 &root_dir,
                 MaterializationReplayScope {
+                    holds: None,
                     workspace_id: &workspace_id,
                     self_writes: Some(self_writes.as_ref()),
                     progress: None,
@@ -429,6 +433,7 @@ pub(super) struct MaterializationReplaySummary {
 
 #[derive(Clone, Copy)]
 pub(super) struct MaterializationReplayScope<'a> {
+    pub(super) holds: Option<&'a dohc_engine_files::PlacementHolds>,
     pub(super) workspace_id: &'a str,
     pub(super) self_writes: Option<&'a dyn SelfWriteRecorder>,
     /// Counts each job this replay takes on, so a caller waiting on a long
@@ -579,6 +584,38 @@ pub(super) fn rollback_job_matches_active(
     .map(Some)
 }
 
+fn switch_parent_deletes_first(jobs: Vec<MaterializationJob>) -> Vec<MaterializationJob> {
+    if !jobs.iter().any(|job| {
+        job.operation == MaterializationOperation::Delete
+            && job.job_id.starts_with("version-switch-")
+    }) {
+        return jobs;
+    }
+    let mut ancestors = HashSet::new();
+    for job in &jobs {
+        if job.operation == MaterializationOperation::Write
+            && job.job_id.starts_with("version-switch-")
+        {
+            let path = job.target_path.to_lowercase();
+            let mut path = path.as_str();
+            while let Some((parent, _)) = path.rsplit_once('/') {
+                ancestors.insert(parent.to_owned());
+                path = parent;
+            }
+        }
+    }
+    if ancestors.is_empty() {
+        return jobs;
+    }
+    let (mut parents, others): (Vec<_>, Vec<_>) = jobs.into_iter().partition(|job| {
+        job.operation == MaterializationOperation::Delete
+            && job.job_id.starts_with("version-switch-")
+            && ancestors.contains(&job.target_path.to_lowercase())
+    });
+    parents.extend(others);
+    parents
+}
+
 pub(super) fn replay_pending_materializations(
     store: &mut EngineStore,
     root_dir: &std::path::Path,
@@ -596,6 +633,14 @@ pub(super) fn replay_pending_materializations(
             selected_seen: 0,
         });
     }
+    let loaded_holds;
+    let holds = match scope.holds {
+        Some(holds) => holds,
+        None => {
+            loaded_holds = dohc_engine_files::PlacementHolds::load(store, scope.workspace_id)?;
+            &loaded_holds
+        }
+    };
     // A crash can leave a replace half done, including for a job that will not
     // run again. Resolve those first, so no displaced file is left unsettled.
     recover_displacements(
@@ -603,6 +648,7 @@ pub(super) fn replay_pending_materializations(
         root_dir,
         Some(scope.workspace_id),
         &MaterializeOptions {
+            holds: Some(holds),
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &StdBackoff,
@@ -611,7 +657,27 @@ pub(super) fn replay_pending_materializations(
         },
     )?;
     reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
-    let jobs = store.list_pending_materialization_jobs()?;
+    let mut jobs = if let Some(selected) = selected {
+        let mut jobs = selected
+            .iter()
+            .map(|id| store.load_materialization_job(id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        jobs.sort_by(|a, b| (a.created_at_ms, &a.job_id).cmp(&(b.created_at_ms, &b.job_id)));
+        jobs
+    } else {
+        store.list_pending_materialization_jobs()?
+    };
+    // Legacy unscoped intents remain replayable in each workspace.
+    jobs.retain(|job| {
+        job.status == JobStatus::Pending
+            && !job.job_id.starts_with("restore-delete-mat_")
+            && (job.workspace_id.is_empty() || job.workspace_id == scope.workspace_id)
+            && selected.is_none_or(|selected| selected.contains(&job.job_id))
+    });
+    let jobs = switch_parent_deletes_first(jobs);
     let summary = (|| -> Result<MaterializationReplaySummary, RuntimeError> {
         let mut summary = MaterializationReplaySummary {
             parked: 0,
@@ -621,18 +687,13 @@ pub(super) fn replay_pending_materializations(
         };
         let mut secret_key: Option<SecretDataKey> = None;
         for job in jobs {
-            if selected.is_some_and(|selected| !selected.contains(&job.job_id)) {
-                continue;
-            }
-            // Empty is the migration sentinel for a pre-coordinate row. Those
-            // intents were globally replayable before workspace scoping existed,
-            // so preserve that behavior until one workspace drains them.
-            if !job.workspace_id.is_empty() && job.workspace_id != scope.workspace_id {
-                continue;
-            }
             summary.selected_seen += usize::from(selected.is_some());
             if let Some(progress) = scope.progress {
                 progress.fetch_add(1, Ordering::Relaxed);
+            }
+            if holds.blocks(&job.target_path) {
+                summary.parked += 1;
+                continue;
             }
             let switch_secret = job.job_id.starts_with("version-switch-secret-mat_");
             let ordinary_secret = job.job_id.starts_with("secret-mat_");
@@ -679,6 +740,7 @@ pub(super) fn replay_pending_materializations(
                         root_dir,
                         &job,
                         &MaterializeOptions {
+                            holds: Some(holds),
                             policy: DurabilityPolicy::per_os(),
                             replacer: &StdReplacer,
                             backoff: &StdBackoff,
@@ -737,6 +799,7 @@ pub(super) fn replay_pending_materializations(
                     &job,
                     plaintext.as_bytes(),
                     &MaterializeOptions {
+                        holds: Some(holds),
                         policy: DurabilityPolicy::per_os(),
                         replacer: &StdReplacer,
                         backoff: &StdBackoff,
@@ -788,7 +851,7 @@ pub(super) fn replay_pending_materializations(
             {
                 if scope
                     .released_hold_paths
-                    .is_some_and(|paths| paths.contains(&job.target_path))
+                    .is_some_and(|paths| paths.contains(&job.target_path.to_lowercase()))
                     && job.operation == MaterializationOperation::Write
                 {
                     match dohc_engine_files::materialize_write_conflict(
@@ -796,6 +859,7 @@ pub(super) fn replay_pending_materializations(
                         root_dir,
                         &job,
                         &MaterializeOptions {
+                            holds: Some(holds),
                             policy: DurabilityPolicy::per_os(),
                             replacer: &StdReplacer,
                             backoff: &StdBackoff,
@@ -862,6 +926,7 @@ pub(super) fn replay_pending_materializations(
                     self_writes,
                     now_ms,
                     faults,
+                    Some(holds),
                 );
                 if materialized {
                     Ok(JobOutcome::Completed)
@@ -883,6 +948,7 @@ pub(super) fn replay_pending_materializations(
                     root_dir,
                     &job,
                     &MaterializeOptions {
+                        holds: Some(holds),
                         policy: DurabilityPolicy::per_os(),
                         replacer: &StdReplacer,
                         backoff: &StdBackoff,
@@ -961,6 +1027,12 @@ pub(super) fn replay_pending_materializations(
             .map_err(StorageError::corrupt_public)
     })?;
     for job_id in checked_jobs {
+        if !holds.is_empty()
+            && let Some(job) = store.load_materialization_job(&job_id)?
+            && holds.blocks(&job.target_path)
+        {
+            continue;
+        }
         let recorder: &dyn SelfWriteRecorder = scope.self_writes.unwrap_or(&());
         match super::versioned::publish_checked_delete_on_store(
             store,
@@ -972,6 +1044,7 @@ pub(super) fn replay_pending_materializations(
             faults,
             true,
             false,
+            Some(holds),
         ) {
             Ok(()) => {}
             Err(RuntimeError::OperationCrashed) => return Err(RuntimeError::OperationCrashed),
@@ -990,6 +1063,7 @@ pub(super) fn replay_pending_materializations(
     Ok(summary)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn materialize_pending_job(
     store: &EngineStore,
     root_dir: &std::path::Path,
@@ -998,6 +1072,7 @@ pub(super) fn materialize_pending_job(
     self_writes: &dyn SelfWriteRecorder,
     now_ms: i64,
     faults: &dyn FaultInjector,
+    holds: Option<&dohc_engine_files::PlacementHolds>,
 ) -> (bool, PostCommitMaterializeOutcome) {
     if job.job_id.starts_with("restore-delete-mat_") {
         return (false, PostCommitMaterializeOutcome::Skipped);
@@ -1011,6 +1086,7 @@ pub(super) fn materialize_pending_job(
         root_dir,
         job,
         &MaterializeOptions {
+            holds,
             policy: DurabilityPolicy::per_os(),
             replacer: &StdReplacer,
             backoff: &StdBackoff,
@@ -1044,6 +1120,7 @@ pub(super) fn materialize_pending_job(
     (materialized, reported)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn materialize_expected_job(
     store: &EngineStore,
     root_dir: &std::path::Path,
@@ -1052,6 +1129,7 @@ pub(super) fn materialize_expected_job(
     self_writes: &dyn SelfWriteRecorder,
     now_ms: i64,
     faults: &dyn FaultInjector,
+    holds: Option<&dohc_engine_files::PlacementHolds>,
 ) -> bool {
     let job = match store.load_materialization_job(job_id) {
         Ok(Some(job)) => job,
@@ -1072,6 +1150,7 @@ pub(super) fn materialize_expected_job(
                 self_writes,
                 now_ms,
                 faults,
+                holds,
             )
             .0
         }

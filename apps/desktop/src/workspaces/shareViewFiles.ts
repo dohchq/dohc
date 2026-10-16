@@ -16,7 +16,7 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
-import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
+import type { WorkspacePathListing } from "../ipc/bridgeContract";
 import {
   assertActiveWorkspaceOperationLease,
   mediaTypeForExtension,
@@ -44,6 +44,10 @@ import {
   recordedShareSelector,
   SharePinInvalidError,
 } from "./shareViewRecords";
+import {
+  SHARE_VIEW_REOPEN_MESSAGE,
+  shareViewIdentityIsIntact,
+} from "./shareViewMarker";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
 import { createShareViewFileChanges } from "./shareViewFileChanges";
@@ -192,7 +196,7 @@ export interface ShareViewFiles {
   list(
     target: ShareViewFilesTarget,
     options?: { includeContentIdentity?: boolean },
-  ): Promise<ListWorkspaceFilesResult>;
+  ): Promise<WorkspacePathListing>;
   projectionStatus(
     target: ShareViewFilesTarget,
   ): Promise<ShareViewProjectionStatus>;
@@ -335,6 +339,9 @@ function assertActiveTarget(
 function writableSelector(target: ActiveShareViewFilesTarget) {
   const selector = recordedShareSelector(target.grantedSelector);
   if (selector === null) throw new SharePinInvalidError(target.shareId);
+  if (target.kind === "standalone" && !shareViewIdentityIsIntact(target)) {
+    throw new SharedFileReadOnlyError(SHARE_VIEW_REOPEN_MESSAGE);
+  }
   if (
     target.kind === "mount" ||
     !shareViewTakesLocalWrites({

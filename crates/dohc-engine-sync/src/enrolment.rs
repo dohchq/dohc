@@ -3762,6 +3762,7 @@ mod tests {
                     &scratch,
                     &job,
                     &dohc_engine_files::MaterializeOptions {
+                        holds: None,
                         policy: dohc_engine_files::DurabilityPolicy::none(),
                         replacer: &dohc_engine_files::StdReplacer,
                         backoff: &dohc_engine_files::NoBackoff,

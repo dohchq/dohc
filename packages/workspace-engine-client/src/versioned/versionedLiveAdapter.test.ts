@@ -1,5 +1,5 @@
 import type { HistoryCursor } from "./versionedWireContract";
-function historyCursor(): HistoryCursor { return { format: 1, engineUuid: "test", workspaceId: "workspace", versionId: "main", objectId: null, textFence: 41, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null }; }
+function historyCursor(): HistoryCursor { return { format: 1, engineUuid: "test", workspaceId: "workspace", versionId: "main", objectId: null, operationId: null, textFence: 41, protectedFence: -1, markerFence: -1, text: null, protected: null, marker: null }; }
 import { ProtocolShapeError } from "../wireSchema";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -401,6 +401,16 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
+  it("retries a held path with the real flush and retried result", async () => {
+    const result = { settled: true, running: true, degraded: false, retried: false, heldFiles: [] };
+    const requests: Request[] = [];
+    const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request) {
+      requests.push(request); return { id: request.id, result };
+    } }, WORKSPACE, { workspaceId: WORKSPACE });
+    expect(await adapter.retryHeldCapture("notes/held.md")).toEqual(result);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ method: "capture.retryHeld", params: { path: "notes/held.md" } });
+  });
   it.each(["workspaceId", "engineUuid", "versionId", "objectId"] as const)("rejects a History cursor from another %s", async field => {
     const engine = new VersionedLoopbackEngine();
     const adapter = new VersionedLiveAdapter({ sendRequest: request => engine.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });
@@ -2148,4 +2158,20 @@ describe("outage typing recovery import", () => {
     }}, WORKSPACE, {workspaceId: WORKSPACE});
     await expect(adapter.importRecovery(checkpoint)).rejects.toThrow();
   });
+});
+
+it("sends Undo retry identity in the request envelope and reads body-free operation references", async () => {
+  const requests: Request[]=[];
+  const client:MinimalDaemonClient={close:()=>undefined,sendRequest:async request=>{
+    requests.push(request);
+    return {id:request.id,result:{operationId:"dohc-operation:minted",versionId:"main",momentCount:0,...(request.method===VERSIONED_METHOD.historyUndo?{compensationOperationId:"dohc-operation:undo:replayed",deduped:true,materialized:false}:{})}};
+  }};
+  const adapter=new VersionedLiveAdapter(client,WORKSPACE,{workspaceId:WORKSPACE});
+  await adapter.holdCapture({operationId:"dohc-operation:minted"}).catch(()=>undefined);
+  await adapter.readHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted"});
+  await adapter.undoHistoryOperation({workspaceId:WORKSPACE,operationId:"dohc-operation:minted",requestId:"retry"});
+  expect(requests[0]?.params).toEqual({operationId:"dohc-operation:minted"});
+  expect(requests[1]).toMatchObject({method:"history.operations",params:{operationId:"dohc-operation:minted"}});
+  expect(requests[2]).toMatchObject({method:"history.undo",idempotencyKey:"retry",params:{operationId:"dohc-operation:minted"}});
+  expect(requests[2]?.params).not.toHaveProperty("requestId");
 });

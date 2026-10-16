@@ -30,7 +30,6 @@ export function createWritableChatIpcHandler<
   Context extends WorkspaceContext,
   Result,
 >(input: {
-  assertTrustedSender: (event: Event) => void;
   parsePayload: (payload: unknown) => Payload;
   requireContext: (workspaceId: string) => Promise<Context>;
   // The write gate, over the whole context — not just its workspace, because
@@ -43,8 +42,7 @@ export function createWritableChatIpcHandler<
   run: (context: Context, payload: Payload) => Promise<Result>;
   afterWrite?: Array<(context: Context, payload: Payload, result: Result) => void>;
 }): MainChatIpcHandler<Event, Result> {
-  return async (event, rawPayload) => {
-    input.assertTrustedSender(event);
+  return async (_event, rawPayload) => {
     const payload = input.parsePayload(rawPayload);
     const context = await input.requireContext(payload.workspaceId);
     input.assertWritable?.(context);
@@ -60,7 +58,6 @@ export function createMarkChatThreadReadIpcHandler<
   Context extends WorkspaceContext,
   Result,
 >(input: {
-  assertTrustedSender: (event: Event) => void;
   parsePayload: (payload: unknown) => Payload;
   requireContext: (workspaceId: string) => Promise<Context>;
   run: (context: Context, payload: Payload) => Promise<Result>;
@@ -121,7 +118,6 @@ export function createChatChannelIpcHandler<
   Context extends WorkspaceContext,
   Result,
 >(input: {
-  assertTrustedSender: (event: Event) => void;
   parsePayload: (payload: unknown) => Payload;
   requireContext: (workspaceId: string) => Promise<Context>;
   assertWritable: ((context: Context) => void) | null;

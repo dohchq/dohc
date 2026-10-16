@@ -7,6 +7,7 @@ import { createNamedLiveProvider, type NamedLiveProviderLimits, type NamedLivePr
 /** Account ID is a stale-selection guard, never an authentication credential. */
 export interface NamedLiveSelection {
   accountId: string;
+  /** Public named:<grantId> binding, never the source workspace ID. */
   workspaceId: string;
   grantId: string;
   objectId: string;

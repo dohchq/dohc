@@ -31,6 +31,9 @@ export type CloudSettings = {
   // A failure that reaches every workspace, such as Disconnect's. It goes to
   // whichever workspace is open when it arrives, with no workspace guard.
   onAccountError: (error: ConnectionErrorReport) => void;
+  // Opens the deletion review. The shell owns it, so it outlives this page
+  // and the account row.
+  onDeleteAccount: (account: { email: string; server: string }) => void;
 };
 
 type WorkspaceSync = Required<Pick<
@@ -170,10 +173,12 @@ export function CloudSyncSettings(props: {
     <>
       <CloudAccountRow
         email={status.email ?? ""}
+        presentation={status.ownPresentation}
         serverUrl={status.serverUrl ?? ""}
         networkAccess={status.networkAccess ?? null}
         onSettled={props.cloud.onChanged}
         onError={props.cloud.onAccountError}
+        onDelete={props.cloud.onDeleteAccount}
       />
       {/* Main refuses to enroll a shared view: it syncs through its share. */}
       {props.sharedView ? null : (

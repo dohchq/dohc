@@ -3972,6 +3972,7 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
             store,
             scratch.path(),
             &MaterializeOptions {
+                holds: None,
                 policy: dohc_engine_files::DurabilityPolicy::per_os(),
                 replacer: &dohc_engine_files::StdReplacer,
                 backoff: &dohc_engine_files::NoBackoff,

@@ -18,6 +18,12 @@ mod capture_write;
 mod delete_rename;
 mod file_resolution;
 pub use file_resolution::{FileResolution, FileResolveTarget};
+mod operations;
+pub use operations::{
+    OPERATION_ID_PREFIX, OperationMoment, ensure_operation_published_in, operation_moments_in,
+    preflight_undo_operation_in, replayed_undo_operation_in, undo_correlation_id,
+    undo_operation_in_tx, undo_request_is_replay_in, validate_operation_id,
+};
 mod history;
 pub use history::{
     HistoryCursor, HistoryMarkerPosition, HistoryMomentMetadata, HistoryMomentPosition,
@@ -53,7 +59,8 @@ pub use capture_write::{
 
 pub use delete_rename::{
     delete_text_in_tx, delete_text_in_tx_checked, finish_checked_delete_in_tx,
-    moment_has_replication_dependents_in, prepare_checked_delete_in_tx, validate_delete_input,
+    moment_has_replication_dependents_in, prepare_checked_delete_in_tx, rename_text_in_tx,
+    validate_delete_input,
 };
 
 pub use rollback::{

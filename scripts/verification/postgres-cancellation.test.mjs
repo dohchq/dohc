@@ -29,7 +29,7 @@ if (process.argv[2] === "fixture") {
       if (args[0] === "run") { writeFileSync(container, "owned fixture"); return { stdout: "a".repeat(64) }; }
       if (args[0] === "inspect") return { stdout: ++probes === 1 ? "starting" : "healthy" };
       if (args[0] === "port") return { stdout: "127.0.0.1:1234" };
-      assert.deepEqual(args, ["rm", "--force", "a".repeat(64)]);
+      assert.deepEqual(args, ["rm", "--force", "--volumes", "a".repeat(64)]);
       removals++;
       assert.ok(process.listenerCount(signal) > 0, "cleanup retains cancellation protection");
       if (cleanupFails) throw new Error("fixture cleanup rejected");

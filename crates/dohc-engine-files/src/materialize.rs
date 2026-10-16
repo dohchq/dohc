@@ -561,6 +561,65 @@ pub enum ProjectionTargetKind {
     Secret,
 }
 
+/// Metadata-only proof for rechecking a hashed projection under a write lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionTargetStamp {
+    Absent,
+    File {
+        byte_length: u64,
+        modified: std::time::SystemTime,
+    },
+    Unavailable,
+}
+
+/// A projection probe bound to one canonical workspace root.
+pub struct ProjectionProbe {
+    root: PathBuf,
+}
+
+impl ProjectionProbe {
+    pub fn new(root: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            root: std::fs::canonicalize(root)?,
+        })
+    }
+    pub fn stamp(&self, rel: &str) -> ProjectionTargetStamp {
+        projection_target_stamp_in(&self.root, rel)
+    }
+    pub fn probe(&self, rel: &str, kind: ProjectionTargetKind) -> ProjectionTargetState {
+        probe_projection_target_in(&self.root, rel, kind)
+    }
+}
+
+pub fn projection_target_stamp(root: &Path, rel: &str) -> ProjectionTargetStamp {
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return ProjectionTargetStamp::Unavailable;
+    };
+    projection_target_stamp_in(&root, rel)
+}
+
+fn projection_target_stamp_in(root: &Path, rel: &str) -> ProjectionTargetStamp {
+    let Ok(target) = resolve_target(root, rel) else {
+        return ProjectionTargetStamp::Unavailable;
+    };
+    if !matches!(projection_has_file_ancestor(root, &target), Ok(false))
+        || !existing_ancestor_is_contained(root, &target)
+    {
+        return ProjectionTargetStamp::Unavailable;
+    }
+    match std::fs::symlink_metadata(target) {
+        Err(e) if e.kind() == ErrorKind::NotFound => ProjectionTargetStamp::Absent,
+        Ok(m) if m.file_type().is_file() && !m.file_type().is_symlink() => match m.modified() {
+            Ok(modified) => ProjectionTargetStamp::File {
+                byte_length: m.len(),
+                modified,
+            },
+            Err(_) => ProjectionTargetStamp::Unavailable,
+        },
+        _ => ProjectionTargetStamp::Unavailable,
+    }
+}
+
 /// Read a prospective projection target without treating foreign or
 /// transiently unreadable content as an overwrite preimage.
 pub fn probe_projection_target(
@@ -572,11 +631,19 @@ pub fn probe_projection_target(
         Ok(root) => root,
         Err(_) => return ProjectionTargetState::UntrackedContent,
     };
-    let target = match resolve_target(&canonical_root, rel) {
+    probe_projection_target_in(&canonical_root, rel, kind)
+}
+
+fn probe_projection_target_in(
+    canonical_root: &Path,
+    rel: &str,
+    kind: ProjectionTargetKind,
+) -> ProjectionTargetState {
+    let target = match resolve_target(canonical_root, rel) {
         Ok(target) => target,
         Err(_) => return ProjectionTargetState::UntrackedContent,
     };
-    match projection_has_file_ancestor(&canonical_root, &target) {
+    match projection_has_file_ancestor(canonical_root, &target) {
         Ok(true) => return ProjectionTargetState::Absent,
         Ok(false) => {}
         Err(_) => return ProjectionTargetState::UntrackedContent,
@@ -584,7 +651,7 @@ pub fn probe_projection_target(
     let metadata = match std::fs::symlink_metadata(&target) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return if existing_ancestor_is_contained(&canonical_root, &target) {
+            return if existing_ancestor_is_contained(canonical_root, &target) {
                 ProjectionTargetState::Absent
             } else {
                 ProjectionTargetState::UntrackedContent
@@ -595,7 +662,7 @@ pub fn probe_projection_target(
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
         return ProjectionTargetState::UntrackedContent;
     }
-    if !existing_ancestor_is_contained(&canonical_root, &target) {
+    if !existing_ancestor_is_contained(canonical_root, &target) {
         return ProjectionTargetState::UntrackedContent;
     }
     let cap = match kind {
@@ -680,13 +747,10 @@ pub fn write_precondition_sha256(
 }
 
 fn existing_ancestor_is_contained(root: &Path, target: &Path) -> bool {
-    let Ok(canonical_root) = std::fs::canonicalize(root) else {
-        return false;
-    };
     let mut candidate = Some(target);
     while let Some(path) = candidate {
         match std::fs::canonicalize(path) {
-            Ok(canonical) => return canonical.starts_with(&canonical_root),
+            Ok(canonical) => return canonical.starts_with(root),
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 candidate = path.parent();
             }
@@ -786,6 +850,138 @@ pub struct MaterializeOptions<'a> {
     pub backoff: &'a dyn ReplaceBackoff,
     pub now_ms: i64,
     pub faults: &'a dyn FaultInjector,
+    /// A snapshot valid for this serialized writer operation. Other callers
+    /// check the durable hold at each placement boundary.
+    pub holds: Option<&'a PlacementHolds>,
+}
+
+/// A held file's source head, never the refused outside observation.
+pub struct PlacementHold {
+    pub source_version_id: String,
+    pub preimage: Preimage,
+}
+
+/// One indexed workspace read, reused throughout a serialized placement batch.
+pub struct PlacementHolds {
+    workspace_id: String,
+    paths: std::collections::HashMap<String, PlacementHold>,
+    case_aliases: std::collections::HashMap<String, String>,
+}
+
+impl PlacementHolds {
+    pub fn load(store: &EngineStore, workspace_id: &str) -> Result<Self, MaterializeError> {
+        let paths = store.read_with(|conn| {
+            let mut statement = conn
+                .prepare_cached(
+                    "SELECT h.path,h.source_version_id,CASE COALESCE(s.content_kind,'text') \
+                 WHEN 'binary' THEN s.binary_sha256 ELSE s.blob_sha256 END \
+                 FROM capture_file_holds h LEFT JOIN snapshots s \
+                 ON s.workspace_id=h.workspace_id AND s.version_id=h.source_version_id \
+                 AND s.object_id=h.object_id WHERE h.workspace_id=?1 ORDER BY h.path",
+                )
+                .map_err(StorageError::corrupt_public)?;
+            statement
+                .query_map([workspace_id], |row| {
+                    let recorded: Option<String> = row.get(2)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        PlacementHold {
+                            source_version_id: row.get(1)?,
+                            preimage: recorded.map_or(Preimage::Absent, Preimage::Present),
+                        },
+                    ))
+                })
+                .map_err(StorageError::corrupt_public)?
+                .collect::<Result<std::collections::HashMap<_, _>, _>>()
+                .map_err(StorageError::corrupt_public)
+        })?;
+        Ok(Self::from_paths(workspace_id, paths))
+    }
+
+    pub fn from_holds(
+        workspace_id: &str,
+        holds: &[dohc_engine_storage::capture_file_holds::CaptureFileHold],
+    ) -> Self {
+        Self::from_paths(
+            workspace_id,
+            holds
+                .iter()
+                .map(|hold| {
+                    (
+                        hold.path.clone(),
+                        PlacementHold {
+                            source_version_id: hold.source_version_id.clone(),
+                            preimage: Preimage::Absent,
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn from_paths(
+        workspace_id: &str,
+        paths: std::collections::HashMap<String, PlacementHold>,
+    ) -> Self {
+        let case_aliases = paths
+            .keys()
+            .map(|path| (path.to_lowercase(), path.clone()))
+            .collect();
+        Self {
+            workspace_id: workspace_id.to_owned(),
+            paths,
+            case_aliases,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &PlacementHold)> {
+        self.paths.iter().map(|(path, hold)| (path.as_str(), hold))
+    }
+
+    /// Lexical checks never resolve or read the outside file. Lowercase aliases
+    /// deliberately over-park distinct paths on case-sensitive volumes.
+    pub fn get(&self, path: &str) -> Option<(&str, &PlacementHold)> {
+        if let Some((path, hold)) = self.paths.get_key_value(path) {
+            return Some((path, hold));
+        }
+        if self.is_empty() {
+            return None;
+        }
+        let stored = self.case_aliases.get(&path.to_lowercase())?;
+        self.paths
+            .get_key_value(stored)
+            .map(|(path, hold)| (path.as_str(), hold))
+    }
+
+    pub fn ancestor(&self, mut path: &str) -> Option<(&str, &PlacementHold)> {
+        if self.is_empty() {
+            return None;
+        }
+        while let Some((parent, _)) = path.rsplit_once('/') {
+            if let Some(held) = self.get(parent) {
+                return Some(held);
+            }
+            path = parent;
+        }
+        None
+    }
+
+    pub fn blocks(&self, path: &str) -> bool {
+        self.get(path).or_else(|| self.ancestor(path)).is_some()
+    }
+
+    #[cfg(windows)]
+    fn resolved(&self, root: &Path, target: &Path) -> Result<bool, MaterializeError> {
+        let path = target
+            .strip_prefix(root)
+            .map_err(|_| MaterializeError::UnsafeTargetPath)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        Ok(self.blocks(&path))
+    }
 }
 
 /// Execute every pending job (oldest first), after resolving every
@@ -862,6 +1058,7 @@ fn materialize_one_ordinary_with(
         &job.workspace_id,
         &job.target_path,
         Some(&target),
+        options.holds,
     )? {
         return Ok(JobOutcome::Parked);
     }
@@ -983,6 +1180,7 @@ fn materialize_secret_one_with_remover(
         &job.workspace_id,
         &job.target_path,
         Some(&target),
+        options.holds,
     )? {
         return Ok(JobOutcome::Parked);
     }
@@ -1054,6 +1252,7 @@ pub fn materialize_secret_delete_one(
         &job.workspace_id,
         &job.target_path,
         Some(&target),
+        options.holds,
     )? {
         return Ok(JobOutcome::Parked);
     }
@@ -1180,6 +1379,7 @@ fn materialize_secret_write(
         backoff,
         now_ms,
         faults,
+        ..
     } = *options;
     ensure_target_symlink_free(root, target)?;
     // Step 1 (idempotent replay): the target already equals the desired content.
@@ -1671,13 +1871,21 @@ fn materialize_cross_volume(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
+    let recorded_preimage = match &job.preimage {
+        Preimage::Present(expected) => {
+            expected == &hex_sha256(b"") || store.holds_content(expected)?
+        }
+        Preimage::Absent => true,
+    };
     let replaced = retry_while_locked(
         target,
         target,
         options.backoff,
         MAX_REPLACE_ATTEMPTS,
         || {
-            if !preimage_matches(&job.preimage, &read_current_no_follow(target)?) {
+            if !recorded_preimage
+                || !preimage_matches(&job.preimage, &read_current_no_follow(target)?)
+            {
                 return Ok(Attempt::Done(false));
             }
             let result = match tmp {
@@ -2575,7 +2783,8 @@ impl RecoveryEntry {
         };
         if let Some(path) = path
             && !path.is_empty()
-            && match placement_is_held(store, root, self.workspace_id(), path, None) {
+            && match placement_is_held(store, root, self.workspace_id(), path, None, options.holds)
+            {
                 Ok(held) => held,
                 Err(error @ MaterializeError::Storage(_)) => return Err(error),
                 // Recovery inspects staging before it needs a resolvable target.
@@ -2592,6 +2801,26 @@ impl RecoveryEntry {
             },
         }
     }
+}
+
+/// Remove the regular file at `rel` when its bytes hash to `sha256`, so the
+/// path is free. `true` when `rel` is free afterwards, absent before or
+/// removed; `false`, removing nothing, when it holds anything else.
+pub fn remove_file_holding(root: &Path, rel: &str, sha256: &str) -> Result<bool, MaterializeError> {
+    match probe_projection_target(root, rel, ProjectionTargetKind::Plaintext) {
+        ProjectionTargetState::Absent => return Ok(true),
+        ProjectionTargetState::Text { sha256: held }
+        | ProjectionTargetState::Binary { sha256: held }
+            if held == sha256 => {}
+        _ => return Ok(false),
+    }
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let target = resolve_target(&canonical_root, rel)?;
+    ensure_target_symlink_free(&canonical_root, &target)?;
+    std::fs::remove_file(&target).map_err(|err| MaterializeError::io(&target, &err))?;
+    sync_parent_dir(target.parent(), DurabilityPolicy::per_os())?;
+    Ok(true)
 }
 
 /// Remove the directory at `rel` when it is empty, so a file can take its
@@ -3443,21 +3672,43 @@ fn preimage_matches(preimage: &Preimage, current: &CurrentTarget) -> bool {
     }
 }
 
-/// Check both the stored spelling and the filesystem-resolved Windows alias.
+/// Protect lexical aliases and held ancestors on every platform. Filesystem
+/// aliases are checked only here, after the placement boundary resolves them.
 fn placement_is_held(
     store: &EngineStore,
     root: &Path,
     workspace: &str,
     path: &str,
     target: Option<&Path>,
+    holds: Option<&PlacementHolds>,
 ) -> Result<bool, MaterializeError> {
+    if target.is_some_and(|target| target.strip_prefix(root).is_err()) {
+        return Err(MaterializeError::UnsafeTargetPath);
+    }
+    if let Some(holds) = holds.filter(|holds| holds.workspace_id == workspace) {
+        if holds.blocks(path) {
+            return Ok(true);
+        }
+        if holds.is_empty() {
+            return Ok(false);
+        }
+        #[cfg(windows)]
+        {
+            if let Some(target) = target {
+                return holds.resolved(root, target);
+            }
+            return holds.resolved(root, &resolve_target(root, path)?);
+        }
+        #[cfg(not(windows))]
+        return Ok(false);
+    }
     if store.placement_is_held(workspace, path)? {
         return Ok(true);
     }
     #[cfg(windows)]
     {
         let resolved_target;
-        let target: &Path = if let Some(target) = target {
+        let target = if let Some(target) = target {
             target
         } else {
             resolved_target = resolve_target(root, path)?;
@@ -4646,6 +4897,29 @@ mod tests {
         assert!(super::remove_empty_directory_target(root, "../d").is_err());
     }
 
+    #[test]
+    fn a_file_is_removed_only_while_it_holds_the_expected_bytes() {
+        let scratch = dohc_test_scratch::ScratchDir::new_named("file-holding").unwrap();
+        let root = scratch.path();
+        let held = dohc_engine_storage::hex_sha256(b"held");
+        std::fs::write(root.join("a.md"), "edited").unwrap();
+        assert!(!super::remove_file_holding(root, "a.md", &held).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.md")).unwrap(),
+            "edited"
+        );
+        std::fs::write(root.join("a.md"), "held").unwrap();
+        assert!(super::remove_file_holding(root, "a.md", &held).unwrap());
+        assert!(!root.join("a.md").exists());
+        assert!(
+            super::remove_file_holding(root, "a.md", &held).unwrap(),
+            "already free"
+        );
+        std::fs::create_dir(root.join("d.md")).unwrap();
+        assert!(!super::remove_file_holding(root, "d.md", &held).unwrap());
+        assert!(root.join("d.md").is_dir());
+    }
+
     #[cfg(unix)]
     #[test]
     fn directory_replacement_refuses_links_in_the_parent_chain() {
@@ -4733,8 +5007,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn review_snapshot_refuses_a_target_outside_its_root() {
+        let scratch = Scratch::new("held-target-outside-root");
+        let store = EngineStore::open(&scratch.db(), 1).unwrap();
+        let holds = PlacementHolds::from_holds("workspace", &[]);
+        let outside = scratch.root.parent().unwrap().join("outside.md");
+        assert!(matches!(
+            placement_is_held(
+                &store,
+                &scratch.root,
+                "workspace",
+                "file.md",
+                Some(&outside),
+                Some(&holds)
+            ),
+            Err(MaterializeError::UnsafeTargetPath)
+        ));
+    }
+
+    #[test]
+    fn review_durable_hold_matches_case_and_descendants() {
+        let scratch = Scratch::new("held-case-and-descendant");
+        let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
+        store.write_with(&NoFaults, |tx| tx.execute_batch("INSERT INTO versioned_workspaces VALUES ('workspace','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('workspace','main','main','Main',1); INSERT INTO file_objects VALUES ('workspace','held',1);").map_err(StorageError::persist_public)).unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::capture_file_holds::record_in(
+                    tx,
+                    &dohc_engine_storage::capture_file_holds::CaptureFileHold {
+                        workspace_id: "workspace".into(),
+                        source_version_id: "main".into(),
+                        object_id: "held".into(),
+                        path: "Plans".into(),
+                        observed_sha256: dohc_engine_storage::hex_sha256(b"outside"),
+                        observed_size: 7,
+                        reason: "ydoc-resolution-not-representable".into(),
+                        observed_at_ms: 1,
+                        attempt_count: 1,
+                        retry_requested: false,
+                    },
+                )
+            })
+            .unwrap();
+        assert!(
+            store
+                .placement_is_held("workspace", "plans/trip.md")
+                .unwrap()
+        );
+        assert!(store.placement_is_held("workspace", "PLANS").unwrap());
+        assert!(!store.placement_is_held("other", "PLANS").unwrap());
+        assert!(!store.placement_is_held("workspace", "planets.md").unwrap());
+    }
+
     fn options_with(replacer: &dyn AtomicReplacer) -> MaterializeOptions<'_> {
         MaterializeOptions {
+            holds: None,
             policy: DurabilityPolicy::none(),
             replacer,
             backoff: &NoBackoff,
@@ -5681,6 +6009,9 @@ mod tests {
         let root = scratch.root.path().to_path_buf();
         let outside = format!("{} too deep\n", "> ".repeat(121));
         std::fs::write(root.join("held.md"), &outside).unwrap();
+        if path != "held.md" && !root.join(path).exists() {
+            return;
+        }
         let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
         capture_file_hold_fixture(&mut store, outside.as_bytes());
         let sha = store.put_binary_blob(b"Canonical.\n").unwrap();
@@ -5759,7 +6090,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
     #[test]
     fn capture_file_hold_parks_case_alias_placements() {
         capture_hold_parks_job(MaterializationOperation::Write, "HELD.MD", false);
@@ -5771,6 +6101,9 @@ mod tests {
         let outside = format!("{} too deep\n", "> ".repeat(121));
         let previous = b"Unknown bytes from before a crash.\n";
         std::fs::write(root.join("held.md"), &outside).unwrap();
+        if path != "held.md" && !root.join(path).exists() {
+            return;
+        }
         let mut store = EngineStore::open(&scratch.db(), 1).unwrap();
         capture_file_hold_fixture(&mut store, outside.as_bytes());
         enqueue_write_job(&mut store, "held-recovery", path, outside.as_bytes(), 1);
@@ -5816,7 +6149,6 @@ mod tests {
         capture_hold_parks_displacement(false, "held.md");
     }
 
-    #[cfg(windows)]
     #[test]
     fn capture_file_hold_parks_case_alias_recovery_sweep() {
         capture_hold_parks_displacement(true, "HELD.MD");
@@ -5997,6 +6329,7 @@ mod tests {
                 &scratch.root,
                 &job,
                 &MaterializeOptions {
+                    holds: None,
                     policy: DurabilityPolicy::none(),
                     replacer: &StdReplacer,
                     backoff: &NoBackoff,
@@ -6024,6 +6357,7 @@ mod tests {
             &scratch.root,
             &job,
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &ContendedOnce(AtomicUsize::new(0)),
                 backoff: &ExternalEditDuringBackoff(target.clone()),
@@ -6059,6 +6393,7 @@ mod tests {
             &job,
             b"SECRET=intended",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &ContendedOnce(AtomicUsize::new(0)),
                 backoff: &ExternalEditDuringBackoff(target.clone()),
@@ -6269,6 +6604,7 @@ mod tests {
             &store,
             &scratch.root,
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6326,6 +6662,7 @@ mod tests {
             &target,
             &job,
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6371,6 +6708,7 @@ mod tests {
             &job,
             b"SECRET=ancestor\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6401,6 +6739,7 @@ mod tests {
             &job,
             b"SECRET=final\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6431,6 +6770,7 @@ mod tests {
             &job,
             b"SECRET=recovered\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6466,6 +6806,7 @@ mod tests {
             &job,
             b"SECRET=must-not-write\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6496,6 +6837,7 @@ mod tests {
             &job,
             plaintext,
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
@@ -6559,6 +6901,7 @@ mod tests {
             &job,
             b"SECRET=pinned\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &SwapAncestorBeforePinnedRename {
                     visible_parent,
@@ -6619,6 +6962,7 @@ mod tests {
             &job,
             b"SECRET=locked\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &AssertAncestorLockedBeforeRename {
                     visible_parent: visible_parent.clone(),
@@ -6701,6 +7045,7 @@ mod tests {
             &job,
             b"SECRET=grandparent-locked\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &AssertGrandparentLockedBeforeRename {
                     grandparent: grandparent.clone(),
@@ -6868,6 +7213,7 @@ mod tests {
             &job,
             b"SECRET=plaintext\n",
             &MaterializeOptions {
+                holds: None,
                 policy: DurabilityPolicy::none(),
                 replacer: &StdReplacer,
                 backoff: &NoBackoff,
