@@ -119,6 +119,7 @@ impl ActorHandle {
         workspace_id: String,
         version_id: Option<String>,
         object_id: Option<String>,
+        operation_id: Option<String>,
         limit: usize,
         cursor: Option<HistoryCursor>,
     ) -> Result<HistoryPageRead, RuntimeError> {
@@ -128,6 +129,7 @@ impl ActorHandle {
                     &workspace_id,
                     version_id.as_deref(),
                     object_id.as_deref(),
+                    operation_id.as_deref(),
                     limit,
                     cursor,
                 )

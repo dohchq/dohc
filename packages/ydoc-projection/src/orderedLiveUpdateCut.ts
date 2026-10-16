@@ -713,7 +713,14 @@ interface ExtendedUtf8Measurement {
   readonly hasLoneSurrogate: boolean
 }
 
+// Long strings are measured natively: once the scalar loop has seen many short
+// strings, V8 runs it several times slower on a 20 MiB document body.
+const NATIVE_UTF8_MEASURE_UNITS = 16_384
+const utf8MeasureScratch = new Uint8Array(3 * NATIVE_UTF8_MEASURE_UNITS)
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
 function measureExtendedUtf8(value: string): ExtendedUtf8Measurement {
+  if (value.length > NATIVE_UTF8_MEASURE_UNITS) return measureLongExtendedUtf8(value)
   let byteLength = 0
   let hasLoneSurrogate = false
   for (let index = 0; index < value.length; index += 1) {
@@ -735,6 +742,21 @@ function measureExtendedUtf8(value: string): ExtendedUtf8Measurement {
     }
   }
   return { byteLength, hasLoneSurrogate }
+}
+
+// TextEncoder writes a lone surrogate as U+FFFD, which has the same three-byte length.
+function measureLongExtendedUtf8(value: string): ExtendedUtf8Measurement {
+  let byteLength = 0
+  for (let start = 0; start < value.length;) {
+    let end = Math.min(start + NATIVE_UTF8_MEASURE_UNITS, value.length)
+    const last = value.charCodeAt(end - 1)
+    if (end < value.length && last >= 0xd800 && last <= 0xdbff) end -= 1
+    const { read, written } = utf8Encoder.encodeInto(value.substring(start, end), utf8MeasureScratch)
+    if (read !== end - start) throw new RangeError('invalid extended UTF-8 length')
+    byteLength += written
+    start = end
+  }
+  return { byteLength, hasLoneSurrogate: LONE_SURROGATE.test(value) }
 }
 
 function utf8Length(value: string): number {
