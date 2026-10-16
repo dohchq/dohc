@@ -584,6 +584,62 @@ it("warms a cold reach before the first admission check of a write", async () =>
   expect(order).toEqual(["other work", "answer"]);
 });
 
+// Proves: a write whose credential is revoked during its warm-up answers like
+// any revoked credential, and nothing is screened or prepared under it.
+it("answers a write whose credential is revoked during its warm-up like any revoked credential", async () => {
+  const f = await fixture();
+  let revoked = false;
+  const authorize = (input: {workspaceId: string; bearer: string; method: string; pathname: string}) =>
+    authorizeServiceHostReplication(f.storage, {key, namespace, ...input});
+  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,
+    authorize, revalidate: input => revoked ? null : authorize(input)});
+  const list = f.storage.listServiceHostDocumentRows.bind(f.storage);
+  f.storage.listServiceHostDocumentRows = input => {revoked = true; return list(input);};
+  const steps: string[] = [];
+  const held = f.storage.maxOriginSeq.bind(f.storage), prepare = f.storage.prepareLogAppend.bind(f.storage);
+  f.storage.maxOriginSeq = (...args) => {steps.push("screen"); return held(...args);};
+  f.storage.prepareLogAppend = async (...args) => {steps.push("prepare"); return prepare(...args);};
+  // The private blob would fail screening as missing.
+  const push = async () => {
+    const response = await handle(new Request(`https://relay.test/sync/${ws}/hosted/log`, {method: "POST",
+      headers: {authorization: `Bearer ${f.bearer}`, "content-type": "application/json"},
+      body: JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: HOST_ORIGIN,
+        ops: [{originSeq: 0, opKind: "ydoc.update", recordedAtMs: 3, payload: ydoc(binding.objectId, "docs/a.md", P)}]})}));
+    return [response.status, await response.json()];
+  };
+  const during = await push();
+  expect(revoked).toBe(true);
+  expect(during).toEqual(await push());
+  expect(during[0]).toBe(404);
+  expect(steps).toEqual([]);
+});
+
+// Proves: a document that joins after a write's warm-up is not scanned inside
+// the append's writer, and the host's next write warms it first.
+it("never scans a document that joins after the warm-up inside the append's writer", async () => {
+  const f = await fixture();
+  f.append(...Array.from({length: 1_100}, (): [string, Record<string, unknown>] => ["ydoc.update", ydoc("object-b", "docs/b.md", B)]));
+  const own = blob("host edit");
+  await f.upload(own);
+  let writing = false;
+  const written: Array<[string, boolean]> = [];
+  const list = f.storage.listServiceHostDocumentRows.bind(f.storage);
+  f.storage.listServiceHostDocumentRows = input => {if (writing) written.push([input.objectId, input.afterRelaySeq > 0]); return list(input);};
+  const append = f.storage.appendLogBatch.bind(f.storage);
+  f.storage.appendLogBatch = input => {writing = true; try {return append(input);} finally {writing = false;}};
+  const prepare = f.storage.prepareLogAppend.bind(f.storage);
+  // The document joins after the write's warm-up and screening.
+  f.storage.prepareLogAppend = async (...args) => {f.storage.prepareLogAppend = prepare; f.enroll("docs/b.md"); return prepare(...args);};
+  expect(await (await f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", own)]])).json()).toMatchObject({inserted: 1});
+  // The writer only caught up the document it already had.
+  expect(written).toEqual([[binding.objectId, true]]);
+  written.length = 0;
+  // The next write warms the joined document first, so naming its blob lands and the writer only catches up.
+  expect(await (await f.push([["moment.append", write(binding.objectId, "docs/a.md", B, {momentId: "copied"})]], 1)).json())
+    .toMatchObject({inserted: 1});
+  expect(written).toEqual([[binding.objectId, true], ["object-b", true]]);
+});
+
 it("keeps upload proof through later uploads and idle time", async () => {
   vi.useFakeTimers({toFake: ["Date"]});
   vi.setSystemTime(1_000_000);

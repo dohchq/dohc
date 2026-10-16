@@ -177,7 +177,7 @@ export async function startServiceLiveHost(options: {
   const recovering = new Set<string>();
   // Whether an update completed on this daemon.
   let updated = false;
-  // The stores of workspaces whose replica diverged and detached. None attaches again on this daemon, and each store stays where it is.
+  // The stores of workspaces whose replica diverged. None attaches again on this daemon, and each store stays where it is.
   const diverged = new Map<string, string>();
   // When each hosted document is due to unload with no live connection, and
   // the count of connection changes it last saw. An idle unload that started
@@ -651,10 +651,11 @@ export async function startServiceLiveHost(options: {
           if(activation!.workspaceReady(workspaceId))await step(async()=>{await attached.hosted.push(passSignal);await pull(attached,passSignal);});
         }
         // A diverged replica runs nothing more. Its workspace detaches for good, and its store stays.
+        // It counts as diverged before the detach, which a lost reply or an exiting engine can fail.
         for(const [workspaceId,attached] of [...attachments]){
           if(attached.hosted.diverged)await step(async()=>{
-            const store=members.get(workspaceId)!.workspace.root;
-            await detach(workspaceId,passSignal);diverged.set(workspaceId,store);
+            diverged.set(workspaceId,members.get(workspaceId)!.workspace.root);
+            await detach(workspaceId,passSignal);
           });
         }
         if(!failed)lastError=undefined;

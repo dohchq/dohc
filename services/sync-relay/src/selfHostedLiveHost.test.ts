@@ -55,7 +55,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
   const pending = new Set<string>(options.pending), updates: ServiceHostedSet[] = [], attachedAfter: string[][] = [], events: string[] = [];
   const refusal = new Error("Workspace attach refused.");
   let failUpdate: Error | undefined, refusedPath: string | undefined, holdUpdate: {entered: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>} | undefined;
-  let running: {holds(document: Document): boolean; diverge(workspaceId: string): void; attached: Map<string, string>} | undefined;
+  let running: {holds(document: Document): boolean; diverge(workspaceId: string, detached: boolean): void; attached: Map<string, string>} | undefined;
   const starts: Array<{config: Configuration; configPath: string; close: ReturnType<typeof vi.fn<() => Promise<void>>>; controller: AbortController}> = [];
   let live = 0, peak = 0;
   const startHost = vi.fn(async ({configPath}: {configPath: string}) => {
@@ -88,7 +88,11 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
       attached.delete(workspaceId); events.push(`detach ${workspaceId}`);
       return true;
     });
-    running = {holds, attached, diverge(workspaceId) {diverged.set(workspaceId, attached.get(workspaceId)!); attached.delete(workspaceId); held = held.filter(row => row.workspaceId !== workspaceId);}};
+    // A failed detach leaves the diverged workspace attached.
+    running = {holds, attached, diverge(workspaceId, detached) {
+      diverged.set(workspaceId, attached.get(workspaceId)!);
+      if (detached) {attached.delete(workspaceId); held = held.filter(row => row.workspaceId !== workspaceId);}
+    }};
     // Its replica had its chance to retire the document once it is attached and no longer hosts it.
     const pulledAfterDeparture = (document: Document) => attached.has(document.workspaceId) && !holds(document);
     return {invalidated: controller.signal, close, update, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, onEvent: () => () => undefined,
@@ -136,7 +140,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     /** Refuses every update that wants the path. */
     refuseAttach(path: string | undefined) {refusedPath = path;},
     holds: (objectId: string, workspaceId = scope.workspaceId) => running?.holds({workspaceId, objectId}) ?? false,
-    diverge: (workspaceId = scope.workspaceId) => running!.diverge(workspaceId),
+    diverge: (workspaceId = scope.workspaceId, detached = true) => running!.diverge(workspaceId, detached),
     holdNextUpdate() {holdUpdate = {entered: deferred(), release: deferred()}; return holdUpdate;}};
 }
 
@@ -485,6 +489,30 @@ it("keeps a diverged store in place and its workspace detached across passes and
   expect((await readdir(f.data)).sort()).toEqual([storeName(scope.workspaceId), storeName(workspaceId, "epoch-2", "stream-2")].sort());
   expect(await readdir(store)).toEqual(["replica.sqlite"]);
   expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("unpublished work");
+});
+
+// Proves: a divergence whose detach failed as its daemon exited keeps the
+// store out of the replacement daemon, and is reported once.
+it("keeps a diverged workspace whose detach failed out of the replacement daemon", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  const workspaceId = "workspace-2", ownerUserId = "owner-2", shareId = "share-2", path = "docs/other.md";
+  f.storage.claimWorkspace({workspaceId, ownerUserId, createdAtMs: 1});
+  f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
+  f.share(shareId, ["docs"], {workspaceId, ownerUserId});
+  f.moment(path, "second-owner-object", workspaceId);
+  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
+  await vi.waitFor(() => expect(f.attachedAfter.at(-1)).toEqual([scope.workspaceId, workspaceId]), {timeout: 10_000});
+  f.diverge(scope.workspaceId, false);
+  f.starts[0]!.controller.abort();
+  await vi.waitFor(() => expect(f.starts).toHaveLength(2), {timeout: 10_000});
+  await vi.waitFor(() => expect(f.attachedAfter.at(-1)).toEqual([workspaceId]), {timeout: 10_000});
+  expect(f.onError.mock.calls).toEqual([[expect.objectContaining({message: expect.stringMatching(/workspace .+ diverged from the relay/)})]]);
+  f.onError.mockClear();
+  await f.waitPasses();
+  expect(f.onError).not.toHaveBeenCalled();
+  expect(f.updates.at(-1)!.workspaces.map(row => row.workspaceId)).toEqual([workspaceId]);
+  expect(f.attachedAfter.at(-1)).toEqual([workspaceId]);
+  expect(f.starts).toHaveLength(2);
 });
 
 // Proves: startup deletes nothing: not a store no enrollment names, not what

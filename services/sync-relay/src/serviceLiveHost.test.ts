@@ -510,7 +510,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   const membership: {method: string; workspace?: string; params: unknown}[] = [];
   let ownerRequests = 0, client!: ReturnType<typeof clientFrom>["client"] & {captureOwnerActivation: ReturnType<typeof vi.fn>};
   // The engine's reason for refusing native capture, as for a document with an open sync conflict.
-  let refusal: Error | undefined;
+  let refusal: Error | undefined, detachFailure: Error | undefined;
   spawn.mockImplementation(async options => {
     const captured = clientFrom(options), discovery = captured.client.sendRequest.getMockImplementation()!;
     client = Object.assign(captured.client, {captureOwnerActivation: vi.fn(async () => {if (refusal) throw refusal; return capture;})});
@@ -524,7 +524,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         case "liveApplication.hosts": return discovery();
         case "liveApplication.attachWorkspace": return reply({workspaceId: request.params.workspaceId,
           workspaceHandle: request.params.workspaceId === "workspace" ? "attached-handle" : `attached-${request.params.workspaceId}`});
-        case "liveApplication.detachWorkspace": return reply({detached: true});
+        case "liveApplication.detachWorkspace": if (detachFailure) throw detachFailure; return reply({detached: true});
         case "liveApplication.unloadDocument": {
           const next = unloads.shift() ?? {status: "unloaded"};
           if (next instanceof Error) throw next;
@@ -564,6 +564,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     ownerCalls: () => client.sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: unknown})
       .filter(request => request.method.startsWith("liveApplication.")).map(request => [request.method, request.params]),
     refuseCapture(error: Error | undefined) {refusal = error;},
+    failDetach(error: Error | undefined) {detachFailure = error;},
     // Starts a new host on the same relay. Its first pass captures and, while capture is refused, leaves no owner.
     async restart() {
       await host.close();
@@ -1025,6 +1026,20 @@ it("detaches a diverged workspace for good and retains its documents", async () 
   expect(o.membership).toEqual([o.attach, o.detach]);
   expect(o.host.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]);
   expect(o.host.isDocumentReady(o.document)).toBe(false);
+});
+
+// Proves: a divergence counts before its detach, so a detach the exiting
+// engine fails still leaves the workspace in `diverged` for its replacement.
+it("records a divergence whose detach fails as the engine exits", async () => {
+  const o = await emptyServiceHost();
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.failDetach(new EngineRequestError(1, {code: "SESSION_EXPIRED", message: "engine exited", retry: "no"} as never));
+  o.replies.diverge = true;
+  await vi.waitFor(() => expect(o.host.invalidated.aborted).toBe(true));
+  expect(o.membership).toEqual([o.attach, o.detach]);
+  expect(o.host.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]);
 });
 
 it.each([false, true])("detaches a workspace at once when its identity changes, leaving its pending document unsettled (new documents at once: %s)", async newAtOnce => {

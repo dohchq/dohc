@@ -142,7 +142,7 @@ type BlobReach = (sha256: string) => boolean;
  * Requests await `warm` before they check a blob. It scans each document that
  * has no reach yet a page at a time, yielding between pages, so a rescan of a
  * long history never holds the event loop. `known` stays synchronous for the
- * append's writer and then reads only rows above each reach.
+ * append's writer and reads only rows above each reach it already has.
  */
 function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumentRows" | "serviceHostUploaded">) {
   const workspaces = new Map<string, WorkspaceReach>();
@@ -179,11 +179,13 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
   };
   const known = (scope: ServiceHostFeedScope): BlobReach => {
     const entry = currentReach(scope);
-    const reaches = [...scope.shared.keys()].map(objectId => {
-      let document = entry.documents.get(objectId);
-      if (!document) entry.documents.set(objectId, document = { through: 0, blobs: new Set() });
+    // A document with no reach yet grants nothing until a warm-up builds it, so
+    // a write naming its blobs fails as missing and lands on the host's retry.
+    const reaches = [...scope.shared.keys()].flatMap(objectId => {
+      const document = entry.documents.get(objectId);
+      if (!document) return [];
       while (!extend(scope, document, objectId));
-      return document.blobs;
+      return [document.blobs];
     });
     return sha256 => reaches.some(blobs => blobs.has(sha256)) || storage.serviceHostUploaded(scope.workspaceId, sha256);
   };
@@ -275,6 +277,7 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
       const admission: HostedAdmission = {
         async screen(originId, ops) {
           await warmReach(workspaceId);
+          guard();
           const scope = currentScope(workspaceId), known = blobReach.known(scope);
           const held = storage.maxOriginSeq(workspaceId, originId);
           for (const op of ops) {
