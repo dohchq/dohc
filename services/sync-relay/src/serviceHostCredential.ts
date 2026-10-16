@@ -34,17 +34,15 @@ export function serviceHostFeedRoute(input: {workspaceId: string; method: string
 }
 
 /**
- * A service token grants replication and the scoped feed only, never account
- * or share administration. Ordinary routes require an enabled enrollment;
- * hosted routes remain valid while the current identity has an undrained
- * enrollment, including one retired by Stop.
+ * A service token grants the scoped feed only: never the workspace's ordinary
+ * replication, account or share administration. It stays valid while the
+ * current identity has an undrained enrollment, including one retired by Stop.
  */
 export function authorizeServiceHostReplication(storage: SyncRelayStorage, input: ServiceHostCredentialKey & {
   workspaceId: string; bearer: string; method: string; pathname: string;
 }): string | null {
-  const hosted = serviceHostFeedRoute(input);
-  if (!/^dohc-service-v1\.[A-Za-z0-9_-]{43}$/.test(input.bearer) || !(serviceHostReplicationRoute(input) || hosted)) return null;
-  const workspace = storage.currentServiceHostWorkspace(input.workspaceId, hosted);
+  if (!/^dohc-service-v1\.[A-Za-z0-9_-]{43}$/.test(input.bearer) || !serviceHostFeedRoute(input)) return null;
+  const workspace = storage.currentServiceHostWorkspace(input.workspaceId, true);
   if (!workspace) return null;
   const supplied = Buffer.from(input.bearer), expected = Buffer.from(deriveServiceHostBearer(workspace, input));
   return supplied.length === expected.length && timingSafeEqual(supplied, expected) ? workspace.ownerUserId : null;

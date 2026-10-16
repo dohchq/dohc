@@ -323,6 +323,15 @@ export function listServiceHostEnrollments(storage: StorageContext, workspaceId?
     return values.map(row);
   });
 }
+/**
+ * The enrollments the service host has not drained: its documents, and the
+ * ones it must still remove from its replicas before their release. Active
+ * rows come first; Stop leaves retired rows here, at most a page of them.
+ */
+export function listUndrainedServiceHostEnrollments(storage: StorageContext): readonly ServiceHostEnrollment[] {
+  return storage.readLiveAuthority(() => storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE host_drained_at_ms IS NULL
+    ORDER BY retired,workspace_id,path LIMIT ?`).all(SERVICE_HOST_MAX_DOCUMENTS * 2).map(row));
+}
 export function listRetiredServiceHostEnrollments(storage: StorageContext, workspaceId: string, after?: string): {
   documents: readonly ServiceHostEnrollment[]; nextCursor: string | null;
 } {

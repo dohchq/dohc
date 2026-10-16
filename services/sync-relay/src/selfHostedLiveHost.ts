@@ -1,8 +1,8 @@
 import {createHash} from "node:crypto";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
-import {mkdir, mkdtemp, rm, writeFile} from "node:fs/promises";
+import {mkdir, mkdtemp, readdir, rename, rm, writeFile} from "node:fs/promises";
 import {realpathSync, statSync} from "node:fs";
-import {isAbsolute, join, posix, resolve} from "node:path";
+import {basename, isAbsolute, join, posix, resolve} from "node:path";
 import type {Event} from "@dohc/workspace-engine-client";
 import {tmpdir} from "node:os";
 import {setTimeout as delay} from "node:timers/promises";
@@ -46,7 +46,7 @@ export async function startSelfHostedLiveHost(options: {
   const provision = storage.provisionLiveHostControl({mode: "service", hostId, updatedAtMs: Date.now(), guard: storage.captureStanding()});
   if (!provision.ok || provision.snapshot.transition) throw new Error("Self-host live editing requires its provisioned service host. Existing device hosts must use the host transition procedure.");
   let current: Host | undefined;
-  let initialReconciliationComplete = false, selectedDocuments = false;
+  let initialReconciliationComplete = false, selectedDocuments = false, storesChecked = false;
   let signature = "", lastError: unknown;
   let discoveryCursor: {workspaceId: string; shareId: string} | undefined;
   let writeGeneration = 1, scanGeneration = 0, scannedGeneration = 0;
@@ -54,19 +54,29 @@ export async function startSelfHostedLiveHost(options: {
   const eventHandlers = new Set<(event: Event) => void>();
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
   const changes = Effect.runSync(Queue.sliding<void>(1));
-  const valid = (row: ServiceHostEnrollment) => row.enabled && storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
-    storage.verifyWorkspaceIdentity(row) === "matched" && storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
-  const documentKey = (row: ServiceHostEnrollment) => JSON.stringify([row.workspaceId, row.objectId]);
-  // Documents awaiting release that an earlier daemon may have left with
-  // unsettled work in their workspace stores. Each stays hosted until one
-  // activation pass settles it, then leaves through the ordinary unload.
-  // Only the workspace's current identity recovers; an old identity's work stays unsettled in its store.
-  let recovering = new Set<string>();
-  // A document is hosted while an active Edit grant covers it and its owner has not paused or stopped it, or while it recovers.
-  const hosts = (row: ServiceHostEnrollment, covered: boolean) => (recovering.has(documentKey(row)) || (covered && !row.ownerStop)) && valid(row);
-  const selection = () => storage.listServiceHostEnrollments().filter(row => hosts(row, storage.serviceHostEnrollmentHasEditGrant(row)));
-  const selectionSignature = (rows: readonly ServiceHostEnrollment[]) => JSON.stringify(rows.map(({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}) =>
-    ({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity})));
+  // Whether the enrollment names its workspace's current owner and identity.
+  const matching = (row: ServiceHostEnrollment) => storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) && storage.verifyWorkspaceIdentity(row) === "matched";
+  // A release applies to the document: it was stopped, paused, or no Edit grant covers it.
+  const departs = (row: ServiceHostEnrollment, covered: boolean) => row.retired || !covered || row.ownerStop !== null;
+  // A document is hosted while an active Edit grant covers it at its enrolled path and its owner has not paused or stopped it.
+  const hosts = (row: ServiceHostEnrollment, covered: boolean) => !departs(row, covered) && matching(row) &&
+    storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
+  // Hosted documents, and those that departed but may remain in their workspace's hosted replica. A
+  // departed document under an obsolete identity has none to leave: its old store is fenced.
+  const select = () => {
+    const undrained = storage.listUndrainedServiceHostEnrollments();
+    const covered = new Set(undrained.filter(row => storage.serviceHostEnrollmentHasEditGrant(row)));
+    const leaving = undrained.filter(row => departs(row, covered.has(row)));
+    return {targets: undrained.filter(row => hosts(row, covered.has(row))), departing: leaving.filter(matching),
+      obsolete: leaving.filter(row => !matching(row))};
+  };
+  const selectionSignature = ({targets, departing}: ReturnType<typeof select>) => JSON.stringify([targets, departing].map(rows =>
+    rows.map(({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}) => ({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}))));
+  // A workspace identity's hosted replica. The label keeps a store of any other kind from opening as one.
+  const storeName = (row: ServiceHostEnrollment) => createHash("sha256")
+    .update(JSON.stringify(["hosted-v1", history.namespace, row.workspaceId, row.replicationEpoch, row.streamIdentity])).digest("hex");
+  // Drained stores whose removal failed. Their workspaces stay detached until it succeeds.
+  const unremoved = new Map<string, {directory: string; rows: readonly ServiceHostEnrollment[]}>();
   function schedule() {
     if (!signal.aborted) Queue.offerUnsafe(changes, undefined);
   }
@@ -74,20 +84,37 @@ export async function startSelfHostedLiveHost(options: {
     const previous = current; current = undefined;
     if (previous) await previous.close();
   }
-  async function hostedSet(rows: readonly ServiceHostEnrollment[]): Promise<ServiceHostedSet> {
-    const grouped = new Map<string, ServiceHostEnrollment[]>();
-    for (const row of rows) grouped.set(row.workspaceId, [...grouped.get(row.workspaceId) ?? [], row]);
+  function release(row: ServiceHostEnrollment) {
+    try {storage.releaseServiceHostEnrollment({workspaceId: row.workspaceId, objectId: row.objectId, nowMs: Date.now()});}
+    catch (error) {options.onError?.(error);}
+  }
+  // Removes every store no undrained enrollment names, as one released while
+  // this host was down or one from before hosted replicas. Set-aside stores
+  // and anything that is not a store, such as automation replicas, stay.
+  async function removeUnnamedStores() {
+    const named = new Set(storage.listUndrainedServiceHostEnrollments().filter(matching).map(storeName));
+    for (const name of await readdir(root)) if (/^[0-9a-f]{64}$/.test(name) && !named.has(name)) await rm(join(root, name), {recursive: true, force: true});
+  }
+  async function removeStore(workspaceId: string) {
+    const {directory, rows} = unremoved.get(workspaceId)!;
+    await rm(directory, {recursive: true, force: true});
+    unremoved.delete(workspaceId);
+    for (const row of rows) release(row);
+  }
+  async function hostedSet({targets, departing}: ReturnType<typeof select>): Promise<ServiceHostedSet> {
+    const named = new Map<string, ServiceHostEnrollment>();
+    for (const row of [...targets, ...departing]) if (!named.has(row.workspaceId)) named.set(row.workspaceId, row);
     const workspaces = [];
-    for (const [workspaceId, documents] of grouped) {
-      // Every hosted document matches the workspace's current identity, so any of them names it.
-      const row = documents[0]!;
-      const directory = join(root, createHash("sha256").update(JSON.stringify([history.namespace, row.workspaceId, row.replicationEpoch, row.streamIdentity])).digest("hex"));
+    // Every selected document matches its workspace's current identity, so any of them names it.
+    for (const [workspaceId, row] of named) {
+      const directory = join(root, storeName(row));
       await mkdir(directory, {recursive: true, mode: 0o700});
       workspaces.push({root: canonicalPath(directory, true), workspaceId, maxRegistrations: 64,
-        ordinaryReplication: {relay: {baseUrl: relay.origin, bearerToken: deriveServiceHostBearer(row, {key: options.key, namespace: history.namespace})},
-          identity: {kind: "join" as const, replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}, maxPagesPerPull: 8}});
+        hostedReplication: {relay: {baseUrl: relay.origin, bearerToken: deriveServiceHostBearer(row, {key: options.key, namespace: history.namespace})},
+          identity: {replicationEpoch: row.replicationEpoch, streamIdentity: row.streamIdentity}, maxPagesPerPull: 8}});
     }
-    return {workspaces, documents: rows.map(({workspaceId, objectId, path, shareId}) => ({workspaceId, objectId, path, shareId}))};
+    return {workspaces, documents: targets.map(({workspaceId, objectId, path, shareId}) => ({workspaceId, objectId, path, shareId})),
+      departing: departing.map(({workspaceId, objectId}) => ({workspaceId, objectId}))};
   }
   async function start(): Promise<Host> {
     const temporary = await mkdtemp(join(tmpdir(), "dohc-self-host-config-"));
@@ -103,10 +130,15 @@ export async function startSelfHostedLiveHost(options: {
       return host;
     } finally {await rm(temporary, {recursive: true, force: true});}
   }
+  // The selection, without workspaces whose drained store is still being removed.
+  const selection = () => {
+    const selected = select(), kept = (row: ServiceHostEnrollment) => !unremoved.has(row.workspaceId);
+    return {...selected, targets: selected.targets.filter(kept), departing: selected.departing.filter(kept)};
+  };
   async function reconcile() {
     // An owner's Pause or Stop, or the loss of the last Edit grant, takes
-    // effect once the host no longer holds the document.
-    let releasing: readonly ServiceHostEnrollment[] = [];
+    // effect once no hosted replica holds the document.
+    let selected: ReturnType<typeof select> | undefined;
     try {
       signal.throwIfAborted();
       if (discoveryCursor || scannedGeneration !== writeGeneration) {
@@ -114,36 +146,53 @@ export async function startSelfHostedLiveHost(options: {
         discoveryCursor = discoverServiceHostDocuments(storage, options.onError, discoveryCursor) ?? undefined;
         if (!discoveryCursor) scannedGeneration = scanGeneration;
       }
-      const enrolled = storage.listServiceHostEnrollments();
-      const covered = new Set(enrolled.filter(row => storage.serviceHostEnrollmentHasEditGrant(row)));
-      releasing = enrolled.filter(row => !covered.has(row) || (row.enabled && row.ownerStop));
+      if (!storesChecked) {await removeUnnamedStores(); storesChecked = true;}
+      for (const workspaceId of [...unremoved.keys()]) await removeStore(workspaceId);
       // Only a failed daemon restarts. Membership changes update the running one.
       if (current?.invalidated.aborted) {await stopCurrent(); signature = "";}
-      if (!current) recovering = new Set(releasing.filter(valid).map(documentKey));
-      else for (const row of releasing) if (current.settled(row)) recovering.delete(documentKey(row));
-      const rows = enrolled.filter(row => hosts(row, covered.has(row))), next = selectionSignature(rows);
-      // A document that can no longer be hosted has nothing to recover.
-      recovering = new Set(rows.map(documentKey).filter(key => recovering.has(key)));
-      selectedDocuments = rows.length > 0;
-      if (next !== signature || (rows.length > 0 && !current)) {
-        const desired = await hostedSet(rows);
+      // A diverged store may hold work nobody published, so it is kept aside, never deleted, and the workspace starts over from the relay.
+      for (const {workspaceId, root: store} of current?.diverged() ?? []) {
+        await mkdir(join(root, "diverged"), {recursive: true, mode: 0o700});
+        const kept = join(root, "diverged", `${basename(store)}-${Date.now()}`);
+        await rename(store, kept);
+        current!.rebuild(workspaceId); signature = "";
+        options.onError?.(new Error(`The live editing copy of workspace ${workspaceId} diverged from the relay. It was kept at ${kept} and is rebuilt from the relay.`));
+      }
+      selected = selection();
+      const {targets, departing} = selected, next = selectionSignature(selected);
+      selectedDocuments = targets.length > 0;
+      if (next !== signature || ((targets.length || departing.length) && !current)) {
+        const desired = await hostedSet(selected);
         signal.throwIfAborted();
         if (next !== selectionSignature(selection())) {schedule(); return;}
-        if (!current && rows.length > 0) current = await start();
+        if (!current && (targets.length || departing.length)) current = await start();
         // A failed update may already have changed membership, so the next reconciliation updates again.
         signature = "";
-        // A document still settling keeps the selection open, so the next reconciliation retries its unload.
-        if (!current || !(await current.update(desired)).length) signature = next;
+        await current?.update(desired);
+        signature = next;
+      }
+      // A workspace with no documents lets go of its store once its replica
+      // drained: detach, remove the store, then release its enrollments. A
+      // failure between steps leaves them undrained, so the next start drains again.
+      for (const workspaceId of new Set(departing.map(row => row.workspaceId))) {
+        if (!current || targets.some(row => row.workspaceId === workspaceId) || !(await current.detachDrained(workspaceId, signal))) continue;
+        // The workspace stays detached, and out of every update, until its store is gone.
+        signature = "";
+        const rows = departing.filter(row => row.workspaceId === workspaceId);
+        unremoved.set(workspaceId, {directory: join(root, storeName(rows[0]!)), rows});
+        await removeStore(workspaceId);
       }
       lastError = undefined; initialReconciliationComplete = true;
     } catch (error) {
       if (!signal.aborted) {lastError = error; options.onError?.(error);}
     } finally {
       // A failed update or one damaged row does not hold back the others.
-      for (const row of releasing) {
-        if (signal.aborted || recovering.has(documentKey(row)) || current?.holds(row)) continue;
-        try {storage.releaseServiceHostEnrollment({workspaceId: row.workspaceId, objectId: row.objectId, nowMs: Date.now()});}
-        catch (error) {options.onError?.(error);}
+      if (selected && !signal.aborted) {
+        for (const row of selected.obsolete) release(row);
+        // A sibling document keeps its workspace attached, so its replica confirms each departed document gone.
+        for (const row of selected.departing) {
+          if (selected.targets.some(target => target.workspaceId === row.workspaceId) && current?.retains(row) === false) release(row);
+        }
       }
     }
   }
@@ -181,7 +230,7 @@ export async function startSelfHostedLiveHost(options: {
      */
     automationWorkspaces(): string[] {
       const found = new Set<string>();
-      for (const row of selection()) {
+      for (const row of selection().targets) {
         const folder = posix.dirname(row.path);
         const file = folder === "." ? "automations.yaml" : `${folder}/automations.yaml`;
         if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: file}) !== undefined) found.add(row.workspaceId);

@@ -12,7 +12,7 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
 const key = new Uint8Array(32).fill(17), namespace = "service-route-test";
 const serviceReplication = (storage: Parameters<typeof authorizeServiceHostReplication>[0]) => createServiceHostReplication({storage, prefix: "dohc-service-v1.",
-  authorize: input => authorizeServiceHostReplication(storage, {key, namespace, ...input})});
+  hostedFeed: true, authorize: input => authorizeServiceHostReplication(storage, {key, namespace, ...input})});
 async function fixture() {
   const f = await ticketFixture(); cleanup.push(f.close);
   f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
@@ -248,10 +248,11 @@ it("rechecks ownership after an enrollment request body finishes", async () => {
 it("service replication refuses foreign workspaces and account administration", async () => {
   const f = await fixture(), bearer = deriveServiceHostBearer(f.storage.enrollServiceHostDocument(f.input), {key, namespace});
   const handler = serviceReplication(f.storage);
-  for (const path of ["/sync/workspaces", "/sync/foreign/bootstrap", `/sync/${scope.workspaceId}/epoch`, `/sync/${scope.workspaceId}/live-host`]) {
+  for (const path of ["/sync/workspaces", "/sync/foreign/hosted/bootstrap", `/sync/${scope.workspaceId}/epoch`, `/sync/${scope.workspaceId}/live-host`,
+    `/sync/${scope.workspaceId}/hosted/live-host`]) {
     expect((await handler(new Request(`https://relay.test${path}`, {method: "POST", headers: {authorization: `Bearer ${bearer}`}}))).status).toBe(404);
   }
-  const response = await handler(new Request(`https://relay.test/sync/${scope.workspaceId}/bootstrap`, {headers: {authorization: `Bearer ${bearer}`}}));
+  const response = await handler(new Request(`https://relay.test/sync/${scope.workspaceId}/hosted/bootstrap`, {headers: {authorization: `Bearer ${bearer}`}}));
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({replicationEpoch: "epoch", streamIdentity: "stream"});
 });
@@ -260,16 +261,16 @@ it.each(["blob", "log"] as const)("a service token revoked during the %s body ca
   const f = await fixture(), bearer = deriveServiceHostBearer(f.storage.enrollServiceHostDocument(f.input), {key, namespace});
   const handler = serviceReplication(f.storage);
   const bytes = new TextEncoder().encode("unpublished"), digest = createHash("sha256").update(bytes).digest("hex");
-  const pending = deferredBody(kind === "blob" ? "PUT" : "POST", `https://relay.test/sync/${scope.workspaceId}/${kind === "blob" ? `blobs/${digest}` : "log"}`,
+  const pending = deferredBody(kind === "blob" ? "PUT" : "POST", `https://relay.test/sync/${scope.workspaceId}/hosted/${kind === "blob" ? `blobs/${digest}` : "log"}`,
     {authorization: `Bearer ${bearer}`, "content-type": kind === "blob" ? "application/octet-stream" : "application/json"});
   const result = handler(pending.request); await pending.started;
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
   f.release(binding.objectId);
-  pending.finish(kind === "blob" ? bytes : new TextEncoder().encode(JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: "service", ops: [
+  pending.finish(kind === "blob" ? bytes : new TextEncoder().encode(JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: "service-host:native", ops: [
     {originSeq: 0, opKind: "moment.append", recordedAtMs: 10, payload: {operation: "write"}}]})));
   expect((await result).status).toBe(404);
   expect(f.storage.getBlob(scope.workspaceId, digest)).toBeNull();
-  expect(f.storage.fetchLogCoordinate({workspaceId: scope.workspaceId, originId: "service", originSeq: 0})).toBeNull();
+  expect(f.storage.fetchLogCoordinate({workspaceId: scope.workspaceId, originId: "service-host:native", originSeq: 0})).toBeNull();
 });
 
 it("reports a renamed enrolled document as unavailable and retains its original enrollment", async () => {
@@ -291,8 +292,12 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
   expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({ok: true, documents: [{path: first.path, status: "retired"}], nextCursor: null});
+  // Stopped but undrained: the host's credential still reads the empty scope, and its release ends it.
   const replication = serviceReplication(f.storage);
-  expect((await replication(new Request(`https://relay.test/sync/${scope.workspaceId}/bootstrap`, {headers: {authorization: `Bearer ${bearer}`}}))).status).toBe(404);
+  const bootstrap = () => replication(new Request(`https://relay.test/sync/${scope.workspaceId}/hosted/bootstrap`, {headers: {authorization: `Bearer ${bearer}`}}));
+  expect(await (await bootstrap()).json()).toMatchObject({hasContent: false});
+  f.release(first.objectId);
+  expect((await bootstrap()).status).toBe(404);
   expect((await f.handle(f.request("POST", {path: first.path}))).status).toBe(202);
   expect(f.storage.listServiceHostEnrollments()[0]).toMatchObject({objectId: first.objectId, shareId: first.shareId, retired: false, enabled: true});
   expect((await f.handle(f.request("POST", {path: "docs/missing.md"}))).status).toBe(404);

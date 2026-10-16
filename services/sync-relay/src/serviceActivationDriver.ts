@@ -15,7 +15,6 @@ import {ServiceActivationStaleCut,type ServiceActivationStore} from "./storage/s
 import type {ServiceActivationAccess} from "./storage/serviceActivationAccess";
 import type {SyncRelayStorage,LiveHostConnectionCoordinate} from "./storage";
 import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
-import type {ServiceOrdinaryReplication} from "./serviceOrdinaryReplication";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 
@@ -51,6 +50,11 @@ export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceAc
 type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;
   binding:LiveObjectBinding;target:string;actor:{ownerUserId:string;shareId:string}};
 const fenced={kind:"pending" as const,reason:"Service binding is fenced or unavailable."};
+/** A workspace's hosted replica, as activation uses it. */
+export interface ServiceActivationReplica {
+  pull(signal:AbortSignal):Promise<{hasMore:boolean}>;
+  publish(signal?:AbortSignal):Promise<{pushed:number;hasMore:boolean}>;
+}
 
 export class ServiceActivationDriver {
   readonly #store;
@@ -62,8 +66,10 @@ export class ServiceActivationDriver {
   readonly #loaded=new Set<string>();
   // Hosted targets the engine unloaded while idle, with their documents. Passes skip them until they wake.
   readonly #dormant=new Map<string,string>();
+  // Targets a hosted pass left held, until the engine captures them again.
+  readonly #held=new Set<string>();
   constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
-    workspaces:ReadonlyMap<string,{handle:string;ordinary:ServiceOrdinaryReplication}>;config:ServiceActivationConfig;
+    workspaces:ReadonlyMap<string,{handle:string;replica:ServiceActivationReplica}>;config:ServiceActivationConfig;
     adoption:{maxBytes:number;maxEvents:number};restore?:LiveRestorePreparation;nextRequestId():number;deadlineMs:number;
     assertCurrent():void;registered():void;
     runDocument<T>(document:LiveDocumentKey,signal:AbortSignal,operation:()=>Promise<T>):Promise<T>;}){
@@ -89,8 +95,25 @@ export class ServiceActivationDriver {
   removeTarget(target:ServiceActivationTarget){
     const key=targetKey(target);
     this.#targets=this.#targets.filter(row=>targetKey(row)!==key);
-    this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);
+    this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);this.#held.delete(key);
     for(const [document,owner] of this.#owners)if(owner.target===key)this.#owners.delete(document);
+  }
+  /**
+   * Clears readiness of documents a hosted pass left held. The engine has
+   * already ended their sessions; each activates again once its capture
+   * succeeds. Until then they do not hold back their workspace's pulls,
+   * which bring what they wait for.
+   */
+  hold(workspaceId:string,objectIds:readonly string[]){
+    const held=(document:string)=>{
+      const key=parseLiveDocumentKey(JSON.parse(document));
+      return key.workspaceId===workspaceId && objectIds.includes(key.objectId);
+    };
+    for(const [document,owner] of this.#owners){
+      if(!held(document))continue;
+      owner.completed=false;this.#completedTargets.delete(owner.target);this.#owners.delete(document);this.#held.add(owner.target);
+    }
+    for(const [target,document] of this.#dormant)if(held(document)){this.#dormant.delete(target);this.#held.add(target);}
   }
   /**
    * Forgets a document the engine unloaded while it stays a target, and ends
@@ -151,7 +174,7 @@ export class ServiceActivationDriver {
         if(sleeping!==undefined && error instanceof EngineRequestError && error.wireError?.code==="INVALID_PARAMS")this.#dormant.set(slot,sleeping);
         throw error;
       }
-      signal?.throwIfAborted();o.assertCurrent();
+      signal?.throwIfAborted();o.assertCurrent();this.#held.delete(slot);
       if(capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source))throw new Error("Native service activation source changed.");
       this.#owners.set(key,owner);
       return capture;
@@ -159,7 +182,8 @@ export class ServiceActivationDriver {
     return owner.consumer;
   }
   workspaceReady(workspaceId:string){
-    return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target)).every(target=>this.#completedTargets.has(targetKey(target)));
+    return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target) && !this.#held.has(targetKey(target)))
+      .every(target=>this.#completedTargets.has(targetKey(target)));
   }
   consumer(value:LiveDocumentKey){
     const document=parseLiveDocumentKey(value),owner=this.#owners.get(JSON.stringify(document));
@@ -195,11 +219,12 @@ export class ServiceActivationDriver {
     }
     if(!owner){
       if(!saved){
-        const pulled=await workspace.ordinary.pull(signal);check();
-        if(pulled.hasMore)return {kind:"pending" as const,reason:"Ordinary replication has more pages."};
+        const pulled=await workspace.replica.pull(signal);check();
+        if(pulled.hasMore)return {kind:"pending" as const,reason:"Hosted replication has more pages."};
       }
       this.#loaded.add(key);
       const capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,saved?.activationId);check();
+      this.#held.delete(key);
       if(capture.source.workspaceId!==target.workspaceId || capture.source.relayDatabaseNamespace!==o.history.namespace ||
         (saved && (capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source)))) {
         throw new Error("Native service activation source changed.");
@@ -213,7 +238,7 @@ export class ServiceActivationDriver {
           if(!(error instanceof ServiceActivationStaleCut))throw error;
           this.#staleLeases.set(key,{activationId:capture.activationId,sessionId:capture.sessionId});
           await releaseStale();
-          return {kind:"pending" as const,reason:"Ordinary replication advanced before activation."};
+          return {kind:"pending" as const,reason:"Hosted replication advanced before activation."};
         }
         o.registered();
         saved=this.#store.read(target.workspaceId,target.path,c.maxCaptureBytes)!;
@@ -261,7 +286,7 @@ export class ServiceActivationDriver {
       nextRequestId:o.nextRequestId,assertCurrent:o.assertCurrent});
     const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,
       host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
-      publishOrdinary:signal=>workspace.ordinary.publish(signal),
+      publish:signal=>workspace.replica.publish(signal),
       ownerAdmission:{trustedAccount:o.trustedAccount,activation:access,shares:new Map([[target.workspaceId,target.shareId]]),
         maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,validate:c.validateAdmission}});
     return {consumer,transport,completed:false,target:targetKey(target),...state};

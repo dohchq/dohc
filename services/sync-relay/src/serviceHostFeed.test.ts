@@ -306,11 +306,9 @@ it("keeps a refused row's coordinate without its payload, its blobs or any proje
     {kind: "chat", channelWireId: "general", access: "read-write"}];
   for (const selector of selectors) expect(filterOpForShare(selector, "relay.refused", owner[0]!.payloadJson).allowed).toBe(false);
   // Only the relay writes one.
-  const ordinary = await f.handle(new Request(`https://relay.test/sync/${ws}/log`, {method: "POST",
-    headers: {authorization: `Bearer ${f.bearer}`, "content-type": "application/json"},
-    body: JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: "owner-device",
-      ops: [{originSeq: 100, opKind: "relay.refused", recordedAtMs: 3, payload: {}}]})}));
-  expect(ordinary.status).toBe(400);
+  const claimed = await f.request("POST", "log", JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: HOST_ORIGIN,
+    ops: [{originSeq: 100, opKind: "relay.refused", recordedAtMs: 3, payload: {}}]}));
+  expect(claimed.status).toBe(400);
   const next = f.storage.maxOriginSeq(ws, "owner-device") + 1;
   const forged = parseLogOp({originSeq: next, opKind: "moment.append", recordedAtMs: 3, payload: {}});
   forged.opKind = "relay.refused";
@@ -527,11 +525,12 @@ it("writes only from the service host's reserved origins, which no other route a
   const edit = ["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)] satisfies [string, Record<string, unknown>];
   expect((await f.push([edit], 0, "owner-device")).status).toBe(400);
   expect((await f.push([edit])).status).toBe(200);
+  // The host's credential has no ordinary route; ordinary provenance refuses these origins from everyone else.
   const ordinary = await f.handle(new Request(`https://relay.test/sync/${ws}/log`, {method: "POST",
     headers: {authorization: `Bearer ${f.bearer}`, "content-type": "application/json"},
     body: JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: `${SERVICE_HOST_ORIGIN_PREFIX}other`,
       ops: [{originSeq: 0, opKind: edit[0], recordedAtMs: 3, payload: edit[1]}]})}));
-  expect(ordinary.status).toBe(400);
+  expect(ordinary.status).toBe(404);
 });
 
 it("keeps each document's blob reach across scope changes and drops an idle workspace", async () => {
@@ -669,8 +668,8 @@ it("reads only the current scope with the workspace's one credential as document
   expect((await f.request("GET", `log?${identity}&scope=${left.scope.token}&since=0&object=object-b`)).status).toBe(400);
   expect(await (await f.push([["moment.append", write("object-b", "docs/b.md", B)]])).json())
     .toMatchObject({refusals: [{reason: "outside-hosted-documents"}]});
-  // Ordinary replication stays open to the same credential until the session host switches over.
-  expect((await f.handle(new Request(`https://relay.test/sync/${ws}/log?${identity}`, {headers: {authorization: `Bearer ${f.bearer}`}}))).status).toBe(200);
+  // The credential never reaches the workspace's ordinary replication.
+  expect((await f.handle(new Request(`https://relay.test/sync/${ws}/log?${identity}`, {headers: {authorization: `Bearer ${f.bearer}`}}))).status).toBe(404);
   // A new workspace identity leaves the enrollments, and so the credential, behind.
   f.storage.rotateWorkspaceIdentity({workspaceId: ws, ownerUserId: "owner-1", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 40});
   expect((await f.request("GET", "log?replicationEpoch=epoch-2&streamIdentity=stream-2")).status).toBe(404);
@@ -720,13 +719,13 @@ it("cuts a paused document's reads at once and keeps its writes until the sessio
   expect((await f.request("GET", `log?${identity}`)).status).toBe(404);
 });
 
-it("keeps only the hosted credential alive for an undrained Stop and then drops it", async () => {
+it("keeps the hosted credential alive for an undrained Stop and then drops it, never granting ordinary routes", async () => {
   const f = await fixture();
   const ordinary = () => authorizeServiceHostReplication(f.storage, {key, namespace, workspaceId: ws, bearer: f.bearer,
     method: "GET", pathname: `/sync/${ws}/log`});
   const hosted = () => authorizeServiceHostReplication(f.storage, {key, namespace, workspaceId: ws, bearer: f.bearer,
     method: "GET", pathname: `/sync/${ws}/hosted/log`});
-  expect(ordinary()).toBe("owner-1");
+  expect(ordinary()).toBeNull();
   expect(hosted()).toBe("owner-1");
   expect(f.storage.setServiceHostEnrollmentEnabled({workspaceId: ws, path: "docs/a.md", ownerUserId: "owner-1",
     enabled: false, retire: true, nowMs: 20, guard() {}})).toMatchObject({retired: true, enabled: false, hostDrainedAtMs: null});

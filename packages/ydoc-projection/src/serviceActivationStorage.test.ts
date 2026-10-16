@@ -173,6 +173,29 @@ it('ignores refused moments while verifying an ordinary activation cut',()=>{
     expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
   }finally{f.close()}
 })
+// A hosted replica's cursor passes every row of the workspace, including rows of
+// documents it may not read, so it matches the relay's newest sequence.
+it('activates at a hosted cursor that passed rows of documents outside the hosted scope',()=>{
+  const f=fixture();try{
+    f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',3,'ydoc.update',?,3)")
+      .run(JSON.stringify({versionId:'main',objectId:'private-object',path:'private/b.md',contentKind:'richdoc',isBaseState:true,lineageClaimId:'c'.repeat(64),updateBlobSha256:'c'.repeat(64)}))
+    expect(f.prepare).toThrow(ServiceActivationStaleCut)
+    f.capture.source.committedCursor=4
+    expect(f.prepare()).toEqual({document:f.document,replayed:false,completed:false})
+  }finally{f.close()}
+})
+// A host publication the relay kept after the document left its enrolled path
+// writes the old path. It projects nowhere, but activation still refuses it.
+it('refuses activation over a departed host publication',()=>{
+  const f=fixture();try{
+    f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_admission) VALUES ('workspace','service-host:native',0,'moment.append',?,3,'departed')")
+      .run(JSON.stringify({versionId:'main',objectId:'object',momentId:'departed',path:'docs/old.md',operation:'write',payloadAfterPath:'docs/old.md',
+        payloadAfterContentKind:'text',payloadAfterBlobSha256:f.capture.source.sourceDigest,payloadAfterByteLength:f.capture.source.sourceByteLength}))
+    f.capture.source.committedCursor=4
+    expect(f.prepare).toThrow('Ordinary activation history replaced the live document.')
+    expect(f.raw.prepare('SELECT * FROM sync_relay_live_documents').all()).toEqual([])
+  }finally{f.close()}
+})
 it('refuses an ordinary baseline as stale after a real workspace identity rotation',()=>{
   const f=fixture();try{
     f.prepare();const access=f.store.pending(f.document,host)
@@ -455,7 +478,7 @@ function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:Re
   const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md',shareId:'share'}
   const driver=new ServiceActivationDriver({trustedAccount:accountId=>({accountId,name:'Owner'}),storage:f.storage,history:f.history,host,
     client:{...native,captureOwnerActivation,sendRequest} as never,
-    workspaces:new Map([['workspace',{handle:'native-workspace',ordinary:{pull} as never}]]),
+    workspaces:new Map([['workspace',{handle:'native-workspace',replica:{pull,publish:vi.fn()}}]]),
     config:{targets:[target],validateBaseline,validateJournal,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
       maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000,idleUnloadMs:600_000,idleRetryMs:30_000},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
