@@ -71,3 +71,5 @@ pub use dohc_engine_domain::{
 pub use dohc_engine_sync::{
     ApplyDisposition, ApplyOutcome, ConflictApplyResult, ReplicationEnvelope,
 };
+
+pub use actor::{HistoryOperation, HistoryUndoResult};
