@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { test } from "./helpers/systemClipboard";
+import { expect, type Page } from "@playwright/test";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { activityPin, desktopPins, settingsNavPin, settingsSectionPin } from "../src/testPins";

@@ -1,5 +1,6 @@
+import { test } from "./helpers/systemClipboard";
 import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS } from "../src/settings/userSettings";

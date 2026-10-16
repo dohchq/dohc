@@ -1,5 +1,6 @@
+import { test } from "./helpers/systemClipboard";
 import { activityPin, settingsNavPin } from "../src/testPins";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
 import { join } from "node:path";
 import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { launchDesktopApp } from "./helpers/desktopApp";

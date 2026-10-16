@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+import { test } from "./helpers/systemClipboard";
+import { expect } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,

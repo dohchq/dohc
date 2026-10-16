@@ -1,8 +1,9 @@
+import { test } from "./helpers/systemClipboard";
 import { activityPin, settingsNavPin } from "../src/testPins";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test, type BrowserContext } from "@playwright/test";
+import { expect, type BrowserContext } from "@playwright/test";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack } from "./helpers/selfHostOnboarding";

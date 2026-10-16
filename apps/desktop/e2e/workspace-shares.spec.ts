@@ -1,5 +1,6 @@
+import { test } from "./helpers/systemClipboard";
 import { desktopPins, activityPin } from "../src/testPins";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";

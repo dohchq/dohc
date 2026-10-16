@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+import { test } from "./helpers/systemClipboard";
+import { expect } from "@playwright/test";
 import { readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";

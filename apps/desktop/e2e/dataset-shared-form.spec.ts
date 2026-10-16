@@ -1,5 +1,6 @@
+import { test } from "./helpers/systemClipboard";
 import { editorTabTestId } from "../src/testPins";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";

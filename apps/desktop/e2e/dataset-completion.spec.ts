@@ -1,5 +1,6 @@
+import { test } from "./helpers/systemClipboard";
 import { activityPin, settingsNavPin, editorTabTestId } from "../src/testPins";
-import { expect, test, type Page, type Locator } from "@playwright/test";
+import { expect, type Page, type Locator } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";

@@ -1,5 +1,6 @@
+import { test } from "./helpers/systemClipboard";
 import { desktopPins, activityPin, settingsNavPin, settingsSectionPin } from "../src/testPins";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
