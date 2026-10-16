@@ -2138,3 +2138,62 @@ it("does not replay acknowledged agent originals when a later original loses its
   await session.close({ settle: false });
   scratch.destroy();
 });
+
+it.each(["quit", "renderer retirement"] as const)("%s releases a refused settle without pruning the durable typing", async mode => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typing that must survive quit.");
+  const outside = "# Outside\n\nAnother app wrote this.\n";
+  await writeFile(join(root, PATH), outside);
+  settleRefusal = wireRefusal("conflict-stale-target");
+  closeRefusal = wireRefusal("ydoc-unsettled-close");
+  await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+  const closeEntered = Promise.withResolvers<void>();
+  const finishClose = Promise.withResolvers<void>();
+  beforeClose = async () => { closeEntered.resolve(); await finishClose.promise; };
+  const closing = session.close(mode === "quit" ? { shuttingDown: true } : undefined);
+  await closeEntered.promise;
+  capture.beginShutdown();
+  sessions.beginShutdown();
+  finishClose.resolve();
+  try {
+    await expect(closing).resolves.toBeUndefined();
+    expect(methodCount(YDOC_METHOD.evict)).toBe(1);
+    expect(daemon.leases.size).toBe(0);
+    await expect(capture.settleAndCloseAllLiveSessions()).resolves.toBeUndefined();
+    expect(await readFile(join(root, PATH), "utf8")).toBe(outside);
+    settleRefusal = null;
+    closeRefusal = null;
+    const reopened = await openEngineYdocProviderSession({ transport: ydoc, workspace: WORKSPACE_ID, versionId: "main", path: PATH, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    const recovered = new Y.Doc();
+    try {
+      Y.applyUpdate(recovered, reopened.initialUpdate);
+      expect(documentMarkdown(Y.encodeStateAsUpdate(recovered))).toContain("Typing that must survive quit.");
+    } finally { recovered.destroy(); await reopened.close(); }
+  } finally { editor.destroy(); }
+});
+it("keeps a quit lease reserved when durable eviction fails, then retries its release", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typing that must survive a failed eviction.");
+  await writeFile(join(root, PATH), "Outside bytes.");
+  settleRefusal = wireRefusal("conflict-stale-target");
+  closeRefusal = wireRefusal("ydoc-unsettled-close");
+  const send = ydoc.sendRequest.bind(ydoc);
+  let blockEvict = true;
+  vi.spyOn(ydoc, "sendRequest").mockImplementation(async request => {
+    if (blockEvict && request.method === YDOC_METHOD.evict) throw wireRefusal("engine-store-busy", "OVERLOADED");
+    return send(request);
+  });
+  await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+  capture.beginShutdown();
+  sessions.beginShutdown();
+  try {
+    await expect(session.close({ shuttingDown: true })).rejects.toThrow("engine-store-busy");
+    expect(daemon.leases.size).toBe(1);
+    blockEvict = false;
+    await expect(capture.settleAndCloseAllLiveSessions()).resolves.toBeUndefined();
+    expect(daemon.leases.size).toBe(0);
+    expect(await readFile(join(root, PATH), "utf8")).toBe("Outside bytes.");
+  } finally { editor.destroy(); }
+});

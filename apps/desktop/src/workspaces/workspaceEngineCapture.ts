@@ -5239,6 +5239,21 @@ export function createWorkspaceEngineCapture(
               }
               throw error;
             }
+            // Quit cannot resolve a changed target by settling again. Eviction
+            // preserves the provider's pending state and durable lineage while
+            // releasing the lease for capture recovery. Renderer retirement can
+            // start this close before main announces shutdown.
+            if (
+              (opts?.shuttingDown || captureWaitAbort.signal.aborted) &&
+              (isConflictStaleTargetRefusal(error) || isYdocUnsettledCloseRefusal(error))
+            ) {
+              liveEntry.status = "failing-close";
+              await session.evict();
+              if (liveYDocSessions.get(input.path) === liveEntry) {
+                liveYDocSessions.delete(input.path);
+              }
+              return;
+            }
             // The reservation may still be held and the on-disk state is
             // indeterminate — retain a failing-close guard so a retry/force-close
             // can complete the teardown, and DO NOT swallow (data-integrity
