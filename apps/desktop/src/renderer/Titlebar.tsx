@@ -1,3 +1,4 @@
+import { shortcutText } from "../shortcuts/shortcutRegistry";
 import { desktopPins } from "../testPins";
 import { DohcMark } from "@dohc/brand";
 import { Check, PanelLeft, PanelRight, Search } from "lucide-react";
@@ -95,7 +96,7 @@ export function Titlebar(props: {
   // createMainWindow) — lay out around them with fixed insets there, and
   // around the OS window-controls overlay via env() everywhere else.
   const isMac = window.dohcDesktop?.platform === "darwin";
-  const quickOpenShortcut = isMac ? "⌘P" : "Ctrl P";
+  const quickOpenShortcut = shortcutText("quick-open", window.dohcDesktop?.platform);
   const leftInset = isMac ? "80px" : "calc(env(titlebar-area-x, 0px) + 12px)";
 
   return (

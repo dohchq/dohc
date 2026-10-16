@@ -102,8 +102,8 @@ The service verifies the commit in its own checkout, `C:\w\_verification\lane` o
 Stopping `pnpm verify:pr` does not stop the request. Run the same command again to follow it, or to get its result once it has finished.
 Pass `--detach` to submit the request and return at once.
 
-- Requests run in the order the service accepted them.
-- A newer commit on the same branch replaces that branch's waiting request and keeps its place. A running request finishes.
+- Requests run in the order the service accepted them, unless someone [moves one](#move-a-waiting-request).
+- A newer commit on the same branch replaces that branch's waiting request and keeps its place, including a place a move gave it. A running request finishes.
 - The same commit with the same gates joins the existing request, or reuses its pass.
 - A run that fails because of the machine is retried in place, after 30 seconds, 2 minutes, 5 minutes, then every 15 minutes. Machine failures include a program that could not start, too little disk, and Docker or the host tools not responding.
 - A run that fails a check is reported at once. The service never retries it.
@@ -118,7 +118,19 @@ Each attempt has its own evidence folder, `C:\w\_verification\requests\<id>\atte
 Read the service's verdict from the request's `status.json`, or from the last line `pnpm verify:pr` prints.
 
 Run `pnpm verify:queue status` to see the service, the running requests, the line, and wait estimates.
-Run `pnpm verify:queue cancel <id>` to stop a request. A finished request keeps its verdict.
+Run `pnpm verify:queue cancel <id>` to stop one of your own requests. Never cancel a request another agent submitted. A finished request keeps its verdict.
+
+The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows what holds each verification lane, a queued request or an agent's inline gate, with its steps and its live output, then the requests ready and waiting for a lane, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Threads, Tests, and Nightly tabs show the whole line, every run this week, each thread's runs and results, the slowest and flaky tests, and the nightly runs.
+When T3 runs on the host, the dashboard names each request by the T3 thread that linked its branch's pull request, or whose worktree or branch it uses. It reads T3's local database read-only once a minute. Without T3 it names requests by their branch.
+Select a run to see its failing step's test summary, its steps on a timeline, and any of its logs. The dashboard refreshes every few seconds and cannot change the queue. It records the host's CPU and free memory once a minute in `monitor-load.json` in the queue root.
+To open it from another device, serve it on the tailnet only:
+
+```powershell
+tailscale serve --bg --https=8446 http://127.0.0.1:4250
+```
+
+Then open `https://<host>.<tailnet>.ts.net:8446`. Do not use Tailscale Funnel: the page shows branch names and test output.
+The page answers only to the host's own names and to tailnet names.
 
 The `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
 A supervisor runs the service in a Windows job object. When the service exits or its heartbeat stops for two minutes, the supervisor stops it and everything it started, then starts it again.
@@ -180,10 +192,56 @@ A test that passes only on that retry does not fail the gate. `result.json` list
 A flaky test is a defect. Fix the condition it races, or report it to whoever owns it. A test that fails twice still fails the gate.
 A repository or desktop script step reruns as a whole, after its first attempt's ignored outputs. A test that fails on a clean tree but passes beside those outputs is recorded as flaky like any other, so treat every entry as a real failure until you have read it.
 
+### Failures other branches share
+
+`result.json` lists each test that failed on its last try under `failed`, with the same step and test names as `flaky`. The queue records both lists for each attempt in `status.json` and the queue history.
+The list covers package tests, the repository and desktop script tests, the account and desktop browser proofs, and the Rust tests. A step that fails outside a test, such as typecheck, lists none.
+Before you resubmit a failed run, run each command that it prints and records under `rerun` until its failed tests pass.
+
+When a run fails on the shared host, the verifier looks for its failed tests in the last day of queue history. It prints each test that another branch's run also failed, with those branches, and records them in `result.json` under `shared`. Runs of your own branch do not count.
+A failure that other branches share often comes from main or from a flaky test, not from your change.
+
+When the gate prints that list, check the test on `origin/main` and in the [last nightly](#nightly-run). Do this before you change your branch for that test.
+Do not add a workaround for that failure to your PR. Fix main or the flaky test in its own PR, or wait for that fix and rebase.
+
+### Move a waiting request
+
+Move a request only to unblock other work: a fix for a failure that several branches share, a fix for a broken main, or a request the owner asked to hurry.
+Never move a request only to get your own run sooner. Any agent may move any waiting request, including one another thread submitted.
+
+```sh
+pnpm verify:queue move <id> --first --reason "<why>" [--by "<name>"]
+pnpm verify:queue move <id> --before <other-id> --reason "<why>" [--by "<name>"]
+```
+
+`--first` puts the request at the front of the line. `--before` puts it just ahead of another waiting request.
+A move only brings a waiting request forward. `--before` needs another waiting request that is ahead of it now.
+A move never stops or starts a run. It changes only which request starts next, and the nightly run still goes first.
+The service applies the move within a few seconds, and the command prints the request's new place. If the service is not running, the move applies when it starts.
+A service installed before this command existed applies no moves. After 30 seconds the command says so. Run `pnpm verify:queue upgrade` from a checkout of `origin/main` to install a service that applies them.
+The command refuses a request that is unknown, running, or finished, or one already ahead of the `--before` request, and says why.
+
+The service records each move in `history.jsonl` with its reason, the `--by` name, the OS user, and the checkout that asked. It keeps the reason to one line of at most 300 characters.
+`pnpm verify:queue status` shows the last move beside the request, such as `moved first by Ice (C:\w\fix-grid): fixes the grid test three branches fail`. Every agent on the host runs as the same OS user, so the checkout always shows.
+The dashboard marks a moved request in the line and in its lane once it runs. Point at the mark, or move keyboard focus to it, to see who moved it and why.
+
+### A failure stops the run
+
+The first step that fails stops the rest of a PR run. A step fails only after its retry, so a test that passes on retry stops nothing.
+The runner interrupts the running Rust job, package tests, and proofs as it does on Ctrl+C. It then removes their processes, Postgres, and containers.
+The verdict is FAIL. `result.json` names the failed step under `stopped.after` and lists each step that did not finish under `stopped.notRun`.
+Each of those steps has the verdict `NOT RUN`. `js-tests/result.json` records the package tests and proofs that did not finish in the same way.
+A stopped Rust job is never a pass, so its evidence cannot be reused.
+
+Pass `--keep-going` to let both jobs finish after a failure. In the JavaScript job, running steps finish, but no new step starts.
+Use it when you need every failure, or Rust evidence to reuse after a JavaScript failure.
+A `--full` run always keeps going. On the shared host, the queue keeps going only with `--full`; add `--inline` to keep going without it.
+
 ### Nightly run
 
 Every night at 03:07, the `dohc-verification-nightly` scheduled task submits a full verification of main's head: every gate, every package, and every proof.
 It covers everything merged since the last nightly that passed, and it runs before the rest of the line. A head that already passed is not verified again.
+It keeps going after a failure, so triage sees the failures of both jobs.
 `pnpm verify:queue status` shows the last passing nightly. Submit one by hand with `pnpm verify:queue nightly`.
 A failed nightly means a merged change broke main or an affected-package selection missed something. Find the change that broke it and revert or fix it the same day.
 The [`verification-triage` skill](../../.agents/skills/verification-triage/SKILL.md) has the procedure.
@@ -210,6 +268,7 @@ Use it when a build or test step reads a changed file outside the filters.
 After a renderer fix, reuse completed Rust evidence with `pnpm verify:pr --base <target-ref> --reuse-rust <original-result.json>`.
 The current run must select Rust. Add `--job rust` to request that job explicitly.
 The verifier accepts an original Rust pass from a completed PR run, including one whose JavaScript job failed.
+Without `--keep-going`, a JavaScript failure stops the Rust job, so that run has no Rust pass.
 The original report must contain a Rust identity and every required passing gate check.
 Older reports without this identity require a fresh Rust run.
 The verifier compares Git content, tools, platform, environment, and Cargo configuration.
@@ -221,7 +280,7 @@ The reference keeps the original tested commit, report hash, gate log hash, and 
 Keep the original report and logs until review finishes. Reused evidence cannot become another reuse source.
 
 Run `pnpm verify:pr --base <target-ref> --full` before a release or when impact is uncertain.
-It runs both gates even when the filters omit one, including when the diff is empty.
+It runs both gates even when the filters omit one, including when the diff is empty, and keeps going after a failure.
 Use `pnpm verify:plan --base <target-ref> --full` to inspect that selection.
 
 Read `result.json` before reporting a pass. Include the commit, gates, and evidence directory in the PR.

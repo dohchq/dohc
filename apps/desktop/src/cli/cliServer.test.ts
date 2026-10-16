@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
-import { createApp, deleteWorkspacePath, importData, moveWorkspacePath, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
+import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { executeCli } from "@dohc/cli";
 import {
   CLI_PROTOCOL_VERSION,
@@ -2365,6 +2365,42 @@ describe("CLI socket server", () => {
         attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 0 },
       },
     }]);
+  });
+
+  it.each([false, true])("lists document chats over the desktop socket with MCP fields in a read-only view=%s", async readOnly => {
+    const thread = await store!.createThread({
+      workspaceId: WORKSPACE_ID, title: "File review",
+      linkedFile: { objectId: "object_tracked", pathHint: "old-name.md" },
+    });
+    await store!.createThread({
+      workspaceId: WORKSPACE_ID, title: "Other file",
+      linkedFile: { objectId: "object_other", pathHint: "other.md" },
+    });
+    registryWorkspace.readOnly = readOnly;
+    context.readOnly = readOnly;
+    const mcp = await listFileChats({ root: workspaceRoot, home: stateDir, ...(readOnly ? { shareAccess: "view" as const } : {}) }, { path: "tracked.md" });
+    expect(mcp).toEqual({
+      ok: true, path: "tracked.md", fileObjectId: "object_tracked",
+      threads: [{ id: thread.id, title: thread.title, createdAtMs: thread.createdAtMs, updatedAtMs: thread.updatedAtMs, linkedPathHint: "old-name.md" }],
+    });
+    const result = await executeCli({ argv: ["document", "chats", "tracked.md", "--json"], cwd: workspaceRoot, env: {}, client: { stateDir } });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 3, ...mcp });
+    expect(calls.writes).toBe(0);
+  });
+
+  it("does not count a successful document chats list through either door in the usage record", async () => {
+    const usage = createUsageStore({ stateDir: () => stateDir, appVersion: "0.1.0", coverage: DESKTOP_USAGE_COVERAGE });
+    try {
+      await usage.load();
+      serverOptions.recordSuccess = invocation => usage.recordSuccess(invocation);
+      const mcp = await listFileChats({ root: workspaceRoot, home: stateDir }, { path: "tracked.md" });
+      expect(mcp).toEqual({ ok: true, path: "tracked.md", fileObjectId: "object_tracked", threads: [] });
+      const result = await executeCli({ argv: ["document", "chats", "tracked.md", "--json"], cwd: workspaceRoot, env: {}, client: { stateDir } });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ schemaVersion: 3, ...mcp });
+      expect((await usage.read()).counts).toEqual([]);
+    } finally { await usage.close(); }
   });
 
   it("comments on a file through the chat write path a person's comment takes", async () => {

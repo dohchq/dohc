@@ -204,7 +204,7 @@ While off, run PR verification locally. Manual GitHub checks use self-hosted Lin
 When enabled, ready PRs from this repository use Blacksmith. Fork PRs still need local verification.
 Use passing cloud evidence instead of repeating full gates locally when it covers the change.
 Before changing CI activation, read [the Blacksmith setup procedure](docs/engineering/enable-blacksmith.md).
-Keep one concern per PR. Keep required contract, caller, and test changes together.
+Keep required contract, caller, and test changes together.
 Finish implementation, self-simplification, and focused checks before requesting independent review.
 
 ### Verify the change

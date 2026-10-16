@@ -1,7 +1,10 @@
-// Tests that passed only on retry, and the slowest tests. The gate retries a
-// failing test once, so a flaky test no longer fails a change it has nothing to
-// do with, and records each one here so it gets fixed instead of hidden. It also
-// records the slowest tests, so the suites' time can be kept in budget.
+// Tests that passed only on retry, tests that failed on their last try, and the
+// slowest tests. The gate retries a failing test once, so a flaky test no longer
+// fails a change it has nothing to do with, and records each one here so it gets
+// fixed instead of hidden. Failed tests use the same names, so the queue can tell
+// when other branches fail the same test, and the gate can print the command that
+// reruns each one. It also records the slowest tests, so the suites' time can be
+// kept in budget.
 
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -23,22 +26,50 @@ export function nextestFlaky(log) {
   return [...new Set(names)];
 }
 
-/** The failed tests in a node:test spec report, or none when the run failed outside its tests. */
+/**
+ * Tests nextest's summary lists as failed on their last try: a failure, a
+ * timeout, a crash, or a test binary that could not start. A run that printed
+ * no summary names none.
+ */
+export function nextestFailures(log) {
+  const summary = plain(log).split(/^\s*Summary \[.*$/mu).slice(1).join("\n");
+  const names = [...summary.matchAll(/^\s*(?:TRY \d+ )?(?:FAIL|TIMEOUT|ABORT|XFAIL|LEAK-FAIL|SIG\w+)\s+\[[^\]]*\]\s+(?:\([^)]*\)\s+)?(.+?)\s*$/gmu)].map(match => match[1]);
+  return [...new Set(names)];
+}
+
+/**
+ * The failed tests in a node:test spec report, named `file › test`, or
+ * `file › parent > test` for a subtest. A run that failed outside its tests
+ * names none.
+ */
 export function nodeTestFailures(log) {
   const text = plain(log);
   const start = text.indexOf("✖ failing tests:");
   if (start < 0) return [];
-  const names = [...text.slice(start).matchAll(/^✖ (.+?) \([\d.]+ms\)\s*$/gmu)].map(match => match[1]);
+  // The report above the summary shows each failed test again, indented under its parents' ▶ lines.
+  const report = text.slice(0, start).split("\n").map(line => line.trimEnd());
+  const names = [...text.slice(start).matchAll(/^(?:test at (.+):\d+:\d+\s*\n)?(✖ (.+?) \([\d.]+ms\))\s*$/gmu)].map(([, file, result, name]) => {
+    const parents = [];
+    for (const line of report) {
+      const depth = (line.length - line.trimStart().length) / 2;
+      if (line.trimStart().startsWith("▶ ")) parents[depth] = line.trimStart().slice(2);
+      else if (file && line.trimStart() === result) return `${file.replaceAll("\\", "/")} › ${[...parents.slice(0, depth), name].join(" > ")}`;
+    }
+    return name;
+  });
   return [...new Set(names)];
 }
 
+const playwrightSpecs = (suites = [], status) => suites.flatMap(suite => [
+  ...(suite.specs ?? []).filter(spec => spec.tests?.some(test => test.status === status)).map(spec => `${spec.file} › ${spec.title}`),
+  ...playwrightSpecs(suite.suites, status),
+]);
+
 /** Tests a Playwright JSON report marks flaky. */
-export function playwrightFlaky(suites = []) {
-  return suites.flatMap(suite => [
-    ...(suite.specs ?? []).filter(spec => spec.tests?.some(test => test.status === "flaky")).map(spec => `${spec.file} › ${spec.title}`),
-    ...playwrightFlaky(suite.suites),
-  ]);
-}
+export const playwrightFlaky = suites => playwrightSpecs(suites, "flaky");
+
+/** Tests a Playwright JSON report marks unexpected: they failed on every try. An interrupted test counts as skipped. */
+export const playwrightFailures = suites => playwrightSpecs(suites, "unexpected");
 
 /** Failed tests in a vitest JSON report. */
 export function vitestFailures(path) {
@@ -48,7 +79,7 @@ export function vitestFailures(path) {
   } catch { return []; }
 }
 
-/** The tests the vitest reporter recorded in `path`: { test, flaky, seconds }. */
+/** The tests the vitest reporter recorded in `path`: { test, flaky, failed, seconds }. */
 export function readTestRecord(path) {
   return read(path).split(/\r?\n/u).filter(Boolean).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
 }
@@ -81,6 +112,48 @@ export function playwrightTimes(suites = []) {
     })),
     ...playwrightTimes(suite.suites),
   ]);
+}
+
+// A pattern that matches `text`, written inside double quotes. A backslash there
+// reaches the runner unchanged in bash, PowerShell, and cmd, so it escapes the
+// regular expression syntax. Some characters cannot be written the same way in
+// every shell: bash and PowerShell expand `$`, PowerShell escapes with the
+// backtick, bash reads `\\` as one backslash, and cmd expands `%` and, with
+// delayed expansion, `!`. Those, `"`, and characters outside ASCII, whose
+// encoding depends on the shell, match as `.`, one per UTF-16 unit as the
+// runners read them.
+const literally = text => text.replace(/([[\](){}*+?.^|])|[^ -~]|[$"`\\%!]/g, (character, syntax) => syntax ? `\\${syntax}` : ".");
+
+/**
+ * The command that reruns one failed test from the repository root, with the
+ * gate's builds in place, or null when no command reruns that test alone.
+ * vitest and node:test pass when a pattern matches no test, so each pattern
+ * matches the whole recorded name.
+ */
+export function rerunCommand(row) {
+  const { step, test } = row ?? {};
+  if (typeof step !== "string" || typeof test !== "string") return null;
+  if (step === "rust") {
+    // nextest names a test by its binary, then its path. The focused Rust runner reuses the gate's test build and budget.
+    const [, binary, path] = test.match(/^([\w:/.-]+) ([\w:]+)$/u) ?? [];
+    return binary ? `node tools/rust-engine-program/run-rust-profile.mjs rerun -- --filter-expr "binary_id(=${binary}) & test(=${path})"` : null;
+  }
+  const at = test.indexOf(" › ");
+  const file = test.slice(0, at), name = test.slice(at + 3);
+  if (at < 0 || !/^[\w./-]+$/u.test(file)) return null;
+  // Playwright matches a test by its file, its title, then its tags.
+  const title = `"(^| )${literally(file)} ${literally(name)}( @\\S+)*$"`;
+  if (step === "desktop") return `pnpm qa:e2e -- ${file} --grep ${title}`;
+  if (step === "accounts") return `node apps/desktop/scripts/run-playwright.mjs --config services/workspace-api/playwright.config.ts ${file} --grep ${title}`;
+  // vitest matches a test's suites and name joined by spaces, and a name can contain " > ".
+  if (step.startsWith("@dohc/")) return `pnpm --filter ${step} exec vitest run ${file} -t "^${name.split(" > ").map(literally).join(" (> )?")}$"`;
+  // node:test runs a subtest only inside its top-level test, whose own name can contain " > ".
+  // A file that failed to load runs whole.
+  const pattern = name.replaceAll("\\", "/") === file ? "" : ` --test-name-pattern "^${literally(name.split(" > ")[0])}( > |$)"`;
+  const nodeTest = `node${file.endsWith(".ts") ? " --experimental-transform-types" : ""} --test${pattern} ${file}`;
+  if (step === "repository") return nodeTest;
+  if (step === "desktop-scripts" || step === "desktop-runtime-packaging") return `pnpm --filter @dohc/desktop exec ${nodeTest}`;
+  return null;
 }
 
 /** The slowest rows, longest first. */
