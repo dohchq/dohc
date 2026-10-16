@@ -3541,7 +3541,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let end = (page.uploaded_ops + width).min(ops.len());
             let mut uploads = Vec::new();
             let mut upload_bytes = 0;
-            for sha256 in collect_blob_refs(&ops[page.uploaded_ops..end])?.keys() {
+            'blobs: for sha256 in collect_blob_refs(&ops[page.uploaded_ops..end])?.keys() {
                 if !missing.contains(sha256) {
                     continue;
                 }
@@ -3551,15 +3551,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .get(sha256)
                     .ok_or(RelayError::InvalidResponse)?;
                 for kind in kinds {
+                    if !uploads.is_empty()
+                        && local_blob_length(store, sha256, *kind, false)?.is_some_and(|length| {
+                            length > MAX_BLOB_UPLOAD_BATCH_BYTES - upload_bytes
+                        })
+                    {
+                        break 'blobs;
+                    }
                     if let Some(local) = local_blob_bytes(store, sha256, *kind)? {
                         bytes = Some(local);
                         break;
                     }
                 }
                 let bytes = bytes.ok_or(RelayError::BlobInvalid)?;
-                if !uploads.is_empty() && upload_bytes + bytes.len() > MAX_BLOB_UPLOAD_BATCH_BYTES {
-                    break;
-                }
                 upload_bytes += bytes.len();
                 uploads.push(BlobUploadRequest {
                     workspace_id: workspace_id.to_owned(),
@@ -3610,7 +3614,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         for (sha256, kinds) in blob_refs_to_apply(store, ops)? {
             let mut missing = Vec::new();
             for kind in kinds {
-                if !local_blob_present(store, &sha256, kind)? {
+                if local_blob_length(store, &sha256, kind, true)?.is_none() {
                     missing.push(kind);
                 }
             }
@@ -3988,7 +3992,7 @@ pub(crate) fn take_local_blob_bytes_call_count() -> usize {
     })
 }
 
-/// Is this digest already hydrated and valid for the kind being asked for?
+/// Read the stored length and validate it for the kind being asked for.
 ///
 /// Both questions, because they stopped being the same one. `Binary` and
 /// `Ydoc` share `binary_blobs` and no longer share a ceiling, so bare table
@@ -4003,11 +4007,12 @@ pub(crate) fn take_local_blob_bytes_call_count() -> usize {
 /// name, rather than reported present. Refused rather than re-fetched: the
 /// length is already known, and downloading identical bytes to reject them
 /// would only make the observed size less exact.
-fn local_blob_present(
+fn local_blob_length(
     store: &EngineStore,
     sha256: &str,
     kind: BlobKind,
-) -> Result<bool, RelayError> {
+    validate_ceiling: bool,
+) -> Result<Option<usize>, RelayError> {
     let (constraint, limit_bytes) = blob_ceiling(kind);
     let stored: Option<i64> = store
         .read_with(|conn| {
@@ -4025,17 +4030,17 @@ fn local_blob_present(
         })
         .map_err(local)?;
     let Some(byte_length) = stored else {
-        return Ok(false);
+        return Ok(None);
     };
     let observed = usize::try_from(byte_length).map_err(|_| RelayError::BlobInvalid)?;
-    if observed > limit_bytes {
+    if validate_ceiling && observed > limit_bytes {
         return Err(RelayError::BlobTooLarge {
             constraint,
             limit_bytes,
             observed: ObservedBytes::Exact(observed),
         });
     }
-    Ok(true)
+    Ok(Some(observed))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

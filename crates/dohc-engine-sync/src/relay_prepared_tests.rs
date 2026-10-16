@@ -6,6 +6,7 @@ struct PausedRelay(
     crate::tests::FakeRelay,
     std::sync::atomic::AtomicBool,
     std::sync::atomic::AtomicUsize,
+    std::sync::atomic::AtomicUsize,
 );
 
 macro_rules! delegate {
@@ -28,6 +29,10 @@ impl RelayTransport for PausedRelay {
     delegate!(claim_workspace, ClaimRequest, ClaimResponse);
     delegate!(rotate_epoch, EpochRequest, EpochResponse);
     fn upload_blob(&self, request: BlobUploadRequest) -> Result<(), RelayError> {
+        let limit = self.3.load(std::sync::atomic::Ordering::SeqCst);
+        if limit > 0 && self.2.load(std::sync::atomic::Ordering::SeqCst) >= limit {
+            return Err(RelayError::Local("prepared-upload-test-pause".into()));
+        }
         assert_eq!(
             dohc_engine_storage::hex_sha256(&request.bytes),
             request.sha256
@@ -103,11 +108,25 @@ fn acknowledge_seed(store: &mut EngineStore) {
 fn prepared_owner_prefix_rechecks_a_restore_after_upload_progress() {
     let (_scratch, mut store, observed, checkpoint) = crate::tests::owner_publication::fixture();
     acknowledge_seed(&mut store);
+    let TxnOutcome::Committed(second_blob) = store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_storage::put_binary_blob(tx, b"second blob")
+        })
+        .unwrap()
+    else {
+        panic!("unexpected crash");
+    };
     for (kind, payload) in [
         ("chat.message.append", serde_json::json!({})),
         (
             "ydoc.update",
             serde_json::json!({"versionId":"main","objectId":"owner","path":"owner.md","contentKind":"richdoc","lineageClaimId":observed.binding.lineage_claim_id,"updateBlobSha256":dohc_engine_storage::hex_sha256(&checkpoint)}),
+        ),
+        ("chat.message.append", serde_json::json!({})),
+        ("chat.message.append", serde_json::json!({})),
+        (
+            "moment.append",
+            serde_json::json!({"versionId":"main","objectId":"other","path":"other.bin","payloadAfterContentKind":"binary","payloadAfterBlobSha256":second_blob,"payloadAfterByteLength":11}),
         ),
     ] {
         crate::journal_local_replication_op(
@@ -116,33 +135,24 @@ fn prepared_owner_prefix_rechecks_a_restore_after_upload_progress() {
         .unwrap();
     }
     let client = RelaySyncClient::new(PausedRelay::default());
-    let mut progress = PushWorkspaceProgress::default();
-    assert!(matches!(
-        resume(&client, &mut store, &mut progress),
-        Err(RelayError::Local(_))
-    ));
-    // Finish the actual upload phase before resuming the ordinary entry point.
-    // This exposes the boundary before sending, without an in-flight append.
     client
         .transport()
         .1
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let mut page = progress.page.take().unwrap();
-    assert_eq!(page.ops.len(), 2);
-    assert_eq!(
-        client
-            .upload_push_prefix(
-                &store,
-                "ws",
-                &page.identity.clone(),
-                &mut page,
-                progress.started,
-                &mut progress.confirmed_blobs
-            )
-            .unwrap(),
-        2
-    );
-    assert_eq!(page.uploaded_ops, 2);
+    client
+        .transport()
+        .3
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let mut progress = PushWorkspaceProgress::default();
+    assert!(matches!(
+        resume(&client, &mut store, &mut progress),
+        Err(RelayError::Local(ref message)) if message == "prepared-upload-test-pause"
+    ));
+    let page = progress.page.as_ref().unwrap();
+    assert_eq!(page.ops.len(), 5);
+    assert_eq!(page.prefix.allowed_ops, 5);
+    assert_eq!(page.uploaded_ops, 4);
+    assert!(page.sending.is_none());
     assert_eq!(
         client
             .transport()
@@ -150,9 +160,9 @@ fn prepared_owner_prefix_rechecks_a_restore_after_upload_progress() {
             .load(std::sync::atomic::Ordering::SeqCst),
         1
     );
-    assert!(page.inventory.is_empty() && page.missing.is_empty());
+    assert!(page.inventory.is_empty());
+    assert_eq!(page.missing, BTreeSet::from([second_blob]));
     let held = page.ops[1].origin_seq;
-    progress.page = Some(page);
     store.write_with(&NoFaults, |tx| {
         let input = serde_json::json!({"oldBinding":observed.binding,"newFence":1});
         tx.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','owner','relay','restore',?1,'{}')", [input.to_string()]).unwrap();
@@ -175,6 +185,61 @@ fn prepared_owner_prefix_rechecks_a_restore_after_upload_progress() {
         crate::read_pushed_seq(&store, "ws", "local").unwrap(),
         held - 1
     );
+}
+
+#[test]
+fn prepared_push_reads_an_overflowing_blob_only_in_its_own_round() {
+    let (_scratch, mut store, _, _) = crate::tests::owner_publication::fixture();
+    acknowledge_seed(&mut store);
+    let large = vec![7; 2 * 1024 * 1024];
+    let large_sha = hex_sha256(&large);
+    // Inventory within one operation window visits digests in sorted order.
+    let small = (0..100)
+        .map(|index| format!("small {index}").into_bytes())
+        .find(|bytes| hex_sha256(bytes) < large_sha)
+        .unwrap();
+    for bytes in [small, large] {
+        let TxnOutcome::Committed(sha) = store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::put_binary_blob(tx, &bytes)
+            })
+            .unwrap()
+        else {
+            panic!("unexpected crash");
+        };
+        let payload = serde_json::json!({"versionId":"main","objectId":"other","path":"other.bin","payloadAfterContentKind":"binary","payloadAfterBlobSha256":sha,"payloadAfterByteLength":bytes.len()});
+        crate::journal_local_replication_op(
+            &mut store,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "moment.append",
+            &payload,
+            10,
+            &NoFaults,
+        )
+        .unwrap();
+    }
+    let client = RelaySyncClient::new(PausedRelay::default());
+    client
+        .transport()
+        .1
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = take_local_blob_bytes_call_count();
+    let result = resume(&client, &mut store, &mut PushWorkspaceProgress::default()).unwrap();
+    assert!(matches!(
+        result,
+        SyncPassOutcome::Complete { pushed: 2, .. }
+    ));
+    assert_eq!(
+        client
+            .transport()
+            .2
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    assert_eq!(take_local_blob_bytes_call_count(), 2, "read each blob once");
 }
 
 #[test]
