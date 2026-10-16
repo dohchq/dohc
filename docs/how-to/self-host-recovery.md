@@ -45,7 +45,7 @@ The server loses this work with the host data:
 - Changes from automation runs that the server had not yet sent to the relay.
 - Button presses that the server accepted but had not finished.
   Each of these presses ends instead of running again.
-  The person who pressed the button can press it again.
+  A press may have made some of its changes, so check them before pressing again.
 
 An older host data archive does not get this protection.
 Its copies lack the claims made after the archive, so presses accepted since then can run twice.

@@ -152,7 +152,7 @@ function replace(
   return read(storage, next.workspaceId);
 }
 
-const REPLICA_REPLACED = "This server rebuilt its copy of the workspace before this press ran. Press it again.";
+const REPLICA_REPLACED = "This server rebuilt its copy of the workspace before this press finished. Check its changes before pressing it again.";
 
 /**
  * No condition needs the replica now. Returns the row once it has been
