@@ -539,3 +539,11 @@ describe("private named live gateway", () => {
     expect(redeem).toHaveBeenCalledTimes(2);
   });
 });
+
+it("keeps an unrelated connection while its account is resolving",async()=>{
+  const entered=deferred<void>(),resolved=deferred<typeof session>();
+  const state=await fixture({resolveSession:async()=>{entered.resolve();return resolved.promise;}});
+  const socket=state.browser();await entered.promise;
+  state.gateway.deleteAccount("unrelated",["unrelated-workspace"]);resolved.resolve(session);
+  expect(await socket.status).toBe(101);expect(socket.socket.readyState).toBe(WebSocket.OPEN);
+});

@@ -190,3 +190,19 @@ it('keeps revoked bootstrap cookies opaque when their local request budget is ex
   const unknown=await f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host}}));
   expect(unknown.status).toBe(404);expect(await unknown.json()).toEqual({ok:false,error:'not found'});
 });
+
+it("drops a publication's launch and staged document when its owner is deleted", async () => {
+  const f = fixture(), app = await launch(f);
+  f.handler.deleteAccount("deleted-owner", [], [publicationId]);
+  expect((await app.read()).status).toBe(404);
+  expect((await f.redeem(app.handoff)).status).toBe(404);
+});
+it("refuses an in-flight launch after its publication is deleted", async () => {
+  let release!: () => void, entered!: () => void;
+  const waiting = new Promise<void>(resolve => {entered = resolve;});
+  const hold = new Promise<void>(resolve => {release = resolve;});
+  const f = fixture(async () => {entered(); await hold;});
+  const pending = f.issue(); await waiting;
+  f.handler.deleteAccount("deleted-owner", [], [publicationId]); release();
+  expect((await pending).status).toBe(404);
+});

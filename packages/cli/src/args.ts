@@ -19,6 +19,8 @@ type ExportScope =
 
 type CliCommandBody =
   | { verb: "shareCopy"; shareId: string; grantId: string }
+  | { verb: "accountDeletePreview" }
+  | { verb: "accountDelete"; server: string; previewToken: string }
   | { verb: "accessObject"; ref: AccessObjectRef; cursor?: string }
   | { verb: "accessSharing"; lane: "granted" | "received"; cursor?: string }
   | { verb: "documentRead" | "fileChats"; path: string }
@@ -117,6 +119,8 @@ export interface CliVerbSpec {
   freeText?: boolean;
   /** Request fields copied from an earlier verb's result. */
   take?: readonly CliFieldSource[];
+  /** A stray argument can be a secret, so refusing one never repeats it. */
+  strayRefusal?: string;
   parse(input: VerbInput): CliCommandBody;
 }
 
@@ -184,7 +188,7 @@ function readVerbInput(name: string, verb: CliVerbSpec, tokens: readonly string[
     } else if (!optionsEnded && token === "--") {
       optionsEnded = true;
     } else if (!optionsEnded && token.startsWith("--")) {
-      fail(`unknown ${name} option '${token}'${verb.freeText ? `; put ${DASH_RULE}` : ""}`);
+      fail(verb.strayRefusal ?? `unknown ${name} option '${token}'${verb.freeText ? `; put ${DASH_RULE}` : ""}`);
     } else {
       operands.push(token);
     }
@@ -662,6 +666,47 @@ const AUTOMATION_VERBS = {
   },
 } satisfies Record<string, CliVerbSpec>;
 
+const ACCOUNT_DELETE_STRAY =
+  "account delete takes only --server and --preview-token; dohc reads the password from stdin or asks for it";
+
+const ACCOUNT_VERBS = {
+  deletePreview: {
+    capabilityId: "account.delete.preview",
+    summary: "List what deleting the connected server account removes.",
+    operands: "",
+    notes: ["The result holds the server and previewToken that delete needs. The token expires after five minutes."],
+    parse: ({ operands }) => {
+      noExtraArgs(operands, "account deletePreview");
+      return { verb: "accountDeletePreview" };
+    },
+  },
+  delete: {
+    capabilityId: "account.delete",
+    summary: "Delete the connected server account and the workspaces it owns on the server.",
+    operands: "",
+    flags: [
+      { name: "--server", value: "address", text: "Use server from deletePreview. Required." },
+      { name: "--preview-token", value: "token", text: "Use previewToken from deletePreview. Required." },
+    ],
+    notes: [
+      "dohc reads the account password from stdin, or asks for it when stdin is a terminal. Never pass it as an argument.",
+      "This cannot be undone. Copies on this computer stay. People you shared with lose access and keep their copies.",
+      "If you create an account again later, the server will not accept your old copies of the deleted workspaces. Its backups keep the data until they expire.",
+      "When the server cannot finish at once, the account stays blocked and the server finishes later. Either way, the dohc app disconnects from the server. If it cannot, delete exits 1 and says how to finish.",
+      "If the preview expired or changed, run deletePreview again.",
+    ],
+    strayRefusal: ACCOUNT_DELETE_STRAY,
+    parse: (input) => {
+      if (input.operands.length > 0) fail(ACCOUNT_DELETE_STRAY);
+      const server = lastValue(input, "--server");
+      const previewToken = lastValue(input, "--preview-token");
+      if (!server) fail("account delete requires --server <address> from deletePreview");
+      if (!previewToken) fail("account delete requires --preview-token <token> from deletePreview");
+      return { verb: "accountDelete", server, previewToken };
+    },
+  },
+} satisfies Record<string, CliVerbSpec>;
+
 interface JsonVerbHelp {
   summary: string;
   notes?: readonly string[];
@@ -1033,6 +1078,11 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
       "Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.",
     ],
     verbs: AUTOMATION_VERBS,
+  },
+  account: {
+    summary: "Review and delete the server account the dohc app is connected to.",
+    notes: ["Unlike other commands, account verbs also work outside a workspace folder."],
+    verbs: ACCOUNT_VERBS,
   },
 };
 

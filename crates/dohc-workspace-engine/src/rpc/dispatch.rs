@@ -92,6 +92,8 @@ impl EngineService {
                 | "sync.materializePendingCursor"
                 | "sync.commitCursor"
                 | "sync.push"
+                | "sync.createHostedReplica"
+                | "sync.pullHosted"
                 // The claim ledger, so the relay's automations can run the
                 // field changes this host claims when it accepts a live frame.
                 // Nothing that writes files, chats, schedules, or presses.
@@ -394,6 +396,13 @@ impl EngineService {
             }
             "sync.recoverOrigin" => {
                 Box::pin(self.sync_recover_origin(&ctx, request.workspace, request.params)).await?
+            }
+            "sync.createHostedReplica" => {
+                Box::pin(self.sync_create_hosted_replica(&ctx, request.workspace, request.params))
+                    .await?
+            }
+            "sync.pullHosted" => {
+                Box::pin(self.sync_pull_hosted(&ctx, request.workspace, request.params)).await?
             }
             "keys.upload" => {
                 Box::pin(self.keys_upload(&ctx, request.workspace, request.params)).await?
@@ -1247,6 +1256,8 @@ mod tests {
             "sync.materializePendingCursor",
             "sync.commitCursor",
             "sync.push",
+            "sync.createHostedReplica",
+            "sync.pullHosted",
         ] {
             request.method = method.into();
             request.workspace = Some(attached_handle.clone());
@@ -1545,8 +1556,10 @@ mod tests {
             "sync.resetClaimRefusal",
             "sync.materializePendingCursor",
             "sync.commitCursor",
+            "sync.createHostedReplica",
             "sync.probe",
             "sync.pull",
+            "sync.pullHosted",
             "sync.remoteChanges",
             "sync.push",
             "sync.recoverOrigin",

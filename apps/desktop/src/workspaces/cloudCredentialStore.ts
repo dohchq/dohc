@@ -18,6 +18,11 @@ export interface CloudCredentials {
   token: string;
 }
 
+export interface DeletedAccount {
+  serverUrl: string;
+  userId: string;
+}
+
 export interface TokenCipher {
   isAvailable(): boolean;
   // encrypt() must return a string safe to embed in JSON (base64).
@@ -27,6 +32,7 @@ export interface TokenCipher {
 
 const FILE_NAME = "dohc-cloud.json";
 const INVALID_FILE_NAME = "dohc-cloud-invalid.json";
+const DELETED_FILE_NAME = "dohc-cloud-deleted.json";
 const MAX_CLOUD_CREDENTIAL_EMAIL_LENGTH = 320;
 
 function nonEmptyString(value: unknown): value is string {
@@ -48,6 +54,7 @@ export function createCloudCredentialStore(options: {
   const { dir, cipher } = options;
   const file = join(dir, FILE_NAME);
   const invalidFile = join(dir, INVALID_FILE_NAME);
+  const deletedFile = join(dir, DELETED_FILE_NAME);
 
   return {
     async load(): Promise<CloudCredentials | null> {
@@ -198,6 +205,40 @@ export function createCloudCredentialStore(options: {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
+    },
+
+    // Accounts deleted from this computer. A server never reuses a user ID,
+    // so the list only grows, and a sign-in to any of them is refused. A
+    // missing or unreadable file reads as empty: the server still refuses a
+    // deleted account.
+    async loadDeletedAccounts(): Promise<DeletedAccount[]> {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readFile(deletedFile, "utf8"));
+      } catch {
+        return [];
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return [];
+      }
+      const obj = parsed as Record<string, unknown>;
+      if (obj.version !== 1 || !Array.isArray(obj.accounts)) return [];
+      return obj.accounts.flatMap((entry: unknown) => {
+        if (entry === null || typeof entry !== "object") return [];
+        const account = entry as Record<string, unknown>;
+        return nonEmptyString(account.serverUrl) && nonEmptyString(account.userId)
+          ? [{ serverUrl: account.serverUrl, userId: account.userId }]
+          : [];
+      });
+    },
+
+    async saveDeletedAccounts(accounts: DeletedAccount[]) {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      const payload = {
+        version: 1,
+        accounts: accounts.map(({ serverUrl, userId }) => ({ serverUrl, userId })),
+      };
+      await atomicReplaceFile(deletedFile, (tmp) => writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 }));
     },
   };
 }

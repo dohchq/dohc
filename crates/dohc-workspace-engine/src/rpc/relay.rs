@@ -16,6 +16,8 @@ use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::RelayConfiguration;
 use dohc_engine_runtime::RelayOperation;
 use dohc_engine_runtime::RelayOperationOutcome;
+use dohc_engine_sync::HostedCursor;
+use dohc_engine_sync::HostedPassOutcome;
 use dohc_engine_sync::RelayCursor;
 use dohc_engine_sync::ShareCursor;
 use dohc_engine_sync::SyncPassOutcome;
@@ -28,6 +30,7 @@ use std::sync::Arc;
 pub(super) enum IssuedCursor {
     Relay(RelayCursor),
     ShareView(ShareCursor),
+    Hosted(HostedCursor),
 }
 
 #[derive(Clone)]
@@ -93,6 +96,15 @@ struct AdoptJoinIdentityParams {
     stream_identity: String,
 }
 
+/// The coordinate the hosted feed's bootstrap names.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostedReplicaParams {
+    workspace_id: String,
+    replication_epoch: String,
+    stream_identity: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CommitCursorParams {
@@ -110,12 +122,23 @@ struct CommitCursorParams {
 enum PendingCursorParams {
     Relay { token: String },
     ShareView { token: String },
+    Hosted { token: String },
 }
 
 #[derive(Clone, Copy)]
 enum PendingCursorKind {
     Relay,
     ShareView,
+    Hosted,
+}
+
+fn issued_as(cursor: &IssuedCursor, kind: PendingCursorKind) -> bool {
+    matches!(
+        (cursor, kind),
+        (IssuedCursor::Relay(_), PendingCursorKind::Relay)
+            | (IssuedCursor::ShareView(_), PendingCursorKind::ShareView)
+            | (IssuedCursor::Hosted(_), PendingCursorKind::Hosted)
+    )
 }
 
 #[derive(Deserialize)]
@@ -246,6 +269,82 @@ fn relay_cursor_json(cursor: &RelayCursor) -> Value {
     })
 }
 
+fn changed_paths_json(changes: &[dohc_engine_sync::MomentMaterializationChange]) -> Vec<Value> {
+    changes
+        .iter()
+        .map(|change| {
+            json!({
+                "versionId": change.version_id,
+                "path": change.path,
+                "operation": change.operation,
+                "contentKind": change.content_kind,
+            })
+        })
+        .collect()
+}
+
+fn refusals_json(refusals: Vec<dohc_engine_sync::ReplicationRefusal>) -> Vec<Value> {
+    refusals
+        .into_iter()
+        .map(|refusal| {
+            json!({
+                "workspaceId": refusal.workspace_id,
+                "originId": refusal.origin_id,
+                "originSeq": refusal.origin_seq,
+                "opKind": refusal.op_kind,
+                "code": refusal.reason.code(),
+                "reason": refusal.reason.message(),
+            })
+        })
+        .collect()
+}
+
+/// A hosted pass, without its cursor: the caller issues that as a token.
+fn hosted_pass_json(pass: HostedPassOutcome) -> Value {
+    let held = pass
+        .held
+        .iter()
+        .map(|(object_id, hold)| hosted_hold_json(object_id, hold))
+        .collect::<Vec<_>>();
+    json!({
+        "fetched": pass.fetched,
+        "hasMore": pass.has_more,
+        "applied": pass.applied,
+        "refused": pass.refused,
+        "skipped": pass.skipped,
+        "conflictsOpened": pass.conflicts_opened,
+        "changedPaths": changed_paths_json(&pass.changed_paths),
+        "refusals": refusals_json(pass.refusals),
+        "sharingDeclined": sharing_declined_json(pass.sharing_declined),
+        "held": held,
+        "pendingCursor": null,
+    })
+}
+
+/// A held document, which the relay must not open for live editing.
+fn hosted_hold_json(object_id: &str, hold: &dohc_engine_sync::HostedHold) -> Value {
+    use dohc_engine_sync::HostedHold;
+    let mut held = json!({"objectId": object_id, "reason": hold.reason()});
+    match hold {
+        HostedHold::PathHeld { path, held_by } => {
+            held["path"] = json!(path);
+            held["heldBy"] = json!(held_by);
+        }
+        HostedHold::ConflictParentWithheld { conflict_id } => {
+            held["conflictId"] = json!(conflict_id);
+        }
+        HostedHold::WorkWaiting => {}
+        HostedHold::ScopePathMismatch {
+            scope_path,
+            head_path,
+        } => {
+            held["scopePath"] = json!(scope_path);
+            held["headPath"] = json!(head_path);
+        }
+    }
+    held
+}
+
 fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
     match outcome {
         SyncPassOutcome::Complete {
@@ -275,20 +374,8 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "conflictsOpened": conflicts_opened,
             "nextCursor": pending_cursor.as_ref().map(|cursor| cursor.cursor),
             "pendingCursor": pending_cursor.as_ref().map(relay_cursor_json),
-            "changedPaths": changed_paths.iter().map(|change| json!({
-                "versionId": change.version_id,
-                "path": change.path,
-                "operation": change.operation,
-                "contentKind": change.content_kind,
-            })).collect::<Vec<_>>(),
-            "refusals": refusals.into_iter().map(|refusal| json!({
-                "workspaceId": refusal.workspace_id,
-                "originId": refusal.origin_id,
-                "originSeq": refusal.origin_seq,
-                "opKind": refusal.op_kind,
-                "code": refusal.reason.code(),
-                "reason": refusal.reason.message(),
-            })).collect::<Vec<_>>(),
+            "changedPaths": changed_paths_json(&changed_paths),
+            "refusals": refusals_json(refusals),
             "sharingDeclined": sharing_declined_json(sharing_declined),
         }),
         SyncPassOutcome::CrashedAfterRemoteCommit => {
@@ -312,20 +399,8 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "conflictsOpened": conflicts_opened,
             "nextCursor": pending_cursor.cursor,
             "pendingCursor": relay_cursor_json(&pending_cursor),
-            "changedPaths": changed_paths.iter().map(|change| json!({
-                "versionId": change.version_id,
-                "path": change.path,
-                "operation": change.operation,
-                "contentKind": change.content_kind,
-            })).collect::<Vec<_>>(),
-            "refusals": refusals.into_iter().map(|refusal| json!({
-                "workspaceId": refusal.workspace_id,
-                "originId": refusal.origin_id,
-                "originSeq": refusal.origin_seq,
-                "opKind": refusal.op_kind,
-                "code": refusal.reason.code(),
-                "reason": refusal.reason.message(),
-            })).collect::<Vec<_>>(),
+            "changedPaths": changed_paths_json(&changed_paths),
+            "refusals": refusals_json(refusals),
             "sharingDeclined": sharing_declined_json(sharing_declined),
         }),
     }
@@ -434,6 +509,21 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "writes": outcome.writes.iter().map(direct_write_json).collect::<Vec<_>>(),
             "morePending": outcome.more_pending,
         }),
+        RelayOperationOutcome::HostedReplicaCreated => json!({ "hosted": true }),
+        RelayOperationOutcome::HostedPass(pass) => hosted_pass_json(pass),
+        // A pass fetched under a scope that has since moved commits nothing.
+        // A commit that retired a departed document has more to pull: work
+        // that waited for its path. A retirement that failed is reported as
+        // the error it would have been, beside the commit that stands.
+        RelayOperationOutcome::HostedCursorCommitted {
+            committed,
+            retirement,
+        } => json!({
+            "committed": committed,
+            "hasMore": matches!(retirement, Ok(true)),
+            "retirement": retirement.err().map(map_runtime),
+            "sharingDeclined": [],
+        }),
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({
             "fetched": outcome.fetched,
             "hasMore": outcome.has_more,
@@ -539,6 +629,7 @@ impl EngineService {
             let (kind, wire_kind) = match &cursor {
                 IssuedCursor::Relay(_) => (PendingCursorKind::Relay, "relay"),
                 IssuedCursor::ShareView(_) => (PendingCursorKind::ShareView, "shareView"),
+                IssuedCursor::Hosted(_) => (PendingCursorKind::Hosted, "hosted"),
             };
             let mut pending = lock(&self.pending_cursors);
             if pending.contains_key(&token) {
@@ -547,11 +638,7 @@ impl EngineService {
             pending.retain(|_, issued| {
                 issued.handle != *handle
                     || issued.workspace_id != workspace_id
-                    || !matches!(
-                        (&issued.cursor, kind),
-                        (IssuedCursor::Relay(_), PendingCursorKind::Relay)
-                            | (IssuedCursor::ShareView(_), PendingCursorKind::ShareView)
-                    )
+                    || !issued_as(&issued.cursor, kind)
             });
             pending.insert(
                 token.clone(),
@@ -583,11 +670,7 @@ impl EngineService {
         let valid = pending.get(token).is_some_and(|issued| {
             issued.handle == *handle
                 && issued.workspace_id == workspace_id
-                && matches!(
-                    (&issued.cursor, kind),
-                    (IssuedCursor::Relay(_), PendingCursorKind::Relay)
-                        | (IssuedCursor::ShareView(_), PendingCursorKind::ShareView)
-                )
+                && issued_as(&issued.cursor, kind)
         });
         if !valid {
             return Err(WireError::new(
@@ -921,11 +1004,15 @@ impl EngineService {
         let params: CommitCursorParams = parse(params)?;
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, _) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
-        let PendingCursorParams::Relay { token } = params.pending_cursor else {
-            return Err(WireError::new(
-                ErrorCode::InvalidParams,
-                "ordinary materialization requires relay cursor",
-            ));
+        let (kind, token) = match params.pending_cursor {
+            PendingCursorParams::Relay { token } => (PendingCursorKind::Relay, token),
+            PendingCursorParams::Hosted { token } => (PendingCursorKind::Hosted, token),
+            PendingCursorParams::ShareView { .. } => {
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "ordinary materialization requires relay cursor",
+                ));
+            }
         };
         let paths = {
             let mut pending = lock(&self.pending_cursors);
@@ -934,7 +1021,7 @@ impl EngineService {
                 .filter(|issued| {
                     issued.handle == *bound_handle
                         && issued.workspace_id == open.workspace_id
-                        && matches!(issued.cursor, IssuedCursor::Relay(_))
+                        && issued_as(&issued.cursor, kind)
                 })
                 .ok_or_else(|| {
                     WireError::new(ErrorCode::InvalidParams, "invalid-pending-cursor")
@@ -988,6 +1075,7 @@ impl EngineService {
         let (kind, token) = match params.pending_cursor {
             PendingCursorParams::Relay { token } => (PendingCursorKind::Relay, token),
             PendingCursorParams::ShareView { token } => (PendingCursorKind::ShareView, token),
+            PendingCursorParams::Hosted { token } => (PendingCursorKind::Hosted, token),
         };
         if self.configured_live_host.get().is_some()
             && !lock(&self.pending_cursors)
@@ -1016,12 +1104,22 @@ impl EngineService {
                 workspace_id: open.workspace_id.clone(),
                 cursor,
             },
+            IssuedCursor::Hosted(cursor) => RelayOperation::CommitHostedCursor {
+                workspace_id: open.workspace_id.clone(),
+                cursor,
+                root: open.root.clone(),
+                now_ms: now_ms()?,
+            },
         };
         let mut outcome = self
             .relay_execute(ctx, &open, configuration, operation, "sync.commitCursor")
             .await?;
         if share_view && reconcile_collections {
             open.request_collection_reconcile();
+        }
+        // A hosted replica takes no part in enrollment.
+        if matches!(outcome, RelayOperationOutcome::HostedCursorCommitted { .. }) {
+            return relay_outcome_json(outcome);
         }
         // A cursor commit can be what makes enrollment ready, as a push can.
         let (_, declined) = self.originate_live_sessions(ctx, &open).await?;
@@ -1200,6 +1298,104 @@ impl EngineService {
             )
             .await?;
         relay_outcome_json(outcome)
+    }
+
+    /// `sync.createHostedReplica`: make this pristine workspace the session
+    /// host's hosted replica under the coordinate the hosted feed's bootstrap
+    /// names, with its main version. The daemon mints the `service-host:`
+    /// origin. Call it before any other write: that write would give the
+    /// workspace an ordinary identity, and a replica never changes between
+    /// the two. Repeating it under the same coordinate answers the same.
+    pub(super) async fn sync_create_hosted_replica(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: HostedReplicaParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::CreateHostedReplica {
+                    workspace_id: open.workspace_id.clone(),
+                    new_origin_id: format!(
+                        "{}{}",
+                        dohc_engine_sync::SERVICE_HOST_ORIGIN_PREFIX,
+                        sync_identifier("host")?
+                    ),
+                    replication_epoch: params.replication_epoch,
+                    stream_identity: params.stream_identity,
+                    created_at_ms: now_ms()?,
+                },
+                "sync.createHostedReplica",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    /// `sync.pullHosted`: one pass of the hosted feed. A pass that adopted a
+    /// new scope applies nothing and has no `pendingCursor`: pull again.
+    /// Otherwise materialize its `pendingCursor` with
+    /// `sync.materializePendingCursor`, then commit it with
+    /// `sync.commitCursor`, and pull again while the pass or the commit
+    /// answers `hasMore`. Adopting a scope and committing also retire the
+    /// documents that left the scope.
+    pub(super) async fn sync_pull_hosted(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::PullHosted {
+                    workspace_id: open.workspace_id.clone(),
+                    root: open.root.clone(),
+                    now_ms: now_ms()?,
+                },
+                "sync.pullHosted",
+            )
+            .await?;
+        let RelayOperationOutcome::HostedPass(mut pass) = outcome else {
+            return Err(WireError::new(
+                ErrorCode::Internal,
+                "unexpected hosted pass outcome",
+            ));
+        };
+        for facts in std::mem::take(&mut pass.record_facts) {
+            emit_record_events(&self.events, &open.workspace_id, &facts);
+        }
+        if !pass.has_more {
+            self.notify_editors_behind(ctx, &open).await;
+        }
+        let pending = pass.pending_cursor.take();
+        let materialization_paths = pass.changed_paths.clone();
+        let mut result = hosted_pass_json(pass);
+        if let Some(cursor) = pending {
+            let issued = self.issue_pending_cursor(
+                bound_handle,
+                &open.workspace_id,
+                IssuedCursor::Hosted(cursor),
+            )?;
+            let token = issued["token"]
+                .as_str()
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "invalid issued cursor"))?;
+            lock(&self.pending_cursors)
+                .get_mut(token)
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "issued cursor disappeared"))?
+                .materialization_paths = materialization_paths;
+            result["pendingCursor"] = issued;
+        }
+        Ok(result)
     }
 
     pub(super) async fn sync_recover_origin(
