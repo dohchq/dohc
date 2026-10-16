@@ -103,6 +103,7 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
+import { pollChoicesToSend, type PollDraft } from "./chatPoll";
 import { AddAgentForm } from "./AddAgentForm";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { extractChatFileReferences } from "./chatFileMentions";
@@ -597,12 +598,14 @@ export function ChatsView(props: {
   );
   const [dispatchActionBusy, setDispatchActionBusy] = useState(false);
   const [composer, setComposer] = useState("");
+  const [poll, setPoll] = useState<PollDraft | null>(null);
   const [replyTarget, setReplyTarget] = useState<ComposerReplyTarget | null>(null);
   const [resolveTargetMessageId, setResolveTargetMessageId] = useState<string | null>(null);
   const [resolveChosenOption, setResolveChosenOption] = useState<string | null>(null);
   const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [newThreadBody, setNewThreadBody] = useState("");
+  const [newThreadPoll, setNewThreadPoll] = useState<PollDraft | null>(null);
   const [startingThread, setStartingThread] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
   const [newGroupType, setNewGroupType] = useState<"posts" | "chat" | "both">("posts");
@@ -725,11 +728,13 @@ export function ChatsView(props: {
   activeSendContext.current = sendContextKey;
   const latestComposerState = useRef({
     composer,
+    poll,
     replyMessageId: replyTarget?.messageId,
     resolveTargetMessageId,
   });
   latestComposerState.current = {
     composer,
+    poll,
     replyMessageId: replyTarget?.messageId,
     resolveTargetMessageId,
   };
@@ -1323,11 +1328,13 @@ export function ChatsView(props: {
     setDispatchState(IDLE_DISPATCH_STATE);
     setDispatchActionBusy(false);
     setComposer("");
+    setPoll(null);
     setReplyTarget(null);
     setResolveTargetMessageId(null);
     setFlashMessageId(null);
     messageNodes.current.clear();
     setNewThreadBody("");
+    setNewThreadPoll(null);
     resetGroupForm();
     setChannelShares(null);
     setShareReadFailure(null);
@@ -2034,12 +2041,27 @@ export function ChatsView(props: {
     return unsubscribe;
   }, [props.suspendPolling, refreshForActivity]);
 
+  // The view holds the decisions it loaded, so a poll just posted reads its
+  // thread's decisions again to show its choices.
+  const showPostedPoll = useCallback((threadId: string, token: number) => {
+    void bridge().listChatThreadDecisions({ workspaceId, threadId }).then(
+      ({ decisions: listed }) => {
+        if (token === liveToken.current) setDecisions(listed);
+      },
+      () => {
+        // The next refresh of this thread shows the poll.
+      },
+    );
+  }, [workspaceId]);
+
   // The anti-forum move: typing in the channel composer starts the chat.
   // One Enter = thread + first message; no title prompt exists on this path.
   const startThread = useCallback(async () => {
     if (nav.level !== "channel") return;
     const body = newThreadBody.trim();
     if (body.length === 0 || startingThread || startingThreadRef.current) return;
+    const options = newThreadPoll ? pollChoicesToSend(newThreadPoll) : null;
+    if (newThreadPoll && !options) return;
     const channel = nav.channel;
     const token = liveToken.current;
     startingThreadRef.current = true;
@@ -2050,6 +2072,7 @@ export function ChatsView(props: {
         workspaceId,
         channelId: channel.id,
         body,
+        ...(options ? { needsDecision: true, options } : {}),
         ...(extractChatFileReferences(body).length > 0
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
@@ -2065,6 +2088,7 @@ export function ChatsView(props: {
       if (token !== liveToken.current) return;
       props.onThreadStarted?.();
       setNewThreadBody("");
+      setNewThreadPoll(null);
       // The completion is the user's command landing: report it through the
       // seam in the same tick as the nav write (see openConversation).
       props.onNavCommand?.({ level: "thread", channel, thread: result.thread });
@@ -2079,6 +2103,7 @@ export function ChatsView(props: {
       setResolveTargetMessageId(null);
       messageNodes.current.clear();
       setChannelThreads((current) => [result.thread, ...current]);
+      if (options) showPostedPoll(result.thread.id, token);
     } catch (error) {
       if (token !== liveToken.current) return;
       props.onError(ipcErrorMessage(error, "Could not start that chat."), error);
@@ -2086,7 +2111,7 @@ export function ChatsView(props: {
       startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
+  }, [nav, newThreadBody, newThreadPoll, props.onError, props.onNavCommand, props.onThreadStarted, reactions, showPostedPoll, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
@@ -2108,6 +2133,10 @@ export function ChatsView(props: {
     ) {
       return;
     }
+    // A poll's question is the message's own words, never a fallback.
+    const options = poll ? pollChoicesToSend(poll) : null;
+    if (poll && (!options || trimmedBody.length === 0)) return;
+    const token = liveToken.current;
     const parentMessageId = replyTarget?.messageId;
     const request = ++sendRequestGeneration.current;
     inFlightSendByContext.current.set(sendContextKey, request);
@@ -2120,6 +2149,10 @@ export function ChatsView(props: {
       if (latest.composer === composer) {
         next.composer = "";
         setComposer("");
+      }
+      if (latest.poll === poll) {
+        next.poll = null;
+        setPoll(null);
       }
       if (latest.replyMessageId === replyTarget?.messageId) {
         next.replyMessageId = undefined;
@@ -2141,6 +2174,7 @@ export function ChatsView(props: {
         threadId: nav.thread.id,
         ...(parentMessageId ? { parentMessageId } : {}),
         body,
+        ...(options ? { needsDecision: true, options } : {}),
         ...(extractChatFileReferences(body).length > 0
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
@@ -2194,6 +2228,7 @@ export function ChatsView(props: {
       }
       clearMatchingComposer();
       threadComposerRef.current?.scrollIntoView({ block: "end" });
+      if (options) showPostedPoll(nav.thread.id, token);
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
       if (sentMessage && resolvingMessageId) {
@@ -2228,12 +2263,14 @@ export function ChatsView(props: {
   }, [
     composer,
     nav,
+    poll,
     props.onError,
     replyTarget,
     resolveChosenOption,
     resolveTargetMessageId,
     sendContextKey,
     sending,
+    showPostedPoll,
     workspaceId,
   ]);
 
@@ -3099,6 +3136,7 @@ export function ChatsView(props: {
         setMessages([]);
         setMessagesLoading(false);
         setComposer("");
+        setPoll(null);
         void refreshDms("person");
         void refreshShares();
         return;
@@ -3344,6 +3382,7 @@ export function ChatsView(props: {
       setNav({ level: "channels" });
       setMessages([]);
       setComposer("");
+      setPoll(null);
       // Drop the compose draft/recipients so reopening "New message" never
       // shows a stale, unrelated "To:" that could misdirect the next send.
       setDmRecipients("");
@@ -4279,6 +4318,8 @@ export function ChatsView(props: {
                   setComposer(value);
                   presence.setTyping(value.trim().length > 0);
                 }}
+                poll={poll}
+                onPollChange={setPoll}
                 onEscape={() => {
                   setReplyTarget(null);
                   setResolveTargetMessageId(null);
@@ -4626,6 +4667,8 @@ export function ChatsView(props: {
                   fileCandidates={fileMentionCandidates}
                   loadFileHeadings={loadFileHeadings}
                   onChange={setNewThreadBody}
+                  poll={newThreadPoll}
+                  onPollChange={setNewThreadPoll}
                   onSend={() => void startThread()}
                 />
               </div>

@@ -1,4 +1,4 @@
-import { AtSign, FileText, Hash } from "lucide-react";
+import { AtSign, FileText, Hash, ListChecks, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   activeMentionQuery,
@@ -12,6 +12,8 @@ import { formatChatFileReferenceToken } from "./chatFileMentions";
 import { ChatAvatar } from "./ChatAvatar";
 import { ownPresentation, ownAgentPresentation } from "./actorPresentation";
 import { ComposerSendButton } from "./ComposerSendButton";
+import { ComposerPoll } from "./ComposerPoll";
+import { activeCatalogQuery, NEW_POLL, pollChoicesToSend, type PollDraft } from "./chatPoll";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import {
   MENU_ACTIVE_OPTION,
@@ -23,6 +25,7 @@ import {
   MENU_PATH,
   MENU_ROW,
   MENU_ROW_TONE,
+  MENU_SHORTCUT,
   MENU_TITLE,
   menuEnterFrom,
   movedPointer,
@@ -34,6 +37,73 @@ export interface FileMentionCandidate {
   label: string;
 }
 
+export type CatalogRowId = "poll" | "mention" | "file";
+
+// What a / at the start of a word offers. A row's key shows only where that
+// key works in the composer.
+const CATALOG: readonly { id: CatalogRowId; label: string; icon: LucideIcon; keyHint?: string; words: readonly string[] }[] = [
+  { id: "poll", label: "Poll", icon: ListChecks, keyHint: "/poll", words: ["poll"] },
+  { id: "mention", label: "Person or agent", icon: AtSign, keyHint: "@", words: ["person", "agent", "mention"] },
+  { id: "file", label: "File or heading", icon: FileText, words: ["file", "heading"] },
+];
+
+export function matchCatalogRows(query: string, available: (id: CatalogRowId) => boolean): CatalogRowId[] {
+  const needle = query.toLocaleLowerCase();
+  return CATALOG.filter((row) => available(row.id) && row.words.some((word) => word.startsWith(needle))).map((row) => row.id);
+}
+
+// The catalog's rows. The textarea keeps focus, so a row is picked on mouse
+// down and the active row draws the outline Enter acts on.
+export function ComposerCatalogOptions(props: {
+  listboxId: string;
+  testIdPrefix: string;
+  rows: readonly CatalogRowId[];
+  highlight: number;
+  onPick: (id: CatalogRowId) => void;
+  onHover: (index: number) => (event: { movementX: number; movementY: number }) => void;
+}) {
+  return (
+    <>
+      {props.rows.map((id, index) => {
+        const row = CATALOG.find((entry) => entry.id === id)!;
+        const Icon = row.icon;
+        return (
+          <li key={id} role="presentation">
+            <button
+              type="button"
+              role="option"
+              id={`${props.listboxId}-catalog-${id}`}
+              aria-selected={index === props.highlight}
+              data-active={index === props.highlight || undefined}
+              data-testid={`${props.testIdPrefix}-catalog-option`}
+              data-row={id}
+              tabIndex={-1}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                props.onPick(id);
+              }}
+              onMouseMove={props.onHover(index)}
+              className={OPTION_CLASS}
+            >
+              <span className={`${MENU_ICON} text-subtle`}>
+                <Icon size={14} aria-hidden />
+              </span>
+              <span className={MENU_LABEL}>{row.label}</span>
+              {row.keyHint ? <kbd className={MENU_SHORTCUT}>{row.keyHint}</kbd> : null}
+            </button>
+          </li>
+        );
+      })}
+    </>
+  );
+}
+
+const OPTION_CLASS = `${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest} data-active:text-ink`;
+
+function menuQueryAt(value: string, caret: number): boolean {
+  return activeMentionQuery(value, caret) !== null || activeCatalogQuery(value, caret) !== null;
+}
+
 // A chat composer with @-mention autocomplete. Same send affordances as the
 // shared ChatComposer (Enter sends, Shift+Enter newlines, IME-safe), but while
 // an @-mention menu is open Enter/Tab accept the highlighted candidate instead
@@ -42,6 +112,9 @@ export interface FileMentionCandidate {
 // The mention roster is the agents in the workspace plus the user; picking one
 // inserts "@handle " and the parent parses the sent body to decide who to
 // notify / invoke.
+//
+// A / at the start of a word opens the catalog in the same list: a poll, and
+// the @ menu's people and files.
 export function MentionComposer(props: {
   testIdPrefix: string;
   composerId: string;
@@ -73,9 +146,14 @@ export function MentionComposer(props: {
   authorPresentation?: ActorPresentation;
   // Takes focus when it mounts, with the caret after its text.
   autoFocus?: boolean;
+  // A poll's choices while one is drafted; the message is its question. Only
+  // a surface that shows a posted poll's choices passes onPollChange.
+  poll?: PollDraft | null;
+  onPollChange?: (poll: PollDraft | null) => void;
 }) {
   const [focused, setFocused] = useState(false);
-  const expanded = props.surface !== "post" || focused || props.value.length > 0;
+  const poll = props.onPollChange ? props.poll ?? null : null;
+  const expanded = props.surface !== "post" || focused || props.value.length > 0 || poll !== null;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
     const node = textareaRef.current;
@@ -120,10 +198,22 @@ export function MentionComposer(props: {
   // the new value; this holds the pending caret target for the layout effect.
   const pendingCaret = useRef<number | null>(null);
   const highlightFileOnOpen = useRef(false);
+  const pollRef = useRef<HTMLFieldSetElement | null>(null);
+  const focusPollOnOpen = useRef(false);
 
   const active = useMemo(
     () => (menuOpen ? activeMentionQuery(props.value, caret) : null),
     [caret, menuOpen, props.value],
+  );
+  const catalogQuery = useMemo(
+    () => (menuOpen && !active ? activeCatalogQuery(props.value, caret) : null),
+    [active, caret, menuOpen, props.value],
+  );
+  const hasFiles = (props.fileCandidates?.length ?? 0) > 0;
+  const offersPoll = props.onPollChange !== undefined;
+  const catalogRows = useMemo(
+    () => (catalogQuery ? matchCatalogRows(catalogQuery.query, (id) => (id === "poll" ? offersPoll : id === "file" ? hasFiles : true)) : []),
+    [catalogQuery, hasFiles, offersPoll],
   );
   const matches = useMemo(
     () => (active ? matchMentionCandidates(active.query, props.candidates) : []),
@@ -141,8 +231,12 @@ export function MentionComposer(props: {
       )
       .slice(0, 6);
   }, [active, props.fileCandidates]);
-  const menuLength = fileStage ? fileStage.headings.length + 1 : matches.length + fileMatches.length;
-  const showMenu = fileStage !== null || (active !== null && menuLength > 0);
+  const menuLength = fileStage
+    ? fileStage.headings.length + 1
+    : catalogQuery
+      ? catalogRows.length
+      : matches.length + fileMatches.length;
+  const showMenu = fileStage !== null || ((active !== null || catalogQuery !== null) && menuLength > 0);
 
   const menuRef = useRef<HTMLUListElement | null>(null);
   const [menuPosition, setMenuPosition] = useState<{
@@ -193,6 +287,14 @@ export function MentionComposer(props: {
       setCaret(target);
     }
   }, [props.value]);
+
+  // After the caret effect, so a poll opened over a question takes focus
+  // from the textarea that effect focused.
+  useLayoutEffect(() => {
+    if (!focusPollOnOpen.current || !poll) return;
+    focusPollOnOpen.current = false;
+    pollRef.current?.querySelector("input")?.focus();
+  }, [poll]);
 
   useEffect(() => {
     // The loader is scoped to the active workspace. A response started with
@@ -275,6 +377,44 @@ export function MentionComposer(props: {
     [props.loadFileHeadings],
   );
 
+  // Opens an empty poll. Focus goes to its first choice when the message
+  // already holds the question, and otherwise stays on the question.
+  const togglePoll = useCallback(
+    (question: string) => {
+      if (!props.onPollChange) return;
+      if (poll) {
+        props.onPollChange(null);
+        return;
+      }
+      focusPollOnOpen.current = question.trim().length > 0;
+      props.onPollChange(NEW_POLL);
+    },
+    [poll, props.onPollChange],
+  );
+
+  const pickCatalogRow = useCallback(
+    (id: CatalogRowId) => {
+      const current = activeCatalogQuery(props.value, caret);
+      if (!current) return;
+      const before = props.value.slice(0, current.start);
+      const after = props.value.slice(current.start + 1 + current.query.length);
+      setHighlight(0);
+      if (id === "poll") {
+        pendingCaret.current = current.start;
+        setMenuOpen(false);
+        props.onChange(`${before}${after}`);
+        if (!poll) togglePoll(`${before}${after}`);
+        return;
+      }
+      // The other rows are the @ menu: the / becomes an @ and the menu stays
+      // open on the roster, or on the files for File or heading.
+      highlightFileOnOpen.current = id === "file";
+      pendingCaret.current = current.start + 1;
+      props.onChange(`${before}@${after}`);
+    },
+    [caret, poll, props.onChange, props.value, togglePoll],
+  );
+
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
       // IME guard first: Enter during composition confirms the composed
@@ -301,6 +441,9 @@ export function MentionComposer(props: {
               const heading = fileStage.headings[index - 1];
               if (heading) completeFile({ path: fileStage.path, headingAnchor: heading.anchor });
             }
+          } else if (catalogQuery) {
+            const row = catalogRows[index];
+            if (row) pickCatalogRow(row);
           } else if (index < matches.length) {
             const candidate = matches[index];
             if (candidate) complete(candidate);
@@ -335,7 +478,7 @@ export function MentionComposer(props: {
         props.onEscape();
       }
     },
-    [chooseFile, complete, completeFile, fileMatches, fileStage, highlight, matches, menuLength, props.onEscape, props.onSend, showMenu],
+    [catalogQuery, catalogRows, chooseFile, complete, completeFile, fileMatches, fileStage, highlight, matches, menuLength, pickCatalogRow, props.onEscape, props.onSend, showMenu],
   );
 
   const listboxId = `${props.composerId}-mentions`;
@@ -351,15 +494,16 @@ export function MentionComposer(props: {
   const hover = (index: number) => (event: { movementX: number; movementY: number }) => {
     if (movedPointer(event) && index !== boundedHighlight) setHighlight(index);
   };
-  const optionClass = `${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest} data-active:text-ink`;
   const { placement: menuPlacement, ...menuBox } = menuPosition;
   const activeDescendant = !showMenu
     ? undefined
     : fileStage
       ? `${listboxId}-file-section-${boundedHighlight}`
-      : boundedHighlight < matches.length
-        ? `${listboxId}-${matches[boundedHighlight]?.id}`
-        : `${listboxId}-file-${boundedHighlight - matches.length}`;
+      : catalogQuery
+        ? `${listboxId}-catalog-${catalogRows[boundedHighlight]}`
+        : boundedHighlight < matches.length
+          ? `${listboxId}-${matches[boundedHighlight]?.id}`
+          : `${listboxId}-file-${boundedHighlight - matches.length}`;
 
   const insertAtCaret = (text: string) => {
     const node = textareaRef.current;
@@ -377,7 +521,44 @@ export function MentionComposer(props: {
   const isPost = props.surface === "post";
   const locked = props.sending || props.disabled === true;
   const empty = !props.allowEmptySend && props.value.trim().length === 0;
+  // A poll sends once it has a question and two choices the engine accepts.
+  const pollUnready = poll !== null && (props.value.trim().length === 0 || pollChoicesToSend(poll) === null);
+  const sendDisabled = props.disabled === true || empty || pollUnready;
+  const pollBlock = poll !== null && props.onPollChange ? (
+    <ComposerPoll
+      rootRef={pollRef}
+      testIdPrefix={props.testIdPrefix}
+      choices={poll}
+      disabled={locked}
+      surface={isPost ? "post" : "stream"}
+      onChange={props.onPollChange}
+      onFocusQuestion={() => textareaRef.current?.focus()}
+    />
+  ) : null;
+  const pollButton = (shape: "post" | "icon") => offersPoll ? (
+    <button
+      type="button"
+      data-testid={`${props.testIdPrefix}-poll-toggle`}
+      aria-label="Poll"
+      aria-pressed={poll !== null}
+      title={poll ? "Remove poll" : "Add a poll"}
+      tabIndex={-1}
+      disabled={locked}
+      onMouseDown={(event) => {
+        event.preventDefault();
+        togglePoll(props.value);
+      }}
+      className={shape === "post"
+        ? "flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40 aria-pressed:bg-selected aria-pressed:text-ink"
+        : "grid size-8 shrink-0 place-items-center rounded-md border border-line text-subtle hover:bg-hover hover:text-ink disabled:opacity-40 aria-pressed:bg-selected aria-pressed:text-ink"}
+    >
+      <ListChecks size={14} strokeWidth={1.9} aria-hidden />
+      {shape === "post" ? "Poll" : null}
+    </button>
+  ) : null;
   return (
+    <>
+    {isPost ? null : pollBlock}
     <form
       data-expanded={isPost ? expanded : undefined}
       className={
@@ -418,12 +599,21 @@ export function MentionComposer(props: {
           popover="manual"
           style={{ margin: 0, inset: "auto", ...menuBox, ...menuEnterFrom(menuPlacement) }}
           id={listboxId}
-          data-testid={`${props.testIdPrefix}-mention-menu`}
+          data-testid={`${props.testIdPrefix}-${!fileStage && catalogQuery ? "catalog" : "mention-menu"}`}
           role="listbox"
-          aria-label={fileStage ? `Mention ${fileStage.label}` : "Mention a person, agent, or file"}
+          aria-label={fileStage ? `Mention ${fileStage.label}` : catalogQuery ? "Add to message" : "Mention a person, agent, or file"}
           className={`${MENU_FRAME} ${MENU_ENTER} fixed z-50 w-64 max-w-[calc(100vw-16px)]`}
         >
-          {fileStage ? (
+          {!fileStage && catalogQuery ? (
+            <ComposerCatalogOptions
+              listboxId={listboxId}
+              testIdPrefix={props.testIdPrefix}
+              rows={catalogRows}
+              highlight={boundedHighlight}
+              onPick={pickCatalogRow}
+              onHover={hover}
+            />
+          ) : fileStage ? (
             <>
               <li role="presentation">
                 <button
@@ -439,7 +629,7 @@ export function MentionComposer(props: {
                     completeFile({ path: fileStage.path });
                   }}
                   onMouseMove={hover(0)}
-                  className={optionClass}
+                  className={OPTION_CLASS}
                 >
                   <span className={`${MENU_ICON} text-subtle`}>
                     <FileText size={14} aria-hidden />
@@ -470,7 +660,7 @@ export function MentionComposer(props: {
                         completeFile({ path: fileStage.path, headingAnchor: heading.anchor });
                       }}
                       onMouseMove={hover(index)}
-                      className={optionClass}
+                      className={OPTION_CLASS}
                       style={{ paddingLeft: `${8 + (heading.level - 1) * 8}px` }}
                     >
                       <span className={`${MENU_ICON} text-subtle`}>
@@ -502,7 +692,7 @@ export function MentionComposer(props: {
                   complete(candidate);
                 }}
                 onMouseMove={hover(index)}
-                className={optionClass}
+                className={OPTION_CLASS}
               >
                 <span className={`${MENU_ICON} text-subtle`}>
                   <AtSign size={14} aria-hidden />
@@ -535,7 +725,7 @@ export function MentionComposer(props: {
                     chooseFile(candidate);
                   }}
                   onMouseMove={hover(index)}
-                  className={optionClass}
+                  className={OPTION_CLASS}
                 >
                   <span className={`${MENU_ICON} text-subtle`}>
                     <FileText size={14} aria-hidden />
@@ -590,8 +780,8 @@ export function MentionComposer(props: {
           }
           beforeInput.current = null;
           setCaret(nextCaret);
-          // Open the menu whenever the caret sits inside a mention token.
-          setMenuOpen(activeMentionQuery(nextValue, nextCaret) !== null);
+          // Open the menu whenever the caret sits inside a mention or a / token.
+          setMenuOpen(menuQueryAt(nextValue, nextCaret));
           setHighlight(0);
           props.onChange(nextValue);
         }}
@@ -600,9 +790,7 @@ export function MentionComposer(props: {
         onClick={() => {
           syncCaret();
           const node = textareaRef.current;
-          setMenuOpen(
-            node ? activeMentionQuery(node.value, node.selectionStart ?? 0) !== null : false,
-          );
+          setMenuOpen(node ? menuQueryAt(node.value, node.selectionStart ?? 0) : false);
         }}
         onFocus={() => setFocused(true)}
         onBlur={() => {
@@ -619,6 +807,7 @@ export function MentionComposer(props: {
             : "min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle dohc-focus-input"
         }
       />
+      {isPost && expanded ? pollBlock : null}
       {isPost ? (
         expanded ? (
           <div className="mt-2 flex items-center gap-1 border-t border-line pt-2">
@@ -655,12 +844,13 @@ export function MentionComposer(props: {
                 File
               </button>
             ) : null}
+            {pollButton("post")}
             <span className="flex-1" />
             <ComposerSendButton
               testId={`${props.testIdPrefix}-send`}
               label={props.sendLabel}
               sending={props.sending}
-              disabled={props.disabled === true || empty}
+              disabled={sendDisabled}
               shape="post"
             />
           </div>
@@ -713,15 +903,17 @@ export function MentionComposer(props: {
               <FileText size={14} strokeWidth={1.9} aria-hidden />
             </button>
           ) : null}
+          {pollButton("icon")}
           <ComposerSendButton
             testId={`${props.testIdPrefix}-send`}
             label={props.sendLabel}
             sending={props.sending}
-            disabled={props.disabled === true || empty}
+            disabled={sendDisabled}
             shape="icon"
           />
         </>
       )}
     </form>
+    </>
   );
 }
