@@ -268,7 +268,9 @@ test('an external database leaves out the bundled database, its volume and every
   // Every service that connects to the database gets the external host and the provider's CA certificate.
   const clients = Object.keys(compose.services).filter(name => name !== 'postgres' && compose.services[name].environment?.POSTGRES_PASSWORD);
   assert.deepEqual(clients, ['postgres-migrate', 'workspace-api', 'sync-relay']);
-  assert.deepEqual(Object.keys(overlay.services).filter(name => name !== 'postgres'), clients);
+  assert.deepEqual(Object.keys(overlay.services).filter(name => !['postgres', 'relay-initialize'].includes(name)), clients);
+  // Relay setup waits for migrations, so a first start whose migrations fail leaves the relay volumes empty for a retry.
+  assert.deepEqual(overlay.services['relay-initialize'], {depends_on: {'postgres-migrate': {condition: 'service_completed_successfully'}}});
   for (const name of clients) {
     assert.deepEqual(overlay.services[name].environment, {DOHC_POSTGRES_HOST: '${DOHC_POSTGRES_HOST:?Set DOHC_POSTGRES_HOST}',
       DOHC_POSTGRES_PORT: '${DOHC_POSTGRES_PORT:?Set DOHC_POSTGRES_PORT}'});
@@ -377,12 +379,15 @@ const externalChecks = (options, {accounts = 'missing', relay = relayCheck([])} 
   return {checks, calls};
 };
 
+const deployed = relayCheck(['/continuity/deployment.json', '/data/sync-relay.sqlite']);
+
 test('with an external database, every start but the first refuses an empty database before Compose starts it', () => {
   const later = {start: true, firstStart: false};
-  const refused = externalChecks(later).checks;
-  assert.deepEqual(refused.map(([name]) => name), ['accounts database']);
-  assert.match(refused[0][1], /holds no dohc accounts/);
-  assert.deepEqual(externalChecks(later, {accounts: 'present'}), {checks: [['accounts database', '']], calls: ['check-accounts']});
+  const refused = externalChecks(later, {relay: deployed}).checks;
+  assert.deepEqual(refused.map(([name]) => name), ['relay deployment', 'accounts database']);
+  assert.match(refused[1][1], /holds no dohc accounts/);
+  assert.deepEqual(externalChecks(later, {accounts: 'present', relay: deployed}),
+    {checks: [['relay deployment', ''], ['accounts database', '']], calls: ['relay-initialize', 'check-accounts']});
   assert.deepEqual(externalChecks({start: true, firstStart: true}), {checks: [['relay deployment', '']], calls: ['relay-initialize']});
   assert.deepEqual(externalChecks({start: false, firstStart: false}), {checks: [], calls: []});
   // Without an external database or a data disk, a start checks neither, as before.
@@ -398,6 +403,24 @@ test('a first start with an external database refuses relay Docker volumes that 
   }
   for (const relay of [relayCheck([], true), {status: 1, stdout: ''}, {status: 125, stdout: ''}, {status: null}, {status: 0, stdout: ''}]) {
     assert.deepEqual(externalChecks(firstStart, {relay}).checks,
+      [['relay deployment', "Could not check the relay's Docker volumes. Check that Docker is running, then try again."]], JSON.stringify(relay));
+  }
+});
+
+test('a later start with an external database refuses relay Docker volumes without the relay deployment', () => {
+  const later = {start: true, firstStart: false};
+  // Empty volumes on a new host, or after relay setup failed: setup would create a new relay deployment under the existing accounts.
+  // Only a deliberate first start, which finds the volumes empty, creates one.
+  assert.deepEqual(externalChecks(later, {accounts: 'present'}), {calls: ['relay-initialize'], checks: [['relay deployment',
+    "The relay's Docker volumes hold no relay deployment. Start on the host that holds them. " +
+    'Start with --first-start only to create a new relay deployment that holds none of the existing workspaces.']]});
+  assert.deepEqual(externalChecks({start: true, firstStart: true}, {accounts: 'present'}).checks, [['relay deployment', '']]);
+  for (const files of [['/continuity/deployment.json'], ['/data/sync-relay.sqlite']]) {
+    assert.deepEqual(externalChecks(later, {accounts: 'present', relay: relayCheck(files)}).checks, [['relay deployment',
+      "The relay deployment in the relay's Docker volumes is missing its record or its database. Keep the volumes unchanged and check that this host ran the deployment."]], files.join());
+  }
+  for (const relay of [relayCheck([], true), {status: 1, stdout: ''}, {status: 0, stdout: ''}]) {
+    assert.deepEqual(externalChecks(later, {accounts: 'present', relay}).checks,
       [['relay deployment', "Could not check the relay's Docker volumes. Check that Docker is running, then try again."]], JSON.stringify(relay));
   }
 });

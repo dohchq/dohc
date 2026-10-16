@@ -230,12 +230,13 @@ The setup has no option to turn this check off.
    DOHC_POSTGRES_CA_FILE=/etc/dohc/postgres-ca.pem
    POSTGRES_DB=dohc
    POSTGRES_USER=dohc
-   POSTGRES_PASSWORD=your-database-password
+   POSTGRES_PASSWORD='your-database-password'
    ```
 
    Use the host name that the provider's certificate names.
    `POSTGRES_DB` and `POSTGRES_USER` can contain only letters, digits, underscores, hyphens and dots.
    `POSTGRES_PASSWORD` replaces the password that `init` generated.
+   Keep it in single quotes: Docker Compose replaces `$` and the name after it in an unquoted value.
 
 With `DOHC_POSTGRES_HOST` set, the setup and recovery commands add the external-database Compose overlay.
 The deployment then does not start the bundled Postgres or create its volume.
@@ -304,6 +305,7 @@ With `DOHC_DATA_DIRECTORY` or `DOHC_POSTGRES_HOST` set, add `--first-start` for 
 After that, every start and upgrade refuses to run in these cases:
 
 - With `DOHC_DATA_DIRECTORY` set, the disk does not hold the relay deployment.
+- With only `DOHC_POSTGRES_HOST` set, the relay's Docker volumes do not hold the relay deployment, for example on a new host.
 - With `DOHC_POSTGRES_HOST` set, the external database is unreachable or holds no dohc accounts.
 - With only `DOHC_DATA_DIRECTORY` set, the accounts volume on the host holds no accounts database.
 
@@ -311,6 +313,8 @@ The accounts check accepts any database that holds dohc accounts, including anot
 
 A first start refuses unless all three disk folders are empty, and names each folder that holds data.
 With `DOHC_POSTGRES_HOST` set and no data disk, a first start refuses if the relay's Docker volumes already hold relay data.
+Without a data disk, the relay deployment stays in the Docker volumes on its original host, so start it there.
+Add `--first-start` only to create a new relay deployment that holds none of the existing workspaces.
 A start also refuses when Docker cannot complete these checks.
 
 The deployment initializes fresh storage, applies authentication migrations, and starts the services.

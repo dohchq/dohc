@@ -124,7 +124,7 @@ export function dataDiskVolumeErrors(config, docker) {
 }
 
 /**
- * A first start needs empty relay storage: with a data disk, all three disk folders. Every later start needs the relay deployment on the disk.
+ * A first start needs empty relay storage: with a data disk, all three disk folders. Every later start needs the relay deployment.
  * An empty host-data starts: documents rebuild from the relay, but claims in progress are lost (#2016).
  * Without a data disk, relay-initialize reads the image's empty /host-data, so only the relay's own volumes count.
  */
@@ -148,11 +148,14 @@ export function relayDeploymentError(envFile, settings, docker, firstStart) {
       (relayData ? 'Start without --first-start.' : 'Check that DOHC_DATA_DIRECTORY names a new deployment folder.');
   }
   if (!relayData) {
-    return `No relay deployment found in ${directory}. Mount the data disk there and try again. ` +
-      'Never recreate its folders: setup would create a new deployment.';
+    return directory ? `No relay deployment found in ${directory}. Mount the data disk there and try again. ` +
+      'Never recreate its folders: setup would create a new deployment.'
+      : "The relay's Docker volumes hold no relay deployment. Start on the host that holds them. " +
+        'Start with --first-start only to create a new relay deployment that holds none of the existing workspaces.';
   }
   if (!result.deployment) {
-    return `The relay deployment in ${directory} is missing its record or its database. Keep the disk unchanged and check that it is this deployment's disk.`;
+    return directory ? `The relay deployment in ${directory} is missing its record or its database. Keep the disk unchanged and check that it is this deployment's disk.`
+      : "The relay deployment in the relay's Docker volumes is missing its record or its database. Keep the volumes unchanged and check that this host ran the deployment.";
   }
   return '';
 }
@@ -193,8 +196,9 @@ export function deploymentChecks(envFile, settings, docker, { start, firstStart 
     checks.push(['data disk volumes', problems.join(' ')]);
     if (problems.length) return checks;
   }
-  // A first start with an external database creates its accounts, which would not own an existing relay deployment's workspaces.
-  if (start && (settings.DOHC_DATA_DIRECTORY || firstStart && settings.DOHC_POSTGRES_HOST)) {
+  // With an external database, a first start creates accounts that would not own an existing relay deployment's workspaces,
+  // and a later start on empty relay volumes would create a new relay deployment under the existing accounts.
+  if (start && (settings.DOHC_DATA_DIRECTORY || settings.DOHC_POSTGRES_HOST)) {
     const problem = relayDeploymentError(envFile, settings, docker, firstStart);
     checks.push([settings.DOHC_DATA_DIRECTORY ? 'relay deployment on the data disk' : 'relay deployment', problem]);
     if (problem) return checks;
