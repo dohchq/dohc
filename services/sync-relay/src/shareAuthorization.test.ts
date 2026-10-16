@@ -178,7 +178,7 @@ describe("share authorization", () => {
     const link = (access: string): SyncRelayShareGrantRow => ({
       ...grant, grantId: "link-grant", principalKind: "link", principalUserId: null, access,
     });
-    const files = (storage: AuthorizationStorage, action: ShareAction = "read") =>
+    const files = (storage: AuthorizationStorage, action: "read" | "live-edit" | "direct-write" = "read") =>
       authorizeLinkShareAction({ storage, grantId: "link-grant", action });
     const chat = (storage: AuthorizationStorage, action: "read" | "append" = "read") =>
       authorizeLinkChatAction({ storage, grantId: "link-grant", action });

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DiscussionActivityHub } from "./discussionActivity";
+import { MAX_LINK_CHAT_FOLLOWS_PER_GRANT } from "./linkChatRoutes";
 import { MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE } from "./namedRecipientChat";
 import { authorizeLinkChatAction, authorizeLinkShareAction } from "./shareAuthorization";
 import type { SyncRelayStorage } from "./storage";
@@ -220,34 +221,49 @@ describe("link chat on a Group share", () => {
     }
   });
 
-  it("caps link follows per workspace", async () => {
-    const f = await fixture(released, new DiscussionActivityHub({ maxWaitersPerActor: MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE + 1 }));
-    const capability = String((await groupLink(f)).exchanged.capabilityToken);
-    const latest = String((await json(await readChat(f, capability, history))).nextCursor);
+  it("caps link follows per link and per workspace", async () => {
+    const f = await fixture();
+    const linkCount = MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE / MAX_LINK_CHAT_FOLLOWS_PER_GRANT;
+    const capabilities: string[] = [];
+    for (let index = 0; index <= linkCount; index++) capabilities.push(String((await groupLink(f)).exchanged.capabilityToken));
+    const latest = String((await json(await readChat(f, capabilities[0]!, history))).nextCursor);
     const follow = `${history}&since=${latest}&hold=30000`;
     const controllers: AbortController[] = [], polls: Promise<Response>[] = [];
-    try {
-      for (let index = 0; index < MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE; index++) {
-        const controller = new AbortController(), entered = deferred(), wait = f.activity.wait.bind(f.activity);
-        controllers.push(controller);
-        const spy = vi.spyOn(f.activity, "wait").mockImplementation((group, actor, options) => {
-          const pending = wait(group, actor, options);
-          entered.resolve();
-          return pending;
-        });
-        polls.push(readChat(f, capability, follow, { signal: controller.signal }));
-        await entered.promise;
-        spy.mockRestore();
-      }
-      const overflow = await readChat(f, capability, follow);
+    const park = async (capability: string) => {
+      const controller = new AbortController(), entered = deferred(), wait = f.activity.wait.bind(f.activity);
+      controllers.push(controller);
+      const spy = vi.spyOn(f.activity, "wait").mockImplementation((group, actor, options) => {
+        const pending = wait(group, actor, options);
+        entered.resolve();
+        return pending;
+      });
+      const poll = readChat(f, capability, follow, { signal: controller.signal });
+      polls.push(poll);
+      const parked = await Promise.race([entered.promise.then(() => true), poll.then(() => false)]);
+      spy.mockRestore();
+      expect(parked).toBe(true);
+    };
+    const expectRefused = async (capability: string) => {
+      // Without a hold, so a follow the cap missed answers at once.
+      const overflow = await readChat(f, capability, `${history}&since=${latest}`);
       expect(overflow.status).toBe(429);
       expect(await json(overflow)).toMatchObject({ code: "link_read_rate_limited" });
+    };
+    try {
+      for (let index = 0; index < MAX_LINK_CHAT_FOLLOWS_PER_GRANT; index++) await park(capabilities[0]!);
+      await expectRefused(capabilities[0]!);
+      // One link at its cap leaves the other links theirs, up to the workspace's.
+      for (const capability of capabilities.slice(1, linkCount)) {
+        for (let index = 0; index < MAX_LINK_CHAT_FOLLOWS_PER_GRANT; index++) await park(capability);
+      }
+      expect(f.activity.stats().waiters).toBe(MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE);
+      await expectRefused(capabilities[linkCount]!);
     } finally {
       controllers.forEach((controller) => controller.abort());
       await Promise.all(polls);
     }
     expect(f.activity.stats().waiters).toBe(0);
-    expect((await readChat(f, capability, `${history}&since=${latest}`)).status).toBe(200);
+    expect((await readChat(f, capabilities[0]!, `${history}&since=${latest}`)).status).toBe(200);
   });
 
   it("keeps file-only callers on the Group's folder and away from its channel", async () => {

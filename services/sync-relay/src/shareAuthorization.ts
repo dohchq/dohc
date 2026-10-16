@@ -178,7 +178,7 @@ export function resolveReceivedShareAuthority(
 // A link's files: a path grant, or a Group's folder. The action is still
 // judged against the whole grant, so a Group folder is never live-edited.
 export function authorizeLinkShareAction(
-  input: Omit<ShareGrantAuthorizationInput, "principal">,
+  input: Omit<ShareGrantAuthorizationInput, "principal" | "action"> & { action: "read" | "live-edit" | "direct-write" },
 ): ShareAuthorizationResult<ShareSelector> {
   const result = authorizeShareGrantAction({ ...input, principal: { kind: "link" } });
   const files = result.ok ? fileSideOf(result.effectiveSelector) : null;

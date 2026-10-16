@@ -11,6 +11,9 @@ import type { SyncRelayStorage } from "./storage";
 export type LinkChatRoute = { route: "link-chat-channels" } | { route: "link-chat-messages" };
 
 export const LINK_CHAT_MAX_RESPONSE_BYTES = 1024 * 1024;
+// Every holder of one link shares its follows, so one link cannot take all
+// of its workspace's.
+export const MAX_LINK_CHAT_FOLLOWS_PER_GRANT = 32;
 
 // What a link holder sees of a message: no account IDs.
 export type LinkChatMessage = Omit<NamedChatMessage, "authorUserId">;
@@ -59,6 +62,11 @@ export function createLinkChatRoutes(options: {
 }) {
   const { storage } = options;
   const followsByWorkspace = new Map<string, number>();
+  const followsByGrant = new Map<string, number>();
+  const release = (counts: Map<string, number>, key: string) => {
+    const count = (counts.get(key) ?? 1) - 1;
+    if (count === 0) counts.delete(key); else counts.set(key, count);
+  };
   return async (request: Request, route: LinkChatRoute): Promise<Response> => {
     if (request.method !== "GET") throw relayError("method_not_allowed");
     const url = new URL(request.url);
@@ -94,8 +102,12 @@ export function createLinkChatRoutes(options: {
     const following = url.searchParams.has("since");
     if (following) {
       const count = followsByWorkspace.get(share.workspaceId) ?? 0;
-      if (count >= MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE) throw relayError("link_read_rate_limited");
+      const linkCount = followsByGrant.get(capability.grantId) ?? 0;
+      if (count >= MAX_BROWSER_CHAT_FOLLOWS_PER_WORKSPACE || linkCount >= MAX_LINK_CHAT_FOLLOWS_PER_GRANT) {
+        throw relayError("link_read_rate_limited");
+      }
       followsByWorkspace.set(share.workspaceId, count + 1);
+      followsByGrant.set(capability.grantId, linkCount + 1);
     }
     try {
       return respond(await readSharedChannelPage({
@@ -110,8 +122,8 @@ export function createLinkChatRoutes(options: {
       }));
     } finally {
       if (following) {
-        const count = (followsByWorkspace.get(share.workspaceId) ?? 1) - 1;
-        if (count === 0) followsByWorkspace.delete(share.workspaceId); else followsByWorkspace.set(share.workspaceId, count);
+        release(followsByWorkspace, share.workspaceId);
+        release(followsByGrant, capability.grantId);
       }
     }
   };
