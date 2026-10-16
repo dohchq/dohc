@@ -109,15 +109,15 @@ Pass `--detach` to submit the request and return at once.
 - A run that fails a check is reported at once. The service never retries it.
 - A run stops and fails after two hours of awake time. Time the machine spends asleep does not count.
 - While Docker does not respond, runs that need the JavaScript gate wait and Rust-only runs continue.
-- While free memory is below 10 GB, no second run starts. A check that fails after free memory fell below 3 GB during the run is retried as a machine failure.
+- A run beyond the first starts only while free memory is at least 10 GB. A check that fails after free memory fell below 3 GB during the run is retried as a machine failure.
 - While free disk is below the 40 GB floor, no run starts. The service first deletes the build output of its lanes that have no run.
 
 Each lane runs with its own temp folder, `C:\w\_verification\tmp\<lane>`, which antivirus skips and the service empties before each run.
-Each attempt records the load it verified under in `status.json` and `C:\w\_verification\history.jsonl`: the lane count, the most runs at once, the lowest free memory, and the mean CPU use. Read them before changing the lane count.
+Each attempt records the load it verified under in `status.json` and `C:\w\_verification\history.jsonl`: the highest lane setting while it ran, the most runs at once, the lowest free memory, and the mean CPU use. Read them before changing the lane count, and to tell a failure under three lanes from one under two.
 Each attempt has its own evidence folder, `C:\w\_verification\requests\<id>\attempts\<n>`, and its `result.json` names the request and attempt.
 Read the service's verdict from the request's `status.json`, or from the last line `pnpm verify:pr` prints.
 
-Run `pnpm verify:queue status` to see the service, a pause, the running requests, the line with each request's owner, and wait estimates.
+Run `pnpm verify:queue status` to see the service, a pause, the lane setting, the running requests, the line with each request's owner, and wait estimates.
 Run `pnpm verify:queue cancel <id>` to stop one of your own requests. Never cancel a request another agent submitted. A finished request keeps its verdict.
 
 The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows what holds each verification lane, a queued request or an agent's inline gate, with its steps and its live output, then the requests ready and waiting for a lane, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Threads, Tests, and Nightly tabs show the whole line, every run this week, each thread's runs and results, the tests that failed on two or more branches in the last day, the slowest and flaky tests, and the nightly runs.
@@ -126,9 +126,15 @@ When T3 runs on the host, the dashboard names each request by the T3 thread that
 Select a run to see its failing step's test summary, its steps on a timeline, and any of its logs. The dashboard refreshes every few seconds. It records the host's CPU and free memory once a minute in `monitor-load.json` in the queue root.
 When the page cannot reach the dashboard server, it says so and since when, keeps what it last showed, and tries again. It waits at most 15 seconds for each answer.
 
-The dashboard's only change to the queue is its Pause and Resume button. Pause asks for an optional reason and does what `pnpm verify:queue pause` does. Resume does what `pnpm verify:queue resume` does, without asking first.
+The dashboard changes the queue in two ways: its Pause and Resume button, and its lane switch. Pause asks for an optional reason and does what `pnpm verify:queue pause` does. Resume does what `pnpm verify:queue resume` does, without asking first.
 While the queue is paused, every tab shows a banner with the words `pnpm verify:queue status` uses, such as `Paused and idle: safe to restart`. A hold after a computer restart says so. Start estimates count from the resume, such as `40 min after resume`.
 The pause records `by` as `{ "name": "dashboard", "host": "<host name the page used>" }`, and the service log records each pause and resume from the dashboard.
+
+The lane switch beside Pause sets the host's lane count, `verification-lanes`, to 2 or 3 without asking first. It always shows the current setting, including a count of 1 or 4 set on the host.
+At 3, the queue starts a third gate when a request waits and free memory allows another run. The first gate in `C:\w\_verification\lane-3` starts cold, because the service creates that checkout then.
+Switching back to 2 stops nothing. Lane 3 finishes its current gate and takes no more. Until then, every tab shows `Lane 3 closes after its current gate`, and `pnpm verify:queue status` prints the same note.
+The setting stays until someone changes it, through service and computer restarts.
+The queue's history records each change from the dashboard as a `lanes` event, with `by` as for a pause, and the service log records it too.
 
 To open the dashboard from another device, serve it on the tailnet only:
 
@@ -136,10 +142,11 @@ To open the dashboard from another device, serve it on the tailnet only:
 tailscale serve --bg --https=8446 http://127.0.0.1:4250
 ```
 
-Then open `https://<host>.<tailnet>.ts.net:8446`. Every device and user that the tailnet's access rules let reach this port can read the page and pause or resume the queue.
+Then open `https://<host>.<tailnet>.ts.net:8446`. Every device and user that the tailnet's access rules let reach this port can read the page, pause or resume the queue, and switch the lanes.
 Do not use Tailscale Funnel: the page shows branch names and test output. The page refuses every request that arrives through Funnel.
 The page answers only to the host's own names and to tailnet names.
-Pause and resume accept only a JSON `POST` whose `Origin` header names the host the request was sent to. A page from any other origin, including another port on this host or another tailnet machine, cannot send that request, so it cannot pause or resume the queue.
+Pause, resume, and the lane switch accept only a JSON `POST` whose `Origin` header names the host the request was sent to. A page from any other origin, including another port on this host or another tailnet machine, cannot send that request, so it cannot change the queue.
+The lane switch accepts only `{ "lanes": 2 }` or `{ "lanes": 3 }`. The server refuses any other value and changes nothing.
 A write body must arrive within 10 seconds and be at most 4 KB. The server answers a refused write and closes its connection.
 
 The `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
@@ -172,11 +179,12 @@ If registered work arrives during measurement, it stops its own child and record
 Its host context covers registered lanes and does not prove that the host was otherwise idle.
 
 The host runs one verification at a time unless `verification-lanes` in the slot root holds a larger count, up to `4`.
-Every verifier and the queue service read that file, so all of them agree on the count.
-The queue service runs each extra lane's requests in its own checkout, `C:\w\_verification\lane-2` to `lane-4`. Each one's build output takes about 10 GB more disk.
+Every verifier and the queue service read that file, so all of them agree on the count. Direct `pnpm verify:pr` runs on the host take the same lanes.
+The queue service runs each extra lane's requests in its own checkout, `C:\w\_verification\lane-2` to `lane-4`, and creates each one on its first run there. Each one's build output takes about 10 GB more disk.
+Use the dashboard's lane switch for 2 or 3 lanes. For another count, write the file on the host:
 
 ```powershell
-Set-Content C:\w\_locks\verification-lanes 3
+Set-Content C:\w\_locks\verification-lanes 4
 ```
 
 Write a smaller count to return to fewer lanes. Runs already admitted to a lane finish first.

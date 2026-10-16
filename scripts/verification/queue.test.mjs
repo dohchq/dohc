@@ -668,6 +668,39 @@ test("four lanes run four requests at once, each in its own checkout", async t =
   for (const entry of hung) await cancel(root, entry.id);
 });
 
+test("three lanes run a third gate; switching back to two stops nothing and starts no gate until fewer than two run; each attempt records the lanes it ran under", async t => {
+  let lanes = 3;
+  const { root, request, settled, calls } = harness(t, { lanes: () => lanes, heartbeatMs: 50 });
+  const beat = () => readJson(queuePaths(root).service);
+  const state = id => listRequests(root).find(candidate => candidate.id === id).status.state;
+  // The clock samples the host and counts awake time together, so awake time shows a run has sampled its lanes.
+  const sampled = id => waitFor(() => beat()?.running.find(run => run.id === id)?.awakeMs > 0, `${id} must sample the host`);
+  const hung = [];
+  for (const branch of ["a", "b", "c"]) hung.push(await request("hang", { branch: `refs/heads/${branch}` }));
+  await waitFor(() => calls.length === 3, "three lanes run three gates at once");
+  for (const entry of hung) await sampled(entry.id);
+  lanes = 2;
+  await waitFor(() => beat()?.lanes === 2, "the service reads the lowered setting");
+  assert.deepEqual(hung.map(entry => state(entry.id)), ["running", "running", "running"], "switching back to two stops nothing");
+  const next = await request("hang", { branch: "refs/heads/d" });
+  // A later acceptance means the service has decided about the request before it.
+  await request("pass", { branch: "refs/heads/later" });
+  assert.equal(state(next.id), "queued", "no gate starts while three run under a setting of two");
+  await cancel(root, hung[0].id);
+  await settled(hung[0].id);
+  await request("pass", { branch: "refs/heads/later-still" });
+  assert.equal(state(next.id), "queued", "the closing lane takes no more gates");
+  await cancel(root, hung[1].id);
+  await waitFor(() => calls.find(call => call.id === next.id), "a gate starts once fewer than two run");
+  await sampled(next.id);
+  for (const entry of [hung[2], next]) await cancel(root, entry.id);
+  const loads = [];
+  for (const entry of [...hung, next]) loads.push((await settled(entry.id)).status.attempts[0].load);
+  assert.deepEqual(loads.map(load => [load.lanes, load.peakRuns]), [[3, 3], [3, 3], [3, 3], [2, 2]], "a gate that ran while three lanes were open says so, even after the switch back");
+  const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(event => event.event === "finished");
+  assert.deepEqual([...hung, next].map(entry => finished.find(event => event.id === entry.id).load), loads, "the history records the same load");
+});
+
 test("a submission the service cannot verify is rejected with a reason", async t => {
   const { request } = harness(t);
   assert.match((await request("pass", { head: "0".repeat(40) })).rejected, /not in this host's repository/u);

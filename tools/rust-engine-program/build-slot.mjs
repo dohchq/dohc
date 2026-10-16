@@ -841,7 +841,11 @@ export function verificationLanes(env = process.env) {
     throw new Error("A verification trial requires DOHC_VERIFICATION_TRIAL=1 and an isolated DOHC_VERIFICATION_SLOT_ROOT; keep Cargo on its shared root.");
   }
   const root = trialRoot ?? cargoRoot;
-  if (!root) return 1;
+  return root ? readVerificationLanes(root) : 1;
+}
+
+/** The lane count in `root`'s `verification-lanes`, 1 when the file is absent. Any other content throws. */
+export function readVerificationLanes(root) {
   const path = join(root, "verification-lanes");
   let setting;
   try { setting = readFileSync(path, "utf8").trim(); }
@@ -850,6 +854,10 @@ export function verificationLanes(env = process.env) {
   if (count < 1 || count > maxVerificationLanes) throw new Error(`${path} must contain a lane count from 1 to ${maxVerificationLanes}.`);
   return count;
 }
+
+/** The verification slots held in `root`, by number, including slots above a lowered or unreadable setting. */
+export const heldVerificationSlots = root => Array.from({ length: maxVerificationLanes }, (_, index) => index + 1)
+  .filter(slot => existsSync(slotDir(root, slot, "verification-slot")));
 
 /**
  * Hold one of the host's verification lanes for a whole PR gate, so gates
@@ -1073,9 +1081,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try { verificationSlots = verificationLanes(); }
   catch (error) { verificationConfigurationError = error.message; }
   // Show every held lane, including lanes above a lowered or unreadable setting.
-  const heldVerificationSlots = verificationRoot ? Array.from({length: maxVerificationLanes}, (_, index) => index + 1)
-    .filter(index => existsSync(join(verificationRoot, `verification-slot-${index}`))) : [];
-  const inspectedVerificationSlots = Math.max(verificationSlots, ...heldVerificationSlots);
+  const inspectedVerificationSlots = Math.max(verificationSlots, ...(verificationRoot ? heldVerificationSlots(verificationRoot) : []));
   const lanes = [
     ...(cargoRoot ? [buildQueueStatus({root: cargoRoot, slots: budget?.slots ?? 4})] : []),
     ...(verificationRoot ? [
