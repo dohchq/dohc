@@ -4,11 +4,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
+import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
-import { attemptOutcome, cancel, lastNightlyPass, listRequests, nextRequest, nightlyTaskDefinition, placeSubmission, position, queuePaths, readJson, serviceRuns, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, cancel, lastNightlyPass, listRequests, movedNote, nextRequest, nightlyTaskDefinition, parseMove, placeMove, placeSubmission, position, queuePaths, readJson, requestMove, serviceRuns, sharedFailures, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
 import { laneTemp, runService, sweepContainers } from "./queue-service.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
 import { run } from "./process.mjs";
@@ -74,6 +75,62 @@ test("the nightly run of main goes ahead of the line, and only a ready one does"
   assert.equal(position([first, nightly], first.id), 2);
 });
 
+test("a move puts a queued request first or before another, the line follows it, and the nightly still goes first", () => {
+  const running = entry("000000001-aaaaaa", { head: "h1" }, "running");
+  const a = entry("000000002-bbbbbb", { head: "h2" });
+  const b = entry("000000003-cccccc", { head: "h3" });
+  const c = entry("000000004-dddddd", { head: "h4" });
+  const nightly = entry("000000005-eeeeee", { head: "h5", nightly: true });
+  const passed = entry("000000006-ffffff", { head: "h6" }, "passed");
+  const superseded = entry("000000007-gggggg", { head: "h7" }, "superseded", { supersededBy: c.id });
+  const health = { diskOk: true, dockerOk: true };
+  const apply = (requests, move) => {
+    const { orders, rejected } = placeMove(requests, move);
+    assert.equal(rejected, undefined);
+    return requests.map(row => orders.has(row.id) ? { ...row, status: { ...row.status, order: orders.get(row.id) } } : row);
+  };
+  let requests = apply([running, a, b, c, passed, superseded], { id: c.id });
+  assert.equal(nextRequest(requests, health).id, c.id, "--first starts it next");
+  assert.deepEqual([c, a, b].map(row => position(requests, row.id)), [2, 3, 4]);
+  assert.deepEqual(requests.map(row => row.request.sequence), [1, 2, 3, 4, 6, 7], "a move changes no sequence");
+  assert.deepEqual(requests.map(row => row.status.order ?? null), [null, 3, 4, 2, null, null], "the queued requests share out their own values again");
+  requests = apply(requests, { id: b.id, before: a.id });
+  assert.deepEqual([c, b, a].map(row => position(requests, row.id)), [2, 3, 4], "--before puts it just ahead of the other");
+  // The running request keeps its sequence, so a retry after a machine failure comes back ahead of the line it left.
+  const retried = requests.map(row => row.id === running.id ? { ...row, status: { ...row.status, state: "queued" } } : row);
+  assert.equal(nextRequest(retried, health).id, running.id);
+  requests = [...requests, nightly];
+  assert.equal(nextRequest(requests, health).id, nightly.id, "the nightly still goes first");
+  assert.deepEqual([nightly, c, b, a].map(row => position(requests, row.id)), [2, 3, 4, 5]);
+  const refused = move => placeMove(requests, move).rejected;
+  assert.match(refused({ id: running.id }), /it is running\. Only a queued request can move\.$/u);
+  assert.match(refused({ id: passed.id }), /it has already finished: passed/u);
+  assert.match(refused({ id: superseded.id }), /replaced by 000000004-dddddd/u);
+  assert.match(refused({ id: "000000009-zzzzzz" }), /^No verification request 000000009-zzzzzz\.$/u);
+  assert.match(refused({ id: a.id, before: running.id }), /before 000000001-aaaaaa: it is running/u, "nothing goes ahead of a running request");
+  assert.match(refused({ id: a.id, before: a.id }), /before itself/u);
+  assert.equal(refused({ id: c.id, before: a.id }), `Cannot move ${c.id} before ${a.id}: ${c.id} is already ahead of ${a.id}. A move only brings a request forward.`);
+  assert.equal(refused({ id: a.id, before: nightly.id }), `Cannot move ${a.id} before ${nightly.id}: the nightly run always goes first. Use --first to put ${a.id} at the front of the rest of the line.`);
+  assert.match(placeMove(requests, { id: a.id }, new Set([a.id])).rejected, /it is running/u, "a request the service has started cannot move before its status says so");
+});
+
+test("a move is checked and cleaned before it is applied, and its note always names the checkout", () => {
+  const by = { name: "Ice", user: "ice", cwd: "C:\\w\\fix-grid" };
+  const move = fields => parseMove({ id: "000000002-bbbbbb", before: null, reason: "unblocks others", by, ...fields });
+  assert.deepEqual(move({}), { id: "000000002-bbbbbb", before: null, reason: "unblocks others", by });
+  assert.match(move({ before: "" }).rejected, /--before names no request/u, "an empty --before is never --first");
+  assert.match(move({ before: " \n" }).rejected, /--before names no request/u);
+  for (const fields of [{ id: "" }, { id: { toString: 1 } }, { reason: "\n\t" }, { reason: 7 }, { by: "Ice" }, { by: { name: 5 } }, { by: [] }]) {
+    assert.ok(move(fields).rejected, JSON.stringify(fields));
+  }
+  for (const raw of [null, [1], "move", 3]) assert.match(parseMove(raw).rejected, /not a JSON object/u);
+  const cleaned = move({ reason: `fixes main\n000000001-aaaaaa  #1  all\r\n\u001b[31mred\u202e ${"x".repeat(400)}`, by: { name: "Ice\nX", user: null, cwd: `C:\\w\\${"y".repeat(300)}` } });
+  assert.equal(cleaned.reason, `fixes main 000000001-aaaaaa #1 all [31mred ${"x".repeat(400)}`.slice(0, 300), "one line, no control characters, at most 300 characters");
+  assert.deepEqual([cleaned.by.name, cleaned.by.user, cleaned.by.cwd.length], ["Ice X", null, 200]);
+  assert.equal(movedNote({ before: null, by, reason: "unblocks others" }), "moved first by Ice (C:\\w\\fix-grid): unblocks others");
+  assert.equal(movedNote({ before: "000000001-aaaaaa", by: { ...by, name: null }, reason: "r" }), "moved before 000000001-aaaaaa by ice (C:\\w\\fix-grid): r");
+});
+
 test("the nightly submission verifies main's head in full, against the last nightly that passed", async t => {
   const root = mkdtempSync(join(tmpdir(), "dohc-queue-nightly-"));
   const fixture = fixtureRepo();
@@ -124,6 +181,43 @@ test("the service task restarts a dead supervisor from the session that installe
   assert.match(xml, /<TimeTrigger>.*<Repetition><Interval>PT5M<\/Interval>/u);
   assert.match(xml, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/u);
   assert.match(xml, /<Priority>4<\/Priority>/u, "the default priority runs every gate below normal");
+});
+
+test("a failed test is shared when another branch's run failed it in the last day; runs of the same branch do not count", async t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-queue-shared-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const paths = queuePaths(root);
+  const now = Date.parse("2026-10-15T12:00:00Z");
+  const grid = { step: "@dohc/desktop", test: "src/grid.test.tsx › draws the table" };
+  const rust = { step: "rust", test: "dohc-engine-sync tests::lane_delete" };
+  const own = { step: "repository", test: "fails only on this branch" };
+  const lines = { "000000001-aaaaaa": "refs/heads/feat/a", "000000002-bbbbbb": "refs/heads/fix/b", "000000003-cccccc": "refs/heads/mine",
+    "000000004-dddddd": "refs/heads/old", "000000005-eeeeee": "refs/heads/other-step", "000000006-ffffff": null };
+  for (const [id, branch] of Object.entries(lines)) await writeJson(join(paths.request(id), "request.json"), { id, branch, checkout: `C:\\w\\${id.slice(-6)}` });
+  const finished = (hours, id, failed) => JSON.stringify({ at: new Date(now - hours * 60 * 60_000).toISOString(), event: "finished", id, attempt: 1, failed, outcome: "failed" });
+  writeFileSync(paths.history, [
+    finished(30, "000000004-dddddd", [grid, rust]),
+    finished(5, "000000001-aaaaaa", [grid]),
+    "{torn",
+    JSON.stringify({ at: new Date(now - 4 * 60 * 60_000).toISOString(), event: "started", id: "000000002-bbbbbb", failed: [rust] }),
+    finished(3, "000000002-bbbbbb", [grid, rust]),
+    finished(3, "000000005-eeeeee", [{ step: "@dohc/sync-relay", test: grid.test }]),
+    finished(2, "000000003-cccccc", [grid, own]),
+    finished(1, "000000006-ffffff", [rust]),
+    finished(1, "000000009-pruned", [own]),
+  ].join("\n") + "\n");
+  const failed = [grid, rust, own, { step: "rust", test: "fails nowhere else" }];
+  assert.deepEqual(sharedFailures(root, failed, { branch: "refs/heads/mine", now }), [
+    { ...grid, branches: ["feat/a", "fix/b"] },
+    { ...rust, branches: ["C:\\w\\ffffff", "fix/b"] },
+  ], "a run older than a day, the same test in another step, this branch's runs, and a request with no record do not count; a detached run is named by its checkout");
+  assert.deepEqual(sharedFailures(root, failed, { branch: "Mine", now }), sharedFailures(root, failed, { branch: "refs/heads/mine", now }), "a branch named without refs/heads/ is still this branch");
+  assert.deepEqual(sharedFailures(root, [own], { branch: "refs/heads/mine", now }), []);
+  assert.deepEqual(sharedFailures(root, [], { branch: "refs/heads/mine", now }), []);
+  assert.deepEqual(sharedFailures(join(root, "missing"), failed, { branch: "refs/heads/mine", now }), [], "a missing queue root gives none");
+  rmSync(paths.history);
+  mkdirSync(paths.history);
+  assert.deepEqual(sharedFailures(root, failed, { branch: "refs/heads/mine", now }), [], "an unreadable history gives none");
 });
 
 test("a request whose status cannot be read is skipped, never taken for a new one", () => {
@@ -197,7 +291,7 @@ function harness(t, { timeLimitMs = 60_000, docker = async () => true, sweep = a
     if (behavior === "pass") receipt({ verdict: "PASS" });
     else if (behavior === "pass-on-retry") receipt({ verdict: "PASS", flaky: [{ step: "repository", test: "times out under load" }],
       timings: [{ name: "tests", seconds: 1260.4 }, { name: "rust", seconds: 990.2 }], slowest: [{ step: "desktop", test: "restarts", seconds: 66 }] });
-    else if (behavior === "fail") receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } });
+    else if (behavior === "fail") receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" }, failed: [{ step: "repository", test: "times out under load" }] });
     else if (behavior === "slow-fail") { await sleep(300); receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } }); }
     else if (behavior === "fail-as-host-fails") { hostFails(calls.length); receipt({ verdict: "FAIL", error: "a test failed", failure: { kind: "check", cause: "tests" } }); }
     else if (behavior === "flaky-host") receipt(calls.filter(call => call.id === grant.request).length === 1
@@ -301,6 +395,8 @@ test("two lanes run two requests at once, each in its own checkout, and the next
   await cancel(root, first.id);
   assert.equal((await settled(first.id)).status.state, "cancelled");
   assert.equal(state(second.id), "running", "a stop reaches only its own run");
+  const laneOf = id => listRequests(root).find(candidate => candidate.id === id).status.attempts[0].lane;
+  assert.deepEqual([laneOf(first.id), laneOf(second.id)], [one, two].map(call => call.lane.endsWith("-2") ? 2 : 1), "each attempt names the lane it ran in");
   // Each attempt records the load it verified under, in its status and in the history.
   const load = listRequests(root).find(candidate => candidate.id === first.id).status.attempts[0].load;
   assert.equal(load.lanes, 2);
@@ -342,6 +438,18 @@ test("a pass with tests that needed a retry records them in its attempt and the 
   // The history keeps the step times and slowest tests for the weekly review.
   assert.deepEqual(finished.steps, { tests: 1260, rust: 990 });
   assert.deepEqual(finished.slowest, [{ step: "desktop", test: "restarts", seconds: 66 }]);
+});
+
+test("a failed run records the tests that failed in its attempt and the history, where another branch finds them", async t => {
+  const { root, request, settled } = harness(t);
+  const failed = await settled((await request("fail")).id);
+  const expected = [{ step: "repository", test: "times out under load" }];
+  assert.equal(failed.status.verdict, "FAIL");
+  assert.deepEqual(failed.status.attempts[0].failed, expected);
+  const finished = readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).find(event => event.event === "finished" && event.id === failed.id);
+  assert.deepEqual(finished.failed, expected);
+  assert.deepEqual(sharedFailures(root, expected, { branch: "refs/heads/other" }), [{ ...expected[0], branches: ["fail"] }]);
+  assert.deepEqual(sharedFailures(root, expected, { branch: "refs/heads/fail" }), []);
 });
 
 test("an attempt that never sampled the host records its load as null", async t => {
@@ -702,4 +810,191 @@ test("a Rust-only request never asks Docker to clean up after it", async t => {
   await settled(rust.id);
   await settled(js.id);
   assert.deepEqual(swept, [js.id]);
+});
+
+/** Run pnpm verify:queue against a private queue root, without blocking the service in this process. */
+function queueCli(root, ...args) {
+  return new Promise(done => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL("./queue.mjs", import.meta.url)), ...args], { env: { ...process.env, DOHC_VERIFICATION_QUEUE_ROOT: root }, windowsHide: true });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", chunk => { stdout += chunk; });
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    child.on("close", code => done({ code, stdout, stderr }));
+  });
+}
+
+const historyEvents = (root, event) => readFileSync(queuePaths(root).history, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(row => row.event === event);
+
+test("pnpm verify:queue move changes what starts next, and the history and status say who moved it and why", async t => {
+  const { root, request, settled, calls } = harness(t);
+  const hung = await request("hang");
+  await waitFor(() => calls.find(call => call.id === hung.id), "the hang must start");
+  const a = await request("pass", { branch: "refs/heads/a" });
+  const b = await request("pass", { branch: "refs/heads/b" });
+  const c = await request("pass", { branch: "refs/heads/c" });
+  const nightly = await request("pass", { branch: "refs/heads/main", nightly: true });
+  const first = await queueCli(root, "move", c.id, "--first", "--reason", "fixes the test\nthree branches fail", "--by", "Ice");
+  assert.equal(first.code, 0, first.stderr);
+  assert.match(first.stdout, /now #3 in line, was #5/u, "the running request and the nightly stay ahead");
+  const before = await queueCli(root, "move", b.id, "--before", a.id, "--reason", "main is broken until it lands");
+  assert.equal(before.code, 0, before.stderr);
+  assert.match(before.stdout, /now #4 in line, was #5/u);
+  const status = await queueCli(root, "status");
+  const line = id => status.stdout.split("\n").find(row => row.startsWith(id)) ?? "";
+  assert.ok(line(c.id).includes("#3") && line(c.id).endsWith(`  (moved first by Ice (${process.cwd()}): fixes the test three branches fail)`), status.stdout);
+  assert.ok(line(b.id).endsWith(`  (moved before ${a.id} by ${userInfo().username} (${process.cwd()}): main is broken until it lands)`), status.stdout);
+  assert.ok(!status.stdout.includes("\nthree branches fail"), "a reason never starts a row of its own");
+  assert.equal(listRequests(root).find(candidate => candidate.id === hung.id).status.state, "running", "a move never touches a running request");
+  await cancel(root, hung.id);
+  for (const { id } of [a, b, c, nightly]) assert.equal((await settled(id)).status.verdict, "PASS");
+  assert.deepEqual(calls.map(call => call.id), [hung.id, nightly.id, c.id, b.id, a.id]);
+  const moves = historyEvents(root, "moved");
+  assert.deepEqual(moves.map(({ id, from, to, before, reason, by }) => ({ id, from, to, before, reason, name: by.name })), [
+    { id: c.id, from: 5, to: 3, before: null, reason: "fixes the test three branches fail", name: "Ice" },
+    { id: b.id, from: 5, to: 4, before: a.id, reason: "main is broken until it lands", name: null }]);
+  assert.deepEqual(moves.map(({ by }) => [by.user, by.cwd]), [[userInfo().username, process.cwd()], [userInfo().username, process.cwd()]], "every mover is known by its user and checkout");
+  const moved = listRequests(root).find(candidate => candidate.id === c.id);
+  assert.equal(moved.request.sequence, Number(c.id.slice(0, 9)), "a move changes no id or sequence");
+  assert.deepEqual([moved.status.moved.reason, moved.status.moved.by.name], ["fixes the test three branches fail", "Ice"], "the request keeps its last move");
+});
+
+test("a move of a running, finished, or unknown request is refused with a reason, and the running request keeps running", async t => {
+  const { root, request, settled, calls } = harness(t);
+  const done = await settled((await request("pass")).id);
+  const hung = await request("hang");
+  await waitFor(() => listRequests(root).find(candidate => candidate.id === hung.id)?.status.state === "running", "the hang must start");
+  const waiting = await request("pass", { branch: "refs/heads/waiting" });
+  const behind = await request("pass", { branch: "refs/heads/behind" });
+  // The command refuses at once.
+  for (const [args, message] of [
+    [[hung.id, "--first"], /^Cannot move \S+: it is running\. Only a queued request can move\.$/u],
+    [[done.id, "--first"], /it has already finished: passed/u],
+    [["000000099-ffffff", "--first"], /^No verification request 000000099-ffffff\.$/u],
+    [[waiting.id, "--before", hung.id], /before \S+: it is running\. Move it before a queued request, or use --first\.$/u],
+    [[waiting.id, "--before", behind.id], /is already ahead of \S+\. A move only brings a request forward\.$/u],
+  ]) {
+    const result = await queueCli(root, "move", ...args, "--reason", "unblocks others");
+    assert.equal(result.code, 1, result.stdout);
+    assert.match(result.stderr.trim(), message);
+  }
+  for (const args of [[waiting.id, "--first"], [waiting.id, "--first", "--before", done.id, "--reason", "x"], [waiting.id, "--reason", "x"]]) {
+    assert.match((await queueCli(root, "move", ...args)).stderr, /^Use move <id> --first/u, args.join(" "));
+  }
+  // The service makes the same checks for a move written straight to it, and answers each one.
+  for (const [move, message] of [[{ id: hung.id }, /it is running/u], [{ id: done.id }, /already finished/u], [{ id: "000000099-ffffff" }, /No verification request/u], [{ id: waiting.id, reason: "" }, /needs a reason/u], [{ id: waiting.id, before: behind.id }, /already ahead/u]]) {
+    const key = await requestMove(root, { reason: "unblocks others", by: { name: "test" }, ...move });
+    assert.match((await waitFor(() => readJson(join(queuePaths(root).keys, key)), "the service must answer the move")).rejected, message);
+  }
+  assert.equal(listRequests(root).find(candidate => candidate.id === hung.id).status.state, "running", "a refused move leaves the run alone");
+  assert.equal(calls.filter(call => call.id === hung.id).length, 1);
+  assert.ok(!existsSync(queuePaths(root).history) || historyEvents(root, "moved").length === 0, "a refused move records no move");
+  await cancel(root, hung.id);
+  assert.equal((await settled(waiting.id)).status.verdict, "PASS");
+  assert.equal((await settled(behind.id)).status.verdict, "PASS");
+});
+
+test("a newer commit that replaces a moved request keeps the moved place", async t => {
+  const { root, request, settled, calls } = harness(t);
+  const hung = await request("hang");
+  await waitFor(() => calls.find(call => call.id === hung.id), "the hang must start");
+  const other = await request("pass", { branch: "refs/heads/other" });
+  const old = await request("pass", { branch: "refs/heads/feature" });
+  const key = await requestMove(root, { id: old.id, reason: "fixes main", by: { name: "Ice", user: "ice", cwd: "C:\\w\\fix" } });
+  assert.deepEqual(await waitFor(() => readJson(join(queuePaths(root).keys, key)), "the move must be applied"), { moved: old.id, from: 3, to: 2 });
+  const newer = await request("pass", { branch: "refs/heads/feature" });
+  assert.equal((await settled(old.id)).status.supersededBy, newer.id);
+  const requests = listRequests(root);
+  assert.equal(position(requests, newer.id), 2, "the newer commit keeps the moved place");
+  assert.equal(movedNote(requests.find(candidate => candidate.id === newer.id).status.moved), "moved first by Ice (C:\\w\\fix): fixes main", "and the record of the move");
+  await cancel(root, hung.id);
+  await settled(other.id);
+  await settled(newer.id);
+  assert.deepEqual(calls.map(call => call.id), [hung.id, newer.id, other.id]);
+});
+
+test("a malformed move is answered and removed, and the rest of the tick still runs", async t => {
+  const { root, request, settled, calls } = harness(t);
+  const paths = queuePaths(root);
+  const hung = await request("hang");
+  await waitFor(() => calls.find(call => call.id === hung.id), "the hang must start");
+  const waiting = await request("pass", { branch: "refs/heads/waiting" });
+  const by = { name: "test", user: "ice", cwd: "C:\\w\\x" };
+  const bad = [
+    [{ id: { toString: 1 }, reason: "x", by }, /names no request to move/u],
+    [{ id: waiting.id, before: "", reason: "x", by }, /--before names no request/u],
+    [{ id: waiting.id, reason: "x", by: "Ice" }, /by field/u],
+    [{ id: waiting.id, reason: "x", by: { name: 5 } }, /by field/u],
+  ];
+  const keys = [];
+  for (const [move] of bad) keys.push(await requestMove(root, move));
+  const array = `move-${Date.now()}-array`;
+  await writeJson(join(paths.moves, `${array}.json`), [1]);
+  // A move the service can use, written as a client might: its text is cleaned to one short line.
+  const dirty = await requestMove(root, { id: waiting.id, reason: `fixes main\n000000001-aaaaaa  #1  all\u001b[31m ${"x".repeat(400)}`, by: { name: "Ice\nX", user: "ice", cwd: `C:\\w\\${"y".repeat(300)}` } });
+  // A cancel written with them still stops the run in the same pass.
+  await cancel(root, hung.id);
+  assert.equal((await settled(hung.id)).status.state, "cancelled");
+  for (const [index, [, message]] of bad.entries()) assert.match((await waitFor(() => readJson(join(paths.keys, keys[index])), "each malformed move must be answered")).rejected, message);
+  assert.match((await waitFor(() => readJson(join(paths.keys, array)), "a move that is not an object must be answered")).rejected, /not a JSON object/u);
+  assert.equal((await waitFor(() => readJson(join(paths.keys, dirty)), "the dirty move must be answered")).moved, waiting.id);
+  await waitFor(() => readdirSync(paths.moves).length === 0, "every answered move is removed");
+  const { moved } = (await settled(waiting.id)).status;
+  assert.equal(moved.reason, `fixes main 000000001-aaaaaa #1 all [31m ${"x".repeat(400)}`.slice(0, 300));
+  assert.deepEqual([moved.by.name, moved.by.cwd.length], ["Ice X", 200]);
+});
+
+test("a move file that stays unreadable is answered and removed after a minute", async t => {
+  const { root } = harness(t);
+  const paths = queuePaths(root);
+  mkdirSync(paths.moves, { recursive: true });
+  const torn = join(paths.moves, `move-${Date.now()}-torn.json`);
+  writeFileSync(torn, "{\"id\": \"0000");
+  // The service reads every move in each pass, so an answer to a later one means it has seen the torn one.
+  const later = await requestMove(root, { id: "000000099-ffffff", reason: "unblocks others", by: { name: "test" } });
+  await waitFor(() => readJson(join(paths.keys, later)), "the later move must be answered");
+  assert.ok(existsSync(torn), "a new unreadable move may still be being written");
+  assert.equal(readJson(join(paths.keys, basename(torn, ".json"))), null);
+  const old = new Date(Date.now() - 2 * 60_000);
+  utimesSync(torn, old, old);
+  assert.match((await waitFor(() => readJson(join(paths.keys, basename(torn, ".json"))), "the old unreadable move must be answered")).rejected, /could not read the move/u);
+  await waitFor(() => !existsSync(torn), "the old unreadable move must be removed");
+});
+
+test("sixty moves into the same gap keep the exact order", async t => {
+  const { root, request, calls } = harness(t);
+  const hung = await request("hang");
+  await waitFor(() => calls.find(call => call.id === hung.id), "the hang must start");
+  const a = await request("pass", { branch: "refs/heads/a" });
+  const b = await request("pass", { branch: "refs/heads/b" });
+  const c = await request("pass", { branch: "refs/heads/c" });
+  // Each move puts the last request just ahead of the one before it, into the gap behind the first.
+  let [second, third] = [b.id, c.id];
+  for (let n = 1; n <= 60; n += 1) {
+    const key = await requestMove(root, { id: third, before: second, reason: "unblocks others", by: { name: "test" } });
+    const answer = await waitFor(() => readJson(join(queuePaths(root).keys, key)), `move ${n} must be answered`);
+    assert.deepEqual([answer.rejected, answer.to], [undefined, 3], `move ${n} puts ${third} at #3, behind the running request and ${a.id}`);
+    [second, third] = [third, second];
+  }
+  const requests = listRequests(root);
+  assert.deepEqual([a.id, b.id, c.id].map(id => position(requests, id)), [2, 3, 4]);
+  assert.ok(requests.every(entry => Number.isInteger(entry.status.order ?? entry.request.sequence)), "every place is a whole number");
+});
+
+test("a newer commit that replaces two queued requests takes the place of the one furthest ahead", async t => {
+  const { root, fixture, request, settled, calls } = harness(t);
+  const paths = queuePaths(root);
+  const hung = await request("hang");
+  await waitFor(() => calls.find(call => call.id === hung.id), "the hang must start");
+  // Two queued requests on one branch, as after a run on it was retried behind a newer commit. The later one was moved ahead.
+  const moved = { at: new Date().toISOString(), before: null, reason: "fixes main", by: { name: "Ice", user: "ice", cwd: "C:\\w\\fix" } };
+  for (const [id, status] of [["000000101-aaaaaa", { order: 50 }], ["000000102-bbbbbb", { order: 40, moved }]]) {
+    await writeJson(join(paths.request(id), "request.json"), { id, sequence: Number(id.slice(0, 9)), head: fixture.head, base: fixture.base, scope: "all", gates: { rust: true, js: true }, checkout: "pass", branch: "refs/heads/feature" });
+    await writeJson(join(paths.request(id), "status.json"), { state: "queued", attempts: [], ...status });
+  }
+  const newer = await request("pass", { branch: "refs/heads/feature" });
+  for (const id of ["000000101-aaaaaa", "000000102-bbbbbb"]) assert.equal((await settled(id)).status.supersededBy, newer.id);
+  const { status } = listRequests(root).find(candidate => candidate.id === newer.id);
+  assert.deepEqual([status.order, status.moved], [40, moved]);
+  await cancel(root, hung.id);
+  assert.equal((await settled(newer.id)).status.verdict, "PASS");
 });

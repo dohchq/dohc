@@ -1,3 +1,4 @@
+import { shortcutText } from "../shortcuts/shortcutRegistry";
 import { Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { rendererMarks } from "../performance/rendererMarks";
@@ -139,15 +140,15 @@ export function CommandPalette(props: {
         </ul>
         <div className="flex items-center gap-3 border-t border-line px-3.5 py-2 text-[10px] text-subtle">
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-mono">↑↓</kbd>
+            <kbd className="rounded border border-line bg-bg px-1 font-mono">{shortcutText("palette-move", window.dohcDesktop?.platform)}</kbd>
             navigate
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-mono">↵</kbd>
+            <kbd className="rounded border border-line bg-bg px-1 font-mono">{shortcutText("palette-accept", window.dohcDesktop?.platform)}</kbd>
             open
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-mono">esc</kbd>
+            <kbd className="rounded border border-line bg-bg px-1 font-mono">{shortcutText("palette-dismiss", window.dohcDesktop?.platform)}</kbd>
             dismiss
           </span>
         </div>

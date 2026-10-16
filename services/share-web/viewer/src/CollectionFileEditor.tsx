@@ -1,3 +1,4 @@
+import {fetchShareWeb} from "./apiVersion";
 import {useEffect, useRef, useState} from "react";
 import {collectionWriteBody, COLLECTION_WRITES_PATH, parseCollectionWriteOutcome, type CollectionWriteOutcome} from "../../src/collectionWrites";
 import {DiscardDraft} from "./DiscardDraft";
@@ -79,7 +80,7 @@ export function CollectionFileEditor({session, path, blobSha256, available, onCl
     setStatus({kind: "saving"});
     void (async (): Promise<Status> => {
       try {
-        const response = await fetch(COLLECTION_WRITES_PATH, {method: "POST", credentials: "same-origin", signal: controller.signal,
+        const response = await fetchShareWeb(COLLECTION_WRITES_PATH, {method: "POST", credentials: "same-origin", signal: controller.signal,
           headers: {[SESSION_HEADER]: session, "content-type": "application/json"},
           body: collectionWriteBody(id, [{path, basedOnBlobSha256: base.blobSha256, text}], Date.now())});
         const outcome = parseCollectionWriteOutcome(response.status, await response.json().catch(() => null));
