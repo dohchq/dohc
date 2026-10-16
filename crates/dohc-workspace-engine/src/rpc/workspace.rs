@@ -45,6 +45,7 @@ pub(super) const MAX_OPEN_HANDLES: usize = 64;
 /// A `capture.hold`: the apply gate it holds, and when it ends unless the
 /// holder renews it first.
 pub(super) struct CaptureHold {
+    pub(super) operation_id: Option<String>,
     pub(super) _guard: tokio::sync::OwnedMutexGuard<()>,
     pub(super) expires_at: tokio::time::Instant,
 }

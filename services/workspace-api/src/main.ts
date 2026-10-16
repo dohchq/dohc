@@ -16,6 +16,7 @@ import { createCrashReportIntake, createPostgresCrashReportStore } from "./crash
 import { createReadinessProbe } from "./readiness";
 import { createRouter, type AuthGateway } from "./routes";
 import { createSignUpAdmission } from "./signUpAdmission";
+import { createAccountDeletion } from "./accountDeletion";
 
 // The auth host: one Postgres, Better Auth on /api/auth/*, and the browser
 // account pages that drive it. This file owns the process — env, database,
@@ -45,7 +46,9 @@ const deliverEmail: SendEmail = config.smtp
 const email = accountEmailDelivery(deliverEmail);
 const pool = new Pool({ connectionString: config.postgresUrl, connectionTimeoutMillis: 3000, query_timeout: 5000, statement_timeout: 5000 });
 pool.on("error", () => console.error("[workspace-api] An idle database connection failed."));
+const accountDeletion = createAccountDeletion({pool, secret: config.secret, serverOrigin: config.baseURL, relayUrl: config.internalRelayUrl});
 const auth = createWorkspaceAuth({
+  accountDeletion,
   pool,
   baseURL: config.baseURL,
   secret: config.secret,
@@ -65,6 +68,7 @@ if (config.signUp) {
     process.exit(1);
   }
 }
+
 
 const gateway: AuthGateway = {
   handler: (request) => email.handle(request, (forwarded) => auth.handler(forwarded), async () => (await auth.api.getSession({ headers: request.headers }))?.user.email ?? null),
@@ -144,6 +148,9 @@ const server = createServer((request, response) => {
   return handler(request, response);
 });
 server.listen(config.port, config.bindHost, () => {
+  const resume = () => {void accountDeletion.resume().catch(() => console.error("[workspace-api] Resuming account deletion failed."));};
+  resume();
+  setInterval(resume, 60_000).unref();
   console.log(`[workspace-api] listening on ${config.bindHost}:${config.port} (auth at /api/auth)`);
   console.log(`[workspace-api] email transport: ${config.emailTransport}`);
   if (config.testAuthSeam) console.log("[workspace-api] DOHC_TEST_AUTH seam ENABLED (dev/test only)");

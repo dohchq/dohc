@@ -44,10 +44,12 @@ const cellStyle = (column: number) =>
     fontVariantNumeric: `var(${columnVar("figures", column)})`,
   });
 
-// A grid's columns take their text's width, not the pane's.
+// A grid's columns take their text's width, not the pane's. The header stays
+// in view while the rows scroll; the frame clips without scrolling itself, so
+// the scroller around the grid holds the header.
 export function DataGrid({
   columns,
-  headerAction,
+  headerRoom,
   trailing,
   className,
   style,
@@ -55,8 +57,8 @@ export function DataGrid({
   ...props
 }: ComponentPropsWithoutRef<"table"> & {
   columns: readonly DataGridColumn[];
-  // Room in each header for an action beside its name.
-  headerAction?: boolean;
+  // Room in each header beside its name, in px, for its icons and actions.
+  headerRoom?: number;
   // A last column after the data's, such as Add column.
   trailing?: boolean;
 }) {
@@ -64,22 +66,27 @@ export function DataGrid({
     <table
       {...props}
       style={{ ...numberColumns(columns), ...style }}
-      className={`border-separate border-spacing-0 overflow-hidden rounded-lg border border-line text-[13px] ${className ?? ""}`}
+      className={`border-separate border-spacing-0 overflow-clip rounded-lg border border-line text-[13px] ${className ?? ""}`}
     >
       {children}
-      <ColumnWidths columns={columns} headerAction={headerAction} trailing={trailing} />
+      <ColumnWidths columns={columns} headerRoom={headerRoom ?? 0} trailing={trailing} />
     </table>
   );
 }
 
+// Every header cell stays in view while the rows scroll, with the header's
+// hairline 1px below it. At rest the hairline covers the first row's top
+// border exactly; scrolled, it stays under the header.
+export const STICKY_HEADER = "sticky top-0 z-10 shadow-[0_1px_0_var(--dohc-line)]";
+
 // The header's first cell, over the row numbers.
 export function DataGridGutterHeader({ wide, className, ...props }: ComponentPropsWithoutRef<"th"> & { wide?: boolean }) {
-  return <th {...props} className={`${wide ? "w-10" : "w-8"} bg-panel-2 p-0 ${className ?? ""}`} />;
+  return <th {...props} className={`${STICKY_HEADER} ${wide ? "w-10" : "w-8"} bg-panel-2 p-0 ${className ?? ""}`} />;
 }
 
 // A column's header. Its actions show on hover or focus (DataGridColumnAction).
-// A header whose name is being edited draws the focused cell's outline; its
-// buttons keep their own focus ring.
+// A header that holds focus itself, or whose name is being edited, draws the
+// focused cell's outline; its buttons keep their own focus ring.
 export function DataGridHeaderCell({
   column,
   className,
@@ -90,7 +97,7 @@ export function DataGridHeaderCell({
       {...props}
       data-grid-cell=""
       style={headerStyle(column)}
-      className={`group/column h-7 bg-panel-2 px-2.5 text-[12px] font-medium text-muted has-[input:focus]:outline-2 has-[input:focus]:-outline-offset-2 has-[input:focus]:outline-accent ${className ?? ""}`}
+      className={`group/column ${STICKY_HEADER} h-7 bg-panel-2 px-2.5 text-[12px] font-medium text-muted focus:outline-2 focus:-outline-offset-2 focus:outline-accent has-[input:focus]:outline-2 has-[input:focus]:-outline-offset-2 has-[input:focus]:outline-accent ${className ?? ""}`}
     />
   );
 }
@@ -158,13 +165,25 @@ export function DataGridCell({
   );
 }
 
+// Measures a cell's text as the grid draws it: 12px mono for numbers, 13px
+// sans otherwise. Where no canvas can measure (a test DOM), it counts
+// characters.
+export function cellMeasure(numeric: boolean): (text: string) => number {
+  const context = typeof OffscreenCanvas === "undefined" ? null : new OffscreenCanvas(1, 1).getContext("2d");
+  if (!context) return (text) => text.length;
+  const root = getComputedStyle(document.documentElement);
+  context.font = numeric ? `12px ${root.getPropertyValue("--font-mono")}` : `13px ${root.getPropertyValue("--font-sans")}`;
+  return (text) => context.measureText(text).width;
+}
+
 // Sets each column's width from its text, at least 64px and at most 320px,
 // in a row of no height after the last. It draws the text in its column's
 // font, which comes from the same columns as its text. Cells fill their
-// column, so a cell's own text never moves the table.
+// column, or draw at most its widest text, so a cell's own text never moves
+// the table.
 const ColumnWidths = memo(function ColumnWidths(props: {
   columns: readonly DataGridColumn[];
-  headerAction?: boolean;
+  headerRoom: number;
   trailing?: boolean;
 }) {
   return (
@@ -174,9 +193,8 @@ const ColumnWidths = memo(function ColumnWidths(props: {
         {props.columns.map((text, column) => (
           <td key={column} className="p-0" style={cellStyle(column)}>
             <div
-              className={`box-content h-0 max-w-80 overflow-hidden whitespace-pre pl-2.5 font-sans text-[12px] font-medium ${
-                props.headerAction ? "pr-[34px]" : "pr-2.5"
-              }`}
+              className="box-content h-0 max-w-80 overflow-hidden whitespace-pre pl-2.5 font-sans text-[12px] font-medium"
+              style={{ paddingRight: 10 + props.headerRoom }}
             >
               {text.header}
             </div>

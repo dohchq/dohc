@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { resolveEngineBinary } from "../src/testing/engineBinary";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import { readHistoryMoments } from "./helpers/history";
 import { relayJson } from "./helpers/relayPeer";
 import { startServerProxy } from "./helpers/selfHostOnboarding";
 import { mintLocalhostCa } from "../../../services/share-web/src/testing/localhostCa";
@@ -163,12 +164,9 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
       await wakeOwner();
       return [await readFile(join(ownerTemp.rootPath, SCHEMA_PATH), "utf8"), await readFile(join(ownerTemp.rootPath, AUTOMATIONS_PATH), "utf8")];
     }, { timeout: 120_000, intervals: [2_000] }).toEqual([SCHEMA_BROWSER, AUTOMATIONS_AGENT]);
-    await expect.poll(async () => await owner!.page.evaluate(async (workspaceId) => {
-      const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-      const listed = await api.listEngineMoments({ workspaceId, limit: 100 });
-      if (!("moments" in listed)) return [];
-      return listed.moments.filter((moment) => moment.linkAuthor).map((moment) => [moment.path, moment.linkAuthor!.grantId]);
-    }, WORKSPACE_ID), { timeout: 60_000, intervals: [2_000] })
+    await expect.poll(async () => (await readHistoryMoments(owner!.page, WORKSPACE_ID) ?? [])
+      .filter((moment) => moment.linkAuthor).map((moment) => [moment.path, moment.linkAuthor!.grantId]),
+    { timeout: 60_000, intervals: [2_000] })
       .toEqual(expect.arrayContaining([[SCHEMA_PATH, link.grantId], [AUTOMATIONS_PATH, link.grantId]]));
 
     // --- Stop and restore ends the link and puts both files back -------------

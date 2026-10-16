@@ -1,7 +1,7 @@
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import { recordedShareSelector } from "./shareViewRecords";
 import type { ShareViewSelector } from "./shareViewInfo";
-import { shareViewIsPresent } from "./shareViewMarker";
+import { shareViewIdentityIsIntact, shareViewIsPresent } from "./shareViewMarker";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
 
 // The two lanes of #646 PR3a, and the rule that keeps a workspace in exactly
@@ -87,8 +87,8 @@ export function requireShareViewMembership(
 }
 
 /**
- * The same scope, for sending: the level must positively be `edit`, and the
- * share must not have ended.
+ * The same scope, for sending: the marker must name its recipient too, the
+ * level must positively be `edit`, and the share must not have ended.
  */
 export function requireShareViewProposalScope(
   shareView: unknown,
@@ -96,6 +96,7 @@ export function requireShareViewProposalScope(
   const scope = requireShareViewMembership(shareView);
   const marker = isRecord(shareView) ? shareView : {};
   if (
+    !shareViewIdentityIsIntact(marker) ||
     !shareViewTakesLocalWrites({
       access: scope.grant.access,
       ended: marker.ended === true,

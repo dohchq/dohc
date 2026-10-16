@@ -3,7 +3,8 @@ import { documentButtonAccess } from "./documentButtonAccess";
 
 describe("documentButtonAccess", () => {
   const share = (grantedSelector: unknown, ended = false) => ({
-    shareId: "share-1", granterEmail: "owner@example.com", genericChatWritable: false, grantedSelector, ...(ended ? { ended } : {}),
+    shareId: "share-1", recipientUserId: "recipient-1", granterEmail: "owner@example.com", genericChatWritable: false,
+    grantedSelector, ...(ended ? { ended } : {}),
   });
   const edit = (paths: string[], versionId: string | null = null) => share({ paths, versionId, access: "edit" });
 
@@ -26,6 +27,8 @@ describe("documentButtonAccess", () => {
     ["Comment", share({ paths: ["Invoices"], versionId: null, access: "comment" })],
     ["an ended share", share({ paths: ["Invoices"], versionId: null, access: "edit" }, true)],
     ["a damaged grant", share({ paths: [""], versionId: null, access: "edit" })],
+    ["a marker that lost its share id", { ...edit(["Invoices"]), shareId: undefined }],
+    ["a marker that lost its recipient", { ...edit(["Invoices"]), recipientUserId: undefined }],
     ["no grant at all", share(undefined)],
     ["a marker that lost its value", null],
   ])("refuses %s", (_name, shareView) => {

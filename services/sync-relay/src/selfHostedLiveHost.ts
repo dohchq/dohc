@@ -19,6 +19,13 @@ import {startServiceLiveHost, type ServiceHostedSet} from "./serviceLiveHost";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {discoverServiceHostDocuments} from "./serviceHostEnrollmentRoutes";
 
+export async function deleteSelfHostedWorkspaceRoots(root: string, namespace: string, workspaces: readonly {workspaceId: string; replicationEpoch: string | null; streamIdentity: string | null}[]): Promise<void> {
+  for (const row of workspaces) {
+    const directory = join(root, createHash("sha256").update(JSON.stringify([namespace, row.workspaceId, row.replicationEpoch, row.streamIdentity])).digest("hex"));
+    await rm(directory, {recursive: true, force: true});
+  }
+}
+
 type Host = Awaited<ReturnType<typeof startServiceLiveHost>>;
 // Background reconciliation must not keep an otherwise idle Node process alive.
 const pause = (ms: number) => Effect.promise(signal => delay(ms, undefined, {signal, ref: false}));
@@ -147,6 +154,7 @@ export async function startSelfHostedLiveHost(options: {
       }
     }
   }
+  let reconciliation: Promise<void> | undefined;
   const finished = Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {
     yield* Effect.acquireRelease(Effect.succeed(changes), Queue.shutdown);
     yield* Effect.acquireRelease(
@@ -164,11 +172,17 @@ export async function startSelfHostedLiveHost(options: {
       yield* Queue.clear(changes);
       // File operations and daemon starts may ignore cancellation. Drain them
       // before finalization, so a late start cannot escape its owner's close.
-      yield* Effect.uninterruptible(Effect.promise(reconcile));
+      yield* Effect.uninterruptible(Effect.promise(() => {reconciliation = reconcile(); return reconciliation;}));
     }
   })), {signal});
   return {
     current: () => current,
+    async deleteWorkspaces(workspaces: readonly {workspaceId: string; replicationEpoch: string | null; streamIdentity: string | null}[]) {
+      await reconciliation;
+      await current?.deleteWorkspaces(workspaces.map(row => row.workspaceId));
+      await deleteSelfHostedWorkspaceRoots(root, history.namespace, workspaces);
+      signature = ""; schedule();
+    },
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
     get unavailable() {return signal.aborted || !initialReconciliationComplete || lastError !== undefined ||
       (selectedDocuments && (!current || current.invalidated.aborted));},
