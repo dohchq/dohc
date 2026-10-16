@@ -63,6 +63,13 @@ struct ClearCaptureRecoveryParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CaptureHoldParams {
+    #[serde(default)]
+    operation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CaptureHoldIdParams {
     hold_id: String,
 }
@@ -94,6 +101,23 @@ fn hold_is_live(holds: &mut HashMap<String, CaptureHold>, hold_id: &str, now: In
 /// its lease ran out, the workspace closed or the engine restarted, so the
 /// caller restores disk instead of recording a change capture may already
 /// have seen.
+pub(super) fn capture_operation_id(
+    open: &OpenWorkspace,
+    hold_id: Option<&str>,
+) -> Result<Option<String>, WireError> {
+    let Some(id) = hold_id else {
+        return Ok(None);
+    };
+    let mut holds = lock(&open.capture_holds);
+    if !hold_is_live(&mut holds, id, Instant::now()) {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            "capture-hold-ended",
+        ));
+    }
+    Ok(holds.get(id).and_then(|hold| hold.operation_id.clone()))
+}
+
 pub(super) fn require_capture_hold(
     open: &OpenWorkspace,
     hold_id: Option<&str>,
@@ -492,7 +516,9 @@ impl EngineService {
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
+        params: Value,
     ) -> Result<Value, WireError> {
+        let params: CaptureHoldParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         if !open.is_local_owner() {
             return Err(WireError::new(
@@ -508,6 +534,12 @@ impl EngineService {
             }
             guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
         };
+        if let Some(operation) = &params.operation_id {
+            open.actor
+                .admit_history_operation(open.workspace_id.clone(), operation.clone())
+                .await
+                .map_err(map_runtime)?;
+        }
         let hold_id = format!(
             "hold-{:016x}",
             NEXT_CAPTURE_HOLD.fetch_add(1, Ordering::Relaxed)
@@ -516,6 +548,7 @@ impl EngineService {
         lock(&open.capture_holds).insert(
             hold_id.clone(),
             CaptureHold {
+                operation_id: params.operation_id,
                 _guard: guard,
                 expires_at,
             },
@@ -841,7 +874,11 @@ mod tests {
         let (_scratch, service, handle) = lease_fixture().await;
         let open = service.open(Some(&handle)).expect("open handle");
         let reply = service
-            .capture_hold(&RequestContext::unbounded(), Some(handle.clone()))
+            .capture_hold(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({}),
+            )
             .await
             .expect("hold");
         assert_eq!(reply["leaseMs"], json!(30_000));
@@ -859,7 +896,11 @@ mod tests {
         let (_scratch, service, handle) = lease_fixture().await;
         let open = service.open(Some(&handle)).expect("open handle");
         let reply = service
-            .capture_hold(&RequestContext::unbounded(), Some(handle.clone()))
+            .capture_hold(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({}),
+            )
             .await
             .expect("hold");
         let half = super::CAPTURE_HOLD_LEASE / 2;
