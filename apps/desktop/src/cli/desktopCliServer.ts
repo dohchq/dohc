@@ -84,6 +84,7 @@ interface DesktopCliServerDependencies<State> {
     > | null;
     queueCloudSync(workspaceId: string): void;
     agentRunDepth(workspaceId: string): number;
+    dispatchedAgentRun(workspaceId: string): boolean;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
   currentDaemon(): Pick<EngineDaemonLifecycle, "requestWorkspace"> | null;
@@ -455,6 +456,7 @@ export function createDesktopCliServer<State>(
       localUserDisplayName,
       localPersonId,
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
+      dispatchedAgentRun: (workspaceId) => activity.dispatchedAgentRun(workspaceId),
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,
       // so this queues cloud sync too. The sync engine debounces a second
