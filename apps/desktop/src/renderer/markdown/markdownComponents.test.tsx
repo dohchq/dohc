@@ -52,26 +52,20 @@ describe("MARKDOWN_COMPONENTS tables", () => {
     expect(cells[1]?.style.textAlign).toBe("right");
   });
 
-  it("scrolls a wide table inside its own container so the page never does", () => {
+  it("draws a table in the editor's frame, header and rows in one body", () => {
     const view = renderMarkdown(TABLE);
 
+    // The editor's .tableWrapper scrolls a wide table inside itself, so the
+    // page never scrolls sideways.
     const table = view.container.querySelector("table");
-    const wrapper = table?.parentElement;
-    expect(wrapper?.className).toContain("overflow-x-auto");
-    // The document body itself must not carry the horizontal scroll.
-    expect(view.container.className).not.toContain("overflow-x-auto");
-  });
-
-  it("styles table cells with the document's own border and header tokens", () => {
-    const view = renderMarkdown(TABLE);
-
-    expect(view.container.querySelector("table")?.className).toContain(
-      "border-line",
-    );
-    expect(view.container.querySelector("th")?.className).toContain("bg-panel");
-    expect(view.container.querySelector("td")?.className).toContain(
-      "border-line",
-    );
+    expect(table?.parentElement?.className).toBe("tableWrapper");
+    // The editor keeps every row in one tbody, and only the first row drops
+    // its top hairline. A thead would drop the first body row's too.
+    expect(table?.querySelector("thead")).toBeNull();
+    expect(table?.querySelectorAll(":scope > tbody")).toHaveLength(1);
+    expect(table?.querySelectorAll(":scope > tbody > tr")).toHaveLength(3);
+    // The editor's cells hold a paragraph, and its spacing sets their height.
+    expect(table?.querySelectorAll(":is(th, td) > p")).toHaveLength(6);
   });
 
   it("renders a table that a split document carries in one chunk", () => {

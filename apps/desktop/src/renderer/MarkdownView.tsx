@@ -67,7 +67,7 @@ import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
-import { PROPERTIES_LINE, PROPERTIES_PANEL, READ_BODY } from "./pageTopmatter";
+import { PROPERTIES_LINE, PROPERTIES_PANEL } from "./pageTopmatter";
 import { FrontmatterAsWritten, LiveFrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
@@ -2323,7 +2323,7 @@ export function MarkdownView(props: {
         <div
           ref={localDocPaneRef}
           data-testid="view-markdown"
-          className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
           <div className="group/topmatter">
             {/* Title, icon and properties autosave through the same disk write
@@ -2332,7 +2332,8 @@ export function MarkdownView(props: {
               body={draft}
               onChange={onPropertiesDraft}
               filenameStem={filenameStem(props.path)}
-              readOnly={readOnly || opening}
+              readOnly={readOnly}
+              opening={opening}
             />
             {recordButtons}
             {/* Opening, the panel's loading line holds its row and the block
@@ -2347,10 +2348,8 @@ export function MarkdownView(props: {
             )}
             <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
           </div>
-          <div
-            ref={readDocumentRef}
-            className={`dohc-readable-text ${READ_BODY} text-[length:var(--dohc-editor-font-size)] [font-family:var(--dohc-editor-font)]`}
-          >
+          {/* The editor's own rules draw the body, so it replaces it in place. */}
+          <div ref={readDocumentRef} className="dohc-readable-text dohc-notion-editor">
             {renderedDocument}
           </div>
           {backlinks}

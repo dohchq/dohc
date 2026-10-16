@@ -354,13 +354,13 @@ describe("markdown document opening state", () => {
     expect(screen.getByText("Loading properties...")).toBeTruthy();
     const asWritten = () => screen.getByTestId("frontmatter-as-written").querySelector("details");
     expect(asWritten()?.open, "`propertiesShown={!readOnly}` → `propertiesShown={!readOnly && !opening}`. The block opens while the document opens, then closes when it is ready and moves the body.").toBe(false);
-    // The body sits in the editor's column: its 720px measure inside 56px
-    // gutters, 6px under the top matter.
-    const body = screen.getByTestId("view-markdown").querySelector(".dohc-readable-text");
-    expect([...(body?.classList ?? [])]).toEqual(
-      expect.arrayContaining(["mx-auto", "max-w-[832px]", "px-14", "pt-1.5"]),
-    );
-    expect(body?.classList.contains("p-6")).toBe(false);
+    // The body draws with the editor's own rules (styles.css
+    // .dohc-notion-editor): its column, type and block spacing. No block
+    // carries a look of its own that would beat them.
+    const body = screen.getByText("Base paragraph.").parentElement;
+    expect(body?.classList.contains("dohc-notion-editor"), "The read body keeps its own type and spacing, so each block moves when the editor replaces it.").toBe(true);
+    expect(body?.querySelector("h1")?.className).toBe("");
+    expect(body?.querySelector("p")?.className).toBe("");
 
     await waitFor(() =>
       expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
