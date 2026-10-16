@@ -1,7 +1,7 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
-import {readServiceActivation} from "./serviceActivationAccess";
+import {readServiceActivation, readStagedServiceActivationHandoff} from "./serviceActivationAccess";
 import {SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
@@ -111,9 +111,10 @@ function owner(storage: StorageContext, workspaceId: string, ownerUserId: string
   if (!storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) refuse();
 }
 // A fence would strand a pending service activation: it can no longer complete,
-// and service restore continues only a completed one.
+// and service restore continues only a completed one. A staged handoff would
+// install its successor over the owner origin the restore pins.
 function requireNoPendingActivation(storage: StorageContext, document: LiveDocumentKey): void {
-  if (readServiceActivation(storage, document)?.completion_json === null) refuse();
+  if (readServiceActivation(storage, document)?.completion_json === null || readStagedServiceActivationHandoff(storage, document)) refuse();
 }
 function requireUnretiredEnrollment(storage: StorageContext, document: LiveDocumentKey): void {
   // Enrollments are main-only and keyed by workspace/object, even after a path moves.

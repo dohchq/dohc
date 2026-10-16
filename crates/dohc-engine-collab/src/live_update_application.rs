@@ -81,6 +81,10 @@ pub enum ApplicationError {
     Corrupt,
     #[error("live application delivery or cursor conflicts with retained evidence")]
     Conflict,
+    /// The store no longer holds the retained activation source, as after its
+    /// deletion or rebuild. The relay may hand the document off to a new one.
+    #[error("the retained owner activation source is not in this store")]
+    ActivationSourceMissing,
     #[error("owner outbox configured budget is below the persisted adoption budget")]
     ConfiguredBudgetMismatch,
     #[error("live application exceeds its configured byte budget")]

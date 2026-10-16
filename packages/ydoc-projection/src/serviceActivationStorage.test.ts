@@ -11,6 +11,8 @@ import {expect,it,vi} from 'vitest'
 import * as Y from 'yjs'
 import {parseHostEpoch} from '@dohc/live-session-contract/host-control'
 import type {NativeOwnerActivation} from '../../workspace-engine-client/src/daemon/nativeOwnerActivation.js'
+import {EngineRequestError} from '../../workspace-engine-client/src/daemon/index.js'
+import type {LiveOwnerAdoptionCut} from '../../workspace-engine-client/src/daemon/index.js'
 import {markdownToYDoc} from './import-export.js'
 import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidator} from './liveDocumentValidation.js'
 import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
@@ -819,4 +821,387 @@ it('retries the exact stale lease release before another ordinary pull after res
     expect(order).toEqual(['pull','capture','release-lost','release','pull','capture','release'])
     expect(f.raw.prepare('SELECT * FROM sync_relay_service_activations').all()).toEqual([])
   }finally{f.close()}
+})
+
+// A host store that lost the retained source captures a successor of the same
+// document: the same baseline and lineage, its own native head and state.
+function successor(f:ReturnType<typeof fixture>,mark='b',nativeHeadSequence=5):NativeOwnerActivation{
+  return {...f.capture,activationId:`ordinary-activation-${mark.repeat(64)}`,sessionId:`successor-${mark}`,
+    source:{...f.capture.source,nativeHeadSequence}}
+}
+const stageHandoff=(f:ReturnType<typeof fixture>,capture:NativeOwnerActivation,activationId=f.capture.activationId,shareId='share')=>
+  f.store.stageHandoff({document:f.document,activationId,capture,host,shareId,registeredAtMs:6,maxCaptureBytes:1_000_000,guard(){}})
+const ownerOrigin=(f:ReturnType<typeof fixture>)=>JSON.parse(String(f.raw.prepare('SELECT origin_json FROM sync_relay_live_delivery_owners').get()!.origin_json))
+const handoffs=(f:ReturnType<typeof fixture>)=>f.raw.prepare('SELECT successor_activation_id AS id,predecessor_activation_id AS predecessor,cut_cursor AS cut,state FROM sync_relay_service_activation_handoffs ORDER BY rowid').all()
+// Usage the retained rows do not account for. Staging and installation keep it unchanged.
+const unaccounted=(f:ReturnType<typeof fixture>)=>Number(f.raw.prepare(`SELECT
+  (SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id='workspace')
+  -(SELECT COALESCE(SUM(accounted_bytes),0) FROM sync_relay_service_activations)
+  -(SELECT COALESCE(SUM(accounted_bytes),0) FROM sync_relay_live_delivery_owners)
+  -(SELECT COALESCE(SUM(accounted_bytes),0) FROM sync_relay_service_activation_handoffs) AS n`).get()!.n)
+function adoptSuccessor(f:ReturnType<typeof fixture>,capture:NativeOwnerActivation,throughCursor:number,access?:ReturnType<typeof f.store.pending>){
+  const delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
+  const cut=delivery.captureOwnerCut({host,document:f.document,actor,adoptionId:capture.activationId,
+    expectedLocalSequence:capture.source.nativeHeadSequence,maxBytes:1_000_000,maxEvents:100,throughCursor})
+  const acknowledge=()=>delivery.acknowledgeOwnerAdoption(cut,{adoptionId:capture.activationId,
+    localYDocSequence:capture.source.nativeHeadSequence,terminalCursor:throughCursor,adoptionReplayed:false})
+  return {delivery,cut,acknowledge}
+}
+
+it('stages a successor at the owner tip and installs it with its adoption ACK',()=>{
+  const f=fixture();try{
+    completeActivation(f)
+    const tip=ownerTip(f),before=unaccounted(f),next=successor(f),predecessorOrigin=ownerOrigin(f)
+    const stale=f.storage.createLiveCommittedDeliveryStore(f.history).openOwnerDelivery({host,document:f.document,actor})
+    expect(stageHandoff(f,next)).toEqual({replayed:false,throughCursor:tip})
+    expect(f.store.staged(f.document)).toEqual({activationId:next.activationId,source:next.source,throughCursor:tip})
+    // The retained activation and its owner stay until installation.
+    expect(f.store.read('workspace','docs/a.md',1_000_000)).toMatchObject({activationId:f.capture.activationId,completed:true})
+    expect(ownerOrigin(f)).toEqual(predecessorOrigin)
+    expect(unaccounted(f)).toBe(before)
+    const adopted=adoptSuccessor(f,next,tip)
+    expect(adopted.delivery.existingOwnerDelivery({host,document:f.document,actor})).toBeNull()
+    expect(adopted.cut.cut.events.map(event=>event.metadata.accepted.receipt.journalCursor)).toEqual([tip])
+    adopted.acknowledge()
+    const saved=f.store.read('workspace','docs/a.md',1_000_000)!
+    expect(saved).toMatchObject({activationId:next.activationId,completed:true,source:next.source})
+    expect(saved.fullState).toEqual(new Uint8Array(next.fullState))
+    expect(ownerOrigin(f)).toMatchObject({adoptionId:next.activationId,expectedLocalSequence:5,originEventCount:1})
+    expect(f.raw.prepare('SELECT tip_cursor,tip_sequence,tip_application_sequence FROM sync_relay_live_delivery_owners').get())
+      .toEqual({tip_cursor:tip,tip_sequence:5,tip_application_sequence:5})
+    expect(f.store.staged(f.document)).toBeNull()
+    expect(handoffs(f)).toEqual([{id:next.activationId,predecessor:f.capture.activationId,cut:tip,state:'installed'}])
+    expect(unaccounted(f)).toBe(before)
+    // A repeated ACK finds its origin installed.
+    expect(adopted.acknowledge).not.toThrow()
+    expect(unaccounted(f)).toBe(before)
+    expect(adopted.delivery.existingOwnerDelivery({host,document:f.document,actor})).not.toBeNull()
+    // Delivery opened under the superseded origin is fenced.
+    expect(stale.assertCurrent).toThrow()
+    // A later restore pins the successor's origin.
+    const row=f.raw.prepare('SELECT * FROM sync_relay_live_documents').get()!
+    const basis:StopRestoreBasis={binding:adopted.cut.binding,ownerBinding:adopted.cut.binding,baselineDigest:f.document.lineageClaimId,
+      baselineByteLength:f.capture.baselineBytes.length,projectedDigest:String(row.baseline_projected_sha256),
+      projectedLength:Number(row.baseline_projected_byte_length),baselineSequence:Number(row.baseline_moment_relay_seq),
+      registeredAtMs:Number(row.registered_at_ms),namespace:f.history.namespace,hostMode:'service',hostId:host.hostId,ownerOrigin:JSON.stringify(ownerOrigin(f))}
+    expect(()=>requireStopRestoreOwnerOrigin(f.storage as StorageContext,basis)).not.toThrow()
+    expect(()=>requireStopRestoreOwnerOrigin(f.storage as StorageContext,{...basis,ownerOrigin:JSON.stringify(predecessorOrigin)})).toThrow()
+  }finally{f.close()}
+})
+
+it('refuses a predecessor adoption ACK after the successor is installed',()=>{
+  const f=fixture();try{
+    completeActivation(f)
+    const tip=ownerTip(f),next=successor(f)
+    const old=adoptSuccessor(f,f.capture,tip)
+    stageHandoff(f,next);adoptSuccessor(f,next,tip).acknowledge()
+    expect(old.acknowledge).toThrow()
+    expect(ownerOrigin(f).adoptionId).toBe(next.activationId)
+  }finally{f.close()}
+})
+
+it('refuses to install over an owner origin the handoff did not stage',()=>{
+  const f=fixture();try{
+    completeActivation(f)
+    const tip=ownerTip(f),next=successor(f)
+    stageHandoff(f,next)
+    const adopted=adoptSuccessor(f,next,tip)
+    f.raw.exec("UPDATE sync_relay_live_delivery_owners SET origin_json=json_set(origin_json,'$.originEventCount',7)")
+    expect(adopted.acknowledge).toThrow('Committed delivery evidence is damaged or conflicts.')
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.activationId).toBe(f.capture.activationId)
+    expect(f.store.staged(f.document)).toMatchObject({activationId:next.activationId})
+  }finally{f.close()}
+})
+
+it.each(['predecessor','owner'] as const)('refuses a staged handoff whose recorded %s changed',change=>{
+  const f=fixture();try{
+    completeActivation(f)
+    const tip=ownerTip(f),next=successor(f)
+    stageHandoff(f,next)
+    if(change==='predecessor'){
+      f.raw.prepare('UPDATE sync_relay_service_activation_handoffs SET predecessor_activation_id=?').run(`ordinary-activation-${'e'.repeat(64)}`)
+      expect(()=>adoptSuccessor(f,next,tip)).toThrow('Retained service activation origin differs.')
+    }else{
+      f.raw.exec("UPDATE sync_relay_live_delivery_owners SET origin_json=json_set(origin_json,'$.originEventCount',7)")
+      expect(()=>stageHandoff(f,successor(f,'c'))).toThrow('Service activation handoff is damaged.')
+    }
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.activationId).toBe(f.capture.activationId)
+  }finally{f.close()}
+})
+
+it('leaves a staged handoff uninstalled when the owner share changes before its ACK',()=>{
+  const f=fixture();try{
+    completeActivation(f)
+    const tip=ownerTip(f),next=successor(f)
+    stageHandoff(f,next)
+    const adopted=adoptSuccessor(f,next,tip)
+    f.raw.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'").run(JSON.stringify({paths:['other'],versionId:null}))
+    expect(adopted.acknowledge).toThrow()
+    expect(ownerOrigin(f).adoptionId).toBe(f.capture.activationId)
+    expect(f.store.staged(f.document)).toMatchObject({activationId:next.activationId})
+  }finally{f.close()}
+})
+
+it('installs only at the staged cut, while later edits wait for delivery after it',()=>{
+  const f=fixture();try{
+    completeActivation(f)
+    const tip=ownerTip(f),next=successor(f)
+    stageHandoff(f,next)
+    const edit=commitEdit(f)
+    expect(()=>adoptSuccessor(f,next,edit.journalCursor).acknowledge()).toThrow('Committed delivery evidence is damaged or conflicts.')
+    expect(ownerOrigin(f).adoptionId).toBe(f.capture.activationId)
+    const adopted=adoptSuccessor(f,next,tip);adopted.acknowledge()
+    const opened=adopted.delivery.openOwnerDelivery({host,document:f.document,actor})
+    expect(adopted.delivery.nextOwnerApplication(opened)!.metadata.accepted.receipt).toEqual(edit)
+  }finally{f.close()}
+})
+
+it('resumes a staged successor and restages only after the store loses it again',()=>{
+  const f=fixture();try{
+    completeActivation(f)
+    const tip=ownerTip(f),before=unaccounted(f),first=successor(f,'b'),second=successor(f,'c',7)
+    stageHandoff(f,first)
+    expect(stageHandoff(f,first)).toEqual({replayed:true,throughCursor:tip})
+    expect(()=>stageHandoff(f,{...first,source:{...first.source,nativeHeadSequence:9}})).toThrow()
+    expect(stageHandoff(f,second)).toEqual({replayed:false,throughCursor:tip})
+    expect(handoffs(f)).toEqual([{id:second.activationId,predecessor:f.capture.activationId,cut:tip,state:'staged'}])
+    expect(unaccounted(f)).toBe(before)
+    expect(()=>adoptSuccessor(f,first,tip)).toThrow()
+    adoptSuccessor(f,second,tip).acknowledge()
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.activationId).toBe(second.activationId)
+    expect(unaccounted(f)).toBe(before)
+    // A later loss hands the installed successor off in turn.
+    const third=successor(f,'d',8)
+    expect(()=>stageHandoff(f,third)).toThrow('Retained service activation is unavailable.')
+    stageHandoff(f,third,second.activationId)
+    adoptSuccessor(f,third,tip).acknowledge()
+    expect(handoffs(f)).toEqual([{id:second.activationId,predecessor:f.capture.activationId,cut:tip,state:'installed'},
+      {id:third.activationId,predecessor:second.activationId,cut:tip,state:'installed'}])
+    expect(unaccounted(f)).toBe(before)
+  }finally{f.close()}
+})
+
+it.each([
+  ['a changed share','share'],
+  ['a different share','other'],
+  ['another lineage base','base'],
+  ['another path','path'],
+  ['an unchanged activation','same'],
+  ['an advanced ordinary cut','cut'],
+] as const)('refuses a handoff with %s',(_case,change)=>{
+  const f=fixture();try{
+    completeActivation(f)
+    let next=successor(f),shareId='share'
+    if(change==='share')f.raw.exec("UPDATE sync_relay_shares SET granter_user_id='someone-else'")
+    else if(change==='other'){
+      f.raw.exec("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('other','workspace','owner','{\"paths\":[\"docs\"],\"versionId\":null}',0)")
+      shareId='other'
+    }
+    else if(change==='base')next={...next,source:{...next.source,baseOriginSeq:0}}
+    else if(change==='path')next={...next,source:{...next.source,currentPath:'docs/b.md'}}
+    else if(change==='same')next=f.capture
+    else f.raw.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','other',1,'object.snapshot','{}',3)")
+    const staging=()=>stageHandoff(f,next,f.capture.activationId,shareId)
+    if(change==='cut')expect(staging).toThrow(ServiceActivationStaleCut)
+    else expect(staging).toThrow()
+    expect(handoffs(f)).toEqual([])
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.activationId).toBe(f.capture.activationId)
+  }finally{f.close()}
+})
+
+it('refuses a handoff while a restore is unfinished, and a restore while a handoff is staged',()=>{
+  const f=fixture();try{
+    completeActivation(f)
+    f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
+    const plan=()=>f.storage.readStopRestorePlan({document:f.document,ownerUserId:'owner',operationId:'restore',shareId:'share',grantId:'grant',
+      restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId,maxOutputBytes:1_000_000})
+    const intent=plan().intent
+    stageHandoff(f,successor(f))
+    expect(plan).toThrow('conflicts with current authority')
+    expect(()=>f.storage.beginStopRestore(intent,40)).toThrow('conflicts with current authority')
+    expect(f.storage.getShareGrant('grant')).toMatchObject({status:'active'})
+    f.raw.exec('DELETE FROM sync_relay_service_activation_handoffs')
+    f.storage.beginStopRestore(intent,40)
+    expect(()=>stageHandoff(f,successor(f))).toThrow('Service activation handoff waits for an unfinished restore.')
+    expect(handoffs(f)).toEqual([])
+  }finally{f.close()}
+})
+
+it('replaces a pending activation that delivered nothing, which then completes as its own',()=>{
+  const f=fixture();try{
+    f.prepare()
+    const before=unaccounted(f),next=successor(f)
+    expect(stageHandoff(f,next)).toEqual({replayed:false,throughCursor:0})
+    expect(f.store.staged(f.document)).toBeNull()
+    expect(handoffs(f)).toEqual([{id:next.activationId,predecessor:f.capture.activationId,cut:0,state:'installed'}])
+    expect(f.store.read('workspace','docs/a.md',1_000_000)).toMatchObject({activationId:next.activationId,completed:false,source:next.source})
+    expect(unaccounted(f)).toBe(before)
+    expect(()=>f.store.pending(f.document,host)).not.toThrow()
+    completeSuccessor(f,next,f.store.pending(f.document,host))
+  }finally{f.close()}
+})
+
+it('replaces a pending activation adopted at the baseline at its adoption ACK',()=>{
+  const f=fixture();try{
+    ownerCapture(f).acknowledge()
+    const before=unaccounted(f),next=successor(f)
+    expect(stageHandoff(f,next)).toEqual({replayed:false,throughCursor:0})
+    expect(f.store.staged(f.document)).toMatchObject({activationId:next.activationId,throughCursor:0})
+    const access=f.store.pending(f.document,host)
+    expect(access.activationId).toBe(next.activationId)
+    expect(ownerOrigin(f).adoptionId).toBe(f.capture.activationId)
+    const adopted=adoptSuccessor(f,next,0,access)
+    expect(adopted.delivery.existingOwnerDelivery({host,document:f.document,actor})).toBeNull()
+    adopted.acknowledge()
+    expect(ownerOrigin(f)).toMatchObject({adoptionId:next.activationId,originEventCount:0})
+    expect(handoffs(f)).toEqual([{id:next.activationId,predecessor:f.capture.activationId,cut:0,state:'installed'}])
+    expect(unaccounted(f)).toBe(before)
+    completeSuccessor(f,next,access,false)
+  }finally{f.close()}
+})
+
+it('refuses to hand off a pending activation whose seed reached the journal',()=>{
+  const f=fixture();try{
+    const owner=ownerCapture(f);owner.acknowledge()
+    const access=f.store.pending(f.document,host),current=f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)
+    const cut=f.storage.readLiveUpdateJournalCut({document:f.document})
+    if(current.kind!=='current' || cut.kind!=='cut')throw new Error('Missing activation authority')
+    const validation=validateJournal({document:f.document,currentPath:current.binding.currentPath,
+      checkpoint:cut.cut.checkpoint.bytes,suffix:[],candidate:f.capture.fullState})
+    f.storage.commitLiveUpdateJournal({host,actor,expectedAuthority:current.authority,
+      metadata:{deliveryId:'seed',updateDigest:hash(f.capture.fullState),binding:current.binding},cutToken:cut.cut,validation,
+      updateBytes:f.capture.fullState,receivedAtMs:4},access)
+    expect(()=>stageHandoff(f,successor(f))).toThrow('delivered its seed')
+    expect(handoffs(f)).toEqual([])
+  }finally{f.close()}
+})
+
+// Seeds, applies and completes a pending successor as an ordinary activation completes.
+function completeSuccessor(f:ReturnType<typeof fixture>,next:NativeOwnerActivation,access:ReturnType<typeof f.store.pending>,adopt=true){
+  const delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
+  if(adopt)adoptSuccessor(f,next,0,access).acknowledge()
+  const current=f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)
+  const cut=f.storage.readLiveUpdateJournalCut({document:f.document})
+  if(current.kind!=='current' || cut.kind!=='cut')throw new Error('Missing activation authority')
+  const validation=validateJournal({document:f.document,currentPath:current.binding.currentPath,
+    checkpoint:cut.cut.checkpoint.bytes,suffix:[],candidate:next.fullState})
+  expect(f.storage.commitLiveUpdateJournal({host,actor,expectedAuthority:current.authority,
+    metadata:{deliveryId:'seed',updateDigest:hash(next.fullState),binding:current.binding},cutToken:cut.cut,validation,
+    updateBytes:next.fullState,receivedAtMs:4},access).result.kind).toBe('accepted')
+  const owner=delivery.openOwnerDelivery({host,document:f.document,actor})
+  const event=delivery.nextOwnerApplication(owner)!
+  delivery.acknowledgeOwnerDeliveryApplication(owner,{...event.metadata.accepted.receipt,localYDocSequence:next.source.nativeHeadSequence,applicationReplayed:false})
+  f.store.complete({document:f.document,host,access,nativeState:{adoptionId:next.activationId,pendingBytes:0},guard(){}})
+  expect(f.store.read('workspace','docs/a.md',1_000_000)).toMatchObject({activationId:next.activationId,completed:true})
+}
+
+const missing=()=>new EngineRequestError(1,{code:'CONFLICT',message:'live-application-activation-source-missing',retry:'no'})
+// The native side of a replacement store: it adopts the successor, applies later
+// journal entries, and can lose its adoption reply or seed state the journal lacks.
+function handoffNative(f:ReturnType<typeof fixture>,next:NativeOwnerActivation){
+  const state={adopted:false,pendingBytes:0,loseAdoption:false,refuseAdoption:false,applied:[] as LiveUpdateReceipt[]}
+  const sendRequest=vi.fn(async(request:{id:number;method:string;params:Record<string,unknown>})=>{
+    if(request.method==='liveApplication.register')return {id:request.id,result:{registrationId:9}}
+    if(request.method==='liveApplication.ownerState')return {id:request.id,result:{adoptionId:next.activationId,
+      expectedLocalSequence:next.source.nativeHeadSequence,throughCursor:state.adopted?ownerTip(f):null,outboxId:state.pendingBytes?'outbox':null,
+      pendingBytes:state.pendingBytes,outboxState:'active'}}
+    if(request.method==='liveApplication.releaseOwnerActivation')return {id:request.id,result:{released:true}}
+    throw new Error(`Unexpected native request ${request.method}.`)
+  })
+  const sendLiveOwnerAdoption=vi.fn(async(request:{id:number},cut:LiveOwnerAdoptionCut)=>{
+    if(state.refuseAdoption)throw new EngineRequestError(request.id,{code:'INVALID_PARAMS',
+      message:'invalid live application input: owner adoption journal does not account for durable state',retry:'no'})
+    const replayed=state.adopted;state.adopted=true
+    if(state.loseAdoption){state.loseAdoption=false;throw new Error('Native adoption response was lost.')}
+    return {id:request.id,result:{status:'adopted',adoption:{adoptionId:cut.adoptionId,localYDocSequence:cut.expectedLocalSequence,
+      terminalCursor:cut.terminalReceipt?.journalCursor??0,adoptionReplayed:replayed}}}
+  })
+  const sendLiveApplication=vi.fn(async(request:{id:number},event:{metadata:{accepted:{receipt:LiveUpdateReceipt}}})=>{
+    state.applied.push(event.metadata.accepted.receipt)
+    return {id:request.id,result:{status:'applied',ack:{...event.metadata.accepted.receipt,localYDocSequence:6,applicationReplayed:false}}}
+  })
+  const readLiveApplicationAck=vi.fn(async()=>null)
+  // The store resumes only the successor it holds, and reports any other source missing.
+  const capture=vi.fn(async(_request:unknown,_path:string,_max:number,_signal?:AbortSignal,id?:string)=>{
+    if(id!==undefined && id!==next.activationId)throw missing()
+    return next
+  })
+  return {state,capture,client:{sendRequest,sendLiveOwnerAdoption,sendLiveApplication,readLiveApplicationAck}}
+}
+function handoffDriver(f:ReturnType<typeof fixture>,native:ReturnType<typeof handoffNative>){
+  return activationDriver(f,native.capture,native.client.sendRequest,undefined,native.client)
+}
+
+it('hands a completed activation off to a replacement store and delivers edits after the cut',async()=>{
+  const f=fixture();try{
+    completeActivation(f)
+    const tip=ownerTip(f),next=successor(f),native=handoffNative(f,next),signal=new AbortController().signal
+    const edit=commitEdit(f),d=handoffDriver(f,native)
+    expect(await d.driver.activate(d.target,signal)).toMatchObject({kind:'done'})
+    expect(native.capture.mock.calls.map(call=>call[4])).toEqual([f.capture.activationId,undefined])
+    expect(d.pull).toHaveBeenCalledTimes(1)
+    expect(native.client.sendLiveOwnerAdoption.mock.calls[0]![1].terminalReceipt?.journalCursor).toBe(tip)
+    expect(native.state.applied).toEqual([edit])
+    expect(f.store.read('workspace','docs/a.md',1_000_000)).toMatchObject({activationId:next.activationId,completed:true})
+    expect(ownerTip(f)).toBe(edit.journalCursor)
+    expect(d.driver.workspaceReady('workspace')).toBe(true)
+    // A later pass resumes the installed successor without another handoff.
+    const again=handoffDriver(f,native)
+    expect(await again.driver.activate(again.target,signal)).toMatchObject({kind:'done'})
+    expect(native.capture.mock.calls.at(-1)![4]).toBe(next.activationId)
+    expect(native.client.sendLiveOwnerAdoption).toHaveBeenCalledTimes(1)
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+it('hands off only on a missing source, never on a native conflict',async()=>{
+  const f=fixture();try{
+    completeActivation(f)
+    const capture=vi.fn(async()=>{throw new EngineRequestError(1,{code:'CONFLICT',message:'live-application-conflict',retry:'no'})})
+    const d=activationDriver(f,capture)
+    await expect(d.driver.activate(d.target,new AbortController().signal)).rejects.toThrow('live-application-conflict')
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(d.pull).not.toHaveBeenCalled()
+    expect(handoffs(f)).toEqual([])
+  }finally{f.close()}
+})
+
+it.each([
+  ['the native adoption reply is lost','adoption'],
+  ['the pass stops after staging','staged'],
+] as const)('resumes the staged successor when %s',async(_case,step)=>{
+  const f=fixture();try{
+    completeActivation(f)
+    const next=successor(f),native=handoffNative(f,next),signal=new AbortController().signal
+    if(step==='adoption')native.state.loseAdoption=true
+    const stopped=new Error('Pass stopped.')
+    const drain=step==='staged'?vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockRejectedValueOnce(stopped):undefined
+    const first=handoffDriver(f,native)
+    await expect(first.driver.activate(first.target,signal)).rejects.toThrow(step==='staged'?'Pass stopped.':'Native adoption response was lost.')
+    expect(f.store.staged(f.document)).toMatchObject({activationId:next.activationId})
+    expect(ownerOrigin(f).adoptionId).toBe(f.capture.activationId)
+    drain?.mockRestore()
+    const retry=handoffDriver(f,native)
+    expect(await retry.driver.activate(retry.target,signal)).toMatchObject({kind:'done'})
+    expect(native.capture.mock.calls.at(-1)![4]).toBe(next.activationId)
+    expect(retry.pull).not.toHaveBeenCalled()
+    expect(ownerOrigin(f).adoptionId).toBe(next.activationId)
+    expect(handoffs(f)).toEqual([{id:next.activationId,predecessor:f.capture.activationId,cut:ownerTip(f),state:'installed'}])
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+it.each([
+  ['refuses to adopt a state the journal does not account for','refused'],
+  ['adopts with state the journal lacks','seeded'],
+] as const)('keeps the document not ready when the replacement store %s',async(_case,outcome)=>{
+  const f=fixture();try{
+    completeActivation(f)
+    const next=successor(f),native=handoffNative(f,next),signal=new AbortController().signal
+    if(outcome==='refused')native.state.refuseAdoption=true;else native.state.pendingBytes=10
+    const d=handoffDriver(f,native)
+    await expect(d.driver.activate(d.target,signal)).rejects.toThrow(outcome==='refused'?'does not account for durable state':'never published')
+    expect(ownerOrigin(f).adoptionId).toBe(f.capture.activationId)
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.activationId).toBe(f.capture.activationId)
+    expect(f.store.staged(f.document)).toMatchObject({activationId:next.activationId})
+    expect(d.driver.workspaceReady('workspace')).toBe(false)
+  }finally{vi.restoreAllMocks();f.close()}
 })

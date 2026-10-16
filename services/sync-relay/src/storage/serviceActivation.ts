@@ -11,16 +11,20 @@ import type { StorageContext } from "./context";
 import type { LiveHostConnectionCoordinate } from "./types";
 import { attachLiveJournalHistory, requireLiveJournalHistory, type LiveJournalHistoryAuthority } from "./liveJournalHistory";
 import { currentLiveDocumentBinding, registerOrdinaryActivationBaselineInTransaction } from "./liveDocumentAuthority";
-import {verifyOrdinaryActivationCut,type OrdinaryActivationBounds} from "./ordinaryActivationSource";
+import {currentCut,verifyOrdinaryActivationCut,type OrdinaryActivationBounds} from "./ordinaryActivationSource";
 export {ServiceActivationStaleCut} from "./ordinaryActivationSource";
 import { assertWorkspaceQuota } from "./workspaces";
-import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
-import { readServiceActivation, serviceActivationAccess, type ServiceActivationAccess } from "./serviceActivationAccess";
+import { SERVICE_ACTIVATIONS, SERVICE_ACTIVATION_HANDOFFS } from "./serviceActivationSchema";
+import { chargeServiceActivationUsage, readServiceActivation, readStagedServiceActivationHandoff, serviceActivationAccess, serviceActivationCharge,
+  serviceActivationHandoffCharge, type ServiceActivationAccess } from "./serviceActivationAccess";
 import { LIVE_JOURNAL_TABLE } from "./schema";
+import { LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
+import { LIVE_RESTORE_OPERATIONS } from "./liveRestoreOperationSchema";
 
-const digest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+const digest = (bytes: Uint8Array | string): string => createHash("sha256").update(bytes).digest("hex");
 const key = (source: NativeOwnerActivationSource): LiveDocumentKey => parseLiveDocumentKey({workspaceId: source.workspaceId,
   mainVersionId: source.mainVersionId, objectId: source.objectId, lineageClaimId: source.lineageClaimId});
+const documentParams = (document: LiveDocumentKey) => [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
 
 export class ServiceActivationStore {
   constructor(private readonly storage: StorageContext, private readonly history: LiveJournalHistoryAuthority) {
@@ -183,6 +187,124 @@ export class ServiceActivationStore {
           sourceJson,bindingJson,source.fullStateDigest,fullState,share.granterUserId,share.shareId,charge);
       this.storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(charge,document.workspaceId);
       return {document,replayed:false,completed:false};
+    });
+  }
+
+  /** The successor a handoff staged for the document, which the next pass resumes instead of the retained activation. */
+  staged(document: LiveDocumentKey) {
+    requireLiveJournalHistory(this.storage, this.history);
+    return this.storage.readTx(() => {
+      const row = readStagedServiceActivationHandoff(this.storage, document);
+      if (!row || row.relay_database_namespace !== this.history.namespace) return null;
+      const retained = readServiceActivation(this.storage, document);
+      if (!retained) throw new Error("Service activation handoff is damaged.");
+      const source = parseNativeOwnerActivationSource(JSON.parse(String(row.successor_source_json)),
+        JSON.parse(String(retained.binding_json)).currentPath, 20_971_520);
+      return {activationId: String(row.successor_activation_id), source, throughCursor: Number(row.cut_cursor)};
+    });
+  }
+
+  /**
+   * Stages a successor after the host store lost the retained activation's
+   * source. The successor keeps the document's baseline and lineage and adopts
+   * at the predecessor's owner tip C, which its native adoption proves equals
+   * the baseline plus the journal through C. A completed activation is replaced
+   * when that adoption's ACK installs it. A pending one that delivered nothing
+   * is replaced now, since no owner tip depends on it.
+   */
+  stageHandoff(input: {document: LiveDocumentKey; activationId: string; capture: NativeOwnerActivation; host: LiveHostConnectionCoordinate;
+    shareId: string; registeredAtMs: number; maxCaptureBytes: number; guard(): void}) {
+    input.guard(); requireLiveJournalHistory(this.storage, this.history);
+    const {capture} = input, fullState = new Uint8Array(capture.fullState), baselineBytes = new Uint8Array(capture.baselineBytes);
+    if (baselineBytes.byteLength + fullState.byteLength + Buffer.byteLength(JSON.stringify(capture.source)) > input.maxCaptureBytes) {
+      throw new Error("Ordinary activation capture exceeds its configured byte budget.");
+    }
+    const source = parseNativeOwnerActivationSource(capture.source, capture.source.currentPath, 20_971_520);
+    if (!/^ordinary-activation-[0-9a-f]{64}$/.test(capture.activationId) || source.version !== 1 ||
+        source.relayDatabaseNamespace !== this.history.namespace || source.fullStateByteLength !== fullState.length ||
+        digest(fullState) !== source.fullStateDigest || digest(baselineBytes) !== source.lineageClaimId ||
+        !isDeepStrictEqual(key(source), parseLiveDocumentKey(input.document))) {
+      throw new Error("Native activation identity differs.");
+    }
+    const document = key(source), sourceJson = JSON.stringify(source);
+    return this.storage.tx(() => {
+      input.guard(); requireLiveJournalHistory(this.storage, this.history);
+      const row = readServiceActivation(this.storage, document);
+      if (!row || row.activation_id !== input.activationId || row.relay_database_namespace !== this.history.namespace) {
+        throw new Error("Retained service activation is unavailable.");
+      }
+      const share = this.storage.getShare(input.shareId);
+      if (row.share_id !== input.shareId || !share || share.workspaceId !== document.workspaceId || share.granterUserId !== row.owner_user_id ||
+          !this.storage.workspaceIsOwnedBy(document.workspaceId, share.granterUserId)) {
+        throw new Error("Service activation share or owner changed.");
+      }
+      const prior = parseNativeOwnerActivationSource(JSON.parse(String(row.source_json)), JSON.parse(String(row.binding_json)).currentPath, 20_971_520);
+      if (source.currentPath !== prior.currentPath || source.baseRelaySeq !== prior.baseRelaySeq ||
+          source.baseOriginId !== prior.baseOriginId || source.baseOriginSeq !== prior.baseOriginSeq) {
+        throw new Error("Native activation does not continue the retained lineage.");
+      }
+      currentCut(this.storage, source);
+      if (!registerLiveHostInTransaction(this.storage, {...input.host, updatedAtMs: input.registeredAtMs, guard: input.guard}).ok) {
+        throw new Error("Service activation host is unavailable.");
+      }
+      const completed = row.completion_json !== null, original = parseLiveObjectBinding(JSON.parse(String(row.binding_json)));
+      const access = completed ? undefined : this.pending(document, input.host);
+      const current = currentLiveDocumentBinding(this.storage, {document, actor: {kind: "owner", userId: String(row.owner_user_id), shareId: String(row.share_id)}}, access);
+      if (current.kind !== "current" || !isDeepStrictEqual(current.host, input.host) || (!completed && !isDeepStrictEqual(current.binding, original))) {
+        throw new Error("Retained service activation authority changed.");
+      }
+      requireResumedBinding(this.storage.db, this.history.namespace, original, current.binding);
+      if (this.storage.db.prepare(`SELECT 1 FROM ${LIVE_RESTORE_OPERATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND phase<>'resumed'`)
+        .get(document.workspaceId, document.mainVersionId, document.objectId)) throw new Error("Service activation handoff waits for an unfinished restore.");
+      const owner = this.storage.db.prepare(`SELECT origin_json,tip_cursor FROM ${LIVE_DELIVERY_OWNERS}
+        WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND host_id=?`)
+        .get(this.history.namespace, ...documentParams(document), input.host.hostId);
+      const originDigest = owner ? digest(String(owner.origin_json)) : null;
+      const staged = readStagedServiceActivationHandoff(this.storage, document);
+      // A restaged handoff keeps the predecessor whose owner tip it replaces.
+      const predecessorId = staged ? String(staged.predecessor_activation_id) : String(row.activation_id);
+      if (staged ? staged.relay_database_namespace !== this.history.namespace || staged.predecessor_origin_digest !== originDigest ||
+            String(completed ? staged.predecessor_activation_id : staged.successor_activation_id) !== row.activation_id
+          : owner && JSON.parse(String(owner.origin_json)).adoptionId !== row.activation_id) {
+        throw new Error("Service activation handoff is damaged.");
+      }
+      if (completed && !owner) throw new Error("Service activation handoff is damaged.");
+      if (staged?.successor_activation_id === capture.activationId) {
+        if (staged.successor_source_json !== sourceJson) throw new Error("Service activation handoff already has another successor.");
+        return {replayed: true, throughCursor: Number(staged.cut_cursor)};
+      }
+      const delivered = this.storage.db.prepare(`SELECT count(*) AS count FROM ${LIVE_JOURNAL_TABLE}
+        WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`).get(...documentParams(document))!;
+      // A pending activation's only journal entry is its own seed, which its replacement could never complete with.
+      if (!completed && Number(delivered.count) !== 0) throw new Error("A pending service activation that delivered its seed cannot be handed off.");
+      const cutCursor = owner ? Number(owner.tip_cursor) : 0;
+      let delta = 0;
+      if (staged) {
+        this.storage.db.prepare(`DELETE FROM ${SERVICE_ACTIVATION_HANDOFFS} WHERE relay_database_namespace=? AND successor_activation_id=? AND state='staged'`)
+          .run(this.history.namespace, staged.successor_activation_id);
+        delta -= Number(staged.accounted_bytes);
+      }
+      // Only a completed activation keeps the successor's state here until installation.
+      const state = completed || owner ? "staged" : "installed", heldState = completed ? fullState : null;
+      const handoffCharge = serviceActivationHandoffCharge({namespace: this.history.namespace, successorId: capture.activationId, predecessorId,
+        document, originDigest, sourceJson, stateDigest: source.fullStateDigest, cutCursor, stateBytes: heldState?.length ?? 0});
+      this.storage.db.prepare(`INSERT INTO ${SERVICE_ACTIVATION_HANDOFFS}(relay_database_namespace,successor_activation_id,predecessor_activation_id,
+        workspace_id,main_version_id,object_id,lineage_claim_id,predecessor_origin_digest,successor_source_json,successor_state_digest,successor_state_bytes,
+        cut_cursor,state,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(this.history.namespace, capture.activationId, predecessorId,
+        ...documentParams(document), originDigest, sourceJson, source.fullStateDigest, heldState, cutCursor, state, handoffCharge);
+      delta += handoffCharge;
+      if (!completed) {
+        const charge = serviceActivationCharge({namespace: this.history.namespace, activationId: capture.activationId, sourceJson,
+          bindingJson: String(row.binding_json), stateDigest: source.fullStateDigest, stateBytes: fullState.length,
+          ownerUserId: String(row.owner_user_id), shareId: String(row.share_id), completion: null});
+        const replaced = this.storage.db.prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET activation_id=?,source_json=?,state_digest=?,state_bytes=?,accounted_bytes=?
+          WHERE relay_database_namespace=? AND activation_id=? AND completion_json IS NULL`)
+          .run(capture.activationId, sourceJson, source.fullStateDigest, fullState, charge, this.history.namespace, row.activation_id);
+        if (replaced.changes !== 1) throw new Error("Service activation handoff is damaged.");
+        delta += charge - Number(row.accounted_bytes);
+      }
+      chargeServiceActivationUsage(this.storage, document.workspaceId, delta);
+      return {replayed: false, throughCursor: cutCursor};
     });
   }
 }

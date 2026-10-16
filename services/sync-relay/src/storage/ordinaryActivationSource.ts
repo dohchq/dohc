@@ -17,7 +17,8 @@ const cuts=new WeakMap<VerifiedOrdinaryActivationCut,{storage:StorageContext;sou
 const hash=(bytes:Uint8Array|string)=>createHash("sha256").update(bytes).digest("hex");
 const integer=(value:unknown):value is number=>typeof value==="number"&&Number.isSafeInteger(value)&&value>=0;
 function requireValue(value:unknown,message:string):asserts value{if(!value)throw new Error(message);}
-function currentCut(storage:StorageContext,source:NativeOwnerActivationSource){
+/** Whether the capture stands at the workspace's current identity and relay cursor. */
+export function currentCut(storage:StorageContext,source:NativeOwnerActivationSource){
   const current=storage.db.prepare("SELECT replication_epoch,stream_identity FROM sync_relay_workspaces WHERE workspace_id=?").get(source.workspaceId);
   const high=storage.db.prepare("SELECT COALESCE(MAX(relay_seq),0) AS cursor FROM sync_relay_log WHERE workspace_id=?").get(source.workspaceId);
   if(current?.replication_epoch!==source.replicationEpoch||current.stream_identity!==source.streamIdentity||high?.cursor!==source.committedCursor||

@@ -144,6 +144,9 @@ impl RuntimeError {
                     }
                     ApplicationError::Corrupt => "live-application-corrupt",
                     ApplicationError::Conflict => "live-application-conflict",
+                    ApplicationError::ActivationSourceMissing => {
+                        "live-application-activation-source-missing"
+                    }
                     ApplicationError::ConfiguredBudgetMismatch => {
                         "owner-outbox-configured-budget-mismatch"
                     }

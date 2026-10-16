@@ -276,9 +276,9 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
             ApplicationError::InvalidInput(_)
             | ApplicationError::WorkspaceMismatch
             | ApplicationError::MainVersionMismatch => ErrorCode::InvalidParams,
-            ApplicationError::Conflict | ApplicationError::ConfiguredBudgetMismatch => {
-                ErrorCode::Conflict
-            }
+            ApplicationError::Conflict
+            | ApplicationError::ConfiguredBudgetMismatch
+            | ApplicationError::ActivationSourceMissing => ErrorCode::Conflict,
             // The earlier settlement's file write lands on its own; retry later.
             ApplicationError::MaterializationPending => ErrorCode::Overloaded,
             _ => ErrorCode::Internal,
@@ -704,6 +704,14 @@ mod tests {
         ));
         assert_eq!(error.code, ErrorCode::Overloaded);
         assert_eq!(error.message, "settlement-materialization-pending");
+        // The relay hands a document off only on this exact refusal.
+        let error = map_runtime(RuntimeError::LiveApplication(
+            ApplicationError::ActivationSourceMissing,
+        ));
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert_eq!(error.message, "live-application-activation-source-missing");
+        let error = map_runtime(RuntimeError::LiveApplication(ApplicationError::Conflict));
+        assert_eq!(error.message, "live-application-conflict");
     }
 
     /// The artifact lock and a busy engine database are two

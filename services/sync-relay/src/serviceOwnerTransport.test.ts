@@ -2,16 +2,16 @@ import {expect,it,vi} from "vitest";
 import type {NativeOwnerActivation} from "@dohc/workspace-engine-client/daemon";
 import {serviceOwnerTransport} from "./serviceOwnerTransport";
 
-function fixture(){
+function fixture(handoff?:{throughCursor:number;completed:boolean},pendingBytes=12){
   const binding={workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"b".repeat(64),currentPath:"file.md",selectorPaths:["file.md"],restoreFenceGeneration:1};
   const capture={activationId:`ordinary-activation-${"a".repeat(64)}`,sessionId:"actual-native-session",source:{nativeHeadSequence:2}} as NativeOwnerActivation;
   let adopted=false,changed=false;
   const sendRequest=vi.fn(async(request:{id:number;method:string})=>({id:request.id,result:request.method==="liveApplication.register"?{registrationId:7}:
     request.method==="liveApplication.ownerState"?{adoptionId:adopted?capture.activationId:"native-default-adoption",expectedLocalSequence:2,
-      throughCursor:adopted?0:null,outboxId:adopted?"actual-outbox":null,pendingBytes:adopted?12:0,outboxState:adopted?"active":null}:{delivered:true}}));
+      throughCursor:adopted?handoff?.throughCursor??0:null,outboxId:adopted?"actual-outbox":null,pendingBytes:adopted?pendingBytes:0,outboxState:adopted?"active":null}:{delivered:true}}));
   const sendLiveOwnerAdoption=vi.fn(async()=>{adopted=true;return {id:3,result:{status:"adopted",adoption:{}}};});
   const transport=serviceOwnerTransport({client:{sendRequest,sendLiveOwnerAdoption} as never,workspace:"native-workspace",capture:async()=>capture,binding,
-    nextRequestId:()=>100,assertCurrent(){if(changed)throw new Error("retired");}});
+    nextRequestId:()=>100,assertCurrent(){if(changed)throw new Error("retired");},handoff});
   const request={id:1,workspace:"native-workspace",deadlineMs:1000};
   return {binding,capture,transport,sendRequest,sendLiveOwnerAdoption,request,retire(){changed=true;}};
 }
@@ -43,4 +43,33 @@ it("refuses foreign bindings, sessions, and retirement without invoking native a
   expect(f.sendLiveOwnerAdoption).not.toHaveBeenCalled();
   f.retire();
   await expect(f.transport.client.sendRequest({...f.request,method:"liveApplication.ownerState",params:{registrationId:7}})).rejects.toThrow("retired");
+});
+const receipt=(journalCursor:number)=>({deliveryId:`delivery-${journalCursor}`,updateDigest:"c".repeat(64),journalCursor,acceptingHostEpoch:1});
+const cut=(f:ReturnType<typeof fixture>,through:number)=>({adoptionId:f.capture.activationId,expectedLocalSequence:2,
+  events:Array.from({length:through},(_,index)=>({metadata:{accepted:{receipt:receipt(index+1)}}})),terminalReceipt:through?receipt(through):null}) as never;
+it("lets a handoff successor adopt only through its predecessor's owner tip",async()=>{
+  const f=fixture({throughCursor:3,completed:true},0);
+  await f.transport.client.sendRequest({...f.request,method:"liveApplication.register",params:{binding:f.binding}});
+  const state=await f.transport.client.sendRequest({...f.request,id:2,method:"liveApplication.ownerState",params:{registrationId:7}});
+  expect(state.result).toMatchObject({throughCursor:3});
+  const adopt=(through:number)=>f.transport.client.sendLiveOwnerAdoption({...f.request,registrationId:7,sessionId:f.capture.sessionId},cut(f,through),{maxBytes:1000,maxEvents:5});
+  for (const through of [0,2,4])await expect(adopt(through)).rejects.toThrow("cut changed");
+  expect(f.sendLiveOwnerAdoption).not.toHaveBeenCalled();
+  await expect(adopt(3)).resolves.toMatchObject({result:{status:"adopted"}});
+  // An ordinary activation still adopts only at its baseline.
+  const ordinary=fixture();
+  await ordinary.transport.client.sendRequest({...ordinary.request,method:"liveApplication.register",params:{binding:ordinary.binding}});
+  await expect(ordinary.transport.client.sendLiveOwnerAdoption({...ordinary.request,registrationId:7,sessionId:ordinary.capture.sessionId},
+    cut(ordinary,1),{maxBytes:1000,maxEvents:5})).rejects.toThrow("cut changed");
+});
+it("refuses a completed activation's successor that seeded state its journal lacks",async()=>{
+  const f=fixture({throughCursor:3,completed:true});
+  await f.transport.client.sendRequest({...f.request,method:"liveApplication.register",params:{binding:f.binding}});
+  await expect(f.transport.client.sendLiveOwnerAdoption({...f.request,registrationId:7,sessionId:f.capture.sessionId},cut(f,3),{maxBytes:1000,maxEvents:5}))
+    .rejects.toThrow("never published");
+  // A pending activation's successor seeds its state like any first activation.
+  const pending=fixture({throughCursor:0,completed:false});
+  await pending.transport.client.sendRequest({...pending.request,method:"liveApplication.register",params:{binding:pending.binding}});
+  await expect(pending.transport.client.sendLiveOwnerAdoption({...pending.request,registrationId:7,sessionId:pending.capture.sessionId},cut(pending,0),{maxBytes:1000,maxEvents:5}))
+    .resolves.toMatchObject({result:{status:"adopted"}});
 });

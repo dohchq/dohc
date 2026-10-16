@@ -51,6 +51,9 @@ export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceAc
 type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;
   binding:LiveObjectBinding;target:string;actor:{ownerUserId:string;shareId:string}};
 const fenced={kind:"pending" as const,reason:"Service binding is fenced or unavailable."};
+// Only the store's loss of the retained source starts a handoff, never a conflict or damage.
+const sourceMissing=(error:unknown)=>error instanceof EngineRequestError && error.wireError?.code==="CONFLICT" &&
+  error.wireError.message==="live-application-activation-source-missing";
 
 export class ServiceActivationDriver {
   readonly #store;
@@ -194,19 +197,37 @@ export class ServiceActivationDriver {
       if(owner)return fenced;
     }
     if(!owner){
-      if(!saved){
+      const pull=async()=>{
         const pulled=await workspace.ordinary.pull(signal);check();
-        if(pulled.hasMore)return {kind:"pending" as const,reason:"Ordinary replication has more pages."};
+        return pulled.hasMore?{kind:"pending" as const,reason:"Ordinary replication has more pages."}:undefined;
+      };
+      if(!saved){
+        const pending=await pull();
+        if(pending)return pending;
       }
       this.#loaded.add(key);
-      const capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,saved?.activationId);check();
+      // A handoff staged by an earlier pass resumes its successor, never the activation it replaces.
+      const retained=(document && this.#store.staged(document))??saved;
+      let capture:NativeOwnerActivation;
+      try{
+        capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,retained?.activationId);check();
+      }catch(error){
+        // The host store lost the retained source: a fresh capture hands the document off to it.
+        if(!saved || !sourceMissing(error))throw error;
+        check();
+        const pending=await pull();
+        if(pending)return pending;
+        capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal);check();
+      }
       if(capture.source.workspaceId!==target.workspaceId || capture.source.relayDatabaseNamespace!==o.history.namespace ||
-        (saved && (capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source)))) {
+        (retained && capture.activationId===retained.activationId && !isDeepStrictEqual(capture.source,retained.source))) {
         throw new Error("Native service activation source changed.");
       }
-      if(!saved){
+      if(!saved || capture.activationId!==retained?.activationId){
         try{
-          this.#store.prepare({capture,host:o.host,shareId:target.shareId,registeredAtMs:Date.now(),guard:check,
+          if(saved)this.#store.stageHandoff({document:document!,activationId:saved.activationId,capture,host:o.host,shareId:target.shareId,
+            registeredAtMs:Date.now(),maxCaptureBytes:c.maxCaptureBytes,guard:check});
+          else this.#store.prepare({capture,host:o.host,shareId:target.shareId,registeredAtMs:Date.now(),guard:check,
             validateBaseline:c.validateBaseline,validateJournal:c.validateJournal,bounds:{maxCaptureBytes:c.maxCaptureBytes,
               maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain}});
         }catch(error){
@@ -220,10 +241,12 @@ export class ServiceActivationDriver {
       }
       document=parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,
         objectId:saved.source.objectId,lineageClaimId:saved.source.lineageClaimId});
+      const staged=this.#store.staged(document);
       const resumed=this.#store.resume({document,activationId:saved.activationId,host:o.host,registeredAtMs:Date.now(),guard:check});
       o.registered();check();
       owner=this.#owner(target,async()=>capture,{binding:resumed.binding,activationPending:!resumed.completed,
-        actor:{ownerUserId:saved.ownerUserId,shareId:saved.shareId}},resumed.access);
+        actor:{ownerUserId:saved.ownerUserId,shareId:saved.shareId}},resumed.access,
+        staged?.activationId===capture.activationId?{throughCursor:staged.throughCursor,completed:resumed.completed}:undefined);
       this.#owners.set(JSON.stringify(document),owner);
     }
     const held=owner;
@@ -255,10 +278,11 @@ export class ServiceActivationDriver {
     });
   }
   // Owner delivery through the native session's verified transport.
-  #owner(target:ServiceActivationTarget,capture:(signal?:AbortSignal)=>Promise<NativeOwnerActivation>,state:Pick<Owner,"binding"|"actor"|"activationPending">,access?:ServiceActivationAccess):Owner{
+  #owner(target:ServiceActivationTarget,capture:(signal?:AbortSignal)=>Promise<NativeOwnerActivation>,state:Pick<Owner,"binding"|"actor"|"activationPending">,
+    access?:ServiceActivationAccess,handoff?:{throughCursor:number;completed:boolean}):Owner{
     const o=this.options,c=o.config,workspace=o.workspaces.get(target.workspaceId)!;
     const transport=serviceOwnerTransport({client:o.client,workspace:workspace.handle,capture,binding:state.binding,
-      nextRequestId:o.nextRequestId,assertCurrent:o.assertCurrent});
+      nextRequestId:o.nextRequestId,assertCurrent:o.assertCurrent,handoff});
     const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,
       host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
       publishOrdinary:signal=>workspace.ordinary.publish(signal),

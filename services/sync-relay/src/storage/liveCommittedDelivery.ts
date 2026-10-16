@@ -1,8 +1,10 @@
 import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors";
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
-import type { ServiceActivationAccess } from "./serviceActivationAccess";
+import {chargeServiceActivationUsage, readServiceActivation, readStagedServiceActivationHandoff, serviceActivationCharge,
+  serviceActivationHandoffCharge, type ServiceActivationAccess} from "./serviceActivationAccess";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
+import {SERVICE_ACTIVATIONS, SERVICE_ACTIVATION_HANDOFFS} from "./serviceActivationSchema";
 import {readRestoreAdmission,verifyRestoreCheckpoint,restoreDigest,type RestoreAdmission,type RestoreSourceRange} from "./liveRestoreCheckpoint";
 import {retainedRestoreLifecycle,validateRestoreLifecycle,requireResumedBinding} from "./liveRestoreLifecycleStorage";
 import { randomUUID, createHash } from "node:crypto";
@@ -321,7 +323,12 @@ export class LiveCommittedDeliveryStore {
       this.#standing(host);
       const current=currentLiveDocumentBinding(this.#storage,{document,actor:input.actor},this.activation);
       integrity(current.kind==="current" && isDeepStrictEqual(current.host,host));
-      return this.#ownerRow(host,document)!==undefined;
+      const owner=this.#ownerRow(host,document);
+      if(!owner)return false;
+      // A staged handoff's successor adopts in place of the owner it supersedes.
+      const staged=readStagedServiceActivationHandoff(this.#storage,document);
+      return !(staged && staged.relay_database_namespace===this.#history.namespace &&
+        staged.predecessor_origin_digest===createHash("sha256").update(String(owner.origin_json)).digest("hex"));
     });
     return exists?this.openOwnerDelivery({...input,host,document}):null;
   }
@@ -496,7 +503,8 @@ export class LiveCommittedDeliveryStore {
       bindLiveDeliveryHostNamespace(this.#storage,document.workspaceId,host.hostId,this.#history.namespace);
       integrity(!this.#storage.db.prepare(`SELECT 1 FROM ${BOOTSTRAPS} WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=?`).get(this.#history.namespace,...documentParams(document),host.hostId));
       const previous = this.#ownerRow(host,document);
-      if (previous) { integrity(previous.origin_json === origin && Number(previous.tip_cursor) >= Number(ack.terminalCursor)); return; }
+      if (previous?.origin_json === origin) { integrity(Number(previous.tip_cursor) >= Number(ack.terminalCursor)); return; }
+      if (previous) { this.#installHandoff(document,host,previous,origin,cut); return; }
       const tip = JSON.stringify(cut.terminalReceipt), cursor = cut.terminalReceipt?.journalCursor ?? 0;
       const values = [this.#history.namespace,...documentParams(document),host.hostId,origin,tip,cursor,cut.expectedLocalSequence,cut.expectedLocalSequence];
       const charge = Buffer.byteLength(JSON.stringify(values));
@@ -507,6 +515,40 @@ export class LiveCommittedDeliveryStore {
       }
       this.#storage.db.prepare(`INSERT INTO ${OWNERS}(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,host_id,origin_json,tip_receipt_json,tip_cursor,tip_sequence,tip_application_sequence,accounted_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(...values,charge);
     });
+  }
+  // Installs a staged handoff's successor in the adoption ACK's transaction. The
+  // owner tip stays at the cut the successor adopted, and delivery continues after it.
+  #installHandoff(document: LiveDocumentKey,host: LiveHostConnectionCoordinate,previous: Record<string, unknown>,origin: string,cut: LiveOwnerAdoptionCut) {
+    const staged = readStagedServiceActivationHandoff(this.#storage,document), cursor = cut.terminalReceipt?.journalCursor ?? 0;
+    integrity(staged && staged.relay_database_namespace === this.#history.namespace && staged.successor_activation_id === cut.adoptionId &&
+      staged.predecessor_origin_digest === createHash("sha256").update(String(previous.origin_json)).digest("hex") &&
+      previous.tip_cursor === staged.cut_cursor && cursor === staged.cut_cursor);
+    const tip = JSON.stringify(cut.terminalReceipt);
+    const values = [this.#history.namespace,...documentParams(document),host.hostId,origin,tip,cursor,cut.expectedLocalSequence,cut.expectedLocalSequence];
+    const ownerCharge = Buffer.byteLength(JSON.stringify(values));
+    integrity(this.#storage.db.prepare(`UPDATE ${OWNERS} SET origin_json=?,tip_receipt_json=?,tip_cursor=?,tip_sequence=?,tip_application_sequence=?,accounted_bytes=?
+      WHERE relay_database_namespace=? AND ${WHERE_DOCUMENT} AND host_id=? AND origin_json=?`).run(origin,tip,cursor,cut.expectedLocalSequence,cut.expectedLocalSequence,
+        ownerCharge,this.#history.namespace,...documentParams(document),host.hostId,previous.origin_json as string).changes === 1);
+    let delta = ownerCharge - authorityInteger(previous.accounted_bytes,1);
+    const row = readServiceActivation(this.#storage,document); integrity(row);
+    if (row.activation_id === staged.predecessor_activation_id) {
+      // A completed activation moves to the successor, which adopted with nothing left to publish.
+      integrity(row.completion_json !== null && staged.successor_state_bytes instanceof Uint8Array);
+      const completion = JSON.stringify({adoptionId: cut.adoptionId,localYDocSequence: cut.expectedLocalSequence,terminalReceipt: cut.terminalReceipt,nativeOutboxEmpty: true});
+      const charge = serviceActivationCharge({namespace: this.#history.namespace,activationId: cut.adoptionId,sourceJson: String(staged.successor_source_json),
+        bindingJson: String(row.binding_json),stateDigest: String(staged.successor_state_digest),stateBytes: staged.successor_state_bytes.byteLength,
+        ownerUserId: String(row.owner_user_id),shareId: String(row.share_id),completion});
+      integrity(this.#storage.db.prepare(`UPDATE ${SERVICE_ACTIVATIONS} SET activation_id=?,source_json=?,state_digest=?,state_bytes=?,completion_json=?,accounted_bytes=?
+        WHERE relay_database_namespace=? AND activation_id=? AND completion_json IS NOT NULL`).run(cut.adoptionId,staged.successor_source_json as string,
+          staged.successor_state_digest as string,staged.successor_state_bytes,completion,charge,this.#history.namespace,row.activation_id as string).changes === 1);
+      delta += charge - authorityInteger(row.accounted_bytes,1);
+    } else integrity(row.activation_id === cut.adoptionId && row.completion_json === null);
+    const handoffCharge = serviceActivationHandoffCharge({namespace: this.#history.namespace,successorId: cut.adoptionId,
+      predecessorId: String(staged.predecessor_activation_id),document,originDigest: String(staged.predecessor_origin_digest),
+      sourceJson: String(staged.successor_source_json),stateDigest: String(staged.successor_state_digest),cutCursor: cursor,stateBytes: 0});
+    integrity(this.#storage.db.prepare(`UPDATE ${SERVICE_ACTIVATION_HANDOFFS} SET state='installed',successor_state_bytes=NULL,accounted_bytes=?
+      WHERE relay_database_namespace=? AND successor_activation_id=? AND state='staged'`).run(handoffCharge,this.#history.namespace,cut.adoptionId).changes === 1);
+    chargeServiceActivationUsage(this.#storage,document.workspaceId,delta + handoffCharge - authorityInteger(staged.accounted_bytes,1));
   }
   #refundOwner(workspaceId: string, amount: number) {
     integrity(this.#storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?").run(amount,workspaceId,amount).changes === 1);

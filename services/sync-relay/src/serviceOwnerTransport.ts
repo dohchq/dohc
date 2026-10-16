@@ -7,12 +7,14 @@ import {authorityInteger} from "./storage/liveDocumentAuthority";
 /**
  * Adapts one real imported native session to the existing owner delivery consumer.
  * The session is captured at the first registration, so work that never registers never loads it.
+ * A handoff successor adopts the journal through its predecessor's owner tip; any other activation adopts at the baseline.
  */
 export function serviceOwnerTransport(options: {
   client: EngineClient; workspace: string; capture(signal?: AbortSignal): Promise<NativeOwnerActivation>; binding: LiveObjectBinding;
-  nextRequestId(): number; assertCurrent(): void;
+  nextRequestId(): number; assertCurrent(): void; handoff?: {throughCursor: number; completed: boolean};
 }) {
-  const {client,workspace,nextRequestId,assertCurrent}=options;
+  const {client,workspace,nextRequestId,assertCurrent,handoff}=options;
+  const through=handoff?.throughCursor??0;
   const binding=parseLiveObjectBinding(options.binding);
   let captured: Pick<NativeOwnerActivation,"activationId"|"sessionId"|"source">|undefined, registrationId: number|undefined, adopted=false, outboxId: string|undefined;
   const check=(signal?:AbortSignal)=>{signal?.throwIfAborted();assertCurrent();};
@@ -72,7 +74,7 @@ export function serviceOwnerTransport(options: {
       }
       const capture=session();
       return {id:request.id,result:{adoptionId:capture.activationId,expectedLocalSequence:capture.source.nativeHeadSequence,
-        throughCursor:state.throughCursor??0,sessionId:capture.sessionId}};
+        throughCursor:state.throughCursor??through,sessionId:capture.sessionId}};
     }
     if(request.method==="liveApplication.quarantineOwnerOutbox") {
       const params=configRecord(request.params,["registrationId","reason"]);
@@ -99,12 +101,22 @@ export function serviceOwnerTransport(options: {
     check(signal);registration(request.registrationId);
     const capture=session();
     if(request.workspace!==workspace || request.sessionId!==capture.sessionId || cut.adoptionId!==capture.activationId ||
-      cut.expectedLocalSequence!==capture.source.nativeHeadSequence || cut.events.length!==0 || cut.terminalReceipt!==null) {
+      cut.expectedLocalSequence!==capture.source.nativeHeadSequence || (cut.terminalReceipt?.journalCursor??0)!==through ||
+      (cut.terminalReceipt===null)!==(through===0) || (cut.events.length===0)!==(through===0)) {
       throw new Error("Service owner adoption cut changed.");
     }
     const response=await client.sendLiveOwnerAdoption(request,cut,bounds,signal);
     check(signal);
-    if((response.result as {status?:unknown}).status==="adopted")adopted=true;
+    if((response.result as {status?:unknown}).status!=="adopted")return response;
+    adopted=true;
+    // Native adoption seeds what the journal lacks. A completed activation's
+    // successor must have nothing to seed, or the relay would install an
+    // owner that never published an edit the predecessor applied.
+    if(handoff?.completed) {
+      const state=await readState({id:nextRequestId(),workspace,deadlineMs:request.deadlineMs,method:"liveApplication.ownerState",
+        params:{registrationId:request.registrationId}},signal);
+      if(state.pendingBytes!==0)throw new Error("The new host store differs from edits the previous store never published. Recover the previous store to resume this document.");
+    }
     return response;
   };
   const facade=new Proxy(client,{get(target,property){

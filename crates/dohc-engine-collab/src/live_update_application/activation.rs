@@ -243,6 +243,10 @@ pub fn resume_imported_owner_activation(
         return Err(invalid("invalid ordinary activation resume"));
     }
     store.read_with(|conn| {
+        let retained: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_owner_activation_sources WHERE activation_id=?1)",
+            [activation_id], |r| r.get(0)).map_err(read_sql)?;
+        if !retained { return Err(ApplicationError::ActivationSourceMissing); }
         let sizes: (i64,i64,i64) = conn.query_row(
             "SELECT length(CAST(a.descriptor_json AS BLOB)),length(b.bytes),length(f.bytes)
              FROM ydoc_owner_activation_sources a JOIN binary_blobs b ON b.sha256=a.lineage_claim_id

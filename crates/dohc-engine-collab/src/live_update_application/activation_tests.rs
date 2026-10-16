@@ -349,7 +349,36 @@ fn retained_activation_rejects_unadopted_native_changes_and_epoch_changes() {
         })
         .unwrap();
     f.local_edit_before_adoption();
-    assert!(resume_imported(&mut f, &captured.activation_id, 1_000_000).is_err());
+    assert!(matches!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000),
+        Err(ApplicationError::Conflict)
+    ));
+}
+
+/// Only an absent source row may start a relay handoff. A source this store
+/// still holds but cannot read stays a conflict or corruption.
+#[test]
+fn retained_activation_reports_a_missing_source_apart_from_damage() {
+    let mut f = imported_fixture();
+    let captured = capture_imported(&mut f, 1_000_000).unwrap();
+    let missing = format!("ordinary-activation-{}", "0".repeat(64));
+    assert!(matches!(
+        resume_imported(&mut f, &missing, 1_000_000),
+        Err(ApplicationError::ActivationSourceMissing)
+    ));
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_owner_activation_sources SET object_id='other'",
+                [],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    assert!(!matches!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000),
+        Err(ApplicationError::ActivationSourceMissing) | Ok(_)
+    ));
 }
 
 #[test]
@@ -537,7 +566,10 @@ fn release_removes_only_the_matching_unadopted_activation_source() {
             .unwrap(),
         0
     );
-    assert!(resume_imported(&mut f, &captured.activation_id, 1_000_000).is_err());
+    assert!(matches!(
+        resume_imported(&mut f, &captured.activation_id, 1_000_000),
+        Err(ApplicationError::ActivationSourceMissing)
+    ));
     release_imported_owner_activation(
         &mut f.store,
         "namespace",
