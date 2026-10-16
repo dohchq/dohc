@@ -5,12 +5,13 @@ import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
+import { connect } from "node:net";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSampler, monitorState, runDetails, runLog, slotLog, startMonitor, threadDirectory, waitingIntervals } from "./queue-monitor.mjs";
-import { listRequests, nextRequest, position, queuePaths, writeJson } from "./queue.mjs";
+import { listRequests, nextRequest, pauseQueue, position, queuePaths, readJson, readPause, resumeQueue, writeJson } from "./queue.mjs";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
 const iso = minutesAgo => new Date(now - minutesAgo * 60_000).toISOString();
@@ -159,19 +160,21 @@ test("the waiting count is rebuilt from the requests: until each first attempt, 
   assert.equal(buckets.at(-1).running, 1);
 });
 
-function get(port, path, { host = `127.0.0.1:${port}`, method = "GET" } = {}) {
+// A request to the monitor. A chunked body is sent in two writes, without a length.
+function get(port, path, { host = `127.0.0.1:${port}`, method = "GET", headers = {}, body, chunked = false } = {}) {
   return new Promise((done, fail) => {
-    const call = httpRequest({ host: "127.0.0.1", port, path, method, headers: { host } }, response => {
-      let body = "";
-      response.on("data", chunk => { body += chunk; });
-      response.on("end", () => done({ status: response.statusCode, type: response.headers["content-type"], body }));
+    const call = httpRequest({ host: "127.0.0.1", port, path, method, headers: { host, ...headers } }, response => {
+      let text = "";
+      response.on("data", chunk => { text += chunk; });
+      response.on("end", () => done({ status: response.statusCode, type: response.headers["content-type"], headers: response.headers, body: text }));
     });
     call.on("error", fail);
-    call.end();
+    if (chunked) { call.write(body.slice(0, 10)); call.end(body.slice(10)); }
+    else call.end(body);
   });
 }
 
-test("the server answers only reads, and only on this host's names and the tailnet", async t => {
+test("the server answers reads only on this host's names and the tailnet", async t => {
   const root = await queueRoot(t);
   const server = startMonitor({ root, port: 0 });
   t.after(() => server.close());
@@ -185,6 +188,7 @@ test("the server answers only reads, and only on this host's names and the tailn
   assert.equal(JSON.parse(state.body).runs.length > 0, true);
   assert.equal((await get(port, "/api/state", { host: "pc.example.ts.net:8446" })).status, 200, "the tailnet name reaches the page");
   assert.equal((await get(port, "/api/state", { host: "attacker.example" })).status, 403, "a name rebound to this host does not");
+  assert.equal((await get(port, "/api/state", { host: "pc.example.ts.net:8446", headers: { "tailscale-funnel-request": "?1" } })).status, 403, "a request through Funnel does not");
   assert.equal((await get(port, "/api/state", { method: "POST" })).status, 405);
   assert.equal((await get(port, "/api/run?id=000000002-bbbbbb&attempt=7")).status, 404);
   assert.equal((await get(port, "/elsewhere")).status, 404);
@@ -298,4 +302,133 @@ test("status, positions, and the dashboard show the line in the order the servic
   const rows = status.stdout.split(/\r?\n/u).filter(row => row.includes("  owner: "));
   assert.deepEqual(rows.map(row => row.slice(0, 16)), line, status.stdout);
   assert.match(rows.find(row => row.startsWith(c7)), /  b7  owner: cat$/u, "status shows the owner beside each request");
+});
+
+async function monitor(t, root, options = {}) {
+  const server = startMonitor({ root, port: 0, ...options });
+  t.after(() => server.close());
+  if (!server.listening) await once(server, "listening");
+  const { port } = server.address();
+  // A write as the page sends it: a JSON POST that names the page's origin, which each option can change. A GET carries no body, as from a browser.
+  const write = (path, body, { host = `127.0.0.1:${port}`, origin = `http://${host}`, type = "application/json", method = "POST", chunked = false, headers = {} } = {}) =>
+    get(port, path, { host, method, chunked, body: typeof body === "string" || body === undefined ? body : JSON.stringify(body),
+      headers: { ...(origin === null ? {} : { origin }), ...(type === null ? {} : { "content-type": type }), ...headers } });
+  const state = async () => JSON.parse((await get(port, "/api/state")).body);
+  return { port, write, state };
+}
+
+test("the page pauses and resumes the queue with a JSON POST from its own origin, and the pause keeps a one-line reason and names the dashboard", async t => {
+  const root = await queueRoot(t);
+  const { port, write, state } = await monitor(t, root);
+  assert.equal((await state()).pause, null);
+  const paused = await write("/api/pause", { reason: "  new\r\ndrivers\u0000 and\u202e\ttools \u0007" }, { type: "application/json; charset=utf-8" });
+  assert.equal(paused.status, 200);
+  const pause = readPause(root);
+  assert.deepEqual(pause, { at: pause.at, reason: "new drivers and tools", by: { name: "dashboard", host: `127.0.0.1:${port}` } }, "newlines and control characters become one space");
+  assert.deepEqual(JSON.parse(paused.body), { changed: true, pause });
+  assert.equal((await state()).pause.reason, "new drivers and tools", "the next poll shows the pause, not a snapshot from before it");
+  assert.deepEqual(JSON.parse((await write("/api/pause", { reason: "again" })).body), { changed: false, pause }, "pausing a paused queue keeps its first record");
+  const tailnet = { host: "pc.example.ts.net:8446", origin: "https://pc.example.ts.net:8446" };
+  const resumed = await write("/api/resume", {}, tailnet);
+  assert.deepEqual([resumed.status, JSON.parse(resumed.body)], [200, { changed: true, pause: null }], "the page on the tailnet name resumes");
+  assert.equal(readPause(root), null);
+  assert.equal((await state()).pause, null);
+  assert.equal(JSON.parse((await write("/api/resume", {}, tailnet)).body).changed, false, "resuming a moving queue changes nothing");
+  await write("/api/pause", { reason: " \n\t " });
+  assert.equal(readPause(root).reason, null, "a blank reason records none");
+  const defaultPort = await write("/api/resume", {}, { host: "pc.example.ts.net:443", origin: "https://pc.example.ts.net" });
+  assert.equal(JSON.parse(defaultPort.body).changed, true, "a Host that names the scheme's default port matches an Origin that leaves it out");
+});
+
+test("a write is refused with a status, and changes nothing, unless it is a small JSON POST from the page's own origin on an allowed host", async t => {
+  const root = await queueRoot(t);
+  const { write } = await monitor(t, root);
+  const refusals = [
+    ["another site's origin", {}, { origin: "http://attacker.example" }, 403],
+    ["another origin on this host", {}, { origin: "http://127.0.0.1:3000" }, 403],
+    ["no origin", {}, { origin: null }, 403],
+    ["an opaque origin", {}, { origin: "null" }, 403],
+    ["a form's content type", "reason=x", { type: "application/x-www-form-urlencoded" }, 415],
+    ["plain text", "{}", { type: "text/plain" }, 415],
+    ["no content type", "{}", { type: null }, 415],
+    ["a GET", undefined, { method: "GET" }, 405],
+    ["a PUT", {}, { method: "PUT" }, 405],
+    ["a body over the limit", { reason: "x".repeat(5000) }, {}, 413],
+    ["a body over the limit sent without a length", { reason: "x".repeat(5000) }, { chunked: true }, 413],
+    ["a body that is not an object", "[]", {}, 400],
+    ["a body that is not JSON", "{", {}, 400],
+    ["a reason that is not text", { reason: { text: "x" } }, {}, 400],
+    ["a name rebound to this host", {}, { host: "attacker.example", origin: "http://attacker.example" }, 403],
+    ["a request through Funnel", {}, { host: "pc.example.ts.net", origin: "https://pc.example.ts.net", headers: { "tailscale-funnel-request": "?1" } }, 403],
+  ];
+  for (const [name, body, options, status] of refusals) {
+    const answer = await write("/api/pause", body, options);
+    assert.equal(answer.status, status, name);
+    assert.equal(answer.headers.connection, options.method === "GET" ? "keep-alive" : "close", `${name} closes its connection unless it is a GET`);
+    assert.equal(readPause(root), null, `${name} must not pause the queue`);
+  }
+  assert.equal((await write("/api/pause", undefined, { method: "GET" })).headers.allow, "POST");
+  const { pause } = await pauseQueue(root, { reason: "drivers" });
+  for (const [name, body, options, status] of refusals) {
+    assert.equal((await write("/api/resume", body, options)).status, status, name);
+    assert.deepEqual(readPause(root), pause, `${name} must not resume the queue`);
+  }
+  // A cross-site JSON POST first asks with a preflight, which grants nothing.
+  const preflight = await write("/api/pause", undefined, { method: "OPTIONS", origin: "http://attacker.example", type: null });
+  assert.equal(preflight.status, 405);
+  assert.deepEqual(Object.keys(preflight.headers).filter(name => name.startsWith("access-control-")), [], "no answer grants another origin");
+});
+
+test("a write whose body is too large or too slow is refused, and its connection closes", async t => {
+  const root = await queueRoot(t);
+  const { port, write } = await monitor(t, root, { writeWaitMs: 200 });
+  const large = await write("/api/pause", { reason: "x".repeat(5000) }, { chunked: true });
+  assert.deepEqual([large.status, large.headers.connection], [413, "close"], "the client cannot keep streaming a body the server refused");
+  // A body that never arrives gets its answer when the wait runs out, then the server closes the connection.
+  const socket = connect(port, "127.0.0.1");
+  let answer = "";
+  socket.setEncoding("utf8").on("data", chunk => { answer += chunk; });
+  socket.write([`POST /api/pause HTTP/1.1`, `host: 127.0.0.1:${port}`, `origin: http://127.0.0.1:${port}`, "content-type: application/json", "content-length: 100", "", "{"].join("\r\n"));
+  await once(socket, "close");
+  assert.match(answer, /^HTTP\/1\.1 408 [^]*did not arrive in time/u, "the monitor answers, not Node's own request timeout");
+  assert.equal(readPause(root), null);
+});
+
+test("the snapshot says when the queue is paused: the runs it waits for, when it is idle, and a hold after the computer restarted", async t => {
+  const root = await queueRoot(t);
+  const paths = queuePaths(root);
+  const service = readJson(paths.service);
+  const beat = (paused, running = []) => writeJson(paths.service, { ...service, paused, running });
+  assert.equal(monitorState(root, { now }).pause, null);
+  const { pause } = await pauseQueue(root, { reason: "drivers" });
+  assert.deepEqual(monitorState(root, { now }).pause, { ...pause, running: 1, idle: false, restart: false }, "the service's run in flight still runs");
+  await beat(null);
+  assert.deepEqual(monitorState(root, { now }).pause, { ...pause, running: 0, idle: false, restart: false }, "a service that has not seen the pause may still start a run");
+  await beat(pause);
+  assert.deepEqual(monitorState(root, { now }).pause, { ...pause, running: 0, idle: true, restart: false }, "paused and idle: safe to restart");
+  const inline = { slots: 2, owners: [{ name: "verification-slot-2", start: iso(5), elapsedMs: 300_000, checkout: join(root, "inline"), commit: "d".repeat(40), phase: "tests" }], waiters: [] };
+  assert.deepEqual(monitorState(root, { now, slots: () => inline }).pause, { ...pause, running: 1, idle: false, restart: false }, "an inline gate holding a lane is running");
+  await resumeQueue(root);
+  const { pause: held } = await pauseQueue(root, { reason: "the computer restarted" });
+  await beat(held);
+  assert.deepEqual(monitorState(root, { now }).pause, { ...held, running: 0, idle: true, restart: true });
+});
+
+test("the snapshot lists each test that failed on two or more branches in the last day, with whether main's nightly failed it too", async t => {
+  const root = await queueRoot(t);
+  const failed = (minutesAgo, id, tests, outcome = "failed") => appendFileSync(queuePaths(root).history, `${JSON.stringify({ at: iso(minutesAgo), event: "finished", id, outcome, failed: tests })}\n`);
+  const grid = { step: "desktop", test: "grid sorts" }, sync = { step: "rust", test: "sync::merges" }, mine = { step: "tests", test: "only mine" }, old = { step: "tests", test: "long ago" };
+  failed(2 * 1440, "000000002-bbbbbb", [old]);
+  failed(2 * 1440, "000000004-dddddd", [old]);
+  failed(300, "000000002-bbbbbb", [grid, sync, mine]);
+  failed(200, "000000002-bbbbbb", [mine]);
+  failed(120, "000000004-dddddd", [grid]);
+  failed(100, "000000009-ffffff", [mine]);
+  failed(60, "000000003-cccccc", [grid]);
+  assert.deepEqual(monitorState(root, { now }).sharedFailures, [{ ...grid, branches: ["again", "done", "now"], last: iso(60), nightly: null }],
+    "a test failed twice on one branch, more than a day ago, or by a request that is gone does not count, and no nightly finished today");
+  failed(30, "000000005-eeeeee", [sync]);
+  assert.deepEqual(monitorState(root, { now }).sharedFailures, [
+    { ...grid, branches: ["again", "done", "now"], last: iso(60), nightly: false },
+    { ...sync, branches: ["done"], last: iso(30), nightly: true }], "main's nightly counts as a branch, and says which tests it failed too");
 });

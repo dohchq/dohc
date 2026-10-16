@@ -13,7 +13,7 @@
 //   service.json                 service identity, heartbeat, and health (service)
 //   monitor-load.json            the dashboard's minute samples of host load (service)
 //   control/restart              exit once the runs in flight end (client)
-//   control/pause                start no run until resume (client, or the service after the computer restarts)
+//   control/pause                start no run until resume (client, the dashboard, or the service after the computer restarts)
 //   lane/                        the checkout the service verifies in
 //   service/<commit>/, current   installed service checkouts, and the active one
 
@@ -362,21 +362,25 @@ export function serviceState(root, now = Date.now()) {
   return { record, alive: Boolean(record && now - Date.parse(record.heartbeatAt) < 60_000) };
 }
 
-/** The queue's pause, `{ at, reason }`, or null when the line moves. */
+/** The queue's pause, `{ at, reason, by? }`, or null when the line moves. */
 export function readPause(root) {
   const path = queuePaths(root).pause;
   // A marker that antivirus holds for a moment still pauses the queue.
   return readJson(path) ?? (existsSync(path) ? { at: null, reason: null } : null);
 }
 
+// The reason the service records when it holds the line after the computer restarts.
+export const restartReason = "the computer restarted";
+
 /**
  * Hold the line: runs in flight finish, and no run starts until resumeQueue, even after the
- * service or the computer restarts. Pausing a paused queue keeps its first record.
+ * service or the computer restarts. Pausing a paused queue keeps its first record. The reason
+ * is kept to one line; `by` optionally records who paused, such as the dashboard and its host name.
  */
-export async function pauseQueue(root, { reason = null } = {}) {
+export async function pauseQueue(root, { reason = null, by = null } = {}) {
   const current = readPause(root);
   if (current) return { pause: current, changed: false };
-  const pause = { at: new Date().toISOString(), reason };
+  const pause = { at: new Date().toISOString(), reason: oneLine(reason, 300) || null, ...(by ? { by } : {}) };
   await writeJson(queuePaths(root).pause, pause);
   return { pause, changed: true };
 }
@@ -406,15 +410,22 @@ export function inlineRuns(env = process.env) {
 }
 
 /**
- * The pause as status shows it, or null when the queue is not paused. Only a heartbeat that
- * shows this pause can say idle: the service records the pause and its runs together.
+ * The pause with the runs it waits for, `{ at, reason, by?, running, idle }`, or null when the queue
+ * is not paused. Only a heartbeat that shows this pause can say idle: the service records the pause
+ * and its runs together. `inline` counts the inline gates that hold a lane.
  */
-export function pauseStatus(root, { record, alive } = serviceState(root), inline = inlineRuns()) {
+export function pauseState(root, { record, alive } = serviceState(root), inline = inlineRuns()) {
   const pause = readPause(root);
   if (!pause) return null;
   const running = (alive ? serviceRuns(record).runs.length : 0) + inline;
   const seen = !alive || record.paused?.at === pause.at;
-  return running || !seen ? `${pausedSince(pause)}: ${running} running, no new runs start` : "paused and idle: safe to restart";
+  return { ...pause, running, idle: !running && seen };
+}
+
+/** The pause as status shows it, or null when the queue is not paused. */
+export function pauseStatus(root, service = serviceState(root), inline = inlineRuns()) {
+  const pause = pauseState(root, service, inline);
+  return pause && (pause.idle ? "paused and idle: safe to restart" : `${pausedSince(pause)}: ${pause.running} running, no new runs start`);
 }
 
 export const taskName = "dohc-verification-queue";
@@ -654,7 +665,7 @@ function printStatus(root) {
     const place = index + 1;
     // The service's heartbeat says what a running attempt is doing, such as waiting for the host lane.
     const phase = runs.find(row => row.id === entry.id)?.phase;
-    const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase ? `, ${phase}` : ""}` : `#${place}${typical ? `, starts in about ${minutes(startsInMs(place, typical, lanes))}` : ""}`;
+    const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase ? `, ${phase}` : ""}` : `#${place}${typical ? `, starts ${pause ? "about " : "in about "}${minutes(startsInMs(place, typical, lanes))}${pause ? " after resume" : ""}` : ""}`;
     console.log(`${entry.id}  ${where}  ${entry.request.scope}  ${entry.request.head.slice(0, 12)}  ${entry.request.branch?.replace("refs/heads/", "") ?? entry.request.checkout}  owner: ${ownerOf(entry.request).title}${entry.status.waiting ? `  (${entry.status.waiting})` : ""}${entry.status.moved ? `  (${movedNote(entry.status.moved)})` : ""}`);
   }
   if (!live.length) console.log("no requests waiting");
