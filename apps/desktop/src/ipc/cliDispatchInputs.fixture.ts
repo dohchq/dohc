@@ -34,6 +34,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "document read": ["Notes/a.md"],
   "document edit": ["Notes/a.md", "--text", "Updated"],
   "document create": ["Notes/new.md"],
+  "document chats": ["Notes/a.md"],
   "document comment": ["Notes/a.md", "--title", "Review", "--text", "Comment"],
   "chat groups": [], "chat threads": ["group"], "chat inbox": [], "chat show": ["thread"],
   "chat post": ["group", "Post"], "chat reply": ["thread", "Reply"], "chat react": ["message", "thumbsup"],
@@ -43,6 +44,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "automation switch": ["Tasks", "stamp", "on", "--base", hash, "--submit-id", "switch-1"],
   "automation runs": ["Tasks", "stamp"], "automation run": ["Tasks", "stamp", "run"],
   "automation retry": ["Tasks", "stamp", "run"], "automation press": ["Tasks", "button", "record"],
+  "account deletePreview": [], "account delete": ["--server", "https://dohc.example.com", "--preview-token", "token"],
   // JSON verb parsers declare their socket dispatch after validating these request fields.
   ...Object.fromEntries(Object.entries(CLI_COMMANDS).flatMap(([group, command]) =>
     Object.entries(command.verbs).filter(([, verb]) => verb.fields).map(([name, verb]) => [

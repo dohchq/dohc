@@ -361,7 +361,11 @@ fn ydoc_conflict_decision_id(envelope: &ReplicationEnvelope) -> String {
     )
 }
 
-fn ydoc_conflict_coordinate_id(workspace_id: &str, origin_id: &str, origin_seq: i64) -> String {
+pub(crate) fn ydoc_conflict_coordinate_id(
+    workspace_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+) -> String {
     let coordinate = format!("{workspace_id}\0{origin_id}\0{origin_seq}");
     format!(
         "sync-ydoc-conflict:{}",

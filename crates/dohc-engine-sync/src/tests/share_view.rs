@@ -5899,7 +5899,7 @@ fn received_head_replaces_local_draft_and_version_snapshot_gets_tokens() {
     engine.read_with(|conn| {assert_eq!(conn.query_row("SELECT object_id FROM path_aliases WHERE workspace_id='ws' AND path='docs/a.md'",[],|row|row.get::<_,String>(0))?,token);Ok::<_,rusqlite::Error>(())}).unwrap();
     // This draft was never submitted. Its current head retires, but history remains readable.
     let history = VersionedTextStore::new(&mut engine)
-        .history_page("ws", Some("main"), Some("local-proposal"), 50, None)
+        .history_page("ws", Some("main"), Some("local-proposal"), None, 50, None)
         .unwrap();
     assert_eq!(history.moments.len(), 1);
     assert_eq!(history.moments[0].moment_id, "local-draft");

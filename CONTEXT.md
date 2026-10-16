@@ -170,3 +170,11 @@ _Avoid_: app backend, private app database
 **Dataset operation**:
 A named action in an approved dataset revision with declared caller access and read or write authority. Forms, apps, owner views, and agents use the same operation to enforce its rules.
 _Avoid_: raw database edit (for a governed data change)
+
+## Replica current view
+
+A replica current view is the relay-owned view of a shared workspace after the passive engine drains both replication lanes.
+It contains a complete file manifest, current text, and the applied ordinary and journal cursors.
+The union of current share selectors limits collection. It grants no recipient access.
+The relay replaces the stored view atomically and removes text with no remaining references.
+Settlement cuts remain a separate concept. Recipient access and pinned History are separate changes.

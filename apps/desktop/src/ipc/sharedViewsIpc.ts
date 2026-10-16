@@ -11,7 +11,7 @@ import { refreshReceivedReferencePin } from "../workspaces/workspaceFileReferenc
 import { ShareSelectorInvalidError, type fetchShareViewInfo, type fetchShareViewAccess, type probeShareViewLog } from "../workspaces/shareViewInfo";
 import type { RendererWorkspaceOperationSession } from "../window/rendererWorkspaceOperation";
 import { assertMountableSelector } from "../workspaces/shareMounts";
-import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+import { SHARE_VIEW_REOPEN_MESSAGE, shareViewIdentityIsIntact, shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { SharePinInvalidError, shareViewIdentitySelector, recordedShareSelector } from "../workspaces/shareViewRecords";
 import { waitForReceivedShareCaptureReady } from "../workspaces/receivedShareCaptureReady";
 import { workspaceSummaryFor } from "../workspaces/workspaceSummaryProjection";
@@ -352,7 +352,7 @@ export function registerSharedViewsIpcHandlers<
         cached = undefined;
       }
       const view = cached ? undefined : requireWorkspace(input.workspaceId).shareView;
-      if (view && (!view.recipientUserId || !recordedShareSelector(view.grantedSelector))) {
+      if (view && (!shareViewIdentityIsIntact(view) || !recordedShareSelector(view.grantedSelector))) {
         return { ok: true, status: "unchanged", probed: true, changedPaths: 0,
           excludedPaths: [], unjournalablePaths: [], refusedOps: 0, refusedDetail: null };
       }
@@ -434,8 +434,8 @@ export function registerSharedViewsIpcHandlers<
           return { ...current, shareView };
         };
         let workspace = currentShareViewWorkspace();
-        if (!workspace.shareView.recipientUserId) {
-          throw new Error("This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.");
+        if (!shareViewIdentityIsIntact(workspace.shareView)) {
+          throw new Error(SHARE_VIEW_REOPEN_MESSAGE);
         }
         // A proven large fresh import can publish its workspace handle before
         // initial capture finishes. Every share.* RPC stays fenced until the
@@ -623,10 +623,10 @@ export function registerSharedViewsIpcHandlers<
             const pin = recordedShareSelector(view?.grantedSelector);
             const credentials = currentCredentials();
             if (!view || !pin) return { status: "unverified" };
-            if (!view.recipientUserId) return { status: "needs-reopen" };
+            if (!shareViewIdentityIsIntact(view)) return { status: "needs-reopen" };
             if (view.ended) return { status: "ended" };
             if (!credentials?.relayUrl || !view.relayUrl || !relayUrlsMatch(credentials.relayUrl, view.relayUrl) ||
-              !view.recipientUserId || view.recipientUserId !== credentials.userId) {
+              view.recipientUserId !== credentials.userId) {
               return { status: "unverified" };
             }
             let statedAccess;

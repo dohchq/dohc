@@ -17,6 +17,7 @@ import recipientRecordsIpc from "./ipcExposure.pr1688.json";
 import launchOpenIpc from "./ipcExposure.pr1701.json";
 import restartCaptureIpc from "./ipcExposure.pr1719.json";
 import earlyQuitIpc from "./ipcExposure.earlyQuit.json";
+import historyTimelineIpc from "./ipcExposure.historyTimeline.json";
 import historyNamesIpc from "./ipcExposure.pr1785.json";
 import liveDraftRecoveryIpc from "./ipcExposure.pr1747.json";
 import liveDraftListingIpc from "./ipcExposure.liveDraftListing.json";
@@ -31,6 +32,8 @@ import pinnedCliCapabilities from "./cliCapabilities.pinned.json";
 import { CLI_DISPATCH_ARGUMENTS } from "./cliDispatchInputs.fixture";
 import publicationCli from "./cliExposure.pr1659.json";
 import commentsCli from "./cliExposure.pr1700.json";
+import fileChatsCli from "./cliExposure.pr2000.json";
+import accountDeletion from "./cliExposure.accountDeletion.json";
 import admission from "./operationAdmission.json";
 import accessExposure from "./accessExposure.delta.json";
 import shareCopyExposure from "./ipcExposure.shareCopy.json";
@@ -67,8 +70,8 @@ describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves every IPC wire name and the 26 enforced table guards", () => {
     // Hand-reviewed #1639 removals and #1701, #1688, #1747, reports, save retry,
     // capture recovery, History names, shared write feedback, Stop and restore,
-    // usage record, share copy, early-quit typing recovery, offer and system motion additions,
-    // separate from the hashed main baseline.
+    // usage record, share copy, early-quit typing recovery, offer, system motion, and account
+    // deletion additions, separate from the hashed main baseline.
     const expectedNames = [...mainIpc.names];
     expectedNames.push("desktop:check-shared-view-access");
     expectedNames.push("desktop:dismiss-share-capture-notice");
@@ -76,7 +79,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions, ...offersIpc.nameAdditions, ...systemMotionIpc.nameAdditions, ...captureHoldsIpc.nameAdditions]) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...historyTimelineIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions, ...offersIpc.nameAdditions, ...systemMotionIpc.nameAdditions, ...captureHoldsIpc.nameAdditions, ...accountDeletion.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }
@@ -85,18 +88,27 @@ describe("B1 main inventories (a4be19d5b)", () => {
     const guards = Object.fromEntries(rows.map(row => [row.channel, row.guard]));
     expect(Object.fromEntries(Object.keys(mainIpc.guards).map(channel => [channel, guards[channel]]))).toEqual(mainIpc.guards);
   });
+  it("records the 13 migrated file operations", () => {
+    const channels = [
+      "list-workspace-files", "create-workspace-file", "create-workspace-folder",
+      "move-workspace-path", "delete-workspace-path", "export-workspace-zip",
+      "export-document-file", "import-workspace-files", "read-workspace-text",
+      "write-workspace-text", "write-workspace-asset", "pick-image-files", "open-file-externally",
+    ].map(name => `desktop:${name}`);
+    expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
+  });
   it("preserves socket verbs, public verbs, and all public help", () => {
-    expect(socketVerbs).toEqual([...mainCli.socketVerbs, ...accessExposure.socketVerbAdditions, ...shareCopyCli.socketVerbAdditions].sort());
+    expect(socketVerbs).toEqual([...mainCli.socketVerbs, ...accessExposure.socketVerbAdditions, ...shareCopyCli.socketVerbAdditions, ...accountDeletion.socketVerbAdditions].sort());
     const expectedGroups = [...accessExposure.publicGroupAdditions, ...mainCli.publicGroups];
     for (const { group, before } of shareCopyCli.publicGroupAdditions) {
       expect(expectedGroups).not.toContain(group);
       expect(expectedGroups).toContain(before);
       expectedGroups.splice(expectedGroups.indexOf(before), 0, group);
     }
-    expect(Object.keys(CLI_COMMANDS)).toEqual(expectedGroups);
+    expect(Object.keys(CLI_COMMANDS)).toEqual([...expectedGroups, ...accountDeletion.publicGroupAdditions]);
     // Hand-reviewed #1659 additions, separate from the hashed main baseline.
-    const expectedPublicVerbs = [...accessExposure.publicVerbAdditions, ...mainCli.publicVerbs];
-    for (const { verb, before } of [...publicationCli.publicVerbAdditions, ...commentsCli.publicVerbAdditions, ...shareCopyCli.publicVerbAdditions]) {
+    const expectedPublicVerbs = [...accessExposure.publicVerbAdditions, ...mainCli.publicVerbs, ...accountDeletion.publicVerbAdditions];
+    for (const { verb, before } of [...publicationCli.publicVerbAdditions, ...commentsCli.publicVerbAdditions, ...fileChatsCli.publicVerbAdditions, ...shareCopyCli.publicVerbAdditions]) {
       expect(expectedPublicVerbs).not.toContain(verb);
       expect(expectedPublicVerbs).toContain(before);
       expectedPublicVerbs.splice(expectedPublicVerbs.indexOf(before), 0, verb);
@@ -107,7 +119,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       help[group] = renderCliHelp({ help: [group] });
       for (const verb of Object.keys(command.verbs)) help[`${group} ${verb}`] = renderCliHelp({ help: [group, verb] });
     }
-    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help, ...commentsCli.help, ...accessExposure.help, ...shareCopyCli.help });
+    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help, ...commentsCli.help, ...accessExposure.help, ...shareCopyCli.help, ...fileChatsCli.help, ...accountDeletion.help });
   });
   it("pins each row's guard, scope, and handler check to the hand-edited admission record", () => {
     expect(Object.fromEntries(rows.map(row => [row.channel, {
@@ -203,10 +215,18 @@ describe("capability identities and exposure", () => {
     }
   });
 
+  it("exposes document chats as the existing file-chat list capability", () => {
+    expect(CLI_COMMANDS.document!.verbs.chats?.capabilityId).toBe("file.chats.list");
+    expect(parseCliArguments(["document", "chats", "Notes/a.md"], {}))
+      .toMatchObject({ verb: "fileChats", path: "Notes/a.md" });
+    expect(CLI_CAPABILITIES.fileChats).toEqual(["file.chats.list"]);
+    expect(pinnedCliCapabilities.public).toHaveProperty("document chats", "file.chats.list");
+  });
+
   it("pins every internal-only socket verb in the main CLI inventory", () => {
-    const publicSocketVerbs = new Set([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions, ...shareCopyCli.socketVerbAdditions]);
+    const publicSocketVerbs = new Set([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...fileChatsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions, ...shareCopyCli.socketVerbAdditions, ...accountDeletion.socketVerbAdditions]);
     const internalVerbs = socketVerbs.filter(verb => !publicSocketVerbs.has(verb));
-    expect(internalVerbs).toEqual(mainCli.internalVerbs.filter(verb => !commentsCli.publicSocketPromotions.includes(verb)));
+    expect(internalVerbs).toEqual(mainCli.internalVerbs.filter(verb => ![...commentsCli.publicSocketPromotions, ...fileChatsCli.publicSocketPromotions].includes(verb)));
   });
 
   it("matches IPC and MCP exposure to their actual rows and advertised tools", async () => {

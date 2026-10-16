@@ -1,3 +1,4 @@
+import {accountIsFenced} from "./storage/accountDeletion";
 import {parseRoute} from "./relayRoute";
 import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
 import {normalizeLinkRefusal} from "./linkRefusal";
@@ -251,8 +252,19 @@ export function createSyncRelayHandler({
   serverRuns = () => undefined,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
   resolveNamedBrowserSession: ReturnType<typeof createNamedLiveBrowserHttp>["resolve"];
+  deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]): void;
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
 } {
+  const accountActor = resolveActor;
+  const requireUnfencedActor = (actor: Awaited<ReturnType<ResolveActor>>) => {
+    if (accountIsFenced(storage, actor.userId)) throw notFound();
+    return actor;
+  };
+  resolveActor = (request, workspaceId) => {
+    const actor = accountActor(request, workspaceId);
+    return typeof (actor as {then?: unknown}).then === "function"
+      ? Promise.resolve(actor).then(requireUnfencedActor) : requireUnfencedActor(actor as Awaited<ReturnType<ResolveActor>>);
+  };
   const publicEditRelease = parsePublicEditRelease(releaseInput);
   const respondToDataset = datasetHost ? createDatasetRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs, pressDataset}) : undefined;
   const respondToDatasetReplica = datasetHost ? createDatasetReplicaRoutes(datasetHost, storage, {limits: appBackendAdmissionLimits, nowMs}) : undefined;
@@ -370,7 +382,7 @@ export function createSyncRelayHandler({
     throw notFound();
   }
 
-  const { respondToSharePresence, respondToWorkspacePresence } = createPresenceRoutes(
+  const { respondToSharePresence, respondToWorkspacePresence, deleteAccount: deletePresenceAccount } = createPresenceRoutes(
     presence,
     nowMs,
     storage,
@@ -988,6 +1000,12 @@ export function createSyncRelayHandler({
     return normalizeLinkRefusal(result, path);
   };
   return Object.assign(handle, {
+    deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {
+      presence.deleteAccount(userId, workspaceIds);
+      deletePresenceAccount(userId);
+      namedBrowser?.deleteAccount(userId, workspaceIds);
+      for (const shareId of shareIds) terminateLinkStreamsForShare(shareId);
+    },
     resolveNamedBrowserSession: (request: Request, discriminator: string) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),
     /**
      * A GET of the owner's share listings, answered in process as the

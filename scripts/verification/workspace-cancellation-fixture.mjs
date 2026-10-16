@@ -15,7 +15,7 @@ export async function runCanonicalCancellationFixture(root, sourceRoot) {
   put('apps/desktop/scripts/ensure-electron-installed.mjs','');
   put('scripts/verification/rust-reuse.mjs', "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
   put('.github/workflows/pr-checks.yml','fixture workflow');
-  put('node_modules/js-yaml/index.js',"exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
+  put('node_modules/js-yaml/index.js',"exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],repository:[]};");
   put('node_modules/pnpm/package.json',JSON.stringify({main:'package.json',bin:{pnpm:'fixture.mjs'}}));
   put('scripts/verification/doctor.mjs','export const doctor=()=>({checks:[]});');
   put('scripts/verification/admission.mjs',"export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;");

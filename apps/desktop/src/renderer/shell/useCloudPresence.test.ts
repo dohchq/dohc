@@ -32,7 +32,7 @@ it("answers for the workspace on screen, not the one the window just left", asyn
   );
 
   const { result, rerender } = renderHook(
-    ({ workspaceId }) => useCloudPresence(workspaceId, onStatusUnavailable),
+    ({ workspaceId }) => useCloudPresence(workspaceId, onStatusUnavailable, true),
     { initialProps: { workspaceId: "ws-synced" } },
   );
   await waitFor(() => expect(result.current.workspaceSynced).toBe(true));
@@ -52,7 +52,7 @@ it("drops a status that arrives after the workspace changed", async () => {
   );
 
   const { result, rerender } = renderHook(
-    ({ workspaceId }) => useCloudPresence(workspaceId, onStatusUnavailable),
+    ({ workspaceId }) => useCloudPresence(workspaceId, onStatusUnavailable, true),
     { initialProps: { workspaceId: "ws-a" } },
   );
   rerender({ workspaceId: "ws-b" });
@@ -71,7 +71,7 @@ it("reports sync for this workspace after a refresh", async () => {
     .mockResolvedValueOnce({ connected: true, workspaceSynced: false })
     .mockResolvedValue({ connected: true, workspaceSynced: true });
 
-  const { result } = renderHook(() => useCloudPresence("ws-1", onStatusUnavailable));
+  const { result } = renderHook(() => useCloudPresence("ws-1", onStatusUnavailable, true));
   await waitFor(() => expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(1));
   expect(result.current.workspaceSynced).toBe(false);
 
@@ -84,7 +84,7 @@ it("reports sync for this workspace after a refresh", async () => {
 it("reports a failed read and retries the current workspace", async () => {
   bridgeMock.cloudStatus.mockRejectedValueOnce(new Error("engine unavailable"))
     .mockResolvedValue({ connected: true, workspaceSynced: true });
-  const { result } = renderHook(() => useCloudPresence("ws-1", onStatusUnavailable));
+  const { result } = renderHook(() => useCloudPresence("ws-1", onStatusUnavailable, true));
   await waitFor(() => expect(onStatusUnavailable).toHaveBeenCalledTimes(1));
   expect(result.current.workspaceSynced).toBe(false);
   await act(async () => onStatusUnavailable.mock.calls[0]![0]());
@@ -97,7 +97,7 @@ it("says the status could not be read until a read answers, for this workspace o
   bridgeMock.cloudStatus.mockRejectedValueOnce(new Error("engine unavailable"))
     .mockResolvedValue({ connected: true, workspaceSynced: true });
   const { result, rerender } = renderHook(
-    ({ workspaceId }) => useCloudPresence(workspaceId, onStatusUnavailable),
+    ({ workspaceId }) => useCloudPresence(workspaceId, onStatusUnavailable, true),
     { initialProps: { workspaceId: "ws-1" } },
   );
   expect(result.current.cloudStatusUnreadable).toBe(false);
@@ -111,7 +111,7 @@ it("says the status could not be read until a read answers, for this workspace o
 
 it("does not report a confirmed unsynced workspace as unavailable", async () => {
   bridgeMock.cloudStatus.mockResolvedValue({ connected: true, workspaceSynced: false });
-  renderHook(() => useCloudPresence("ws-1", onStatusUnavailable));
+  renderHook(() => useCloudPresence("ws-1", onStatusUnavailable, true));
   await act(async () => {});
   expect(onStatusUnavailable).not.toHaveBeenCalled();
 });
@@ -122,7 +122,7 @@ it("ignores stale failures and retires retry actions on workspace switch", async
     .mockReturnValueOnce(pending.promise)
     .mockResolvedValue({ connected: true, workspaceSynced: true });
   const { rerender } = renderHook(
-    ({ workspaceId }) => useCloudPresence(workspaceId, onStatusUnavailable),
+    ({ workspaceId }) => useCloudPresence(workspaceId, onStatusUnavailable, true),
     { initialProps: { workspaceId: "ws-a" } },
   );
   await waitFor(() => expect(onStatusUnavailable).toHaveBeenCalledTimes(1));
@@ -137,10 +137,22 @@ it("ignores stale failures and retires retry actions on workspace switch", async
 
 it("retires a failure's retry after unmount", async () => {
   bridgeMock.cloudStatus.mockRejectedValue(new Error("offline"));
-  const { unmount } = renderHook(() => useCloudPresence("ws-1", onStatusUnavailable));
+  const { unmount } = renderHook(() => useCloudPresence("ws-1", onStatusUnavailable, true));
   await waitFor(() => expect(onStatusUnavailable).toHaveBeenCalledTimes(1));
   const retry = onStatusUnavailable.mock.calls[0]![0];
   unmount();
   retry();
   expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(1);
+});
+
+it("does not read cloud status before workspace admission", async () => {
+  const { result, rerender } = renderHook(
+    ({ ready }) => useCloudPresence("workspace", onStatusUnavailable, ready),
+    { initialProps: { ready: false } },
+  );
+  expect(bridgeMock.cloudStatus).not.toHaveBeenCalled();
+  result.current.refreshCloudStatus();
+  expect(bridgeMock.cloudStatus).not.toHaveBeenCalled();
+  await act(async () => { rerender({ ready: true }); });
+  expect(bridgeMock.cloudStatus).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace" });
 });

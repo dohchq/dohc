@@ -32,7 +32,7 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof
  * needs to trust that CA: Node reads it, and the debug engine accepts it only
  * for an HTTPS loopback relay.
  */
-export async function startSelfHostOnboardingStack(directory: string, options: { live?: boolean } = {}) {
+export async function startSelfHostOnboardingStack(directory: string, options: { live?: boolean; signal: AbortSignal }) {
   assert.ok(process.env.POSTGRES_URL, "Supply a disposable POSTGRES_URL.");
   assert.equal(process.env.DOHC_REQUIRE_POSTGRES, "1", "Require the real Postgres dependency.");
   const ca = options.live ? await mintLocalhostCa(directory) : undefined;
@@ -48,7 +48,7 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
   try {
     relay = await startAuthenticatedRelay(directory, proxy.origin, ca ? { ...trustEnv, ...selfHostLiveEnv(directory, proxy.origin) } : {});
     proxy.routeRelayTo(relay.url);
-    const account = await startAccountServer({ publicOrigin: proxy.origin });
+    const account = await startAccountServer({ publicOrigin: proxy.origin, signal: options.signal });
     proxy.routeAuthTo(account.listenOrigin);
     return {
       account,
@@ -352,6 +352,7 @@ function selfHostLiveEnv(directory: string, origin: string): NodeJS.ProcessEnv {
     DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
     DOHC_RELAY_PUBLIC_ORIGIN: origin,
     DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
+    DOHC_RELAY_SHARE_WEB_URL: origin,
     DOHC_RELAY_NAMED_LIVE_HOSTS: new URL(origin).host,
     DOHC_RELAY_LINK_KEY: randomBytes(32).toString("hex"),
     DOHC_RELAY_EXCHANGE_KEY: randomBytes(32).toString("hex"),

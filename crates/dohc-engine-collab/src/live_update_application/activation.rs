@@ -35,6 +35,44 @@ pub struct ImportedOwnerActivation {
     pub restore_generation: Option<i64>,
 }
 
+/// The committed fetch position the document's imported content stands at,
+/// with the identity it was fetched under. A hosted replica answers only for
+/// a document whose backfill committed, at the further of its main and
+/// backfill cursors; any other replica reads its ordinary cursor.
+fn committed_position(
+    conn: &rusqlite::Connection,
+    key: &DocKey,
+) -> Result<(i64, String, String), ApplicationError> {
+    let hosted: Option<(Option<String>, i64, String, String)> = conn
+        .query_row(
+            "SELECT d.state,MAX(h.main_cursor,COALESCE(d.backfill_cursor,0)),
+                    i.replication_epoch,i.stream_identity
+             FROM hosted_replicas h JOIN sync_identity i ON i.workspace_id=h.workspace_id
+             LEFT JOIN hosted_documents d ON d.workspace_id=h.workspace_id AND d.object_id=?2
+                AND d.scope_generation=h.scope_generation
+             WHERE h.workspace_id=?1",
+            params![key.workspace_id, key.object_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    if let Some((state, cursor, epoch, stream)) = hosted {
+        if state.as_deref() != Some("ready") {
+            return Err(ApplicationError::Conflict);
+        }
+        return Ok((cursor, epoch, stream));
+    }
+    let (cursor, epoch, stream): (String, String, String) = conn
+        .query_row(
+            "SELECT cursor,replication_epoch,stream_identity FROM sync_relay_cursors WHERE workspace_id=?1",
+            [&key.workspace_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(read_sql)?;
+    let cursor: i64 = cursor.parse().map_err(|_| ApplicationError::Corrupt)?;
+    Ok((cursor, epoch, stream))
+}
+
 pub fn release_imported_owner_activation(
     store: &mut EngineStore,
     namespace: &str,
@@ -114,10 +152,7 @@ pub fn capture_imported_owner_activation(
         let base_origin_id = marker.base_origin_id.clone().ok_or(ApplicationError::Conflict)?;
         let base_origin_seq = marker.base_origin_seq.ok_or(ApplicationError::Conflict)?;
         let base_relay_seq = marker.base_relay_seq.ok_or(ApplicationError::Conflict)?;
-        let (cursor, epoch, stream): (String, String, String) = tx.query_row(
-            "SELECT cursor,replication_epoch,stream_identity FROM sync_relay_cursors WHERE workspace_id=?1",
-            [&key.workspace_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(read_sql)?;
-        let cursor: i64 = cursor.parse().map_err(|_| ApplicationError::Corrupt)?;
+        let (cursor, epoch, stream) = committed_position(tx, key)?;
         integer(cursor, 0, SAFE)?;
         if base_relay_seq > cursor { return Err(ApplicationError::Conflict); }
         let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
@@ -240,10 +275,7 @@ pub fn resume_imported_owner_activation(
         let verified=adoption::read_adoption_source(conn,namespace,activation_id,&binding)?
             .and_then(|(_,_,_,_,source)|source).ok_or(ApplicationError::Corrupt)?;
         if verified!=source { return Err(ApplicationError::Corrupt); }
-        let (cursor,epoch,stream):(String,String,String)=conn.query_row(
-            "SELECT cursor,replication_epoch,stream_identity FROM sync_relay_cursors WHERE workspace_id=?1",
-            [&key.workspace_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(read_sql)?;
-        let cursor:i64=cursor.parse().map_err(|_|ApplicationError::Corrupt)?;
+        let (cursor,epoch,stream)=committed_position(conn,key)?;
         if cursor<source.committed_cursor || epoch!=source.replication_epoch || stream!=source.stream_identity {
             return Err(ApplicationError::Conflict);
         }

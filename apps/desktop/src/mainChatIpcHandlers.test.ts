@@ -35,7 +35,10 @@ function runtimeHarness() {
   const handlers = new Map<string, RegisteredHandler>();
   return {
     handle(channel: string, handler: RegisteredHandler) {
-      handlers.set(channel, handler);
+      handlers.set(channel, async (event, payload) => {
+        if (!event.trusted) throw new Error("Untrusted renderer.");
+        return handler(event, payload);
+      });
     },
     invoke(channel: string, payload: unknown, event: TestEvent = { trusted: true }) {
       const handler = handlers.get(channel);
@@ -231,7 +234,6 @@ describe("runtime main chat IPC boundaries", () => {
     ipc.handle(
       CHANNELS.markChatThreadRead,
       createMarkChatThreadReadIpcHandler({
-        assertTrustedSender: deps.assertTrustedSender,
         parsePayload,
         requireContext,
         run: markThreadRead,
@@ -1237,9 +1239,6 @@ describe("chat read state in a share view", () => {
       ipc.handle(
         CHANNELS.markChatThreadRead,
         createMarkChatThreadReadIpcHandler({
-          assertTrustedSender(event: TestEvent) {
-            if (!event.trusted) throw new Error("Untrusted renderer.");
-          },
           parsePayload(payload: unknown) {
             const parsed = payload as { workspaceId?: unknown };
             if (typeof parsed?.workspaceId !== "string") throw new Error("Invalid payload.");

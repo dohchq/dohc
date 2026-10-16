@@ -6,7 +6,6 @@ import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refu
 import {relayLinkRefusal} from "./linkRefusal";
 import { asRecord } from "@dohc/workspace-core/records";
 import { normalizeShareDiscussionBody, normalizeShareDiscussionDisplayName } from "@dohc/security-contract/share-discussion";
-import { RELAY_VERSION_REFUSAL_STATUS, RelayVersionRefusalError, relayVersionRefusal } from "./relayVersion";
 import { remoteLiveDocument } from "./remoteLiveDocument";
 import { shareLinkSummary } from "./shareSummary";
 import type { createLinkLiveClient } from "./linkLiveClient";
@@ -110,11 +109,7 @@ const error = (message: string): CallToolResult => ({ isError: true, content: [{
 const json = async (response: Response, signal: AbortSignal): Promise<unknown> => {
   if (!response.ok) {
     const value = await readBoundedJson(response, 4096, signal).catch(() => null);
-    const refusal = response.status === RELAY_VERSION_REFUSAL_STATUS
-      ? relayVersionRefusal(value)
-      : null;
     await response.body?.cancel().catch(() => undefined);
-    if (refusal) throw new RelayVersionRefusalError(refusal);
     const code = parseLinkRefusal(value, response.status);
     throw new Error(code ? LINK_REFUSALS[code].error : "not found");
   }

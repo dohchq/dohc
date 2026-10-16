@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import type { AgentRunStatusResult } from "../../ipc/bridgeContract";
+import type { AgentRunStatusResult, DesktopUserSettingsResult } from "../../ipc/bridgeContract";
+import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import type { SettingsSectionId } from "../settings/settingsRegistry";
 import { useAgentSetup } from "./useAgentSetup";
 
@@ -21,12 +22,32 @@ it("shares the bootstrap status read with history", async () => {
   const pending = new Promise<AgentRunStatusResult>((done) => { resolve = done; });
   const getAgentRunStatus = vi.fn().mockReturnValue(pending);
   vi.stubGlobal("dohcDesktop", { getAgentRunStatus });
-  const { result } = renderHook(() => useAgentSetup("ws-1", null, null));
+  const { result } = renderHook(() => useAgentSetup("ws-1", null, null, true));
 
   const historyRead = result.current.readAgentStatusForHistory();
   expect(historyRead).toBe(pending);
   await act(async () => { resolve(active); await historyRead; });
   expect(getAgentRunStatus).toHaveBeenCalledTimes(1);
+});
+
+it("drops a slow run read from A after a switch to B and back to A", async () => {
+  const reads: Array<(status: AgentRunStatusResult) => void> = [];
+  const getAgentRunStatus = vi.fn(() => new Promise<AgentRunStatusResult>((done) => { reads.push(done); }));
+  vi.stubGlobal("dohcDesktop", { getAgentRunStatus });
+  const settings: DesktopUserSettingsResult = { settings: DEFAULT_USER_SETTINGS, source: "stored" };
+  const { result, rerender } = renderHook(
+    ({ workspaceId }: { workspaceId: string }) => useAgentSetup(workspaceId, settings, null, true),
+    { initialProps: { workspaceId: "ws-a" } },
+  );
+  rerender({ workspaceId: "ws-b" });
+  rerender({ workspaceId: "ws-a" });
+  expect(reads).toHaveLength(3);
+
+  await act(async () => { reads[2]!(inactive); });
+  expect(result.current.agentSetup).toMatchObject({ workspaceId: "ws-a", agentRunActive: false });
+  // The first A read and B's read both answer after the current one.
+  await act(async () => { reads[0]!(active); reads[1]!(active); });
+  expect(result.current.agentSetup).toMatchObject({ workspaceId: "ws-a", agentRunActive: false });
 });
 
 it.each([false, true])("discards unconsumed bootstrap status when Settings closes (already resolved: %s)", async (resolved) => {
@@ -35,7 +56,7 @@ it.each([false, true])("discards unconsumed bootstrap status when Settings close
   const getAgentRunStatus = vi.fn().mockReturnValueOnce(pending).mockResolvedValue(inactive);
   vi.stubGlobal("dohcDesktop", { getAgentRunStatus });
   const { result, rerender } = renderHook(
-    ({ section }: { section: SettingsSectionId | null }) => useAgentSetup("ws-1", null, section),
+    ({ section }: { section: SettingsSectionId | null }) => useAgentSetup("ws-1", null, section, true),
     { initialProps: { section: null } as { section: SettingsSectionId | null } },
   );
   if (resolved) await act(async () => { resolve(active); await pending; });
@@ -48,4 +69,16 @@ it.each([false, true])("discards unconsumed bootstrap status when Settings close
   expect(getAgentRunStatus).toHaveBeenCalledTimes(3);
   if (!resolved) await act(async () => { resolve(active); await pending; });
   await expect(historyRead).resolves.toEqual(inactive);
+});
+
+it("does not read agent status before workspace admission", async () => {
+  const getAgentRunStatus = vi.fn().mockResolvedValue(inactive);
+  vi.stubGlobal("dohcDesktop", { getAgentRunStatus });
+  const { rerender } = renderHook(
+    ({ ready }) => useAgentSetup("workspace", null, null, ready),
+    { initialProps: { ready: false } },
+  );
+  expect(getAgentRunStatus).not.toHaveBeenCalled();
+  await act(async () => { rerender({ ready: true }); });
+  expect(getAgentRunStatus).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace" });
 });
