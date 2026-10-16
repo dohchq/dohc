@@ -3919,6 +3919,96 @@ fn a_held_backfill_longer_than_the_retention_limit_holds_only_its_document() {
     );
 }
 
+/// Codex's review: each held document read a full page of its own rows on
+/// every pass, past the pass's limit, though a stopped one needs only the row
+/// it stopped at. Held reads share what the main feed left, and a read cut
+/// short goes on in later passes until its document is ready.
+#[test]
+fn held_reads_share_the_pass_limit() {
+    const RENAMES: i64 = crate::MAX_PULL_OPS as i64 + 1;
+    const HELD: [&str; 3] = ["doc-b1", "doc-b2", "doc-b3"];
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-a", "a.md", "hosted a");
+    feed.create("owner", 2, "doc-c", "c.md", "c 0");
+    let mut ends = Vec::new();
+    for (index, object_id) in HELD.iter().enumerate() {
+        let origin = format!("peer-{index}");
+        feed.create(&origin, 0, object_id, "a.md", "hosted b");
+        let mut at = ("a.md".to_owned(), format!("moment-{origin}-0"));
+        for seq in 1..=RENAMES {
+            let to = format!("{}{index}.md", if seq % 2 == 0 { "y" } else { "x" });
+            feed.rename(&origin, seq, object_id, &at.0, &to, "hosted b", &at.1);
+            at = (to, format!("moment-{origin}-{seq}"));
+        }
+        ends.push(at.0);
+    }
+    feed.share("doc-a", "a.md");
+    feed.share("doc-c", "c.md");
+    sync(&client, &mut store);
+    for (object_id, end) in HELD.iter().zip(&ends) {
+        feed.share(object_id, end);
+    }
+    sync(&client, &mut store);
+    for object_id in HELD {
+        assert_eq!(hold(&store, object_id), Some(path_held("a.md", "doc-a")));
+    }
+
+    for seq in 1..=crate::model::MAX_PULL_OPS_PER_PASS as i64 {
+        let before = (
+            "doc-c",
+            format!("c {}", seq - 1),
+            format!("moment-owner-{}", seq + 1),
+        );
+        feed.replace(
+            "owner",
+            seq + 2,
+            "doc-c",
+            "c.md",
+            &format!("c {seq}"),
+            (before.0, &before.1, &before.2),
+        );
+    }
+    let busy = pass(&client, &mut store, &NoFaults).unwrap();
+    assert!(
+        busy.fetched <= crate::model::MAX_PULL_OPS_PER_PASS + HELD.len(),
+        "fetched {}",
+        busy.fetched
+    );
+    assert!(commit(&client, &mut store, &busy));
+    for object_id in HELD {
+        assert_eq!(hold(&store, object_id), Some(path_held("a.md", "doc-a")));
+    }
+
+    feed.rename(
+        "owner",
+        3 + crate::model::MAX_PULL_OPS_PER_PASS as i64,
+        "doc-a",
+        "a.md",
+        "d.md",
+        "hosted a",
+        "moment-owner-1",
+    );
+    sync(&client, &mut store);
+    let (heads, _) = content(&store);
+    assert_eq!(
+        heads["doc-c"],
+        format!("c {}", crate::model::MAX_PULL_OPS_PER_PASS)
+    );
+    for object_id in HELD {
+        assert!(ready(&store, object_id));
+        assert_eq!(
+            count(
+                &store,
+                &format!("SELECT COUNT(*) FROM moments WHERE object_id='{object_id}'")
+            ),
+            RENAMES + 1
+        );
+    }
+}
+
 #[test]
 fn an_ordinary_replica_has_nothing_to_retire() {
     let (_scratch, _path, mut ordinary) = open_store();
