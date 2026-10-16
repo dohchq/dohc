@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
+import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
 import {OwnerRestoreRequest, OwnerRestoreActionResponse, type OwnerRestoreAction, type OwnerRestoreResult} from "./ipc/ownerRestoreContract";
 import {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ipc/ownerAppPublicationContract";
@@ -70,6 +71,7 @@ import {
   workspaceSearchOperations,
   folderAppOfferOperations,
   workspaceVersionOperations,
+  historyOperations,
   engineYDocAdmissionOperations,
   engineYDocSaveOperations,
   parseWorkspaceActivityEventForIpc,
@@ -116,8 +118,10 @@ async function invokeParsed<Schema extends z.ZodType>(
 const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
+  ...operationBridge(workspaceFileOperations, invoke),
   ...operationBridge(chatOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
+  ...operationBridge(historyOperations, invoke),
   ...operationBridge(shareDirectWriteDeliveryOperations, invoke),
   ...operationBridge(shareCopyOperations, invoke),
   ...operationBridge(accessOperations, invoke),
@@ -147,8 +151,6 @@ const bridge: DohcDesktopBridge = {
   closeThisWindow: () => ipcRenderer.invoke(CHANNELS.closeThisWindow),
   revealWorkspaceFolder: (payload) =>
     ipcRenderer.invoke(CHANNELS.revealWorkspaceFolder, payload),
-  listWorkspaceFiles: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listWorkspaceFiles, payload),
   listCollections: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollections, payload),
   getCollection: (payload) =>
@@ -159,18 +161,6 @@ const bridge: DohcDesktopBridge = {
   getCollectionRecordHistory: (payload) =>
     ipcRenderer.invoke(CHANNELS.getCollectionRecordHistory, payload),
   locateRecordHistoryRun: (payload) => ipcRenderer.invoke(CHANNELS.locateRecordHistoryRun, payload),
-  createWorkspaceFile: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createWorkspaceFile, payload),
-  createWorkspaceFolder: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createWorkspaceFolder, payload),
-  moveWorkspacePath: (payload) =>
-    ipcRenderer.invoke(CHANNELS.moveWorkspacePath, payload),
-  deleteWorkspacePath: (payload) =>
-    ipcRenderer.invoke(CHANNELS.deleteWorkspacePath, payload),
-  exportWorkspaceZip: (payload) =>
-    ipcRenderer.invoke(CHANNELS.exportWorkspaceZip, payload),
-  exportDocumentFile: (payload) =>
-    ipcRenderer.invoke(CHANNELS.exportDocumentFile, payload),
   // The invoke RESULT is validated like main→renderer events are: only a
   // member of the closed command set reaches renderer code — anything else
   // reads as null ("dismissed").
@@ -204,18 +194,6 @@ const bridge: DohcDesktopBridge = {
     }
     return paths;
   },
-  importWorkspaceFiles: (payload) =>
-    ipcRenderer.invoke(CHANNELS.importWorkspaceFiles, payload),
-  readWorkspaceText: (payload) =>
-    ipcRenderer.invoke(CHANNELS.readWorkspaceText, payload),
-  writeWorkspaceText: (payload) =>
-    ipcRenderer.invoke(CHANNELS.writeWorkspaceText, payload),
-  writeWorkspaceAsset: (payload) =>
-    ipcRenderer.invoke(CHANNELS.writeWorkspaceAsset, payload),
-  pickImageFiles: (payload) =>
-    ipcRenderer.invoke(CHANNELS.pickImageFiles, payload),
-  openFileExternally: (payload) =>
-    ipcRenderer.invoke(CHANNELS.openFileExternally, payload),
   readWorkspaceGraph: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceGraph, payload),
   getBacklinks: (payload) => ipcRenderer.invoke(CHANNELS.getBacklinks, payload),

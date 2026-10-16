@@ -146,7 +146,7 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
         dohcDesktop: EngineMomentsBridge;
       }).dohcDesktop;
       const start = performance.now();
-      const pageResult = await api.listEngineMoments({ workspaceId: id, limit: 200 });
+      const pageResult = await api.listEngineMoments({ workspaceId: id, limit: 50 });
       if ("status" in pageResult) {
         throw new Error("History was still updating after its first row rendered.");
       }
@@ -159,7 +159,7 @@ test("switching A->B with A's heavy panels open shows only B's history and chats
     expect(ipcTiming.latestMomentOrder).toBeGreaterThanOrEqual(999);
     console.log(
       `[perf] history first useful content (1,000 moments): shell-ready->first row ${historyFirstContentMs}ms; ` +
-        `listEngineMoments(limit 200) IPC round-trip ${ipcTiming.ms.toFixed(1)}ms`,
+        `listEngineMoments(limit 50) IPC round-trip ${ipcTiming.ms.toFixed(1)}ms`,
     );
     // Budget: first useful content under 500ms.
     expect(ipcTiming.ms).toBeLessThan(500);

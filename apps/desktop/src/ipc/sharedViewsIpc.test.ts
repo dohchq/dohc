@@ -13,6 +13,19 @@ import { createSharedViewsIpcHarness as harness, credentials, info, outcome, rea
 
 afterEach(() => vi.restoreAllMocks());
 
+it.each(["background", "manual"] as const)("binds the %s shared-view refresh before any service", async trigger => {
+  const h = await harness();
+  h.registry.set("other", { ...h.workspace, workspaceId: "other", rootPath: `${h.workspace.rootPath}-other` });
+  const payload = { workspaceId: "existing", trigger };
+  await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, payload)).resolves.toMatchObject({ ok: true });
+  const services = [h.warm, h.registryRead, h.fetchInfo, h.probeLog, h.storeFor,
+    h.reconcile, h.open, h.setView, h.notify];
+  services.forEach(service => service.mockClear());
+  await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { ...payload, workspaceId: "other" }))
+    .rejects.toThrow("window changed workspaces");
+  services.forEach(service => expect(service).not.toHaveBeenCalled());
+});
+
 it.each(["accept", "refresh"])("%s saves only a nonempty relay owner id", async operation => {
   for (const granterUserId of ["relay-owner", ""]) {
     const h = await harness();

@@ -3,7 +3,7 @@ import { appendFile, readdir, readFile, rename, rm, writeFile } from "node:fs/pr
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTestScratch, metadataDirAt, testMetadataDir } from "./testScratch";
-import { createAutomationRunStore, MAX_RUN_FILE_BYTES, RUN_PLAN_BUDGET_BYTES, type ClaimStanding, type ExpiringClaim, type StoredRun } from "./automationRunStore";
+import { createAutomationRunStore, EXPIRE_BATCH_RUNS, MAX_RUN_FILE_BYTES, RUN_PLAN_BUDGET_BYTES, type ClaimStanding, type ExpiringClaim, type StoredRun } from "./automationRunStore";
 
 const AUTOMATION = "collection:Tasks#bump";
 // Thirty days after 1000, when runs that ended before 1000 expire.
@@ -510,10 +510,11 @@ describe("the automation run store", () => {
 
   it("expires in batches that go on where the last stopped, and leaves no folder once an automation's runs are gone", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
-    const store = createAutomationRunStore(root, testMetadataDir);
-    for (let index = 0; index < 150; index += 1) await store.save(run(`atc_a${index}`, "done", 10));
+    // The first batch stops inside the second automation's folder.
+    const store = createAutomationRunStore(root, testMetadataDir, undefined, { expireBatchRuns: 4 });
+    for (let index = 0; index < 3; index += 1) await store.save(run(`atc_a${index}`, "done", 10));
     const deleted = "collection:Gone#old";
-    for (let index = 0; index < 150; index += 1) await store.save({ ...run(`atc_b${index}`, "done", 10), automationId: deleted });
+    for (let index = 0; index < 3; index += 1) await store.save({ ...run(`atc_b${index}`, "done", 10), automationId: deleted });
     let batches = 0;
     for (let from: string | null = null; ; batches += 1) {
       from = await store.expire(NOW, async () => "gone", from);
@@ -529,12 +530,12 @@ describe("the automation run store", () => {
 
   it("keeps a claim whose new run was saved between two batches of a pass", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
-    const store = createAutomationRunStore(root, testMetadataDir);
-    for (let index = 0; index < 250; index += 1) await store.save(run(`atc_c${index}`, "done", 10));
+    const store = createAutomationRunStore(root, testMetadataDir, undefined, { expireBatchRuns: 4 });
+    for (let index = 0; index < 5; index += 1) await store.save(run(`atc_c${index}`, "done", 10));
     const from = await store.expire(NOW, async () => "gone", null);
     expect(from).not.toBeNull();
     let waiting: string | undefined;
-    for (let index = 0; index < 250 && waiting === undefined; index += 1) {
+    for (let index = 0; index < 5 && waiting === undefined; index += 1) {
       if ((await store.runsOf(AUTOMATION, `atc_c${index}`)).runs.length > 0) waiting = `atc_c${index}`;
     }
     // Tried again under a changed automation, it ran just now.
@@ -542,6 +543,24 @@ describe("the automation run store", () => {
     await store.save({ ...run(waiting!, "done", NOW), definitionHash: other, keySeed: other });
     await expect(store.expire(NOW, async () => "gone", from)).resolves.toBeNull();
     expect((await store.runsOf(AUTOMATION, waiting!)).runs).toHaveLength(2);
+  });
+
+  it("reads at most EXPIRE_BATCH_RUNS plan files in a batch unless told otherwise", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    await store.save(run("atc_d0", "done", 10));
+    const folder = join(root, ".dohc", "automations", "runs", hashOf(AUTOMATION));
+    const [saved] = await readdir(folder);
+    const text = await readFile(join(folder, saved!), "utf8");
+    // Plain copies of one saved run: a durable save each would cost seconds on a busy disk.
+    await Promise.all(Array.from({ length: EXPIRE_BATCH_RUNS }, (_, index) => writeFile(
+      join(folder, saved!.replace(hashOf("atc_d0"), hashOf(`atc_d${index + 1}`))),
+      text.replace('"claimId":"atc_d0"', `"claimId":"atc_d${index + 1}"`),
+    )));
+    let asked = 0;
+    await expect(store.expire(NOW, async () => { asked += 1; return "open"; }, null)).resolves.not.toBeNull();
+    expect(asked).toBe(EXPIRE_BATCH_RUNS);
+    for (const expireBatchRuns of [0, -1, 1.5]) expect(() => createAutomationRunStore(root, testMetadataDir, undefined, { expireBatchRuns })).toThrow(RangeError);
   });
 
   it("lists the claims whose Undo is unfinished until each of their runs is undone", async () => {
