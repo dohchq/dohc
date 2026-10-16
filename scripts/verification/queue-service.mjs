@@ -13,8 +13,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
-import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
-import { attemptOutcome, lastNightlyPass, lineOrder, listRequests, monitorPort, nextRequest, orderOf, ownerFor, ownerOf, parseMove, pauseQueue, placeMove, placeSubmission, position, protocol, queueLanePurpose, queuePaths, readJson, readPause, restartReason, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { acquireVerificationSlot, freeDiskGb, maxVerificationLanes, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
+import { attemptOutcome, lastNightlyPass, lineOrder, listRequests, monitorPort, nextRequest, orderOf, ownerFor, ownerOf, parseMove, pauseQueue, placeMove, placeSubmission, position, protocol, queueLanePurpose, queuePaths, readJson, readPause, recordHistory, restartReason, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
 import { startMonitor, threadDirectory } from "./queue-monitor.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
@@ -46,7 +46,8 @@ export async function sweepContainers({ request, command = run } = {}) {
   };
   const ids = new Set(request ? await list([`label=dohc.verification=${request}`]) : []);
   if (!request) for (const status of ["exited", "dead"]) for (const id of await list(["name=dohc-verify-", `status=${status}`])) ids.add(id);
-  if (ids.size) await command("docker", ["rm", "--force", ...ids], { timeoutMs: 60_000, quietStdout: true });
+  // --volumes also removes each container's anonymous data volume, which would otherwise stay on the disk.
+  if (ids.size) await command("docker", ["rm", "--force", "--volumes", ...ids], { timeoutMs: 60_000, quietStdout: true });
   return ids.size;
 }
 
@@ -158,7 +159,7 @@ export async function runService({
   const requestBudgetMs = 2 * timeLimitMs;
   // Attempts in flight, by request id. Each holds one of the lane checkouts.
   const running = new Map();
-  const checkouts = [lane, `${lane}-2`];
+  const checkouts = Array.from({ length: maxVerificationLanes }, (_, index) => index ? `${lane}-${index + 1}` : lane);
   let laneCount = 1;
   // The host's CPU and free memory at the last clock tick.
   const host = { cpuBusyPercent: null, freeMemGb: null };
@@ -182,7 +183,7 @@ export async function runService({
 
   const statusPath = id => join(paths.request(id), "status.json");
   const setStatus = (id, status) => writeJson(statusPath(id), { ...status, updatedAt: new Date().toISOString() });
-  const history = event => { try { appendFileSync(paths.history, JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n"); } catch { /* History informs estimates and records moves; losing a line must not stop the queue. A request keeps its last move in its status. */ } };
+  const history = event => recordHistory(root, event);
   const beat = () => writeJson(paths.service, {
     protocol, pid: process.pid, commit, startedAt, heartbeatAt: new Date().toISOString(), lanes: laneCount,
     // Read with the runs: once a heartbeat shows the pause, no run starts that it does not list.
@@ -374,7 +375,7 @@ export async function runService({
       mkdirSync(output, { recursive: true });
       await prepare({ lane: checkout, repo, head: entry.request.head, signal: current.abort.signal });
       current.phase = "waiting for the host lane";
-      lease = await holdLane({ entry, signal: current.abort.signal, lanes: laneCount });
+      lease = await holdLane({ entry, signal: current.abort.signal, lanes: () => laneCount });
       // Rust-only runs need no Docker, so a sweep failure must not stop them.
       await sweep({}).catch(error => log(`container sweep failed: ${error.message}`));
       current.phase = "verifying";
