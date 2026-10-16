@@ -41,6 +41,7 @@ it("projects a valid pause and omits provenance from a received share", () => {
   const entry = { workspaceId: "workspace", rootPath: "/workspace", kind: "personal" as const, mode: "local-first" as const,
     syncPause: { atMs: 42, author: { kind: "person" as const, personId: "local" } } };
   expect(syncPauseFor(entry, "local")).toEqual({ atMs: 42, author: { kind: "person", personId: "local", self: true } });
+  expect(syncPauseFor({ ...entry, shareView: null as never }, "local")).toBeUndefined();
   expect(syncPauseFor({ ...entry, shareView: { shareId: "share", granterEmail: null, genericChatWritable: false,
     grantedSelector: { paths: ["note.md"], versionId: null, access: "edit" } } }, "local")).toBeUndefined();
 });

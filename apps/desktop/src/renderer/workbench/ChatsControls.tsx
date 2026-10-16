@@ -192,6 +192,34 @@ export function joinedChannelLabel(joined: JoinedSharedChannelRow, ownerRemoved 
   return `Shared by ${from}${suffix}`;
 }
 
+// A bar on a comment box's top edge that says what the comment answers, such
+// as Replying to, with × to stop.
+export function ComposerModeBar(props: {
+  testId: string;
+  cancelTestId: string;
+  cancelLabel: string;
+  onCancel: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      data-testid={props.testId}
+      className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
+    >
+      <span className="min-w-0 flex-1 truncate">{props.children}</span>
+      <button
+        type="button"
+        data-testid={props.cancelTestId}
+        aria-label={props.cancelLabel}
+        onClick={props.onCancel}
+        className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 // The read-only / ended composer replacement: honest and quiet.
 export function ComposerNotice(props: { testId: string; children: React.ReactNode }) {
   return (

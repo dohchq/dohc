@@ -4,11 +4,13 @@ import { join, relative, resolve } from "node:path";
 import { cancellationScope } from "./cancellation.mjs";
 import { pnpm, repoRoot, run } from "./process.mjs";
 import { startTiming, timed } from "./timing.mjs";
-import { nodeTestFailures, nodeTestTimes, readLog, readTestRecord, slowest, testRecordReporter } from "./flaky.mjs";
+import { nodeTestFailures, nodeTestPassed, nodeTestTimes, readLog, readTestRecord, recordedRun, rerunCommand, slowest, testRecordReporter } from "./flaky.mjs";
 import { affectedPackages, packageReferences } from "./selection.mjs";
 
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 const longestFirst = ["@dohc/ydoc-projection", "@dohc/desktop", "@dohc/sync-relay", "@dohc/app-backend-runtime"];
+const desktopRoot = join(repoRoot, "apps/desktop");
+const fileOf = test => test.slice(0, test.indexOf(" › "));
 
 export function testPlan(packages) {
   return packages.filter(({ manifest }) => manifest.scripts?.test).map(({ name, manifest }) => {
@@ -50,7 +52,8 @@ export async function runBounded(tasks, execute, concurrency = 2) {
 }
 
 // `stop` is the caller's cancellation scope: its stop interrupts these commands, and their first confirmed failure stops it.
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null, stop } = {}) {
+// `repositoryTests` is the repository lane's script: every repository test, or "test:repo:tree" for the ones that read the source tree.
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null, repositoryTests = "test:repo", stop } = {}) {
   if (runProofs !== undefined && typeof runProofs !== "function") throw new Error("runProofs must be a function.");
   mkdirSync(output, { recursive: true });
   const report = { version: 1, concurrency: 2, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
@@ -73,15 +76,15 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     if (failure) throw failure;
     stopper.signal.throwIfAborted();
   }
-  // `rerun` marks a node:test step: one that failed only in its tests runs once more.
-  async function command(name, args, { rerun = false } = {}) {
+  // `rerun` marks a node:test step with its package's directory: one that failed only in its tests runs once more.
+  async function command(name, args, { rerun } = {}) {
     await checkpoint();
     const file = join(output, name.replaceAll(/[^\w.-]/gu, "_"));
     const row = { name, args, log: `${file}.log` };
     report.steps.push(row);
     const record = `${file}.tests.jsonl`;
     const execute = log => run(...pnpm(args), { env: { ...env, DOHC_TEST_RECORD: record }, log, signal: stopper.signal });
-    return timed(row, async () => {
+    async function attempts() {
       try { return await execute(row.log); }
       catch (error) {
         // A failed build or check is not retried, and neither is a step whose report names no failed test.
@@ -93,12 +96,78 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
         row.flaky = failed;
         return result;
       }
+    }
+    // The tests that failed every try, when nothing else failed the step and each one has a command that runs it alone.
+    function failedEveryTry() {
+      const tests = rerun ? (row.retryLog ? nodeTestFailures(readLog(row.retryLog)) : [])
+        : recordedRun(record)?.outside === 0 ? readTestRecord(record).filter(test => test.failed).map(test => test.test) : [];
+      if (!tests.length || !tests.every(test => rerunCommand({ step: name, test }))) return [];
+      if (!rerun) return tests;
+      // A test that failed only the retry did not fail every try.
+      const first = nodeTestFailures(readLog(row.log));
+      if (!tests.every(test => first.includes(test))) return [];
+      // A test that failed in an earlier command of the script stopped the commands after it, which never ran.
+      let script;
+      try { script = JSON.parse(readLog(join(rerun, "package.json"))).scripts?.[args.at(-1)]; } catch { return []; }
+      if (typeof script !== "string") return [];
+      const last = script.split("&&").at(-1).trim().split(/\s+/u);
+      return tests.every(test => last.includes(fileOf(test))) ? tests : [];
+    }
+    // The whole test file, with one worker. A test can fail only after another test in its file, or fail its file in a way the report does not name.
+    function wholeFile(testFile) {
+      if (!rerun) return pnpm(["--filter", name, "exec", "vitest", "run", testFile, "--maxWorkers=1", "--no-file-parallelism", "--retry=0", "--reporter=default", `--reporter=${testRecordReporter}`]);
+      const nodeTest = [...(testFile.endsWith(".ts") ? ["--experimental-transform-types"] : []), "--test", "--test-concurrency=1", testFile];
+      return name === "repository" ? [process.execPath, nodeTest] : pnpm(["--filter", "@dohc/desktop", "exec", "node", ...nodeTest]);
+    }
+    // The failures each file names when it fails alone, which can be other tests than the ones it reran.
+    const failedAlone = [];
+    // Load from other steps can fail a test on both tries. Its file alone shows whether the file fails by itself.
+    async function passAlone(testFile, tests, base) {
+      const log = `${base}.log`, aloneRecord = `${base}.tests.jsonl`;
+      const alone = { file: testFile, outcome: "interrupted" };
+      (row.alone ??= []).push(alone);
+      await checkpoint();
+      alone.log = log;
+      try { await run(...wholeFile(testFile), { env: { ...env, DOHC_TEST_RECORD: aloneRecord, DOHC_TEST_RECORD_ALL: "1" }, log, signal: stopper.signal }); }
+      catch (error) {
+        if (!error.interrupted) {
+          alone.outcome = "failed";
+          failedAlone.push(...rerun ? nodeTestFailures(readLog(log)) : readTestRecord(aloneRecord).filter(test => test.failed).map(test => test.test));
+        }
+        throw error;
+      }
+      // Both runners pass a file whose tests did not run, so the report must show each failed test passed.
+      const report = readLog(log), recorded = readTestRecord(aloneRecord);
+      const passed = rerun ? !nodeTestFailures(report).length && tests.every(test => nodeTestPassed(report, test))
+        : recordedRun(aloneRecord)?.outside === 0 && tests.every(test => recorded.some(row => row.test === test && row.passed));
+      alone.outcome = passed ? "passed" : "no test ran";
+      if (!passed) throw new Error(`${testFile} did not pass its failed tests alone.`);
+    }
+    return timed(row, async () => {
+      try { return await attempts(); }
+      catch (error) {
+        // Before a failure stops the run, each file with a test that failed every try runs once more alone. An interrupted command did not fail by itself.
+        const tests = error.commandExitFailure ? failedEveryTry() : [];
+        if (!tests.length) throw error;
+        for (const [index, [testFile, fileTests]] of [...Map.groupBy(tests, fileOf)].entries()) {
+          try { await passAlone(testFile, fileTests, `${file}.alone-${index + 1}`); }
+          catch { throw error; }
+        }
+        row.passedAlone = tests;
+        // A node:test step's test that failed only its first try passed on retry.
+        const flaky = rerun ? nodeTestFailures(readLog(row.log)).filter(test => !tests.includes(test)) : [];
+        if (flaky.length) row.flaky = flaky;
+      }
     }, save).finally(() => {
       const recorded = readTestRecord(record);
       const flaky = [...(row.flaky ?? []), ...recorded.filter(test => test.flaky).map(test => test.test)];
       if (flaky.length) row.flaky = flaky;
-      // vitest's slow tests come from its reporter; node:test's from the spec report of the attempt that ran last.
-      const times = [...recorded.filter(test => test.seconds >= 2), ...nodeTestTimes(readLog(row.retryLog ?? row.log)).filter(test => test.seconds >= 2)];
+      // vitest's failed and slow tests come from its reporter; node:test's from the spec report of the attempt that ran last.
+      const last = readLog(row.retryLog ?? row.log);
+      const failed = [...new Set([...recorded.filter(test => test.failed).map(test => test.test), ...(rerun ? nodeTestFailures(last) : []), ...failedAlone])]
+        .filter(test => !row.passedAlone?.includes(test));
+      if (failed.length) row.failed = failed;
+      const times = [...recorded.filter(test => test.seconds >= 2), ...nodeTestTimes(last).filter(test => test.seconds >= 2)];
       if (times.length) row.slowest = slowest(times);
       save();
     }).catch(error => {
@@ -126,7 +195,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     if (!prepared) {
       await command("runtime-build", ["--filter", "@dohc/app-backend-runtime", "build"]);
     }
-    const repositoryChecks = command("repository", ["run", "test:repo"], { rerun: true });
+    const repositoryChecks = command("repository", ["run", repositoryTests], { rerun: repoRoot });
     const plan = planPackages().catch(fail);
     const databasePending = new Set();
     const packages = plan.then(async tasks => {
@@ -151,7 +220,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       await repositoryChecks;
       const tasks = await plan;
       if (tasks.some(task => task.name === "@dohc/desktop")) {
-        await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts:isolated"], { rerun: true });
+        await command("desktop-scripts", ["--filter", "@dohc/desktop", "run", "test:scripts:isolated"], { rerun: desktopRoot });
       }
       if (runProofs) {
         await databaseFinished.promise;
@@ -173,7 +242,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     // recovery fixture read. Package tests and proofs must also finish first.
     if (tasks.some(task => task.name === "@dohc/desktop")) {
       await beforeDesktopScripts?.();
-      await command("desktop-runtime-packaging", ["--filter", "@dohc/desktop", "run", "test:scripts:runtime"], { rerun: true });
+      await command("desktop-runtime-packaging", ["--filter", "@dohc/desktop", "run", "test:scripts:runtime"], { rerun: desktopRoot });
     }
     await cancellation.checkpoint();
     report.verdict = "PASS";
@@ -189,7 +258,9 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     const stopped = stopper.unfinished(report.steps, ["repository", ...(report.packages ?? []).map(task => task.name),
       ...(desktop ? ["desktop-scripts"] : []), ...(runProofs ? ["proofs"] : []), ...(desktop ? ["desktop-runtime-packaging"] : [])]);
     if (stopped) report.stopped = stopped;
-    report.flaky = report.steps.flatMap(step => (step.flaky ?? []).map(test => ({ step: step.name, test })));
+    report.flaky = report.steps.flatMap(step => [...(step.flaky ?? []).map(test => ({ step: step.name, test })),
+      ...(step.passedAlone ?? []).map(test => ({ step: step.name, test, passedAlone: true }))]);
+    report.failed = report.steps.flatMap(step => (step.failed ?? []).map(test => ({ step: step.name, test })));
     report.slowest = slowest(report.steps.flatMap(step => (step.slowest ?? []).map(test => ({ step: step.name, ...test }))));
     finish(); save();
   }

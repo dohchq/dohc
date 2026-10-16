@@ -103,6 +103,19 @@ export interface ActorNeutralWriteMetadata {
   correlationId?: string;
 }
 
+export const OPERATION_ID_PREFIX = "dohc-operation:";
+
+export function refuseCallerOperationId(id: string | undefined): void {
+  if (id?.startsWith(OPERATION_ID_PREFIX)) throw new VersionedTextStoreError("invalid-input", "Reserved operation id.");
+}
+
+export interface HistoryOperation { operationId: string; versionId: string; momentCount: number }
+export interface HistoryUndoResult extends HistoryOperation { compensationOperationId: string; deduped: boolean; materialized: boolean }
+export interface HistoryOperationsStore {
+  readHistoryOperation(input: {workspaceId: string; operationId: string}): Promise<HistoryOperation>;
+  undoHistoryOperation(input: {workspaceId: string; operationId: string; requestId: string; author?: MomentWriteAuthor}): Promise<HistoryUndoResult>;
+}
+
 // A recorded moment can also say that a live document session settled it.
 // The settle names no author, and it can carry a collaborator's synced
 // updates, so "ydoc" says how the change arrived, not who made it. Writes

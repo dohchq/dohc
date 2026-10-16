@@ -64,6 +64,7 @@ interface DesktopCliServerDependencies<State> {
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
+  serverAccount?: CliServerOptions["serverAccount"];
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   ownerAppPublication?(request: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null): Promise<OwnerAppPublicationResult>;
@@ -84,6 +85,7 @@ interface DesktopCliServerDependencies<State> {
     > | null;
     queueCloudSync(workspaceId: string): void;
     agentRunDepth(workspaceId: string): number;
+    dispatchedAgentRun(workspaceId: string): boolean;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
   currentDaemon(): Pick<EngineDaemonLifecycle, "requestWorkspace"> | null;
@@ -454,6 +456,7 @@ export function createDesktopCliServer<State>(
   async function startDesktopCliServer(): Promise<CliServerHandle> {
     return startCliServer({
       recordSuccess: dependencies.recordSuccess,
+      serverAccount: dependencies.serverAccount,
       stateDir: stateDir(),
       listWorkspaces: () =>
         listWorkspaces()
@@ -467,6 +470,7 @@ export function createDesktopCliServer<State>(
       localUserDisplayName,
       localPersonId,
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
+      dispatchedAgentRun: (workspaceId) => activity.dispatchedAgentRun(workspaceId),
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,
       // so this queues cloud sync too. The sync engine debounces a second

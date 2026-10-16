@@ -13,7 +13,7 @@ import {
   type CliResultByVerb,
 } from "./protocol";
 import { renderCliResult } from "./render";
-import { readStdinText } from "./stdin";
+import { readPassword, readStdinText } from "./stdin";
 import {
   CHAT_MESSAGE_TOO_LONG,
   MAX_CHAT_MESSAGE_BODY_BYTES,
@@ -33,6 +33,7 @@ interface CliExecutionOptions {
   cwd?: string;
   env?: Readonly<Record<string, string | undefined>>;
   readStdin?: () => Promise<string>;
+  readPassword?: () => Promise<string>;
   request?: (request: CliRequestWithoutToken) => Promise<unknown>;
   client?: CliClientOptions;
 }
@@ -68,6 +69,7 @@ function buildCliRequest(
   cwdInput: string,
   stdinBody?: string,
   runId?: string,
+  password?: string,
 ): CliRequestWithoutToken {
   const common = {
     protocolVersion: CLI_PROTOCOL_VERSION,
@@ -79,6 +81,12 @@ function buildCliRequest(
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, ...(command.agent ? { agent: command.agent } : {}) } };
     case "shareCopy":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, shareId: command.shareId, grantId: command.grantId } };
+    case "accountDeletePreview":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor } };
+    case "accountDelete":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: {
+        cwd: common.cwd, actor: common.actor, server: command.server, previewToken: command.previewToken, password: password ?? "",
+      } };
     case "accessObject":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, ref: command.ref, cursor: command.cursor } };
     case "accessSharing":
@@ -302,7 +310,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -314,11 +322,16 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     const command = parseCliArguments(options.argv, env);
     if ("help" in command) return { exitCode: 0, stdout: renderCliHelp(command), stderr: "" };
     const stdinBody = await bodyForCommand(command, options.readStdin ?? (() => readStdinText(process.stdin, command.verb === "fileChatStart" ? { bytes: MAX_CHAT_MESSAGE_BODY_BYTES, message: CHAT_MESSAGE_TOO_LONG } : undefined)));
+    const password = command.verb === "accountDelete"
+      ? await (options.readPassword ?? (() => readPassword(process.stdin, process.stderr)))()
+      : undefined;
+    if (password === "") throw new DohcCliError("account delete requires the server account password");
     const request = buildCliRequest(
       command,
       options.cwd ?? process.cwd(),
       stdinBody,
       env.DOHC_RUN_ID,
+      password,
     );
     let result: CliResultByVerb[keyof CliResultByVerb];
     if (options.request) {
@@ -331,7 +344,8 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     } else {
       result = await sendCliRequest<typeof command.verb>(request, {
         ...options.client,
-        timeoutMs: options.client?.timeoutMs ?? (command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
+        timeoutMs: options.client?.timeoutMs ?? (command.verb === "accountDelete" ? 120_000
+          : command.verb === "dataset" || command.verb === "appPublication" || command.verb === "ownerAppResponses" ? 90_000 : DEFAULT_RESPONSE_TIMEOUT_MS),
         env,
       });
     }
@@ -345,7 +359,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
           momentSide: command.verb === "moment" ? command.side : "after",
         });
     return {
-      exitCode: "kind" in result && result.kind === "partial" ? 1 : 0,
+      exitCode: ("kind" in result && result.kind === "partial") || ("disconnectError" in result && result.disconnectError !== null) ? 1 : 0,
       // Markdown prints byte for byte so redirection preserves it.
       stdout: (command.verb === "moment" || command.verb === "documentRead") && !command.json
         ? output

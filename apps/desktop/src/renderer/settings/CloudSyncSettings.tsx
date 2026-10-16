@@ -44,6 +44,9 @@ export type CloudSettings = {
   // Whether shared-with-me holds a received share, which keeps syncing while
   // this workspace's sync is off.
   hasReceivedShares?: boolean;
+  // Opens the deletion review. The shell owns it, so it outlives this page
+  // and the account row.
+  onDeleteAccount: (account: { email: string; server: string }) => void;
 };
 
 type SyncPause = NonNullable<CloudStatusResult["syncPause"]>;
@@ -248,6 +251,7 @@ export function CloudSyncSettings(props: {
           networkAccess={status.networkAccess ?? null}
           onSettled={props.cloud.onChanged}
           onError={props.cloud.onAccountError}
+          onDelete={props.cloud.onDeleteAccount}
         />
       ) : connectRow}
       {/* Main refuses to enroll a shared view: it syncs through its share. */}

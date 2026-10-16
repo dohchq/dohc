@@ -6524,6 +6524,55 @@ fn deferred_relay_work_rejects_divergence_gaps_identity_changes_and_limit_overfl
 }
 
 #[test]
+fn deferred_relay_work_charges_a_blob_it_names_twice_once() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    let identity = read_sync_identity(&engine, "ws").unwrap().unwrap();
+    let blob = vec![7; 1_000];
+    let sha = engine.put_binary_blob(&blob).unwrap();
+    // One digest as both a Y.Doc update and a binary chunk.
+    let twice = |origin: &str| {
+        envelope(
+            origin,
+            0,
+            "live.audit.application",
+            json!({"updateBlobSha256": sha, "manifest": {"chunks": [{"sha256": sha}]}}),
+        )
+    };
+    let charged = |op: &ReplicationEnvelope| {
+        serde_json::to_string(op).unwrap().len() as i64 + blob.len() as i64
+    };
+    let retained = |engine: &EngineStore, origin: &str| -> i64 {
+        engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT retained_bytes FROM relay_deferred_ops WHERE workspace_id='ws' AND origin_id=?1",
+                    [origin],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    };
+    let first = twice("a-held");
+    crate::deferred::retain(&mut engine, &identity, &[&first], &NoFaults).unwrap();
+    assert_eq!(retained(&engine, "a-held"), charged(&first));
+    let next = twice("b-held");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE relay_deferred_ops SET retained_bytes=?1",
+                [536_870_912 - charged(&next)],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    crate::deferred::retain(&mut engine, &identity, &[&next], &NoFaults)
+        .expect("work that exactly fills the limit is retained");
+    assert_eq!(retained(&engine, "b-held"), charged(&next));
+}
+
+#[test]
 fn deferred_relay_replay_rotates_between_held_origins() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);

@@ -1,7 +1,8 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
-import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
+import { createApp, deleteWorkspacePath, importData, listFileChats, moveWorkspacePath, replyToChat, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
+import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
 import { executeCli } from "@dohc/cli";
 import {
   CLI_PROTOCOL_VERSION,
@@ -57,6 +58,7 @@ import {
   type CliServerOptions,
   type CliWorkspaceContext,
 } from "./cliServer";
+import { agentWriteAuthor } from "./desktopCliServer";
 
 const WORKSPACE_ID = "workspace-cli-server";
 const SERVER_NOW_MS = Date.parse("2026-07-10T04:05:06.000Z");
@@ -204,6 +206,8 @@ describe("CLI socket server", () => {
   // The chain depth of the agent run in progress in each workspace, as main
   // reports it: this one for the fixture workspace, 0 for any other.
   let agentRunDepth: number;
+  // Whether a run dohc dispatched holds the fixture workspace's run slot.
+  let dispatchedRun: boolean;
 
   async function makeChannelReadOnly(channelId: string): Promise<void> {
     const channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId });
@@ -409,6 +413,7 @@ describe("CLI socket server", () => {
       },
     };
     agentRunDepth = 0;
+    dispatchedRun = false;
     serverOptions = {
       localPersonId: () => "person-local",
       stateDir,
@@ -444,6 +449,7 @@ describe("CLI socket server", () => {
       }),
       localUserDisplayName: () => "Sam",
       agentRunDepth: (workspaceId) => workspaceId === WORKSPACE_ID ? agentRunDepth : 0,
+      dispatchedAgentRun: (workspaceId) => workspaceId === WORKSPACE_ID && dispatchedRun,
       async onWrite() {
         calls.writes += 1;
       },
@@ -920,9 +926,12 @@ describe("CLI socket server", () => {
     agentRunDepth = 2;
     await invoke("stopSync", { cwd: workspaceRoot, actor: "human" });
     expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 2 });
+    dispatchedRun = true;
+    await invoke("stopSync", { cwd: workspaceRoot, actor: "agent", agent: "Claude" });
+    expect(stop).toHaveBeenLastCalledWith({ kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 2 });
     context.readOnly = true;
     await expect(invoke("stopSync", { cwd: workspaceRoot, actor: "agent" })).rejects.toThrow("owning workspace");
-    expect(stop).toHaveBeenCalledTimes(3);
+    expect(stop).toHaveBeenCalledTimes(4);
   });
 
   it("rejects older and newer CLIs before opening a workspace", async () => {
@@ -2247,7 +2256,9 @@ describe("CLI socket server", () => {
         return { path: input.path };
       },
     };
+    // An automation wakes an agent through dispatch.
     agentRunDepth = 3;
+    dispatchedRun = true;
 
     await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } });
     await invoke("collectionCreateRecord", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks", name: "b", fields: {} });
@@ -2260,15 +2271,16 @@ describe("CLI socket server", () => {
     await expect(invoke("collectionSetFields", { cwd: workspaceRoot, actor: "human", recordPath: "tasks/a.md", fields: { status: "parked" } }))
       .resolves.toMatchObject({ ok: false });
 
+    // A name the client gives, as "Client" and "claude-code" do, gives way to the run's.
     const woken = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 3 };
     const attribution = { actorKind: "agent", onBehalfOf: "person-local", depth: 3 };
     expect(authors).toEqual([
       woken,
       woken,
-      { ...woken, agentId: "Client" },
-      { ...woken, agentId: "Client" },
+      woken,
+      woken,
       { actorOriginId: "dohc-mcp", attribution },
-      { actorOriginId: "claude-code", attribution },
+      { actorOriginId: "dohc-mcp", attribution },
     ]);
   });
 
@@ -2331,6 +2343,40 @@ describe("CLI socket server", () => {
     const own = await post({ actor: "human", title: "Mine", body: "My own post." });
     const [mine] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${own.threadId.slice("th_".length)}` });
     expect(mine?.author.kind).toBe("human");
+  });
+
+  it("records a named MCP client's file write and reply in a dispatched run as one agent", async () => {
+    if (!store) throw new Error("Store is not available");
+    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async files => ({ ok: true, written: files.map(file => file.path) }));
+    context.writeFiles = writeFiles;
+    // Main's person is the account the chat writes are admitted under.
+    serverOptions.localPersonId = () => "verified-user-id";
+    const identity = { installationId: "install-local-user-id", account: { issuer: createActorIssuer("https://cloud.test"), userId: "verified-user-id" } };
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: request => invoke(request.verb, request.args) };
+    const posted = await post({ actor: "human", title: "Trip", body: "Plan day 2." });
+    const threadId = `thread-${posted.threadId.slice("th_".length)}`;
+    // The client announced "Codex" in its MCP handshake, and the MCP server
+    // names it on the file write. A reply names no agent.
+    async function writeAndReply() {
+      await writeWorkspaceFile(ctx, { path: "plan.txt", content: "Day 2" }, "Codex");
+      const reply = await replyToChat(ctx, { threadId: posted.threadId, body: "Planned day 2." });
+      if (!reply.ok) throw new Error(reply.reason);
+      const message = (await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId })).find((row) => row.id === reply.messageId);
+      const origin = writeFiles.mock.lastCall?.[1];
+      if (!origin || !message?.authorActorKey) throw new Error("Expected the file write and the reply.");
+      return {
+        file: deriveMomentActor(agentWriteAuthor(origin), { source: "own-store", workspaceId: WORKSPACE_ID, identity }, "Codex").key,
+        reply: parseActorKey(message.authorActorKey),
+      };
+    }
+
+    dispatchedRun = true;
+    const during = await writeAndReply();
+    expect(during.reply).toEqual(during.file);
+
+    // Outside a run, the client's writes keep the name it gave.
+    dispatchedRun = false;
+    expect((await writeAndReply()).file).toMatchObject({ kind: "agent", claimedName: "Codex" });
   });
 
   it("creates a Markdown document with provenance the door derives", async () => {

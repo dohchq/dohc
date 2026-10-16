@@ -1,14 +1,23 @@
 //! Transaction helpers for outbound replication journals.
 
 use dohc_engine_domain::{
-    DomainError, SecretMomentRecord, SecretOp, SecretWriteResult, VersionRecord,
+    DomainError, HOSTED_REPLICA_WRITE_REFUSED, SecretMomentRecord, SecretOp, SecretWriteResult,
+    VersionRecord,
 };
 use dohc_engine_storage::StorageError;
+use dohc_engine_sync::SyncError;
 
-fn outbound_domain(error: dohc_engine_sync::SyncError) -> DomainError {
-    DomainError::Storage(StorageError::persist_public(std::io::Error::other(
-        format!("outbound replication journal append failed: {error}"),
-    )))
+/// A hosted replica's refusal stays the caller's input error; any other
+/// journal failure fails the write as storage.
+fn outbound_domain(error: SyncError) -> DomainError {
+    match error {
+        SyncError::InvalidInput {
+            reason: reason @ HOSTED_REPLICA_WRITE_REFUSED,
+        } => DomainError::InvalidInput { reason },
+        error => DomainError::Storage(StorageError::persist_public(std::io::Error::other(
+            format!("outbound replication journal append failed: {error}"),
+        ))),
+    }
 }
 
 fn relay_enabled_in_tx(

@@ -1,3 +1,4 @@
+import type { TimelineReads } from "../workspaces/historyTimeline";
 import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -12,7 +13,7 @@ import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
 import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
 import type { EngineMomentAuthorNames } from "./engineHistoryIpc";
-import { GetCollectionRecordHistoryResult, captureRecoveryOperations, fileObservationOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
+import { GetCollectionRecordHistoryResult, historyOperations, captureRecoveryOperations, fileObservationOperations, engineYDocAdmissionOperations, engineYDocSaveOperations } from "./bridgeContract";
 import { operationBridge } from "./operationTable";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
@@ -44,6 +45,25 @@ const healthy: SyncStatusResult = { state: "synced", pendingChangeCount: 0, last
 const refused: SyncStatusResult = { ...healthy, historyCaptureFailed: true, engineStoreRefused: "foreign-database" };
 const openPayload = { workspaceId: "workspace", sessionId: "renderer-session", path: "notes/a.md" };
 const descriptor = { id: "image", mimeType: "image/png", created: 1, ref: "assets/image.png", sha256: "a".repeat(64) };
+
+describe("workspace engine sender binding", () => {
+  it.each([
+    CHANNELS.getSyncStatus, CHANNELS.rebuildEngineStore, CHANNELS.listEngineMoments,
+    CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
+  ])("binds %s before reading or changing another open workspace", async channel => {
+    const h = await harness();
+    const input = { workspaceId: "workspace",
+      ...(channel === CHANNELS.readEngineMoment || channel === CHANNELS.restoreEngineMomentFile ? { momentId: "moment" } : {}) };
+    await expect(h.invoke(channel, input)).resolves.toBeDefined();
+    const services = [h.requireEngineCapture, h.requireWorkspace, h.getStatus,
+      h.syncProjection, h.writable, h.canonicalWorkspaceFor, h.requireSessions,
+      h.closeActivity, h.probe, h.move, h.reopen, h.notify,
+      h.capture.listMoments, h.capture.readMoment, h.capture.restoreFileToBeforeMoment];
+    services.forEach(service => service.mockClear());
+    await expect(h.invoke(channel, { ...input, workspaceId: "other" })).rejects.toThrow("no longer active");
+    services.forEach(service => expect(service).not.toHaveBeenCalled());
+  });
+});
 
 type SharedHistoryStore = Pick<ReturnType<ReturnType<typeof createReceivedShareEngineAccess>["storeFor"]>, "listHistoryPage" | "getMoment">;
 
@@ -197,7 +217,9 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
   const recordHeldFiles = vi.fn();
   const prepareRecordHistoryPeople = vi.fn<(_workspaceId: string, userIds: readonly string[], _sender: Sender) => void>();
   const prepareNamed = vi.fn<NonNullable<EngineMomentAuthorNames["prepare"]>>();
+  const historyCollections = vi.fn<() => Promise<Pick<TimelineReads, "scope" | "local" | "remote">>>(async () => ({ scope: "test", local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw new Error("unexpected remote history"); } }));
   const registrations = createWorkspaceEngineIpc({
+    historyCollections,
     readWorkspaceEnginePolicy: readPolicy,
     localPersonId: () => "person-local",
     localPersonName: () => "Ice",
@@ -220,7 +242,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     prepareRecordHistoryPeople,
     retryOwnerLiveDelivery, retryCloudSync,
     retryFileObservation: retry ? id => { void retryFileObservation(id); return retry.read(); } : retryFileObservation,
-    requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
+    assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
     requireEngineSessions: requireSessions, closeDispatchRunActivity: closeActivity,
     probeEngineStoreRefusal: probe, moveEngineStoreAside: move,
@@ -240,7 +262,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, retryFileObservation, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
-    storeWorkspaces, readPolicy,
+    storeWorkspaces, readPolicy, historyCollections,
     sent, recordHistoryPersonName, prepareRecordHistoryPeople, recordHeldFiles,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
     /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
@@ -256,7 +278,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string, re
 
 const channels = [
   CHANNELS.listCollections, CHANNELS.getCollection, CHANNELS.queryCollectionRecords, CHANNELS.getCollectionRecordHistory,
-  CHANNELS.locateRecordHistoryRun, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
+  CHANNELS.locateRecordHistoryRun, historyOperations.listHistory.channel, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, captureRecoveryOperations.retryHeldCapture.channel, captureRecoveryOperations.getCaptureRecoveryStatus.channel, captureRecoveryOperations.clearCaptureRecovery.channel,
   fileObservationOperations.retryFileObservation.channel, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
@@ -721,9 +743,8 @@ describe("workspace engine IPC registrations", () => {
     await expect(result).rejects.toThrow("window changed workspaces");
   });
 
-  it("keeps history admission independent of renderer admission and omits absent paging fields", async () => {
+  it("reads the sender's history and omits absent paging fields", async () => {
     const h = await harness();
-    await h.renderers.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, "document-1");
     await h.invoke(CHANNELS.listEngineMoments);
     expect(h.requireEngineCapture).toHaveBeenCalledWith("workspace", "Engine history");
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({});
@@ -912,7 +933,7 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness();
     h.syncProjection.mockResolvedValue(healthy);
     await expect(h.invoke(CHANNELS.getSyncStatus)).resolves.toEqual(healthy);
-    expect(h.syncProjection).toHaveBeenCalledWith(h.workspace, refused);
+    expect(h.syncProjection).toHaveBeenCalledWith(h.physical, refused);
     expect(h.canonicalWorkspaceFor).not.toHaveBeenCalled();
     h.syncProjection.mockResolvedValue({ ...healthy, pendingChangeCount: -1 });
     await expect(h.invoke(CHANNELS.getSyncStatus)).rejects.toThrow();
@@ -932,7 +953,7 @@ describe("registered engine-store repair", () => {
     );
     await entered.promise;
     const repair = h.invoke(CHANNELS.rebuildEngineStore);
-    expect(h.writable).toHaveBeenCalledWith(h.workspace);
+    expect(h.writable).toHaveBeenCalledWith(h.physical);
     expect(h.canonicalWorkspaceFor).not.toHaveBeenCalled();
     expect(h.requireSessions).not.toHaveBeenCalled();
     release.resolve();
@@ -1277,4 +1298,83 @@ describe("owner History path policy", () => {
     expect(h.readPolicy).not.toHaveBeenCalled();
     expect(h.notify).not.toHaveBeenCalled();
   });
+});
+
+describe("merged History IPC", () => {
+  it("rejects a reply after this renderer changes workspace", async () => {
+    const h = await harness(), reached = deferred<void>(), reply = deferred<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>>();
+    h.capture.listMoments.mockImplementation(async () => { reached.resolve(); return reply.promise; });
+    const result = Promise.resolve(h.invoke(historyOperations.listHistory.channel));
+    const rejected = expect(result).rejects.toThrow("window changed workspaces");
+    await reached.promise;
+    await h.renderers.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, "document-1");
+    reply.resolve({ ...historyPage(), nextCursor: null });
+    await rejected;
+  });
+
+  it("fails closed before reading either source when policy is unreadable", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: null, visibilityPolicy: null, errors: ["Invalid policy"], unreadable: [".dohc/files.toml"] });
+    await expect(h.invoke(historyOperations.listHistory.channel)).resolves.toMatchObject({ status: "policy-unreadable" });
+    expect(h.capture.listMoments).not.toHaveBeenCalled();
+    expect(h.historyCollections).not.toHaveBeenCalled();
+  });
+
+  it("discards policy-hidden positions and retains protected activity", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    const hidden = historyPage("private/a.md").moments[0]!;
+    h.capture.listMoments.mockResolvedValue({ ...historyPage(), moments: [hidden, { ...hidden, id: "protected", protected: true, momentOrder: 9 }], nextCursor: null });
+    await expect(h.invoke(historyOperations.listHistory.channel)).resolves.toMatchObject({ status: "ready", entries: [{ kind: "file", moment: { id: "protected" } }], nextCursor: null });
+  });
+
+  it("reads imported share scope without owner capture, policy, or Collection access", async () => {
+    const listHistoryPage = vi.fn(async () => ({ activeVersion: { id: "main" }, ...historyPageFields,
+      moments: historyPage().moments, nextCursor: null, latestMomentOrder: 10, protectedMoments: [] }));
+    const h = await harness({ listHistoryPage, getMoment: vi.fn(async () => null) } as unknown as SharedHistoryStore);
+    await expect(h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", object: { kind: "file", objectId: "object" } })).resolves.toMatchObject({ status: "ready", entries: [{ kind: "file" }] });
+    expect(listHistoryPage).toHaveBeenCalledWith({ workspaceId: "workspace", objectId: "object", limit: 50 });
+    expect(h.requireEngineCapture).not.toHaveBeenCalled();
+    expect(h.readPolicy).not.toHaveBeenCalled();
+    expect(h.historyCollections).not.toHaveBeenCalled();
+  });
+
+  it("keeps Collections out of named versions and routes per-file object identity", async () => {
+    const h = await harness();
+    h.capture.listMoments.mockResolvedValue({ ...historyPage(), startCursor: { ...historyPageFields.startCursor, versionId: "branch" }, moments: [], nextCursor: null });
+    const local = vi.fn(() => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }));
+    h.historyCollections.mockResolvedValue({ scope: "test", local, remote: async () => { throw Error("unexpected remote"); } });
+    await expect(h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", versionId: "branch" })).resolves.toMatchObject({ versionId: "branch", entries: [] });
+    expect(local).not.toHaveBeenCalled();
+    expect(h.historyCollections).not.toHaveBeenCalled();
+    await h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", versionId: "branch", object: { kind: "file", objectId: "object" } });
+    expect(h.capture.listMoments).toHaveBeenLastCalledWith({ limit: 50, versionId: "branch", objectId: "object" });
+    expect(h.historyCollections).not.toHaveBeenCalled();
+  });
+});
+
+it("does not start the Collection host for main per-file History", async () => {
+  const h = await harness();
+  await h.invoke(historyOperations.listHistory.channel, { workspaceId: "workspace", object: { kind: "file", objectId: "object" } });
+  expect(h.historyCollections).not.toHaveBeenCalled();
+});
+
+it("keys timeline prefetches by the lazily resolved workspace attachment scope", async () => {
+  const h = await harness(), datasetId = "00000000-0000-4000-8000-000000000008";
+  let scope = "attachment-one", calls = 0;
+  const remote = vi.fn(async () => {
+    calls++;
+    return { datasetId, name: "Collection", lineage: "a".repeat(64), headRevision: 2,
+      entries: [{ revision: 2, recordedAtMs: 2000 }, { revision: 1, recordedAtMs: 1000 }].map(row => ({
+        ...row, operation: "Add record", callerReference: null, approvedRevisionHash: "b".repeat(64), changesetBytes: 0, attachmentCount: 0
+      })), nextBeforeRevision: null };
+  });
+  h.historyCollections.mockImplementation(async () => ({ scope, local: () => ({ pages: [], transferred: [datasetId], sourceIds: [datasetId], sourceCount: 1 }), remote }));
+  const input = { workspaceId: "workspace", object: { kind: "dataset", datasetId }, limit: 1 };
+  await h.invoke(historyOperations.listHistory.channel, input);
+  await vi.waitFor(() => expect(calls).toBe(2));
+  scope = "attachment-two";
+  // Refresh and consume the same revision. The old attachment's cache must not match.
+  await h.invoke(historyOperations.listHistory.channel, input);
+  await vi.waitFor(() => expect(calls).toBe(4));
 });

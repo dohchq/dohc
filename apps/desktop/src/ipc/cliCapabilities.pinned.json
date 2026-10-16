@@ -166,6 +166,12 @@
     ],
     "shareCopy": [
       "share.copy.read"
+    ],
+    "accountDeletePreview": [
+      "account.delete.preview"
+    ],
+    "accountDelete": [
+      "account.delete"
     ]
   },
   "public": {
@@ -242,6 +248,8 @@
     "automation retry": "automation.run.retry",
     "automation press": "automation.button.press",
     "sync stop": "workspace.sync.stop",
-    "share copy": "share.copy.read"
+    "share copy": "share.copy.read",
+    "account deletePreview": "account.delete.preview",
+    "account delete": "account.delete"
   }
 }

@@ -1,6 +1,7 @@
 import { runInKeyedLane } from "../keyedLane";
 import type { CloudStopSyncResult, SyncStatusResult } from "../ipc/bridgeContract";
 import type { RegistryEntry } from "./registryStore";
+import { shareViewIsPresent } from "./shareViewMarker";
 import type { WorkspaceSyncPause, WorkspaceSyncPauseAuthor, WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 
 const syncTransitions = new Map<string, Promise<void>>();
@@ -45,7 +46,7 @@ export function createWorkspaceSyncStop(dependencies: {
         ...(status.syncPause ? { syncPause: status.syncPause } : {}),
         status,
       });
-      if (workspace.shareView) {
+      if (shareViewIsPresent(workspace.shareView)) {
         throw new Error("This workspace syncs through a received share. Open the owner's workspace to stop its sync.");
       }
       if (!workspace.remote) return result();

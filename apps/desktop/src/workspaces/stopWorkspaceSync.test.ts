@@ -106,11 +106,13 @@ describe("stop one workspace's sync", () => {
     await h.service.close(h.workspace, h.state);
   });
 
-  it("refuses a received share before touching sessions or sync", async () => {
+  it.each([null, {
+    shareId: "received", granterEmail: null, genericChatWritable: false,
+    grantedSelector: { paths: ["note.md"], versionId: null, access: "edit" as const },
+  }])("refuses a received share before touching sessions or sync (%j)", async shareView => {
     const h = await fixture();
     const operation = { ...h.operation(), workspace: { ...h.operation().workspace,
-      shareView: { shareId: "received", granterEmail: null, genericChatWritable: false,
-        grantedSelector: { paths: ["note.md"], versionId: null, access: "edit" as const } } } };
+      shareView: shareView as import("./registryStore").RegistryEntry["shareView"] } };
     await expect(h.stop(operation)).rejects.toThrow("received share");
     expect(h.steps).toEqual([]);
     expect(h.pauseRemote).not.toHaveBeenCalled();

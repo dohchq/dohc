@@ -81,6 +81,7 @@ function cloud(status: CloudStatusResult | null, overrides: Partial<CloudSetting
     onConnect: vi.fn(),
     onError: vi.fn(),
     onAccountError: vi.fn(),
+    onDeleteAccount: vi.fn(),
     ...overrides,
   };
 }
@@ -154,6 +155,23 @@ describe("CloudSyncSettings", () => {
     expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
     // The page draws from the shell's read; it reads nothing itself.
     expect(bridgeMock.cloudStatus).not.toHaveBeenCalled();
+  });
+
+  it("offers Delete account beside Disconnect, for the account the row shows", async () => {
+    const logout = deferred<void>();
+    bridgeMock.cloudLogout.mockReturnValueOnce(logout.promise);
+    const settings = cloud({ ...SIGNED_IN, serverUrl: "https://dohc.hollis.studio/" });
+    render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
+
+    const remove = within(screen.getByTestId("settings-row-account")).getByTestId("cloud-delete-account") as HTMLButtonElement;
+    expect(remove.textContent).toBe("Delete account…");
+    fireEvent.click(remove);
+    expect(settings.onDeleteAccount).toHaveBeenCalledWith({ email: "sam@hollis.studio", server: "https://dohc.hollis.studio" });
+
+    // Not while Disconnect is ending the same session.
+    fireEvent.click(screen.getByTestId("cloud-disconnect"));
+    expect(remove.disabled).toBe(true);
+    await act(async () => logout.resolve());
   });
 
   // The words a mark cannot carry reach the keyboard and a screen reader, not
