@@ -11,7 +11,7 @@ const receive = {maxPayload: 1024, maxFragments: 8, maxBufferedChunks: 8, closeT
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {for (const cleanup of cleanups.splice(0).reverse()) await cleanup();});
 function request(cookie = `${cookieName}=account-secret; link-secret=not-forwarded`): IncomingMessage {
-  return {rawHeaders: ["Host", "share.example.test", "Origin", origin, "Cookie", cookie]} as IncomingMessage;
+  return {rawHeaders: ["Host", "share.example.test", "Origin", origin, "Cookie", cookie, "x-dohc-share-web-api-version", "99", "x-dohc-api-version", "99"]} as IncomingMessage;
 }
 
 async function fixture(reject = false) {
@@ -44,6 +44,8 @@ it("passes only account credentials and preserves early binary data until the ga
   if (!route) throw new Error("Expected route.");
   expect(f.input()!.url).toBe(`/sync/live/named?session=${discriminator}`);
   expect(f.input()!.headers).toMatchObject({origin, cookie: `${cookieName}=account-secret`, "x-dohc-relay-exchange-key": "x".repeat(32)});
+  expect(f.input()!.headers["x-dohc-share-web-api-version"]).toBeUndefined();
+  expect(f.input()!.headers["x-dohc-api-version"]).toBeUndefined();
   expect(f.input()!.headers["sec-websocket-protocol"]).toBe(`dohc-live-v1,dohc-live-ticket.${token}`);
   expect(route.socket.isPaused).toBe(true);
   const message = once(route.socket, "message");

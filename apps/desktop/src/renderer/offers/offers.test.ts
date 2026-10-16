@@ -4,8 +4,8 @@ import { agentRosterPickIsPresent, detectAgentAddressed, mapAgentRosterPick, typ
 import { observeFolderAppOffers, readFolderAppOffer } from "./folderApp";
 const candidate = { id: "agent:default", kind: "agent" as const, handle: "agent", label: "Agent" };
 const pick = { candidate, from: 0, to: 6 };
-const facts: AddressedAgentFacts = { workspaceId: "one", agentId: candidate.id, reach: null, runnerAvailable: false,
-  runState: { activeRun: null, lastRun: null }, versionRunState: null };
+const facts: AddressedAgentFacts = { workspaceId: "one", agentId: candidate.id, presentation: { group: "", hue: null, self: true },
+  runner: { command: true, enabled: true }, runActive: false, paused: false, liveRun: false, reach: "C:\\work" };
 
 describe("CSV preview offer", () => {
   it.each([0, MAX_CSV_PREVIEW_ROWS - 1, MAX_CSV_PREVIEW_ROWS])("does not offer at %i rows", totalRows => {
@@ -23,17 +23,31 @@ describe("CSV preview offer", () => {
   });
 });
 describe("agent pick offer", () => {
-  it("requires a roster pick and matching live agent facts", () => {
+  it("requires a roster pick of the agent the facts describe", () => {
     expect(detectAgentAddressed("one", null, facts)).toBeNull(); // Typed @agent has no pick.
-    expect(detectAgentAddressed("one", { ...pick, candidate: { ...candidate, kind: "user" } }, facts)).toBeNull();
-    expect(detectAgentAddressed("one", pick, { ...facts, agentId: "other" })).toBeNull();
-    expect(detectAgentAddressed("one", pick, facts)).toMatchObject({ agent: candidate, reach: null, runnerAvailable: false,
-      tryInVersion: { available: false, reason: "no-recoverable-discard" } });
+    expect(detectAgentAddressed("one", { ...candidate, kind: "user" }, facts)).toBeNull();
+    expect(detectAgentAddressed("one", candidate, { ...facts, agentId: "other" })).toBeNull();
+    expect(detectAgentAddressed("one", candidate, null)).toBeNull();
+    expect(detectAgentAddressed("one", candidate, facts)).toMatchObject({ agent: candidate, state: "runs", working: false, reach: "C:\\work" });
   });
-  it("preserves actual reach and run state without inventing availability", () => {
-    const run = { id: "run", agentId: "default", onBehalfOf: "person", startedAt: 1, status: "running" as const };
-    expect(detectAgentAddressed("one", pick, { ...facts, reach: ["docs"], runnerAvailable: true, runState: { ...facts.runState, activeRun: run } }))
-      .toMatchObject({ reach: ["docs"], runnerAvailable: true, runState: { activeRun: run } });
+  it.each([
+    ["runs", {}],
+    ["working", { runActive: true }],
+    ["working", { liveRun: true }],
+    ["paused", { paused: true, liveRun: true }],
+    // Dispatch fails the request before a pause or a busy agent matters.
+    ["runner-off", { runner: { command: true, enabled: false }, paused: true }],
+    ["no-command", { runner: { command: false, enabled: true } }],
+    ["no-command", { runner: { command: false, enabled: false } }],
+    ["unknown", { runner: null }],
+    ["unknown", { paused: null }],
+    ["unknown", { liveRun: null }],
+  ] as const)("is %s by dispatch's rule for %j", (state, override) => {
+    expect(detectAgentAddressed("one", candidate, { ...facts, ...override })?.state).toBe(state);
+  });
+  it("keeps a known run beside an unknown pause, and invents no run", () => {
+    expect(detectAgentAddressed("one", candidate, { ...facts, paused: null, runActive: true })).toMatchObject({ state: "unknown", working: true });
+    expect(detectAgentAddressed("one", candidate, { ...facts, liveRun: null, runActive: null })).toMatchObject({ state: "unknown", working: false });
   });
   it("maps edits before a picked reference and removes it when replaced", () => {
     const moved = mapAgentRosterPick(pick, { from: 0, to: 0, insertedLength: 5 });
@@ -68,8 +82,8 @@ describe("workspace response guard", () => {
 });
 
 it("rejects agent facts from A after switching the roster to B with the same agent id", () => {
-  expect(detectAgentAddressed("two", pick, facts)).toBeNull();
-  expect(detectAgentAddressed("two", pick, { ...facts, workspaceId: "two" })?.workspaceId).toBe("two");
+  expect(detectAgentAddressed("two", candidate, facts)).toBeNull();
+  expect(detectAgentAddressed("two", candidate, { ...facts, workspaceId: "two" })?.state).toBe("runs");
 });
 it("guards offer-specific signals with the workspace generation", () => {
   let token = { workspaceId: "one", generation: 1 };

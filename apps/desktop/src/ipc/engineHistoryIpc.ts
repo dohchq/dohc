@@ -164,7 +164,7 @@ function automationAuthorOf(author: MomentAuthor | undefined, names: EngineMomen
   return automationAuthor === null ? {} : { automationAuthor };
 }
 
-function engineMomentForIpc(
+export function engineMomentForIpc(
   moment: WorkspaceEngineMomentSummary,
   names: EngineMomentAuthorNames,
 ): EngineMomentRecord {

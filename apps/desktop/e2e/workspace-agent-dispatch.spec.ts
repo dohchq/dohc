@@ -26,7 +26,10 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     desktop = await launchDesktopApp({ workspace: temp, env });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
-    await openMyAgent(page);
+    // No runner is set up yet, so there is no agent channel: adding the
+    // agent is the opt-in that creates it.
+    await page.getByTestId(activityPin("chats")).click();
+    await expect(page.getByTestId("chats-view")).toBeVisible();
     await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-add-agent-open").click();
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     for (const name of ["Claude Code", "Codex"]) {
@@ -101,6 +104,34 @@ async function openMyAgent(page: Page): Promise<void> {
   await page.getByTestId("chats-my-agent").click();
   await expect(page.getByTestId("chats-channel-title")).toHaveText("My agent");
 }
+
+test("picking the agent in a group's post says it runs when you send, and the offer leaves after the send", async () => {
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await seedWorkspaceManifest(temp, "agent-dispatch-offer-e2e");
+    await seedRunnerSettings(temp, "report");
+    desktop = await launchDesktopApp({ workspace: temp });
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    const page = desktop.page;
+    await openMyAgent(page);
+    await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
+
+    const composer = page.getByTestId("chats-new-thread-composer");
+    await composer.pressSequentially("@ag");
+    await page.locator('[data-testid="chats-new-thread-mention-option"][data-candidate-id="agent:default"]').click();
+    const offer = page.getByTestId("composer-agent-offer");
+    await expect(offer).toHaveAttribute("data-state", "runs");
+    await expect(offer.getByTestId("composer-agent-offer-words")).toHaveText("Runs when you send");
+
+    await composer.pressSequentially("check the exports");
+    await composer.press("Enter");
+    await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);
+    await expect(page.getByTestId("composer-agent-offer")).toHaveCount(0);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
 
 test("My agent dispatches a fresh successful run for each human message", async () => {
   const temp = await createTempWorkspace();
@@ -197,7 +228,7 @@ test("an agent's question with choices is a poll; picking one answers it and the
   }
 });
 
-test("My agent posts a durable failure note when the runner exits silently", async () => {
+test("a runner that exits silently leaves the thread alone and posts a failed-run notice", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "agent-dispatch-failure-e2e";
@@ -214,19 +245,18 @@ test("My agent posts a durable failure note when the runner exits silently", asy
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(page.getByTestId("chats-thread-view")).toBeVisible();
 
-    const failureNote = page
-      .getByTestId("chats-message")
-      .filter({
-        hasText:
-          "⚠ Agent run failed (exit 3). Open the run chip for details.",
-      });
-    await expect(failureNote).toHaveCount(1);
-    await expect(failureNote.getByTestId("chats-message-body")).toHaveText(
-      "⚠ Agent run failed (exit 3). Open the run chip for details.",
-    );
-    await expect(failureNote.getByTestId("chats-comment-agent-badge")).toHaveCount(0);
-    await expect(failureNote.getByTestId("chats-message-author")).toHaveText("dohc");
-    await expect(failureNote.getByTestId("chats-message-author")).toHaveAttribute("data-author-kind", "system");
+    // The failure is a row in Notices. The thread keeps only what people and
+    // the agent wrote, so once the notice is there it still holds one post.
+    await page.getByTestId("notice-center-toggle").click();
+    // "failed", not "failed to start": the runner started, then exited silently.
+    await expect(page.getByTestId("notice-center").getByText(
+      'Your agent\'s run in "audit the projections" failed',
+      { exact: true },
+    )).toBeVisible();
+    const messages = page.getByTestId("chats-message");
+    await expect(messages).toHaveCount(1);
+    await expect(messages).toHaveAttribute("data-author-kind", "human");
+    await expect(messages).toContainText("audit the projections");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

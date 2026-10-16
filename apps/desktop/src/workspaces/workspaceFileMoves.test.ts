@@ -739,7 +739,7 @@ describe("agent moves and deletes", () => {
     const entered = barrier(), finish = barrier();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
-      const pending = f.engine().changePathsAs(["a.txt"], { operation: "delete", author: named, correlationId: "renew-test" },
+      const pending = f.engine().changePathsAs(["a.txt"], { operation: "delete", author: named, operationId: "dohc-operation:renew-test" },
         async () => { entered.release(); await finish.promise; }, () => []);
       await entered.promise;
       await vi.advanceTimersByTimeAsync(10_000);
@@ -968,7 +968,7 @@ describe("a person's delete", () => {
     const seen = await f.start();
     try {
       const authored = { operation: "delete" as const,
-        author: { kind: "human" as const, humanId: "local:installation" }, correlationId: "snapshot" };
+        author: { kind: "human" as const, humanId: "local:installation" }, operationId: "dohc-operation:snapshot" };
       const changing = f.engine().changePathsAs(["tasks/hand.md"], authored, async engine => {
         await rm(join(f.rootPath, "tasks/hand.md"));
         return await engine.delete("tasks/hand.md");
@@ -1236,5 +1236,37 @@ describe("WorkspaceRef move identity", () => {
       expect(results.every(file => file.status === "absent" || (file.status === "found" && file.path.startsWith("dir/")))).toBe(true);
       expect(await f.engine().fileObjectIdForPath("moved/1.txt")).toBeNull();
     } finally { await f.engine().stop(); }
+  });
+});
+
+describe("History operation admission",()=>{
+  it("mints distinct operation IDs for move, agent delete and person delete",async()=>{
+    const requests:Request[]=[];
+    const f=await fixture({beforeRequest:request=>{requests.push(request);}});
+    for(const name of ["move.txt","agent.txt","person.txt"]) await write(f.rootPath,name,name);
+    await f.start();
+    try {
+      expect(await f.move("move.txt","moved.txt")).toMatchObject({ok:true});
+      expect(await f.remove("agent.txt")).toMatchObject({ok:true});
+      expect(await f.removeByHand("person.txt")).toMatchObject({trashed:true});
+      const ids=requests.filter(r=>r.method==="capture.hold").map(r=>(r.params as {operationId?:string}).operationId).filter(id=>id!==undefined);
+      expect(ids).toHaveLength(3);
+      expect(new Set(ids).size).toBe(3);
+      for(const id of ids) expect(id).toMatch(/^dohc-operation:[a-f0-9-]{36}$/);
+      for(const r of requests.filter(r=>r.method==="versionedText.rename" || r.method==="versionedText.delete")) expect(r.params).not.toHaveProperty("correlationId");
+    } finally {await f.engine().stop();}
+  });
+  it("refuses reserved caller IDs at authored write, restore and app-response removal",async()=>{
+    const f=await fixture();
+    await write(f.rootPath,"kept.md","Before");
+    await f.start();
+    const id="dohc-operation:forged";
+    try {
+      await expect(f.engine().writeAuthoredFile(join(f.rootPath,"kept.md"),"After",named,{correlationId:id})).rejects.toThrow("Reserved operation id.");
+      await expect(f.engine().writeAuthoredFile(join(f.rootPath,"kept.md"),"After",named,{requestId:id})).rejects.toThrow("Reserved operation id.");
+      await expect(f.engine().restoreFileToBeforeMoment("before",person,{expectedHeadMomentId:"head",requestId:id})).rejects.toThrow("Reserved operation id.");
+      await expect(f.engine().undoAcceptedAppResponse({requestId:id,acceptanceId:"a",objectId:"o",momentId:"m",publicPrincipalId:"p",versionId:"main",collectionPath:"responses",path:"responses/a.md",grantId:"g"})).rejects.toThrow("Reserved operation id.");
+      expect(await readFile(join(f.rootPath,"kept.md"),"utf8")).toBe("Before");
+    } finally {await f.engine().stop();}
   });
 });

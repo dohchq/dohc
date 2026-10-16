@@ -1,3 +1,4 @@
+import {fetchShareWeb} from "./apiVersion";
 import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import {LiveAuthorityUnavailableError, parseNamedLiveBrowserLimits, type NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -12,7 +13,7 @@ export interface NamedRecipientFiles {subjectName: string | null; sharerName: st
 export class ShareAccessRemovedError extends Error { constructor() { super("The owner removed your access."); } }
 export async function namedRequest(path: string, signal: AbortSignal, body?: unknown): Promise<unknown> {
   signal = AbortSignal.any([signal, AbortSignal.timeout(RETRY_BUDGET_MS)]);
-  const response = await fetch(path, {method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store",
+  const response = await fetchShareWeb(path, {method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store",
     redirect: "error", signal, headers: {accept: "application/json", ...(body === undefined ? {} : {"content-type": "application/json"})},
     ...(body === undefined ? {} : {body: JSON.stringify(body)})});
   try {

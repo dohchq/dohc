@@ -163,6 +163,12 @@
     ],
     "shareCopy": [
       "share.copy.read"
+    ],
+    "accountDeletePreview": [
+      "account.delete.preview"
+    ],
+    "accountDelete": [
+      "account.delete"
     ]
   },
   "public": {
@@ -171,6 +177,7 @@
     "document read": "document.read",
     "document edit": "document.edit",
     "document create": "document.create",
+    "document chats": "file.chats.list",
     "document comment": "file.chat.start",
     "chat groups": "group.list",
     "chat threads": "chat.threads.list",
@@ -237,6 +244,8 @@
     "automation run": "automation.run.read",
     "automation retry": "automation.run.retry",
     "automation press": "automation.button.press",
-    "share copy": "share.copy.read"
+    "share copy": "share.copy.read",
+    "account deletePreview": "account.delete.preview",
+    "account delete": "account.delete"
   }
 }

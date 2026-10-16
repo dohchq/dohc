@@ -150,6 +150,42 @@ jobs:
               - 'rust-toolchain.toml'
               - '.gitignore'
               - '.github/workflows/pr-checks.yml'
+            # Only the local verifier reads this filter; no job uses it. When
+            # the JavaScript gate runs, a change here runs every repository
+            # test (pnpm test:repo). Any other change runs only the tests that
+            # read the source tree (pnpm test:repo:tree). A repository test
+            # that reads a file outside scripts/, tools/, .github/, and the
+            # root files adds that path here.
+            repository:
+              - 'scripts/**'
+              - 'tools/**'
+              - '.github/**'
+              # Every root file: the manifest, lockfile, workspace list, ignore
+              # rules, and self-host files that the tests read.
+              - '*'
+              - '.*'
+              # Tests read every workspace manifest, and the manifests decide
+              # the installed tools that the tests import.
+              - '**/package.json'
+              # Most verification tests import the desktop's engine staging.
+              - 'apps/desktop/scripts/require-e2e-engine.mjs'
+              # desktop-build-cancellation.test.mjs runs the engine build and
+              # the dev launcher; desktop-release-scripts.test.mjs reads the
+              # engine build and the packaging configuration.
+              - 'apps/desktop/scripts/build-workspace-engine.mjs'
+              - 'apps/desktop/scripts/dev.mjs'
+              - 'apps/desktop/electron-builder.yml'
+              # debug.test.mjs and verification.test.mjs import the shutdown budgets.
+              - 'apps/desktop/src/shutdownBudgets.ts'
+              # artifact-inputs.test.mjs copies these into its fixtures.
+              - 'apps/desktop/src/renderer/styles.css'
+              - 'packages/app-backend-runtime/scripts/build.mjs'
+              # build-artifacts.test.mjs reads the desktop ignore rules.
+              - 'apps/desktop/.gitignore'
+              # yrs-interop.test.mjs runs the interop scripts and reads the
+              # storage migrations.
+              - 'crates/yrs-interop/scripts/**'
+              - 'crates/dohc-engine-storage/src/migration.rs'
 
   javascript:
     name: typecheck + tests

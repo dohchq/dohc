@@ -281,12 +281,14 @@ async function startStack(): Promise<RunningStack> {
     DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
     DOHC_RELAY_LINK_KEY: relayLinkKey,
     DOHC_RELAY_SHARE_WEB_ORIGIN: shareWebUrl,
+    DOHC_RELAY_SHARE_WEB_URL: shareWebUrl,
     FORCE_COLOR: "0",
   });
   const shareWebEnv = buildHarnessEnvironment(process.env, {
     NODE_ENV: "test",
     DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: relayExchangeKey,
     DOHC_SHARE_WEB_PUBLIC_HOSTS: `${LOOPBACK_HOST}:${String(shareWebPort)}`,
+    DOHC_SHARE_WEB_INTERNAL_HOSTS: `${LOOPBACK_HOST}:${String(shareWebPort)}`,
     DOHC_SHARE_WEB_PORT: String(shareWebPort),
     DOHC_SHARE_WEB_BIND: LOOPBACK_HOST,
     FORCE_COLOR: "0",

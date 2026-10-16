@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Verification queue</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Verification queue</div>
+  <div id="service" class="service" role="status" aria-live="polite">Connecting</div>
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button role="tab" id="tab-now" data-tab="now" aria-controls="view-now">Now</button>
+    <button role="tab" id="tab-queue" data-tab="queue" aria-controls="view-queue">Queue <span class="tab-count" id="queue-count"></span></button>
+    <button role="tab" id="tab-history" data-tab="history" aria-controls="view-history">History</button>
+    <button role="tab" id="tab-threads" data-tab="threads" aria-controls="view-threads">Threads</button>
+    <button role="tab" id="tab-tests" data-tab="tests" aria-controls="view-tests">Tests</button>
+    <button role="tab" id="tab-nightly" data-tab="nightly" aria-controls="view-nightly">Nightly</button>
+  </nav>
+  <div class="tools">
+    <span id="updated" class="updated"></span>
+    <button id="pause" class="pause" type="button" hidden></button>
+    <button id="theme" class="theme" type="button" aria-label="Theme"></button>
+  </div>
+</header>
+
+<dialog id="pause-dialog" class="pause-dialog" aria-labelledby="pause-title">
+  <h2 id="pause-title">Pause the queue</h2>
+  <p class="muted">Runs in progress finish. No new run starts until you resume.</p>
+  <label for="pause-reason">Reason (optional)</label>
+  <input id="pause-reason" type="text" maxlength="300" autocomplete="off" spellcheck="false">
+  <div class="dialog-actions">
+    <button id="pause-cancel" class="close" type="button">Cancel</button>
+    <button id="pause-confirm" class="primary" type="button">Pause</button>
+  </div>
+</dialog>
+
+<div id="banners"></div>
+<section id="strip" class="strip" aria-label="Key numbers"></section>
+
+<main>
+  <section id="view-now" class="view" role="tabpanel" aria-labelledby="tab-now">
+    <div class="now-grid">
+      <div class="now-main">
+        <div id="lanes" class="lanes"></div>
+        <div id="lanes-waiting"></div>
+        <div id="just-finished"></div>
+        <div class="panel">
+          <div class="panel-head"><h2>Last 24 hours</h2><div id="legend-now" class="legend"></div></div>
+          <div id="track-now" class="track"></div>
+        </div>
+      </div>
+      <aside class="tower panel">
+        <div class="panel-head"><h2>Up next</h2><button class="link" data-goto="queue">Whole line</button></div>
+        <ol id="tower" class="tower-list"></ol>
+      </aside>
+    </div>
+    <div class="panel">
+      <div class="charts">
+        <figure><figcaption>CPU busy, sampled each minute</figcaption><div id="chart-cpu"></div></figure>
+        <figure><figcaption>Requests waiting</figcaption><div id="chart-queue-now"></div></figure>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-queue" class="view" role="tabpanel" aria-labelledby="tab-queue" hidden>
+    <div class="panel">
+      <div class="panel-head"><h2>Requests waiting</h2>
+        <div class="seg" role="group" aria-label="Range"><button data-load-range="1" aria-pressed="true">24 h</button><button data-load-range="7" aria-pressed="false">7 days</button></div></div>
+      <div id="chart-queue"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>The line</h2><span id="queue-summary" class="muted"></span></div>
+      <div class="table-wrap"><table id="queue-table" class="table"></table></div>
+    </div>
+  </section>
+
+  <section id="view-history" class="view" role="tabpanel" aria-labelledby="tab-history" hidden>
+    <div class="panel">
+      <div class="panel-head">
+        <h2 id="history-title">Last 24 hours</h2>
+        <div class="controls">
+          <div class="seg" role="group" aria-label="Range"><button data-range="1" aria-pressed="true">24 h</button><button data-range="7" aria-pressed="false">7 days</button></div>
+          <div class="seg" role="group" aria-label="Result"><button data-filter="all" aria-pressed="true">All</button><button data-filter="passed" aria-pressed="false">Passed</button><button data-filter="failed" aria-pressed="false">Failed</button><button data-filter="machine" aria-pressed="false">Machine</button></div>
+          <input id="search" class="search" type="search" placeholder="Filter by branch" aria-label="Filter by branch">
+        </div>
+      </div>
+      <div id="track-history" class="track tall"></div>
+      <div id="legend-history" class="legend"></div>
+    </div>
+    <div class="split">
+      <div class="panel"><div class="panel-head"><h2>Runs per day</h2></div><div id="days"></div></div>
+      <div class="panel"><div class="panel-head"><h2>Results</h2></div><div id="outcomes"></div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Runs</h2><span id="runs-summary" class="muted"></span></div>
+      <div class="table-wrap"><table id="runs-table" class="table"></table></div>
+      <div id="runs-more"></div>
+    </div>
+  </section>
+
+  <section id="view-threads" class="view" role="tabpanel" aria-labelledby="tab-threads" hidden>
+    <div class="panel">
+      <div class="panel-head"><h2>Threads using the queue this week</h2><span class="muted">Named by their T3 thread where one linked the branch's pull request. Select a thread to see its runs.</span></div>
+      <div class="table-wrap"><table id="threads-table" class="table"></table></div>
+    </div>
+  </section>
+
+  <section id="view-tests" class="view" role="tabpanel" aria-labelledby="tab-tests" hidden>
+    <div class="panel">
+      <div class="panel-head"><h2>Failing on several branches</h2><span class="muted">Last 24 hours. Main or a flaky test, more often than the branch's change.</span></div>
+      <div class="table-wrap"><table id="shared-table" class="table"></table></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Where a passing gate spends its time</h2><span class="muted">Median per step, this week</span></div>
+      <div id="step-times"></div>
+    </div>
+    <div class="split">
+      <div class="panel"><div class="panel-head"><h2>Flaky tests</h2><span class="muted">Passed only on retry or alone, this week</span></div><div class="table-wrap"><table id="flaky-table" class="table"></table></div></div>
+      <div class="panel"><div class="panel-head"><h2>Slowest tests</h2><span class="muted">This week</span></div><div class="table-wrap"><table id="slow-table" class="table"></table></div></div>
+    </div>
+  </section>
+
+  <section id="view-nightly" class="view" role="tabpanel" aria-labelledby="tab-nightly" hidden>
+    <div id="nightly-hero" class="panel nightly-hero"></div>
+    <div class="panel">
+      <div class="panel-head"><h2>Nightly runs</h2><span class="muted">Main, in full, every night at 03:07. Triage reads the result at 07:13.</span></div>
+      <div class="table-wrap"><table id="nightly-table" class="table"></table></div>
+    </div>
+  </section>
+</main>
+
+<div id="scrim" class="scrim" hidden></div>
+<aside id="drawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden>
+  <header class="drawer-head">
+    <div class="drawer-who"><div id="drawer-title" class="drawer-title"></div><div id="drawer-facts" class="drawer-facts"></div></div>
+    <button id="drawer-close" class="close" type="button">Close</button>
+  </header>
+  <nav class="tabs drawer-tabs" role="tablist" aria-label="Run">
+    <button role="tab" data-pane="summary">Summary</button>
+    <button role="tab" data-pane="steps">Steps</button>
+    <button role="tab" data-pane="logs">Logs</button>
+  </nav>
+  <div id="drawer-body" class="drawer-body"></div>
+</aside>
+<div id="tip" class="tip" role="tooltip" hidden></div>
+</body>
+</html>

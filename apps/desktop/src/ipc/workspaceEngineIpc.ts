@@ -1,8 +1,10 @@
+import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { shareRecordStatuses } from "../workspaces/shareRecordStatus";
 import { WorkspaceDaemonRequester, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { z } from "zod";
 import type { EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
+  historyOperations,
   CaptureRecoveryStatusResult, captureRecoveryOperations, fileObservationOperations,
   ListCollectionsPayload, ListCollectionsResult, GetCollectionPayload, GetCollectionResult,
   QueryCollectionRecordsPayload, QueryCollectionRecordsResult, ListEngineMomentsPayload,
@@ -27,6 +29,7 @@ import type { WorkspaceEngineCapture, probeEngineStoreRefusal } from "../workspa
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { createEngineYDocSessionIpc, EngineYDocIpcSender } from "../workspaces/engineYDocSessionIpc";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
+import { createHistoryTimeline, type TimelineReads } from "../workspaces/historyTimeline";
 import { sharedViewHistory } from "../workspaces/sharedViewHistory";
 import { historyPathAdmission, historyMomentPathsAdmitted, type readWorkspaceEnginePolicy, type WorkspaceEnginePolicySnapshot } from "../workspaces/workspaceEnginePolicyFile";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
@@ -48,7 +51,7 @@ export function createWorkspaceEngineIpc<
   Event extends { sender: Sender },
   Workspace extends RegistryEntry,
   State extends EngineStoreAuthorityState,
-  Operation extends { workspace: Workspace & { attachmentId: symbol } },
+  Operation extends { workspace: Workspace & { attachmentId: symbol }; signal: AbortSignal; scope?: string; assertCurrent(): void },
 >(dependencies: {
   registerHandler(channel: string, handler: (event: Event, payload: any) => unknown): void;
   assertTrustedSender(event: Event): void;
@@ -66,6 +69,7 @@ export function createWorkspaceEngineIpc<
   }>;
   readWorkspaceEnginePolicy: typeof readWorkspaceEnginePolicy;
   readSyncHistory: typeof readSyncHistory;
+  historyCollections(operation: Operation): Promise<Pick<TimelineReads, "local" | "remote" | "scope">>;
   localAgentDisplayName(): string;
   localPersonId(): string;
   /** This computer's person as History names them. */
@@ -94,7 +98,6 @@ export function createWorkspaceEngineIpc<
   retryOwnerLiveDelivery?(workspaceId: string): void;
   retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
   retryFileObservation(workspaceId: string): Promise<void>;
-  requireWorkspace(workspaceId: string): Workspace;
   assertWritableWorkspace(workspace: Workspace): void;
   syncStatusWithOwnedProjection(workspace: Workspace, status: SyncStatusResult): Promise<SyncStatusResult>;
   activity: {
@@ -118,16 +121,19 @@ export function createWorkspaceEngineIpc<
     receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, localPersonName, localPerson,
     localInstallationId, warmCredentialCache, currentCredentials, automationAuthor, namedAuthorLabels, readWorkspaceEnginePolicy, readSyncHistory,
     automationRunOnThisComputer, serverRuns, signedInAccount,
-    notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
+    notifyRenderer, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
     closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
   } = dependencies;
+  const timeline = createHistoryTimeline();
   const runLocator = createRunLocator({
     onThisComputer: automationRunOnThisComputer,
     onServer: (workspaceId, automationId, claimId) => serverRuns.shownTo(workspaceId, automationId, claimId),
     signedInAccount,
   });
+
+  const workspaceHandler = createWorkspaceHandler({ assertTrustedSender, withRendererWorkspaceOperation });
 
   function registerCollections(): void {
     // Collections: read-only engine index queries. list answers
@@ -278,8 +284,8 @@ export function createWorkspaceEngineIpc<
 
   function registerHistory(): void {
     // Engine history + linked Chats (PR 0M-5). Workspaces read their
-    // timeline from engine moments; every handler resolves the workspace via
-    // requireWorkspace and rejects when the engine capture is not attached.
+    // timeline from engine moments through the admitted workspace. Owner
+    // history rejects when the engine capture is not attached.
     // Runs dohc started use the Settings name. Other agents use their handshake label.
     function authorNames(workspaceId: string, sender: Sender, presentations: EngineMomentAuthorNames["presentations"]): EngineMomentAuthorNames {
       return {
@@ -291,34 +297,23 @@ export function createWorkspaceEngineIpc<
       };
     }
 
-    // A shared view reads its own imported history through the renderer's
-    // registered attachment. It keeps no capture, so restore stays refused.
-    // The read never reaches the relay: a share whose access ended keeps the
-    // history it already imported, as it keeps its files, and gains nothing new.
-    // Its authors are what the owner recorded, so they get no issuer and no self.
-    async function readHistory<Result>(
-      event: Event, workspaceId: string,
-      read: (
-        history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> & Partial<Pick<WorkspaceEngineCapture, "filePathForObjectId">>,
-        rootPath: string | null,
-        presentations: EngineMomentAuthorNames["presentations"],
-        // Call after each await, so nothing returns from a replaced folder, server, or shared view.
-        assertCurrent: () => void,
-      ) => Promise<Result>,
-    ): Promise<Result> {
-      // The read stops only when its folder, server, or shared view changes. Other
-      // registry writes replace the entry too, such as the last-opened stamp.
-      const entry = requireWorkspace(workspaceId);
+    // How one History read draws its authors, and the check it makes after each await.
+    // The read stops when its window, server, or shared view changes; the operation itself
+    // retires when the folder does. Other registry writes replace the entry too, such as the
+    // last-opened stamp; they don't stop it.
+    // A received share's authors are what the owner recorded, so they get no issuer and no self.
+    function historyIdentity(operation: Operation) {
+      const entry = operation.workspace;
+      const shared = shareViewIsPresent(entry.shareView);
       const assertCurrent = () => {
-        const current = requireWorkspace(workspaceId);
-        if (current.rootPath !== entry.rootPath || current.remote?.serverUrl !== entry.remote?.serverUrl
-          || shareViewIsPresent(current.shareView) !== shareViewIsPresent(entry.shareView)) {
+        operation.assertCurrent();
+        const current = operation.workspace;
+        if (current.remote?.serverUrl !== entry.remote?.serverUrl || shareViewIsPresent(current.shareView) !== shared) {
           throw new Error("History stopped loading because the workspace changed.");
         }
       };
-      if (!shareViewIsPresent(entry.shareView)) {
-        const { capture } = await requireEngineCapture(workspaceId, "Engine history");
-        assertCurrent();
+      const presentations = async (): Promise<EngineMomentAuthorNames["presentations"]> => {
+        if (shared) return createHistoryPresentationRequest({ source: "received", workspaceId: entry.workspaceId, assertCurrent });
         await warmCredentialCache();
         assertCurrent();
         const credentials = currentCredentials();
@@ -327,32 +322,77 @@ export function createWorkspaceEngineIpc<
         const synced = entry.remote !== undefined
           || (credentials !== null && ["synced", "unknown"].includes(await readSyncHistory(entry.rootPath)));
         assertCurrent();
-        return read(capture, entry.rootPath, createHistoryPresentationRequest({
-          source: "own-store", workspaceId, assertCurrent, serverUrl: entry.remote?.serverUrl, synced,
+        return createHistoryPresentationRequest({
+          source: "own-store", workspaceId: entry.workspaceId, assertCurrent, serverUrl: entry.remote?.serverUrl, synced,
           installationId: localInstallationId(), credentials,
-        }), assertCurrent);
-      }
-      return withRendererWorkspaceOperation(event.sender, workspaceId,
-        "History stopped loading because this window changed workspaces.", async (operation) => {
-          assertCurrent();
-          const { workspace } = operation;
-          if (!shareViewIsPresent(workspace.shareView)) throw new Error("This workspace is no longer a shared view.");
-          const store = receivedShareEngine.storeFor({
-            engineWorkspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: workspace.attachmentId,
-          });
-          return read(sharedViewHistory(store, workspace.workspaceId), null,
-            createHistoryPresentationRequest({ source: "received", workspaceId, assertCurrent }), assertCurrent);
         });
+      };
+      return { entry, shared, assertCurrent, presentations };
+    }
+
+    // A shared view reads its own imported history through the renderer's
+    // registered attachment. It keeps no capture, so restore stays refused.
+    // The read never reaches the relay: a share whose access ended keeps the
+    // history it already imported, as it keeps its files, and gains nothing new.
+    async function readHistory<Result>(
+      operation: Operation,
+      read: (
+        history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> & Partial<Pick<WorkspaceEngineCapture, "filePathForObjectId">>,
+        rootPath: string | null,
+        presentations: EngineMomentAuthorNames["presentations"],
+        // Call after each await, so nothing returns from a replaced window, folder, server, or shared view.
+        assertCurrent: () => void,
+      ) => Promise<Result>,
+    ): Promise<Result> {
+      const { entry, shared, assertCurrent, presentations } = historyIdentity(operation);
+      if (!shared) {
+        const { capture } = await requireEngineCapture(entry.workspaceId, "Engine history");
+        assertCurrent();
+        return read(capture, entry.rootPath, await presentations(), assertCurrent);
+      }
+      const store = receivedShareEngine.storeFor({
+        engineWorkspaceId: entry.workspaceId, rootPath: entry.rootPath, attachmentId: entry.attachmentId,
+      });
+      return read(sharedViewHistory(store, entry.workspaceId), null, await presentations(), assertCurrent);
     }
 
     const policyUnreadable = (policy: WorkspaceEnginePolicySnapshot) => HistoryPolicyUnreadableResult.parse({
       status: "policy-unreadable", unreadable: policy.unreadable, policyErrors: policy.errors,
     });
 
-    registerHandler(CHANNELS.listEngineMoments, async (event, payload) => {
-      assertTrustedSender(event);
+    registerOperations<typeof historyOperations, Event, Operation>({
+      handle: registerHandler, assertTrustedSender,
+      withActiveWorkspace: (event, workspaceId, message, work) => withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
+    }, historyOperations, {
+      listHistory: async (input, { event, operation }) => {
+        // The timeline draws file authors as the moment list does, with the same checks.
+        const identity = historyIdentity(operation);
+        const { entry: workspace, shared, assertCurrent } = identity;
+        assertCurrent();
+        const policy = shared ? null : await readWorkspaceEnginePolicy(workspace.rootPath);
+        assertCurrent();
+        if (policy?.errors.length) return policyUnreadable(policy);
+        const engine = shared ? sharedViewHistory(receivedShareEngine.storeFor({ engineWorkspaceId: workspace.workspaceId,
+          rootPath: workspace.rootPath, attachmentId: workspace.attachmentId }), workspace.workspaceId)
+          : (await requireEngineCapture(workspace.workspaceId, "Engine history")).capture;
+        assertCurrent();
+        const presentations = await identity.presentations();
+        let resolved: Awaited<ReturnType<typeof dependencies.historyCollections>> | undefined;
+        let pending: Promise<NonNullable<typeof resolved>> | undefined;
+        const getCollections = () => pending ??= dependencies.historyCollections(operation).then(value => { assertCurrent(); resolved = value; return value; });
+        const collections: Pick<TimelineReads, "scope" | "local" | "remote"> = shared
+          ? { scope: operation.scope ?? workspace.workspaceId, local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw new Error("Collection History is unavailable in a received share."); } }
+          : { get scope() { return resolved?.scope ?? operation.scope ?? workspace.workspaceId; },
+            local: async (positions, limit, sourceIds) => (await getCollections()).local(positions, limit, sourceIds),
+            remote: async (datasetId, beforeRevision, signal) => (await getCollections()).remote(datasetId, beforeRevision, signal) };
+        return timeline(input, { ...collections, get scope() { return collections.scope; }, engine, signal: operation.signal, assertCurrent,
+          names: authorNames(workspace.workspaceId, event.sender, presentations), ...(policy ? { admitted: historyPathAdmission(policy) } : {}) });
+      },
+    });
+
+    registerHandler(CHANNELS.listEngineMoments, workspaceHandler(async (event, payload, operation) => {
       const input = ListEngineMomentsPayload.parse(payload);
-      return readHistory(event, input.workspaceId, async (history, rootPath, presentations, assertCurrent) => {
+      return readHistory(operation, async (history, rootPath, presentations, assertCurrent) => {
         const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
         assertCurrent();
         if (policy?.errors.length) return policyUnreadable(policy);
@@ -390,12 +430,11 @@ export function createWorkspaceEngineIpc<
           authorNames(input.workspaceId, event.sender, presentations),
         );
       });
-    });
+    }));
 
-    registerHandler(CHANNELS.readEngineMoment, async (event, payload) => {
-      assertTrustedSender(event);
+    registerHandler(CHANNELS.readEngineMoment, workspaceHandler(async (event, payload, operation) => {
       const input = ReadEngineMomentPayload.parse(payload);
-      return readHistory(event, input.workspaceId, async (history, rootPath, presentations, assertCurrent) => {
+      return readHistory(operation, async (history, rootPath, presentations, assertCurrent) => {
         const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
         assertCurrent();
         if (policy?.errors.length) return ReadEngineMomentResult.parse({ ...policyUnreadable(policy), moment: null });
@@ -410,10 +449,9 @@ export function createWorkspaceEngineIpc<
           moment: moment ? engineMomentDetailForIpc(moment, names) : null,
         });
       });
-    });
+    }));
 
-    registerHandler(CHANNELS.restoreEngineMomentFile, async (event, payload) => {
-      assertTrustedSender(event);
+    registerHandler(CHANNELS.restoreEngineMomentFile, workspaceHandler(async (event, payload) => {
       const input = RestoreEngineMomentFilePayload.parse(payload);
       const person = await localPerson();
       const { capture } = await requireEngineCapture(
@@ -423,21 +461,20 @@ export function createWorkspaceEngineIpc<
       const result = await capture.restoreFileToBeforeMoment(input.momentId, person);
       notifyRenderer({ workspaceId: input.workspaceId });
       return RestoreEngineMomentFileResult.parse(result);
-    });
+    }));
   }
 
   function registerStatusAndRepair(): void {
-    registerHandler(CHANNELS.getSyncStatus, async (event, payload) => {
-      assertTrustedSender(event);
+    registerHandler(CHANNELS.getSyncStatus, workspaceHandler(async (event, payload, operation) => {
       const input = WorkspaceIdPayload.parse(payload);
-      const workspace = requireWorkspace(input.workspaceId);
+      const workspace = operation.workspace;
       return SyncStatusResult.parse(
         await syncStatusWithOwnedProjection(
           workspace,
           activity.getStatus(input.workspaceId),
         ),
       );
-    });
+    }));
     registerOperations<typeof captureRecoveryOperations, Event, Operation>({
       handle: registerHandler,
       assertTrustedSender,
@@ -539,10 +576,9 @@ export function createWorkspaceEngineIpc<
       );
     });
 
-    registerHandler(CHANNELS.rebuildEngineStore, async (event, payload) => {
-      assertTrustedSender(event);
+    registerHandler(CHANNELS.rebuildEngineStore, workspaceHandler(async (event, payload, operation) => {
       const input = RebuildEngineStorePayload.parse(payload);
-      const registered = requireWorkspace(input.workspaceId);
+      const registered = operation.workspace;
       assertWritableWorkspace(registered);
       return workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
         runInWorkspaceAuthorityLane(lease, "engine-store",
@@ -601,7 +637,7 @@ export function createWorkspaceEngineIpc<
           );
         }),
       );
-    });
+    }));
   }
 
   function registerYDoc(): void {
