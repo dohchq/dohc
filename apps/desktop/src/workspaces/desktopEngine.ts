@@ -41,7 +41,7 @@ export interface ServerOwnerDelivery {
   } | null>;
 }
 export type OwnerLiveDeliveryStatus = "preparing" | "active" | "retrying";
-type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "restart-required";
+type OwnerLiveDeliveryReason = "document-unavailable" | "workspace-changed" | "session-host-refused" | "live-document-without-lineage" | "restart-required";
 
 type EngineAuthorityState = {
   collectionAutomations: CollectionAutomationsLifecycle;
@@ -187,9 +187,12 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const unavailable = rows.some(row => row.status === "unavailable");
               const unavailableFor = (reason: OwnerLiveDeliveryReason) => rows.some(row => row.status === "unavailable" && row.reason === reason);
               // A document the server refused stays stopped until its owner tries again, so no other reason hides it.
-              const reason = unavailableFor("session-host-refused") ? "session-host-refused" :
+              // One it cannot start goes first: the owner must open it before a Resume can help.
+              const reason = unavailableFor("live-document-without-lineage") ? "live-document-without-lineage" :
+                unavailableFor("session-host-refused") ? "session-host-refused" :
                 unavailableFor("workspace-changed") ? "workspace-changed" :
                 unavailableFor("document-unavailable") ? "document-unavailable" : undefined;
+              const ownerMustAct = reason === "live-document-without-lineage" || reason === "session-host-refused";
               const failures = failedOwnerDocuments.get(workspaceId) ?? new Set<string>();
               const frozen = frozenOwnerDocuments.get(workspaceId) ?? new Set<string>();
               for (const path of failures) if (!documents.some(document => document.binding.currentPath === path)) failures.delete(path);
@@ -223,7 +226,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               else if (result !== "retry") frozen.delete(document.binding.currentPath);
               if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId});
               setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active",
-                frozen.size && reason !== "session-host-refused" ? "document-unavailable" : reason);
+                frozen.size && !ownerMustAct ? "document-unavailable" : reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};
               } catch (error) {
                 if (!operation.signal.aborted && !session.signal.aborted && generation === ownerDeliveryGeneration && !isQuitting()) {

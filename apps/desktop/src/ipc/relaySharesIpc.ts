@@ -211,9 +211,11 @@ export function registerRelaySharesIpcHandlers<
       }
       // Concurrent list reads may see a document in both sets. The current
       // enrollment wins; all bindings and server-only credentials stay in main.
-      // Resume is also how the owner tries again a document the server refused.
+      // Resume is also how the owner tries again a document the server refused,
+      // or one it could not start until the owner opened it.
       const documents = new Map([...stopped.documents, ...current.documents].map(document => [document.path, {
-        ...document, canResume: document.reason === "session-host-refused" || (!document.reason && (document.status === "retired" || document.status === "paused")),
+        ...document, canResume: document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
+          (!document.reason && (document.status === "retired" || document.status === "paused")),
       }]));
       for (const row of documents.values()) {
         const deferred = localStops.find(stop => stop.document.currentPath === row.path)?.deferred;

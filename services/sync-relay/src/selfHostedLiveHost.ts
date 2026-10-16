@@ -243,8 +243,8 @@ export async function startSelfHostedLiveHost(options: {
   return {
     current: () => current,
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
-    /** Whether the running daemon cannot continue the document until its owner tries again. */
-    blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document) !== undefined;},
+    /** Why the running daemon cannot continue the document until its owner tries again, if it cannot. */
+    blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document);},
     /** Lets a blocked document try once more. Returns whether it was blocked. Its next block is reported again. */
     unblock(document: {workspaceId: string; objectId: string}) {
       const unblocked = current?.unblock(document) ?? false;

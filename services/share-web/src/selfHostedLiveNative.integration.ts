@@ -12,6 +12,7 @@ import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLiveValidationExecutor } from "../../sync-relay/src/liveValidation.js";
 import { createEngineClient } from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
+import { YdocLiveAdapter } from "../../../packages/workspace-engine-client/src/ydoc/ydocLiveAdapter.js";
 import { serveFetchHandler } from "@dohc/service-http";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver } from "@dohc/workspace-auth/session";
@@ -721,7 +722,7 @@ async function openSelfHostProof(name: string) {
     const mainVersionId = (await rpc("versions.ensureMain", {})).id as string;
     await push();
     // A rich document the owner writes and edits ordinarily on their device, each change pushed to the relay.
-    // Unless `seeded`, it is only written as text, as an agent writes it, until `seed` opens it as the desktop does.
+    // Unless `seeded`, it is only written as text, as an agent writes it, until `open` opens it as the desktop does.
     const ownerDocument = async (path: string, text: string, {seeded = true} = {}) => {
       writeFileSync(join(ownerRoot, path), text);
       const objectId = (await rpc("versionedText.write", {workspaceId: "workspace", versionId: mainVersionId, path, text, origin: "api"}, randomUUID())).object.id as string;
@@ -736,11 +737,17 @@ async function openSelfHostProof(name: string) {
         await rpc("ydoc.settle", {sessionId: editor.sessionId}); await rpc("ydoc.close", {sessionId: editor.sessionId});
         await push();
       };
-      const seed = (change: (doc: Y.Doc) => void) => edit(change, baseline);
-      if (seeded) await seed(doc => doc.getMap("frontmatter").set("beforeActivation", "ordinary-owner"));
+      // Opens it once and closes it, as the desktop does: its adapter seeds the Y.Doc of a file that has none.
+      const open = async () => {
+        const adapter = new YdocLiveAdapter(owner!);
+        try {await (await adapter.openSession({workspace: handle, versionId: mainVersionId, path, expectedObjectId: objectId, contentKind: "richdoc"})).close();}
+        finally {adapter.dispose();}
+        await push();
+      };
+      if (seeded) await edit(doc => doc.getMap("frontmatter").set("beforeActivation", "ordinary-owner"), baseline);
       else await push();
       return {path, objectId, document: {workspaceId: "workspace", mainVersionId, objectId, lineageClaimId: hash(baseline)},
-        markdown: () => yDocToMarkdown(doc), edit: (change: (doc: Y.Doc) => void) => edit(change), seed};
+        markdown: () => yDocToMarkdown(doc), edit: (change: (doc: Y.Doc) => void) => edit(change), open};
     };
     const first = await ownerDocument("docs/a.md", "Hello"), objectId = first.objectId;
     storage.createShare({share: {shareId: "share", workspaceId: "workspace", granterUserId: ownerUser.id, selectorJson: JSON.stringify({paths: ["docs"], versionId: null}), createdAtMs: Date.now()},
@@ -995,11 +1002,12 @@ it("blocks a document its owner edited while live editing was stopped, and Resum
 
 // Until the session host starts a document's Y.Doc itself (#2069), a file only
 // written as text has nothing to activate, so it blocks instead of retrying.
+// Its owner only opens it, as the Notice tells them, and Resume activates it.
 it("blocks a document written only as text, and activates it once its owner opens it and tries again", () => withSelfHostProof("self-host-without-lineage", async proof => {
   const attempts = () => proof.started("captureOwnerActivation"), from = harness.calls.length;
   const failures = () => harness.calls.slice(from).filter(call => call.method === "captureOwnerActivation" && call.status === "failed").map(call => call.message);
   const plain = await proof.ownerDocument("docs/plain.md", "Written as text", {seeded: false});
-  const refused = {path: "docs/plain.md", status: "unavailable", reason: "session-host-refused"};
+  const refused = {path: "docs/plain.md", status: "unavailable", reason: "live-document-without-lineage"};
   await vi.waitFor(async () => expect(await proof.documents()).toContainEqual(refused), {timeout: 30000});
   expect(failures().at(-1)).toContain("live-document-without-lineage");
   expect(failures().filter(message => !message?.includes("hosted-document-unready"))).toEqual([expect.stringContaining("live-document-without-lineage")]);
@@ -1009,15 +1017,16 @@ it("blocks a document written only as text, and activates it once its owner open
   expect(attempts()).toBe(blocked);
   expect(proof.reports.filter(report => report.startsWith("Live editing of docs/plain.md"))).toEqual([
     `Live editing of docs/plain.md in workspace workspace cannot start: the document has no live-editing history. Its owner must open it once in dohc on a desktop, then try again. Its store is kept at ${proof.store}.`]);
-  // Its owner opens it on their device, which starts its Y.Doc, and the host's replica receives it.
-  await plain.seed(doc => doc.getMap("frontmatter").set("opened", "desktop"));
-  await vi.waitFor(() => expect(proof.serviceRead(engine => engine.prepare("SELECT lineage_claim_status AS status FROM ydoc_docs WHERE workspace_id='workspace' AND object_id=?")
-    .get(plain.objectId))).toEqual({status: "exact"}), {timeout: 30000});
+  // Its owner opens it on their device without changing it, which starts its Y.Doc, and the host's replica receives it.
+  await plain.open();
+  const claim = () => proof.serviceRead(engine => engine.prepare("SELECT lineage_claim_status AS status, lineage_claim_id AS id FROM ydoc_docs WHERE workspace_id='workspace' AND object_id=?")
+    .get(plain.objectId)) as {status: string; id: string | null} | undefined;
+  await vi.waitFor(() => expect(claim()?.status).toBe("exact"), {timeout: 30000});
   expect(attempts()).toBe(blocked);
   // Try again: Resume gives it one more attempt, which activates it.
   expect((await proof.route("POST", {path: "docs/plain.md"})).status).toBe(202);
   await vi.waitFor(async () => expect(await proof.documents()).toContainEqual(expect.objectContaining({path: "docs/plain.md", status: "ready"})), {timeout: 30000});
   expect(attempts()).toBe(blocked + 1);
-  expect(proof.activation("docs/plain.md")?.source.lineageClaimId).toBe(plain.document.lineageClaimId);
+  expect(proof.activation("docs/plain.md")?.source.lineageClaimId).toBe(claim()!.id);
   return {attemptsBeforeResume: blocked, failures: failures(), reports: proof.reports};
 }), 120000);

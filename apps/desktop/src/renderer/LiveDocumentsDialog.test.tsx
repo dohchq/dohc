@@ -224,6 +224,11 @@ describe("LiveDocumentsDialog", () => {
           reason: "session-host-refused",
           canResume: true,
         }),
+        row("docs/unopened.md", {
+          status: "unavailable",
+          reason: "live-document-without-lineage",
+          canResume: true,
+        }),
         row("docs/stopped.md", { status: "retired", canResume: true }),
         row("docs/stopped-gone.md", { status: "retired" }),
       ]),
@@ -242,9 +247,15 @@ describe("LiveDocumentsDialog", () => {
       "File moved or removed",
       "Workspace changed",
       "Stopped by the server",
+      "Not started",
       "Stopped",
       "Stopped",
     ]);
+    // Only the document dohc has never opened says to open it before Resume.
+    const openFirst =
+      "Live editing can't start until you open this document once in dohc. After you open it, resume live editing.";
+    expect(screen.getAllByText(openFirst)).toHaveLength(1);
+    expect(screen.getByTestId("live-document-row-docs/unopened.md").textContent).toContain(openFirst);
 
     expect(actions("docs/live.md")).toEqual(["Stop live editing"]);
     expect(actions("docs/preparing.md")).toEqual(["Stop live editing"]);
@@ -256,6 +267,10 @@ describe("LiveDocumentsDialog", () => {
     expect(actions("docs/moved.md")).toEqual(["Stop live editing"]);
     expect(actions("docs/elsewhere.md")).toEqual(["Stop live editing"]);
     expect(actions("docs/refused.md")).toEqual([
+      "Resume live editing",
+      "Stop live editing",
+    ]);
+    expect(actions("docs/unopened.md")).toEqual([
       "Resume live editing",
       "Stop live editing",
     ]);

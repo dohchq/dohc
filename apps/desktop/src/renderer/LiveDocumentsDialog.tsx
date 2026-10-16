@@ -9,7 +9,7 @@ import { useRequestSequence } from "./useRequestSequence";
 export type LiveDocumentRow = {
   path: string;
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused";
+  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "live-document-without-lineage";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
 };
@@ -139,6 +139,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
   if (row.reason === "session-host-refused") return "Stopped by the server";
+  if (row.reason === "live-document-without-lineage") return "Not started";
   switch (row.status) {
     case "ready":
       return "Live";
@@ -537,6 +538,12 @@ export function LiveDocumentsDialog({
                   >
                     Stop live editing
                   </SecondaryButton>
+                ) : null}
+                {/* A Resume alone fails again until dohc has opened the document once. */}
+                {row.reason === "live-document-without-lineage" ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    Live editing can't start until you open this document once in dohc. After you open it, resume live editing.
+                  </p>
                 ) : null}
                 {row.deferredStop ? (
                   <p className="m-0 basis-full text-[12px] text-muted">

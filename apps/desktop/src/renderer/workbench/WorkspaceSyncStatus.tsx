@@ -57,6 +57,7 @@ function liveDeliveryLabel(
   // A named reason is a state that stays until someone acts on it; an
   // unnamed one is a connection dohc is still dialling.
   if (reason === "session-host-refused") return "Live editing stopped";
+  if (reason === "live-document-without-lineage") return "Live editing can't start";
   return reason ? "Live editing paused" : "Live editing retrying";
 }
 

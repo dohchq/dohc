@@ -3427,10 +3427,12 @@ describe("sync status IPC contract", () => {
   it("carries a document the server refused to the status and the live documents list", () => {
     const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
       historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveDelivery: "retrying" };
-    expect(SyncStatusResult.parse({ ...status, ownerLiveDeliveryReason: "session-host-refused" }).ownerLiveDeliveryReason).toBe("session-host-refused");
-    expect(SyncStatusResult.safeParse({ ...status, ownerLiveDeliveryReason: "session-host-blocked" }).success).toBe(false);
     const row = { path: "docs/a.md", status: "unavailable", canResume: true };
-    expect(OwnerLiveDocument.parse({ ...row, reason: "session-host-refused" }).reason).toBe("session-host-refused");
+    for (const reason of ["session-host-refused", "live-document-without-lineage"] as const) {
+      expect(SyncStatusResult.parse({ ...status, ownerLiveDeliveryReason: reason }).ownerLiveDeliveryReason).toBe(reason);
+      expect(OwnerLiveDocument.parse({ ...row, reason }).reason).toBe(reason);
+    }
+    expect(SyncStatusResult.safeParse({ ...status, ownerLiveDeliveryReason: "session-host-blocked" }).success).toBe(false);
     expect(OwnerLiveDocument.safeParse({ ...row, reason: "session-host-blocked" }).success).toBe(false);
   });
   it("refuses a status that cannot say why history is off", () => {

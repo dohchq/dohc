@@ -7,6 +7,7 @@ import {createServiceHostReplication} from "./serviceHostReplication";
 import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./serviceHostCredential";
 import {relayError} from "./errors";
 import {SERVICE_HOST_ENROLLMENTS} from "./storage/serviceHostEnrollment";
+import type {ServiceActivationBlock} from "./serviceActivationDriver";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
@@ -20,11 +21,11 @@ async function fixture() {
   f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(scope.workspaceId, binding.currentPath, "b".repeat(64));
   const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
   // The documents the session host blocked until their owner tries again.
-  const blocked = new Set<string>();
+  const blocked = new Map<string, ServiceActivationBlock>();
   const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false,
-    blocked: vi.fn((document: {objectId: string}) => blocked.has(document.objectId)),
+    blocked: vi.fn((document: {objectId: string}) => blocked.get(document.objectId)),
     unblock: vi.fn((document: {objectId: string}) => blocked.delete(document.objectId)),
-    block(objectId: string) {blocked.add(objectId);}};
+    block(objectId: string, why: ServiceActivationBlock = "refused") {blocked.set(objectId, why);}};
   let actor = {workspaceId: scope.workspaceId, userId: "owner-1"};
   const resolveActor = vi.fn(async () => actor);
   const handle = createServiceHostEnrollmentRoutes({storage: f.storage, history, host, resolveActor});
@@ -136,6 +137,20 @@ it("reports a document the session host refused until the owner resumes it", asy
   f.host.block(enrolled.objectId);
   expect(await documents()).toEqual([refused]);
   expect(f.host.unblock).toHaveBeenCalledTimes(1);
+});
+
+// Proves: a document blocked for having no live-editing history reads as its
+// own reason, so its owner learns to open it before Resume, which still unblocks it.
+it("reports a document without live-editing history apart from other refusals", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const documents = async () => (await (await f.handle(f.request())).json()).documents;
+  f.host.block(enrolled.objectId, "without-lineage");
+  expect(await documents()).toEqual([{path: binding.currentPath, status: "unavailable", reason: "live-document-without-lineage"}]);
+  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
+  expect(f.host.unblock).toHaveBeenCalledTimes(1);
+  expect(await documents()).toEqual([{path: binding.currentPath, status: "preparing"}]);
+  f.host.block(enrolled.objectId, "refused");
+  expect(await documents()).toEqual([{path: binding.currentPath, status: "unavailable", reason: "session-host-refused"}]);
 });
 
 it("lists automatic enrollment refusals without enrolling documents or exposing other workspaces", async () => {

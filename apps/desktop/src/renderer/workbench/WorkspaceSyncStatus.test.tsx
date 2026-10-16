@@ -217,6 +217,11 @@ describe("sync status surface", () => {
       reason: "session-host-refused" as const,
       label: "Live editing stopped",
     },
+    {
+      delivery: "retrying" as const,
+      reason: "live-document-without-lineage" as const,
+      label: "Live editing can't start",
+    },
   ])("labels $delivery owner live delivery as $label", ({ delivery, reason, label }) => {
     renderStatus({ syncStatus: liveDeliveryStatus(delivery, reason) });
     const live = screen.getByTestId("owner-live-delivery-status");

@@ -802,8 +802,9 @@ describe("server owner peer lifecycle", () => {
 
   // Proves: a document the server refused names the workspace's reason over
   // every other, including a frozen document that clears on its own, and
-  // stops naming it once the server no longer reports it.
-  it("reports a document the server refused ahead of every other reason", async () => {
+  // stops naming it once the server no longer reports it. Only a document the
+  // server cannot start until its owner opens it outranks a refusal.
+  it("reports a document the server refused ahead of every other reason but one it cannot start", async () => {
     const f = fixture(), credentials = new AbortController();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
     const rootPath = await createTestScratch("dohc-server-owner-refused-");
@@ -811,6 +812,7 @@ describe("server owner peer lifecycle", () => {
     const document = {binding: {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
       currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace", shareId: "share"};
     const refused = {path: "refused.md", status: "unavailable", reason: "session-host-refused"};
+    const unopened = {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage"};
     const others = [{path: "changed.md", status: "unavailable", reason: "workspace-changed"}, {path: "moved.md", status: "unavailable", reason: "document-unavailable"}];
     const ready = {path: "a.md", status: "ready", document};
     let rows: unknown[] = others;
@@ -834,6 +836,14 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"));
       rows = [ready, ...others, refused]; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      // A document the server cannot start until its owner opens it goes first, with or without a frozen one.
+      rows = [...others, refused, unopened]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage"));
+      rows = [ready, refused]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
+      rows = [ready, ...others, unopened, refused]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage"));
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
       // The owner's retry succeeded, so the server no longer reports it.
       rows = [ready, ...others]; f.engine.retryOwnerDelivery("owner");

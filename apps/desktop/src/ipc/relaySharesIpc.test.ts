@@ -246,6 +246,7 @@ describe("owner live document enrollment", () => {
         {path: "moved.md", status: "paused", reason: "document-unavailable"},
         {path: "changed.md", status: "unavailable", reason: "workspace-changed"},
         {path: "refused.md", status: "unavailable", reason: "session-host-refused"},
+        {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage"},
       ]});
     await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
       documents: [
@@ -255,6 +256,7 @@ describe("owner live document enrollment", () => {
         {path: "moved.md", status: "paused", reason: "document-unavailable", canResume: false},
         {path: "changed.md", status: "unavailable", reason: "workspace-changed", canResume: false},
         {path: "refused.md", status: "unavailable", reason: "session-host-refused", canResume: true},
+        {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage", canResume: true},
       ], nextCursor: "old.md",
     });
     expect(h.request.mock.calls.map((call) => call[1])).toEqual([

@@ -237,6 +237,16 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
+  // A Resume alone fails again: the server can start only a document that
+  // dohc has opened once, so the owner's first step is to open it.
+  if (reason === "live-document-without-lineage") {
+    return {
+      title: "Live editing can't start",
+      body: "The server can't start live editing for a document in this workspace until you open it once in dohc. Open Live documents to see which document. After you open it, resume live editing there.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
   if (reason === "restart-required") {
     return {
       title: "Live editing paused",

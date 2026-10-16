@@ -1440,34 +1440,45 @@ describe("notice center", () => {
   // A document the server stopped waits for its owner. The way to try again
   // is its Resume in the live documents list, from the toast and the row.
   // Nothing retries meanwhile, so both show the warning, not the retry mark.
-  it("sends a document the server stopped to the live documents list", async () => {
+  // A document the server cannot start also needs its owner to open it first,
+  // and the notice says so, because a Resume alone would fail again.
+  it.each([
+    {
+      reason: "session-host-refused" as const,
+      title: "Live editing stopped",
+      body: "The server stopped live editing for a document in this workspace. Your copy and its history are unchanged. People you shared it with can't edit it live for now. Open Live documents to try again.",
+    },
+    {
+      reason: "live-document-without-lineage" as const,
+      title: "Live editing can't start",
+      body: "The server can't start live editing for a document in this workspace until you open it once in dohc. Open Live documents to see which document. After you open it, resume live editing there.",
+    },
+  ])("sends a $reason document to the live documents list", async ({ reason, title, body }) => {
     const onOpenLiveDocuments = vi.fn();
     const onRetryLiveDelivery = vi.fn();
     const user = userEvent.setup();
     renderNotices({
-      syncStatus: liveDeliveryStatus("retrying", "session-host-refused"),
+      syncStatus: liveDeliveryStatus("retrying", reason),
       onOpenLiveDocuments,
       onRetryLiveDelivery,
     });
-    const body =
-      "The server stopped live editing for a document in this workspace. Your copy and its history are unchanged. People you shared it with can't edit it live for now. Open Live documents to try again.";
 
     const toast = screen.getByTestId("owner-live-delivery-toast");
-    expect(toast.textContent).toContain(`Live editing stopped. ${body}`);
+    expect(toast.textContent).toContain(`${title}. ${body}`);
     expect(liveDeliveryIcon(toast)).toBe("triangle-alert");
     await user.click(screen.getByTestId("owner-live-delivery-toast-action"));
     expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notice = screen.getByTestId("notice-owner-live-delivery");
-    expect(notice.textContent).toContain("Live editing stopped");
+    expect(notice.textContent).toContain(title);
     expect(liveDeliveryIcon(notice)).toBe("triangle-alert");
     expect(notice.textContent).toContain(body);
     expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
     await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
     const copied = await navigator.clipboard.readText();
-    expect(copied).toContain("Live editing: Live editing stopped");
-    expect(copied).toContain("Reason: session-host-refused");
+    expect(copied).toContain(`Live editing: ${title}`);
+    expect(copied).toContain(`Reason: ${reason}`);
     await user.click(within(notice).getByRole("button", { name: "Live documents" }));
     expect(onOpenLiveDocuments).toHaveBeenCalledTimes(2);
     expect(onRetryLiveDelivery).not.toHaveBeenCalled();

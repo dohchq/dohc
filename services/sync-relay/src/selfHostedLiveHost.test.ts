@@ -505,13 +505,13 @@ it("reports a blocked document's store to the operator once per block", async ()
   const reported = expect.objectContaining({message: expect.stringContaining(`docs/a.md in workspace ${scope.workspaceId} stopped until its owner tries again. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`)});
   f.block(binding.objectId);
   await vi.waitFor(() => {f.host.reconcile(); expect(f.onError.mock.calls).toEqual([[reported]]);}, {timeout: 10_000});
-  expect(f.host.blocked(binding)).toBe(true);
+  expect(f.host.blocked(binding)).toBe("refused");
   await f.waitPasses();
   expect(f.onError).toHaveBeenCalledTimes(1);
   expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md"]);
   f.unblock(binding.objectId);
   await f.waitPasses();
-  expect(f.host.blocked(binding)).toBe(false);
+  expect(f.host.blocked(binding)).toBeUndefined();
   f.block(binding.objectId);
   await vi.waitFor(() => {f.host.reconcile(); expect(f.onError.mock.calls).toEqual([[reported], [reported]]);}, {timeout: 10_000});
   // Resume, and its one more capture blocks again before the next reconciliation.
@@ -528,7 +528,7 @@ it("tells the operator a document without lineage must be opened on a desktop fi
   f.block(binding.objectId, "without-lineage");
   await vi.waitFor(() => {f.host.reconcile(); expect(f.onError).toHaveBeenCalled();}, {timeout: 10_000});
   expect(f.onError.mock.calls).toEqual([[expect.objectContaining({message: `Live editing of docs/a.md in workspace ${scope.workspaceId} cannot start: the document has no live-editing history. Its owner must open it once in dohc on a desktop, then try again. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`})]]);
-  expect(f.host.blocked(binding)).toBe(true);
+  expect(f.host.blocked(binding)).toBe("without-lineage");
   await f.waitPasses();
   expect(f.onError).toHaveBeenCalledTimes(1);
 });
