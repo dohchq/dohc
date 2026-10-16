@@ -331,9 +331,13 @@ describe("the poll block", () => {
     expect(errors.map((error) => error.textContent)).toEqual(["Soup is already a choice.", "Pie is already a choice."]);
     expect(choices()[1]!.closest("div")!.nextElementSibling).toBe(errors[0]);
     expect(choices()[3]!.closest("div")!.nextElementSibling).toBe(errors[1]);
-    // Every repeat of a choice points at that choice's message.
-    expect(choices()[4]!.getAttribute("aria-describedby")).toBe(errors[1]!.id);
-    expect(choices()[0]!.getAttribute("aria-invalid")).toBeNull();
+    // Each message has its own id, and every repeat of a choice points at
+    // that choice's message; the first of each choice points at none.
+    const ids = errors.map((error) => error.id);
+    expect(ids.every(Boolean)).toBe(true);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(choices().map((input) => input.getAttribute("aria-describedby"))).toEqual([null, ids[0], null, ids[1], ids[1]]);
+    expect(choices().map((input) => input.getAttribute("aria-invalid"))).toEqual([null, "true", null, "true", "true"]);
   });
 
   it("brings back a removed poll's choices when a poll is opened again, by either door", () => {
