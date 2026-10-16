@@ -127,3 +127,31 @@ pub async fn reconcile_until_settled(
             .expect("capture.flush settled flag");
     }
 }
+
+/// Wait on the durable placement outcome, independently of Undo's committed reply.
+pub async fn wait_for_undo_placement(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    operation: &str,
+    key: &str,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(600), async {
+        loop {
+            let result = call_keyed(
+                transport,
+                handle,
+                900,
+                "history.undo",
+                key,
+                json!({"operationId":operation}),
+            )
+            .await;
+            if result["materialized"] == true {
+                return result;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Undo placement must finish")
+}

@@ -28,7 +28,7 @@ export interface OwnerDatasetData {
   discardMigrationCandidate?(input: Parameters<RuntimeDatasetHost["discardMigration"]>[1]): Promise<void>;
   inspect?(datasetId: string, options?: { includeArchived?: boolean }): Promise<{ dataset: DatasetDescription; copy?: import("@dohc/cli/dataset").DatasetCopyStatus }>;
   historyRevision?(input: { datasetId: string; revisionSha256: string }): Promise<DatasetHistoryRevision>;
-  history(input: { datasetId: string; beforeRevision?: number; limit?: number }): Promise<DatasetHistoryPage>;
+  history(input: { datasetId: string; beforeRevision?: number; limit?: number; metadataOnly?: boolean; signal?: AbortSignal }): Promise<DatasetHistoryPage>;
   list(input: { after?: string; limit?: number; includeArchived?: boolean }): Promise<{ datasets: DatasetDescription[]; nextCursor: string | null }>;
   describe(datasetId: string, input?: { includeArchived?: boolean }): Promise<DatasetDescription>;
   lifecycle?(input: { datasetId: string; after?: string; limit?: number }): Promise<DatasetLifecyclePage>;
@@ -134,9 +134,10 @@ export function createRemoteDatasetData(input: {
     },
     async history(page) {
       const query = new URLSearchParams();
+      if (page.metadataOnly !== undefined) query.set("metadataOnly", String(page.metadataOnly));
       if (page.beforeRevision !== undefined) query.set("beforeRevision", String(z.number().int().positive().parse(page.beforeRevision)));
       if (page.limit !== undefined) query.set("limit", String(z.number().int().min(1).max(100).parse(page.limit)));
-      const result = DatasetHistoryPage.parse(await request(`${path(page.datasetId)}/history${query.size ? `?${query}` : ""}`));
+      const result = DatasetHistoryPage.parse(await request(`${path(page.datasetId)}/history${query.size ? `?${query}` : ""}`, undefined, page.signal ? AbortSignal.any([input.signal, page.signal]) : input.signal));
       if (result.datasetId !== page.datasetId || result.entries.some((row, index) => row.revision >= (index ? result.entries[index - 1]!.revision : page.beforeRevision ?? Number.MAX_SAFE_INTEGER)) ||
         result.nextBeforeRevision !== null && result.nextBeforeRevision !== result.entries.at(-1)?.revision) throw new Error("The server returned an invalid Collection history page.");
       return result;

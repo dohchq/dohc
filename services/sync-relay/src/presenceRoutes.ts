@@ -256,5 +256,5 @@ export function createPresenceRoutes(
     const topic = parsePresenceTopic(new URL(request.url).searchParams.get("topic"));
     return await respondPresence(request, workspaceId, topic, userId);
   };
-  return { respondToSharePresence, respondToWorkspacePresence };
+  return { respondToSharePresence, respondToWorkspacePresence, deleteAccount: project.deleteAccount };
 }

@@ -305,9 +305,13 @@ export function createUsageStore(deps: {
       // Maps contain only validated aggregates; avoid re-validating the whole store.
       const data = JSON.stringify(storedSnapshot(cleanExit));
       await io.mkdir(directory, { recursive: true });
-      await io.writeFile(path + ".tmp", data, { mode: 0o600 });
-      await io.rename(path + ".tmp", path);
+      const tmp = path + ".tmp";
+      await io.writeFile(tmp, data, { mode: 0o600 });
+      await io.sync(tmp);
+      await io.rename(tmp, path);
+      // Rename publishes these bytes even if the directory sync fails.
       lastBytes = data;
+      await io.syncDirectory(directory);
       savedRevision = writingRevision;
       committedCleanExit = cleanExit;
       admissionReady = !cleanExit;
@@ -506,19 +510,20 @@ export function createUsageStore(deps: {
       if (typeof value !== "boolean") return Promise.reject(new Error("Invalid usage setting"));
       return control(async () => {
         const previous = enabled;
+        const previousBytes = lastBytes;
         if (enabled !== value) { enabled = value; incomplete(); changed(); }
         if (!enabled) { pending.length = 0; pendingOverflow = false; }
         try {
           await write();
         } catch (error) {
-          // The file keeps the old setting, so memory keeps it too.
-          if (enabled !== previous) { enabled = previous; changed(); }
+          if (lastBytes === previousBytes && enabled !== previous) { enabled = previous; changed(); }
           throw error;
         }
       });
     },
     clear(): Promise<void> {
       return control(async () => {
+        const previousBytes = lastBytes;
         const saved = { days: [...days], counts: [...counts], coverage: [...coverage],
           unknownCounts: [...unknownCounts], unknownCoverage: [...unknownCoverage] };
         pending.length = 0; pendingOverflow = false;
@@ -529,14 +534,16 @@ export function createUsageStore(deps: {
           await io.rm(path + ".tmp", { force: true });
           await write();
         } catch (error) {
-          // The file keeps the old counts, so memory keeps them too.
-          days.clear(); counts.clear(); coverage.clear();
-          for (const [key, row] of saved.days) days.set(key, row);
-          for (const [key, row] of saved.counts) counts.set(key, row);
-          for (const [key, row] of saved.coverage) coverage.set(key, row);
-          for (const [key, row] of saved.unknownCounts) unknownCounts.set(key, row);
-          for (const [key, row] of saved.unknownCoverage) unknownCoverage.set(key, row);
-          incomplete(); changed();
+          // Unless the file was replaced meanwhile, it keeps the old counts, so memory keeps them too.
+          if (lastBytes === previousBytes) {
+            days.clear(); counts.clear(); coverage.clear();
+            for (const [key, row] of saved.days) days.set(key, row);
+            for (const [key, row] of saved.counts) counts.set(key, row);
+            for (const [key, row] of saved.coverage) coverage.set(key, row);
+            for (const [key, row] of saved.unknownCounts) unknownCounts.set(key, row);
+            for (const [key, row] of saved.unknownCoverage) unknownCoverage.set(key, row);
+            incomplete(); changed();
+          }
           throw error;
         }
       });
