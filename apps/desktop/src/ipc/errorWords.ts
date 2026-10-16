@@ -238,7 +238,6 @@ export function readError(error: unknown): ReadError {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
   }
   if (name === "DaemonRefusalError" && code === "INVALID_PARAMS" && [
-    "A poll has at most twelve choices.",
     "Each choice is one line of at most 200 characters.",
     "Each choice appears once.",
   ].includes(message)) {

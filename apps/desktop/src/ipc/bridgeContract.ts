@@ -2072,7 +2072,7 @@ export const SendChatMessagePayload = z.object({
   body: CHAT_BODY,
   needsDecision: z.boolean().optional(),
   // A poll's choices. Implies needsDecision. The engine normalizes them.
-  options: z.array(z.string().min(1).max(200)).max(12).optional(),
+  options: z.array(z.string().max(200)).max(12).optional(),
   fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
 });
 export type SendChatMessagePayload = z.infer<typeof SendChatMessagePayload>;
@@ -2417,7 +2417,7 @@ export const StartChannelThreadPayload = z.object({
   body: CHAT_BODY,
   needsDecision: z.boolean().optional(),
   // A poll's choices. Implies needsDecision. The engine normalizes them.
-  options: z.array(z.string().min(1).max(200)).max(12).optional(),
+  options: z.array(z.string().max(200)).max(12).optional(),
   lane: z.enum(["posts", "chat"]).optional(),
   fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
 });

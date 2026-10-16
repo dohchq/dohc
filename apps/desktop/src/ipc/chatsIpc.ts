@@ -997,7 +997,7 @@ export function registerChatsIpcHandlers<
         messageCount: 1,
         lastReadSequence: 1,
         unreadCount: 0,
-        openDecisionCount: 0,
+        openDecisionCount: input.needsDecision || (input.options?.length ?? 0) > 0 ? 1 : 0,
       }, automationCollectionOf(workspace.workspaceId), undefined, null),
       message: chatMessageForIpc(started.message, automationCollectionOf(workspace.workspaceId), await presentation(started.message, started.message.threadId)),
       viewerAuthorId:

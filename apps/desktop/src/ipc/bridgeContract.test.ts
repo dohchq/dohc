@@ -4545,7 +4545,6 @@ describe("exclusive app creation IPC contract", () => {
   expect(activityPathsAffectWorkspaceListing([".dohc/files.toml", ".dohc/ui-state.json", ".dohc/engine"], "win32")).toBe(false);
 });
 
-
 describe("poll send payloads", () => {
   const doors = [
     { name: "send", schema: SendChatMessagePayload, target: { threadId: "thread" } },
@@ -4558,6 +4557,10 @@ describe("poll send payloads", () => {
     const { needsDecision: _decision, ...implied } = payload;
     expect(schema.parse(implied)).toEqual(implied);
   });
+  it.each(doors)("leaves an empty choice for the engine to word on $name", ({ schema, target }) => {
+    const payload = { workspaceId: "workspace", ...target, body: "When?", options: [""] };
+    expect(schema.parse(payload)).toEqual(payload);
+  });
   for (const { name, schema, target } of doors) {
     it("accepts the poll choice limits on " + name, () => {
       const payload = { workspaceId: "workspace", ...target, body: "When?" };
@@ -4567,7 +4570,6 @@ describe("poll send payloads", () => {
     it.each([
       { reason: "13 choices", options: Array.from({ length: 13 }, (_, i) => String(i)) },
       { reason: "a 201-character choice", options: ["x".repeat(201)] },
-      { reason: "an empty choice", options: [""] },
       { reason: "a non-string choice", options: [42] },
     ])("refuses $reason on " + name, ({ options }) => {
       expect(schema.safeParse({ workspaceId: "workspace", ...target, body: "When?", options }).success).toBe(false);

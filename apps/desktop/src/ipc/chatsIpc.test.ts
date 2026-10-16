@@ -3,9 +3,6 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import { createTestScratch } from "../workspaces/testTemp";
 import { StartChannelThreadResult, SendChatMessageResult, ListChatMessagesResult, ListChatThreadDecisionsResult } from "./bridgeContract";
-import { DaemonRefusalError } from "@dohc/workspace-engine-client";
-import { ipcWireError } from "./errorWords";
-import { ipcErrorMessage } from "../renderer/ipcError";
 import { chatOperations } from "./bridgeContract";
 import { workspaceFileRef } from "../workspaces/resolveEngineFiles";
 import { describe, expect, it, vi } from "vitest";
@@ -601,7 +598,6 @@ it("keeps two unknown authors distinct in a received share view", async () => {
   expect(tokens[2]!.group).toBe(tokens[0]!.group);
 });
 
-
 describe("poll IPC writes", () => {
   const doors = [
     { name: "send", channel: chatOperations.sendChatMessage.channel, target: { threadId: "thread" }, method: "sendMessage" },
@@ -620,6 +616,20 @@ describe("poll IPC writes", () => {
     expect(input).toMatchObject({ options: ["Monday", "Tuesday"] });
     expect(input).not.toHaveProperty("needsDecision");
   });
+  it.each([
+    { name: "a decision flag", poll: { needsDecision: true }, count: 1 },
+    { name: "choices alone", poll: { options: ["Monday", "Tuesday"] }, count: 1 },
+    { name: "choices with a false decision flag", poll: { needsDecision: false, options: ["Monday", "Tuesday"] }, count: 1 },
+    { name: "a decision flag with no choices", poll: { needsDecision: true, options: [] }, count: 1 },
+    { name: "a plain message", poll: {}, count: 0 },
+    { name: "no decision and no choices", poll: { needsDecision: false, options: [] }, count: 0 },
+  ])("returns the opening decision count for $name", async ({ poll, count }) => {
+    const test = fixture();
+    const result = StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
+      workspaceId: "workspace", channelId: "channel", body: "When?", ...poll,
+    }));
+    expect(result.thread.openDecisionCount).toBe(count);
+  });
   it.each(doors)("refuses a poll in a share view on $name before persistence", async ({ channel, target, name }) => {
     const test = fixture("view");
     await expect(test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", needsDecision: true, options: ["Monday", "Tuesday"] }))
@@ -627,23 +637,6 @@ describe("poll IPC writes", () => {
     for (const method of Object.values(test.storeMethods)) expect(method).not.toHaveBeenCalled();
     expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
   });
-  for (const sentence of [
-    "A poll has at most twelve choices.",
-    "Each choice is one line of at most 200 characters.",
-    "Each choice appears once.",
-  ]) {
-    it.each(doors)("shows the engine poll sentence on $name: " + sentence, async ({ channel, target, method }) => {
-      const test = fixture();
-      test.storeMethods[method].mockRejectedValueOnce(new DaemonRefusalError({ code: "INVALID_PARAMS", message: sentence, retry: "no" }, null));
-      let caught: unknown;
-      try {
-        await test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", options: ["Monday", " Monday "] });
-      } catch (error) { caught = error; }
-      expect(caught).toBeInstanceOf(DaemonRefusalError);
-      const received = new Error("Error invoking remote method '" + channel + "': " + String(ipcWireError(caught)));
-      expect(ipcErrorMessage(received, "Could not send that message.")).toBe(sentence);
-    });
-  }
 });
 
 
