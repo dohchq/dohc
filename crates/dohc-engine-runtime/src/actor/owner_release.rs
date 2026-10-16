@@ -1,9 +1,6 @@
 //! Lifecycle commands for the future release runner. No RPC or startup task calls these.
 use super::*;
-use dohc_engine_collab::{
-    DocKey, LiveObjectBinding,
-    owner_outbox::{enrollment, prefix},
-};
+use dohc_engine_collab::{DocKey, LiveObjectBinding, owner_outbox::prefix};
 use dohc_engine_storage::TxnOutcome;
 use dohc_engine_sync::{self as sync, ReleaseHold};
 use tokio_util::sync::CancellationToken;
@@ -16,11 +13,9 @@ pub enum OwnerReleaseLifecycle {
     },
     Adopt(ReleaseHold),
     Unbind(ReleaseHold),
-    Abandon(ReleaseHold),
-    Successor {
+    Abandon {
         hold: ReleaseHold,
-        input: Box<enrollment::OwnerEnrollmentInput>,
-        digest: String,
+        resolved_digest: String,
     },
     CloseSession {
         hold: ReleaseHold,
@@ -95,9 +90,8 @@ impl ActorHandle {
                 OwnerReleaseLifecycle::Begin { binding, .. } => binding,
                 OwnerReleaseLifecycle::Adopt(h)
                 | OwnerReleaseLifecycle::Unbind(h)
-                | OwnerReleaseLifecycle::Abandon(h)
                 | OwnerReleaseLifecycle::FinishCleanup(h) => h.binding(),
-                OwnerReleaseLifecycle::Successor { hold, .. }
+                OwnerReleaseLifecycle::Abandon { hold, .. }
                 | OwnerReleaseLifecycle::CloseSession { hold, .. }
                 | OwnerReleaseLifecycle::CleanupSession { hold, .. } => hold.binding(),
             };
@@ -106,7 +100,6 @@ impl ActorHandle {
                 &binding.main_version_id,
                 &binding.object_id,
             )?;
-            cache.remove(&key);
             let result = store.write_with(faults.as_ref(), |tx| {
                 let h = match action {
                     OwnerReleaseLifecycle::Begin {
@@ -122,16 +115,12 @@ impl ActorHandle {
                         sync::unbind_release_in(tx, &h, now_ms)?;
                         h
                     }
-                    OwnerReleaseLifecycle::Abandon(h) => {
-                        sync::abandon_release_hold_in(tx, &h, h.digest())?;
-                        h
-                    }
-                    OwnerReleaseLifecycle::Successor {
-                        hold,
-                        input,
-                        digest,
+                    OwnerReleaseLifecycle::Abandon {
+                        hold: h,
+                        resolved_digest,
                     } => {
-                        return sync::successor_release_hold_in(tx, &hold, &input, &digest, now_ms);
+                        sync::abandon_release_hold_in(tx, &h, &resolved_digest)?;
+                        h
                     }
                     OwnerReleaseLifecycle::CloseSession { hold, outbox } => {
                         require_cleanup_hold(tx, &key, &hold)?;
@@ -157,8 +146,14 @@ impl ActorHandle {
                 Ok::<_, sync::SyncError>(h)
             })?;
             match result {
-                TxnOutcome::Committed(h) => Ok(h),
-                TxnOutcome::Crashed { .. } => Err(sync::SyncError::FaultCrash.into()),
+                TxnOutcome::Committed(h) => {
+                    cache.remove(&key);
+                    Ok(h)
+                }
+                TxnOutcome::Crashed { .. } => {
+                    cache.remove(&key);
+                    Err(sync::SyncError::FaultCrash.into())
+                }
             }
         })
         .await
@@ -225,9 +220,11 @@ fn require_cleanup_hold(
     key: &DocKey,
     hold: &ReleaseHold,
 ) -> Result<(), sync::SyncError> {
-    prefix::progress_in(conn, key)
+    if prefix::progress_in(conn, key)
         .map_err(StorageError::corrupt_public)?
-        .filter(|p| p.release_digest == hold.digest())
-        .map(|_| ())
-        .ok_or(sync::SyncError::CoordinateDiverged)
+        .is_some_and(|p| p.release_digest == hold.digest())
+    {
+        return Ok(());
+    }
+    Err(sync::SyncError::CoordinateDiverged)
 }

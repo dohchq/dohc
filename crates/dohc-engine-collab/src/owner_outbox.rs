@@ -618,6 +618,9 @@ fn append_with_retained_base(
     if durable_main.as_ref().map(|(id, _)| id) != Some(&binding.main_version_id) {
         return Err(OwnerOutboxError::MainVersionMismatch);
     }
+    if durable_main.is_some_and(|(_, closed)| closed) {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
 
     if let Some((
         existing_outbox_id,
@@ -686,12 +689,9 @@ fn append_with_retained_base(
         });
     }
 
-    if durable_main.is_some_and(|(_, closed)| closed) {
-        return Err(OwnerOutboxError::ParentMismatch);
-    }
-    let consumed: Option<(String, String, i64, i64, i64, String)> = tx
+    let consumed: Option<(String, String, i64, i64, i64, String, bool)> = tx
         .query_row(
-            "SELECT update_digest,delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state \
+            "SELECT update_digest,delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state,ordinary_edit \
              FROM owner_prefix_consumed \
              WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4 AND append_key=?5",
             params![
@@ -709,15 +709,22 @@ fn append_with_retained_base(
                     r.get(3)?,
                     r.get(4)?,
                     r.get(5)?,
+                    r.get(6)?,
                 ))
             },
         )
         .optional()
         .map_err(read_sql)?;
-    if let Some((digest, delivery_id, sequence, pending_bytes, oldest_entry_at_ms, state)) =
-        consumed
+    if let Some((
+        digest,
+        delivery_id,
+        sequence,
+        pending_bytes,
+        oldest_entry_at_ms,
+        state,
+        ordinary,
+    )) = consumed
     {
-        let ordinary:bool=tx.query_row("SELECT ordinary_edit FROM owner_prefix_consumed WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4 AND append_key=?5",params![binding.workspace_id,binding.main_version_id,binding.object_id,outbox_id,input.append_key],|r|r.get(0)).map_err(read_sql)?;
         if ordinary {
             return Err(OwnerOutboxError::ParentMismatch);
         }

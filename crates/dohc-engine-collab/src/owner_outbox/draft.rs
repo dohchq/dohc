@@ -51,12 +51,12 @@ pub(super) fn draft_proof(
     }
     let parent = find_parent_for_binding(conn, binding)?;
     let progress = super::prefix::progress_in(conn, &key(binding)?)?;
-    if parent.as_ref().is_some_and(|p| {
-        progress
-            .as_ref()
-            .is_some_and(|g| g.closed_sessions.contains(&p.outbox_id))
-    }) {
-        return Err(OwnerOutboxError::ParentMismatch);
+    if progress.is_some() {
+        if let Some(parent) = &parent {
+            if super::prefix::session_closed_in(conn, &key(binding)?, &parent.outbox_id)? {
+                return Err(OwnerOutboxError::ParentMismatch);
+            }
+        }
     }
     let draining = progress.is_some();
     if parent.as_ref().is_some_and(|p| {

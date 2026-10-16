@@ -749,7 +749,7 @@ fn complete_drain_cleanup(
         if let Some((key, leases)) = recovery {
             require_recovery_closed(tx, key, leases)?;
         }
-        if let Some(hold)=&cleanup.release_guard { hold.check_in(tx,true)?; }
+        if let Some(key)=&cleanup.release_guard { for (origin,seq) in &cleanup.coordinates { crate::release_hold::check_deferred_release_in(tx,key,origin,*seq)?; } }
         if let Some(refusal) = cleanup.projection_refusal.as_ref() {
             crate::apply::persist_refusal(tx, refusal)?;
         }
@@ -921,7 +921,7 @@ pub struct YdocDrainCleanup {
     workspace_id: String,
     coordinates: Vec<(String, i64)>,
     projection_refusal: Option<crate::ReplicationRefusal>,
-    release_guard: Option<crate::ReleaseHold>,
+    release_guard: Option<DocKey>,
 }
 
 fn drain_deferred_ydoc(
@@ -992,9 +992,7 @@ fn drain_deferred_ydoc(
                         "parked ydoc.update lineage identity does not match its payload",
                     ));
                 }
-                if release {
-                    crate::release_hold::check_deferred_release_in(conn,key,&origin_id,origin_seq)?;
-                }
+                if release && !crate::release_hold::deferred_release_ready_in(conn,key,&origin_id,origin_seq)? { continue; }
                 pending.push((
                     origin_id,
                     origin_seq,
@@ -1069,7 +1067,7 @@ fn drain_deferred_ydoc(
     let mut payload_recorded_at = 0_i64;
     let release_page = pending.iter().any(|row| row.6);
     let release_guard = if release_page {
-        Some(crate::read_release_hold(store, key)?.ok_or(SyncError::CoordinateDiverged)?)
+        Some(key.clone())
     } else {
         None
     };
@@ -3323,8 +3321,8 @@ pub(crate) fn drain_inactive_ydoc_updates(
         ))).map_err(SyncError::corrupt)?.collect::<Result<Vec<_>,_>>().map_err(SyncError::corrupt)?;
         let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
         let mut batch_bytes = 0;
-        let mut processed = 0;
-        for (origin, seq, at, json, byte_length, release) in rows {
+        let mut fenced = std::collections::BTreeSet::new();
+        for (processed, (origin, seq, at, json, byte_length, release)) in rows.into_iter().enumerate() {
             let cost = usize::try_from(byte_length.ok_or(SyncError::BlobInvalid)?).map_err(SyncError::corrupt)?.saturating_add(json.len());
             // One admitted update is at most 20 MiB, plus a 256 KiB payload.
             if batch_bytes + cost > 24 * 1024 * 1024 {
@@ -3332,16 +3330,20 @@ pub(crate) fn drain_inactive_ydoc_updates(
                 break;
             }
             batch_bytes += cost;
-            processed += 1;
             let payload: YdocUpdatePayload = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
-            if release { let key = DocKey::new(workspace_id,&payload.version_id,&payload.object_id).map_err(map_collab_hard_error)?; crate::release_hold::check_deferred_release_in(tx,&key,&origin,seq)?; }
+            if release { let key = DocKey::new(workspace_id,&payload.version_id,&payload.object_id).map_err(map_collab_hard_error)?;
+                if !crate::release_hold::deferred_release_ready_in(tx,&key,&origin,seq)? { fenced.insert((payload.version_id,payload.object_id,payload.lineage_claim_id)); continue; }
+            }
             let bytes = get_binary_blob(tx, &payload.update_blob_sha256).map_err(SyncError::Storage)?.ok_or(SyncError::BlobInvalid)?;
             if hex_sha256(&bytes) != payload.update_blob_sha256 { return Err(SyncError::BlobInvalid); }
             groups.entry((payload.version_id.clone(),payload.object_id.clone(),payload.lineage_claim_id.clone()))
                 .or_default().push((origin,seq,at,payload,bytes));
         }
         let mut refusals = Vec::new();
-        for ((version,object,_), rows) in groups {
+        let mut consumed = 0;
+        for ((version,object,lineage), rows) in groups {
+            if fenced.contains(&(version.clone(),object.clone(),lineage)) { continue; }
+            consumed += rows.len();
             let key = DocKey::new(workspace_id, version, object).map_err(map_collab_hard_error)?;
             let last = rows.last().unwrap();
             let updates = rows.iter().map(|row| row.4.clone()).collect::<Vec<_>>();
@@ -3359,7 +3361,7 @@ pub(crate) fn drain_inactive_ydoc_updates(
                     params![workspace_id,origin,seq]).map_err(SyncError::persist)?;
             }
         }
-        Ok::<_,SyncError>((processed,refusals))
+        Ok::<_,SyncError>((consumed,refusals))
     })?;
         match result {
             TxnOutcome::Committed((processed, refusals)) => {

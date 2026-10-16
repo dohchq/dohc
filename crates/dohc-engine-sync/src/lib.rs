@@ -27,6 +27,8 @@ mod outbound;
 mod owner_publication;
 mod prefix_publication;
 mod release_hold;
+#[cfg(test)]
+use release_hold::open_release_hold_in;
 mod release_publication;
 pub use prefix_publication::{
     journal_prefix_moment_in_tx, journal_prefix_op_in_tx, journal_prefix_update_in_tx,
@@ -34,10 +36,10 @@ pub use prefix_publication::{
 pub use release_hold::{
     ReleaseHold, abandon_release_hold_in, acknowledge_release_replay_in, adopt_pending_page_in,
     adopt_redelivered_pending_in, apply_replication_envelope_with_release_hold,
-    begin_release_hold_in, close_release_hold_in, open_release_hold_in, pending_release_blocked_in,
+    begin_release_hold_in, close_release_hold_in, pending_release_blocked_in,
     prepare_release_hold_replay_in, read_release_hold, read_release_hold_page,
     release_deferred_wakes_in, replay_release_held_envelope, seal_release_hold_cut_in,
-    successor_release_hold_in, unbind_release_in,
+    unbind_release_in,
 };
 mod settlement_publication;
 pub use owner_publication::{

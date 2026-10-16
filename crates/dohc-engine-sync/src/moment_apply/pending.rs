@@ -92,8 +92,8 @@ pub(crate) fn drain_and_claim(
         // Paths can change during recovery without advancing the generation.
         // Refuse a changed binding before replaying a ready settlement.
         // A later generation supersedes it regardless of path changes.
-        let mut stmt = tx.prepare_cached(
-            &"SELECT p.origin_id,p.origin_seq,l.payload_json,l.recorded_at_ms,p.applied,\
+        const SQL: &str = concat!(
+            "SELECT p.origin_id,p.origin_seq,l.payload_json,l.recorded_at_ms,p.applied,\
                     p.main_version_id,p.object_id,p.record_facts_json,\
                     p.applied=0 AND json_extract(b.binding_json,'$.restoreFenceGeneration')>json_extract(p.binding_json,'$.restoreFenceGeneration'),\
                     COALESCE(json(p.binding_json)!=json(b.binding_json),0) \
@@ -106,9 +106,10 @@ pub(crate) fn drain_and_claim(
              WHERE p.workspace_id=?1 AND (p.applied=1 OR (p.relay_namespace=b.relay_database_namespace AND (\
                (p.terminal_cursor<=b.accepted_cursor AND json_extract(p.binding_json,'$.restoreFenceGeneration')=json_extract(b.binding_json,'$.restoreFenceGeneration')) \
                OR json_extract(b.binding_json,'$.restoreFenceGeneration')>json_extract(p.binding_json,'$.restoreFenceGeneration')))) \
-             AND (p.applied=1 OR NOT (/* release ownership */)) \
-             ORDER BY p.checked_sequence,p.terminal_cursor,p.origin_id,p.origin_seq LIMIT 65".replace("/* release ownership */",crate::release_hold::OWNED_PENDING),
-        ).map_err(SyncError::corrupt)?;
+             AND (p.applied=1 OR NOT (",crate::release_hold::owned_pending!(),")) \
+             ORDER BY p.checked_sequence,p.terminal_cursor,p.origin_id,p.origin_seq LIMIT 65",
+        );
+        let mut stmt = tx.prepare_cached(SQL).map_err(SyncError::corrupt)?;
         let mut rows = stmt.query([workspace_id]).map_err(SyncError::corrupt)?;
         let mut ready = Vec::new();
         while let Some(row) = rows.next().map_err(SyncError::corrupt)? {

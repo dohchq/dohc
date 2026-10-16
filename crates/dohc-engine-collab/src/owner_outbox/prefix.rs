@@ -59,7 +59,6 @@ pub struct PrefixProgress {
     pub consumed_entries: i64,
     pub settlement_owed: bool,
     pub publication_frontier: std::collections::BTreeMap<String, i64>,
-    pub closed_sessions: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +104,7 @@ pub fn commit_blocker_in(
     release_digest: &str,
 ) -> Result<Option<CommitBlocker>, OwnerOutboxError> {
     let key = key(binding)?;
+    require_not_abandoned_in(conn, binding, release_digest)?;
     effective_in(conn, binding)?;
     let p = progress_in(conn, &key)?.ok_or(OwnerOutboxError::StopConflict)?;
     Ok(if p.release_digest != release_digest {
@@ -133,6 +133,7 @@ impl PrefixSettlement {
         let observed = effective_in(conn, binding)?;
         let key = key(binding)?;
         let p = progress_in(conn, &key)?.ok_or(OwnerOutboxError::StopConflict)?;
+        require_not_abandoned_in(conn, binding, &p.release_digest)?;
         let from_sequence = conn.query_row("SELECT COALESCE(settled_update_seq,0) FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id],|r|r.get(0)).map_err(read_sql)?;
         Ok(Self {
             binding: binding.clone(),
@@ -330,7 +331,6 @@ pub fn effective_in(
     let Some(progress) = stop.as_ref().and_then(|s| s.prefix.as_ref()) else {
         return super::accepted::current(conn, binding);
     };
-    require_not_abandoned_in(conn, binding, &progress.release_digest)?;
     let mut observed = read_observed_in(conn, binding)?.ok_or(OwnerOutboxError::NotFound)?;
     if stop.as_ref().is_none_or(|s| {
         s.binding.as_ref() != Some(binding)
@@ -420,7 +420,6 @@ pub fn seal_in_tx(
         consumed_entries: 0,
         settlement_owed: false,
         publication_frontier: Default::default(),
-        closed_sessions: Default::default(),
     };
     stop.prefix = Some(progress.clone());
     super::release::save_in_tx(tx, &key, &stop, now_ms)?;
@@ -564,6 +563,7 @@ pub fn commit_prefix(
     #[cfg(feature = "test-support")]
     let mut fold_ms = 0.0;
     let result = store.write_with(faults, |tx| {
+        require_not_abandoned_in(tx,binding,release_digest)?;
         let observed = effective_in(tx, binding)?;
         if draft.as_ref().is_some_and(|d| super::draft::draft_proof(tx,binding,observed.revision).ok().as_ref() != Some(&d.proof)) { draft = None; }
         if crate::author_coverage::unresolved_in(tx,&key).map_err(collab)? { return Err(OwnerOutboxError::Stopping); }
@@ -668,10 +668,8 @@ pub fn append_old_session_in_tx(
     }
     let stop = super::release::read_in(tx, &key)?.ok_or(OwnerOutboxError::ParentMismatch)?;
     if stop.binding.as_ref() != Some(&input.binding)
-        || stop
-            .prefix
-            .as_ref()
-            .is_none_or(|p| p.closed_sessions.contains(outbox))
+        || stop.prefix.as_ref().is_none()
+        || session_closed_in(tx, &key, outbox)?
     {
         return Err(OwnerOutboxError::ParentMismatch);
     }
@@ -753,9 +751,8 @@ pub fn close_consumed_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     outbox: &str,
-    now_ms: i64,
+    _now_ms: i64,
 ) -> Result<(), OwnerOutboxError> {
-    let mut stop = super::release::read_in(tx, key)?.ok_or(OwnerOutboxError::StopConflict)?;
     let owned: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_prefix_consumed WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4) OR EXISTS(SELECT 1 FROM owner_release_closed_sessions WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4)",params![key.workspace_id,key.version_id,key.object_id,outbox],|r|r.get(0)).map_err(read_sql)?;
     if !owned {
         return Err(OwnerOutboxError::ParentMismatch);
@@ -765,12 +762,7 @@ pub fn close_consumed_in_tx(
         params![outbox, key.workspace_id, key.version_id, key.object_id],
     )
     .map_err(write_sql)?;
-    stop.prefix
-        .as_mut()
-        .ok_or(OwnerOutboxError::StopConflict)?
-        .closed_sessions
-        .insert(outbox.into());
-    super::release::save_in_tx(tx, key, &stop, now_ms)
+    Ok(())
 }
 
 /// The caller closes session ownership before reclaiming its results.
@@ -779,7 +771,7 @@ pub fn cleanup_consumed_in_tx(
     key: &DocKey,
     outbox: &str,
 ) -> Result<usize, OwnerOutboxError> {
-    if !progress_in(tx, key)?.is_some_and(|p| p.closed_sessions.contains(outbox)) {
+    if !session_closed_in(tx, key, outbox)? {
         return Err(OwnerOutboxError::StopConflict);
     }
     tx.execute("DELETE FROM owner_prefix_consumed WHERE rowid IN (SELECT rowid FROM owner_prefix_consumed WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4 LIMIT 64)",params![key.workspace_id,key.version_id,key.object_id,outbox]).map_err(write_sql)
@@ -849,7 +841,7 @@ pub fn finish_cleanup_in_tx(
     if pending {
         return Err(OwnerOutboxError::StopConflict);
     }
-    let holding:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) OR EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest IS NOT NULL)",params![key.workspace_id,key.version_id,key.object_id],|r|r.get(0)).map_err(read_sql)?;
+    let holding:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",params![key.workspace_id,key.version_id,key.object_id],|r|r.get(0)).map_err(read_sql)?;
     if holding {
         return Err(OwnerOutboxError::StopConflict);
     }
@@ -869,13 +861,10 @@ fn require_not_abandoned_in(
     Ok(())
 }
 
-pub fn quarantine_abandoned_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    binding: &LiveObjectBinding,
-) -> Result<(), OwnerOutboxError> {
-    if let Some(observed) = read_observed_in(tx, binding)? {
-        tx.execute("UPDATE release_holds SET owner_snapshot_json=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![binding.workspace_id,binding.main_version_id,binding.object_id,serde_json::to_string(&observed).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
-    }
-    tx.execute("UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='stale-binding' WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND state!='quarantined'",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation]).map_err(write_sql)?;
-    Ok(())
+pub(super) fn session_closed_in(
+    conn: &Connection,
+    key: &DocKey,
+    outbox: &str,
+) -> Result<bool, OwnerOutboxError> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM owner_release_closed_sessions WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4)",params![key.workspace_id,key.version_id,key.object_id,outbox],|r|r.get(0)).map_err(read_sql)
 }

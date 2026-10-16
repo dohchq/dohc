@@ -164,13 +164,13 @@ fn recover_replay_commit(dependency: bool) {
         })
         .unwrap();
     assert_eq!(usage, (0, 0));
+    assert!(matches!(
+        store
+            .write_with(&NoFaults, |tx| close_release_hold_in(tx, &hold))
+            .unwrap(),
+        TxnOutcome::Committed(true)
+    ));
     if let Some(bytes) = predecessor {
-        assert!(matches!(
-            store
-                .write_with(&NoFaults, |tx| close_release_hold_in(tx, &hold))
-                .unwrap(),
-            TxnOutcome::Committed(false)
-        ));
         let mut prior = update(&mut store, &owner, &bytes, 0);
         prior.origin_id = "predecessor".into();
         apply_replication_envelope(
@@ -190,12 +190,6 @@ fn recover_replay_commit(dependency: bool) {
         .unwrap();
         assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
     }
-    assert!(matches!(
-        store
-            .write_with(&NoFaults, |tx| close_release_hold_in(tx, &hold))
-            .unwrap(),
-        TxnOutcome::Committed(true)
-    ));
     assert_eq!(store.table_row_count("release_holds").unwrap(), 0);
 }
 

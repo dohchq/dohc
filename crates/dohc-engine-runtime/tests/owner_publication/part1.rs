@@ -1,8 +1,5 @@
 use super::*;
-use dohc_engine_collab::{
-    WriterDocCache,
-    owner_outbox::{enrollment, prefix},
-};
+use dohc_engine_collab::{WriterDocCache, owner_outbox::prefix};
 use dohc_engine_runtime::actor::OwnerReleaseLifecycle as Action;
 use dohc_engine_storage::StorageError;
 use dohc_engine_sync::{self as sync, NoLiveLeases, ReleaseHold, ReplicationEnvelope};
@@ -184,12 +181,18 @@ async fn part1_adopts_preexisting_pending_and_runtime_unbind_exempts_only_exact_
     let h = begin(&f, &actor).await;
     seal(&mut f, &h);
     save(&f, &actor, &h).await;
-    assert!(lifecycle(&actor, Action::Unbind(h.clone())).await.is_err());
+    assert!(matches!(
+        lifecycle(&actor, Action::Unbind(h.clone())).await,
+        Err(dohc_engine_runtime::RuntimeError::Sync(
+            sync::SyncError::RetryableState { .. }
+        ))
+    ));
     lifecycle(&actor, Action::Adopt(h.clone())).await.unwrap();
     for sql in [
         "UPDATE release_held_ops SET release_digest=replace(release_digest,'a','c')",
         "UPDATE release_held_ops SET object_id='another'",
         "UPDATE release_held_ops SET envelope_json=json_set(envelope_json,'$.recordedAtMs',101)",
+        "UPDATE release_holds SET relay_namespace='other-relay'",
         "UPDATE owner_pending_settlements SET binding_json=json_set(binding_json,'$.restoreFenceGeneration',1)",
     ] {
         f.store
@@ -198,13 +201,19 @@ async fn part1_adopts_preexisting_pending_and_runtime_unbind_exempts_only_exact_
             })
             .unwrap();
         assert!(
-            lifecycle(&actor, Action::Unbind(h.clone())).await.is_err(),
+            matches!(
+                lifecycle(&actor, Action::Unbind(h.clone())).await,
+                Err(dohc_engine_runtime::RuntimeError::Sync(
+                    sync::SyncError::RetryableState { .. }
+                ))
+            ),
             "{sql}"
         );
         assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 1);
         f.store.write_with(&NoFaults,|tx| {
             tx.execute("UPDATE release_held_ops SET release_digest=?1,object_id='object',envelope_json=?2",params![h.digest(),serde_json::to_string(&op).unwrap()]).unwrap();
-            tx.execute("UPDATE owner_pending_settlements SET binding_json=?1",[serde_json::to_string(&f.binding).unwrap()]).unwrap();
+            tx.execute("UPDATE release_holds SET relay_namespace='relay'",[]).unwrap();
+            tx.execute("UPDATE owner_pending_settlements SET relay_namespace='relay',binding_json=?1",[serde_json::to_string(&f.binding).unwrap()]).unwrap();
             Ok::<_,StorageError>(())
         }).unwrap();
     }
@@ -215,12 +224,53 @@ async fn part1_adopts_preexisting_pending_and_runtime_unbind_exempts_only_exact_
             sync::prepare_release_hold_replay_in(tx, &h, true)
         })
         .unwrap();
+    actor
+        .versioned_text_write(
+            dohc_engine_domain::WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "schema".into(),
+                path: "notes/.collection.json".into(),
+                text: r#"{"fields":{"status":{"type":"text"}}}"#.into(),
+                moment_id: "schema-moment".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 70,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    // The current Collection index must survive an older History-only arrival.
+    f.store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO collections VALUES ('workspace','main','notes','notes/.collection.json','valid','[]') ON CONFLICT DO NOTHING", []).unwrap();
+        tx.execute("INSERT INTO collection_records (workspace_id,version_id,record_id,collection_path,file_path,object_id,adoption_state,index_initialized) VALUES ('workspace','main','rec_00000000000000000000000000','notes','notes/owner.md','object','adopted',1)", []).unwrap();
+        tx.execute("INSERT INTO collection_record_fields VALUES ('workspace','main','rec_00000000000000000000000000','status','\"kept\"','valid',NULL)", []).unwrap();
+        Ok::<_, StorageError>(())
+    }).unwrap();
     let before = dohc_engine_collab::load_persisted(&f.store, &key())
         .unwrap()
         .unwrap()
         .doc
         .encode_full_state();
-    actor
+    let moment = op.payload["momentId"].as_str().unwrap().to_owned();
+    let indexed = f
+        .store
+        .read_with(|c| {
+            dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                c,
+                "workspace",
+                "main",
+                "object",
+            )
+        })
+        .unwrap();
+    assert_eq!(indexed, Some(serde_json::json!({"status":"kept"})));
+    let replay = actor
         .owner_release_replay(
             h,
             op,
@@ -237,6 +287,32 @@ async fn part1_adopts_preexisting_pending_and_runtime_unbind_exempts_only_exact_
             .doc
             .encode_full_state(),
         before
+    );
+    assert!(
+        matches!(replay.0.primary,sync::ApplyDisposition::Applied(ref result) if result.record_facts.is_empty())
+    );
+    assert_eq!(
+        f.store
+            .read_with(|c| c.query_row(
+                "SELECT count(*) FROM moments WHERE moment_id=?1",
+                [moment],
+                |r| r.get::<_, i64>(0)
+            ))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.store
+            .read_with(|c| {
+                dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                    c,
+                    "workspace",
+                    "main",
+                    "object",
+                )
+            })
+            .unwrap(),
+        indexed
     );
     supervisor.close_all().unwrap();
 }
@@ -279,7 +355,15 @@ async fn part1_abandonment_fences_acknowledged_dependencies_and_retains_restart_
             sync::acknowledge_release_replay_in(tx, &dependent)
         })
         .unwrap();
-    lifecycle(&actor, Action::Abandon(h.clone())).await.unwrap();
+    lifecycle(
+        &actor,
+        Action::Abandon {
+            hold: h.clone(),
+            resolved_digest: h.digest().into(),
+        },
+    )
+    .await
+    .unwrap();
     let prior = update(&mut f, &prior, "other-peer", 0);
     // The ordinary arrival also tries the deferred drain, which must observe abandonment.
     assert!(
@@ -290,7 +374,7 @@ async fn part1_abandonment_fences_acknowledged_dependencies_and_retains_restart_
             &NoFaults,
             &NoLiveLeases,
         )
-        .is_err()
+        .is_ok()
     );
     assert!(
         sync::drain_deferred_ydoc_for_key(
@@ -299,9 +383,9 @@ async fn part1_abandonment_fences_acknowledged_dependencies_and_retains_restart_
             &key(),
             &NoFaults
         )
-        .is_err()
+        .is_ok()
     );
-    assert!(
+    assert!(matches!(
         actor
             .owner_release_replay(
                 h.clone(),
@@ -310,9 +394,11 @@ async fn part1_abandonment_fences_acknowledged_dependencies_and_retains_restart_
                 Arc::new(NoFaults),
                 CancellationToken::new()
             )
-            .await
-            .is_err()
-    );
+            .await,
+        Err(dohc_engine_runtime::RuntimeError::Sync(
+            sync::SyncError::RetryableState { .. }
+        ))
+    ));
     supervisor.close_all().unwrap();
     let actor = supervisor.open(&f.db, 50).unwrap().actor;
     assert_eq!(
@@ -329,155 +415,18 @@ async fn part1_abandonment_fences_acknowledged_dependencies_and_retains_restart_
             &key(),
             &NoFaults
         )
-        .is_err()
+        .is_ok()
     );
     assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
+    let text = dohc_engine_collab::load_persisted(&f.store, &key())
+        .unwrap()
+        .unwrap()
+        .doc
+        .project(ContentKind::Richdoc)
+        .unwrap()
+        .content;
+    assert!(!text.contains("dependent"));
     supervisor.close_all().unwrap();
-}
-
-#[tokio::test]
-async fn part1_same_generation_successor_rekeys_atomically_and_keeps_private_tail_nonpublishable() {
-    for fault in [
-        dohc_engine_storage::FaultPoint::StorageBeforePersist,
-        dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck,
-    ] {
-        let (mut f, supervisor, actor) = pending_release_fixture(1).await;
-        let h = begin(&f, &actor).await;
-        let peer = Ydoc::wire();
-        peer.apply(&f.bytes).unwrap();
-        let op = update(
-            &mut f,
-            &peer.richdoc_append_paragraph("held peer"),
-            "peer",
-            0,
-        );
-        retain(&mut f, &h, &op);
-        lifecycle(&actor, Action::Abandon(h.clone())).await.unwrap();
-        assert!(
-            actor
-                .owner_release_replay(
-                    h.clone(),
-                    op.clone(),
-                    Arc::new(NoLiveLeases),
-                    Arc::new(NoFaults),
-                    CancellationToken::new()
-                )
-                .await
-                .is_err()
-        );
-        let local = dohc_engine_collab::load_persisted(&f.store, &key())
-            .unwrap()
-            .unwrap();
-        let input = enrollment::OwnerEnrollmentInput {
-            binding: f.binding.clone(),
-            relay_database_namespace: "relay".into(),
-            captured: enrollment::OwnerEnrollmentCapture {
-                native_head_sequence: local.marker.head_update_seq,
-                local_state_digest: hex_sha256(&local.doc.encode_full_state()),
-            },
-            journal_cursor: 0,
-            checkpoint: f.bytes.clone(),
-            host_vector: f.doc.encode_state_vector(),
-            recovery: true,
-        };
-        // The host cut is the baseline, not the editor's private pending document.
-        let baseline = Ydoc::wire();
-        baseline.apply(&f.bytes).unwrap();
-        let input = enrollment::OwnerEnrollmentInput {
-            host_vector: baseline.encode_state_vector(),
-            ..input
-        };
-        let usage = f
-            .store
-            .read_with(|c| {
-                c.query_row(
-                    "SELECT operation_count,retained_bytes FROM release_hold_usage",
-                    [],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-                )
-            })
-            .unwrap();
-        let faults = dohc_engine_testkit::ScriptedFaults::crash_at(fault);
-        let result = actor
-            .owner_release_lifecycle(
-                Action::Successor {
-                    hold: h.clone(),
-                    input: Box::new(input.clone()),
-                    digest: "b".repeat(64),
-                },
-                40,
-                faults,
-                CancellationToken::new(),
-            )
-            .await;
-        assert!(result.is_err());
-        supervisor.close_all().unwrap();
-        let actor = supervisor.open(&f.db, 50).unwrap().actor;
-        let committed = fault == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck;
-        let current = sync::read_release_hold(&f.store, &key()).unwrap().unwrap();
-        assert_eq!(
-            current.digest(),
-            if committed {
-                "b".repeat(64)
-            } else {
-                "a".repeat(64)
-            }
-        );
-        let current = if committed {
-            current
-        } else {
-            lifecycle(
-                &actor,
-                Action::Successor {
-                    hold: h.clone(),
-                    input: Box::new(input),
-                    digest: "b".repeat(64),
-                },
-            )
-            .await
-            .unwrap()
-        };
-        assert_eq!(
-            f.store
-                .read_with(|c| c.query_row(
-                    "SELECT operation_count,retained_bytes FROM release_hold_usage",
-                    [],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-                ))
-                .unwrap(),
-            usage
-        );
-        assert_eq!(
-            f.store.table_row_count("owner_release_recoveries").unwrap(),
-            1
-        );
-        let doc = dohc_engine_collab::load_persisted(&f.store, &key())
-            .unwrap()
-            .unwrap()
-            .doc;
-        assert!(
-            !doc.project(ContentKind::Richdoc)
-                .unwrap()
-                .content
-                .contains("Pending edit")
-        );
-        let tail:i64=f.store.read_with(|c|c.query_row("SELECT count(*) FROM owner_ydoc_outbox_entries WHERE terminal_blob_digest IS NOT NULL AND pending=0",[],|r|r.get(0))).unwrap();
-        assert_eq!(tail, 1);
-        assert!(
-            actor
-                .owner_release_replay(
-                    h,
-                    op.clone(),
-                    Arc::new(NoLiveLeases),
-                    Arc::new(NoFaults),
-                    CancellationToken::new()
-                )
-                .await
-                .is_err()
-        );
-        assert_eq!(current.binding().restore_fence_generation, 0);
-        supervisor.close_all().unwrap();
-    }
 }
 
 fn fold(f: &mut Fixture, h: &ReleaseHold) {
@@ -519,12 +468,13 @@ async fn part1_cleanup_orders_closure_before_reclamation_and_fences_late_runtime
     fold(&mut f, &h);
     save(&f, &actor, &h).await;
     lifecycle(&actor, Action::Unbind(h.clone())).await.unwrap();
-    assert!(
-        lifecycle(&actor, Action::FinishCleanup(h.clone()))
-            .await
-            .is_err()
-    );
-    assert!(
+    assert!(matches!(
+        lifecycle(&actor, Action::FinishCleanup(h.clone())).await,
+        Err(dohc_engine_runtime::RuntimeError::Sync(
+            sync::SyncError::Storage(StorageError::StateCorrupt { .. })
+        ))
+    ));
+    assert!(matches!(
         lifecycle(
             &actor,
             Action::CleanupSession {
@@ -532,9 +482,11 @@ async fn part1_cleanup_orders_closure_before_reclamation_and_fences_late_runtime
                 outbox: outbox.clone()
             }
         )
-        .await
-        .is_err()
-    );
+        .await,
+        Err(dohc_engine_runtime::RuntimeError::Sync(
+            sync::SyncError::Storage(StorageError::StateCorrupt { .. })
+        ))
+    ));
     // Parent cleanup is permitted while the consumed result still owns retry identity.
     f.store
         .write_with(&NoFaults, |tx| {
@@ -572,13 +524,13 @@ async fn part1_cleanup_orders_closure_before_reclamation_and_fences_late_runtime
     )
     .await
     .unwrap();
-    assert!(
+    assert!(matches!(
         actor
             .owner_ydoc_outbox_append("workspace".into(), retry.clone(), CancellationToken::new())
             .await
-            .unwrap()
-            .is_err()
-    );
+            .unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::ParentMismatch)
+    ));
     f.store
         .write_with(&NoFaults, |tx| {
             sync::prepare_release_hold_replay_in(tx, &h, true)?;
@@ -599,211 +551,201 @@ async fn part1_cleanup_orders_closure_before_reclamation_and_fences_late_runtime
     );
     supervisor.close_all().unwrap();
     let actor = supervisor.open(&f.db, 60).unwrap().actor;
-    assert!(
+    assert!(matches!(
         actor
             .owner_ydoc_outbox_append("workspace".into(), retry.clone(), CancellationToken::new())
             .await
-            .unwrap()
-            .is_err()
-    );
+            .unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::ParentMismatch)
+    ));
     f.store
         .write_with(&NoFaults, |tx| {
             tx.execute("DELETE FROM owner_live_stops", [])
                 .map_err(StorageError::persist_public)
         })
         .unwrap();
-    assert!(
+    assert!(matches!(
         actor
             .owner_ydoc_outbox_append("workspace".into(), retry, CancellationToken::new())
             .await
-            .unwrap()
-            .is_err()
-    );
+            .unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::ParentMismatch)
+    ));
     assert_eq!(f.store.table_row_count("owner_ydoc_outboxes").unwrap(), 0);
     supervisor.close_all().unwrap();
 }
 
 #[tokio::test]
-async fn part1_successor_rekeys_acknowledged_deferred_wake_and_replays_only_new_identity() {
-    let (mut f, supervisor, actor) = pending_release_fixture(0).await;
+async fn fix1_abandoned_draft_remains_listed_open_and_writable_offline() {
+    let (mut f, supervisor, actor) = pending_release_fixture(1).await;
     let h = begin(&f, &actor).await;
-    let peer = Ydoc::wire();
-    peer.apply(&f.bytes).unwrap();
-    let op = update(
-        &mut f,
-        &peer.richdoc_append_paragraph("successor peer"),
-        "peer",
-        0,
-    );
-    retain(&mut f, &h, &op);
     seal(&mut f, &h);
-    save(&f, &actor, &h).await;
-    lifecycle(&actor, Action::Unbind(h.clone())).await.unwrap();
-    f.store
-        .write_with(&NoFaults, |tx| {
-            sync::prepare_release_hold_replay_in(tx, &h, true)
-        })
-        .unwrap();
-    actor
-        .owner_release_replay(
-            h.clone(),
-            op.clone(),
-            Arc::new(sync::AlwaysLive),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    f.store
-        .write_with(&NoFaults, |tx| sync::acknowledge_release_replay_in(tx, &op))
-        .unwrap();
-    assert_eq!(f.store.table_row_count("release_held_ops").unwrap(), 0);
-    assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
-    lifecycle(&actor, Action::Abandon(h.clone())).await.unwrap();
-    let input = enrollment::OwnerEnrollmentInput {
-        binding: f.binding.clone(),
-        relay_database_namespace: "relay".into(),
-        captured: enrollment::OwnerEnrollmentCapture {
-            native_head_sequence: 0,
-            local_state_digest: hex_sha256(&f.bytes),
-        },
-        journal_cursor: 0,
-        checkpoint: f.bytes.clone(),
-        host_vector: f.doc.encode_state_vector(),
-        recovery: true,
-    };
-    let mut restored = input.clone();
-    restored.binding.restore_fence_generation += 1;
-    assert!(
-        lifecycle(
-            &actor,
-            Action::Successor {
-                hold: h.clone(),
-                input: Box::new(restored),
-                digest: "b".repeat(64)
-            }
-        )
-        .await
-        .is_err()
-    );
-    let next = lifecycle(
+    lifecycle(
         &actor,
-        Action::Successor {
+        Action::Abandon {
             hold: h.clone(),
-            input: Box::new(input),
-            digest: "b".repeat(64),
+            resolved_digest: h.digest().into(),
         },
     )
     .await
     .unwrap();
-    assert_eq!(
-        f.store
-            .read_with(|c| c.query_row(
-                "SELECT release_digest FROM ydoc_deferred_updates",
-                [],
-                |r| r.get::<_, String>(0)
-            ))
-            .unwrap(),
-        next.digest()
-    );
-    assert!(
-        actor
-            .owner_release_replay(
-                h,
-                op.clone(),
-                Arc::new(NoLiveLeases),
-                Arc::new(NoFaults),
-                CancellationToken::new()
-            )
-            .await
-            .is_err()
-    );
-    supervisor.close_all().unwrap();
-    let actor = supervisor.open(&f.db, 80).unwrap().actor;
-    assert_eq!(
-        actor
-            .owner_release_deferred_wakes("workspace".into(), None)
-            .await
-            .unwrap(),
-        vec![key()]
-    );
-    sync::drain_deferred_ydoc_for_ended_session(
-        &mut f.store,
-        &mut WriterDocCache::new(),
-        &key(),
-        &NoLiveLeases,
-        &NoFaults,
-    )
-    .unwrap();
-    assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
-    assert_eq!(
-        actor
-            .owner_release_deferred_wakes("workspace".into(), None)
-            .await
-            .unwrap(),
-        vec![key()]
-    );
-    let before = dohc_engine_collab::load_persisted(&f.store, &key())
-        .unwrap()
-        .unwrap()
-        .doc;
-    assert!(
-        !before
-            .project(ContentKind::Richdoc)
-            .unwrap()
-            .content
-            .contains("successor peer")
-    );
-    // The successor's authenticated host frame admits this peer delta. A wake alone must not do so.
-    actor
-        .owner_ydoc_apply_accepted(
+    let drafts = actor
+        .owner_ydoc_list_drafts(
             "workspace".into(),
-            dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput {
-                binding: f.binding.clone(),
-                relay_database_namespace: "relay".into(),
-                expected_revision: 2,
-                expected_native_head_sequence: 0,
-                previous_accepted_cursor: 0,
-                journal_cursor: 1,
-                update_bytes: f
-                    .store
-                    .get_binary_blob(op.payload["updateBlobSha256"].as_str().unwrap())
-                    .unwrap()
-                    .unwrap(),
-            },
-            90,
+            None,
+            64,
+            true,
             CancellationToken::new(),
             Arc::new(()),
         )
         .await
         .unwrap()
         .unwrap();
-    let drained = sync::drain_deferred_ydoc_for_live_session(
-        &mut f.store,
-        &mut WriterDocCache::new(),
-        &key(),
-        Some(&f.binding.lineage_claim_id),
-        &NoFaults,
+    assert_eq!(drafts.len(), 1);
+    actor
+        .owner_ydoc_open_draft(f.binding.clone(), 1, CancellationToken::new(), Arc::new(()))
+        .await
+        .unwrap()
+        .unwrap();
+    actor
+        .owner_ydoc_append_draft(
+            "workspace".into(),
+            dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                person_edit: true,
+                binding: f.binding.clone(),
+                expected_revision: 1,
+                append_key: "offline".into(),
+                update: f.doc.richdoc_append_paragraph("offline edit"),
+                now_ms: 70,
+                agent_declaration: None,
+                automation_declaration: None,
+            },
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        f.store
+            .read_with(|c| prefix::commit_blocker_in(c, &f.binding, h.digest())),
+        Err(dohc_engine_collab::OwnerOutboxError::Stopping)
+    ));
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn fix1_abandon_requires_the_resolved_digest_without_mutating_the_draft() {
+    let (mut f, supervisor, actor) = pending_release_fixture(1).await;
+    let h = begin(&f, &actor).await;
+    seal(&mut f, &h);
+    assert!(matches!(
+        lifecycle(
+            &actor,
+            Action::Abandon {
+                hold: h.clone(),
+                resolved_digest: "b".repeat(64),
+            }
+        )
+        .await,
+        Err(dohc_engine_runtime::RuntimeError::Sync(
+            sync::SyncError::CoordinateDiverged
+        ))
+    ));
+    assert!(
+        f.store
+            .read_with(|c| prefix::commit_blocker_in(c, &f.binding, h.digest()))
+            .is_ok()
+    );
+    assert_eq!(
+        f.store
+            .table_row_count("owner_ydoc_outbox_entries")
+            .unwrap(),
+        1
+    );
+    assert!(
+        !f.store
+            .read_with(
+                |c| c.query_row("SELECT abandoned FROM release_holds", [], |r| r
+                    .get::<_, bool>(0))
+            )
+            .unwrap()
+    );
+    lifecycle(
+        &actor,
+        Action::Abandon {
+            hold: h.clone(),
+            resolved_digest: h.digest().into(),
+        },
     )
+    .await
     .unwrap();
-    assert!(drained.refusals.is_empty());
-    assert_eq!(f.store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
-    let doc = dohc_engine_collab::load_persisted(&f.store, &key())
-        .unwrap()
-        .unwrap()
-        .doc;
-    assert!(
-        doc.project(ContentKind::Richdoc)
-            .unwrap()
-            .content
-            .contains("successor peer")
-    );
-    assert!(
-        actor
-            .owner_release_deferred_wakes("workspace".into(), None)
+    assert!(matches!(
+        f.store
+            .read_with(|c| prefix::commit_blocker_in(c, &f.binding, h.digest())),
+        Err(dohc_engine_collab::OwnerOutboxError::Stopping)
+    ));
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn fix1_closed_session_refuses_existing_entry_retry_before_and_after_cleanup() {
+    let (mut f, supervisor, actor) = pending_release_fixture(2).await;
+    let h = begin(&f, &actor).await;
+    let (outbox, sha): (String, String) = f.store.read_with(|c| c.query_row(
+        "SELECT outbox_id,update_digest FROM owner_ydoc_outbox_entries WHERE append_key='pending-1'",
+        [], |r| Ok((r.get(0)?,r.get(1)?)))).unwrap();
+    let retry = dohc_engine_collab::OwnerOutboxAppendInput {
+        binding: f.binding.clone(),
+        base_update: f.bytes.clone(),
+        append_key: "pending-1".into(),
+        update: f.store.get_binary_blob(&sha).unwrap().unwrap(),
+        limits: dohc_engine_collab::OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 100_000,
+        },
+        created_at_ms: 10,
+    };
+    seal(&mut f, &h);
+    fold(&mut f, &h);
+    save(&f, &actor, &h).await;
+    lifecycle(&actor, Action::Unbind(h.clone())).await.unwrap();
+    // Retain an acknowledged delivery beside the folded key, as session cleanup permits.
+    f.store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state) SELECT outbox_id,sequence,append_key,delivery_id,update_digest,NULL,2,10,0,result_pending_bytes,result_oldest_entry_at_ms,result_state FROM owner_prefix_consumed WHERE append_key='pending-1'",[]).map_err(StorageError::persist_public)
+    }).unwrap();
+    lifecycle(
+        &actor,
+        Action::CloseSession {
+            hold: h.clone(),
+            outbox: outbox.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    for cleaned in [false, true] {
+        if cleaned {
+            lifecycle(
+                &actor,
+                Action::CleanupSession {
+                    hold: h.clone(),
+                    outbox: outbox.clone(),
+                },
+            )
             .await
-            .unwrap()
-            .is_empty()
-    );
+            .unwrap();
+        }
+        assert!(matches!(
+            actor
+                .owner_ydoc_outbox_append(
+                    "workspace".into(),
+                    retry.clone(),
+                    CancellationToken::new()
+                )
+                .await
+                .unwrap(),
+            Err(dohc_engine_collab::OwnerOutboxError::ParentMismatch)
+        ));
+    }
     supervisor.close_all().unwrap();
 }

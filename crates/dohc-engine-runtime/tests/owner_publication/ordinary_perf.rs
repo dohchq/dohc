@@ -198,6 +198,47 @@ async fn ordinary_append_settle_push_pull() {
         .unwrap()
         .unwrap();
     let outbox_append = start.elapsed().as_nanos();
+    // A second ordinary document receives the peer delta. The first document
+    // has an authenticated owner binding for the host settlement below.
+    dohc_engine_domain::VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "peer-object".into(),
+                path: "notes/peer.md".into(),
+                text: f.doc.project(ContentKind::Richdoc).unwrap().content,
+                moment_id: "peer-original".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 31,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let peer_base = f.doc.encode_full_state();
+    let peer_claim = hex_sha256(&peer_base);
+    dohc_engine_collab::claim_base(
+        &mut f.store,
+        &DocKey::new("workspace", "main", "peer-object").unwrap(),
+        ContentKind::Richdoc,
+        &peer_base,
+        &NoFaults,
+        32,
+    )
+    .unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET path='notes/peer.md' WHERE object_id='peer-object'",
+                [],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)
+        })
+        .unwrap();
     let transport = PerfRelay::default();
     let peer = append_fixed(&f.doc.encode_full_state(), 200003, "ordinary peer append").1;
     let sha = f.store.put_binary_blob(&peer).unwrap();
@@ -211,7 +252,7 @@ async fn ordinary_append_settle_push_pull() {
             op_kind: "ydoc.update".into(),
             settlement_admission: None,
             admitted_author_snapshot: None,
-            payload: serde_json::json!({"versionId":"main","objectId":"object","path":f.binding.current_path,"contentKind":"richdoc","lineageClaimId":f.binding.lineage_claim_id,"updateBlobSha256":sha}),
+            payload: serde_json::json!({"versionId":"main","objectId":"peer-object","path":"notes/peer.md","contentKind":"richdoc","lineageClaimId":peer_claim,"updateBlobSha256":sha}),
         }],
         next_cursor: 1,
         has_more: false,
@@ -257,6 +298,46 @@ async fn ordinary_append_settle_push_pull() {
     let mut peer = page.ops.pop().unwrap();
     peer.relay_seq = Some(read_back.len() as i64 + 1);
     read_back.push(peer);
+    // A host settlement ahead of the accepted cursor exercises pending enqueue,
+    // including the immutable envelope retained by migration 56.
+    let binding = f.binding.clone();
+    let checkpoint = f.doc.encode_full_state();
+    let (markdown_sha, before_updated, before_moment, before_origin): (String, i64, String, String) = f.store.read_with(|c| c.query_row("SELECT blob_sha256,updated_at_ms,latest_moment_id,metadata_origin FROM snapshots WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))).unwrap();
+    let path = binding.current_path.clone();
+    let host = ReplicationEnvelope {
+        workspace_id: "workspace".into(),
+        origin_id: "host".into(),
+        origin_seq: 0,
+        relay_seq: Some(read_back.len() as i64 + 1),
+        recorded_at_ms: 40,
+        op_kind: "moment.append".into(),
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+        payload: serde_json::json!({
+            "momentId":format!("moment-ydoc-{}", "b".repeat(64)),"versionId":"main","objectId":"object","objectCreatedAtMs":1,
+            "path":path,"recordedAtMs":40,"operation":"write","payloadBeforeBlobSha256":markdown_sha,"payloadBeforePath":path,
+            "payloadAfterBlobSha256":markdown_sha,"payloadAfterPath":path,"metadata":{"origin":"sync"},
+            "beforePresent":"present","beforeObjectId":"object","beforeVersionId":"main","beforePath":path,
+            "beforeBlobSha256":markdown_sha,"beforeUpdatedAtMs":before_updated,"beforeLatestMomentId":before_moment,"beforeMetadata":{"origin":"local-file"}
+        }),
+    };
+    // Outbound replication maps the local ydoc origin to local-file.
+    assert_eq!(before_origin, "ydoc");
+    let moment_id = host.payload["momentId"].clone();
+    f.store.write_with(&NoFaults, |tx| {
+            let head = dohc_engine_collab::read_marker_in(tx, &DocKey::new("workspace","main","object").unwrap()).unwrap().unwrap().head_update_seq;
+            let owner = dohc_engine_collab::owner_outbox::draft::ObservedOwnerBinding {
+                binding:binding.clone(), relay_database_namespace:"relay".into(), revision:1, accepted_cursor:0,
+                native_head_sequence:head, checkpoint_digest:hex_sha256(&checkpoint),
+                limits:dohc_engine_collab::OwnerOutboxLimits {max_pending_bytes:8*1024*1024,max_pending_age_ms:100000},
+            };
+            dohc_engine_collab::owner_outbox::draft::install_observed_binding_in_tx(tx,"workspace",&owner,&checkpoint).map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+            let record = serde_json::json!({"momentId":moment_id,"binding":binding,"relayDatabaseNamespace":"relay","terminalCursor":1,"acceptedStateBlobSha256":hex_sha256(&checkpoint)}).to_string();
+            tx.execute("INSERT INTO live_audit_settlements VALUES('perf-audit','workspace',?1,?2,?3)",rusqlite::params![hex_sha256(record.as_bytes()),record,markdown_sha]).map_err(dohc_engine_storage::StorageError::persist_public)?;
+            Ok::<_,dohc_engine_storage::StorageError>(())
+    }).unwrap();
+    let host_envelope_bytes = serde_json::to_vec(&host).unwrap().len();
+    read_back.push(host);
     let next_cursor = read_back.len() as i64;
     *client.transport().pull.lock().unwrap() = Some(PullResponse {
         ops: read_back,
@@ -292,10 +373,37 @@ async fn ordinary_append_settle_push_pull() {
         )
         .unwrap();
     let pull = start.elapsed().as_nanos();
+    assert!(
+        list_refusal_notices(&f.store, "workspace")
+            .unwrap()
+            .is_empty()
+    );
+    let peer_doc = f
+        .store
+        .read_with(|conn| {
+            dohc_engine_collab::load_doc_in(
+                conn,
+                &DocKey::new("workspace", "main", "peer-object").unwrap(),
+            )
+        })
+        .unwrap();
+    assert!(
+        peer_doc
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("ordinary peer append")
+    );
+    assert_eq!(
+        f.store
+            .table_row_count("owner_pending_settlements")
+            .unwrap(),
+        1
+    );
     assert_eq!(f.store.table_row_count("owner_live_stops").unwrap(), 0);
     println!(
         "DRAIN2B_ORDINARY {}",
-        serde_json::json!({"size":size,"documentSha256":hex_sha256(f.text.as_bytes()),"nativeSha256":hex_sha256(&f.bytes),"append":append,"outboxAppend":outbox_append,"settle":settle,"push":push,"pull":pull})
+        serde_json::json!({"size":size,"hostEnvelopeBytes":host_envelope_bytes,"documentSha256":hex_sha256(f.text.as_bytes()),"nativeSha256":hex_sha256(&f.bytes),"append":append,"outboxAppend":outbox_append,"settle":settle,"push":push,"pull":pull})
     );
     supervisor.close_all().unwrap();
 }

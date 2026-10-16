@@ -73,7 +73,7 @@ fn dependency_transfers_do_not_hide_later_origins_or_prevent_closure() {
         store
             .write_with(&NoFaults, |tx| close_release_hold_in(tx, &hold))
             .unwrap(),
-        TxnOutcome::Committed(false)
+        TxnOutcome::Committed(true)
     ));
     drop(store);
     let mut store = EngineStore::open(&engine_db_path(&dir).unwrap(), 4).unwrap();
@@ -86,12 +86,7 @@ fn dependency_transfers_do_not_hide_later_origins_or_prevent_closure() {
     .unwrap();
     assert!(text(&store).contains("A dependent 69"));
     assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
-    assert!(matches!(
-        store
-            .write_with(&NoFaults, |tx| close_release_hold_in(tx, &hold))
-            .unwrap(),
-        TxnOutcome::Committed(true)
-    ));
+    assert_eq!(store.table_row_count("release_holds").unwrap(), 0);
 }
 
 #[test]
@@ -115,6 +110,12 @@ fn dependency_transfer_can_be_acknowledged_before_missing_predecessors_arrive() 
     ack(&mut store, &op);
     assert_eq!(store.table_row_count("release_held_ops").unwrap(), 0);
     assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
+    assert!(matches!(
+        store
+            .write_with(&NoFaults, |tx| close_release_hold_in(tx, &hold))
+            .unwrap(),
+        TxnOutcome::Committed(true)
+    ));
     assert!(
         store
             .get_binary_blob(op.payload["updateBlobSha256"].as_str().unwrap())
@@ -258,6 +259,99 @@ fn opening_hold_waits_for_preexisting_pending_settlements() {
         Err(SyncError::RetryableState { .. })
     ));
     assert_eq!(store.table_row_count("release_holds").unwrap(), 0);
+}
+
+#[test]
+fn fix1_retain_refuses_pending_coordinate_with_different_ownership() {
+    for mutation in [
+        "UPDATE owner_pending_settlements SET relay_namespace='different'",
+        "UPDATE owner_pending_settlements SET binding_json=json_set(binding_json,'$.restoreFenceGeneration',1)",
+        "UPDATE owner_pending_settlements SET envelope_json=json_set(envelope_json,'$.recordedAtMs',99)",
+    ] {
+        let (_dir, mut store, owner, _) = owner_publication::fixture();
+        let hold = open(&mut store, &owner);
+        let op = audited(&mut store, &owner, 1);
+        apply_replication_envelope(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        store.read_with(|c| c.execute(mutation, [])).unwrap();
+        assert!(
+            matches!(
+                store.write_with(&NoFaults, |tx| hold.retain_in(tx, &op)),
+                Err(SyncError::RetryableState { .. })
+            ),
+            "{mutation}"
+        );
+        assert_eq!(store.table_row_count("release_held_ops").unwrap(), 0);
+        assert_eq!(store.table_row_count("release_held_blobs").unwrap(), 0);
+        assert_eq!(
+            store.table_row_count("owner_pending_settlements").unwrap(),
+            1
+        );
+    }
+}
+
+#[test]
+fn fix1_replication_retain_refuses_a_pending_coordinate_from_another_namespace() {
+    let (_dir, mut store, mut owner, _) = owner_publication::fixture();
+    let hold = open(&mut store, &owner);
+    owner.relay_database_namespace = "different".into();
+    store
+        .read_with(|c| {
+            c.execute(
+                "UPDATE ydoc_owner_bindings SET relay_database_namespace='different'",
+                [],
+            )
+        })
+        .unwrap();
+    let mut op = moment(&mut store, 0, "write");
+    op.payload["momentId"] = json!(format!("moment-ydoc-{}", "b".repeat(64)));
+    let record = json!({"momentId":op.payload["momentId"],"binding":owner.binding,"relayDatabaseNamespace":"different","terminalCursor":1,"acceptedStateBlobSha256":owner.checkpoint_digest}).to_string();
+    store
+        .read_with(|c| {
+            c.execute(
+                "INSERT INTO live_audit_settlements VALUES('audit','ws',?1,?2,?3)",
+                params![
+                    dohc_engine_storage::hex_sha256(record.as_bytes()),
+                    record,
+                    op.payload["payloadAfterBlobSha256"].as_str().unwrap()
+                ],
+            )
+        })
+        .unwrap();
+    assert!(matches!(
+        apply_replication_envelope_with_release_hold(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+            &hold
+        ),
+        Err(SyncError::RetryableState { .. })
+    ));
+    assert_eq!(
+        store
+            .read_with(|c| c.query_row(
+                "SELECT count(*) FROM replication_log WHERE origin_id=?1",
+                [&op.origin_id],
+                |r| r.get::<_, i64>(0)
+            ))
+            .unwrap(),
+        0
+    );
+    for table in [
+        "release_held_ops",
+        "release_held_blobs",
+        "owner_pending_settlements",
+    ] {
+        assert_eq!(store.table_row_count(table).unwrap(), 0, "{table}");
+    }
 }
 
 #[test]
@@ -618,4 +712,98 @@ fn hold_capacity_defers_fetch_while_another_origin_advances() {
     result.unwrap();
     assert_eq!(read_replication_acked_seq(&store, "ws", "peer").unwrap(), 0);
     assert_eq!(read_release_hold_page(&store, &hold).unwrap(), vec![op]);
+}
+
+#[test]
+fn fix1_abandoned_inactive_lineage_keeps_row_without_stopping_workspace_drain() {
+    let (_dir, mut store, owner, _) = owner_publication::fixture();
+    let hold = open(&mut store, &owner);
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Other branch\n")
+        .unwrap();
+    let lineage = store.put_binary_blob(&doc.encode_full_state()).unwrap();
+    let vector = store.put_binary_blob(&doc.encode_state_vector()).unwrap();
+    store.read_with(|c|c.execute("INSERT INTO ydoc_inactive_lineages(workspace_id,version_id,object_id,lineage_claim_id,disposition,content_kind,path,full_state_blob_sha256,state_vector_blob_sha256,recorded_at_ms,updated_at_ms) VALUES('ws','main','owner',?1,'rejected-base','richdoc','owner.md',?1,?2,2,2)",params![lineage,vector])).unwrap();
+    let mut op = update(
+        &mut store,
+        &owner,
+        &doc.richdoc_append_paragraph("fenced inactive"),
+        0,
+    );
+    op.payload["lineageClaimId"] = json!(lineage);
+    retain(&mut store, &hold, &op);
+    released(&mut store, &owner, &hold);
+    replay(&mut store, &hold, &op);
+    ack(&mut store, &op);
+    store
+        .write_with(&NoFaults, |tx| {
+            abandon_release_hold_in(tx, &hold, hold.digest())
+        })
+        .unwrap();
+    let other_text = "Another document's edit\n";
+    let other_sha = dohc_engine_storage::hex_sha256(other_text.as_bytes());
+    store
+        .read_with(|c| {
+            c.execute(
+                "INSERT INTO blobs VALUES(?1,?2,?3)",
+                params![other_sha, other_text.len() as i64, other_text],
+            )
+        })
+        .unwrap();
+    let mut other = envelope(
+        "other-origin",
+        0,
+        "moment.append",
+        json!({"momentId":"unrelated-document","versionId":"main","objectId":"other","path":"other.md","recordedAtMs":2000,"operation":"write","objectCreatedAtMs":1,
+        "payloadAfterBlobSha256":other_sha,"payloadAfterPath":"other.md","metadata":{"origin":"sync"},"beforePresent":"absent","authors":[{"kind":"human","humanId":"person"}]}),
+    );
+    other.relay_seq = Some(2);
+    let relay = FakeRelay::default();
+    *relay.pull.lock().unwrap() = Some(PullResponse {
+        ops: vec![op, other],
+        next_cursor: 2,
+        has_more: false,
+    });
+    let client = RelaySyncClient::new(relay);
+    let outcome = client
+        .pull_chat_workspace(
+            &mut store,
+            &mut WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            100,
+        )
+        .unwrap();
+    let SyncPassOutcome::Complete {
+        pending_cursor: Some(cursor),
+        ..
+    } = outcome
+    else {
+        panic!("{outcome:?}")
+    };
+    client
+        .commit_pull_cursor(&mut store, "ws", &cursor, &NoFaults, &NoLiveLeases, 101)
+        .unwrap();
+    let applied: String = store.read_with(|c| c.query_row("SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 WHERE s.object_id='other'", [], |r|r.get(0))).unwrap();
+    assert_eq!(applied, other_text);
+    assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 1);
+    assert_eq!(release_deferred_wakes_in_for_test(&store).len(), 1);
+    let sha:String=store.read_with(|c|c.query_row("SELECT full_state_blob_sha256 FROM ydoc_inactive_lineages WHERE lineage_claim_id=?1",[lineage],|r|r.get(0))).unwrap();
+    let saved = Ydoc::wire();
+    saved
+        .apply(&store.get_binary_blob(&sha).unwrap().unwrap())
+        .unwrap();
+    assert!(
+        !saved
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains("fenced inactive")
+    );
+}
+fn release_deferred_wakes_in_for_test(store: &EngineStore) -> Vec<DocKey> {
+    store
+        .read_with(|c| release_deferred_wakes_in(c, "ws", None))
+        .unwrap()
 }

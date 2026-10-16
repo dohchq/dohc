@@ -2,11 +2,13 @@ use super::*;
 use dohc_engine_collab::owner_outbox::{self, prefix};
 use rusqlite::Connection;
 
-pub(crate) const OWNED_PENDING: &str = "EXISTS(SELECT 1 FROM release_held_ops r JOIN release_holds h
+macro_rules! owned_pending { () => { "EXISTS(SELECT 1 FROM release_held_ops r JOIN release_holds h
     ON h.workspace_id=r.workspace_id AND h.version_id=r.version_id AND h.object_id=r.object_id AND h.release_digest=r.release_digest
     WHERE r.workspace_id=p.workspace_id AND r.origin_id=p.origin_id AND r.origin_seq=p.origin_seq
     AND r.version_id=p.main_version_id AND r.object_id=p.object_id AND h.relay_namespace=p.relay_namespace
-    AND json(h.binding_json)=json(p.binding_json) AND json(r.envelope_json)=json(p.envelope_json))";
+    AND json(h.binding_json)=json(p.binding_json) AND json(r.envelope_json)=json(p.envelope_json))" }; }
+pub(crate) use owned_pending;
+pub(crate) const OWNED_PENDING: &str = owned_pending!();
 
 /// Open before sending a claim. Pending settlements still block unbinding until adopted.
 pub fn begin_release_hold_in(
@@ -15,10 +17,7 @@ pub fn begin_release_hold_in(
     namespace: &str,
     digest: &str,
 ) -> Result<ReleaseHold, SyncError> {
-    let hold = open_in(tx, binding, namespace, digest, true)?;
-    let snapshot = prefix::effective_in(tx, binding).map_err(SyncError::corrupt)?;
-    tx.execute("UPDATE release_holds SET owner_snapshot_json=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![binding.workspace_id,binding.main_version_id,binding.object_id,serde_json::to_string(&snapshot).map_err(SyncError::corrupt)?]).map_err(SyncError::persist)?;
-    Ok(hold)
+    open_in(tx, binding, namespace, digest, true)
 }
 
 /// Each page owns at most 64 previously validated coordinates, with their exact envelopes.
@@ -158,8 +157,6 @@ pub fn unbind_release_in(
     if !saved {
         return Err(waiting());
     }
-    let snapshot = prefix::effective_in(tx, b).map_err(SyncError::corrupt)?;
-    tx.execute("UPDATE release_holds SET owner_snapshot_json=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id,serde_json::to_string(&snapshot).map_err(SyncError::corrupt)?]).map_err(SyncError::persist)?;
     owner_outbox::release::require_not_host_in(tx, &key).map_err(SyncError::corrupt)?;
     let encoded = serde_json::to_string(b).map_err(SyncError::corrupt)?;
     let removed=tx.execute("DELETE FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND json(binding_json)=json(?4) AND relay_database_namespace=?5",params![b.workspace_id,b.main_version_id,b.object_id,encoded,hold.namespace]).map_err(SyncError::persist)?;
@@ -180,76 +177,7 @@ pub fn abandon_release_hold_in(
         return Err(SyncError::CoordinateDiverged);
     }
     tx.execute("UPDATE release_holds SET abandoned=1,replay_ready=0 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4",params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id,hold.digest]).map_err(SyncError::persist)?;
-    prefix::quarantine_abandoned_in_tx(tx, &hold.binding).map_err(SyncError::corrupt)?;
     Ok(())
-}
-
-/// Install the authenticated successor and re-key every continuation in one transaction.
-pub fn successor_release_hold_in(
-    tx: &Transaction<'_>,
-    old: &ReleaseHold,
-    input: &owner_outbox::enrollment::OwnerEnrollmentInput,
-    digest: &str,
-    now_ms: i64,
-) -> Result<ReleaseHold, SyncError> {
-    old.check_identity_in(tx)?;
-    owner_outbox::enrollment::enroll_release_successor_in_tx(tx, input, &old.digest, now_ms)
-        .map_err(SyncError::corrupt)?;
-    rekey_release_hold_in(
-        tx,
-        old,
-        &input.binding,
-        &input.relay_database_namespace,
-        digest,
-    )
-}
-
-/// Re-key only after successor enrollment installed its authenticated native cut, in this transaction.
-fn rekey_release_hold_in(
-    tx: &Transaction<'_>,
-    old: &ReleaseHold,
-    binding: &LiveObjectBinding,
-    namespace: &str,
-    digest: &str,
-) -> Result<ReleaseHold, SyncError> {
-    old.check_identity_in(tx)?;
-    binding
-        .validate_canonical()
-        .map_err(|_| SyncError::CoordinateDiverged)?;
-    let b = &old.binding;
-    if binding != b
-        || namespace != old.namespace
-        || digest == old.digest
-        || digest.len() != 64
-        || !digest
-            .bytes()
-            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-    {
-        return Err(SyncError::CoordinateDiverged);
-    }
-    let json = serde_json::to_string(binding).map_err(SyncError::corrupt)?;
-    let installed:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND json(binding_json)=json(?4) AND relay_database_namespace=?5)",params![b.workspace_id,b.main_version_id,b.object_id,json,namespace],|r|r.get(0)).map_err(SyncError::corrupt)?;
-    let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
-        .map_err(SyncError::corrupt)?;
-    let expected =
-        (binding.restore_fence_generation > 0).then_some(binding.restore_fence_generation);
-    dohc_engine_collab::live_update_application::require_restore_generation(tx, &key, expected)
-        .map_err(crate::ydoc_apply::map_collab_hard_error)?;
-    if !installed {
-        return Err(waiting());
-    }
-    let changed=tx.execute("UPDATE release_holds SET binding_json=?4,relay_namespace=?5,release_digest=?6,anchor_cursor=NULL,anchor_sha256=NULL,replay_ready=1,successor_ready=1,remote_closed=0,abandoned=0 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND abandoned=1",params![b.workspace_id,b.main_version_id,b.object_id,json,namespace,digest]).map_err(SyncError::persist)?;
-    if changed != 1 {
-        return Err(waiting());
-    }
-    tx.execute("UPDATE release_held_ops SET release_digest=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?5",params![b.workspace_id,b.main_version_id,b.object_id,digest,old.digest]).map_err(SyncError::persist)?;
-    tx.execute("UPDATE owner_pending_settlements SET binding_json=?4,relay_namespace=?5 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND json(binding_json)=json(?6) AND relay_namespace=?7 AND EXISTS(SELECT 1 FROM release_held_ops r WHERE r.workspace_id=owner_pending_settlements.workspace_id AND r.origin_id=owner_pending_settlements.origin_id AND r.origin_seq=owner_pending_settlements.origin_seq AND r.release_digest=?8)",params![b.workspace_id,b.main_version_id,b.object_id,json,namespace,serde_json::to_string(b).map_err(SyncError::corrupt)?,old.namespace,digest]).map_err(SyncError::persist)?;
-    tx.execute("UPDATE ydoc_deferred_updates SET release_binding_json=?4,release_digest=?5,release_namespace=?6 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?7",params![b.workspace_id,b.main_version_id,b.object_id,json,digest,namespace,old.digest]).map_err(SyncError::persist)?;
-    Ok(ReleaseHold {
-        binding: binding.clone(),
-        namespace: namespace.into(),
-        digest: digest.into(),
-    })
 }
 
 pub(crate) fn check_deferred_release_in(
@@ -258,14 +186,17 @@ pub(crate) fn check_deferred_release_in(
     origin: &str,
     seq: i64,
 ) -> Result<(), SyncError> {
-    let saved:Option<(String,String,String)>=conn.query_row("SELECT release_binding_json,release_namespace,release_digest FROM ydoc_deferred_updates WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND release_digest IS NOT NULL",params![key.workspace_id,origin,seq],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(SyncError::corrupt)?;
-    if let Some((json, namespace, digest)) = saved {
-        let hold = ReleaseHold {
-            binding: serde_json::from_str(&json).map_err(SyncError::corrupt)?,
-            namespace,
-            digest,
-        };
-        hold.check_in(conn, true)?;
+    let saved:Option<(String,i64,Option<String>,bool,bool)>=conn.query_row("SELECT d.release_digest,d.release_generation,h.release_digest,COALESCE(h.replay_ready,0),COALESCE(h.abandoned,0) FROM ydoc_deferred_updates d LEFT JOIN release_holds h ON h.workspace_id=d.workspace_id AND h.version_id=d.version_id AND h.object_id=d.object_id WHERE d.workspace_id=?1 AND d.origin_id=?2 AND d.origin_seq=?3 AND d.release_digest IS NOT NULL",params![key.workspace_id,origin,seq],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(SyncError::corrupt)?;
+    if let Some((digest, generation, held, ready, abandoned)) = saved {
+        if held.is_some_and(|held| held != digest || abandoned || !ready) {
+            return Err(waiting());
+        }
+        dohc_engine_collab::live_update_application::require_restore_generation(
+            conn,
+            key,
+            (generation > 0).then_some(generation),
+        )
+        .map_err(crate::ydoc_apply::map_collab_hard_error)?;
     }
     Ok(())
 }
@@ -294,4 +225,17 @@ pub fn release_deferred_wakes_in(
         DocKey::new(workspace, &v, &o).map_err(SyncError::corrupt)
     })
     .collect()
+}
+
+pub(crate) fn deferred_release_ready_in(
+    conn: &Connection,
+    key: &DocKey,
+    origin: &str,
+    seq: i64,
+) -> Result<bool, SyncError> {
+    match check_deferred_release_in(conn, key, origin, seq) {
+        Ok(()) => Ok(true),
+        Err(SyncError::RetryableState { .. }) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
