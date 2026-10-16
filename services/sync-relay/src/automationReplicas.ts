@@ -1,5 +1,6 @@
+import { workspaceIsDeleted } from "./storage/accountDeletion";
 import {createHash, randomBytes} from "node:crypto";
-import {mkdir, readdir, rm, writeFile} from "node:fs/promises";
+import {mkdir, readdir, rm, stat, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -162,7 +163,9 @@ export async function startAutomationReplicas(options: {
 
   const logHead = (workspaceId: string) => storage.automationWorkspaceLogHead(workspaceId);
 
+  let runningPass: Promise<boolean> | undefined;
   async function open(row: AutomationWorkspace): Promise<void> {
+    if (workspaceIsDeleted(storage, row.workspaceId)) return;
     const folder = folderOf(row.workspaceId);
     const home = join(folder, String(row.incarnation));
     const root = join(home, "workspace"), metadataDir = join(home, "metadata");
@@ -281,6 +284,7 @@ export async function startAutomationReplicas(options: {
       await release();
       throw error;
     }
+    if (workspaceIsDeleted(storage, row.workspaceId)) {await release(); return;}
     replicas.set(row.workspaceId, replica);
     options.onChanged?.(row.workspaceId);
   }
@@ -327,7 +331,7 @@ export async function startAutomationReplicas(options: {
     let ok = true;
     let passFailure: unknown = null;
     await engine();
-    const wanted = new Set(options.wanted());
+    const wanted = new Set(options.wanted().filter(id => !workspaceIsDeleted(storage, id)));
     for (const workspaceId of wanted) {
       ok = await each(workspaceId, async () => {
         const row = storage.joinAutomationWorkspace({workspaceId, nowMs: nowMs()});
@@ -337,10 +341,17 @@ export async function startAutomationReplicas(options: {
         if (open_ && (row === null || open_.incarnation !== row.incarnation)) await open_.close();
         if (!canSync(workspaceId)) return;
         if (row !== null && !replicas.has(workspaceId)) {
-          try { await open(row); }
+          let opening: AutomationWorkspace | null = row;
+          try {
+            // The server lost this replica's folder, and its engine with it.
+            if (await missing(join(folderOf(workspaceId), String(row.incarnation)))) {
+              opening = storage.replaceLostAutomationReplica({workspaceId, incarnation: row.incarnation, nowMs: nowMs()});
+            }
+            if (opening !== null) await open(opening);
+          }
           catch (error) {
             if (!syncRetries.has(workspaceId)) {
-              syncRetries.set(workspaceId, { at: performance.now() + RETRY_FIRST_MS, delay: RETRY_FIRST_MS, incarnation: row.incarnation });
+              syncRetries.set(workspaceId, { at: performance.now() + RETRY_FIRST_MS, delay: RETRY_FIRST_MS, incarnation: (opening ?? row).incarnation });
             }
             throw error;
           }
@@ -354,6 +365,7 @@ export async function startAutomationReplicas(options: {
       }) && ok;
     }
     for (const row of storage.listAutomationWorkspaces()) {
+      if (workspaceIsDeleted(storage, row.workspaceId)) continue;
       if (wanted.has(row.workspaceId)) continue;
       syncRetries.delete(row.workspaceId);
       ok = await each(row.workspaceId, async () => {
@@ -453,7 +465,7 @@ export async function startAutomationReplicas(options: {
 
   // A pass, then its look for the nearest deadline. Either failing fails the
   // pass; when both do, the pass's own failure is the one reported.
-  async function pass(): Promise<boolean> {
+  async function passOnce(): Promise<boolean> {
     deadline = undefined;
     let ok: boolean;
     try {
@@ -465,6 +477,8 @@ export async function startAutomationReplicas(options: {
     deadline = untilDeadline();
     return ok;
   }
+
+  const pass = () => runningPass = passOnce();
 
   // One pass at a time, each after the wait the one before it left. A pass
   // that fails runs again after a delay that doubles up to a minute.
@@ -546,6 +560,14 @@ export async function startAutomationReplicas(options: {
   if (storage.unavailable.aborted) closeUnavailable();
   else storage.unavailable.addEventListener("abort", closeUnavailable, {once: true});
   return {
+    async deleteWorkspaces(workspaceIds: readonly string[]) {
+      await runningPass?.catch(() => undefined);
+      for (const id of workspaceIds) {
+        await replicas.get(id)?.close();
+        await rm(folderOf(id), {recursive: true, force: true});
+        failedSyncs.delete(id); syncRetries.delete(id);
+      }
+    },
     /** The daemon is running and a pass completed, even if individual workspaces failed. */
     get unavailable(): boolean {
       return signal.aborted || !reconciled || !client || client.exited.signal.aborted;
@@ -567,6 +589,16 @@ export async function startAutomationReplicas(options: {
     /** Stops the passes, then closes every replica and the engine, waiting for work that ignores the abort. */
     close,
   };
+}
+
+async function missing(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
 }
 
 function replicaFolder(root: string, namespace: string, workspaceId: string): string {

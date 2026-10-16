@@ -120,7 +120,7 @@ if (phase === "prepare") {
   // Reactivation must fail against the unchanged, independently retained clock.
   replaceVolume("before-acceptance.sqlite", ".paired");
   const staleBytes = hash(readFileSync(relayPath));
-  assert.ok(relayStamp() < Number(continuity().expected_stamp));
+  assert.ok(relayStamp() < Number(continuity().confirmed_stamp));
   assert.throws(() => openRelayDeployment(configPath), /continuity/);
   assert.equal(hash(readFileSync(relayPath)), staleBytes);
   assert.deepEqual(continuity(), f.continuity);

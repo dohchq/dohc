@@ -104,5 +104,5 @@ export function createNamedLiveBrowserHttp(options: {
     })();
     return Promise.race([work, cancelled]);
   };
-  return Object.assign(handle, { resolve: sessions.resolve.bind(sessions) });
+  return Object.assign(handle, { resolve: sessions.resolve.bind(sessions), deleteAccount: sessions.deleteAccount });
 }

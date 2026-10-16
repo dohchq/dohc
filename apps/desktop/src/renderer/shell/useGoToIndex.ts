@@ -1,38 +1,54 @@
-import { useLayoutEffect, useMemo, useReducer } from "react";
+import { useEffect, useMemo, useReducer } from "react";
 import { GoToIndex, type GoToSources, type QuickOpenContext } from "../workbench/quick-open-rank";
-/**
- * Prepare after the first paint in background slices below the 4 ms budget.
- * Queries stay withheld until all queued preparation completes.
- * Source owners retain their response guards.
- */
-export function useGoToIndex(workspaceId: string, sources: GoToSources, context: QuickOpenContext, listingCommitted = true): GoToIndex {
+
+export type GoToIndexView = Pick<GoToIndex, "workspaceId" | "revision" | "preparing" | "rows" | "query">;
+
+// Unmounted until the palette PR. Source owners supply committed snapshots
+// and retain their workspace/request guards. Each task yields before continuing.
+export function useGoToIndex(workspaceId: string, sources: GoToSources, context: QuickOpenContext, listingCommitted = true): GoToIndexView {
   const index = useMemo(() => new GoToIndex(workspaceId), [workspaceId]);
   const [, repaint] = useReducer((revision: number) => revision + 1, 0);
-  useLayoutEffect(() => {
+  useEffect(() => () => index.cancel(), [index]);
+  useEffect(() => {
     if (!listingCommitted) return;
+    const run = index.update(sources, context);
+    if (!run) return;
     let current = true;
-    let firstFrame = 0;
-    let paintedFrame = 0;
-    let timer: ReturnType<typeof setTimeout>;
-    index.queuePreparation(sources, context);
-    repaint();
+    const controller = new AbortController();
+    const scheduler = (globalThis as typeof globalThis & { scheduler?: {
+      postTask(callback: () => void, options: { priority: "background"; signal: AbortSignal }): Promise<unknown>;
+    } }).scheduler;
+    const channel = scheduler ? undefined : new MessageChannel();
+    const close = () => { controller.abort(); channel?.port1.close(); channel?.port2.close(); };
+    const schedule = () => {
+      if (scheduler) void scheduler.postTask(prepare, { priority: "background", signal: controller.signal }).catch(error => {
+        if (!controller.signal.aborted) throw error;
+      });
+      else channel!.port2.postMessage(null);
+    };
     const prepare = () => {
       if (!current) return;
-      if (index.prepareSlice()) repaint();
-      else timer = setTimeout(prepare, 0);
+      if (run.step()) { close(); repaint(); }
+      else schedule();
     };
-    const schedule = () => { timer = setTimeout(prepare, 0); };
-    if (index.revision === 0) {
-      firstFrame = requestAnimationFrame(() => {
-        paintedFrame = requestAnimationFrame(schedule);
-      });
-    } else schedule();
+    repaint();
+    if (channel) channel.port1.onmessage = prepare;
+    schedule();
     return () => {
       current = false;
-      clearTimeout(timer);
-      cancelAnimationFrame(firstFrame);
-      cancelAnimationFrame(paintedFrame);
+      close();
     };
   }, [index, listingCommitted, sources.listing, sources.collections, sources.apps, sources.versions, sources.groups, context.pinned, context.recent]);
-  return index;
+  // This render owns the view, not the index. An abandoned render changes no state.
+  // Check incoming verdicts before any query, including before the effect commits them.
+  const removed = useMemo(() => index.removedKeys(sources),
+    [index, index.revision, sources.collections, sources.apps, sources.versions, sources.groups]);
+  const safe = () => index.canQuery(listingCommitted ? sources.listing : undefined);
+  return {
+    workspaceId,
+    get revision() { return index.revision; },
+    get preparing() { return index.preparing || !safe(); },
+    get rows() { return safe() ? index.rowsWithout(removed) : []; },
+    query: (query, limit) => safe() ? index.query(query, limit, removed) : [],
+  };
 }

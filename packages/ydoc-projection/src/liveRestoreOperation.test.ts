@@ -378,18 +378,15 @@ function assertCrashRecovery(boundary: string, sourceEntry = false) {
     expect(raw.prepare("SELECT admission_state,restore_fence_generation FROM sync_relay_live_documents").get()).toEqual({ admission_state: fenced ? "closed" : "open", restore_fence_generation: fenced ? 2 : 1 });
     expect(raw.prepare("SELECT phase FROM sync_relay_live_restore_operations").all()).toEqual(invalidated ? [{ phase: boundary === "native-after-commit" ? "native-fenced" : boundary.startsWith("native-") || boundary === "complete-after-commit" ? "old-cut-applied" : fenced ? "fenced" : "authority-invalidated" }] : []);
   } finally { raw.close(); }
-  if (boundary.endsWith("before-commit")) expect(() => openRelayDeployment(f.configPath)).toThrow(/continuity/);
-  else {
-    const reopened = openRelayDeployment(f.configPath).storage as StorageContext;
-    try {
-      const initial = beginStopRestore(reopened, f.intent, 40);
-      const final = advanceStopRestoreFence(reopened, f.lookup, 50);
-      expect(final.newFence).toBe(2);
-      expect(final.cutoverCursor).toBe(0);
-      expect(advanceStopRestoreFence(reopened, f.lookup, 51)).toEqual(final);
-      if (boundary === "fence-after-commit") expect(initial).toEqual(final);
-    } finally { reopened.close(); }
-  }
+  const reopened = openRelayDeployment(f.configPath).storage as StorageContext;
+  try {
+    const initial = beginStopRestore(reopened, f.intent, 40);
+    const final = advanceStopRestoreFence(reopened, f.lookup, 50);
+    expect(final.newFence).toBe(2);
+    expect(final.cutoverCursor).toBe(0);
+    expect(advanceStopRestoreFence(reopened, f.lookup, 51)).toEqual(final);
+    if (boundary === "fence-after-commit") expect(initial).toEqual(final);
+  } finally { reopened.close(); }
 }
 
 it.each(["before-operation", "invalidation-before-commit", "invalidation-after-commit", "fence-before-commit", "fence-after-commit", "complete-before-commit", "complete-after-commit", "native-before-commit", "native-after-commit"])("retains configured deployment state after process termination at %s", boundary => {
