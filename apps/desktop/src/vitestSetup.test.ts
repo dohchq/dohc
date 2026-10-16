@@ -105,10 +105,12 @@ describe("the rule that gives a desktop test file a worker of its own", () => {
     ["src/c.ts", 'export * from "./b.testSupport.tsx";\n'],
     ["src/d.testSupport.ts", 'import { afterEach, vi } from "vitest";\nexport function track() {\n  afterEach(() => {});\n  return vi.fn();\n}\n'],
     ["src/legendList.ts", 'import { vi } from "vitest";\nvi.mock("@legendapp/list");\n'],
+    ["src/e.editor-fixture.ts", 'import { vi } from "vitest";\nexport function shim() {\n  Object.defineProperty(Range.prototype, "getClientRects", { value: vi.fn() });\n}\n'],
+    ["src/polyfill.ts", 'Object.defineProperty(window, "requestIdleCallback", { value: () => 0 });\n'],
   ]));
 
-  it("finds the helpers that register hooks or mocks when imported, through any import", () => {
-    expect([...helpers].sort()).toEqual(["a.testHarness", "b.testSupport", "c", "legendList"]);
+  it("finds the test helpers that register hooks or mocks or define shared properties, through any import", () => {
+    expect([...helpers].sort()).toEqual(["a.testHarness", "b.testSupport", "c", "e.editor-fixture", "legendList"]);
   });
 
   it.each([
@@ -122,6 +124,12 @@ describe("the rule that gives a desktop test file a worker of its own", () => {
     ['vi.stubGlobal("dohcDesktop", bridge);', true],
     ['vi.stubGlobal("dohcDesktop", bridge);\nafterEach(() => vi.unstubAllGlobals());', false],
     ['vi.spyOn(console, "error");', false],
+    ['Object.defineProperty(URL, "revokeObjectURL", { value: revoke, configurable: true });', true],
+    ['Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: scroll });', true],
+    ['Object.defineProperty(navigator, "clipboard", { value: clipboard });', true],
+    ['Object.defineProperty(list, "clientHeight", { configurable: true, value: 500 });', false],
+    ['import { shim } from "./e.editor-fixture";', true],
+    ['import "./polyfill";', false],
   ])("decides whether %j needs its own worker: %s", (source, own) => {
     expect(needsOwnWorker(source, helpers)).toBe(own);
   });

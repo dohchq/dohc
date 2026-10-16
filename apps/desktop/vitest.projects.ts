@@ -13,10 +13,14 @@ import { join } from "node:path";
 // - calls vi.mock, vi.doMock, or vi.resetModules;
 // - imports a helper that registers hooks or mocks when it is first imported,
 //   because that helper runs once per worker, not once per file;
-// - stubs a global with vi.stubGlobal and never calls vi.unstubAllGlobals.
+// - stubs a global with vi.stubGlobal and never calls vi.unstubAllGlobals;
+// - defines a property on a window object, a DOM constructor, or its
+//   prototype with Object.defineProperty. The property outlives the file, and
+//   it is read-only unless the definition says otherwise.
 
 const MODULE_MOCKS = /\bvi\.(?:mock|doMock|resetModules)\(/u;
 const TOP_LEVEL_HOOK = /^(?:beforeAll|beforeEach|afterEach|afterAll)\(/mu;
+const SHARED_DEFINITION = /\bObject\.definePropert(?:y|ies)\(\s*(?:globalThis|window|document|navigator|crypto|[A-Z]\w*(?:\.prototype)?)\b/u;
 const IMPORTED = /\b(?:from|import)\s*\(?\s*["']([^"']+)["']/gu;
 const JSDOM = "@vitest-environment jsdom";
 
@@ -39,12 +43,15 @@ function importedNames(source: string): string[] {
 }
 
 /**
- * The names of helper modules that register hooks or mocks when imported, or
- * that import a helper that does.
+ * The names of test helpers that register hooks or mocks when imported or that
+ * define properties on shared window objects, and of modules that import such a
+ * helper. A test helper is a module that mentions vitest. A product module that
+ * patches a global does so once per worker, whether or not files share it.
  */
 export function leakingHelpers(helpers: ReadonlyMap<string, string>): Set<string> {
   const leaking = new Set([...helpers]
-    .filter(([, source]) => MODULE_MOCKS.test(source) || TOP_LEVEL_HOOK.test(source))
+    .filter(([, source]) => source.includes("vitest")
+      && (MODULE_MOCKS.test(source) || TOP_LEVEL_HOOK.test(source) || SHARED_DEFINITION.test(source)))
     .map(([path]) => moduleName(path)));
   const imports = [...helpers].map(([path, source]) => ({ name: moduleName(path), imported: importedNames(source) }));
   let grew = true;
@@ -60,9 +67,10 @@ export function leakingHelpers(helpers: ReadonlyMap<string, string>): Set<string
   return leaking;
 }
 
-/** Whether a test file would leave module mocks, helper hooks, or stubbed globals in a shared worker. */
+/** Whether a test file would leave module mocks, helper hooks, or changed globals in a shared worker. */
 export function needsOwnWorker(source: string, helpers: ReadonlySet<string>): boolean {
   return MODULE_MOCKS.test(source)
+    || SHARED_DEFINITION.test(source)
     || importedNames(source).some((name) => helpers.has(name))
     || (source.includes("vi.stubGlobal(") && !source.includes("vi.unstubAllGlobals("));
 }
