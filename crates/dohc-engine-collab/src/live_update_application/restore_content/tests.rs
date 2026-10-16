@@ -137,7 +137,7 @@ fn prefix_restore_refusal(resumed: bool) {
             &"c".repeat(64),
             95,
             &NoFaults,
-            |_, _, _, _| Ok(None)
+            |tx, _, _, _| prefix::test_publication(tx, &observed.binding)
         )
         .is_ok());
 

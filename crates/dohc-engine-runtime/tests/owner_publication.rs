@@ -7,6 +7,9 @@ use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::{path::PathBuf, sync::Arc};
 
+#[path = "owner_publication/part1.rs"]
+mod part1;
+
 struct Fixture {
     db: PathBuf,
     store: EngineStore,
@@ -35,7 +38,8 @@ impl Fixture {
         if size > 0 {
             let doc = Ydoc::wire();
             doc.apply(&bytes).unwrap();
-            doc.richdoc_append_paragraph(&"x".repeat(size));
+            let update = ordinary_perf::append_fixed(&bytes, 200001, &"x".repeat(size)).1;
+            doc.apply(&update).unwrap();
             text = doc.project(ContentKind::Richdoc).unwrap().content;
             bytes = doc.encode_full_state();
         }
@@ -4350,3 +4354,6 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
     }
     supervisor.close_all().unwrap();
 }
+
+#[path = "owner_publication/ordinary_perf.rs"]
+mod ordinary_perf;

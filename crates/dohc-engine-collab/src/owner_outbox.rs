@@ -607,15 +607,15 @@ fn append_with_retained_base(
     let binding_json = binding_json(&binding)?;
     let outbox_id = outbox_id(&binding, &base_update_digest, &binding_json);
 
-    let durable_main_version_id = tx
+    let durable_main = tx
         .query_row(
-            "SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1",
-            [&binding.workspace_id],
-            |row| row.get::<_, String>(0),
+            "SELECT main_version_id,CASE WHEN ?5 THEN EXISTS(SELECT 1 FROM owner_release_closed_sessions WHERE outbox_id=?4 AND workspace_id=?1 AND version_id=?2 AND object_id=?3) ELSE 0 END FROM versioned_workspaces WHERE workspace_id=?1",
+            params![binding.workspace_id,binding.main_version_id,binding.object_id,outbox_id,draft_revision.is_none()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
         )
         .optional()
         .map_err(read_sql)?;
-    if durable_main_version_id.as_deref() != Some(binding.main_version_id.as_str()) {
+    if durable_main.as_ref().map(|(id, _)| id) != Some(&binding.main_version_id) {
         return Err(OwnerOutboxError::MainVersionMismatch);
     }
 
@@ -686,6 +686,9 @@ fn append_with_retained_base(
         });
     }
 
+    if durable_main.is_some_and(|(_, closed)| closed) {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
     let consumed: Option<(String, String, i64, i64, i64, String)> = tx
         .query_row(
             "SELECT update_digest,delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state \
@@ -714,6 +717,10 @@ fn append_with_retained_base(
     if let Some((digest, delivery_id, sequence, pending_bytes, oldest_entry_at_ms, state)) =
         consumed
     {
+        let ordinary:bool=tx.query_row("SELECT ordinary_edit FROM owner_prefix_consumed WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4 AND append_key=?5",params![binding.workspace_id,binding.main_version_id,binding.object_id,outbox_id,input.append_key],|r|r.get(0)).map_err(read_sql)?;
+        if ordinary {
+            return Err(OwnerOutboxError::ParentMismatch);
+        }
         if digest != update_digest {
             return Err(OwnerOutboxError::AppendKeyMismatch);
         }

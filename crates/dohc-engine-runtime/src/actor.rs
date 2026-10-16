@@ -36,6 +36,8 @@ mod collections;
 mod journal;
 mod live_application;
 mod materialization;
+mod owner_release;
+pub use owner_release::OwnerReleaseLifecycle;
 mod relay;
 mod search;
 mod secrets;

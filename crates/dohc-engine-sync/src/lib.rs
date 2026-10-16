@@ -32,9 +32,12 @@ pub use prefix_publication::{
     journal_prefix_moment_in_tx, journal_prefix_op_in_tx, journal_prefix_update_in_tx,
 };
 pub use release_hold::{
-    ReleaseHold, acknowledge_release_replay_in, apply_replication_envelope_with_release_hold,
-    close_release_hold_in, open_release_hold_in, prepare_release_hold_replay_in, read_release_hold,
-    read_release_hold_page, replay_release_held_envelope, seal_release_hold_cut_in,
+    ReleaseHold, abandon_release_hold_in, acknowledge_release_replay_in, adopt_pending_page_in,
+    adopt_redelivered_pending_in, apply_replication_envelope_with_release_hold,
+    begin_release_hold_in, close_release_hold_in, open_release_hold_in, pending_release_blocked_in,
+    prepare_release_hold_replay_in, read_release_hold, read_release_hold_page,
+    release_deferred_wakes_in, replay_release_held_envelope, seal_release_hold_cut_in,
+    successor_release_hold_in, unbind_release_in,
 };
 mod settlement_publication;
 pub use owner_publication::{
@@ -129,6 +132,7 @@ pub use share::{
 };
 pub use share_grant::GrantBinding;
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
+pub use ydoc_apply::drain_deferred_ydoc_for_ended_session;
 pub use ydoc_apply::{
     AlwaysLive, LeaseProbe, LocalHeadReconcile, NoLiveLeases, PreparedLocalYdocLineage,
     ResultingHead, YdocApplyResult, YdocDrainCleanup, YdocDrainResult, YdocLineageReplacement,

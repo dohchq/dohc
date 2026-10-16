@@ -2,6 +2,9 @@ use dohc_engine_collab::{DocKey, LiveObjectBinding, WriterDocCache};
 use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::{OptionalExtension, Transaction, params};
 
+mod lifecycle;
+pub use lifecycle::*;
+
 use crate::{ApplyOutcome, BlobKind, LeaseProbe, ReplicationEnvelope, RoutedApply, SyncError};
 
 /// Inert until a caller opens it in the durable sent-ID transaction.
@@ -23,6 +26,16 @@ pub fn open_release_hold_in(
     binding: &LiveObjectBinding,
     namespace: &str,
     digest: &str,
+) -> Result<ReleaseHold, SyncError> {
+    open_in(tx, binding, namespace, digest, false)
+}
+
+fn open_in(
+    tx: &Transaction<'_>,
+    binding: &LiveObjectBinding,
+    namespace: &str,
+    digest: &str,
+    adopting: bool,
 ) -> Result<ReleaseHold, SyncError> {
     binding
         .validate_canonical()
@@ -49,7 +62,7 @@ pub fn open_release_hold_in(
     let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_pending_settlements p WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND relay_namespace=?5 AND applied=0
         AND NOT EXISTS(SELECT 1 FROM release_held_ops r WHERE r.workspace_id=p.workspace_id AND r.origin_id=p.origin_id AND r.origin_seq=p.origin_seq))",
         params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,namespace], |r|r.get(0)).map_err(SyncError::corrupt)?;
-    if pending {
+    if pending && !adopting {
         return Err(waiting());
     }
     tx.execute("INSERT INTO release_holds(workspace_id,version_id,object_id,release_digest,binding_json,relay_namespace)
@@ -69,16 +82,36 @@ pub fn read_release_hold(
 }
 
 impl ReleaseHold {
+    pub fn binding(&self) -> &LiveObjectBinding {
+        &self.binding
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    fn check_identity_in(&self, conn: &rusqlite::Connection) -> Result<(), SyncError> {
+        let encoded = serde_json::to_string(&self.binding).map_err(SyncError::corrupt)?;
+        let found:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND json(binding_json)=json(?5) AND relay_namespace=?6)",params![self.binding.workspace_id,self.binding.main_version_id,self.binding.object_id,self.digest,encoded,self.namespace],|r|r.get(0)).map_err(SyncError::corrupt)?;
+        if !found {
+            return Err(waiting());
+        }
+        Ok(())
+    }
     pub(crate) fn matches(&self, op: &ReplicationEnvelope) -> bool {
         op.workspace_id == self.binding.workspace_id
             && op.payload["versionId"] == self.binding.main_version_id
             && op.payload["objectId"] == self.binding.object_id
     }
-    fn check_in(&self, tx: &Transaction<'_>, replay: bool) -> Result<(), SyncError> {
+    pub(crate) fn check_in(
+        &self,
+        tx: &rusqlite::Connection,
+        replay: bool,
+    ) -> Result<(), SyncError> {
         let encoded = serde_json::to_string(&self.binding).map_err(SyncError::corrupt)?;
-        let ready: Option<bool> = tx.query_row("SELECT replay_ready FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND json(binding_json)=json(?5) AND relay_namespace=?6",
-            params![self.binding.workspace_id,self.binding.main_version_id,self.binding.object_id,self.digest,encoded,self.namespace], |r|r.get(0)).optional().map_err(SyncError::corrupt)?;
-        if ready.is_none() || (replay && ready != Some(true)) {
+        let ready: Option<(bool,bool)> = tx.query_row("SELECT replay_ready,abandoned FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND json(binding_json)=json(?5) AND relay_namespace=?6",
+            params![self.binding.workspace_id,self.binding.main_version_id,self.binding.object_id,self.digest,encoded,self.namespace], |r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(SyncError::corrupt)?;
+        if ready.is_none_or(|(ready, abandoned)| abandoned || (replay && !ready)) {
             return Err(waiting());
         }
         if replay {
@@ -86,7 +119,7 @@ impl ReleaseHold {
         }
         Ok(())
     }
-    fn check_released_in(&self, tx: &Transaction<'_>) -> Result<(), SyncError> {
+    fn check_released_in(&self, tx: &rusqlite::Connection) -> Result<(), SyncError> {
         let b = &self.binding;
         let expected = (b.restore_fence_generation > 0).then_some(b.restore_fence_generation);
         let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
@@ -94,6 +127,15 @@ impl ReleaseHold {
         dohc_engine_collab::live_update_application::require_restore_generation(tx, &key, expected)
             .map_err(crate::ydoc_apply::map_collab_hard_error)?;
         let encoded = serde_json::to_string(b).map_err(SyncError::corrupt)?;
+        let successor:bool=tx.query_row("SELECT successor_ready FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id],|r|r.get(0)).map_err(SyncError::corrupt)?;
+        if successor {
+            let installed = dohc_engine_collab::owner_outbox::prefix::effective_in(tx, b)
+                .map_err(SyncError::corrupt)?;
+            if installed.relay_database_namespace != self.namespace {
+                return Err(waiting());
+            }
+            return Ok(());
+        }
         let released: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_live_stops s JOIN ydoc_docs d ON d.workspace_id=s.workspace_id AND d.version_id=s.main_version_id AND d.object_id=s.object_id
             WHERE s.workspace_id=?1 AND s.main_version_id=?2 AND s.object_id=?3 AND s.state='released' AND json_extract(s.binding_json,'$.binding')=json(?4) AND s.relay_database_namespace=?5 AND d.lineage_claim_id=?6)
             AND NOT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
@@ -338,6 +380,7 @@ pub fn replay_release_held_envelope(
     leases: &dyn LeaseProbe,
     hold: &ReleaseHold,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
+    store.read_with(|conn| hold.check_in(conn, false))?;
     let completed=store.read_with(|c|c.query_row("SELECT envelope_json,stage,record_facts_json FROM release_held_ops WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND release_digest=?4",
         params![op.workspace_id,op.origin_id,op.origin_seq,hold.digest],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?))).optional().map_err(SyncError::corrupt))?;
     if let Some((json, stage, facts)) = completed {
@@ -419,9 +462,9 @@ pub fn replay_release_held_envelope(
     }
     let result=store.write_with(faults,|tx| {
         permit.check_in(tx)?;
-        tx.execute("INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,lineage_claim_id,relay_seq)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![op.workspace_id,hold.binding.main_version_id,hold.binding.object_id,op.origin_id,op.origin_seq,op.recorded_at_ms,op.payload["lineageClaimId"].as_str().ok_or(SyncError::CoordinateDiverged)?,op.relay_seq]).map_err(SyncError::persist)?;
+        tx.execute("INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,lineage_claim_id,relay_seq,release_binding_json,release_namespace,release_digest)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![op.workspace_id,hold.binding.main_version_id,hold.binding.object_id,op.origin_id,op.origin_seq,op.recorded_at_ms,op.payload["lineageClaimId"].as_str().ok_or(SyncError::CoordinateDiverged)?,op.relay_seq,serde_json::to_string(&hold.binding).map_err(SyncError::corrupt)?,hold.namespace,hold.digest]).map_err(SyncError::persist)?;
         tx.execute("UPDATE release_held_ops SET stage='dependency' WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
             params![op.workspace_id,op.origin_id,op.origin_seq]).map_err(SyncError::persist)?;
         Ok::<_,SyncError>(())
@@ -515,7 +558,8 @@ pub fn acknowledge_release_replay_in(
 pub fn close_release_hold_in(tx: &Transaction<'_>, hold: &ReleaseHold) -> Result<bool, SyncError> {
     hold.check_in(tx, false)?;
     let deleted=tx.execute("DELETE FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND remote_closed=1
-        AND NOT EXISTS(SELECT 1 FROM release_held_ops WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+        AND NOT EXISTS(SELECT 1 FROM release_held_ops WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)
+        AND NOT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest IS NOT NULL)",
         params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id]).map_err(SyncError::persist)?;
     Ok(deleted == 1)
 }

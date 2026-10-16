@@ -6,7 +6,7 @@ const SAFE: i64 = 9_007_199_254_740_991;
 const SCOPE: &str =
     "workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObservedOwnerBinding {
     pub binding: LiveObjectBinding,
     pub relay_database_namespace: String,
@@ -50,7 +50,15 @@ pub(super) fn draft_proof(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     let parent = find_parent_for_binding(conn, binding)?;
-    let draining = super::prefix::progress_in(conn, &key(binding)?)?.is_some();
+    let progress = super::prefix::progress_in(conn, &key(binding)?)?;
+    if parent.as_ref().is_some_and(|p| {
+        progress
+            .as_ref()
+            .is_some_and(|g| g.closed_sessions.contains(&p.outbox_id))
+    }) {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    let draining = progress.is_some();
     if parent.as_ref().is_some_and(|p| {
         p.binding != *binding || (p.state == OwnerOutboxState::Quarantined && !draining)
     }) {

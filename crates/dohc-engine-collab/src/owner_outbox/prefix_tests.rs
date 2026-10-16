@@ -1,6 +1,57 @@
 use super::super::prefix;
 
 #[test]
+fn drain2b_nonempty_prefix_requires_publication_frontier() {
+    let (_dir, mut store, observed, _, _, _) = prefix_queue(1);
+    let before = store.table_row_count("owner_ydoc_outbox_entries").unwrap();
+    let result = prefix::commit_prefix(
+        &mut store, &mut Default::default(), &observed.binding, &"c".repeat(64),
+        6, &NoFaults, |_, _, _, _| Ok(None),
+    );
+    assert!(matches!(result, Err(OwnerOutboxError::Corrupt)), "{result:?}");
+    assert_eq!(store.table_row_count("owner_ydoc_outbox_entries").unwrap(), before);
+}
+
+#[test]
+fn drain2b_closed_session_cannot_reinsert_after_consumed_cleanup() {
+    let (_dir, mut store, observed, _, inputs, outbox) = prefix_queue(1);
+    let key = key(&observed.binding).unwrap();
+    prefix_turn(&mut store, &mut Default::default(), &observed);
+    store.write_with(&NoFaults, |tx| {
+        prefix::close_consumed_in_tx(tx, &key, &outbox, 9)?;
+        prefix::cleanup_consumed_in_tx(tx, &key, &outbox)?;
+        Ok::<_,OwnerOutboxError>(())
+    }).unwrap();
+    let result = append_draft_cached(
+        &mut store, &mut Default::default(), "workspace", inputs[0].clone(), &NoFaults,
+    );
+    assert!(matches!(result, Err(OwnerOutboxError::ParentMismatch)), "{result:?}");
+    assert_eq!(store.table_row_count("owner_ydoc_outbox_entries").unwrap(), 0);
+}
+
+#[test]
+fn drain2b_expected_commit_blockers_preserve_cache() {
+    let (_dir, mut store, observed, _, _, _) = prefix_queue(40);
+    let key = key(&observed.binding).unwrap();
+    let mut cache = crate::WriterDocCache::new();
+    prefix_turn(&mut store, &mut cache, &observed);
+    for (digest, boundary, pending, blocker) in [
+        ("d", false, false, prefix::CommitBlocker::DifferentRelease),
+        ("c", true, false, prefix::CommitBlocker::HistoryBoundaryOwed),
+        ("c", false, true, prefix::CommitBlocker::HistorySavePending),
+    ] {
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE owner_live_stops SET binding_json=json_set(binding_json,'$.prefix.settlementOwed',json(?1))",[if boundary {"true"} else {"false"}]).map_err(write_sql)?;
+            tx.execute("UPDATE ydoc_docs SET settle_prior_update_seq=?1",[pending.then_some(0)]).map_err(write_sql)?;
+            Ok::<_,OwnerOutboxError>(())
+        }).unwrap();
+        assert_eq!(store.read_with(|c|prefix::commit_blocker_in(c,&observed.binding,&digest.repeat(64))).unwrap(),Some(blocker));
+        assert!(prefix::commit_prefix(&mut store,&mut cache,&observed.binding,&digest.repeat(64),10,&NoFaults,|_,_,_,_|panic!("blocked fold")).is_err());
+        assert!(cache.contains_for_test(&key));
+    }
+}
+
+#[test]
 fn prefix_folded_append_retry_keeps_the_tail_moving() {
     let (_dir, mut store, observed, _, inputs, _) = prefix_queue(40);
     let mut cache = crate::WriterDocCache::new();
@@ -222,7 +273,7 @@ fn prefix_chunk_has_a_bounded_sql_instruction_cost() {
         &"c".repeat(64),
         6,
         &NoFaults,
-        |_, _, _, _| Ok(None),
+        |tx, _, _, _| prefix::test_publication(tx, &observed.binding),
     );
     store
         .read_with(|c| {
@@ -370,7 +421,7 @@ fn prefix_turn(
         &"c".repeat(64),
         6,
         &NoFaults,
-        |_, _, _, _| Ok(None),
+        |tx, _, _, _| prefix::test_publication(tx, &observed.binding),
     )
     .unwrap()
     {
@@ -696,9 +747,9 @@ fn prefix_keeps_automation_and_unattributed_original_credit() {
         &"c".repeat(64),
         6,
         &NoFaults,
-        |_, _, actor, attribution| {
+        |tx, _, actor, attribution| {
             credits.push((actor.map(str::to_owned), attribution.cloned()));
-            Ok(None)
+            prefix::test_publication(tx, &observed.binding)
         },
     )
     .unwrap();
@@ -1137,7 +1188,7 @@ fn prefix_union_includes_quarantined_non_parent_work_and_bumps_revision_only_for
                 &"d".repeat(64),
                 11,
                 &NoFaults,
-                |_, _, _, _| Ok(None),
+                |tx, _, _, _| prefix::test_publication(tx, &observed.binding),
             )
             .unwrap();
             let after = store

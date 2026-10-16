@@ -72,6 +72,59 @@ pub struct PrefixSettlement {
     pub through_sequence: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitBlocker {
+    HistorySavePending,
+    HistoryBoundaryOwed,
+    DifferentRelease,
+}
+
+#[cfg(test)]
+pub(crate) fn test_publication(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+) -> Result<Option<(String, i64, bool)>, CollabError> {
+    let seq: i64 = tx.query_row("SELECT COALESCE(MAX(origin_seq),-1)+1 FROM replication_log WHERE workspace_id=?1 AND origin_id='prefix-test'", [&binding.workspace_id], |r|r.get(0)).map_err(|e|CollabError::Storage(StorageError::persist_public(e)))?;
+    let tag = publication_tag_in(tx, binding).map_err(|_| CollabError::OwnerOutboxFrozen)?;
+    tx.execute(
+        "INSERT INTO replication_log VALUES(?1,'prefix-test',?2,'ydoc.update',?3,0,0,'applied')",
+        params![
+            binding.workspace_id,
+            seq,
+            serde_json::json!({"release":tag}).to_string()
+        ],
+    )
+    .map_err(|e| CollabError::Storage(StorageError::persist_public(e)))?;
+    Ok(Some(("prefix-test".into(), seq, false)))
+}
+
+/// Inspect expected refusals before taking either cached document.
+pub fn commit_blocker_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    release_digest: &str,
+) -> Result<Option<CommitBlocker>, OwnerOutboxError> {
+    let key = key(binding)?;
+    effective_in(conn, binding)?;
+    let p = progress_in(conn, &key)?.ok_or(OwnerOutboxError::StopConflict)?;
+    Ok(if p.release_digest != release_digest {
+        Some(CommitBlocker::DifferentRelease)
+    } else if crate::author_coverage::unresolved_in(conn, &key).map_err(collab)? {
+        Some(CommitBlocker::HistorySavePending)
+    } else if p.settlement_owed {
+        Some(CommitBlocker::HistoryBoundaryOwed)
+    } else {
+        None
+    })
+}
+
+pub fn pending_entries_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+) -> Result<i64, OwnerOutboxError> {
+    conn.query_row("SELECT COALESCE(SUM(pending_entry_count),0) FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5", params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation], |r|r.get(0)).map_err(read_sql)
+}
+
 impl PrefixSettlement {
     pub fn prepare_in(
         conn: &Connection,
@@ -277,6 +330,7 @@ pub fn effective_in(
     let Some(progress) = stop.as_ref().and_then(|s| s.prefix.as_ref()) else {
         return super::accepted::current(conn, binding);
     };
+    require_not_abandoned_in(conn, binding, &progress.release_digest)?;
     let mut observed = read_observed_in(conn, binding)?.ok_or(OwnerOutboxError::NotFound)?;
     if stop.as_ref().is_none_or(|s| {
         s.binding.as_ref() != Some(binding)
@@ -322,6 +376,7 @@ pub fn seal_in_tx(
     now_ms: i64,
 ) -> Result<PrefixProgress, OwnerOutboxError> {
     validate_digest(release_digest)?;
+    require_not_abandoned_in(tx, binding, release_digest)?;
     let key = key(binding)?;
     super::release::require_not_host_in(tx, &key)?;
     let mut stop = super::release::read_in(tx, &key)?.ok_or(OwnerOutboxError::StopConflict)?;
@@ -494,7 +549,12 @@ pub fn commit_prefix(
     ) -> Result<Option<(String, i64, bool)>, CollabError>,
 ) -> Result<TxnOutcome<PrefixProgress>, OwnerOutboxError> {
     let key = key(binding)?;
-    store.read_with(|conn| effective_in(conn, binding))?;
+    if store
+        .read_with(|conn| commit_blocker_in(conn, binding, release_digest))?
+        .is_some()
+    {
+        return Err(OwnerOutboxError::Stopping);
+    }
     let mut committed_warm = None;
     let mut draft = cache.take_owner_draft(&key);
     #[cfg(feature = "test-support")]
@@ -510,6 +570,8 @@ pub fn commit_prefix(
         let mut stop = super::release::read_in(tx, &key)?.ok_or(OwnerOutboxError::StopConflict)?;
         let progress = stop.prefix.as_mut().ok_or(OwnerOutboxError::StopConflict)?;
         if progress.release_digest != release_digest || progress.settlement_owed { return Err(OwnerOutboxError::Stopping); }
+        let previous_frontier = progress.publication_frontier.clone();
+        let previous_consumed = progress.consumed_entries;
         let entries: Vec<FoldEntry> = {
             let mut stmt = tx.prepare("SELECT o.outbox_id,e.sequence,e.append_key,e.update_digest,e.byte_length,e.native_source_json,e.agent_declaration_json,e.automation_declaration_json,e.person_edit,e.delivery_id,e.result_pending_bytes,e.result_oldest_entry_at_ms,e.result_state FROM owner_ydoc_outboxes o JOIN owner_ydoc_outbox_entries e ON e.outbox_id=o.outbox_id WHERE o.outbox_id=(SELECT outbox_id FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND pending_entry_count>0 ORDER BY created_at_ms,outbox_id LIMIT 1) AND e.pending=1 ORDER BY e.sequence LIMIT ?6").map_err(read_sql)?;
             let rows = stmt.query_map(params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation,super::release::MAX_RELEASE_ENTRIES], |r| Ok(((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?),r.get(9)?,r.get(10)?,r.get(11)?,r.get(12)?))).map_err(read_sql)?;
@@ -538,13 +600,14 @@ pub fn commit_prefix(
                     require_publication_tag_in_tx(tx, binding, &progress.release_digest, &origin, seq)?;
                 }
                 progress.publication_frontier.entry(origin).and_modify(|head| *head = (*head).max(seq)).or_insert(seq);
-            }
+            } else { return Err(OwnerOutboxError::Corrupt); }
             tx.execute("INSERT INTO owner_prefix_consumed (workspace_id,version_id,object_id,outbox_id,append_key,update_digest,native_sequence,delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![key.workspace_id,key.version_id,key.object_id,entry.0,entry.2,entry.3,seq,delivery_id,entry.1,result_pending_bytes,result_oldest_entry_at_ms,result_state]).map_err(write_sql)?;
             tx.execute("DELETE FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2 AND pending=1",params![entry.0,entry.1]).map_err(write_sql)?;
             *touched.entry(entry.0).or_insert(0) += entry.4;
             used += entry.4;
             progress.consumed_entries += 1;
         }
+        if progress.consumed_entries > previous_consumed && !progress.publication_frontier.iter().any(|(origin,seq)| previous_frontier.get(origin).is_none_or(|before|seq>before)) { return Err(OwnerOutboxError::Corrupt); }
         for (id, bytes) in touched {
             tx.execute("UPDATE owner_ydoc_outboxes SET pending_bytes=pending_bytes-?3,oldest_entry_at_ms=(SELECT created_at_ms FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT 1),state=CASE WHEN state='quarantined' THEN state WHEN pending_bytes-?3>=?2 THEN 'sealed' ELSE 'active' END WHERE outbox_id=?1",params![id,observed.limits.max_pending_bytes,bytes]).map_err(write_sql)?;
         }
@@ -663,7 +726,7 @@ pub fn append_old_session_in_tx(
         )
         .map_err(collab)?;
         tx.execute(
-            "INSERT INTO owner_prefix_consumed (workspace_id,version_id,object_id,outbox_id,append_key,update_digest,native_sequence,delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?7,1,0,'active')",
+            "INSERT INTO owner_prefix_consumed (workspace_id,version_id,object_id,outbox_id,append_key,update_digest,native_sequence,delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state,ordinary_edit) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?7,1,0,'active',1)",
             params![
                 key.workspace_id,
                 key.version_id,
@@ -693,6 +756,15 @@ pub fn close_consumed_in_tx(
     now_ms: i64,
 ) -> Result<(), OwnerOutboxError> {
     let mut stop = super::release::read_in(tx, key)?.ok_or(OwnerOutboxError::StopConflict)?;
+    let owned: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_prefix_consumed WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4) OR EXISTS(SELECT 1 FROM owner_release_closed_sessions WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND outbox_id=?4)",params![key.workspace_id,key.version_id,key.object_id,outbox],|r|r.get(0)).map_err(read_sql)?;
+    if !owned {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    tx.execute(
+        "INSERT INTO owner_release_closed_sessions VALUES (?1,?2,?3,?4) ON CONFLICT DO NOTHING",
+        params![outbox, key.workspace_id, key.version_id, key.object_id],
+    )
+    .map_err(write_sql)?;
     stop.prefix
         .as_mut()
         .ok_or(OwnerOutboxError::StopConflict)?
@@ -722,4 +794,88 @@ pub fn cleanup_session_page_in_tx(
     let parents = tx.execute("DELETE FROM owner_ydoc_outboxes WHERE outbox_id IN (SELECT outbox_id FROM owner_ydoc_outboxes o WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND NOT EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e WHERE e.outbox_id=o.outbox_id) LIMIT 64)",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation]).map_err(write_sql)?;
     let frames = tx.execute("DELETE FROM ydoc_owner_applied_frames WHERE rowid IN (SELECT rowid FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 LIMIT 64)",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     Ok(removed + parents + frames)
+}
+
+/// The sync lifecycle has already checked the exact pending-row ownership and removed the binding.
+pub fn mark_released_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+    digest: &str,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let key = key(binding)?;
+    let mut stop = super::release::read_in(tx, &key)?.ok_or(OwnerOutboxError::StopConflict)?;
+    if stop.binding.as_ref() != Some(binding)
+        || stop
+            .prefix
+            .as_ref()
+            .is_none_or(|p| p.release_digest != digest || p.settlement_owed)
+        || pending_entries_in(tx, binding)? != 0
+        || read_observed_in(tx, binding)?.is_some()
+        || crate::author_coverage::unresolved_in(tx, &key).map_err(collab)?
+    {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    stop.state = "released".into();
+    stop.retirement_owed = false;
+    stop.deferred = None;
+    super::release::save_in_tx(tx, &key, &stop, now_ms)
+}
+
+/// Durable closed-session markers outlive consumed results, progress, and the Stop row.
+pub fn finish_cleanup_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+    digest: &str,
+    now_ms: i64,
+) -> Result<(), OwnerOutboxError> {
+    let key = key(binding)?;
+    let mut stop = super::release::read_in(tx, &key)?.ok_or(OwnerOutboxError::StopConflict)?;
+    if stop.binding.as_ref() != Some(binding) || stop.state != "released" {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    let Some(progress) = stop.prefix.as_ref() else {
+        return Ok(());
+    };
+    if progress.release_digest != digest
+        || progress.settlement_owed
+        || !publication_acked_in(tx, &key)?
+    {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_prefix_consumed WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)
+        OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5)
+        OR EXISTS(SELECT 1 FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)",params![key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id,binding.restore_fence_generation],|r|r.get(0)).map_err(read_sql)?;
+    if pending {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    let holding:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3) OR EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest IS NOT NULL)",params![key.workspace_id,key.version_id,key.object_id],|r|r.get(0)).map_err(read_sql)?;
+    if holding {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    stop.prefix = None;
+    super::release::save_in_tx(tx, &key, &stop, now_ms)
+}
+
+fn require_not_abandoned_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    digest: &str,
+) -> Result<(), OwnerOutboxError> {
+    let abandoned:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND abandoned=1)",params![binding.workspace_id,binding.main_version_id,binding.object_id,digest],|r|r.get(0)).map_err(read_sql)?;
+    if abandoned {
+        return Err(OwnerOutboxError::Stopping);
+    }
+    Ok(())
+}
+
+pub fn quarantine_abandoned_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+) -> Result<(), OwnerOutboxError> {
+    if let Some(observed) = read_observed_in(tx, binding)? {
+        tx.execute("UPDATE release_holds SET owner_snapshot_json=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![binding.workspace_id,binding.main_version_id,binding.object_id,serde_json::to_string(&observed).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
+    }
+    tx.execute("UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='stale-binding' WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND state!='quarantined'",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation]).map_err(write_sql)?;
+    Ok(())
 }

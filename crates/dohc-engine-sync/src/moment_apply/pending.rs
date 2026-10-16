@@ -21,7 +21,7 @@ pub(super) fn enqueue(
     tx.execute(
         "INSERT INTO owner_pending_settlements \
          (workspace_id,origin_id,origin_seq,main_version_id,object_id,lineage_claim_id,\
-          relay_namespace,binding_json,terminal_cursor) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+          relay_namespace,binding_json,terminal_cursor,envelope_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         params![
             envelope.workspace_id,
             envelope.origin_id,
@@ -31,7 +31,8 @@ pub(super) fn enqueue(
             binding.lineage_claim_id,
             relay_namespace,
             serde_json::to_string(binding).map_err(SyncError::corrupt)?,
-            terminal_cursor
+            terminal_cursor,
+            serde_json::to_string(envelope).map_err(SyncError::corrupt)?
         ],
     )
     .map_err(SyncError::persist)?;
@@ -92,7 +93,7 @@ pub(crate) fn drain_and_claim(
         // Refuse a changed binding before replaying a ready settlement.
         // A later generation supersedes it regardless of path changes.
         let mut stmt = tx.prepare_cached(
-            "SELECT p.origin_id,p.origin_seq,l.payload_json,l.recorded_at_ms,p.applied,\
+            &"SELECT p.origin_id,p.origin_seq,l.payload_json,l.recorded_at_ms,p.applied,\
                     p.main_version_id,p.object_id,p.record_facts_json,\
                     p.applied=0 AND json_extract(b.binding_json,'$.restoreFenceGeneration')>json_extract(p.binding_json,'$.restoreFenceGeneration'),\
                     COALESCE(json(p.binding_json)!=json(b.binding_json),0) \
@@ -105,8 +106,8 @@ pub(crate) fn drain_and_claim(
              WHERE p.workspace_id=?1 AND (p.applied=1 OR (p.relay_namespace=b.relay_database_namespace AND (\
                (p.terminal_cursor<=b.accepted_cursor AND json_extract(p.binding_json,'$.restoreFenceGeneration')=json_extract(b.binding_json,'$.restoreFenceGeneration')) \
                OR json_extract(b.binding_json,'$.restoreFenceGeneration')>json_extract(p.binding_json,'$.restoreFenceGeneration')))) \
-             AND (p.applied=1 OR NOT EXISTS(SELECT 1 FROM release_held_ops r WHERE r.workspace_id=p.workspace_id AND r.origin_id=p.origin_id AND r.origin_seq=p.origin_seq)) \
-             ORDER BY p.checked_sequence,p.terminal_cursor,p.origin_id,p.origin_seq LIMIT 65",
+             AND (p.applied=1 OR NOT (/* release ownership */)) \
+             ORDER BY p.checked_sequence,p.terminal_cursor,p.origin_id,p.origin_seq LIMIT 65".replace("/* release ownership */",crate::release_hold::OWNED_PENDING),
         ).map_err(SyncError::corrupt)?;
         let mut rows = stmt.query([workspace_id]).map_err(SyncError::corrupt)?;
         let mut ready = Vec::new();

@@ -213,6 +213,67 @@ pub fn enroll_in_tx(
     limits: &OwnerOutboxLimits,
     now_ms: i64,
 ) -> Result<OwnerDraftDescriptor, OwnerOutboxError> {
+    enroll(tx, workspace, input, limits, now_ms, None)
+}
+
+/// The caller must install and re-key the abandoned hold in this same transaction.
+pub fn enroll_release_successor_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    input: &OwnerEnrollmentInput,
+    digest: &str,
+    now_ms: i64,
+) -> Result<OwnerDraftDescriptor, OwnerOutboxError> {
+    let b = &input.binding;
+    let key = key(b)?;
+    let saved: String = tx.query_row("SELECT owner_snapshot_json FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND abandoned=1", params![b.workspace_id,b.main_version_id,b.object_id,digest], |r|r.get(0)).map_err(read_sql)?;
+    let previous: ObservedOwnerBinding =
+        serde_json::from_str(&saved).map_err(|_| OwnerOutboxError::Corrupt)?;
+    let old = &previous.binding;
+    if old != b
+        || previous.relay_database_namespace != input.relay_database_namespace
+        || input.journal_cursor < previous.accepted_cursor
+        || !input.recovery
+    {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    crate::live_update_application::require_restore_generation(
+        tx,
+        &key,
+        (b.restore_fence_generation > 0).then_some(b.restore_fence_generation),
+    )
+    .map_err(collab)?;
+    let (_, local) = native_state(tx, b, true)?;
+    put_binary_blob_with_sha(tx, &local, &hex_sha256(&local))?;
+    let stop = super::release::read_in(tx, &key)?.ok_or(OwnerOutboxError::StopConflict)?;
+    if stop.binding.as_ref() != Some(old) {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    tx.execute(
+        "INSERT INTO owner_release_recoveries VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT DO NOTHING",
+        params![
+            b.workspace_id,
+            b.main_version_id,
+            b.object_id,
+            digest,
+            serde_json::to_string(&stop).map_err(|_| OwnerOutboxError::Corrupt)?,
+            hex_sha256(&local)
+        ],
+    )
+    .map_err(write_sql)?;
+    tx.execute("DELETE FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id]).map_err(write_sql)?;
+    // The private tail remains in quarantined rows. Only the authenticated cut becomes native.
+    let limits = previous.limits.clone();
+    enroll(tx, &b.workspace_id, input, &limits, now_ms, Some(previous))
+}
+
+fn enroll(
+    tx: &rusqlite::Transaction<'_>,
+    workspace: &str,
+    input: &OwnerEnrollmentInput,
+    limits: &OwnerOutboxLimits,
+    now_ms: i64,
+    release_previous: Option<ObservedOwnerBinding>,
+) -> Result<OwnerDraftDescriptor, OwnerOutboxError> {
     super::prefix::require_delivery_open(tx, &input.binding)?;
     require_workspace(workspace, &input.binding.workspace_id)?;
     validate_identifier(&input.relay_database_namespace, "invalid relay namespace")?;
@@ -227,7 +288,10 @@ pub fn enroll_in_tx(
             "invalid owner enrollment cut",
         ));
     }
-    let recovery = if input.recovery {
+    let release_recovery = release_previous.is_some();
+    let recovery = if release_recovery {
+        release_previous
+    } else if input.recovery {
         recovery_previous(tx, &input.binding)?
     } else {
         None
@@ -278,6 +342,10 @@ pub fn enroll_in_tx(
         return Err(OwnerOutboxError::ParentMismatch);
     }
     if let Some(previous) = previous {
+        if release_recovery {
+            let old = &previous.binding;
+            tx.execute("INSERT INTO ydoc_owner_bindings VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT DO NOTHING",params![old.workspace_id,old.main_version_id,old.object_id,old.lineage_claim_id,binding_json(old)?,previous.relay_database_namespace,previous.revision,previous.accepted_cursor,previous.native_head_sequence,previous.checkpoint_digest,limits.max_pending_bytes,limits.max_pending_age_ms]).map_err(write_sql)?;
+        }
         if recovering {
             let draft = recover_in_tx(
                 tx,
@@ -288,6 +356,7 @@ pub fn enroll_in_tx(
                 &local_bytes,
                 &checkpoint,
                 now_ms,
+                release_recovery,
             )?;
             index_frontmatter_in_tx(tx, &input.binding, &host, None, None, now_ms)?;
             return Ok(draft);
@@ -370,8 +439,13 @@ fn recover_in_tx(
     local_bytes: &[u8],
     checkpoint: &[u8],
     now_ms: i64,
+    release_recovery: bool,
 ) -> Result<OwnerDraftDescriptor, OwnerOutboxError> {
-    let parent = require_recoverable_parent(tx, &previous.binding)?;
+    let parent = if release_recovery && find_parent_for_binding(tx, &previous.binding)?.is_none() {
+        None
+    } else {
+        Some(require_recoverable_parent(tx, &previous.binding)?)
+    };
     if input.journal_cursor < previous.accepted_cursor {
         return Err(OwnerOutboxError::ParentMismatch);
     }
@@ -395,17 +469,19 @@ fn recover_in_tx(
         .checked_add(1)
         .filter(|n| *n < 9_007_199_254_740_991)
         .ok_or(OwnerOutboxError::Frozen)?;
-    tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?2 WHERE outbox_id=?1 AND pending=1", params![parent.outbox_id,parent.quarantine_reason]).map_err(write_sql)?;
-    if previous.binding == input.binding {
-        tx.execute("UPDATE owner_ydoc_outboxes SET state='active',pending_bytes=0,oldest_entry_at_ms=NULL,quarantine_reason=NULL,observed_binding_json=NULL WHERE outbox_id=?1", [&parent.outbox_id]).map_err(write_sql)?;
-    } else {
-        tx.execute("UPDATE owner_ydoc_outboxes SET pending_bytes=0,oldest_entry_at_ms=NULL,observed_binding_json=?2 WHERE outbox_id=?1", params![parent.outbox_id,binding_json(&input.binding)?]).map_err(write_sql)?;
-        if let Some(target) = find_parent_for_binding(tx, &input.binding)? {
-            if target.state != OwnerOutboxState::Quarantined || target.pending_bytes != 0 {
-                return Err(OwnerOutboxError::ParentMismatch);
+    if let Some(parent) = parent {
+        tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?2 WHERE outbox_id=?1 AND pending=1", params![parent.outbox_id,parent.quarantine_reason]).map_err(write_sql)?;
+        if previous.binding == input.binding {
+            tx.execute("UPDATE owner_ydoc_outboxes SET state='active',pending_bytes=0,oldest_entry_at_ms=NULL,quarantine_reason=NULL,observed_binding_json=NULL WHERE outbox_id=?1", [&parent.outbox_id]).map_err(write_sql)?;
+        } else {
+            tx.execute("UPDATE owner_ydoc_outboxes SET pending_bytes=0,oldest_entry_at_ms=NULL,observed_binding_json=?2 WHERE outbox_id=?1", params![parent.outbox_id,binding_json(&input.binding)?]).map_err(write_sql)?;
+            if let Some(target) = find_parent_for_binding(tx, &input.binding)? {
+                if target.state != OwnerOutboxState::Quarantined || target.pending_bytes != 0 {
+                    return Err(OwnerOutboxError::ParentMismatch);
+                }
+                require_recoverable_parent(tx, &input.binding)?;
+                tx.execute("UPDATE owner_ydoc_outboxes SET state='active',quarantine_reason=NULL,observed_binding_json=NULL WHERE outbox_id=?1", [&target.outbox_id]).map_err(write_sql)?;
             }
-            require_recoverable_parent(tx, &input.binding)?;
-            tx.execute("UPDATE owner_ydoc_outboxes SET state='active',quarantine_reason=NULL,observed_binding_json=NULL WHERE outbox_id=?1", [&target.outbox_id]).map_err(write_sql)?;
         }
     }
     let changed = tx.execute("UPDATE ydoc_owner_bindings SET binding_revision=?5,accepted_cursor=?6,native_head_sequence=?7,checkpoint_digest=?8,binding_json=?10 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND binding_revision=?9", params![input.binding.workspace_id,input.binding.main_version_id,input.binding.object_id,input.binding.lineage_claim_id,revision,input.journal_cursor,head,checkpoint_digest,previous.revision,binding_json(&input.binding)?]).map_err(write_sql)?;

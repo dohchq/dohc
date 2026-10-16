@@ -3253,7 +3253,41 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "CREATE TABLE owner_prefix_consumed (workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, object_id TEXT NOT NULL, outbox_id TEXT NOT NULL, append_key TEXT NOT NULL, update_digest TEXT NOT NULL CHECK(length(update_digest)=64), native_sequence INTEGER NOT NULL CHECK(native_sequence>0), delivery_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>=1), result_pending_bytes INTEGER NOT NULL CHECK(result_pending_bytes>0), result_oldest_entry_at_ms INTEGER NOT NULL CHECK(result_oldest_entry_at_ms>=0), result_state TEXT NOT NULL CHECK(result_state IN ('active','sealed')), PRIMARY KEY(workspace_id,version_id,object_id,outbox_id,append_key)) STRICT; CREATE INDEX owner_prefix_pending ON owner_ydoc_outboxes(workspace_id,main_version_id,object_id,lineage_claim_id,restore_fence_generation,created_at_ms,outbox_id) WHERE pending_entry_count>0;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 56,
+        id: "v2-owner-release-lifecycle",
+        sql: V2_OWNER_RELEASE_LIFECYCLE_DDL,
+        sets_user_version: None,
+    },
 ];
+
+const V2_OWNER_RELEASE_LIFECYCLE_DDL: &str = "\
+ALTER TABLE release_holds ADD COLUMN owner_snapshot_json TEXT CHECK(owner_snapshot_json IS NULL OR json_valid(owner_snapshot_json));
+ALTER TABLE release_holds ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0 CHECK(abandoned IN (0,1));
+ALTER TABLE release_holds ADD COLUMN successor_ready INTEGER NOT NULL DEFAULT 0 CHECK(successor_ready IN (0,1));
+ALTER TABLE owner_pending_settlements ADD COLUMN envelope_json TEXT CHECK(envelope_json IS NULL OR json_valid(envelope_json));
+ALTER TABLE owner_prefix_consumed ADD COLUMN ordinary_edit INTEGER NOT NULL DEFAULT 0 CHECK(ordinary_edit IN (0,1));
+ALTER TABLE ydoc_deferred_updates ADD COLUMN release_binding_json TEXT CHECK(release_binding_json IS NULL OR json_valid(release_binding_json));
+ALTER TABLE ydoc_deferred_updates ADD COLUMN release_digest TEXT;
+ALTER TABLE ydoc_deferred_updates ADD COLUMN release_namespace TEXT;
+CREATE INDEX ydoc_deferred_release ON ydoc_deferred_updates(workspace_id,version_id,object_id,release_digest) WHERE release_digest IS NOT NULL;
+CREATE TABLE owner_release_recoveries (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    release_digest TEXT NOT NULL,
+    stop_json TEXT NOT NULL CHECK(json_valid(stop_json)),
+    native_blob_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY(workspace_id,version_id,object_id,release_digest)
+) STRICT;
+CREATE TABLE owner_release_closed_sessions (
+    outbox_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL
+) STRICT;
+INSERT INTO owner_release_closed_sessions SELECT j.value,s.workspace_id,s.main_version_id,s.object_id FROM owner_live_stops s,json_each(s.binding_json,'$.prefix.closedSessions') j;
+";
 
 const V2_REPLICA_FRONTIERS_DDL: &str = "\
 CREATE TABLE replica_frontiers (
@@ -4079,6 +4113,10 @@ mod tests {
             (
                 "v2-owner-prefix-consumed",
                 "9ef0986300d67aa6a9c9d76bf365ea034fff4a277662c6466f14a58b25c17337",
+            ),
+            (
+                "v2-owner-release-lifecycle",
+                "e76cfcfa58661f1317457c621b84008dec8b810dfab6da52247f02b98d0ee1cd",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

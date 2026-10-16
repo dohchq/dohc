@@ -73,7 +73,7 @@ fn dependency_transfers_do_not_hide_later_origins_or_prevent_closure() {
         store
             .write_with(&NoFaults, |tx| close_release_hold_in(tx, &hold))
             .unwrap(),
-        TxnOutcome::Committed(true)
+        TxnOutcome::Committed(false)
     ));
     drop(store);
     let mut store = EngineStore::open(&engine_db_path(&dir).unwrap(), 4).unwrap();
@@ -86,6 +86,12 @@ fn dependency_transfers_do_not_hide_later_origins_or_prevent_closure() {
     .unwrap();
     assert!(text(&store).contains("A dependent 69"));
     assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
+    assert!(matches!(
+        store
+            .write_with(&NoFaults, |tx| close_release_hold_in(tx, &hold))
+            .unwrap(),
+        TxnOutcome::Committed(true)
+    ));
 }
 
 #[test]

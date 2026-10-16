@@ -63,10 +63,11 @@ fn hold_page_work_stays_bounded_at_capacity_and_recovers_reports_first() {
 fn recover_replay_commit(dependency: bool) {
     let (dir, mut store, owner, checkpoint) = owner_publication::fixture();
     let hold = open(&mut store, &owner);
+    let mut predecessor = None;
     let op = if dependency {
         let doc = Ydoc::wire();
         doc.apply(&checkpoint).unwrap();
-        doc.richdoc_append_paragraph("missing predecessor");
+        predecessor = Some(doc.richdoc_append_paragraph("missing predecessor"));
         update(
             &mut store,
             &owner,
@@ -163,6 +164,32 @@ fn recover_replay_commit(dependency: bool) {
         })
         .unwrap();
     assert_eq!(usage, (0, 0));
+    if let Some(bytes) = predecessor {
+        assert!(matches!(
+            store
+                .write_with(&NoFaults, |tx| close_release_hold_in(tx, &hold))
+                .unwrap(),
+            TxnOutcome::Committed(false)
+        ));
+        let mut prior = update(&mut store, &owner, &bytes, 0);
+        prior.origin_id = "predecessor".into();
+        apply_replication_envelope(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &prior,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        drain_deferred_ydoc_for_key(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &DocKey::new("ws", "main", "owner").unwrap(),
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(store.table_row_count("ydoc_deferred_updates").unwrap(), 0);
+    }
     assert!(matches!(
         store
             .write_with(&NoFaults, |tx| close_release_hold_in(tx, &hold))

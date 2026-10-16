@@ -420,6 +420,7 @@ fn apply_deferred_base(
     faults: &dyn FaultInjector,
     search_policy: Option<&SearchPolicySnapshot>,
     recovery_leases: Option<&dyn crate::LeaseProbe>,
+    release: bool,
 ) -> Result<Option<YdocLineageReplacement>, SyncError> {
     let incoming_doc = dohc_engine_collab::Ydoc::wire();
     incoming_doc
@@ -431,6 +432,7 @@ fn apply_deferred_base(
     let bytes = bytes.to_vec();
     let origin_id = origin_id.to_owned();
     let outcome = store.write_with(faults, move |tx| {
+        if release { crate::release_hold::check_deferred_release_in(tx,&key,&origin_id,origin_seq)?; }
         if let Some(leases)=recovery_leases { require_recovery_closed(tx,&key,leases)?; }
         let already_preserved: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1 AND kind='sync-ydoc-conflict')",
@@ -747,6 +749,7 @@ fn complete_drain_cleanup(
         if let Some((key, leases)) = recovery {
             require_recovery_closed(tx, key, leases)?;
         }
+        if let Some(hold)=&cleanup.release_guard { hold.check_in(tx,true)?; }
         if let Some(refusal) = cleanup.projection_refusal.as_ref() {
             crate::apply::persist_refusal(tx, refusal)?;
         }
@@ -818,7 +821,7 @@ pub fn drain_deferred_ydoc_for_live_session(
     complete_drain(store, drained, cleanup, faults)
 }
 
-pub(crate) fn drain_deferred_ydoc_for_ended_session(
+pub fn drain_deferred_ydoc_for_ended_session(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
@@ -918,6 +921,7 @@ pub struct YdocDrainCleanup {
     workspace_id: String,
     coordinates: Vec<(String, i64)>,
     projection_refusal: Option<crate::ReplicationRefusal>,
+    release_guard: Option<crate::ReleaseHold>,
 }
 
 fn drain_deferred_ydoc(
@@ -933,12 +937,13 @@ fn drain_deferred_ydoc(
     } else {
         Vec::new()
     };
-    let pending: Vec<(String, i64, i64, i64, String, YdocUpdatePayload)> =
+    type DeferredRow = (String, i64, i64, i64, String, YdocUpdatePayload, bool);
+    let pending: Vec<DeferredRow> =
         store.read_with(|conn| {
             let mut stmt = conn
                 .prepare(
                     "SELECT log.origin_id,log.origin_seq,deferred.relay_seq,log.recorded_at_ms,
-                        deferred.lineage_claim_id,log.payload_json \
+                        deferred.lineage_claim_id,log.payload_json,deferred.release_digest IS NOT NULL \
                  FROM ydoc_deferred_updates AS deferred \
                  JOIN replication_log AS log \
                    ON log.workspace_id = deferred.workspace_id \
@@ -960,6 +965,7 @@ fn drain_deferred_ydoc(
                             row.get::<_, i64>(3)?,
                             row.get::<_, String>(4)?,
                             row.get::<_, String>(5)?,
+                            row.get::<_, bool>(6)?,
                         ))
                     },
                 )
@@ -973,6 +979,7 @@ fn drain_deferred_ydoc(
                     recorded_at_ms,
                     lineage_claim_id,
                     payload_json,
+                    release,
                 ) = row.map_err(SyncError::corrupt)?;
                 let payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
                     .map_err(|_| local_corruption("parked ydoc.update payload is malformed"))?;
@@ -985,6 +992,9 @@ fn drain_deferred_ydoc(
                         "parked ydoc.update lineage identity does not match its payload",
                     ));
                 }
+                if release {
+                    crate::release_hold::check_deferred_release_in(conn,key,&origin_id,origin_seq)?;
+                }
                 pending.push((
                     origin_id,
                     origin_seq,
@@ -992,6 +1002,7 @@ fn drain_deferred_ydoc(
                     recorded_at_ms,
                     lineage_claim_id,
                     payload,
+                    release,
                 ));
             }
             Ok::<_, SyncError>(pending)
@@ -1006,6 +1017,7 @@ fn drain_deferred_ydoc(
                 workspace_id: key.workspace_id.clone(),
                 coordinates: Vec::new(),
                 projection_refusal: None,
+                release_guard: None,
             },
         ));
     }
@@ -1045,6 +1057,7 @@ fn drain_deferred_ydoc(
                 workspace_id: key.workspace_id.clone(),
                 coordinates: Vec::new(),
                 projection_refusal: None,
+                release_guard: None,
             },
         ));
     }
@@ -1054,6 +1067,12 @@ fn drain_deferred_ydoc(
     let mut sharing_declined = Vec::new();
     let mut last_payload: Option<YdocUpdatePayload> = None;
     let mut payload_recorded_at = 0_i64;
+    let release_page = pending.iter().any(|row| row.6);
+    let release_guard = if release_page {
+        Some(crate::read_release_hold(store, key)?.ok_or(SyncError::CoordinateDiverged)?)
+    } else {
+        None
+    };
     let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
     let mut last_coordinate: Option<(String, i64)> = None;
     let mut projection_coordinates = Vec::new();
@@ -1062,11 +1081,14 @@ fn drain_deferred_ydoc(
     let mut conflicts_opened = 0;
     let mut record_facts = Vec::new();
     let mut projection_refusal = None;
-    for (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload) in pending {
+    for (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload, release) in
+        pending
+    {
         if let Some(leases) = recovery_leases {
             store.read_with(|conn| require_recovery_closed(conn, key, leases))?;
         }
-        if !payload.is_base_state
+        if !release
+            && !payload.is_base_state
             && !matches!(mode, DeferredDrainMode::Live(_))
             && store.read_with(|conn| inactive_lineage_exists(conn, key, &lineage_claim_id))?
         {
@@ -1095,6 +1117,9 @@ fn drain_deferred_ydoc(
             return Err(SyncError::BlobInvalid);
         }
         if let Some(echo) = live_classification {
+            if release && !echo {
+                continue;
+            }
             if echo {
                 drained_coordinates.push((origin_id, origin_seq));
             } else {
@@ -1131,6 +1156,7 @@ fn drain_deferred_ydoc(
                 faults,
                 search_policy.as_ref(),
                 recovery_leases,
+                release,
             )? {
                 lineage_replacements.push(replacement);
             }
@@ -1153,6 +1179,11 @@ fn drain_deferred_ydoc(
         })?;
         if lineage_claim_id != winner_claim_id {
             let retained = store.write_with(faults, |tx| {
+                if release {
+                    crate::release_hold::check_deferred_release_in(
+                        tx, key, &origin_id, origin_seq,
+                    )?;
+                }
                 if let Some(leases) = recovery_leases {
                     require_recovery_closed(tx, key, leases)?;
                 }
@@ -1274,7 +1305,11 @@ fn drain_deferred_ydoc(
             payload.attribution.as_ref(),
             faults,
             recorded_at_ms,
-            |_| {
+            |tx| {
+                if release {
+                    crate::release_hold::check_deferred_release_in(tx, key, &origin_id, origin_seq)
+                        .map_err(|_| CollabError::RestoreFenced)?;
+                }
                 if recovery_leases.is_some_and(|leases| leases.is_live(key)) {
                     Err(CollabError::LeaseHeld)
                 } else {
@@ -1365,6 +1400,7 @@ fn drain_deferred_ydoc(
             drain_origin,
             drain_seq,
             &projection_coordinates,
+            release_page,
             payload_recorded_at,
             search_policy.as_ref(),
             faults,
@@ -1438,6 +1474,7 @@ fn drain_deferred_ydoc(
             workspace_id: key.workspace_id.clone(),
             coordinates: drained_coordinates,
             projection_refusal,
+            release_guard,
         },
     ))
 }
@@ -1481,6 +1518,7 @@ fn project_final_drained_doc(
     drain_origin: &str,
     drain_seq: i64,
     projection_coordinates: &[(String, i64)],
+    release_page: bool,
     payload_recorded_at: i64,
     search_policy: Option<&SearchPolicySnapshot>,
     faults: &dyn FaultInjector,
@@ -1505,6 +1543,7 @@ fn project_final_drained_doc(
             drain_origin,
             drain_seq,
             projection_coordinates,
+            release_page,
             payload_recorded_at,
             search_policy,
             faults,
@@ -1531,6 +1570,7 @@ fn project_final_drained_doc(
         drain_origin,
         drain_seq,
         projection_coordinates,
+        release_page,
         payload_recorded_at,
         search_policy,
         faults,
@@ -1549,12 +1589,20 @@ fn write_final_drained_projection(
     drain_origin: &str,
     drain_seq: i64,
     projection_coordinates: &[(String, i64)],
+    release_page: bool,
     payload_recorded_at: i64,
     search_policy: Option<&SearchPolicySnapshot>,
     faults: &dyn FaultInjector,
     recovery_leases: Option<&dyn crate::LeaseProbe>,
 ) -> Result<TxnOutcome<crate::BaseOrigination>, SyncError> {
     store.write_with(faults, |tx| {
+        if release_page {
+            projection_coordinates
+                .iter()
+                .try_for_each(|(origin, seq)| {
+                    crate::release_hold::check_deferred_release_in(tx, key, origin, *seq)
+                })?;
+        }
         if let Some(leases) = recovery_leases {
             require_recovery_closed(tx, key, leases)?;
         }
@@ -3261,7 +3309,7 @@ pub(crate) fn drain_inactive_ydoc_updates(
     loop {
         let result = store.write_with(faults, |tx| {
         let mut statement = tx.prepare(
-            "SELECT r.origin_id,r.origin_seq,r.recorded_at_ms,r.payload_json,b.byte_length \
+            "SELECT r.origin_id,r.origin_seq,r.recorded_at_ms,r.payload_json,b.byte_length,d.release_digest IS NOT NULL \
              FROM ydoc_deferred_updates d JOIN ydoc_inactive_lineages l \
              ON l.workspace_id=d.workspace_id AND l.version_id=d.version_id \
              AND l.object_id=d.object_id AND l.lineage_claim_id=d.lineage_claim_id \
@@ -3271,12 +3319,12 @@ pub(crate) fn drain_inactive_ydoc_updates(
              WHERE d.workspace_id=?1 ORDER BY d.relay_seq,d.origin_id,d.origin_seq LIMIT 256",
         ).map_err(SyncError::corrupt)?;
         let rows = statement.query_map([workspace_id], |row| Ok((
-            row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<i64>>(4)?,
+            row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,i64>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<i64>>(4)?, row.get::<_,bool>(5)?,
         ))).map_err(SyncError::corrupt)?.collect::<Result<Vec<_>,_>>().map_err(SyncError::corrupt)?;
         let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
         let mut batch_bytes = 0;
         let mut processed = 0;
-        for (origin, seq, at, json, byte_length) in rows {
+        for (origin, seq, at, json, byte_length, release) in rows {
             let cost = usize::try_from(byte_length.ok_or(SyncError::BlobInvalid)?).map_err(SyncError::corrupt)?.saturating_add(json.len());
             // One admitted update is at most 20 MiB, plus a 256 KiB payload.
             if batch_bytes + cost > 24 * 1024 * 1024 {
@@ -3286,6 +3334,7 @@ pub(crate) fn drain_inactive_ydoc_updates(
             batch_bytes += cost;
             processed += 1;
             let payload: YdocUpdatePayload = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
+            if release { let key = DocKey::new(workspace_id,&payload.version_id,&payload.object_id).map_err(map_collab_hard_error)?; crate::release_hold::check_deferred_release_in(tx,&key,&origin,seq)?; }
             let bytes = get_binary_blob(tx, &payload.update_blob_sha256).map_err(SyncError::Storage)?.ok_or(SyncError::BlobInvalid)?;
             if hex_sha256(&bytes) != payload.update_blob_sha256 { return Err(SyncError::BlobInvalid); }
             groups.entry((payload.version_id.clone(),payload.object_id.clone(),payload.lineage_claim_id.clone()))

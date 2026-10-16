@@ -308,9 +308,9 @@ fn prefix_collection_visibility_and_index_repair_preserve_original_field_history
         &"c".repeat(64),
         13,
         &NoFaults,
-        |_, _, actor, _| {
+        |tx, _, actor, _| {
             credit.push(actor.map(str::to_owned));
-            Ok(None)
+            prefix::test_publication(tx, &draft.binding)
         },
     )
     .unwrap();
@@ -405,7 +405,7 @@ fn prefix_quarantined_collection_fields_keep_original_agent_credit() {
         &"c".repeat(64),
         15,
         &NoFaults,
-        |_, _, _, _| Ok(None),
+        |tx, _, _, _| prefix::test_publication(tx, &draft.binding),
     )
     .unwrap();
     assert_visible_fields(&store, &draft.binding, expected);
