@@ -329,7 +329,7 @@ It runs the source checks in `pnpm test:repo:source`, then `packaged-benchmark.t
 
 `--full`, `--keep-going`, and an empty diff run every repository test. The nightly run always runs every repository test.
 `pnpm verify:plan` shows the script under `javascript.repositoryTests`, and `result.json` records it under `repositoryTests`.
-When the gate runs only the tree set, the verifier prints `repository tests: tree set only (no tooling change)`.
+When the gate runs only the tree set, the verifier prints `repository tests: tree set only (no tooling change). --full runs every repository test.`
 
 A repository test that reads a file outside `scripts/`, `tools/`, `.github/`, and the root files must add that path to the `repository` filter.
 A test that reads package source goes in `test:repo:tree` as well as `test:repo`, so that every JavaScript change runs it.
