@@ -545,12 +545,43 @@ it("keeps each document's blob reach across scope changes and drops an idle work
     expect(await f.blobStatus(A.sha256)).toBe(200);
     return reads.map(({objectId, afterRelaySeq}) => [objectId, afterRelaySeq > 0]);
   };
-  expect(await scans()).toEqual([[binding.objectId, false]]);
+  // The warm-up scans a document with no reach, then the request catches up each one.
+  expect(await scans()).toEqual([[binding.objectId, false], [binding.objectId, true]]);
   // A joining document is scanned; the unchanged one resumes where it stopped.
   f.enroll("docs/b.md");
-  expect(await scans()).toEqual([[binding.objectId, true], ["object-b", false]]);
+  expect(await scans()).toEqual([["object-b", false], [binding.objectId, true], ["object-b", true]]);
   vi.setSystemTime(1_000_000 + 10 * 60_000);
-  expect(await scans()).toEqual([[binding.objectId, false], ["object-b", false]]);
+  expect(await scans()).toEqual([[binding.objectId, false], ["object-b", false], [binding.objectId, true], ["object-b", true]]);
+});
+
+// Proves: a cold reach over a long history lets other work run between its
+// pages, and concurrent requests share one warm-up that reads each page once.
+it("rebuilds a cold blob reach a page at a time in one warm-up that concurrent requests share", async () => {
+  const f = await fixture();
+  f.append(...Array.from({length: 1_100}, (): [string, Record<string, unknown>] => ["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]));
+  const reads: number[] = [];
+  const list = f.storage.listServiceHostDocumentRows.bind(f.storage);
+  f.storage.listServiceHostDocumentRows = input => {reads.push(input.afterRelaySeq); return list(input);};
+  const order: string[] = [];
+  setImmediate(() => order.push("other work"));
+  const answered = async (status: Promise<number>) => {const value = await status; order.push("answer"); return value;};
+  expect(await Promise.all([answered(f.blobStatus(Y.sha256)), answered(f.blobStatus(A.sha256))])).toEqual([200, 200]);
+  expect(order).toEqual(["other work", "answer", "answer"]);
+  // Three pages of history, read once, then each request's catch-up from the end.
+  const end = reads.at(-1)!;
+  expect(reads.slice(0, 3)).toEqual([0, expect.any(Number), expect.any(Number)]);
+  expect(reads.slice(3)).toEqual([end, end]);
+  expect(new Set(reads.slice(0, 3)).size).toBe(3);
+});
+
+it("warms a cold reach before the first admission check of a write", async () => {
+  const f = await fixture();
+  f.append(...Array.from({length: 1_100}, (): [string, Record<string, unknown>] => ["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]));
+  const order: string[] = [];
+  setImmediate(() => order.push("other work"));
+  const pushed = f.push([["ydoc.update", ydoc(binding.objectId, "docs/a.md", Y)]]).then(response => {order.push("answer"); return response;});
+  expect(await (await pushed).json()).toMatchObject({inserted: 1});
+  expect(order).toEqual(["other work", "answer"]);
 });
 
 it("keeps upload proof through later uploads and idle time", async () => {

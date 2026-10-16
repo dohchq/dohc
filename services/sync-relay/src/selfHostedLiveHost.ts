@@ -1,8 +1,8 @@
 import {createHash} from "node:crypto";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
-import {mkdir, mkdtemp, readdir, rename, rm, writeFile} from "node:fs/promises";
+import {mkdir, mkdtemp, rm, writeFile} from "node:fs/promises";
 import {realpathSync, statSync} from "node:fs";
-import {basename, isAbsolute, join, posix, resolve} from "node:path";
+import {isAbsolute, join, posix, resolve} from "node:path";
 import type {Event} from "@dohc/workspace-engine-client";
 import {tmpdir} from "node:os";
 import {setTimeout as delay} from "node:timers/promises";
@@ -46,7 +46,7 @@ export async function startSelfHostedLiveHost(options: {
   const provision = storage.provisionLiveHostControl({mode: "service", hostId, updatedAtMs: Date.now(), guard: storage.captureStanding()});
   if (!provision.ok || provision.snapshot.transition) throw new Error("Self-host live editing requires its provisioned service host. Existing device hosts must use the host transition procedure.");
   let current: Host | undefined;
-  let initialReconciliationComplete = false, selectedDocuments = false, storesChecked = false;
+  let initialReconciliationComplete = false, selectedDocuments = false;
   let signature = "", lastError: unknown;
   let discoveryCursor: {workspaceId: string; shareId: string} | undefined;
   let writeGeneration = 1, scanGeneration = 0, scannedGeneration = 0;
@@ -85,10 +85,12 @@ export async function startSelfHostedLiveHost(options: {
   const selectionSignature = ({targets, departing}: ReturnType<typeof select>) => JSON.stringify([targets, departing].map(rows =>
     rows.map(({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}) => ({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}))));
   // A workspace identity's hosted replica. The label keeps a store of any other kind from opening as one.
+  // A store keeps its parked documents' activations, so nothing here deletes one.
   const storeName = (row: Pick<ServiceHostEnrollment, "workspaceId" | "replicationEpoch" | "streamIdentity">) => createHash("sha256")
     .update(JSON.stringify(["hosted-v1", history.namespace, row.workspaceId, row.replicationEpoch, row.streamIdentity])).digest("hex");
-  // Drained stores whose removal failed. Their workspaces stay detached until it succeeds.
-  const unremoved = new Map<string, {directory: string; rows: readonly ServiceHostEnrollment[]}>();
+  // Workspaces whose hosted replica diverged from the relay. Each stays
+  // detached for the life of this process, its store untouched, and releases nothing.
+  const diverged = new Set<string>();
   // The documents this reconciliation released, or tried to.
   const left = new Set<string>();
   function schedule() {
@@ -103,36 +105,6 @@ export async function startSelfHostedLiveHost(options: {
     left.add(documentKey(row));
     try {if (!storage.releaseServiceHostEnrollment({workspaceId: row.workspaceId, objectId: row.objectId, nowMs: Date.now()})) moved.add(movedKey(row));}
     catch (error) {options.onError?.(error);}
-  }
-  // Renames the directory aside first, so a removal that stops partway never leaves part of a store to open.
-  async function removeDirectory(directory: string) {
-    const tombstone = `${directory}.removing`;
-    await rm(tombstone, {recursive: true, force: true});
-    try {await rename(directory, tombstone);}
-    catch (error) {if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;}
-    await rm(tombstone, {recursive: true, force: true});
-  }
-  // Removes every store no undrained enrollment names, as one released while
-  // this host was down or one from before hosted replicas, and what a removal
-  // left partway. Set-aside stores and anything that is not a store, such as
-  // automation replicas, stay. Resolves to whether every removal succeeded.
-  async function removeUnnamedStores() {
-    const named = new Set(storage.listUndrainedServiceHostWorkspaces().map(storeName));
-    let removed = true;
-    for (const name of await readdir(root)) {
-      if (!/^[0-9a-f]{64}(\.removing)?$/.test(name) || named.has(name)) continue;
-      try {await (name.endsWith(".removing") ? rm(join(root, name), {recursive: true, force: true}) : removeDirectory(join(root, name)));}
-      catch (error) {removed = false; options.onError?.(error);}
-    }
-    return removed;
-  }
-  // A failure leaves the store and its enrollments for the next reconciliation, and holds back no other workspace.
-  async function removeStore(workspaceId: string) {
-    const {directory, rows} = unremoved.get(workspaceId)!;
-    try {await removeDirectory(directory);}
-    catch (error) {options.onError?.(error); return;}
-    unremoved.delete(workspaceId);
-    for (const row of rows) leave(row);
   }
   async function hostedSet({targets, departing}: ReturnType<typeof select>): Promise<ServiceHostedSet> {
     const named = new Map<string, ServiceHostEnrollment>();
@@ -163,9 +135,9 @@ export async function startSelfHostedLiveHost(options: {
       return host;
     } finally {await rm(temporary, {recursive: true, force: true});}
   }
-  // The selection, without workspaces whose drained store is still being removed.
+  // The selection, without diverged workspaces.
   const selection = () => {
-    const selected = select(), kept = (row: ServiceHostEnrollment) => !unremoved.has(row.workspaceId);
+    const selected = select(), kept = (row: ServiceHostEnrollment) => !diverged.has(row.workspaceId);
     return {...selected, targets: selected.targets.filter(kept), departing: selected.departing.filter(kept)};
   };
   async function reconcile() {
@@ -180,21 +152,15 @@ export async function startSelfHostedLiveHost(options: {
         discoveryCursor = discoverServiceHostDocuments(storage, options.onError, discoveryCursor) ?? undefined;
         if (!discoveryCursor) scannedGeneration = scanGeneration;
       }
-      if (!storesChecked) storesChecked = await removeUnnamedStores();
-      for (const workspaceId of [...unremoved.keys()]) await removeStore(workspaceId);
+      // A diverged store may hold work nobody published. It stays where it is,
+      // and nothing attaches it again, even on a restarted daemon.
+      for (const {workspaceId, root: store} of current?.diverged() ?? []) {
+        if (diverged.has(workspaceId)) continue;
+        diverged.add(workspaceId);
+        options.onError?.(new Error(`The live editing copy of workspace ${workspaceId} diverged from the relay. It stays detached, and its store is kept at ${store}.`));
+      }
       // Only a failed daemon restarts. Membership changes update the running one.
       if (current?.invalidated.aborted) {await stopCurrent(); signature = "";}
-      // A diverged store may hold work nobody published, so it is kept aside, never deleted, and the workspace starts over from the relay.
-      // One that cannot be moved stays diverged, and detached, until a later reconciliation moves it.
-      for (const {workspaceId, root: store} of current?.diverged() ?? []) {
-        try {
-          await mkdir(join(root, "diverged"), {recursive: true, mode: 0o700});
-          const kept = join(root, "diverged", `${basename(store)}-${Date.now()}`);
-          await rename(store, kept);
-          current!.rebuild(workspaceId); signature = "";
-          options.onError?.(new Error(`The live editing copy of workspace ${workspaceId} diverged from the relay. It was kept at ${kept} and is rebuilt from the relay.`));
-        } catch (error) {options.onError?.(error);}
-      }
       selected = selection();
       const {targets, departing} = selected, next = selectionSignature(selected);
       selectedDocuments = targets.length > 0;
@@ -208,16 +174,14 @@ export async function startSelfHostedLiveHost(options: {
         await current?.update(desired);
         signature = next;
       }
-      // A workspace with no documents lets go of its store once its replica
-      // drained: detach, remove the store, then release its enrollments. A
-      // failure between steps leaves them undrained, so the next start drains again.
+      // A workspace with no documents detaches once its replica drained, then
+      // releases its enrollments. Its store stays, so a document shared again
+      // resumes there. A failure between steps leaves them undrained, so the next start drains again.
       for (const workspaceId of new Set(departing.map(row => row.workspaceId))) {
         if (!current || targets.some(row => row.workspaceId === workspaceId) || !(await current.detachDrained(workspaceId, signal))) continue;
-        // The workspace stays detached, and out of every update, until its store is gone.
+        // A release that fails keeps its row selected, so the next update attaches the workspace again.
         signature = "";
-        const rows = departing.filter(row => row.workspaceId === workspaceId);
-        unremoved.set(workspaceId, {directory: join(root, storeName(rows[0]!)), rows});
-        await removeStore(workspaceId);
+        for (const row of departing) if (row.workspaceId === workspaceId) leave(row);
       }
       lastError = undefined; initialReconciliationComplete = true;
     } catch (error) {
@@ -230,12 +194,12 @@ export async function startSelfHostedLiveHost(options: {
         for (const row of selected.departing) {
           if (selected.targets.some(target => target.workspaceId === row.workspaceId) && current?.retains(row) === false) leave(row);
         }
-        // Once every retired document on the page left, waits on its store's removal, or
-        // stayed through a pull after it departed, the next page gets its turn, so
-        // documents that stay cannot keep the ones after them from leaving.
+        // Once every retired document on the page left or stayed through a pull
+        // after it departed, the next page gets its turn, so documents that
+        // stay cannot keep the ones after them from leaving.
         const page = [...selected.departing, ...selected.obsolete].filter(row => row.retired);
         if ((selected.nextCursor || retiredCursor) && page.every(row =>
-          left.has(documentKey(row)) || unremoved.has(row.workspaceId) || current?.pulledAfterDeparture(row))) {
+          left.has(documentKey(row)) || current?.pulledAfterDeparture(row))) {
           retiredCursor = selected.nextCursor ?? undefined;
           schedule();
         }

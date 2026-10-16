@@ -177,7 +177,7 @@ export async function startServiceLiveHost(options: {
   const recovering = new Set<string>();
   // Whether an update completed on this daemon.
   let updated = false;
-  // The stores of workspaces whose replica diverged and detached. None attaches again until its caller set its store aside.
+  // The stores of workspaces whose replica diverged and detached. None attaches again on this daemon, and each store stays where it is.
   const diverged = new Map<string, string>();
   // When each hosted document is due to unload with no live connection, and
   // the count of connection changes it last saw. An idle unload that started
@@ -589,7 +589,7 @@ export async function startServiceLiveHost(options: {
       registerRetained();
       updated = true;
     }));
-    // Detaches a workspace whose replica drained. Its caller then removes the store and releases its enrollments.
+    // Detaches a workspace whose replica drained. Its caller then releases its enrollments and keeps the store.
     const detachDrained = (workspaceId: string, callerSignal?: AbortSignal) => exclusive(() => withLiveHostSignal(signal, callerSignal, async joined => {
       if (!drained(workspaceId)) return false;
       await detach(workspaceId, joined);
@@ -643,7 +643,7 @@ export async function startServiceLiveHost(options: {
         for(const [workspaceId,attached] of [...attachments]){
           if(activation!.workspaceReady(workspaceId))await step(async()=>{await attached.hosted.push(passSignal);await pull(attached,passSignal);});
         }
-        // A diverged replica runs nothing more. Its workspace detaches until its caller sets the store aside.
+        // A diverged replica runs nothing more. Its workspace detaches for good, and its store stays.
         for(const [workspaceId,attached] of [...attachments]){
           if(attached.hosted.diverged)await step(async()=>{
             const store=members.get(workspaceId)!.workspace.root;
@@ -694,7 +694,7 @@ export async function startServiceLiveHost(options: {
        * and unload documents that left, while their workspace stays attached.
        * On a fresh daemon, they first resume departing documents that are
        * still enabled. A workspace that is no longer wanted, or whose identity
-       * changed, detaches at once. A diverged workspace waits for `rebuild`.
+       * changed, detaches at once. A diverged workspace stays detached.
        */
       update,
       /**
@@ -722,18 +722,16 @@ export async function startServiceLiveHost(options: {
         return !!row && (activation!.completed(row.target) || activation!.dormant(row.target));
       },
       /**
-       * Whether a workspace with no documents can let go of its store: nothing
-       * of it is loaded, and its last pull succeeded with nothing departed.
+       * Whether a workspace with no documents can detach: nothing of it is
+       * loaded, and its last pull succeeded with nothing departed.
        */
       drained,
-      /** Detaches a drained workspace. Resolves to whether it did; the caller then removes its store and releases its enrollments. */
+      /** Detaches a drained workspace. Resolves to whether it did; the caller then releases its enrollments and keeps its store. */
       detachDrained,
-      /** The workspaces whose replica diverged from the relay, with their stores. Each stays detached until its store is set aside. */
+      /** The workspaces whose replica diverged from the relay, with their stores. Each stays detached on this daemon. */
       diverged(): readonly {readonly workspaceId: string; readonly root: string}[] {
         return [...diverged].map(([workspaceId, root]) => ({workspaceId, root}));
       },
-      /** Lets the next update attach the workspace again, to a store its caller set aside. */
-      rebuild(workspaceId: string) {diverged.delete(workspaceId);},
       /** Whether the document can be opened now. A dormant document reloads when it is opened. */
       isDocumentReady(document: LiveDocumentKey): boolean {
         try {

@@ -13,17 +13,8 @@ import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
 import {serviceHostDocumentEnabled} from "./storage/serviceHostEnrollment";
 import type {StorageContext} from "./storage/context";
 
-// The named operation fails on an existing directory with this name, as for a store whose files are still open.
-const fsFailure = vi.hoisted(() => ({name: undefined as string | undefined, method: "rename" as "rename" | "rm"}));
-vi.mock("node:fs/promises", async importOriginal => {
-  const fs = await importOriginal<typeof import("node:fs/promises")>(), {existsSync: exists} = await import("node:fs");
-  const fails = (method: string, path: unknown) => fsFailure.method === method && basename(String(path)) === fsFailure.name && exists(String(path));
-  return {...fs,
-    rename: (...args: Parameters<typeof fs.rename>) => fails("rename", args[0]) ? Promise.reject(new Error("EBUSY store in use")) : fs.rename(...args),
-    rm: (...args: Parameters<typeof fs.rm>) => fails("rm", args[0]) ? Promise.reject(new Error("EBUSY store in use")) : fs.rm(...args)};
-});
 const cleanup: Array<() => Promise<void>> = [];
-afterEach(async () => {fsFailure.name = undefined; vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
+afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
 type Configuration = {workspaces: unknown[]; activation: {targets: unknown[]}; hostId: string; instanceId: string};
 type Hosted = ServiceHostedSet["documents"][number];
 type Workspace = ServiceHostedSet["workspaces"][number];
@@ -101,8 +92,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     // Its replica had its chance to retire the document once it is attached and no longer hosts it.
     const pulledAfterDeparture = (document: Document) => attached.has(document.workspaceId) && !holds(document);
     return {invalidated: controller.signal, close, update, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, onEvent: () => () => undefined,
-      diverged: () => [...diverged].map(([workspaceId, root]) => ({workspaceId, root})),
-      rebuild(workspaceId: string) {diverged.delete(workspaceId); events.push(`rebuild ${workspaceId}`);}} as never;
+      diverged: () => [...diverged].map(([workspaceId, root]) => ({workspaceId, root}))} as never;
   });
   const onError = vi.fn();
   // Records what the store and attachment looked like at each release.
@@ -294,9 +284,9 @@ it("keeps a document hosted while any Edit grant covers it and retires it once i
 });
 
 // Proves: stopping a workspace's last document keeps the workspace attached
-// until its replica drains, then detaches it, deletes its store and only then
-// releases the enrollment. A later reconciliation has nothing left to do.
-it("drains a stopped last document, then detaches the workspace, deletes its store and releases it", async () => {
+// until its replica drains, then detaches it and only then releases the
+// enrollment. The store stays, and sharing the document again reopens it.
+it("drains a stopped last document, then detaches the workspace and releases it, keeping its store", async () => {
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   const store = join(f.data, storeName(scope.workspaceId));
   await writeFile(join(store, "replica.sqlite"), "hosted");
@@ -314,12 +304,19 @@ it("drains a stopped last document, then detaches the workspace, deletes its sto
   expect(f.events).toEqual([]);
   f.pending.delete(binding.objectId);
   await vi.waitFor(() => expect(f.enrollment()!.hostDrainedAtMs).not.toBeNull(), {timeout: 10_000});
-  expect(f.events).toEqual([`detach ${scope.workspaceId}`, `release ${binding.objectId} attached=false store=false`]);
+  expect(f.events).toEqual([`detach ${scope.workspaceId}`, `release ${binding.objectId} attached=false store=true`]);
   expect(f.storage.currentServiceHostWorkspace(scope.workspaceId, true)).toBeNull();
   // The next reconciliation no longer wants the workspace.
   await vi.waitFor(() => expect(f.updates.at(-1)!.workspaces).toEqual([]), {timeout: 10_000});
-  expect(existsSync(store)).toBe(false);
+  expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("hosted");
   expect(f.host.current()).toBeDefined(); expect(f.starts[0]!.close).not.toHaveBeenCalled();
+  // Shared again, the document's workspace attaches to the store it kept.
+  f.storage.enrollServiceHostDocument(f.input);
+  const returned = await f.waitUpdate(["docs/a.md"]);
+  expect(returned.workspaces.map(row => basename(row.root))).toEqual([storeName(scope.workspaceId)]);
+  expect(f.attachedAfter.at(-1)).toEqual([scope.workspaceId]);
+  expect(await readdir(f.data)).toEqual([storeName(scope.workspaceId)]);
+  expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("hosted");
 });
 
 it("retires the last document without stopping the daemon", async () => {
@@ -453,9 +450,10 @@ it.each([false, true])("releases a paused document under an obsolete identity wi
   expect(f.starts).toHaveLength(1); expect(f.starts[0]!.close).not.toHaveBeenCalled();
 });
 
-// Proves: a diverged store is moved aside, never deleted, its enrollments
-// stay undrained, and the workspace attaches again to a store rebuilt from the relay.
-it("sets a diverged store aside, reports it, releases nothing and attaches the workspace again to a new store", async () => {
+// Proves: a diverged store stays where it is, untouched and reported once.
+// Its workspace releases nothing and is not attached again on later passes or
+// by a restarted daemon, while another workspace's changes still apply.
+it("keeps a diverged store in place and its workspace detached across passes and daemon restarts", async () => {
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   const store = join(f.data, storeName(scope.workspaceId));
   await writeFile(join(store, "replica.sqlite"), "unpublished work");
@@ -463,28 +461,10 @@ it("sets a diverged store aside, reports it, releases nothing and attaches the w
   f.pending.add(binding.objectId);
   f.diverge();
   f.host.reconcile();
-  await vi.waitFor(() => expect(f.events).toContain(`rebuild ${scope.workspaceId}`), {timeout: 10_000});
-  const [kept] = await readdir(join(f.data, "diverged"));
-  expect(kept).toMatch(new RegExp(`^${storeName(scope.workspaceId)}-\\d+$`));
-  expect(await readFile(join(f.data, "diverged", kept!, "replica.sqlite"), "utf8")).toBe("unpublished work");
-  expect(f.onError).toHaveBeenCalledWith(expect.objectContaining({message: expect.stringContaining("diverged from the relay")}));
+  const reported = expect.objectContaining({message: expect.stringMatching(/diverged from the relay.*stays detached.*store is kept at .+/)});
+  await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(reported), {timeout: 10_000});
   f.onError.mockClear();
-  // The workspace attaches again to a new, empty store.
-  await vi.waitFor(() => expect(f.attachedAfter.at(-1)).toEqual([scope.workspaceId]), {timeout: 10_000});
-  expect(await readdir(store)).toEqual([]);
   await f.waitPasses();
-  expect(f.enrollment()).toMatchObject({enabled: true, ownerStop: "pause", hostDrainedAtMs: null});
-  expect(f.events.filter(event => event.startsWith("release"))).toEqual([]);
-});
-
-// Proves: a diverged store that cannot be moved aside keeps its workspace
-// detached and reported, while other workspaces' changes still apply.
-it("keeps a diverged store that cannot be moved aside and still applies other workspaces' changes", async () => {
-  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
-  Object.assign(fsFailure, {name: storeName(scope.workspaceId), method: "rename"});
-  f.diverge(); f.host.reconcile();
-  await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(expect.objectContaining({message: "EBUSY store in use"})), {timeout: 10_000});
-  f.onError.mockReset();
   const workspaceId = "workspace-2", ownerUserId = "owner-2", shareId = "share-2", path = "docs/other.md";
   f.storage.claimWorkspace({workspaceId, ownerUserId, createdAtMs: 1});
   f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
@@ -492,27 +472,36 @@ it("keeps a diverged store that cannot be moved aside and still applies other wo
   f.moment(path, "second-owner-object", workspaceId);
   f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
   await vi.waitFor(() => expect(f.attachedAfter.at(-1)).toEqual([workspaceId]), {timeout: 10_000});
-  expect(f.events).not.toContain(`rebuild ${scope.workspaceId}`);
-  fsFailure.name = undefined;
-  await vi.waitFor(() => expect(f.events).toContain(`rebuild ${scope.workspaceId}`), {timeout: 10_000});
-  await vi.waitFor(() => expect([...f.attachedAfter.at(-1)!].sort()).toEqual([scope.workspaceId, workspaceId]), {timeout: 10_000});
+  // A replacement daemon knows nothing of the divergence, and still gets only the other workspace.
+  f.starts[0]!.controller.abort();
+  await f.waitStarted(2);
+  await vi.waitFor(() => expect(f.updates.at(-1)!.workspaces.map(row => row.workspaceId)).toEqual([workspaceId]), {timeout: 10_000});
+  await f.waitPasses();
+  expect(f.updates.at(-1)!.departing).toEqual([]);
+  expect(f.attachedAfter.at(-1)).toEqual([workspaceId]);
+  expect(f.onError).not.toHaveBeenCalled();
+  expect(f.enrollment()).toMatchObject({enabled: true, ownerStop: "pause", hostDrainedAtMs: null});
+  expect(f.events.filter(event => event.startsWith("release"))).toEqual([]);
+  expect((await readdir(f.data)).sort()).toEqual([storeName(scope.workspaceId), storeName(workspaceId, "epoch-2", "stream-2")].sort());
+  expect(await readdir(store)).toEqual(["replica.sqlite"]);
+  expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("unpublished work");
 });
 
-// Proves: startup removes stores that no undrained enrollment names, and keeps
-// the named ones, set-aside stores, and directories that are not stores.
-it("removes unnamed stores at startup and keeps undrained, set-aside and other directories", async () => {
+// Proves: startup deletes nothing: not a store no enrollment names, not what
+// an earlier build left partway or set aside, and not other directories.
+it("deletes no store at startup, named or not", async () => {
   const stale = "f".repeat(64), named = storeName(scope.workspaceId);
+  const directories = [stale, named, `${stale}.removing`, join("diverged", `${stale}-1`), join("automations", "replica")];
   const f = await fixture({seed: async data => {
-    for (const directory of [stale, named, join("diverged", `${stale}-1`), join("automations", "replica")]) {
+    for (const directory of directories) {
       await mkdir(join(data, directory), {recursive: true});
       await writeFile(join(data, directory, "marker"), directory);
     }
   }});
   await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
-  expect((await readdir(f.data)).sort()).toEqual(["automations", "diverged", named].sort());
-  expect(await readFile(join(f.data, named, "marker"), "utf8")).toBe(named);
-  expect(await readdir(join(f.data, "diverged"))).toEqual([`${stale}-1`]);
-  expect(await readdir(join(f.data, "automations"))).toEqual(["replica"]);
+  await f.waitPasses();
+  expect((await readdir(f.data)).sort()).toEqual(["automations", "diverged", named, stale, `${stale}.removing`].sort());
+  for (const directory of directories) expect(await readFile(join(f.data, directory, "marker"), "utf8")).toBe(directory);
 });
 
 it("retries runtime checks without rescanning unchanged shares and rescans after owner writes", async () => {
@@ -722,9 +711,9 @@ it("lets a renamed document leave its replica without releasing it, and hosts it
 });
 
 // Proves: renaming a workspace's last document keeps the workspace attached
-// until its replica drains, then detaches it and deletes its store. The
+// until its replica drains, then detaches it and keeps its store. The
 // enrollment stays, and nothing attaches the workspace again.
-it("drains the workspace of a renamed last document, deletes its store and keeps its enrollment", async () => {
+it("drains the workspace of a renamed last document and keeps its store and its enrollment", async () => {
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   const store = join(f.data, storeName(scope.workspaceId));
   await writeFile(join(store, "replica.sqlite"), "hosted");
@@ -737,18 +726,17 @@ it("drains the workspace of a renamed last document, deletes its store and keeps
   expect(f.events).toEqual([]); expect(existsSync(store)).toBe(true);
   f.pending.delete(binding.objectId);
   await vi.waitFor(() => expect(f.updates.at(-1)!.workspaces).toEqual([]), {timeout: 10_000});
-  expect(f.events).toEqual([`detach ${scope.workspaceId}`, `release ${binding.objectId} attached=false store=false`]);
-  expect(existsSync(store)).toBe(false);
+  expect(f.events).toEqual([`detach ${scope.workspaceId}`, `release ${binding.objectId} attached=false store=true`]);
+  expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("hosted");
   expect(f.enrollment()).toMatchObject({enabled: true, retired: false, ownerStop: null, hostDrainedAtMs: null});
   const updates = f.updates.length;
   await f.waitPasses();
   expect(f.updates).toHaveLength(updates); expect(f.events).toHaveLength(2);
 });
 
-// Proves: startup keeps the store of every undrained workspace, past any page
-// of enrollments, and a page of stopped documents that stay gives way to the
-// next, so every one of them reaches its replica and is released.
-it("keeps every undrained workspace's store at startup and reaches stopped documents past a page of ones that stay", async () => {
+// Proves: a page of stopped documents that stay gives way to the next, so
+// every one of them reaches its replica and is released. Every store stays.
+it("reaches stopped documents past a page of ones that stay and keeps every store", async () => {
   const workspaces = Array.from({length: 130}, (_, index) => `stopped-${String(index).padStart(3, "0")}`);
   const last = storeName(workspaces.at(-1)!), stale = "e".repeat(64);
   const f = await fixture({pending: ["object-stopped"], seed: async (data, relay) => {
@@ -765,66 +753,11 @@ it("keeps every undrained workspace's store at startup and reaches stopped docum
   }});
   await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   expect(await readFile(join(f.data, last, "marker"), "utf8")).toBe(last);
-  expect(existsSync(join(f.data, stale))).toBe(false);
+  expect(await readFile(join(f.data, stale, "marker"), "utf8")).toBe(stale);
   await vi.waitFor(() => expect(f.updates.some(update => update.departing.some(row => row.workspaceId === workspaces.at(-1)))).toBe(true), {timeout: 10_000});
   expect(f.storage.listUndrainedServiceHostWorkspaces()).toHaveLength(131);
   f.pending.delete("object-stopped");
   await vi.waitFor(() => expect(f.storage.listUndrainedServiceHostWorkspaces().map(row => row.workspaceId)).toEqual([scope.workspaceId]), {timeout: 20_000});
-  expect(existsSync(join(f.data, last))).toBe(false);
-});
-
-// Proves: what a removal left partway is removed at startup, so a store that
-// was being deleted never reopens with part of its contents. A store under the
-// same name, attached again since, stays.
-it("removes partly removed stores at startup and keeps the store attached under the same name", async () => {
-  const named = storeName(scope.workspaceId), stale = "f".repeat(64);
-  const f = await fixture({seed: async data => {
-    for (const directory of [named, `${named}.removing`, `${stale}.removing`]) {
-      await mkdir(join(data, directory)); await writeFile(join(data, directory, "replica.sqlite"), directory);
-    }
-  }});
-  await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
-  expect(await readdir(f.data)).toEqual([named]);
-  expect(await readFile(join(f.data, named, "replica.sqlite"), "utf8")).toBe(named);
-});
-
-// Proves: a drained store is moved aside before it is removed. One whose
-// removal stops partway is gone from its name and keeps its enrollment until a retry finishes.
-it("moves a drained store aside before removing it and releases it only once the removal finishes", async () => {
-  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
-  const store = join(f.data, storeName(scope.workspaceId));
-  await writeFile(join(store, "replica.sqlite"), "hosted");
-  Object.assign(fsFailure, {name: `${storeName(scope.workspaceId)}.removing`, method: "rm"});
-  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
-  await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(expect.objectContaining({message: "EBUSY store in use"})), {timeout: 10_000});
-  expect(existsSync(store)).toBe(false);
-  expect(await readFile(join(`${store}.removing`, "replica.sqlite"), "utf8")).toBe("hosted");
-  expect(f.enrollment()!.hostDrainedAtMs).toBeNull();
-  fsFailure.name = undefined;
-  await vi.waitFor(() => expect(f.enrollment()!.hostDrainedAtMs).not.toBeNull(), {timeout: 10_000});
-  expect(await readdir(f.data)).toEqual([]);
-});
-
-// Proves: a store whose removal keeps failing holds back only its own workspace.
-it("removes and releases one drained workspace while another's store removal keeps failing", async () => {
-  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
-  const workspaceId = "workspace-2", ownerUserId = "owner-2", shareId = "share-2", path = "docs/other.md";
-  f.storage.claimWorkspace({workspaceId, ownerUserId, createdAtMs: 1});
-  f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
-  f.share(shareId, ["docs"], {workspaceId, ownerUserId});
-  f.moment(path, "second-owner-object", workspaceId);
-  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
-  await f.waitUpdate(["docs/a.md", path]);
-  const failing = join(f.data, storeName(scope.workspaceId)), other = join(f.data, storeName(workspaceId, "epoch-2", "stream-2"));
-  Object.assign(fsFailure, {name: storeName(scope.workspaceId), method: "rename"});
-  f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true});
-  f.storage.setServiceHostEnrollmentEnabled({...f.input, workspaceId, ownerUserId, path, enabled: false, retire: true});
-  await vi.waitFor(() => expect(f.storage.readServiceHostEnrollment(workspaceId, path)!.hostDrainedAtMs).not.toBeNull(), {timeout: 10_000});
-  expect(existsSync(other)).toBe(false);
-  await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(expect.objectContaining({message: "EBUSY store in use"})), {timeout: 10_000});
-  expect(existsSync(failing)).toBe(true); expect(f.enrollment()!.hostDrainedAtMs).toBeNull();
-  expect(f.host.unavailable).toBe(false);
-  fsFailure.name = undefined;
-  await vi.waitFor(() => expect(f.enrollment()!.hostDrainedAtMs).not.toBeNull(), {timeout: 10_000});
-  expect(existsSync(failing)).toBe(false);
+  expect(await readFile(join(f.data, last, "marker"), "utf8")).toBe(last);
+  expect(existsSync(join(f.data, storeName(workspaces[0]!)))).toBe(true);
 });

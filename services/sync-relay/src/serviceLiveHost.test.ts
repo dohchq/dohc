@@ -924,8 +924,8 @@ it("keeps a departing document retained when the engine refuses to resume it aft
 });
 
 // Proves: a diverged replica stops and detaches, its documents stay retained,
-// and the workspace attaches again only once its caller set the store aside.
-it("detaches a diverged workspace, retains its documents, and attaches it again only after rebuild", async () => {
+// and no later update attaches the workspace again on this daemon.
+it("detaches a diverged workspace for good and retains its documents", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
@@ -937,12 +937,10 @@ it("detaches a diverged workspace, retains its documents, and attaches it again 
   expect(o.host.isDocumentReady(o.document)).toBe(false);
   o.replies.diverge = false;
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
-  expect(o.membership).toEqual([o.attach, o.detach]);
-  o.host.rebuild("workspace");
-  expect(o.host.diverged()).toEqual([]);
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
-  expect(o.membership).toEqual([o.attach, o.detach, o.attach]);
-  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  expect(o.membership).toEqual([o.attach, o.detach]);
+  expect(o.host.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]);
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
 });
 
 it.each([false, true])("detaches a workspace at once when its identity changes, leaving its pending document unsettled (new documents at once: %s)", async newAtOnce => {
