@@ -166,7 +166,10 @@ export async function withRelayDeploymentMaintenance<T>(configPath: string, oper
         const uri = pathToFileURL(deployment.config.relayPath);
         uri.searchParams.set("immutable", "1");
         db = new DatabaseSync(uri.href, { readOnly: true });
-        marker = relayDeploymentMarker(db, deployment.config);
+        // An empty file opens as a database without tables; restore repairs it like corrupt bytes.
+        if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_relay_continuity'").get()) {
+          marker = relayDeploymentMarker(db, deployment.config);
+        }
       } catch (error) {
         if (!(error instanceof Error && "errcode" in error && (error.errcode === 11 || error.errcode === 26))) throw error;
       } finally { db?.close(); }

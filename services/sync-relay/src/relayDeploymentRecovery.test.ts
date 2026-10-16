@@ -137,14 +137,14 @@ describe("relay recovery snapshots", () => {
     expect(readFileSync(f.relayPath)).toEqual(bytes);
   });
 
-  it("repairs a corrupt relay database while preserving its original bytes", async () => {
+  it.each(["damaged database", ""])("repairs a corrupt relay database while preserving its original bytes (%j)", async damaged => {
     const f = fixture(), backup = join(f.root, "backup"), live = openRelayDeployment(f.configPath);
     live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
     live.storage.close();
     await backupRelayDeployment(f.configPath, backup);
-    writeFileSync(f.relayPath, "damaged database");
+    writeFileSync(f.relayPath, damaged);
     const result = await restoreRelayDeployment(f.configPath, backup);
-    expect(readFileSync(join(result.preservedDirectory, "original.sqlite"), "utf8")).toBe("damaged database");
+    expect(readFileSync(join(result.preservedDirectory, "original.sqlite"), "utf8")).toBe(damaged);
     const reopened = openRelayDeployment(f.configPath);
     try { expect(reopened.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 })).toBe("owned"); }
     finally { reopened.storage.close(); }
