@@ -804,6 +804,14 @@ async function openSelfHostProof(name: string) {
       unpushed: () => serviceRead(engine => engine.prepare("SELECT origin_id,origin_seq,op_kind,payload_json FROM replication_log WHERE workspace_id='workspace' AND imported=0")
         .all() as {origin_id: string; origin_seq: number; op_kind: string; payload_json: string}[])
         .filter(row => relayRead.prepare("SELECT 1 FROM sync_relay_log WHERE workspace_id='workspace' AND origin_id=? AND origin_seq=?").get(row.origin_id, row.origin_seq) === undefined),
+      /** The operation the relay's log holds at each row's coordinates. A refused row holds `relay.refused`. */
+      relayed: (rows: readonly {origin_id: string; origin_seq: number}[]) => rows.map(row =>
+        (relayRead.prepare("SELECT op_kind FROM sync_relay_log WHERE workspace_id='workspace' AND origin_id=? AND origin_seq=?").get(row.origin_id, row.origin_seq) as {op_kind: string} | undefined)?.op_kind),
+      /** The last journal cursor the session host applied of a document, and the last it settled into the file. */
+      settlement: (object = objectId) => serviceRead(engine => engine.prepare(`SELECT
+        (SELECT COALESCE(MAX(journal_cursor),0) FROM live_device_update_applications WHERE workspace_id='workspace' AND object_id=?1) AS applied,
+        (SELECT COALESCE(MAX(terminal_cursor),0) FROM live_device_settlements WHERE workspace_id='workspace' AND object_id=?1) AS settled`)
+        .get(object) as {applied: number; settled: number}),
     };
     await vi.waitFor(async () => expect(await proof.documents()).toEqual([expect.objectContaining({path: "docs/a.md", status: "ready"})]), {timeout: 30000});
     return {proof, close};
@@ -831,29 +839,41 @@ async function withSelfHostProof(name: string, run: (proof: SelfHostProof) => Pr
 
 // The owner stops live editing. The relay refuses what the host has not
 // published, its replica parks the document, and the host releases its
-// enrollment, keeping the store. `stopped` runs once Stop has answered.
+// enrollment, keeping the store. `stopped` runs once Stop has answered, which
+// resolves to Stop's answer.
 async function stopLiveEditing(proof: SelfHostProof, stopped = () => {}) {
-  expect((await proof.route("DELETE", {path: "docs/a.md", retire: true})).body).toMatchObject({status: "retired"});
+  const answer = (await proof.route("DELETE", {path: "docs/a.md", retire: true})).body;
+  expect(answer).toMatchObject({status: "retired"});
   stopped();
   await vi.waitFor(() => {
     expect(proof.hosted()?.state).toBe("parked");
     expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")?.hostDrainedAtMs).not.toBeNull();
   }, {timeout: 30000});
+  return answer;
 }
 
 it("parks a stopped document in its store and resumes the same activation when it is shared again", () => withSelfHostProof("self-host-park", async proof => {
-  // The owner stops while the host still holds a live edit it accepted and has not pushed.
-  harness.unreachable.add("sync.push");
+  // The owner stops while the host holds a live edit it accepted and has neither settled nor pushed.
+  harness.unreachable.add("sync.push"); harness.unreachable.add("liveApplication.settle");
   const accepted = await proof.liveEdit("beforeStop", "live");
   const saved = proof.activation()!, before = await proof.hostState(), stores = readdirSync(proof.hostRoot);
   expect(stores).toEqual([basename(proof.store)]);
+  expect(before.markdown).toContain("beforeStop");
   const waiting = proof.unpushed();
   expect(waiting.map(row => row.op_kind)).toContain("ydoc.update");
-  await stopLiveEditing(proof, () => harness.unreachable.delete("sync.push"));
+  const unsettled = proof.settlement();
+  expect(unsettled.applied).toBe(accepted.journalCursor); expect(unsettled.settled).toBeLessThan(accepted.journalCursor);
+  const stop = await stopLiveEditing(proof, () => {harness.unreachable.delete("sync.push"); harness.unreachable.delete("liveApplication.settle");});
+  // Stop settled what the host accepted into the file before it parked.
+  expect(proof.settlement()).toEqual({applied: accepted.journalCursor, settled: accepted.journalCursor});
+  expect(proof.serviceRead(engine => engine.prepare("SELECT blob_sha256 FROM hosted_parked_snapshots WHERE workspace_id='workspace' AND object_id=?")
+    .all(saved.source.objectId))).toEqual([{blob_sha256: hash(Buffer.from(before.markdown))}]);
   // The relay refused that work at its coordinates; nothing of it was published.
-  const coordinate = proof.relayRead.prepare("SELECT op_kind FROM sync_relay_log WHERE workspace_id='workspace' AND origin_id=? AND origin_seq=?");
-  expect(waiting.map(row => (coordinate.get(row.origin_id, row.origin_seq) as {op_kind: string} | undefined)?.op_kind))
-    .toEqual(waiting.map(() => "relay.refused"));
+  expect(proof.relayed(waiting)).toEqual(waiting.map(() => "relay.refused"));
+  // The relay's live journal still holds the edit, through the cursor Stop answered with.
+  expect(stop.acceptedCursor).toBe(accepted.journalCursor);
+  expect(proof.relayRead.prepare("SELECT delivery_id,update_digest FROM sync_relay_live_update_journal WHERE workspace_id='workspace' AND object_id=? AND journal_cursor=?")
+    .get(saved.source.objectId, accepted.journalCursor)).toEqual({delivery_id: accepted.deliveryId, update_digest: accepted.updateDigest});
   const captures = harness.captures.length;
   expect((await proof.route("POST", {shareId: "share"})).status).toBe(202);
   await vi.waitFor(async () => expect(await proof.documents()).toEqual([expect.objectContaining({path: "docs/a.md", status: "ready"})]), {timeout: 30000});
@@ -899,9 +919,10 @@ it("pushes a write the host accepted before it reconnected, while another docume
   }, {timeout: 30000});
   expect(proof.hosted()).toEqual({state: "held", reason: "hosted-live-edit-unadmitted"});
   expect(proof.unpushed()).toEqual(expect.arrayContaining(waiting));
-  // Once pushes reach the engine again, the accepted write reaches the relay.
+  // Once pushes reach the engine again, the accepted write reaches the relay as it was written, not as refusals.
   harness.unreachable.delete("sync.push");
   await vi.waitFor(() => expect(proof.unpushed()).toEqual([]), {timeout: 30000});
+  expect(proof.relayed(waiting)).toEqual(waiting.map(row => row.op_kind));
   expect(proof.hosted()).toEqual({state: "held", reason: "hosted-live-edit-unadmitted"});
   expect(proof.hosted(second.objectId)?.state).toBe("ready");
   return {accepted, waiting: waiting.map(({origin_id, origin_seq, op_kind}) => ({origin_id, origin_seq, op_kind})), reconnected: proof.live().coordinate.connectionId};

@@ -343,6 +343,21 @@ export class LiveCommittedDeliveryStore {
     return {terminal: parsed,sequence: authorityInteger(row.tip_sequence),adoptionId:parseLiveUpdateIdentifier(origin.adoptionId),
       adoptionSequence: authorityInteger(origin.expectedLocalSequence)};
   }
+  /**
+   * The last receipt the host applied under its adoption. It needs the host's
+   * standing but not the document's live authority, so what the host already
+   * applied can settle after Stop fenced the document.
+   */
+  ownerDeliveryTip(input: {host: LiveHostConnectionCoordinate; document: LiveDocumentKey; adoptionId: string}): LiveUpdateReceipt | null {
+    const host = snapshotHostCoordinate(input.host), document = journalDocument(input.document);
+    return this.#storage.readTx(() => {
+      this.#standing(host);
+      const row = this.#ownerRow(host,document); integrity(row && JSON.parse(String(row.origin_json)).adoptionId === input.adoptionId);
+      const terminal = JSON.parse(String(row.tip_receipt_json)), parsed = terminal === null ? null : parseLiveUpdateReceipt(terminal);
+      integrity((parsed?.journalCursor ?? 0) === row.tip_cursor);
+      return parsed;
+    });
+  }
   nextOwnerApplication(capture: OwnerDeliveryCapture): AdmittedLiveUpdate | undefined {
     const {document,highWater} = this.#ownerDelivery(capture), progress = this.ownerDeliveryProgress(capture);
     const raw = this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} AND journal_cursor>? AND journal_cursor<=? ORDER BY journal_cursor LIMIT 1`)

@@ -212,6 +212,27 @@ export class OwnerCommittedDelivery {
     finally {this.#active.delete(key);}
   }
   settle(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,true,signal); }
+  /**
+   * Settles what the host already applied under this connection's adoption,
+   * whatever the document's live authority now, as once Stop fenced it. It
+   * delivers and admits nothing. Null when nothing was adopted here to settle.
+   */
+  async settleApplied(value: LiveDocumentKey,signal?: AbortSignal): Promise<CommittedSettlement | null> {
+    const document = parseLiveDocumentKey(value), key = JSON.stringify(document), c = this.connection, adopted = this.#adopted.get(key);
+    if (!adopted) return null;
+    if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
+    this.#active.add(key);
+    try {
+      const terminal = this.#store.ownerDeliveryTip({host: c.host,document,adoptionId: adopted.adoptionId});
+      if (adopted.settled && adopted.settled.terminalCursor === (terminal?.journalCursor ?? 0)) return adopted.settled;
+      const response = await c.client.sendRequest({id: c.nextRequestId(),workspace: c.workspace,deadlineMs: c.deadlineMs,
+        method: "liveApplication.settle",params: {registrationId: adopted.registrationId,terminalReceipt: terminal ? {...terminal} : null}},signal);
+      signal?.throwIfAborted();
+      const settled = settlementResult(response.result,terminal);
+      if (settled.materialized) adopted.settled = settled;
+      return settled;
+    } finally { this.#active.delete(key); }
+  }
   async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
     const restore = this.connection.restore;
     if (!restore) throw new Error("Restore preparation is not configured on this host.");

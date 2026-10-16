@@ -507,6 +507,8 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   // Queued unload replies, or errors that lose them. `replies` overrides every hosted pass and commit until a test changes it.
   const pushed = deferred<void>(), unloads: unknown[] = [];
   const replies: {pass: Record<string, unknown>; commit: Record<string, unknown>; diverge?: boolean} = {pass: {}, commit: {}};
+  // Whether the engine's settlement reaches the file. Until it does, the same terminal settles again.
+  const settlement = {materialized: true};
   const membership: {method: string; workspace?: string; params: unknown}[] = [];
   let ownerRequests = 0, client!: ReturnType<typeof clientFrom>["client"] & {captureOwnerActivation: ReturnType<typeof vi.fn>};
   // The engine's reason for refusing native capture, as for a document with an open sync conflict.
@@ -539,7 +541,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
         case "liveApplication.settle": {
           const terminal = request.params.terminalReceipt as {journalCursor: number} | null;
           return reply({status: "settled", settlement: {settlementId: "settlement", previousCursor: 0, terminalCursor: terminal?.journalCursor ?? 0,
-            applicationCount: 0, localYDocSequence: 2, momentId: "settled-moment", markdownDigest: "c".repeat(64), materialized: true,
+            applicationCount: 0, localYDocSequence: 2, momentId: "settled-moment", markdownDigest: "c".repeat(64), materialized: settlement.materialized,
             collectionReconcileRequired: false}});
         }
         case "liveApplication.fenceRestore": return reply({status: "pending", reason: "native-fence-pending"});
@@ -559,7 +561,7 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes the hosted replica.
   if (!options.empty) await pushed.promise;
-  return {f, raw, host, document, workspace, target, pushed, unloads, replies, membership, spawned: () => spawn.mock.calls.length, client: () => client,
+  return {f, raw, host, document, workspace, target, pushed, unloads, replies, settlement, membership, spawned: () => spawn.mock.calls.length, client: () => client,
     ownerRequests: () => ownerRequests,
     ownerCalls: () => client.sendRequest.mock.calls.map(call => (call as unknown[])[0] as {method: string; params: unknown})
       .filter(request => request.method.startsWith("liveApplication.")).map(request => [request.method, request.params]),
@@ -777,11 +779,15 @@ it("keeps a workspace with no documents attached until its replica drains, then 
   expect(o.spawned()).toBe(1); expect(o.client().close).not.toHaveBeenCalled();
 });
 
-// Proves: a stopped document cannot settle, so it goes once the engine has its
-// unload, and its accepted cut stays. Its accepted work is pushed right before
-// the unload, while the engine can still prove it. Its workspace drains and detaches.
-it.each(["settlement-pending", "delivery-pending"])("drops a stopped last document with %s and drains its workspace", async reason => {
+// Proves: Stop ends editing authority, not the host's duty to settle what it
+// already applied. A stopped document settles through the tip the host applied,
+// with no delivery or admission, then publishes and unloads. It stays while its
+// unload answers pending, so its workspace drains only once the engine unloads
+// it. Its accepted cut stays.
+it.each(["settlement-pending", "delivery-pending"])("settles a stopped last document and keeps it while its unload answers %s", async reason => {
   const o = await emptyServiceHost();
+  // Passes apply the document's work, but none of their settlements reaches the file.
+  o.settlement.materialized = false;
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
   await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
@@ -790,13 +796,32 @@ it.each(["settlement-pending", "delivery-pending"])("drops a stopped last docume
   const stopped = o.f.storage.setServiceHostEnrollmentEnabled({workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path,
     enabled: false, retire: true, restoreFenceGeneration: generation, nowMs: 20, guard() {}});
   expect(stopped).toMatchObject({enabled: false, retired: true});
+  // An unchanged update waits for the pass that was running at Stop.
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  const tip = JSON.parse(String(o.raw.prepare("SELECT tip_receipt_json FROM sync_relay_live_delivery_owners WHERE object_id='object'").get()!.tip_receipt_json));
+  o.settlement.materialized = true;
   o.unloads.push({status: "pending", reason});
   vi.spyOn(console, "error").mockImplementation(() => {});
+  const sent = o.ownerCalls().length, first = o.park("liveApplication.unloadDocument");
   await o.host.update({workspaces: [o.workspace], documents: [], departing: [o.sibling]});
-  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
-  expect(o.membership.filter(row => row.method === "liveApplication.unloadDocument")).toHaveLength(1);
+  await first.entered.promise;
+  // It settled what the host applied and published that right before the unload.
   const methods = o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
-  expect(methods[methods.indexOf("liveApplication.unloadDocument") - 1]).toBe("sync.push");
+  expect(methods.slice(methods.lastIndexOf("liveApplication.settle"))).toEqual(["liveApplication.settle", "sync.push", "liveApplication.unloadDocument"]);
+  const unload = ["liveApplication.unloadDocument", {objectId: "object"}];
+  expect(o.ownerCalls().slice(sent)).toEqual([["liveApplication.settle", {registrationId: 7, terminalReceipt: tip}], unload]);
+  // The engine answers pending, so the document stays, and the next pass unloads it again.
+  const second = o.park("liveApplication.unloadDocument");
+  let again = false;
+  void second.entered.promise.then(() => {again = true;});
+  first.release.resolve();
+  await vi.waitFor(() => expect(again).toBe(true));
+  expect(o.host.retains(o.sibling)).toBe(true);
+  expect(o.host.drained("workspace")).toBe(false);
+  // Its settlement reached the file, so it is not sent again.
+  expect(o.ownerCalls().slice(sent)).toEqual([["liveApplication.settle", {registrationId: 7, terminalReceipt: tip}], unload, unload]);
+  second.release.resolve();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
   expect(o.host.isDocumentReady(o.document)).toBe(false);
   await expect(o.host.detachDrained("workspace")).resolves.toBe(true);
   expect(o.host.automationLedger("workspace")).toBeNull();

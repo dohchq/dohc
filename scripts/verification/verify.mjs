@@ -102,7 +102,8 @@ export function changedFiles(baseCommit, includeUncommitted = false, root = repo
 
 export function readSelfHostNativeProof(output, executable, sha256) {
   const tests = JSON.parse(readFileSync(join(output, "vitest.json"), "utf8"));
-  if (!tests.success || tests.numTotalTests < 1 || tests.numPassedTests !== tests.numTotalTests || tests.numFailedTests || tests.numPendingTests || tests.numTodoTests) {
+  if (!tests.success || !Number.isSafeInteger(tests.numTotalTests) || tests.numTotalTests < 1 || tests.numPassedTests !== tests.numTotalTests ||
+    tests.numFailedTests || tests.numPendingTests || tests.numTodoTests) {
     throw new Error("The self-host native proof did not complete its mandatory tests.");
   }
   const directories = readdirSync(output, {withFileTypes: true}).filter(entry => entry.isDirectory() && entry.name.startsWith("self-host-live-"));

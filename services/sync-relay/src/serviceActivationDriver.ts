@@ -212,6 +212,11 @@ export class ServiceActivationDriver {
     if(!owner?.completed || this.#invalidated(owner,document))throw new Error("Service document activation is incomplete.");
     return owner;
   }
+  /** Settles what the host already applied of an owned document, as once Stop fenced it. Null when nothing was adopted to settle. */
+  settleApplied(value:LiveDocumentKey,signal:AbortSignal){
+    const document=parseLiveDocumentKey(value),owner=this.#owners.get(JSON.stringify(document));
+    return owner?owner.consumer.settleApplied(document,signal):Promise.resolve(null);
+  }
   /**
    * Activates the target and drains it. A target with no owner here first pulls
    * its workspace, which also tells this driver whether the engine holds it.
