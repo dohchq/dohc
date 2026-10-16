@@ -1013,6 +1013,61 @@ fn completed_hold(
     )
 }
 
+/// A write of each head `object_id` has, for the pass whose commit can make
+/// it ready: its read reached the end. The files a document that is not ready
+/// left unwritten, after an interrupted pass or a return, come back from its
+/// heads, whichever pass or settlement wrote them.
+pub(crate) fn head_writes(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    conn.prepare_cached(
+        "SELECT version_id,path,content_kind FROM snapshots WHERE workspace_id=?1 AND object_id=?2",
+    )
+    .map_err(SyncError::corrupt)?
+    .query_map(params![workspace_id, object_id], |row| {
+        Ok(crate::MomentMaterializationChange {
+            version_id: row.get(0)?,
+            path: row.get(1)?,
+            operation: "write",
+            content_kind: if row.get::<_, String>(2)? == "binary" {
+                "binary"
+            } else {
+                "text"
+            },
+        })
+    })
+    .map_err(SyncError::corrupt)?
+    .collect::<Result<_, _>>()
+    .map_err(SyncError::corrupt)
+}
+
+/// Which of `stored`, the decisions a journaled row of `object_id`, a
+/// document that is not ready, recorded when it applied, a pass materializes
+/// again. Its history since may have left their paths to another document or
+/// a retired file, so none stands while its heads are parked, nor at a path
+/// anything else holds now ([`park::paths_hold`]). The pass that makes it
+/// ready writes its heads.
+pub(crate) fn redelivered_unready(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+    stored: Vec<crate::MomentMaterializationChange>,
+) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    if stored.is_empty() || !park::parked_paths(conn, workspace_id, object_id)?.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut free = Vec::with_capacity(stored.len());
+    for change in stored {
+        let at = [(change.version_id.clone(), change.path.clone())];
+        if park::paths_hold(conn, workspace_id, object_id, &at)?.is_none() {
+            free.push(change);
+        }
+    }
+    Ok(free)
+}
+
 /// Whether this replica refused an ordinary `ydoc.update` of `object_id`'s
 /// current lineage because its live session never admitted it. The refusal
 /// keeps the row journaled, so no later read applies it.

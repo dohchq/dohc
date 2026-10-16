@@ -2060,8 +2060,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         // A returning document's heads come back before its rows route, so
         // the rows it applied skip as redelivered against them.
-        let unparked =
-            crate::hosted::unpark_returned(store, workspace_id, faults).map_err(local)?;
+        crate::hosted::unpark_returned(store, workspace_id, faults).map_err(local)?;
 
         // Every document with retained work may retain more behind it; one
         // whose retained work runs past this replay holds from where it stops.
@@ -2110,11 +2109,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             faults,
             leases,
         )?;
-        for change in unparked {
-            pass.changed_paths
-                .entry((change.version_id.clone(), change.path.clone()))
-                .or_insert(change);
-        }
         // A ready document that stopped at a conflict child whose parent the
         // feed withholds, or at work past the retention limit, is held from
         // there and reads its own rows.
@@ -2130,13 +2124,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         // A read stops before its document's first row that did not apply;
         // nothing of it was retained, so its next read fetches it again.
-        let (reads, held, unparks) = store
+        let (reads, held, unparks, heads) = store
             .read_with(|conn| {
                 let mut held = BTreeMap::new();
                 let mut settled = BTreeMap::new();
                 // A document whose parked heads this pass freed the paths of
                 // comes back on the next pass.
                 let mut unparks = false;
+                // Readiness never precedes its files, so a pass whose commit
+                // can make a document ready writes each of its heads.
+                let mut heads = Vec::new();
                 for (object_id, (cursor, more)) in reads {
                     unparks |= crate::hosted::unparks_next(conn, workspace_id, &object_id)?;
                     let read = match pass.stopped.get(&object_id) {
@@ -2155,14 +2152,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             complete: !more,
                         },
                     };
+                    if read.complete {
+                        heads.extend(crate::hosted::head_writes(conn, workspace_id, &object_id)?);
+                    }
                     if let Some(hold) = read.hold(conn, workspace_id, &object_id)? {
                         held.insert(object_id.clone(), hold);
                     }
                     settled.insert(object_id, read);
                 }
-                Ok::<_, SyncError>((settled, held, unparks))
+                Ok::<_, SyncError>((settled, held, unparks, heads))
             })
             .map_err(local)?;
+        for change in heads {
+            insert_changed_path(&mut pass.changed_paths, change);
+        }
         // A finished backfill still leaves the main feed or another document,
         // and a held document whose read went on backfills again.
         let more = has_more
@@ -2367,6 +2370,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         accumulate_pull_outcome(
                             store,
                             op,
+                            holding.unready(op),
                             outcome,
                             &mut pass.applied,
                             &mut pass.refused,
@@ -5915,10 +5919,14 @@ pub(crate) fn replayed_domain(error: DomainError) -> RelayError {
     }
 }
 
+/// Fold one routed op into its pass. `unready` names its hosted document when
+/// that is not ready; a row of it the journal already held materializes only
+/// what still stands of its decisions ([`crate::hosted::redelivered_unready`]).
 #[allow(clippy::too_many_arguments)]
 fn accumulate_pull_outcome(
     store: &EngineStore,
     op: &ReplicationEnvelope,
+    unready: Option<&str>,
     outcome: ApplyOutcome<crate::RoutedApply>,
     applied: &mut usize,
     refused: &mut usize,
@@ -5969,9 +5977,21 @@ fn accumulate_pull_outcome(
             if let Some(refusal) = crate::apply::read_replayed_refusal(store, op).map_err(local)? {
                 push_refusal_once(refusals, refusal);
             }
-            for change in
-                crate::router::redelivered_materialization_changes(store, op).map_err(local)?
-            {
+            let mut changes =
+                crate::router::redelivered_materialization_changes(store, op).map_err(local)?;
+            if let Some(object_id) = unready {
+                changes = store
+                    .read_with(|conn| {
+                        crate::hosted::redelivered_unready(
+                            conn,
+                            &op.workspace_id,
+                            object_id,
+                            changes,
+                        )
+                    })
+                    .map_err(local)?;
+            }
+            for change in changes {
                 insert_changed_path(changed_paths, change);
             }
             *skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?;

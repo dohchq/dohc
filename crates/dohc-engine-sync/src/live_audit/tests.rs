@@ -4707,9 +4707,12 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
     // It returns: its head comes back, every row it applied skips, the host's
     // own rows too, and it is ready with the state it parked with.
     scope(&mut store, "scope-3", &[("object", "note.md")]);
-    let unparked = crate::hosted::unpark_returned(&mut store, "ws", &NoFaults).unwrap();
+    crate::hosted::unpark_returned(&mut store, "ws", &NoFaults).unwrap();
+    let heads = store
+        .read_with(|conn| crate::hosted::head_writes(conn, "ws", "object"))
+        .unwrap();
     assert_eq!(
-        unparked
+        heads
             .iter()
             .map(|change| change.path.as_str())
             .collect::<Vec<_>>(),

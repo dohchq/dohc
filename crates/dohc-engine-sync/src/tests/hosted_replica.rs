@@ -2989,13 +2989,24 @@ fn a_replacement_waits_for_the_departed_document_holding_its_path() {
 /// Accepted live work of `object_id` at journal cursor 7, past any
 /// settlement, as the session host applied it.
 fn accept_live_work(store: &mut EngineStore, object_id: &str) -> String {
-    let update = dohc_engine_storage::hex_sha256(b"live update");
+    accept_live_update(store, object_id, "lineage", b"live update")
+}
+
+/// Accepted live `update` of `object_id` on `lineage`, as
+/// [`accept_live_work`] records it.
+fn accept_live_update(
+    store: &mut EngineStore,
+    object_id: &str,
+    lineage: &str,
+    bytes: &[u8],
+) -> String {
+    let update = dohc_engine_storage::hex_sha256(bytes);
     store
         .write_with(&NoFaults, |tx| {
-            dohc_engine_storage::put_binary_blob(tx, b"live update").map_err(SyncError::Storage)?;
+            dohc_engine_storage::put_binary_blob(tx, bytes).map_err(SyncError::Storage)?;
             tx.execute_batch(&format!(
                 "INSERT INTO live_device_application_bindings VALUES \
-                   ('relay','ws','main','{object_id}','lineage','a.md','[]',0,'host',1,'instance', \
+                   ('relay','ws','main','{object_id}','{lineage}','a.md','[]',0,'host',1,'instance', \
                     'connection',1); \
                  INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id, \
                    delivery_id,main_version_id,object_id,lineage_claim_id,current_path, \
@@ -3003,10 +3014,11 @@ fn accept_live_work(store: &mut EngineStore, object_id: &str) -> String {
                    journal_cursor,accepting_host_epoch,principal_kind,principal_id,received_at_ms, \
                    first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch, \
                    applied_instance_id,applied_connection_id) VALUES \
-                   ('relay','ws','delivery','main','{object_id}','lineage','a.md','[]',0,'{update}', \
-                    11,7,1,'owner','owner',0,0,1,'host',1,'instance','connection'); \
+                   ('relay','ws','delivery','main','{object_id}','{lineage}','a.md','[]',0,'{update}', \
+                    {length},7,1,'owner','owner',0,0,1,'host',1,'instance','connection'); \
                  INSERT INTO live_device_application_first_seen VALUES \
-                   ('relay','ws','delivery',0,1,0,1);"
+                   ('relay','ws','delivery',0,1,0,1);",
+                length = bytes.len()
             ))
             .map_err(SyncError::persist)?;
             Ok::<_, SyncError>(())
@@ -3017,6 +3029,12 @@ fn accept_live_work(store: &mut EngineStore, object_id: &str) -> String {
 
 /// The settlement of `object_id`'s accepted work through journal cursor 7.
 fn settle_live_work(store: &mut EngineStore, object_id: &str) {
+    settle_live_lineage(store, object_id, "lineage");
+}
+
+/// The settlement of `object_id`'s accepted work on `lineage` through
+/// journal cursor 7.
+fn settle_live_lineage(store: &mut EngineStore, object_id: &str, lineage: &str) {
     let digest = "d".repeat(64);
     store
         .write_with(&NoFaults, |tx| {
@@ -3026,7 +3044,7 @@ fn settle_live_work(store: &mut EngineStore, object_id: &str) {
                    terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,application_count, \
                    interval_digest,moment_id,markdown_digest,source_state_vector_digest, \
                    binding_json,host_coordinate_json,recorded_at_ms) VALUES \
-                   ('settlement','relay','ws','main','{object_id}','lineage',0,7,0,1,1, \
+                   ('settlement','relay','ws','main','{object_id}','{lineage}',0,7,0,1,1, \
                     '{digest}','settled','{digest}','{digest}','{{}}','{{}}',0)"
             ))
             .map_err(SyncError::persist)?;
@@ -4358,6 +4376,251 @@ fn a_return_interrupted_at_its_unparking_finishes_once_after_a_restart() {
     }
 }
 
+/// Sol's park review: `doc-b` parked at `a.md`, the owner moved it to `b.md`,
+/// and `doc-a` took `a.md/child.md`, so `a.md` is a folder here. On its
+/// return, `doc-b`'s creation skips as journaled, and the decision it stored
+/// to write `a.md` named that folder, which no materialization can write. No
+/// stored decision of a document whose heads are parked materializes: the
+/// pass names nothing of `doc-b`, holds it, and commits.
+#[test]
+fn a_returning_document_materializes_nothing_while_its_heads_are_parked() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    feed.unshare("doc-b");
+    feed.rename(
+        "owner",
+        2,
+        "doc-b",
+        "a.md",
+        "b.md",
+        "hosted b",
+        "moment-owner-1",
+    );
+    feed.create("owner", 3, "doc-a", "a.md/child.md", "hosted a");
+    feed.share("doc-a", "a.md/child.md");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+
+    feed.share("doc-b", "b.md");
+    assert_eq!(
+        pass(&client, &mut store, &NoFaults).unwrap().pending_cursor,
+        None
+    );
+    let back = pass(&client, &mut store, &NoFaults).unwrap();
+    assert_eq!(back.skipped, 1, "its creation skips as journaled");
+    assert_eq!(back.changed_paths, []);
+    assert_eq!(
+        back.held,
+        BTreeMap::from([("doc-b".to_owned(), path_held("a.md", "doc-a"))])
+    );
+    assert!(commit(&client, &mut store, &back));
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("a.md", "doc-a")));
+}
+
+/// A parked document's history materializes nothing, even at a path nothing
+/// holds now. `doc-b` was created at `x.md` and moved to `a.md`, where it
+/// parked; `doc-a` took `a.md`. On its return, the decisions its journaled
+/// rows stored at the free `x.md` stay unnamed while its heads are parked.
+#[test]
+fn a_parked_return_names_no_path_of_its_history() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-b", "x.md", "hosted b");
+    feed.rename(
+        "owner",
+        2,
+        "doc-b",
+        "x.md",
+        "a.md",
+        "hosted b",
+        "moment-owner-1",
+    );
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    feed.unshare("doc-b");
+    feed.create("owner", 3, "doc-a", "a.md", "hosted a");
+    feed.share("doc-a", "a.md");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    assert!(ready(&store, "doc-a"));
+
+    feed.share("doc-b", "a.md");
+    assert_eq!(
+        pass(&client, &mut store, &NoFaults).unwrap().pending_cursor,
+        None
+    );
+    let back = pass(&client, &mut store, &NoFaults).unwrap();
+    assert_eq!(back.skipped, 2);
+    assert_eq!(back.changed_paths, []);
+    assert_eq!(
+        back.held,
+        BTreeMap::from([("doc-b".to_owned(), path_held("a.md", "doc-a"))])
+    );
+    assert!(commit(&client, &mut store, &back));
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("a.md", "doc-a")));
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM hosted_parked_snapshots"),
+        1
+    );
+}
+
+/// A returning document that never parked replays its journal too. `doc-b`
+/// was created at `x.md` and moved to `a.md`; while it was out, `doc-c` took
+/// `x.md/y.md`. The decisions `doc-b`'s rows stored at `x.md` would name
+/// `doc-c`'s folder, so the pass names only its head.
+#[test]
+fn a_returning_documents_stored_decisions_skip_paths_others_hold_now() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    feed.create("owner", 1, "doc-b", "x.md", "hosted b");
+    feed.rename(
+        "owner",
+        2,
+        "doc-b",
+        "x.md",
+        "a.md",
+        "hosted b",
+        "moment-owner-1",
+    );
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    feed.unshare("doc-b");
+    feed.create("owner", 3, "doc-c", "x.md/y.md", "hosted c");
+    feed.share("doc-c", "x.md/y.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-c"));
+    assert_eq!(departed_hosted_object_ids(&store, "ws").unwrap(), ["doc-b"]);
+
+    feed.share("doc-b", "a.md");
+    assert_eq!(
+        pass(&client, &mut store, &NoFaults).unwrap().pending_cursor,
+        None
+    );
+    let back = pass(&client, &mut store, &NoFaults).unwrap();
+    assert_eq!(back.skipped, 2);
+    assert_eq!(
+        back.changed_paths
+            .iter()
+            .map(|change| (change.path.as_str(), change.operation))
+            .collect::<Vec<_>>(),
+        [("a.md", "write")]
+    );
+    assert!(commit(&client, &mut store, &back));
+    assert!(ready(&store, "doc-b"));
+}
+
+/// The durability review of parking, N2: a head or path alias of a parked
+/// document outside the parked tables made its unparking fail the whole
+/// pass. Its document is held instead, and the others keep syncing.
+#[test]
+fn a_parked_document_with_a_head_outside_its_parked_tables_is_held() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    feed.unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
+                 SELECT workspace_id,version_id,path,object_id FROM hosted_parked_path_aliases",
+                [],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+
+    feed.share("doc-b", "a.md");
+    feed.create("owner", 2, "doc-c", "c.md", "hosted c");
+    feed.share("doc-c", "c.md");
+    sync_parking(&client, &mut store);
+    assert!(ready(&store, "doc-c"));
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::WorkWaiting));
+    let again = pass(&client, &mut store, &NoFaults).unwrap();
+    assert!(!again.has_more, "nothing loops");
+    assert!(commit(&client, &mut store, &again));
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM hosted_parked_snapshots"),
+        1
+    );
+}
+
+/// The durability review of parking: a return held at its path writes its
+/// file only in the pass that unparks it, so a host that stopped after that
+/// pass and before materializing it lost the write, and the next pass, with
+/// nothing to unpark or read, made `doc-b` ready without its file. `doc-b`
+/// returns to `a.md` while `doc-a` holds it; `doc-a` moves, the next pass
+/// unparks `doc-b`, and the host stops before materializing. After the
+/// restart, the pass that makes `doc-b` ready names its file.
+#[test]
+fn a_held_return_interrupted_after_its_unparking_names_its_file_when_it_becomes_ready() {
+    let (_scratch, path, mut store, client) = departing_b();
+    let feed = client.transport();
+    feed.unshare("doc-b");
+    sync_parking(&client, &mut store);
+    feed.create("owner", 2, "doc-a", "a.md", "hosted a");
+    feed.share("doc-a", "a.md");
+    sync_parking(&client, &mut store);
+    feed.share("doc-b", "a.md");
+    sync_parking(&client, &mut store);
+    assert_eq!(hold(&store, "doc-b"), Some(path_held("a.md", "doc-a")));
+
+    feed.rename(
+        "owner",
+        3,
+        "doc-a",
+        "a.md",
+        "c.md",
+        "hosted a",
+        "moment-owner-2",
+    );
+    let freed = pass(&client, &mut store, &NoFaults).unwrap();
+    assert!(freed.has_more, "doc-b comes back on the next pass");
+    assert!(commit(&client, &mut store, &freed));
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::WorkWaiting));
+    let unparked = pass(&client, &mut store, &NoFaults).unwrap();
+    assert!(
+        unparked
+            .changed_paths
+            .iter()
+            .any(|change| change.path == "a.md")
+    );
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM hosted_parked_snapshots"),
+        0
+    );
+    drop(store);
+
+    let mut store = EngineStore::open(&path, 3_000).unwrap();
+    let again = pass(&client, &mut store, &NoFaults).unwrap();
+    assert_eq!(
+        again
+            .changed_paths
+            .iter()
+            .map(|change| (change.path.as_str(), change.operation))
+            .collect::<Vec<_>>(),
+        [("a.md", "write")]
+    );
+    assert_eq!(again.held, BTreeMap::new());
+    assert_eq!(
+        hold(&store, "doc-b"),
+        Some(HostedHold::WorkWaiting),
+        "ready only once its pass commits"
+    );
+    assert!(commit(&client, &mut store, &again));
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(
+        content(&store).0,
+        heads(&[("doc-a", "hosted a"), ("doc-b", "hosted b")])
+    );
+}
+
 /// Parking (G4): a parked document is no longer hosted. The replica refuses
 /// to write for it before it takes a sequence.
 #[test]
@@ -4515,11 +4778,11 @@ fn restores(store: &EngineStore) -> String {
 /// Parking: retirement unlinked a document's restores from the settlements
 /// that resumed them and deleted both, so a restore made before it left could
 /// not be reconstructed. Parking keeps the restores, their links and their
-/// proposal bytes through the return, and the document reads the same
-/// restore generation after it.
+/// proposal bytes through a restart and the return, and the document reads
+/// the same restore generation after it.
 #[test]
 fn a_restore_made_before_parking_survives_the_return() {
-    let (_scratch, _path, mut store, client) = departing_b();
+    let (_scratch, path, mut store, client) = departing_b();
     accept_live_work(&mut store, "doc-b");
     settle_live_work(&mut store, "doc-b");
     let point = dohc_engine_storage::hex_sha256(b"restore point");
@@ -4570,6 +4833,8 @@ fn a_restore_made_before_parking_survives_the_return() {
     client.transport().unshare("doc-b");
     sync_parking(&client, &mut store);
     assert!(is_parked(&store, "doc-b"));
+    drop(store);
+    let mut store = EngineStore::open(&path, 3_000).unwrap();
     assert_eq!((restores(&store), generation(&store)), before);
     assert!(has_blob(&store, &point));
 
@@ -4579,10 +4844,11 @@ fn a_restore_made_before_parking_survives_the_return() {
     assert_eq!((restores(&store), generation(&store)), before);
 }
 
-/// Serve a peer's plaintext Y.Doc update of `object_id` at `path`, `seq` in
-/// its origin, on `lineage`.
-fn plaintext_update(
+/// Serve a peer's `kind` Y.Doc update of `object_id` at `path`, `seq` in its
+/// origin, on `lineage`.
+fn peer_update(
     feed: &HostedFeed,
+    kind: &str,
     seq: i64,
     object_id: &str,
     path: &str,
@@ -4600,7 +4866,7 @@ fn plaintext_update(
             "versionId": "main",
             "objectId": object_id,
             "path": path,
-            "contentKind": "plaintext",
+            "contentKind": kind,
             "updateBlobSha256": sha,
             "lineageClaimId": lineage,
             "isBaseState": base
@@ -4623,7 +4889,7 @@ fn an_unadmitted_edit_made_while_parked_holds_the_returning_document() {
     ydoc.plaintext_insert(0, "hosted b");
     let base = ydoc.encode_full_state();
     let lineage = dohc_engine_storage::hex_sha256(&base);
-    plaintext_update(feed, 0, "doc-b", "a.md", base, &lineage);
+    peer_update(feed, "plaintext", 0, "doc-b", "a.md", base, &lineage);
     feed.share("doc-b", "a.md");
     sync(&client, &mut store);
     assert!(ready(&store, "doc-b"));
@@ -4634,7 +4900,7 @@ fn an_unadmitted_edit_made_while_parked_holds_the_returning_document() {
     assert!(is_parked(&store, "doc-b"));
 
     let edit = ydoc.plaintext_insert(8, " and more");
-    plaintext_update(feed, 1, "doc-b", "a.md", edit, &lineage);
+    peer_update(feed, "plaintext", 1, "doc-b", "a.md", edit, &lineage);
     feed.share("doc-b", "a.md");
     sync_parking(&client, &mut store);
     assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
@@ -4653,6 +4919,65 @@ fn an_unadmitted_edit_made_while_parked_holds_the_returning_document() {
     );
     assert!(commit(&client, &mut store, &again));
     assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+}
+
+/// Parking (G2), through native admission: `doc-b` is a richdoc whose native
+/// live binding accepted and settled `echo` before it parked. While it is
+/// parked, a peer sends `echo` back, or, if `!admitted`, an edit its session
+/// never saw. On its return the echo applies and `doc-b` is ready; the edit
+/// is refused, and `doc-b` is held.
+fn richdoc_edit_made_while_parked(admitted: bool) {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.richdoc_append_paragraph("hosted b");
+    let base = ydoc.encode_full_state();
+    let lineage = dohc_engine_storage::hex_sha256(&base);
+    peer_update(feed, "richdoc", 0, "doc-b", "a.md", base.clone(), &lineage);
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    let echo = ydoc.richdoc_append_paragraph("accepted");
+    accept_live_update(&mut store, "doc-b", &lineage, &echo);
+    settle_live_lineage(&mut store, "doc-b", &lineage);
+    feed.unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+
+    let edit = if admitted {
+        echo
+    } else {
+        let peer = dohc_engine_collab::Ydoc::wire();
+        peer.apply(&base).unwrap();
+        peer.richdoc_append_paragraph("unseen")
+    };
+    peer_update(feed, "richdoc", 1, "doc-b", "a.md", edit, &lineage);
+    feed.share("doc-b", "a.md");
+    sync_parking(&client, &mut store);
+    let refused = count(
+        &store,
+        "SELECT COUNT(*) FROM replication_refused_ydoc_blobs",
+    );
+    assert!(coordinates(&store).contains(&("peer".to_owned(), 1)));
+    if admitted {
+        assert!(ready(&store, "doc-b"));
+        assert_eq!(refused, 0);
+    } else {
+        assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+        assert_eq!(refused, 1);
+    }
+}
+
+#[test]
+fn a_richdoc_edit_its_session_never_admitted_holds_the_returning_document() {
+    richdoc_edit_made_while_parked(false);
+}
+
+#[test]
+fn an_admitted_richdoc_echo_leaves_the_returning_document_ready() {
+    richdoc_edit_made_while_parked(true);
 }
 
 /// Parking: the reply to the host's push of `doc-b`'s row is lost after the

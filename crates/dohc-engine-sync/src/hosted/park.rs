@@ -12,7 +12,7 @@ use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
 use rusqlite::{Connection, ToSql, params};
 
 use super::{DOCUMENT_NAMED_SQL, HostedHold};
-use crate::{MomentMaterializationChange, SyncError};
+use crate::SyncError;
 
 /// A hosted document outside the current scope that still holds state here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,24 +241,36 @@ pub(crate) fn parked_hold(
 }
 
 /// Whether `object_id`'s heads are parked and nothing holds their paths any
-/// more, so the next pass brings them back.
+/// more, so the next pass brings them back. A head or path alias of its own
+/// outside the parked tables would collide with them, so it stays held.
 pub(crate) fn unparks_next(
     conn: &Connection,
     workspace_id: &str,
     object_id: &str,
 ) -> Result<bool, SyncError> {
     let paths = parked_paths(conn, workspace_id, object_id)?;
-    Ok(!paths.is_empty() && paths_hold(conn, workspace_id, object_id, &paths)?.is_none())
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    let unparked: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND object_id=?2) \
+             OR EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND object_id=?2)",
+            params![workspace_id, object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(!unparked && paths_hold(conn, workspace_id, object_id, &paths)?.is_none())
 }
 
 /// Bring back the heads of each document of the scope whose heads are
-/// parked, once nothing holds their paths. Answers each path it wrote, for
-/// the pass to materialize.
+/// parked, once nothing holds their paths. Its file comes back with the pass
+/// that makes it ready, which writes each of its heads.
 pub(crate) fn unpark_returned(
     store: &mut EngineStore,
     workspace_id: &str,
     faults: &dyn FaultInjector,
-) -> Result<Vec<MomentMaterializationChange>, SyncError> {
+) -> Result<(), SyncError> {
     // A document still held writes nothing, pass after pass.
     let returned = store.read_with(|conn| {
         let mut returned = Vec::new();
@@ -270,11 +282,10 @@ pub(crate) fn unpark_returned(
         Ok::<_, SyncError>(returned)
     })?;
     if returned.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let policy = crate::file_search::search_policy_for_store(store);
     let outcome = store.write_with(faults, |tx| {
-        let mut changes = Vec::new();
         for object_id in &returned {
             if !unparks_next(tx, workspace_id, object_id)? {
                 continue;
@@ -302,34 +313,27 @@ pub(crate) fn unpark_returned(
                 execute(tx, sql, &bound)?;
             }
             for (version_id, path, kind, text) in heads {
-                let binary = kind == "binary";
                 crate::file_search::upsert_file_search_index(
                     tx,
                     workspace_id,
                     &version_id,
                     object_id,
                     &path,
-                    text.as_deref().filter(|_| !binary),
+                    text.as_deref().filter(|_| kind != "binary"),
                     policy.as_ref(),
                 )?;
-                changes.push(MomentMaterializationChange {
-                    version_id,
-                    path,
-                    operation: "write",
-                    content_kind: if binary { "binary" } else { "text" },
-                });
             }
         }
-        Ok::<_, SyncError>(changes)
+        Ok::<_, SyncError>(())
     })?;
     match outcome {
-        TxnOutcome::Committed(changes) => Ok(changes),
+        TxnOutcome::Committed(()) => Ok(()),
         TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
     }
 }
 
 /// Each version and path `object_id` parked a head or path alias at.
-fn parked_paths(
+pub(super) fn parked_paths(
     conn: &Connection,
     workspace_id: &str,
     object_id: &str,
@@ -351,7 +355,7 @@ fn parked_paths(
 /// What holds one of `paths` here against `object_id`: another document's
 /// head or path alias, matched like a capture hold, which names a document of
 /// the scope as holding it, or a retired file.
-fn paths_hold(
+pub(super) fn paths_hold(
     conn: &Connection,
     workspace_id: &str,
     object_id: &str,

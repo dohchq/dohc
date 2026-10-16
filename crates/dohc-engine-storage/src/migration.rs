@@ -3318,6 +3318,7 @@ CREATE TABLE hosted_parked_snapshots (
     FOREIGN KEY (workspace_id, object_id)
       REFERENCES hosted_documents(workspace_id, object_id) ON DELETE CASCADE
 ) STRICT;
+CREATE INDEX hosted_parked_snapshots_by_document ON hosted_parked_snapshots(workspace_id, object_id);
 CREATE TABLE hosted_parked_path_aliases (
     workspace_id TEXT NOT NULL,
     version_id TEXT NOT NULL,
@@ -3328,6 +3329,8 @@ CREATE TABLE hosted_parked_path_aliases (
     FOREIGN KEY (workspace_id, object_id)
       REFERENCES hosted_documents(workspace_id, object_id) ON DELETE CASCADE
 ) STRICT;
+CREATE INDEX hosted_parked_path_aliases_by_document
+  ON hosted_parked_path_aliases(workspace_id, object_id, version_id, path);
 ";
 
 const V2_REPLICA_FRONTIERS_DDL: &str = "\
@@ -4153,7 +4156,7 @@ mod tests {
             ),
             (
                 "v2-hosted-parked-documents",
-                "61b1c8605da45cd03db539c568112ab2f8f8572322fa3c0acc6d39c653f5e6cb",
+                "a6e80178e07cc6f87c290de0fe89172900d0028889646923555e95dee534ff03",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4441,6 +4444,29 @@ mod tests {
                 ("ready".to_owned(), "ready".to_owned(), None, None, 7, 1),
             ]
         );
+        // A document's parked rows are found without scanning every parked row.
+        for (table, index) in [
+            (
+                "hosted_parked_snapshots",
+                "hosted_parked_snapshots_by_document",
+            ),
+            (
+                "hosted_parked_path_aliases",
+                "hosted_parked_path_aliases_by_document",
+            ),
+        ] {
+            let plan: String = conn
+                .query_row(
+                    &format!(
+                        "EXPLAIN QUERY PLAN SELECT version_id,path FROM {table} \
+                         WHERE workspace_id='hosted' AND object_id='held'"
+                    ),
+                    [],
+                    |row| row.get(3),
+                )
+                .unwrap();
+            assert!(plan.contains(index), "{table}: {plan}");
+        }
         for valid in [
             "UPDATE hosted_documents SET state='parked',held_reason=NULL,held_path=NULL,held_by=NULL \
              WHERE object_id='held'",
