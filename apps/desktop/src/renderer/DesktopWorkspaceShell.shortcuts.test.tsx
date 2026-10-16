@@ -121,6 +121,38 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
   });
 
+  it("toggles the sidebar while Notices is open", async () => {
+    await ready(platform);
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-center");
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+
+    fireEvent(screen.getByTestId("notice-center-toggle"), keyEvent(SHORTCUTS["toggle-sidebar"].accelerators[0], platform));
+    expect(screen.queryByTestId("side-panel")).toBeNull();
+    expect(screen.getByTestId("notice-center")).toBeTruthy();
+  });
+
+  it("closes Go to with its toggle shortcut", async () => {
+    await ready(platform);
+    const binding = SHORTCUTS["quick-open"].accelerators[0];
+    fireEvent(window, keyEvent(binding, platform));
+    await screen.findByTestId("quick-open");
+
+    const event = keyEvent(binding, platform);
+    fireEvent(screen.getByRole("textbox", { name: "File" }), event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(screen.queryByTestId("quick-open")).toBeNull();
+  });
+
+  it("blocks the toggle-sidebar menu command behind Settings", async () => {
+    const bridge = await ready(platform);
+    fireEvent(window, keyEvent(SHORTCUTS.settings.accelerators[0], platform));
+    await screen.findByTestId("settings-dialog");
+
+    act(() => bridge.emitMenuCommand("toggle-sidebar"));
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+  });
+
   it.each([
     ["command palette", "command-palette", "command-palette"],
     ["Go to", "quick-open", "quick-open"],

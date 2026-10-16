@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette, type Command } from "./CommandPalette";
+import { SHORTCUTS } from "../shortcuts/shortcutRegistry";
 
 beforeEach(() => {
   // jsdom doesn't implement scrollIntoView; the palette nudges the selected
@@ -28,6 +29,23 @@ function selectedLabel(): string | null {
 }
 
 describe("CommandPalette keyboard selection", () => {
+  it.each(["win32", "darwin"])("handles its own toggle shortcuts on %s", (platform) => {
+    const { ran, onClose } = setup();
+    const input = screen.getByRole("textbox", { name: "Command" });
+    for (const binding of SHORTCUTS["command-palette"].accelerators) {
+      const parts = binding.split("+");
+      const event = new KeyboardEvent("keydown", {
+        key: parts.at(-1)!, shiftKey: parts.includes("Shift"),
+        ctrlKey: platform === "win32", metaKey: platform === "darwin",
+        bubbles: true, cancelable: true,
+      });
+      fireEvent(input, event);
+      expect(event.defaultPrevented).toBe(true);
+    }
+    expect(onClose).toHaveBeenCalledTimes(SHORTCUTS["command-palette"].accelerators.length);
+    expect(ran).toEqual([]);
+  });
+
   it("Arrow keys move the selection (wrapping) and Enter runs it", async () => {
     const { ran, onClose } = setup();
     expect(selectedLabel()).toBe("alpha");

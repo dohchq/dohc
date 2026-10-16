@@ -3901,11 +3901,7 @@ export function DesktopWorkspaceShell(props: {
       // A modal owns the keyboard while it is visible. Native/main-owned
       // shortcuts such as Close Window and zoom never reach this listener,
       // so they continue to work over a modal.
-      const commandPaletteOwnShortcut =
-        command === "command-palette" &&
-        event.target instanceof Element &&
-        event.target.closest("[data-testid='command-palette']") !== null;
-      if (hasBlockingModal() && !commandPaletteOwnShortcut) return;
+      if (hasBlockingModal()) return;
       if (command === "settings") {
         event.preventDefault();
         openSettings();

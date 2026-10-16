@@ -1,4 +1,4 @@
-import { shortcutText } from "../shortcuts/shortcutRegistry";
+import { matchShellShortcut, shortcutText } from "../shortcuts/shortcutRegistry";
 import { Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { rendererMarks } from "../performance/rendererMarks";
@@ -18,6 +18,7 @@ export function CommandPalette(props: {
   testId?: string;
   placeholder?: string;
   ariaLabel?: string;
+  toggleShortcut?: "command-palette" | "quick-open";
   // Optional ranking seam: Quick Open passes its prepared path
   // ranker. Default palettes keep the simple substring filter.
   rank?: (query: string, commands: Command[]) => Command[];
@@ -96,7 +97,10 @@ export function CommandPalette(props: {
               setSelectedIndex(0);
             }}
             onKeyDown={(event) => {
-              if (event.key === "Escape") props.onClose();
+              if (matchShellShortcut(event.nativeEvent) === (props.toggleShortcut ?? "command-palette")) {
+                event.preventDefault();
+                props.onClose();
+              } else if (event.key === "Escape") props.onClose();
               else if (event.key === "ArrowDown") {
                 event.preventDefault();
                 moveSelection(1);

@@ -142,6 +142,7 @@ describe("PageIdentity", () => {
 
       await user.click(screen.getByTestId("page-icon-add"));
 
+      expect(screen.getByRole("dialog", { name: "Choose an icon" }).getAttribute("aria-modal")).toBe("true");
       expect(document.activeElement).toBe(screen.getByLabelText("Use 📄"));
     });
 
