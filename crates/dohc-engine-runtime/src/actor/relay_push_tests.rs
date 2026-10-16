@@ -9,6 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "relay_cache_tests.rs"]
 mod cache_tests;
 
+#[path = "relay_push_retention_tests.rs"]
+mod retention_tests;
+
 const WORKSPACE: &str = "ws";
 const ORIGIN: &str = "local";
 const PREFIX_OPS: usize = dohc_engine_sync::MAX_PUSH_OPS_PER_BATCH;
@@ -100,6 +103,13 @@ struct Relay {
 impl Relay {
     fn answer(&mut self, request: &RelayIoRequest) -> RelayIoResponse {
         match request {
+            RelayIoRequest::UploadBlobs(requests) => {
+                assert!((2..=dohc_engine_sync::MAX_BLOB_UPLOAD_BATCH).contains(&requests.len()));
+                for request in requests {
+                    self.answer(&RelayIoRequest::UploadBlob(request.clone()));
+                }
+                RelayIoResponse::UploadBlob
+            }
             RelayIoRequest::BlobsHave(request) => {
                 assert!(request.sha256s.len() <= PREFIX_OPS);
                 self.inventories += 1;
@@ -446,7 +456,12 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
                 let relay = Arc::clone(&io_relay);
                 let cancelled_upload = Arc::clone(&io_cancelled_upload);
                 async move {
-                    if let RelayIoRequest::UploadBlob(upload) = &request {
+                    let upload = match &request {
+                        RelayIoRequest::UploadBlob(upload) => Some(upload),
+                        RelayIoRequest::UploadBlobs(uploads) => uploads.first(),
+                        _ => None,
+                    };
+                    if let Some(upload) = upload {
                         *cancelled_upload.lock().unwrap() = Some(upload.sha256.clone());
                         token.cancel();
                         std::future::pending::<Result<RelayIoResponse, RelayError>>().await
@@ -549,7 +564,7 @@ async fn deferred_push_requires_hosted_author_proof_and_preserves_neutral_marker
 }
 
 #[test]
-fn writer_mutation_rebuilds_deferred_preparation_and_pushes_new_coordinates() {
+fn prepared_push_keeps_its_bounded_page_after_a_writer_append() {
     let (_scratch, _path, mut store) = fixture_with_files(1);
     let transport = DeferredRelayTransport::default();
     let mut cache = WriterDocCache::new();
@@ -566,11 +581,10 @@ fn writer_mutation_rebuilds_deferred_preparation_and_pushes_new_coordinates() {
     append_file(&mut store, 1);
     assert_eq!(read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(), -1);
     assert_eq!(step(&mut store, &mut cache, &transport), None);
-    let request = transport.take_pending().expect("rebuilt inventory");
-    let RelayIoRequest::BlobsHave(inventory) = &request else {
-        panic!("preparation was not rebuilt: {request:?}");
+    let request = transport.take_pending().expect("prepared upload");
+    let RelayIoRequest::UploadBlob(_) = &request else {
+        panic!("later append restarted the prepared page: {request:?}");
     };
-    assert_eq!(inventory.sha256s.len(), 2);
     let response = relay.answer(&request);
     transport.complete(request, Ok(response));
 
@@ -581,7 +595,9 @@ fn writer_mutation_rebuilds_deferred_preparation_and_pushes_new_coordinates() {
             assert_eq!(relay.ops.keys().copied().collect::<Vec<_>>(), vec![0, 1]);
             assert_eq!(relay.inserted, 2);
             assert_eq!(relay.skipped, 0);
-            assert_eq!(relay.pushes.len(), 1);
+            assert_eq!(relay.pushes.len(), 2);
+            assert_eq!(relay.pushes[0].ops.len(), 1);
+            assert_eq!(relay.pushes[1].ops.len(), 1);
             assert_eq!(relay.inventories, 2);
             assert_eq!(relay.uploads.len(), 2);
             assert!(relay.uploads.values().all(|count| *count == 1));
@@ -591,7 +607,7 @@ fn writer_mutation_rebuilds_deferred_preparation_and_pushes_new_coordinates() {
         let response = relay.answer(&request);
         transport.complete(request, Ok(response));
     }
-    panic!("rebuilt page did not finish");
+    panic!("retained page did not finish");
 }
 
 #[test]

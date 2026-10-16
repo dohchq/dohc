@@ -247,6 +247,7 @@ enum RelayIoRequest {
     RotateEpoch(EpochRequest),
     BlobsHave(BlobHaveRequest),
     UploadBlob(BlobUploadRequest),
+    UploadBlobs(Vec<BlobUploadRequest>),
     DownloadBlobs(BlobDownloadBatchRequest),
     UploadKeyEnvelope(KeyEnvelopeRequest),
     DownloadKeyEnvelope(KeyEnvelopeDownloadRequest),
@@ -321,6 +322,7 @@ impl DeferredRelayTransport {
                         | RelayIoRequest::PushHosted(_)
                         | RelayIoRequest::ShareLogPush(_)
                         | RelayIoRequest::UploadBlob(_)
+                        | RelayIoRequest::UploadBlobs(_)
                         | RelayIoRequest::DownloadBlobs(_)
                         | RelayIoRequest::UploadKeyEnvelope(_)
                         | RelayIoRequest::DownloadKeyEnvelope(_)
@@ -377,6 +379,56 @@ impl DeferredRelayTransport {
     }
 
     fn complete(&self, request: RelayIoRequest, result: Result<RelayIoResponse, RelayError>) {
+        if let (RelayIoRequest::BlobsHave(have), Ok(RelayIoResponse::BlobsHave(response))) =
+            (&request, &result)
+        {
+            let missing = response
+                .missing
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            if missing.len() == response.missing.len()
+                && missing.iter().all(|sha| have.sha256s.contains(sha))
+            {
+                self.push_progress
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .confirm_blob_presence(
+                        &have.workspace_id,
+                        &have.replication_epoch,
+                        &have.stream_identity,
+                        have.sha256s
+                            .iter()
+                            .filter(|sha| !missing.contains(sha))
+                            .cloned(),
+                    );
+            }
+        }
+        let uploads = match (&request, &result) {
+            (RelayIoRequest::UploadBlob(upload), Ok(RelayIoResponse::UploadBlob)) => {
+                std::slice::from_ref(upload)
+            }
+            (RelayIoRequest::UploadBlobs(uploads), Ok(RelayIoResponse::UploadBlob)) => {
+                uploads.as_slice()
+            }
+            _ => &[],
+        };
+        if !uploads.is_empty() {
+            let mut progress = self
+                .push_progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if uploads.iter().all(|upload| {
+                progress.confirm_blob_presence(
+                    &upload.workspace_id,
+                    &upload.replication_epoch,
+                    &upload.stream_identity,
+                    [upload.sha256.clone()],
+                )
+            }) {
+                // The native continuation consumes presence, without retaining blob bytes.
+                return;
+            }
+        }
         let mut state = self
             .state
             .lock()
@@ -458,6 +510,13 @@ macro_rules! relay_transport_method {
 }
 
 impl RelayTransport for DeferredRelayTransport {
+    fn invalidate_push_responses(&self) {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = DeferredRelayState::default();
+    }
+
     fn publishes_native_settlements(&self) -> bool {
         self.native_settlements
     }
@@ -570,6 +629,15 @@ impl RelayTransport for DeferredRelayTransport {
         BlobHaveResponse,
         BlobsHave
     );
+
+    fn upload_blobs(&self, mut requests: Vec<BlobUploadRequest>) -> Result<(), RelayError> {
+        if requests.len() == 1 {
+            return self.upload_blob(requests.remove(0));
+        }
+        self.resolve(RelayIoRequest::UploadBlobs(requests), |response| {
+            matches!(response, RelayIoResponse::UploadBlob).then_some(())
+        })
+    }
 
     fn upload_blob(&self, request: BlobUploadRequest) -> Result<(), RelayError> {
         self.resolve(RelayIoRequest::UploadBlob(request), |response| {
@@ -2207,6 +2275,9 @@ fn execute_blocking_http_request(
         RelayIoRequest::BlobsHave(request) => transport
             .blobs_have(request)
             .map(RelayIoResponse::BlobsHave),
+        RelayIoRequest::UploadBlobs(requests) => transport
+            .upload_blobs(requests)
+            .map(|()| RelayIoResponse::UploadBlob),
         RelayIoRequest::UploadBlob(request) => transport
             .upload_blob(request)
             .map(|()| RelayIoResponse::UploadBlob),

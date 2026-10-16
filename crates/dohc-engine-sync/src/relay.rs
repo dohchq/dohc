@@ -621,6 +621,8 @@ pub struct ShareViewPullOutcome {
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
 /// dependency; production adapters live in separate crates.
 pub trait RelayTransport {
+    /// Discard cached responses when the store identity changes during a push.
+    fn invalidate_push_responses(&self) {}
     /// The native replica publishes settlement proofs; the relay derives their authors.
     fn publishes_native_settlements(&self) -> bool {
         false
@@ -658,6 +660,14 @@ pub trait RelayTransport {
     fn rotate_epoch(&self, req: EpochRequest) -> Result<EpochResponse, RelayError>;
     fn blobs_have(&self, req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError>;
     fn upload_blob(&self, req: BlobUploadRequest) -> Result<(), RelayError>;
+    fn upload_blobs(&self, requests: Vec<BlobUploadRequest>) -> Result<(), RelayError> {
+        if requests.is_empty() || requests.len() > MAX_BLOB_UPLOAD_BATCH {
+            return Err(RelayError::InvalidResponse);
+        }
+        requests
+            .into_iter()
+            .try_for_each(|request| self.upload_blob(request))
+    }
     fn download_blobs(
         &self,
         req: BlobDownloadBatchRequest,
@@ -739,6 +749,12 @@ pub struct RelaySyncClient<T> {
     automation_claims: std::sync::Mutex<Vec<dohc_engine_domain::AutomationClaim>>,
 }
 
+#[cfg(test)]
+#[path = "relay_prepared_tests.rs"]
+mod prepared_tests;
+
+pub const MAX_BLOB_UPLOAD_BATCH: usize = 4;
+
 const MAX_PUSH_OPS_PER_PASS: usize = crate::MAX_PUSH_OPS_PER_BATCH;
 // Soft limit on preparation and blob uploads, reserving 10 seconds of the
 // desktop's 30-second RPC deadline for append and durable acknowledgement.
@@ -750,6 +766,8 @@ const PUSH_PRE_APPEND_BUDGET: std::time::Duration = std::time::Duration::from_se
 pub struct PushWorkspaceProgress {
     started: std::time::Instant,
     acknowledged: usize,
+    confirmed_identity: Option<crate::SyncIdentity>,
+    confirmed_blobs: BTreeSet<String>,
     page: Option<PreparedPushPage>,
     batch_size: usize,
     file_versions_selected: bool,
@@ -757,6 +775,25 @@ pub struct PushWorkspaceProgress {
 }
 
 impl PushWorkspaceProgress {
+    /// Record validated successful responses from this push's transport only.
+    pub fn confirm_blob_presence(
+        &mut self,
+        workspace: &str,
+        epoch: &str,
+        stream: &str,
+        sha256s: impl IntoIterator<Item = String>,
+    ) -> bool {
+        if !self.confirmed_identity.as_ref().is_some_and(|identity| {
+            identity.workspace_id == workspace
+                && identity.replication_epoch == epoch
+                && identity.stream_identity == stream
+        }) {
+            return false;
+        }
+        self.confirmed_blobs.extend(sha256s);
+        true
+    }
+
     /// Sticky across I/O continuations, including failed enrollment work.
     pub fn writer_cache_reset_required(&self) -> bool {
         self.writer_cache_reset_required
@@ -768,6 +805,8 @@ impl Default for PushWorkspaceProgress {
         Self {
             started: std::time::Instant::now(),
             acknowledged: 0,
+            confirmed_identity: None,
+            confirmed_blobs: BTreeSet::new(),
             page: None,
             batch_size: crate::MAX_PUSH_OPS_PER_BATCH,
             file_versions_selected: false,
@@ -811,7 +850,8 @@ struct PreparedPushPage {
     ops: Vec<ReplicationEnvelope>,
     prefix: crate::OwnerPublicationPrefix,
     blob_refs: BTreeMap<String, BTreeSet<BlobKind>>,
-    missing: Option<BTreeSet<String>>,
+    missing: BTreeSet<String>,
+    inventory: VecDeque<Vec<String>>,
     uploaded_ops: usize,
     sending: Option<usize>,
 }
@@ -1393,6 +1433,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .ok_or(RelayError::InvalidResponse)?;
             return Err(RelayError::ClaimRefused(Box::new(refusal.clone())));
         }
+        if progress.confirmed_identity.as_ref() != Some(&identity) {
+            if progress.confirmed_identity.is_some() {
+                self.transport.invalidate_push_responses();
+            }
+            progress.confirmed_blobs.clear();
+            progress.confirmed_identity = Some(identity.clone());
+        }
         // A hosted replica holds the owner's documents, not its own: it
         // enrolls nothing and only sends what its live sessions journal.
         let hosted = store
@@ -1505,21 +1552,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .map_err(local)?;
                 // An in-flight append can consume its original response after
                 // local edits, but never under a different workspace identity.
-                let cached = progress.page.as_ref().is_some_and(|page| {
+                let previous = progress.page.as_ref().filter(|page| {
                     page.identity == identity
                         && page.origin_id == origin_id
                         && page.cursor == cursor
-                        && (page.sending.is_some() || page.revision == revision)
                 });
+                let cached = previous
+                    .is_some_and(|page| page.sending.is_some() || page.revision == revision);
                 if !cached {
-                    let mut ops = list_replication_ops(
-                        store,
-                        workspace_id,
-                        &origin_id,
-                        cursor,
-                        MAX_PUSH_OPS_PER_PASS - progress.acknowledged,
-                    )
-                    .map_err(local)?;
+                    // Reprove the original bounded page after every write. New
+                    // appends enter the next page, after this one is acknowledged.
+                    let limit = previous
+                        .map_or(MAX_PUSH_OPS_PER_PASS - progress.acknowledged, |page| {
+                            page.ops.len()
+                        });
+                    let mut ops =
+                        list_replication_ops(store, workspace_id, &origin_id, cursor, limit)
+                            .map_err(local)?;
                     if ops.is_empty() {
                         break;
                     }
@@ -1540,18 +1589,40 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     let revision = store
                         .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
                         .map_err(local)?;
-                    progress.page = Some(PreparedPushPage {
+                    let blob_refs = collect_blob_refs(&ops[..prefix.allowed_ops])?;
+                    let inventory = blob_refs
+                        .keys()
+                        .filter(|sha| !progress.confirmed_blobs.contains(*sha))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .chunks(crate::MAX_BLOB_HAVE_BATCH)
+                        .map(<[String]>::to_vec)
+                        .collect();
+                    let mut page = PreparedPushPage {
                         identity: identity.clone(),
                         origin_id: origin_id.clone(),
                         cursor,
                         revision,
-                        blob_refs: collect_blob_refs(&ops[..prefix.allowed_ops])?,
+                        blob_refs,
+                        inventory,
                         ops,
                         prefix,
-                        missing: None,
+                        missing: BTreeSet::new(),
                         uploaded_ops: 0,
                         sending: None,
-                    });
+                    };
+                    if let Some(previous) = progress.page.take()
+                        && previous.identity == page.identity
+                        && previous.origin_id == page.origin_id
+                        && previous.cursor == page.cursor
+                        && previous.ops == page.ops
+                        && previous.prefix == page.prefix
+                    {
+                        page.missing = previous.missing;
+                        page.inventory = previous.inventory;
+                        page.uploaded_ops = previous.uploaded_ops;
+                    }
+                    progress.page = Some(page);
                 }
                 let page = progress.page.as_mut().ok_or(RelayError::InvalidResponse)?;
                 let count = match page.sending {
@@ -1562,6 +1633,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         &identity,
                         page,
                         progress.started,
+                        &mut progress.confirmed_blobs,
                     )?,
                 };
                 page.sending = Some(count);
@@ -3426,35 +3498,40 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         identity: &crate::SyncIdentity,
         page: &mut PreparedPushPage,
         started: std::time::Instant,
+        confirmed: &mut BTreeSet<String>,
     ) -> Result<usize, RelayError> {
         let ops = &page.ops[..page.prefix.allowed_ops];
-        if page.missing.is_none() {
-            let all = page.blob_refs.keys().cloned().collect::<Vec<_>>();
-            let mut missing = BTreeSet::new();
-            for chunk in all.chunks(crate::MAX_BLOB_HAVE_BATCH) {
-                let response = self.transport.blobs_have(BlobHaveRequest {
-                    workspace_id: workspace_id.to_owned(),
-                    replication_epoch: identity.replication_epoch.clone(),
-                    stream_identity: identity.stream_identity.clone(),
-                    sha256s: chunk.to_vec(),
-                })?;
-                let requested = chunk.iter().collect::<BTreeSet<_>>();
-                for sha in response.missing {
-                    if !requested.contains(&sha) || !missing.insert(sha) {
-                        return Err(RelayError::InvalidResponse);
-                    }
-                }
+        let missing = &mut page.missing;
+        while let Some(chunk) = page.inventory.front() {
+            let response = self.transport.blobs_have(BlobHaveRequest {
+                workspace_id: workspace_id.to_owned(),
+                replication_epoch: identity.replication_epoch.clone(),
+                stream_identity: identity.stream_identity.clone(),
+                sha256s: chunk.clone(),
+            })?;
+            let returned = response.missing.iter().collect::<BTreeSet<_>>();
+            if returned.len() != response.missing.len()
+                || returned.iter().any(|sha| !chunk.contains(sha))
+            {
+                return Err(RelayError::InvalidResponse);
             }
-            page.missing = Some(missing);
+            confirmed.extend(chunk.iter().filter(|sha| !returned.contains(sha)).cloned());
+            missing.extend(response.missing);
+            page.inventory.pop_front();
         }
-        let missing = page.missing.as_mut().ok_or(RelayError::InvalidResponse)?;
+        missing.retain(|sha| !confirmed.contains(sha));
         while page.uploaded_ops < ops.len() {
-            // Finish at least one operation, then reserve time for append and
-            // durable acknowledgement before the caller's 30-second deadline.
             if page.uploaded_ops > 0 && started.elapsed() >= PUSH_PRE_APPEND_BUDGET {
                 break;
             }
-            for sha256 in collect_blob_refs(&ops[page.uploaded_ops..=page.uploaded_ops])?.keys() {
+            let width = if started.elapsed() >= PUSH_PRE_APPEND_BUDGET {
+                1
+            } else {
+                MAX_BLOB_UPLOAD_BATCH
+            };
+            let end = (page.uploaded_ops + width).min(ops.len());
+            let mut uploads = Vec::new();
+            for sha256 in collect_blob_refs(&ops[page.uploaded_ops..end])?.keys() {
                 if !missing.contains(sha256) {
                     continue;
                 }
@@ -3469,16 +3546,30 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         break;
                     }
                 }
-                self.transport.upload_blob(BlobUploadRequest {
+                uploads.push(BlobUploadRequest {
                     workspace_id: workspace_id.to_owned(),
                     replication_epoch: identity.replication_epoch.clone(),
                     stream_identity: identity.stream_identity.clone(),
                     sha256: sha256.clone(),
                     bytes: bytes.ok_or(RelayError::BlobInvalid)?,
-                })?;
-                missing.remove(sha256);
+                });
+                if uploads.len() == MAX_BLOB_UPLOAD_BATCH {
+                    break;
+                }
             }
-            page.uploaded_ops += 1;
+            if !uploads.is_empty() {
+                let uploaded = uploads
+                    .iter()
+                    .map(|upload| upload.sha256.clone())
+                    .collect::<Vec<_>>();
+                self.transport.upload_blobs(uploads)?;
+                for sha in uploaded {
+                    missing.remove(&sha);
+                    confirmed.insert(sha);
+                }
+                continue;
+            }
+            page.uploaded_ops = end;
         }
         Ok(page.uploaded_ops)
     }
@@ -6086,7 +6177,8 @@ mod push_budget_tests {
                     pending: None,
                     budget_exhausted: false,
                 },
-                missing: Some(BTreeSet::from([sha])),
+                missing: BTreeSet::from([sha]),
+                inventory: VecDeque::new(),
                 uploaded_ops: 0,
                 sending: None,
             };
@@ -6098,12 +6190,13 @@ mod push_budget_tests {
                         "ws",
                         &identity,
                         &mut page,
-                        std::time::Instant::now()
+                        std::time::Instant::now(),
+                        &mut BTreeSet::new(),
                     )
                     .unwrap(),
                 2
             );
-            assert!(page.missing.unwrap().is_empty());
+            assert!(page.missing.is_empty());
         }
     }
 
@@ -6140,7 +6233,8 @@ mod push_budget_tests {
                 budget_exhausted: false,
             },
             blob_refs: BTreeMap::new(),
-            missing: None,
+            inventory: VecDeque::new(),
+            missing: BTreeSet::new(),
             uploaded_ops: 0,
             sending: None,
         };
@@ -6148,7 +6242,14 @@ mod push_budget_tests {
         let started = std::time::Instant::now() - PUSH_PRE_APPEND_BUDGET;
         assert_eq!(
             client
-                .upload_push_prefix(&store, "ws", &identity, &mut page, started)
+                .upload_push_prefix(
+                    &store,
+                    "ws",
+                    &identity,
+                    &mut page,
+                    started,
+                    &mut BTreeSet::new()
+                )
                 .unwrap(),
             1
         );
