@@ -2058,6 +2058,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             ops.extend(response.ops);
             reads.insert(object_id.clone(), (response.next_cursor, response.has_more));
         }
+        // A returning document's heads come back before its rows route, so
+        // the rows it applied skip as redelivered against them.
+        let unparked =
+            crate::hosted::unpark_returned(store, workspace_id, faults).map_err(local)?;
 
         // Every document with retained work may retain more behind it; one
         // whose retained work runs past this replay holds from where it stops.
@@ -2094,7 +2098,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         // Relay order is each document's order, across origins.
         ops.sort_by_key(|op| op.relay_seq);
-        let pass = self.apply_pulled(
+        let mut pass = self.apply_pulled(
             store,
             cache,
             workspace_id,
@@ -2106,6 +2110,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             faults,
             leases,
         )?;
+        for change in unparked {
+            pass.changed_paths
+                .entry((change.version_id.clone(), change.path.clone()))
+                .or_insert(change);
+        }
         // A ready document that stopped at a conflict child whose parent the
         // feed withholds, or at work past the retention limit, is held from
         // there and reads its own rows.
@@ -2121,11 +2130,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         // A read stops before its document's first row that did not apply;
         // nothing of it was retained, so its next read fetches it again.
-        let (reads, held) = store
+        let (reads, held, unparks) = store
             .read_with(|conn| {
                 let mut held = BTreeMap::new();
                 let mut settled = BTreeMap::new();
+                // A document whose parked heads this pass freed the paths of
+                // comes back on the next pass.
+                let mut unparks = false;
                 for (object_id, (cursor, more)) in reads {
+                    unparks |= crate::hosted::unparks_next(conn, workspace_id, &object_id)?;
                     let read = match pass.stopped.get(&object_id) {
                         Some(op) => crate::HostedRead {
                             // Commit refuses one below its document's read
@@ -2147,13 +2160,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                     settled.insert(object_id, read);
                 }
-                Ok::<_, SyncError>((settled, held))
+                Ok::<_, SyncError>((settled, held, unparks))
             })
             .map_err(local)?;
         // A finished backfill still leaves the main feed or another document,
         // and a held document whose read went on backfills again.
         let more = has_more
             || pass.has_more
+            || unparks
             || backfill.is_some()
             || reads
                 .values()
@@ -4269,7 +4283,7 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
 
 /// Whether a held op is retained across passes, so the cursor can move past
 /// it: work behind a live session, and a hosted moment or Y.Doc row whose
-/// path waits for a departed document to retire. A hosted document that is
+/// path waits for a departed document to park. A hosted document that is
 /// not ready retains nothing.
 fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
     match reason {

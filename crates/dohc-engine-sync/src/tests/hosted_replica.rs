@@ -492,6 +492,8 @@ struct HostedFeed {
     refusing: Mutex<BTreeSet<String>>,
     /// Corrupts each push response after the relay recorded the batch.
     garble: Mutex<Option<fn(&mut PushResponse)>>,
+    /// Loses the reply to the next push after the relay recorded its batch.
+    lose_push_reply: AtomicBool,
     /// Every blob a download asked for.
     downloads: Mutex<Vec<String>>,
 }
@@ -510,6 +512,7 @@ impl HostedFeed {
             pushes: Mutex::new(Vec::new()),
             refusing: Mutex::new(BTreeSet::new()),
             garble: Mutex::new(None),
+            lose_push_reply: AtomicBool::new(false),
             downloads: Mutex::new(Vec::new()),
         }
     }
@@ -819,6 +822,9 @@ impl RelayTransport for HostedFeed {
         if let Some(garble) = *self.garble.lock().unwrap() {
             garble(&mut response);
         }
+        if self.lose_push_reply.swap(false, Ordering::SeqCst) {
+            return Err(RelayError::WorkspaceUnavailable);
+        }
         Ok(response)
     }
 
@@ -998,34 +1004,49 @@ fn sync(client: &RelaySyncClient<HostedFeed>, store: &mut EngineStore) {
     panic!("the hosted replica did not catch up");
 }
 
-/// Retire every departed document that can retire, and forget each retired
-/// file as the runtime does once the file is gone. Answers whether one
-/// retired or a path came free.
-fn retire(store: &mut EngineStore) -> bool {
-    let mut retired = false;
+/// Park every departed document that can park, and forget each retired file
+/// as the runtime does once the file is gone. Answers whether one parked or
+/// a path came free.
+fn park(store: &mut EngineStore) -> bool {
+    let mut parked = false;
     for document in departed_hosted_documents(store, "ws").unwrap() {
-        retired |= retire_hosted_document(store, "ws", &document.object_id, "main", &NoFaults)
+        parked |= park_hosted_document(store, "ws", &document.object_id, "main", &NoFaults)
             .unwrap()
             == TxnOutcome::Committed(true);
     }
     for file in retired_hosted_files(store, "ws").unwrap() {
         forget_retired_hosted_file(store, "ws", &file.path, &NoFaults).unwrap();
-        retired = true;
+        parked = true;
     }
-    retired
+    parked
 }
 
-/// [`sync`], retiring where the runtime does: after a pass that adopted a
-/// scope, and after each commit. A retirement leaves more to pull.
-fn sync_retiring(client: &RelaySyncClient<HostedFeed>, store: &mut EngineStore) {
+/// [`sync`], parking where the runtime does: after a pass that adopted a
+/// scope, and after each commit. Parking leaves more to pull.
+fn sync_parking(client: &RelaySyncClient<HostedFeed>, store: &mut EngineStore) {
     for _ in 0..64 {
         let outcome = pass(client, store, &NoFaults).unwrap();
         commit(client, store, &outcome);
-        if !retire(store) && !outcome.has_more {
+        if !park(store) && !outcome.has_more {
             return;
         }
     }
     panic!("the hosted replica did not catch up");
+}
+
+/// Whether `object_id` is parked: its row says so, and its heads and path
+/// aliases are in the parked tables and nowhere else.
+fn is_parked(store: &EngineStore, object_id: &str) -> bool {
+    count(
+        store,
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM hosted_documents WHERE object_id='{object_id}' \
+               AND state='parked') \
+             AND EXISTS(SELECT 1 FROM hosted_parked_snapshots WHERE object_id='{object_id}') \
+             AND NOT EXISTS(SELECT 1 FROM snapshots WHERE object_id='{object_id}') \
+             AND NOT EXISTS(SELECT 1 FROM path_aliases WHERE object_id='{object_id}')"
+        ),
+    ) == 1
 }
 
 /// The tables with an `object_id` column that still hold a row of
@@ -1563,11 +1584,11 @@ fn retained_work_of_a_removed_document_leaves_a_hosted_one_free() {
     assert_eq!(
         retained(&store),
         500,
-        "the removed document's work waits for its retirement"
+        "the removed document's work waits for it to park"
     );
-    assert!(retire(&mut store));
-    assert_eq!(retained(&store), 0);
-    assert!(holding(&store, "gone").is_empty());
+    assert!(park(&mut store));
+    assert_eq!(retained(&store), 0, "parking releases it");
+    assert_eq!(holding(&store, "gone"), ["hosted_documents"]);
 }
 
 /// Documents take turns at the replay page, so one whose work stays held
@@ -2903,8 +2924,8 @@ fn heads(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 /// The slice-3 re-review's first finding: clearing `a.md` for `doc-a` dropped
 /// the head `doc-b`'s unsettled work still needed. `doc-a`'s moments now
-/// wait, in order, until `doc-b` retires, and then apply as a create and its
-/// edit, with nothing of `doc-b` left behind.
+/// wait, in order, until `doc-b` parks, and then apply as a create and its
+/// edit. `doc-b` keeps its history and bytes, and holds no path.
 #[test]
 fn a_replacement_waits_for_the_departed_document_holding_its_path() {
     let (_scratch, _path, mut store, client) = departing_b();
@@ -2923,12 +2944,13 @@ fn a_replacement_waits_for_the_departed_document_holding_its_path() {
     assert_eq!(hold(&store, "doc-a"), Some(HostedHold::WorkWaiting));
     assert_eq!(retained(&store), 0, "the edit waits behind the create");
 
-    sync_retiring(&client, &mut store);
+    sync_parking(&client, &mut store);
     let (now, moments) = content(&store);
     assert_eq!(now, heads(&[("doc-a", "edited a")]));
     assert_eq!(
         moments,
         BTreeMap::from([
+            ("moment-owner-1".to_owned(), 1),
             ("moment-owner-2".to_owned(), 1),
             ("moment-owner-3".to_owned(), 1)
         ])
@@ -2950,16 +2972,17 @@ fn a_replacement_waits_for_the_departed_document_holding_its_path() {
             "text".to_owned()
         )]
     );
-    assert!(holding(&store, "doc-b").is_empty());
+    assert!(is_parked(&store, "doc-b"));
     assert_eq!(
         coordinates(&store),
         [
             ("owner".to_owned(), 0),
+            ("owner".to_owned(), 1),
             ("owner".to_owned(), 2),
             ("owner".to_owned(), 3)
         ]
     );
-    assert!(!has_blob(&store, &text_sha("hosted b")));
+    assert!(has_blob(&store, &text_sha("hosted b")));
     assert!(departed_hosted_documents(&store, "ws").unwrap().is_empty());
 }
 
@@ -3015,7 +3038,8 @@ fn settle_live_work(store: &mut EngineStore, object_id: &str) {
 /// The slice-3 re-review's first reproduction: `doc-b` has accepted,
 /// unsettled live work when the scope moves to `doc-a`. `doc-b` keeps its
 /// head until that work settles and the relay holds every row the host wrote
-/// for it; only then does it retire and `doc-a` take the path.
+/// for it; only then does it park and `doc-a` take the path. Parking keeps
+/// its accepted work and every row naming it.
 #[test]
 fn a_departed_document_keeps_its_head_until_its_work_settles() {
     let (_scratch, _path, mut store, client) = departing_b();
@@ -3041,17 +3065,17 @@ fn a_departed_document_keeps_its_head_until_its_work_settles() {
     }
     replace_b_with_a(client.transport());
 
-    sync_retiring(&client, &mut store);
+    sync_parking(&client, &mut store);
     assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
     assert_eq!(hold(&store, "doc-a"), Some(HostedHold::WorkWaiting));
     assert_eq!(retained(&store), 0, "doc-a waits in its feed");
-    assert!(!hosted_document_retirable(&store, "ws", "doc-b").unwrap());
+    assert!(!hosted_document_parkable(&store, "ws", "doc-b").unwrap());
 
     // The work settles; the rows the host wrote are not acknowledged yet.
     settle_live_work(&mut store, "doc-b");
-    sync_retiring(&client, &mut store);
+    sync_parking(&client, &mut store);
     assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
-    assert!(!hosted_document_retirable(&store, "ws", "doc-b").unwrap());
+    assert!(!hosted_document_parkable(&store, "ws", "doc-b").unwrap());
 
     store
         .write_with(&NoFaults, |tx| {
@@ -3064,27 +3088,29 @@ fn a_departed_document_keeps_its_head_until_its_work_settles() {
             Ok::<_, SyncError>(())
         })
         .unwrap();
-    sync_retiring(&client, &mut store);
+    sync_parking(&client, &mut store);
     assert_eq!(content(&store).0, heads(&[("doc-a", "hosted a")]));
     assert_eq!(retained(&store), 0);
-    assert!(holding(&store, "doc-b").is_empty());
-    assert_eq!(
-        coordinates(&store),
-        [("owner".to_owned(), 0), ("owner".to_owned(), 2)],
-        "every row naming doc-b goes, the host's own too"
-    );
+    assert!(is_parked(&store, "doc-b"));
+    let mut kept = vec![
+        ("owner".to_owned(), 0),
+        ("owner".to_owned(), 1),
+        ("owner".to_owned(), 2),
+    ];
+    kept.extend((0..5).map(|seq| (HOST.to_owned(), seq)));
+    assert_eq!(coordinates(&store), kept, "the host's own rows stay too");
     assert_eq!(
         count(
             &store,
             "SELECT COUNT(*) FROM live_device_application_first_seen"
         ),
-        0
+        1
     );
-    assert!(!has_blob(&store, &update));
+    assert!(has_blob(&store, &update));
 }
 
 /// Part 5's lifecycle fact: the host releases a document only once it is
-/// gone. Retirement removes its rows before its file, so the retired file
+/// gone. Parking releases its heads before its file, so the retired file
 /// keeps it departed, across a restart, until the file is forgotten.
 #[test]
 fn a_departed_document_is_reported_until_its_file_is_forgotten() {
@@ -3096,10 +3122,10 @@ fn a_departed_document_is_reported_until_its_file_is_forgotten() {
     assert_eq!(departed(&store), ["doc-b"]);
 
     assert_eq!(
-        retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
+        park_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
         TxnOutcome::Committed(true)
     );
-    assert_eq!(holding(&store, "doc-b"), ["hosted_retired_files"]);
+    assert!(is_parked(&store, "doc-b"));
     assert_eq!(departed(&store), ["doc-b"], "its file is still to go");
     drop(store);
     let mut store = EngineStore::open(&path, 3_000).unwrap();
@@ -3117,7 +3143,7 @@ fn a_file_retired_without_its_document_is_removed_but_names_none() {
     client.transport().unshare("doc-b");
     sync(&client, &mut store);
     assert_eq!(
-        retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
+        park_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
         TxnOutcome::Committed(true)
     );
     store
@@ -3184,11 +3210,13 @@ fn pending_outbox(store: &mut EngineStore, object_id: &str) {
 }
 
 /// Part 5's retirement deadlock: a departed document with a deferred update
-/// waited for rows the feed no longer serves. Retirement drops the update,
-/// which the relay still holds, and still waits for the host's own undelivered
-/// outbox bytes.
+/// waited for rows the feed no longer serves. It parks with the update, which
+/// its return skips as redelivered, so the update and its bytes stay queued:
+/// dropping them would lose the edit. Work the relay served that was never
+/// journaled is released, and the return fetches it again. Parking still
+/// waits for the host's own undelivered outbox bytes.
 #[test]
-fn retirement_drops_the_relays_deferred_updates_and_waits_for_accepted_work() {
+fn parking_keeps_journaled_deferred_updates_and_waits_for_accepted_work() {
     let (_scratch, _path, mut store, client) = departing_b();
     let feed = client.transport();
     let update = baseless_ydoc_delta(feed, "doc-b", "a.md");
@@ -3196,15 +3224,19 @@ fn retirement_drops_the_relays_deferred_updates_and_waits_for_accepted_work() {
     let deferred = "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE object_id='doc-b'";
     assert_eq!(count(&store, deferred), 1);
     pending_outbox(&mut store, "doc-b");
+    let identity = read_sync_identity(&store, "ws").unwrap().unwrap();
+    let unjournaled = document_op(9, 99, "doc-b");
+    crate::deferred::retain(&mut store, &identity, &[&unjournaled], &NoFaults).unwrap();
+    assert_eq!(retained(&store), 1);
 
     feed.unshare("doc-b");
-    sync_retiring(&client, &mut store);
+    sync_parking(&client, &mut store);
     assert_eq!(
         content(&store).0,
         heads(&[("doc-b", "hosted b")]),
         "its outbox bytes hold it"
     );
-    assert!(!hosted_document_retirable(&store, "ws", "doc-b").unwrap());
+    assert!(!hosted_document_parkable(&store, "ws", "doc-b").unwrap());
     assert_eq!(departed_hosted_object_ids(&store, "ws").unwrap(), ["doc-b"]);
     assert_eq!(count(&store, deferred), 1);
 
@@ -3217,14 +3249,28 @@ fn retirement_drops_the_relays_deferred_updates_and_waits_for_accepted_work() {
             .map_err(SyncError::persist)
         })
         .unwrap();
-    sync_retiring(&client, &mut store);
-    assert!(holding(&store, "doc-b").is_empty());
-    assert!(!has_blob(&store, &update));
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    assert_eq!(count(&store, deferred), 1);
+    assert!(has_blob(&store, &update));
+    assert_eq!(retained(&store), 0, "work never journaled is released");
     assert!(departed_hosted_object_ids(&store, "ws").unwrap().is_empty());
+
+    let journal = coordinates(&store);
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+    assert_eq!(
+        count(&store, deferred),
+        1,
+        "the update still waits for its base"
+    );
+    assert_eq!(coordinates(&store), journal, "nothing applied twice");
 }
 
 /// Main's capture holds: a held file's row referenced the document's object,
-/// so retiring it failed. The hold goes with the document.
+/// so retiring it failed. The hold, which holds its path, goes when it parks.
 #[test]
 fn a_capture_hold_does_not_keep_a_departed_document() {
     let (_scratch, _path, mut store, client) = departing_b();
@@ -3239,13 +3285,14 @@ fn a_capture_hold_does_not_keep_a_departed_document() {
         })
         .unwrap();
     client.transport().unshare("doc-b");
-    sync_retiring(&client, &mut store);
-    assert!(holding(&store, "doc-b").is_empty());
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM capture_file_holds"), 0);
     assert!(departed_hosted_object_ids(&store, "ws").unwrap().is_empty());
 }
 
 #[test]
-fn retirement_is_all_or_nothing_and_idempotent() {
+fn parking_is_all_or_nothing_and_idempotent() {
     let (_scratch, path, mut store, client) = departing_b();
     client.transport().unshare("doc-b");
     sync(&client, &mut store);
@@ -3258,7 +3305,7 @@ fn retirement_is_all_or_nothing_and_idempotent() {
 
     let crash = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
     assert_eq!(
-        retire_hosted_document(&mut store, "ws", "doc-b", "main", crash.as_ref()).unwrap(),
+        park_hosted_document(&mut store, "ws", "doc-b", "main", crash.as_ref()).unwrap(),
         TxnOutcome::Crashed { committed: false }
     );
     drop(store);
@@ -3274,25 +3321,26 @@ fn retirement_is_all_or_nothing_and_idempotent() {
     assert!(retired_hosted_files(&store, "ws").unwrap().is_empty());
 
     assert_eq!(
-        retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
+        park_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
         TxnOutcome::Committed(true)
     );
-    assert_eq!(holding(&store, "doc-b"), ["hosted_retired_files"]);
+    assert!(is_parked(&store, "doc-b"));
+    assert_eq!(coordinates(&store), before.1, "its journal stays");
     assert_eq!(
         retired_hosted_files(&store, "ws").unwrap(),
         [RetiredFile {
             path: "a.md".to_owned(),
             sha256: text_sha("hosted b")
         }],
-        "its file is recorded with its rows' removal"
+        "its file is recorded as its head parks"
     );
     assert_eq!(
-        retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
+        park_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
         TxnOutcome::Committed(false),
-        "nothing is left to retire"
+        "nothing is left to park"
     );
-    assert!(retire(&mut store), "its file's path comes free");
-    assert!(!retire(&mut store));
+    assert!(park(&mut store), "its file's path comes free");
+    assert!(!park(&mut store));
 }
 
 /// Sol's retirement review: a file that did not go after its document
@@ -3305,7 +3353,7 @@ fn a_retired_file_holds_its_path_until_it_is_forgotten() {
     replace_b_with_a(client.transport());
     sync(&client, &mut store);
     assert_eq!(
-        retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
+        park_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
         TxnOutcome::Committed(true)
     );
     drop(store);
@@ -3328,10 +3376,10 @@ fn a_retired_file_holds_its_path_until_it_is_forgotten() {
 
 /// Sol's retirement review: retiring a document deleted every conflict that
 /// named it, including one another hosted document still needs. `doc-b`'s
-/// rename left a conflict against `doc-a` at `b.md`; `doc-a` retires and the
-/// conflict stays, with the bytes of both sides, until `doc-b` retires too.
+/// rename left a conflict against `doc-a` at `b.md`. A parked document keeps
+/// its conflicts, with the bytes of both sides, after both documents park.
 #[test]
-fn retirement_keeps_a_conflict_another_hosted_document_holds() {
+fn parking_keeps_a_conflict_and_the_bytes_of_its_sides() {
     let (_scratch, _path, mut store) = hosted_store();
     let client = RelaySyncClient::new(HostedFeed::new());
     let feed = client.transport();
@@ -3356,23 +3404,23 @@ fn retirement_keeps_a_conflict_another_hosted_document_holds() {
     assert_eq!(count(&store, conflict), 1);
 
     feed.unshare("doc-a");
-    sync_retiring(&client, &mut store);
-    assert!(holding(&store, "doc-a").is_empty());
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-a"));
     assert!(document(&store, "doc-b").is_some());
     assert_eq!(count(&store, conflict), 1, "doc-b still has it to resolve");
     assert!(has_blob(&store, &text_sha("hosted a")));
     assert!(has_blob(&store, &text_sha("hosted b")));
 
     feed.unshare("doc-b");
-    sync_retiring(&client, &mut store);
-    assert!(holding(&store, "doc-b").is_empty());
-    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
-    assert!(!has_blob(&store, &text_sha("hosted a")));
-    assert!(!has_blob(&store, &text_sha("hosted b")));
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    assert_eq!(count(&store, conflict), 1);
+    assert!(has_blob(&store, &text_sha("hosted a")));
+    assert!(has_blob(&store, &text_sha("hosted b")));
 }
 
 #[test]
-fn retirement_keeps_bytes_another_document_holds() {
+fn parking_keeps_every_version_of_its_bytes() {
     let (_scratch, _path, mut store) = hosted_store();
     let client = RelaySyncClient::new(HostedFeed::new());
     let feed = client.transport();
@@ -3392,24 +3440,26 @@ fn retirement_keeps_bytes_another_document_holds() {
     sync(&client, &mut store);
 
     feed.unshare("doc-b");
-    sync_retiring(&client, &mut store);
-    assert!(holding(&store, "doc-b").is_empty());
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
     assert_eq!(content(&store).0, heads(&[("doc-a", "shared text")]));
     assert!(has_blob(&store, &text_sha("shared text")));
-    assert!(!has_blob(&store, &text_sha("only b")));
+    assert!(has_blob(&store, &text_sha("only b")), "its head's bytes");
 }
 
 /// The slice-3 re-review's second finding: a returning document skipped its
 /// journaled creation as a redelivery, so the rename fetched after it found
-/// no head and opened a conflict. `doc-b` retires after it leaves, the owner
-/// moves it to `b.md`, and its return rebuilds it from its first row.
+/// no head and opened a conflict. `doc-b` parks after it leaves, and the
+/// owner moves it to `b.md`. Its return brings its head back at `a.md`
+/// before its rows route, so its creation skips and the rename applies to
+/// it once. The pass names both paths to materialize.
 #[test]
-fn a_document_that_returns_after_retiring_backfills_from_the_start() {
+fn a_document_that_returns_after_parking_applies_only_what_it_missed() {
     let (_scratch, _path, mut store, client) = departing_b();
     let feed = client.transport();
     feed.unshare("doc-b");
-    sync_retiring(&client, &mut store);
-    assert!(holding(&store, "doc-b").is_empty());
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
 
     feed.rename(
         "owner",
@@ -3421,15 +3471,34 @@ fn a_document_that_returns_after_retiring_backfills_from_the_start() {
         "moment-owner-1",
     );
     feed.share("doc-b", "b.md");
-    sync_retiring(&client, &mut store);
-    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+    assert_eq!(
+        sync_changes(&client, &mut store),
+        [("a.md".to_owned(), "delete"), ("b.md".to_owned(), "write")]
+    );
+    let (now, moments) = content(&store);
+    assert_eq!(now, heads(&[("doc-b", "hosted b")]));
+    assert_eq!(
+        moments,
+        BTreeMap::from([
+            ("moment-owner-1".to_owned(), 1),
+            ("moment-owner-2".to_owned(), 1)
+        ])
+    );
     assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+    assert_eq!(
+        paths(&store),
+        (
+            vec![("doc-b".to_owned(), "b.md".to_owned())],
+            vec![("b.md".to_owned(), "doc-b".to_owned())]
+        )
+    );
     assert_eq!(
         count(
             &store,
-            "SELECT COUNT(*) FROM snapshots WHERE object_id='doc-b' AND path='b.md'"
+            "SELECT (SELECT COUNT(*) FROM hosted_parked_snapshots) \
+             + (SELECT COUNT(*) FROM hosted_parked_path_aliases)"
         ),
-        1
+        0
     );
     assert_eq!(
         coordinates(&store),
@@ -3437,8 +3506,7 @@ fn a_document_that_returns_after_retiring_backfills_from_the_start() {
             ("owner".to_owned(), 0),
             ("owner".to_owned(), 1),
             ("owner".to_owned(), 2)
-        ],
-        "its creation applied again"
+        ]
     );
     assert!(ready(&store, "doc-b"));
     assert_eq!(document(&store, "doc-b").unwrap().path, "b.md");
@@ -3457,7 +3525,7 @@ fn sync_changes(
             changes.insert(change.path.clone(), change.operation);
         }
         commit(client, store, &outcome);
-        if !retire(store) && !outcome.has_more {
+        if !park(store) && !outcome.has_more {
             return changes.into_iter().collect();
         }
     }
@@ -3497,12 +3565,13 @@ fn hold(store: &EngineStore, object_id: &str) -> Option<HostedHold> {
     }
 }
 
-/// The retirement round's open case: `doc-b` left the scope at `a.md`, the
-/// owner moved it to `b.md`, and `doc-a` took `a.md`. `doc-b` returns, and
-/// its backfill replays its creation at `a.md` after `doc-a`'s later row.
-/// The creation neither applies nor opens a conflict: `doc-b` is held, and
-/// `doc-a` and the main cursor go on. Once the owner moves `doc-a`, `doc-b`'s
-/// history applies behind it and `doc-b` is ready at `b.md`.
+/// The retirement round's open case, and path reuse while parked: `doc-b`
+/// left the scope at `a.md` and parked, the owner moved it to `b.md`, and
+/// `doc-a` took `a.md`. `doc-b` returns with its head parked at `a.md`,
+/// which `doc-a` holds, so its head stays parked, the rename it missed waits,
+/// and nothing opens a conflict: `doc-b` is held, and `doc-a` and the main
+/// cursor go on. Once the owner moves `doc-a`, `doc-b`'s head comes back,
+/// the rename applies behind it, and `doc-b` is ready at `b.md`.
 #[test]
 fn a_returning_document_is_held_while_another_holds_its_old_path() {
     let (_scratch, _path, mut store, client) = departing_b();
@@ -3519,25 +3588,27 @@ fn a_returning_document_is_held_while_another_holds_its_old_path() {
     );
     feed.create("owner", 3, "doc-a", "a.md", "hosted a");
     feed.share("doc-a", "a.md");
-    sync_retiring(&client, &mut store);
+    sync_parking(&client, &mut store);
     assert_eq!(content(&store).0, heads(&[("doc-a", "hosted a")]));
-    assert!(holding(&store, "doc-b").is_empty());
+    assert!(is_parked(&store, "doc-b"));
 
     feed.share("doc-b", "b.md");
-    assert!(
-        sync_changes(&client, &mut store).is_empty(),
-        "doc-a's file stays as it is"
-    );
+    sync_parking(&client, &mut store);
+    assert_eq!(content(&store).0, heads(&[("doc-a", "hosted a")]));
     assert_eq!(hold(&store, "doc-b"), Some(path_held("a.md", "doc-a")));
     assert_eq!(
-        retained(&store),
-        0,
-        "its creation and rename wait in its feed"
+        count(
+            &store,
+            "SELECT COUNT(*) FROM hosted_parked_snapshots WHERE object_id='doc-b'"
+        ),
+        1,
+        "its head stays parked"
     );
+    assert_eq!(retained(&store), 0, "its rename waits in its feed");
     assert_eq!(
         document(&store, "doc-b").unwrap().backfill_cursor,
-        1,
-        "before its creation"
+        2,
+        "before its rename"
     );
     assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
 
@@ -3568,7 +3639,7 @@ fn a_returning_document_is_held_while_another_holds_its_old_path() {
         "edited a",
         "moment-owner-4",
     );
-    sync_retiring(&client, &mut store);
+    sync_parking(&client, &mut store);
     let pair = |left: &str, right: &str| (left.to_owned(), right.to_owned());
     assert_eq!(
         paths(&store),
@@ -3924,7 +3995,7 @@ fn a_ydoc_base_waits_for_a_retired_file_at_its_path() {
     feed.unshare("doc-b");
     sync(&client, &mut store);
     assert_eq!(
-        retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
+        park_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
         TxnOutcome::Committed(true)
     );
     ydoc_base(feed, "doc-a", "a.md", "hosted a");
@@ -3975,7 +4046,7 @@ fn a_departed_path_holds_its_case_aliases_descendants_and_ancestors() {
         );
 
         assert_eq!(
-            retire_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
+            park_hosted_document(&mut store, "ws", "doc-b", "main", &NoFaults).unwrap(),
             TxnOutcome::Committed(true)
         );
         sync(&client, &mut store);
@@ -4081,7 +4152,7 @@ fn a_held_backfill_longer_than_the_retention_limit_holds_only_its_document() {
 }
 
 #[test]
-fn an_ordinary_replica_has_nothing_to_retire() {
+fn an_ordinary_replica_has_nothing_to_park() {
     let (_scratch, _path, mut ordinary) = open_store();
     seed_identity(&mut ordinary);
     assert!(
@@ -4090,9 +4161,532 @@ fn an_ordinary_replica_has_nothing_to_retire() {
             .is_empty()
     );
     assert_eq!(
-        retire_hosted_document(&mut ordinary, "ws", "doc-b", "main", &NoFaults).unwrap(),
+        park_hosted_document(&mut ordinary, "ws", "doc-b", "main", &NoFaults).unwrap(),
         TxnOutcome::Committed(false)
     );
+}
+
+/// Parking: a returning document reads its rows again from cursor zero, and
+/// each row its journal holds skips as redelivered, so nothing applies
+/// twice. Its head comes back before the rows route, and the pass names its
+/// file to materialize.
+#[test]
+fn a_returning_document_rereads_from_zero_and_skips_what_it_applied() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    feed.replace(
+        "owner",
+        2,
+        "doc-b",
+        "a.md",
+        "edited b",
+        ("doc-b", "hosted b", "moment-owner-1"),
+    );
+    sync(&client, &mut store);
+    let before = (content(&store), coordinates(&store), paths(&store));
+    feed.unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    assert!(content(&store).0.is_empty());
+
+    feed.share("doc-b", "a.md");
+    assert_eq!(
+        pass(&client, &mut store, &NoFaults).unwrap().pending_cursor,
+        None
+    );
+    let back = pass(&client, &mut store, &NoFaults).unwrap();
+    let read = client.transport().pull_requests().last().unwrap().clone();
+    assert_eq!((read.object_id.as_deref(), read.cursor), (Some("doc-b"), 0));
+    assert_eq!((back.applied, back.skipped), (0, 2));
+    assert_eq!(
+        back.changed_paths
+            .iter()
+            .map(|change| (change.path.as_str(), change.operation))
+            .collect::<Vec<_>>(),
+        [("a.md", "write")]
+    );
+    assert!(commit(&client, &mut store, &back));
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(
+        (content(&store), coordinates(&store), paths(&store)),
+        before
+    );
+}
+
+/// Parking: `doc-b` returns at `b.md`, while its history leaves it at
+/// `a.md`, where it parked. Its head comes back there and it is held, naming
+/// both paths; each later pass reads one page and finishes, so nothing loops.
+/// The rename that takes it to `b.md` makes it ready.
+#[test]
+fn a_document_that_returns_at_another_path_is_held_without_looping() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    feed.unshare("doc-b");
+    sync_parking(&client, &mut store);
+    feed.share("doc-b", "b.md");
+    sync_parking(&client, &mut store);
+    let away = HostedHold::ScopePathMismatch {
+        scope_path: "b.md".to_owned(),
+        head_path: Some("a.md".to_owned()),
+    };
+    assert_eq!(hold(&store, "doc-b"), Some(away.clone()));
+    assert_eq!(paths(&store).0, [("doc-b".to_owned(), "a.md".to_owned())]);
+    for _ in 0..2 {
+        let again = pass(&client, &mut store, &NoFaults).unwrap();
+        assert!(!again.has_more);
+        assert_eq!(again.applied, 0);
+        assert_eq!(
+            again.held,
+            BTreeMap::from([("doc-b".to_owned(), away.clone())])
+        );
+        assert!(commit(&client, &mut store, &again));
+    }
+
+    feed.rename(
+        "owner",
+        2,
+        "doc-b",
+        "a.md",
+        "b.md",
+        "hosted b",
+        "moment-owner-1",
+    );
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(paths(&store).0, [("doc-b".to_owned(), "b.md".to_owned())]);
+}
+
+/// Parking, path reuse the other way round: `doc-b` returns to `a.md` first,
+/// and then `doc-c`, whose history takes `a.md`, joins the scope. `doc-c` is
+/// held by `doc-b`, as any backfill at another document's path is.
+#[test]
+fn a_document_that_takes_a_returned_documents_path_is_held() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    feed.unshare("doc-b");
+    sync_parking(&client, &mut store);
+    feed.share("doc-b", "a.md");
+    sync_parking(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+
+    feed.create("owner", 2, "doc-c", "a.md", "hosted c");
+    feed.share("doc-c", "a.md");
+    sync_parking(&client, &mut store);
+    assert_eq!(hold(&store, "doc-c"), Some(path_held("a.md", "doc-b")));
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM conflicts"), 0);
+}
+
+/// Parking: two documents parked at one path do not hold each other, and
+/// either can come back to it.
+#[test]
+fn documents_parked_at_one_path_return_in_turn() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    feed.unshare("doc-b");
+    feed.replace(
+        "owner",
+        2,
+        "doc-c",
+        "a.md",
+        "hosted c",
+        ("doc-b", "hosted b", "moment-owner-1"),
+    );
+    feed.share("doc-c", "a.md");
+    sync_parking(&client, &mut store);
+    assert_eq!(content(&store).0, heads(&[("doc-c", "hosted c")]));
+    feed.unshare("doc-c");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    assert!(is_parked(&store, "doc-c"));
+
+    feed.share("doc-b", "a.md");
+    sync_parking(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+    assert!(is_parked(&store, "doc-c"));
+}
+
+/// Parking: a return stops at its unparking, before it commits or after it
+/// commits but before its pass does, and the host restarts. Either way the
+/// return finishes once: its head comes back, the pass names its file, and
+/// nothing applies twice.
+#[test]
+fn a_return_interrupted_at_its_unparking_finishes_once_after_a_restart() {
+    for unparked in [false, true] {
+        let (_scratch, path, mut store, client) = departing_b();
+        let feed = client.transport();
+        feed.unshare("doc-b");
+        sync_parking(&client, &mut store);
+        let parked_heads = "SELECT COUNT(*) FROM hosted_parked_snapshots";
+        let journal = coordinates(&store);
+        feed.share("doc-b", "a.md");
+        assert_eq!(
+            pass(&client, &mut store, &NoFaults).unwrap().pending_cursor,
+            None
+        );
+        if unparked {
+            let back = pass(&client, &mut store, &NoFaults).unwrap();
+            assert!(
+                back.changed_paths
+                    .iter()
+                    .any(|change| change.path == "a.md")
+            );
+            assert_eq!(count(&store, parked_heads), 0);
+        } else {
+            let crash = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+            assert!(pass(&client, &mut store, crash.as_ref()).is_err());
+            assert_eq!(count(&store, parked_heads), 1, "{unparked}");
+        }
+        drop(store);
+        let mut store = EngineStore::open(&path, 3_000).unwrap();
+        let again = pass(&client, &mut store, &NoFaults).unwrap();
+        assert!(
+            again
+                .changed_paths
+                .iter()
+                .any(|change| change.path == "a.md"),
+            "{unparked}: its file is named again"
+        );
+        assert!(commit(&client, &mut store, &again));
+        sync(&client, &mut store);
+        assert!(ready(&store, "doc-b"), "{unparked}");
+        assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+        assert_eq!(coordinates(&store), journal, "{unparked}");
+        assert_eq!(count(&store, parked_heads), 0);
+    }
+}
+
+/// Parking (G4): a parked document is no longer hosted. The replica refuses
+/// to write for it before it takes a sequence.
+#[test]
+fn a_write_for_a_parked_document_is_refused() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    client.transport().unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    let before = last_outbound_seq(&store);
+    for (kind, payload) in [
+        ("ydoc.update", json!({"objectId": "doc-b"})),
+        ("moment.append", json!({"objectId": "doc-b"})),
+        ("live.audit.application", json!({"objectId": "doc-b"})),
+    ] {
+        let refused = store.write_with(&NoFaults, |tx| {
+            journal_local_op_in_tx(tx, "ws", kind, &payload, 3_000)
+        });
+        assert!(
+            matches!(
+                refused,
+                Err(SyncError::InvalidInput {
+                    reason: dohc_engine_domain::HOSTED_REPLICA_WRITE_REFUSED
+                })
+            ),
+            "{kind}: {refused:?}"
+        );
+    }
+    assert_eq!(last_outbound_seq(&store), before);
+}
+
+/// An activation of `object_id` in namespace `relay`, of `lineage`.
+fn activate(store: &mut EngineStore, object_id: &str) -> String {
+    let lineage = dohc_engine_storage::hex_sha256(b"activation lineage");
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_storage::put_binary_blob(tx, b"activation lineage")
+                .map_err(SyncError::Storage)?;
+            tx.execute(
+                "INSERT INTO ydoc_owner_activation_sources VALUES \
+                 ('activation','relay','ws','main',?1,?2,'moment-owner-1',?3,?2,'{}')",
+                params![object_id, lineage, text_sha("hosted b")],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    lineage
+}
+
+/// The adoption of `object_id`'s activation, in `namespace`.
+fn adopt_activation(store: &mut EngineStore, object_id: &str, lineage: &str, namespace: &str) {
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO live_owner_adoptions (relay_database_namespace,adoption_id, \
+                   workspace_id,main_version_id,object_id,lineage_claim_id,binding_json, \
+                   source_moment_id,source_digest,source_byte_length, \
+                   baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest, \
+                   coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor, \
+                   terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) \
+                 VALUES (?1,'activation','ws','main',?2,?3,'{}','moment-owner-1',?4,8,0,0,'e','c', \
+                   0,0,0,'{}','{}',1,1)",
+                params![namespace, object_id, lineage, text_sha("hosted b")],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}
+
+/// Parking (G3): an activation without its adoption resumes only on the
+/// exact state it captured, which a return would change. Its document stays
+/// departed until the activation is adopted in its own namespace.
+#[test]
+fn a_document_parks_only_once_every_activation_is_adopted() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let lineage = activate(&mut store, "doc-b");
+    client.transport().unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(!hosted_document_parkable(&store, "ws", "doc-b").unwrap());
+    assert_eq!(departed_hosted_object_ids(&store, "ws").unwrap(), ["doc-b"]);
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+
+    adopt_activation(&mut store, "doc-b", &lineage, "other-relay");
+    sync_parking(&client, &mut store);
+    assert!(
+        !hosted_document_parkable(&store, "ws", "doc-b").unwrap(),
+        "an adoption in another namespace is not its own"
+    );
+
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE live_owner_adoptions SET relay_database_namespace='relay'",
+                [],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM ydoc_owner_activation_sources WHERE object_id='doc-b'"
+        ),
+        1,
+        "its activation stays for its return"
+    );
+}
+
+/// Parking keeps the existing restore check: a document whose restore has
+/// not resumed stays departed.
+#[test]
+fn a_document_with_an_unfinished_restore_does_not_park() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO live_restore_fences (workspace_id,main_version_id,object_id, \
+                   relay_database_namespace,operation_id,input_json,receipt_json) \
+                 VALUES ('ws','main','doc-b','relay','restore','{\"newFence\":2}','{}')",
+                [],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    client.transport().unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(!hosted_document_parkable(&store, "ws", "doc-b").unwrap());
+    assert_eq!(departed_hosted_object_ids(&store, "ws").unwrap(), ["doc-b"]);
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+}
+
+/// The restores of `doc-b` and the settlements that resumed them, as their
+/// rows hold them.
+fn restores(store: &EngineStore) -> String {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT json_array( \
+                   (SELECT json_group_array(json_array(operation_id,previous_operation_id, \
+                      resume_settlement_id,resume_receipt_json,proposal_point_sha256)) \
+                    FROM (SELECT * FROM live_restore_fences ORDER BY operation_id)), \
+                   (SELECT json_group_array(json_array(settlement_id,settlement_kind, \
+                      restore_operation_id)) \
+                    FROM (SELECT * FROM live_device_settlements ORDER BY settlement_id)))",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// Parking: retirement unlinked a document's restores from the settlements
+/// that resumed them and deleted both, so a restore made before it left could
+/// not be reconstructed. Parking keeps the restores, their links and their
+/// proposal bytes through the return, and the document reads the same
+/// restore generation after it.
+#[test]
+fn a_restore_made_before_parking_survives_the_return() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    accept_live_work(&mut store, "doc-b");
+    settle_live_work(&mut store, "doc-b");
+    let point = dohc_engine_storage::hex_sha256(b"restore point");
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_storage::put_binary_blob(tx, b"restore point")
+                .map_err(SyncError::Storage)?;
+            // A restore applied through the accepted delivery, and resumed by
+            // the settlement after it.
+            tx.execute(
+                "INSERT INTO live_restore_fences (workspace_id,main_version_id,object_id, \
+                   relay_database_namespace,operation_id,input_json,receipt_json, \
+                   proposal_json,proposal_candidate_sha256,proposal_frozen_sha256, \
+                   proposal_point_sha256,application_json,application_delivery_id) \
+                 VALUES ('ws','main','doc-b','relay','restore','{\"newFence\":2}','{}', \
+                   '{}',?1,?1,?1,'{}','delivery')",
+                [&point],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE live_device_settlements SET settlement_kind='restore', \
+                 restore_operation_id='restore'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE live_restore_fences SET resume_receipt_json='{}', \
+                 resume_settlement_id='settlement',resume_evidence_digest=?1",
+                ["e".repeat(64)],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "doc-b").unwrap();
+    let generation = |store: &EngineStore| {
+        store
+            .read_with(|conn| {
+                Ok::<_, SyncError>(format!(
+                    "{:?}",
+                    dohc_engine_collab::live_update_application::restore_generation(conn, &key)
+                ))
+            })
+            .unwrap()
+    };
+    let before = (restores(&store), generation(&store));
+
+    client.transport().unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    assert_eq!((restores(&store), generation(&store)), before);
+    assert!(has_blob(&store, &point));
+
+    client.transport().share("doc-b", "a.md");
+    sync_parking(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!((restores(&store), generation(&store)), before);
+}
+
+/// Serve a peer's plaintext Y.Doc update of `object_id` at `path`, `seq` in
+/// its origin, on `lineage`.
+fn plaintext_update(
+    feed: &HostedFeed,
+    seq: i64,
+    object_id: &str,
+    path: &str,
+    update: Vec<u8>,
+    lineage: &str,
+) {
+    let sha = dohc_engine_storage::hex_sha256(&update);
+    let base = sha == lineage;
+    feed.blobs.lock().unwrap().insert(sha.clone(), update);
+    feed.append(envelope(
+        "peer",
+        seq,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": path,
+            "contentKind": "plaintext",
+            "updateBlobSha256": sha,
+            "lineageClaimId": lineage,
+            "isBaseState": base
+        }),
+    ));
+}
+
+/// Parking (G2): `doc-b` has a native live binding when it parks, and while
+/// it is parked a peer makes an ordinary edit its session never admitted.
+/// On its return the replica refuses that edit, so the content here would
+/// miss it: `doc-b` is held, every pass reports why, and it never becomes
+/// ready.
+#[test]
+fn an_unadmitted_edit_made_while_parked_holds_the_returning_document() {
+    let (_scratch, _path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.plaintext_insert(0, "hosted b");
+    let base = ydoc.encode_full_state();
+    let lineage = dohc_engine_storage::hex_sha256(&base);
+    plaintext_update(feed, 0, "doc-b", "a.md", base, &lineage);
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    accept_live_work(&mut store, "doc-b");
+    settle_live_work(&mut store, "doc-b");
+    feed.unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+
+    let edit = ydoc.plaintext_insert(8, " and more");
+    plaintext_update(feed, 1, "doc-b", "a.md", edit, &lineage);
+    feed.share("doc-b", "a.md");
+    sync_parking(&client, &mut store);
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM replication_refused_ydoc_blobs"
+        ),
+        1
+    );
+    let again = pass(&client, &mut store, &NoFaults).unwrap();
+    assert!(!again.has_more);
+    assert_eq!(
+        again.held,
+        BTreeMap::from([("doc-b".to_owned(), HostedHold::LiveEditUnadmitted)])
+    );
+    assert!(commit(&client, &mut store, &again));
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+}
+
+/// Parking: the reply to the host's push of `doc-b`'s row is lost after the
+/// relay recorded it. `doc-b` cannot park while its row looks unpushed; the
+/// next push is acknowledged, `doc-b` parks, and its return skips the row as
+/// its own.
+#[test]
+fn a_lost_push_reply_holds_parking_until_the_retry_is_acknowledged() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    assert_eq!(journal_live_update(&mut store, "doc-b", b"live b"), 0);
+    let push = |store: &mut EngineStore| {
+        client.push_workspace(store, "ws", &NoFaults, &NoLiveLeases, 3_000, 1_000_000)
+    };
+    feed.lose_push_reply.store(true, Ordering::SeqCst);
+    assert!(push(&mut store).is_err());
+    assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), -1);
+
+    feed.unshare("doc-b");
+    sync_parking(&client, &mut store);
+    assert!(!hosted_document_parkable(&store, "ws", "doc-b").unwrap());
+    assert_eq!(departed_hosted_object_ids(&store, "ws").unwrap(), ["doc-b"]);
+
+    push(&mut store).unwrap();
+    assert_eq!(read_pushed_seq(&store, "ws", HOST).unwrap(), 0);
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b"));
+    let journal = coordinates(&store);
+
+    feed.share("doc-b", "a.md");
+    sync_parking(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(coordinates(&store), journal, "its own row skips");
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
 }
 
 /// The slice-3 review's second reproduction: the relay serves a refused

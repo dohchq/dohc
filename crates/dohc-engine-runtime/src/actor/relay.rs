@@ -155,7 +155,7 @@ pub enum RelayOperation {
     },
     /// One pass of the hosted feed. Its cursor commits with
     /// `CommitHostedCursor` once its changed paths are materialized. A pass
-    /// that adopts a new scope, and every commit, then retire the documents
+    /// that adopts a new scope, and every commit, then park the documents
     /// that left the scope, as `root` holds them.
     PullHosted {
         workspace_id: String,
@@ -1720,15 +1720,16 @@ pub enum RelayOperationOutcome {
         /// `false` when the scope moved since the pass fetched; nothing
         /// committed.
         committed: bool,
-        /// Retirement after the commit: `Ok(true)` when a document that left
-        /// the scope retired, so work that waited for its path can apply and
-        /// the caller pulls again. Its failure leaves the commit standing.
+        /// Parking after the commit: `Ok(true)` when a document that left the
+        /// scope parked or its file's path came free, so work that waited for
+        /// its path can apply and the caller pulls again. Its failure leaves
+        /// the commit standing.
         retirement: Result<bool, RuntimeError>,
         /// As for [`Self::HostedPass`], after the commit. A failure to read
         /// them released nothing and leaves the commit standing; the next
         /// pass releases them.
         unready: Result<Vec<String>, RuntimeError>,
-        /// As for [`Self::HostedPass`], after the retirement. A failure to
+        /// As for [`Self::HostedPass`], after the parking. A failure to
         /// read them leaves the commit standing; the next pass reports them.
         departed: Result<Vec<String>, RuntimeError>,
     },
@@ -2621,7 +2622,7 @@ fn run_relay_operation(
                 client.pull_hosted_workspace(store, doc_cache, &workspace_id, &NoFaults, leases)?;
             // A pass without a cursor adopted a new scope.
             if pass.pending_cursor.is_none() {
-                retire_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms)?;
+                park_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms)?;
             }
             Ok(RelayOperationOutcome::HostedPass {
                 pass,
@@ -2637,7 +2638,7 @@ fn run_relay_operation(
         } => match client.commit_hosted_cursor(store, &workspace_id, &cursor, &NoFaults)? {
             TxnOutcome::Committed(committed) => {
                 let retirement =
-                    retire_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms);
+                    park_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms);
                 Ok(RelayOperationOutcome::HostedCursorCommitted {
                     committed,
                     retirement,
@@ -2677,16 +2678,16 @@ fn release_unready_hosted(
     Ok(unready)
 }
 
-/// Retire each hosted document that left the scope once nothing of it is
-/// left to settle, deliver or push: no live session holds it, the unload
-/// checks pass, and its file holds its head or nothing. Each retires in its
-/// own transaction, which records its file as retired; the file goes after,
-/// and a file an earlier pass could not remove goes first. A file holding
+/// Park each hosted document that left the scope once nothing of it is left
+/// to settle, deliver or push: no live session holds it, the unload checks
+/// pass, and its file holds its head or nothing. Each parks in its own
+/// transaction, which records its file as retired; the file goes after, and
+/// a file an earlier pass could not remove goes first. A file holding
 /// anything else is a bug in a service root nothing else writes to, so its
-/// document stays departed, the others still retire, and the pass names the
-/// first such file. Answers whether any document retired or any path came
+/// document stays departed, the others still park, and the pass names the
+/// first such file. Answers whether any document parked or any path came
 /// free.
-fn retire_departed_hosted(
+fn park_departed_hosted(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
     leases: &LeaseRegistry,
@@ -2698,7 +2699,7 @@ fn retire_departed_hosted(
         .get_active_version(workspace_id)?
         .version_id;
     let mut unexpected = None;
-    let mut retired = remove_retired_files(store, workspace_id, root, &mut unexpected)?;
+    let mut parked = remove_retired_files(store, workspace_id, root, &mut unexpected)?;
     'departed: for document in dohc_engine_sync::departed_hosted_documents(store, workspace_id)? {
         let versions = document
             .heads
@@ -2713,7 +2714,7 @@ fn retire_departed_hosted(
             })
             .collect::<Result<Vec<_>, _>>()?;
         if keys.iter().any(|key| leases.is_held(key))
-            || !dohc_engine_sync::hosted_document_retirable(
+            || !dohc_engine_sync::hosted_document_parkable(
                 store,
                 workspace_id,
                 &document.object_id,
@@ -2746,7 +2747,7 @@ fn retire_departed_hosted(
                 }
             }
         }
-        match dohc_engine_sync::retire_hosted_document(
+        match dohc_engine_sync::park_hosted_document(
             store,
             workspace_id,
             &document.object_id,
@@ -2757,7 +2758,7 @@ fn retire_departed_hosted(
             TxnOutcome::Committed(false) => continue,
             TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
         }
-        retired = true;
+        parked = true;
         for key in &keys {
             doc_cache.remove(key);
             doc_cache.unpin(key);
@@ -2766,7 +2767,7 @@ fn retire_departed_hosted(
     }
     match unexpected {
         Some(path) => Err(RuntimeError::HostedFileUnexpected { path }),
-        None => Ok(retired),
+        None => Ok(parked),
     }
 }
 
@@ -3361,7 +3362,7 @@ mod hosted_refusal_tests {
         let file = root.path().join("a.md");
         std::fs::write(&file, "not the head").unwrap();
         let pass = |store: &mut EngineStore| {
-            retire_departed_hosted(
+            park_departed_hosted(
                 store,
                 &mut WriterDocCache::new(),
                 &LeaseRegistry::default(),
@@ -3400,10 +3401,10 @@ mod hosted_refusal_tests {
 
     /// The durability review: a stuck retired file returned before the
     /// retired files after it and every departed document, so nothing else
-    /// in the workspace ever retired. The others still go; the stuck one
-    /// stays departed, and the pass still names it.
+    /// in the workspace ever retired. The others still go or park; the stuck
+    /// one stays departed, and the pass still names it.
     #[test]
-    fn a_stuck_retired_file_does_not_hold_back_other_retirements() {
+    fn a_stuck_retired_file_does_not_hold_back_other_departed_documents() {
         let scratch = ScratchDir::new().unwrap();
         let root = ScratchDir::new().unwrap();
         let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
@@ -3449,7 +3450,7 @@ mod hosted_refusal_tests {
             ["doc-b", "doc-c", "doc-z"]
         );
 
-        let refused = retire_departed_hosted(
+        let refused = park_departed_hosted(
             &mut store,
             &mut WriterDocCache::new(),
             &LeaseRegistry::default(),
@@ -3508,7 +3509,7 @@ mod hosted_refusal_tests {
         std::fs::write(root.path().join("d/keep.md"), "keep").unwrap();
 
         assert!(
-            retire_departed_hosted(
+            park_departed_hosted(
                 &mut store,
                 &mut WriterDocCache::new(),
                 &LeaseRegistry::default(),

@@ -14,9 +14,9 @@
 //! feed skips its rows, and nothing of it is retained, so a held document
 //! neither freezes the main cursor nor fills deferred work. A document is in
 //! scope while its row carries the replica's scope generation; one that left
-//! keeps its state until it retires.
+//! keeps its state until it parks, and keeps what its return needs after.
 
-mod retirement;
+mod park;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,11 +25,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{ReplicationEnvelope, SyncError};
 
-pub use retirement::{
+pub use park::{
     DepartedDocument, DepartedHead, RetiredFile, departed_hosted_documents,
-    departed_hosted_object_ids, forget_retired_hosted_file, hosted_document_retirable,
-    retire_hosted_document, retired_hosted_files,
+    departed_hosted_object_ids, forget_retired_hosted_file, hosted_document_parkable,
+    park_hosted_document, retired_hosted_files,
 };
+pub(crate) use park::{unpark_returned, unparks_next};
 
 /// The origin prefix the relay reserves for a service host's writes.
 pub const SERVICE_HOST_ORIGIN_PREFIX: &str = "service-host:";
@@ -52,7 +53,7 @@ pub const HOSTED_REPLICA_NOT_PRISTINE: &str =
 pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withheld";
 
 /// A moment or Y.Doc row whose path a document outside the scope, or the file
-/// a retired one left, still holds here. It waits until that path is free.
+/// a parked one left, still holds here. It waits until that path is free.
 pub(crate) const PATH_HELD_BY_DEPARTED: &str = "hosted-path-held-by-departed";
 
 /// A backfilled op whose path another document in the scope holds here
@@ -80,7 +81,8 @@ pub fn is_hosted_replica(store: &EngineStore, workspace_id: &str) -> Result<bool
 /// A hosted replica writes only what a session host does for a document it
 /// hosts: live `ydoc.update`, settlement `moment.append` and `live.audit.*`.
 /// The relay refuses anything else from a host, so it is refused here, before
-/// it commits a coordinate nothing could push.
+/// it commits a coordinate nothing could push. A parked document is no longer
+/// hosted.
 pub(crate) fn allocate_outbound_seq_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -103,7 +105,7 @@ pub(crate) fn allocate_outbound_seq_in_tx(
         Some(object_id) => tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM hosted_documents \
-                 WHERE workspace_id=?1 AND object_id=?2)",
+                 WHERE workspace_id=?1 AND object_id=?2 AND state<>'parked')",
                 params![workspace_id, object_id],
                 |row| row.get(0),
             )
@@ -330,8 +332,8 @@ pub(crate) fn forget_before(payload: &mut serde_json::Value) {
 
 /// Hold back a moment that would take `path` while a hosted document that
 /// left the scope still holds it here. That document may still settle work
-/// against its head there, so the path stays its own until it retires and
-/// its file is gone; the moment waits and applies after. An ordinary replica
+/// against its head there, so the path stays its own until it parks and its
+/// file is gone; the moment waits and applies after. An ordinary replica
 /// holds nothing back.
 pub(crate) fn wait_for_departed_occupant_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -348,7 +350,7 @@ pub(crate) fn wait_for_departed_occupant_in_tx(
     Ok(())
 }
 
-/// Whether a hosted document that left the scope, or the file a retired one
+/// Whether a hosted document that left the scope, or the file a parked one
 /// left, holds `path` here against `object_id`. A path held this way matches
 /// like a capture hold: in any case, and with everything beneath it. It also
 /// holds each folder above it, which a file at that path would collide with.
@@ -398,7 +400,8 @@ fn claimed_path(op: &ReplicationEnvelope) -> Option<(&str, &str)> {
 
 /// Why a hosted replica holds `op` back before routing it, or `None`. A row
 /// its journal already holds is never held: the router skips it as applied.
-/// Otherwise an op of a document that is not ready waits while another
+/// Otherwise every op of a returning document waits while its heads are
+/// parked, an op of a document that is not ready waits while another
 /// document in the scope holds its path ([`backfill_path_held`]), and a Y.Doc
 /// row waits while a departed document or a retired file holds its path, as
 /// a moment does when it applies.
@@ -417,6 +420,14 @@ pub(crate) fn held_before_routing(
         .map_err(SyncError::corrupt)?;
     if journaled {
         return Ok(None);
+    }
+    if let Some(object_id) = hosted_document(op).filter(|id| unready.contains(*id))
+        && let Some(hold) = park::parked_hold(conn, &op.workspace_id, object_id)?
+    {
+        return Ok(Some(match hold {
+            HostedHold::PathHeld { .. } => BACKFILL_PATH_HELD,
+            _ => PATH_HELD_BY_DEPARTED,
+        }));
     }
     if backfill_path_held(conn, unready, op)?.is_some() {
         return Ok(Some(BACKFILL_PATH_HELD));
@@ -547,6 +558,10 @@ pub enum HostedHold {
         scope_path: String,
         head_path: Option<String>,
     },
+    /// Its history holds an ordinary edit of its live lineage that this
+    /// replica refused because its session never admitted it, so its content
+    /// here is incomplete. It cannot be edited live here.
+    LiveEditUnadmitted,
 }
 
 impl HostedHold {
@@ -557,13 +572,16 @@ impl HostedHold {
             Self::ConflictParentWithheld { .. } => CONFLICT_PARENT_WITHHELD,
             Self::WorkWaiting => "hosted-backfill-work-waiting",
             Self::ScopePathMismatch { .. } => SCOPE_PATH_MISMATCH,
+            Self::LiveEditUnadmitted => LIVE_EDIT_UNADMITTED,
         }
     }
 
     fn held_path(&self) -> Option<&str> {
         match self {
             Self::PathHeld { path, .. } => Some(path),
-            Self::ConflictParentWithheld { .. } | Self::WorkWaiting => None,
+            Self::ConflictParentWithheld { .. } | Self::WorkWaiting | Self::LiveEditUnadmitted => {
+                None
+            }
             Self::ScopePathMismatch { head_path, .. } => head_path.as_deref(),
         }
     }
@@ -573,19 +591,24 @@ impl HostedHold {
             Self::PathHeld { held_by, .. } => Some(held_by),
             Self::ConflictParentWithheld { .. }
             | Self::WorkWaiting
-            | Self::ScopePathMismatch { .. } => None,
+            | Self::ScopePathMismatch { .. }
+            | Self::LiveEditUnadmitted => None,
         }
     }
 
     fn held_conflict_id(&self) -> Option<&str> {
         match self {
             Self::ConflictParentWithheld { conflict_id } => Some(conflict_id),
-            Self::PathHeld { .. } | Self::WorkWaiting | Self::ScopePathMismatch { .. } => None,
+            Self::PathHeld { .. }
+            | Self::WorkWaiting
+            | Self::ScopePathMismatch { .. }
+            | Self::LiveEditUnadmitted => None,
         }
     }
 }
 
 const SCOPE_PATH_MISMATCH: &str = "hosted-scope-path-mismatch";
+const LIVE_EDIT_UNADMITTED: &str = "hosted-live-edit-unadmitted";
 
 /// A `hosted_documents` row's state, held reason, held path, held-by and
 /// held conflict columns, with `scope_path` its `path`.
@@ -615,6 +638,9 @@ fn decode_status(
                     scope_path: scope_path.to_owned(),
                     head_path,
                 })
+            }
+            ("held", Some(LIVE_EDIT_UNADMITTED), None, None, None) => {
+                HostedDocumentStatus::Held(HostedHold::LiveEditUnadmitted)
             }
             _ => {
                 return Err(crate::error::local_corruption(
@@ -702,7 +728,8 @@ pub fn read_hosted_replica(
 /// Its generation moves, so no pass fetched under the old scope can commit.
 /// A document still in scope keeps its progress; one that joins, or returns
 /// after leaving, backfills from the start, because the feed withheld its
-/// rows while it was out. A ready document the scope moves away from its
+/// rows while it was out, and a parked one's journal skips what it already
+/// applied. A ready document the scope moves away from its
 /// head is held until the row that takes it there applies; its own read
 /// picks up where the main feed is, which applied or retained everything of
 /// it before.
@@ -935,6 +962,9 @@ pub(crate) fn stopped_hold(
     object_id: &str,
     op: &ReplicationEnvelope,
 ) -> Result<HostedHold, SyncError> {
+    if let Some(hold) = park::parked_hold(conn, &op.workspace_id, object_id)? {
+        return Ok(hold);
+    }
     let unready = BTreeSet::from([object_id.to_owned()]);
     if let Some(hold) = backfill_path_held(conn, &unready, op)? {
         return Ok(hold);
@@ -948,15 +978,22 @@ pub(crate) fn stopped_hold(
 }
 
 /// What holds a document whose read reached the end of its rows from being
-/// ready: retained work of it still waiting, or a head away from the path
-/// its scope names. `None` once nothing does.
+/// ready: heads still parked, retained work of it still waiting, a live edit
+/// it refused, or a head away from the path its scope names. `None` once
+/// nothing does.
 fn completed_hold(
     conn: &Connection,
     workspace_id: &str,
     object_id: &str,
 ) -> Result<Option<HostedHold>, SyncError> {
+    if let Some(hold) = park::parked_hold(conn, workspace_id, object_id)? {
+        return Ok(Some(hold));
+    }
     if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
         return stopped_hold(conn, object_id, &waiting).map(Some);
+    }
+    if live_edit_unadmitted(conn, workspace_id, object_id)? {
+        return Ok(Some(HostedHold::LiveEditUnadmitted));
     }
     let scope_path: String = conn
         .query_row(
@@ -974,6 +1011,28 @@ fn completed_hold(
             },
         ),
     )
+}
+
+/// Whether this replica refused an ordinary `ydoc.update` of `object_id`'s
+/// current lineage because its live session never admitted it. The refusal
+/// keeps the row journaled, so no later read applies it.
+fn live_edit_unadmitted(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replication_refused_ydoc_blobs r \
+         JOIN replication_log l USING (workspace_id,origin_id,origin_seq) \
+         JOIN ydoc_docs d ON d.workspace_id=l.workspace_id \
+           AND d.version_id=json_extract(l.payload_json,'$.versionId') \
+           AND d.object_id=json_extract(l.payload_json,'$.objectId') \
+           AND d.lineage_claim_id=json_extract(l.payload_json,'$.lineageClaimId') \
+         WHERE r.workspace_id=?1 AND d.object_id=?2)",
+        params![workspace_id, object_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 /// The path of `object_id`'s head in the version the root holds.

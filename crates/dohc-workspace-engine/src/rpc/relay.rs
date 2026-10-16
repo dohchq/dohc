@@ -335,7 +335,7 @@ fn hosted_hold_json(object_id: &str, hold: &dohc_engine_sync::HostedHold) -> Val
         HostedHold::ConflictParentWithheld { conflict_id } => {
             held["conflictId"] = json!(conflict_id);
         }
-        HostedHold::WorkWaiting => {}
+        HostedHold::WorkWaiting | HostedHold::LiveEditUnadmitted => {}
         HostedHold::ScopePathMismatch {
             scope_path,
             head_path,
@@ -516,9 +516,9 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             hosted_pass_json(pass, departed)
         }
         // A pass fetched under a scope that has since moved commits nothing.
-        // A commit that retired a departed document has more to pull: work
-        // that waited for its path. A retirement that failed is reported as
-        // the error it would have been, beside the commit that stands. A
+        // A commit that parked a departed document has more to pull: work
+        // that waited for its path. Parking that failed is reported as the
+        // error it would have been, beside the commit that stands. A
         // commit that could not read what it left unready, or what departed
         // documents remain, has more to pull, whose pass releases or reports
         // them, or says why it cannot. `departed` is null when unread.
@@ -1355,7 +1355,7 @@ impl EngineService {
     /// Otherwise materialize its `pendingCursor` with
     /// `sync.materializePendingCursor`, then commit it with
     /// `sync.commitCursor`, and pull again while the pass or the commit
-    /// answers `hasMore`. Adopting a scope and committing also retire the
+    /// answers `hasMore`. Adopting a scope and committing also park the
     /// documents that left the scope.
     pub(super) async fn sync_pull_hosted(
         &self,

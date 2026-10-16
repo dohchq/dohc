@@ -812,12 +812,12 @@ async fn ordinary_relay_rpcs_leave_a_hosted_replica_untouched() {
     );
 }
 
-/// A document that leaves the scope retires once nothing of it is pending:
-/// its rows and its file go, and the document that replaced it at its path
-/// takes it. A file holding anything but its head is a bug in a service
-/// root, so retirement stops and names it.
+/// A document that leaves the scope parks once nothing of it is pending: its
+/// head and file go, and the document that replaced it at its path takes it.
+/// A file holding anything but its head is a bug in a service root, so
+/// parking stops and names it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_departed_document_retires_and_frees_its_file_for_its_replacement() {
+async fn a_departed_document_parks_and_frees_its_file_for_its_replacement() {
     let mut relay = HostedRelay::default();
     relay.log.push(json!({
         "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
@@ -865,8 +865,8 @@ async fn a_departed_document_retires_and_frees_its_file_for_its_replacement() {
         "not the head"
     );
 
-    // The durability review: a commit lands whether or not retirement after
-    // it fails, and says both.
+    // The durability review: a commit lands whether or not parking after it
+    // fails, and says both.
     let commits = || {
         Connection::open(engine_db_path(&scratch).expect("db path"))
             .expect("open db")
@@ -892,24 +892,73 @@ async fn a_departed_document_retires_and_frees_its_file_for_its_replacement() {
     }
     assert_eq!(commits(), before + 2);
 
-    // With its head back on disk, doc-b retires after the next commit, and
-    // doc-a's waiting write applies and takes the path.
+    // With its head back on disk, doc-b parks after the next commit, and
+    // doc-a's waiting write applies and takes the path. doc-b keeps its
+    // object and history for its return.
     std::fs::write(&file, "hosted b").expect("write a.md");
     host.sync().await;
     assert_eq!(std::fs::read_to_string(&file).expect("a.md"), "hosted a");
-    assert_eq!(document_state(&scratch, "doc-b"), None);
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
     assert_eq!(host.pull().await["departed"], json!([]));
     assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
     let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
-    let (objects, conflicts): (i64, i64) = conn
+    let (objects, heads, conflicts): (i64, i64, i64) = conn
         .query_row(
             "SELECT (SELECT COUNT(*) FROM file_objects WHERE object_id='doc-b'), \
+                    (SELECT COUNT(*) FROM snapshots WHERE object_id='doc-b'), \
                     (SELECT COUNT(*) FROM conflicts)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("count");
+    assert_eq!((objects, heads, conflicts), (1, 0, 0));
+}
+
+/// A parked document's file goes, and when it is shared again its head
+/// comes back and its file with it, with nothing applied twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_document_comes_back_with_its_file_when_it_returns() {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-b", "notes/a.md", "hosted b");
+    relay.share("doc-b", "notes/a.md");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    let file = scratch.path().join("notes/a.md");
+    assert_eq!(std::fs::read_to_string(&file).expect("a.md"), "hosted b");
+
+    relay.relay().unshare("doc-b");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
+    assert!(!file.exists());
+    assert_eq!(host.pull().await["departed"], json!([]));
+
+    relay.relay().share("doc-b", "notes/a.md");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
+    assert_eq!(std::fs::read_to_string(&file).expect("a.md"), "hosted b");
+    let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
+    let (moments, parked): (i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM moments WHERE object_id='doc-b'), \
+                    (SELECT COUNT(*) FROM hosted_parked_snapshots)",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("count");
-    assert_eq!((objects, conflicts), (0, 0));
+    assert_eq!((moments, parked), (1, 0));
 }
 
 /// The durability review: `doc-b` left the scope at `a.md/x/c.md` and
@@ -948,7 +997,7 @@ async fn a_retired_file_leaves_no_folder_in_its_replacements_way() {
         relay.share("doc-a", "a.md");
     }
     host.sync().await;
-    assert_eq!(document_state(&scratch, "doc-b"), None);
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
     assert_eq!(document_state(&scratch, "doc-a").as_deref(), Some("ready"));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("a.md")).expect("a.md"),
@@ -1005,10 +1054,10 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
         .open(&file)
         .expect("lock a.md");
 
-    // doc-b retires; its file cannot go.
+    // doc-b parks; its file cannot go.
     let (_, message) = host.error("sync.pullHosted").await;
     assert!(!message.contains("hosted-file-unexpected"), "{message}");
-    assert_eq!(document_state(&scratch, "doc-b"), None);
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
     host.call("workspace.close", json!({})).await;
     drop(host);
 
@@ -1020,7 +1069,11 @@ async fn a_retired_file_that_could_not_go_holds_its_path_until_it_goes() {
         id: 1,
     };
     let pass = host.pull().await;
-    assert_eq!(pass["departed"], json!(["doc-b"]), "its rows are gone");
+    assert_eq!(
+        pass["departed"],
+        json!(["doc-b"]),
+        "it parked; its file remains"
+    );
     let commit = host.commit_answer(&pass["pendingCursor"]).await;
     assert_eq!(commit["committed"], true);
     assert!(commit["retirement"].is_object(), "{commit}");
@@ -1104,12 +1157,12 @@ async fn retired_file_holds_its_path_while_a_folder_is_locked(locked: &str) {
         .open(scratch.path().join(locked))
         .expect("lock folder");
 
-    // doc-b retires; its file goes, but the locked folder cannot, across
+    // doc-b parks; its file goes, but the locked folder cannot, across
     // passes.
     let conn = Connection::open(engine_db_path(&scratch).expect("db path")).expect("open db");
     for _ in 0..2 {
         host.sync().await;
-        assert_eq!(document_state(&scratch, "doc-b"), None);
+        assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
         assert!(!scratch.path().join("a.md/x/c.md").exists());
         let pass = host.pull().await;
         assert_eq!(pass["departed"], json!(["doc-b"]));
@@ -1190,7 +1243,7 @@ async fn a_returning_document_is_held_off_another_documents_path_until_it_moves(
         relay.share("doc-a", "a.md");
     }
     host.sync().await;
-    assert_eq!(document_state(&scratch, "doc-b"), None);
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
     let read = |path: &str| std::fs::read_to_string(scratch.path().join(path)).ok();
     assert_eq!(read("a.md").as_deref(), Some("hosted a"));
 
@@ -1300,7 +1353,7 @@ async fn a_departed_document_keeps_its_head_until_its_session_settles() {
     host.call("sync.push", json!({"workspaceId": WORKSPACE}))
         .await;
     host.sync().await;
-    assert_eq!(document_state(&scratch, "doc-b"), None);
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
     assert_eq!(std::fs::read_to_string(&file).expect("a.txt"), "hosted a");
 }
 
