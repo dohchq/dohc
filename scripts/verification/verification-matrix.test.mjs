@@ -439,7 +439,14 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
           assert.deepEqual(report.failed, [row]);
           assert.deepEqual(report.shared, [{ ...row, branches: ["feat/a"] }], "this branch's own run does not count");
           assert.match(result.stdout, /\[verification\] 1 failed test also failed on other branches in the last day\. [^\n]*:\n {2}@dohc\/fixture: src\/index\.test\.ts › keeps its value \(also feat\/a\)\n/u);
-        } else assert.equal(report.shared, undefined, "a failure without failed tests looks nothing up");
+          const rerun = 'pnpm --filter @dohc/fixture exec vitest run src/index.test.ts -t "^keeps its value$"';
+          assert.deepEqual(report.rerun, [rerun]);
+          assert.ok(result.stdout.endsWith(`[verification] Rerun the failed tests locally before resubmitting. Set DOHC_REQUIRE_POSTGRES=1 and DOHC_REQUIRE_ENGINE_E2E=1, as the gate does, so a missing database or engine fails instead of skipping:\n  ${rerun}\n`), result.stdout);
+        } else {
+          assert.equal(report.shared, undefined, "a failure without failed tests looks nothing up");
+          assert.equal(report.rerun, undefined, "a failure without failed tests has nothing to rerun");
+          assert.doesNotMatch(result.stdout, /Rerun the failed tests/u);
+        }
         if (fault === "restart-one-missing") {
           for (const tag of ["@restart-durability-idle-external", "@restart-durability-overlapping-typing", "@restart-durability-capture-before-reopen"]) {
             assert.ok(report.desktopProofs.some(title => title.split(/\s+/u).includes(tag)), `${tag} passed`);
@@ -470,6 +477,8 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         }
       } else {
         assert.equal(result.status, 0, result.stderr);
+        assert.equal(report.rerun, undefined);
+        assert.doesNotMatch(result.stdout, /Rerun the failed tests/u, "a passing run prints no commands");
         assert.deepEqual(report.steps.map(({name})=>name).sort(), [
           ...(mode === "pr" ? ["install"] : []),
           ...(desktop ? ["electron-install", "desktop"] : []),

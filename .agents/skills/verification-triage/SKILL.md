@@ -14,7 +14,8 @@ Both procedures follow these rules:
 - Follow `AGENTS.md`. Keep one concern per PR.
 - Create worktrees with `~/dev/garage/tools/worktree.mjs`. Remove your worktrees and processes when you finish.
 - Verify each PR with `pnpm verify:pr --base origin/main` through the queue.
-- Do not cancel, kill, or edit another request under `C:\w\_verification` or `C:\w\_locks`.
+- You may move a waiting request, yours or another thread's, with `pnpm verify:queue move` and a `--reason`. Move one only to unblock other work, as [the procedure](../../../docs/engineering/verify-agent-work.md#move-a-waiting-request) describes.
+- Do not cancel, kill, or edit another request, or its files under `C:\w\_verification` or `C:\w\_locks`.
 - Do not stop another agent's run.
 
 ## Run a nightly by hand
