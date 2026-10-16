@@ -1068,7 +1068,7 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
             .is_none(),
         "redelivery must still leave the cursor pending"
     );
-    assert_eq!(
+    assert!(matches!(
         client
             .commit_pull_cursor(
                 &mut reopened,
@@ -1079,8 +1079,8 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
                 1_000
             )
             .expect("commit after materialization"),
-        TxnOutcome::Committed(Vec::new())
-    );
+        TxnOutcome::Committed(ref commit) if commit.sharing_declined.is_empty()
+    ));
     assert_eq!(
         read_relay_cursor(&reopened, "ws")
             .expect("cursor")
