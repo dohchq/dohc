@@ -94,23 +94,41 @@ export const UsageSnapshot = z.strictObject({
 });
 export type UsageSnapshot = z.infer<typeof UsageSnapshot>;
 
-// Validate the aggregate shape before dropping ids retired by this build.
-// Unknown fields are still errors, including on a row about a retired id.
+// Validate the aggregate shape before separating unknown and retired ids.
+// The store keeps these rows until they age out, except unknown pairs filed
+// under its own app version. Unknown fields remain errors.
 const StoredCapabilityId = z.string().max(128).regex(/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/);
-const StoredSnapshot = z.strictObject({
+export const StoredSnapshot = z.strictObject({
   version: z.literal(1), enabled: z.boolean(), cleanExit: z.boolean().default(false),
   days: z.array(UsageDayRecord),
   counts: z.array(UsageCount.extend({ capabilityId: StoredCapabilityId })),
   coverage: z.array(z.strictObject({ appVersion: UsageAppVersion,
     pairs: z.array(UsageBuildPair.extend({ capabilityId: StoredCapabilityId })) })),
 });
-export function decodeUsageSnapshot(input: unknown): UsageSnapshot {
+export type StoredSnapshot = z.infer<typeof StoredSnapshot>;
+export function decodeUsageSnapshot(input: unknown): {
+  snapshot: UsageSnapshot; dropped: Pick<StoredSnapshot, "counts" | "coverage">;
+} {
   const stored = StoredSnapshot.parse(input);
-  return UsageSnapshot.parse({ ...stored,
-    counts: stored.counts.filter(row => UsageActionId.safeParse(row.capabilityId).success),
-    coverage: stored.coverage.map(version => ({ ...version,
-      pairs: version.pairs.filter(pair => UsageCapabilityId.safeParse(pair.capabilityId).success) })),
+  const dropped: Pick<StoredSnapshot, "counts" | "coverage"> = { counts: [], coverage: [] };
+  const snapshot = UsageSnapshot.parse({ ...stored,
+    counts: stored.counts.filter(row => {
+      if (UsageActionId.safeParse(row.capabilityId).success) return true;
+      dropped.counts.push(row);
+      return false;
+    }),
+    coverage: stored.coverage.map(version => {
+      const unknown: StoredSnapshot["coverage"][number] = { appVersion: version.appVersion, pairs: [] };
+      const pairs = version.pairs.filter(pair => {
+        if (UsageCapabilityId.safeParse(pair.capabilityId).success) return true;
+        unknown.pairs.push(pair);
+        return false;
+      });
+      if (unknown.pairs.length) dropped.coverage.push(unknown);
+      return { ...version, pairs };
+    }),
   });
+  return { snapshot, dropped };
 }
 
 export const UsageQuery = z.strictObject({
