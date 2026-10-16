@@ -512,8 +512,7 @@ export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log
   const write = async (request, action, send) => {
     const { body, refused, gone } = await writeBody(request, writeWaitMs);
     if (gone) return;
-    // Closing the connection stops a refused client from streaming the rest of its body.
-    if (refused) return send(refused[0], "text/plain", refused[1], { connection: "close" });
+    if (refused) return send(refused[0], "text/plain", refused[1]);
     const host = request.headers.host;
     let answer;
     if (action === "pause") {
@@ -532,7 +531,9 @@ export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log
   const server = createServer((request, response) => {
     const send = (code, type, body, headers = {}) => {
       response.writeHead(code, { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
-        "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'", ...headers });
+        "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        // Closing the connection stops a refused client from streaming the rest of a body.
+        ...(code >= 400 && !["GET", "HEAD"].includes(request.method) ? { connection: "close" } : {}), ...headers });
       response.end(request.method === "HEAD" ? undefined : body);
     };
     const json = value => value ? send(200, "application/json", JSON.stringify(value)) : send(404, "application/json", "null");

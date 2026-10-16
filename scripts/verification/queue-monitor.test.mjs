@@ -312,6 +312,7 @@ test("a write is refused with a status, and changes nothing, unless it is a smal
   for (const [name, body, options, status] of refusals) {
     const answer = await write("/api/pause", body, options);
     assert.equal(answer.status, status, name);
+    assert.equal(answer.headers.connection, options.method === "GET" ? "keep-alive" : "close", `${name} closes its connection unless it is a GET`);
     assert.equal(readPause(root), null, `${name} must not pause the queue`);
   }
   assert.equal((await write("/api/pause", undefined, { method: "GET" })).headers.allow, "POST");
