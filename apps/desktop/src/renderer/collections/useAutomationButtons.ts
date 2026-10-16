@@ -14,7 +14,15 @@ import { bridge } from "../bridge";
 // button subscribes to its own field and record, so a press re-renders only
 // that button, and a table's cells keep their elements and focus.
 
-export type ReportButtonError = (fallback: string, error: unknown, retry: (() => void) | null) => void;
+// `identity` names what failed, such as one database cell, when the words
+// alone may not tell two failures apart. Its Notice then replaces only a
+// Notice of the same identity; without one, the words decide.
+export type ReportButtonError = (
+  fallback: string,
+  error: unknown,
+  retry: (() => void) | null,
+  identity?: string,
+) => void;
 /** Whose buttons a store shows: a document Collection's, or one table's of a dataset Collection. */
 export type ButtonsOf = { collectionPath: string } | { datasetId: string; table: string };
 export interface ButtonReporter {

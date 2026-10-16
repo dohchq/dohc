@@ -917,6 +917,7 @@ export const FileInspector = memo(function FileInspector(
               refreshKey={props.refreshKey}
               onSharePath={props.onSharePath}
               readOnly={props.readOnly}
+              onError={props.onButtonError}
             />
           </Suspense>
           </SkeletonSlot>
