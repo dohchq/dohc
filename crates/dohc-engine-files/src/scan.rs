@@ -120,6 +120,7 @@ pub struct Scanner {
     bounds: ScanBounds,
     pool: HashPool,
     io_faults: Option<Arc<dyn ScanIoFaultInjector>>,
+    paths: Option<Vec<String>>,
 }
 
 impl Scanner {
@@ -134,6 +135,7 @@ impl Scanner {
             bounds,
             pool,
             io_faults: None,
+            paths: None,
         })
     }
 
@@ -147,6 +149,12 @@ impl Scanner {
         let mut scanner = Self::new(bounds)?;
         scanner.io_faults = Some(io_faults);
         Ok(scanner)
+    }
+
+    /// Restrict enumeration to exact paths for an operation's reconciliation.
+    pub fn with_paths(mut self, paths: Option<Vec<String>>) -> Self {
+        self.paths = paths;
+        self
     }
 
     /// The bounds this scanner enforces.
@@ -352,6 +360,9 @@ impl Scanner {
 
     /// Enumerate every tracked candidate under `root`, bounded and cancellable.
     fn enumerate(&self, root: &Path, token: &CancellationToken) -> Result<EnumOutcome, FilesError> {
+        if let Some(paths) = &self.paths {
+            return self.enumerate_paths(root, paths, token);
+        }
         let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
         let mut files: Vec<Candidate> = Vec::new();
         let mut skipped: Vec<SkippedPath> = Vec::new();
@@ -533,6 +544,92 @@ impl Scanner {
             }
         }
 
+        Ok(EnumOutcome::Completed {
+            files,
+            skipped,
+            failed,
+        })
+    }
+
+    fn enumerate_paths(
+        &self,
+        root: &Path,
+        paths: &[String],
+        token: &CancellationToken,
+    ) -> Result<EnumOutcome, FilesError> {
+        let mut files = Vec::new();
+        let mut skipped = Vec::new();
+        let mut failed = Vec::new();
+        for rel in paths {
+            if token.is_cancelled() {
+                return Ok(EnumOutcome::Cancelled);
+            }
+            if floor::is_excluded_file(rel) {
+                continue;
+            }
+            let relative = Path::new(rel);
+            if !relative
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+            {
+                return Err(FilesError::InvalidRoot {
+                    reason: "invalid scoped path",
+                });
+            }
+            let mut abs = root.to_path_buf();
+            let mut metadata = None;
+            for component in relative.components() {
+                abs.push(component);
+                match std::fs::symlink_metadata(&abs) {
+                    Ok(m) if m.file_type().is_symlink() => {
+                        metadata = None;
+                        break;
+                    }
+                    Ok(m) => metadata = Some(m),
+                    Err(e)
+                        if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+                    {
+                        metadata = None;
+                        break;
+                    }
+                    Err(e) => {
+                        failed.push(FailedPath {
+                            path: rel.clone(),
+                            kind: e.kind(),
+                        });
+                        metadata = None;
+                        break;
+                    }
+                }
+            }
+            if let Some(m) = metadata.filter(|m| m.is_file()) {
+                let size = m.len();
+                if size > self.bounds.max_file_bytes {
+                    match self.bounds.over_cap {
+                        OverCapPolicy::Skip => skipped.push(SkippedPath {
+                            path: rel.clone(),
+                            size,
+                            reason: SkipReason::OverCap,
+                        }),
+                        OverCapPolicy::Error => {
+                            return Err(FilesError::FileTooLarge {
+                                path: rel.clone(),
+                                size,
+                                cap: self.bounds.max_file_bytes,
+                            });
+                        }
+                    }
+                } else {
+                    files.push(Candidate {
+                        rel: rel.clone(),
+                        abs,
+                        size,
+                        mtime_ms: mtime_ms(&m),
+                    });
+                }
+            }
+            self.check_file_bound(files.len(), skipped.len(), failed.len())?;
+        }
         Ok(EnumOutcome::Completed {
             files,
             skipped,

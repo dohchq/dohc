@@ -31,12 +31,18 @@ function harness() {
 }
 afterEach(() => vi.clearAllMocks());
 describe("local app publication review", () => {
+  it("forwards parsed agent approval provenance into local activation", async () => {
+    const h = harness(), review = await h.prepare();
+    const agent = { kind: "agent", label: "Builder", labelSource: "agent-declared" } as const;
+    await h.handler({ action: "approve", workspaceId: "w", approvalId: review.approvalId, candidateDigest: review.candidateDigest }, "caller", h.operation, agent);
+    expect(h.activate).toHaveBeenCalledWith({ candidate, files: [] }, h.controller.signal, agent);
+  });
   it("captures before approval and activates the captured bundle without remote credentials", async () => {
     const h = harness(); const review = await h.prepare();
     expect(review.local).toBe(true); expect(h.activate).not.toHaveBeenCalled();
     expect(await h.handler({ action: "approve", workspaceId: "w", approvalId: review.approvalId, candidateDigest: review.candidateDigest }, "caller", h.operation))
       .toEqual({ kind: "published", publicationId: hash, authorityRevision: 1, local: true });
-    expect(h.activate).toHaveBeenCalledWith({ candidate, files: [] }, h.controller.signal);
+    expect(h.activate).toHaveBeenCalledWith({ candidate, files: [] }, h.controller.signal, null);
     expect(await h.handler({ action: "approve", workspaceId: "w", approvalId: review.approvalId, candidateDigest: review.candidateDigest }, "caller", h.operation)).toBeNull();
   });
   it.each(["digest", "caller", "session", "abort"])("refuses changed %s before local activation", async kind => {
