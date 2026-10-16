@@ -1,9 +1,9 @@
-import { rm } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createSmtpSender, smtpSettingsFromEnv } from "@dohc/workspace-auth/smtp";
-import { openRelaySnapshot, relayRelease, relaySnapshotKey, saveRelaySnapshot, snapshotStorageFromEnv, uploadRelaySnapshot, withRelaySnapshot } from "./relaySnapshot";
-import { pingHeartbeat, runSnapshotJobOnce } from "./relaySnapshotJob";
+import { clearRelaySnapshotStaging, openRelaySnapshot, relayRelease, relaySnapshotKey, saveRelaySnapshot, snapshotStorageFromEnv,
+  uploadRelaySnapshot, withRelaySnapshot } from "./relaySnapshot";
+import { createSnapshotJob, pingHeartbeat, saveSnapshotJobState } from "./relaySnapshotJob";
 
 const usage = `run --database PATH --state-directory PATH
 Take an encrypted relay snapshot every hour and upload it to the configured S3-compatible bucket.
@@ -49,8 +49,9 @@ async function main(args: string[]): Promise<void> {
   }
   if (action === "snapshot") {
     const values = fields(rest, ["--database", "--state-directory", "--directory"]);
-    const saved = await withRelaySnapshot({ relayPath: values.get("--database")!, stagingDirectory: join(values.get("--state-directory")!, "staging"),
-      key, release: relayRelease() }, snapshot => saveRelaySnapshot(snapshot, values.get("--directory")!));
+    const stagingDirectory = await clearRelaySnapshotStaging(values.get("--state-directory")!, "manual");
+    const saved = await withRelaySnapshot({ relayPath: values.get("--database")!, stagingDirectory, key, release: relayRelease() },
+      snapshot => saveRelaySnapshot(snapshot, values.get("--directory")!));
     console.log(`Relay snapshot saved: ${saved}`);
     console.log("Keep DOHC_SNAPSHOT_KEY in escrow away from this host. Without it, the snapshot cannot be opened.");
     return;
@@ -65,22 +66,22 @@ async function main(args: string[]): Promise<void> {
   if (!smtp) throw new Error("Configure DOHC_SMTP_* so snapshot failures can reach the operator.");
   const heartbeatUrl = process.env.DOHC_SNAPSHOT_HEARTBEAT_URL?.trim() || undefined;
   if (heartbeatUrl && new URL(heartbeatUrl).protocol !== "https:") throw new Error("Set DOHC_SNAPSHOT_HEARTBEAT_URL to an HTTPS URL.");
-  const stateDirectory = values.get("--state-directory")!, stagingDirectory = join(stateDirectory, "staging");
-  // Staging only ever holds this job's unfinished copies; an interrupted run leaves plaintext behind.
-  await rm(stagingDirectory, { recursive: true, force: true });
-  const options = { statePath: join(stateDirectory, "notifications.json"), alertEmail, heartbeatUrl,
-    serverName: process.env.DOHC_SERVER_NAME?.trim() || "your dohc server" };
-  const deps = {
+  const stateDirectory = values.get("--state-directory")!, stagingDirectory = await clearRelaySnapshotStaging(stateDirectory, "hourly");
+  const pass = createSnapshotJob({ statePath: join(stateDirectory, "notifications.json"), alertEmail, heartbeatUrl,
+    serverName: process.env.DOHC_SERVER_NAME?.trim() || "your dohc server" }, {
     snapshot: () => withRelaySnapshot({ relayPath: values.get("--database")!, stagingDirectory, key, release: relayRelease() },
       snapshot => uploadRelaySnapshot(snapshot, storage)),
     sendEmail: createSmtpSender(smtp),
     ping: pingHeartbeat,
+    saveState: saveSnapshotJobState,
     now: () => new Date(),
     log: (message: string) => console.log(message),
-  };
+  });
+  // A restart takes a snapshot at once and can repeat an email, so a failed pass waits for the next hour instead.
   for (;;) {
     const started = Date.now();
-    await runSnapshotJobOnce(options, deps);
+    try { await pass(); }
+    catch (error) { console.error(`The snapshot pass failed. The next pass runs in an hour. ${error instanceof Error ? error.message : String(error)}`); }
     await delay(Math.max(0, started + hour - Date.now()));
   }
 }

@@ -137,6 +137,14 @@ test('hourly snapshots read the relay read-only, never mount continuity, and sta
   assert.equal(service.read_only, true);
   assert.equal(service.depends_on['sync-relay'].condition, 'service_healthy');
   assert.ok(!Object.keys(compose.services['sync-relay'].environment).some(name => name.startsWith('DOHC_SNAPSHOT_')));
+  // Outbound only: its own network, shared with no service, so Postgres, workspace-api and the relay are unreachable.
+  assert.deepEqual(service.networks, ['snapshots']);
+  assert.deepEqual(compose.networks.snapshots, {});
+  for (const [name, other] of Object.entries(compose.services)) if (name !== 'relay-snapshot') assert.ok(!JSON.stringify(other.networks ?? []).includes('snapshots'), name);
+  for (const overlay of ['private', 'cloudflare', 'external-postgres', 'data-disk']) {
+    const text = readFileSync(`tools/self-host/compose.${overlay}.yml`, 'utf8');
+    assert.ok(!/relay-snapshot|networks:/.test(text), overlay);
+  }
   assert.ok(!composeArgs('.env.self-host', settings(), 'up').includes('--profile'));
   const enabled = composeArgs('.env.self-host', { ...settings(), DOHC_SNAPSHOT_S3_BUCKET: 'dohc-snapshots', DOHC_DATA_DIRECTORY: '/mnt/disk/dohc' }, 'up');
   assert.ok(enabled.indexOf('tools/self-host/compose.data-disk.yml') < enabled.indexOf('--profile'));

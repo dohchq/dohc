@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
-import { copyFile, mkdir, open, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, open, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { join } from "node:path";
@@ -179,7 +179,8 @@ export async function openRelaySnapshot(packagePath: string, key: Buffer, output
 
     await mkdir(outputDirectory, { mode: 0o700 });
     created = true;
-    const databasePath = join(outputDirectory, "relay.sqlite");
+    // The final name appears only after every check, so an interrupted run leaves no usable-looking copy.
+    const databasePath = join(outputDirectory, "relay.sqlite.partial");
     const database = await open(databasePath, "wx", 0o600);
     let lead = Buffer.alloc(0), manifestLength: number | undefined;
     try {
@@ -214,6 +215,7 @@ export async function openRelaySnapshot(packagePath: string, key: Buffer, output
         actual.stamp !== manifest.stamp || actual.schemaSha256 !== manifest.schemaSha256) {
       throw new Error("The relay snapshot database does not match its manifest.");
     }
+    await rename(databasePath, join(outputDirectory, "relay.sqlite"));
     await writeFile(join(outputDirectory, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", { flag: "wx", mode: 0o600, flush: true });
     await syncDirectory(outputDirectory);
     return manifest;
@@ -225,11 +227,47 @@ export async function openRelaySnapshot(packagePath: string, key: Buffer, output
 }
 
 export interface SealedRelaySnapshot { path: string; name: string; manifest: RelaySnapshotManifest }
+export interface FilesystemSpace { free: number; total: number }
+
+const gib = 1024 ** 3;
+const gibText = (bytes: number) => `${(bytes / gib).toFixed(1)} GiB`;
+export async function filesystemSpace(path: string): Promise<FilesystemSpace> {
+  const { bavail, blocks, bsize } = await statfs(path);
+  return { free: bavail * bsize, total: blocks * bsize };
+}
+const fileSize = (path: string) => stat(path).then(stats => stats.size, error => { if (error.code === "ENOENT") return 0; throw error; });
+
+/**
+ * Staging shares the relay's disk. At its peak it holds the copy and the sealed package, and the
+ * copy's read lock makes the relay's WAL grow, so a snapshot leaves the larger of 1 GiB and a tenth
+ * of the disk for the relay's own commits.
+ */
+export function relaySnapshotSpaceNeeded(databaseBytes: number, filesystemBytes: number): number {
+  return 2 * databaseBytes + Math.max(gib, Math.ceil(filesystemBytes / 10));
+}
+
+/**
+ * Each command stages in its own folder, so the hourly job never removes a manual snapshot in
+ * progress. A folder only holds its command's unfinished copies, and an interrupted run leaves
+ * plaintext behind, so each start clears it.
+ */
+export async function clearRelaySnapshotStaging(stateDirectory: string, command: "hourly" | "manual"): Promise<string> {
+  const directory = join(stateDirectory, "staging", command);
+  await rm(directory, { recursive: true, force: true });
+  return directory;
+}
 
 /** Captures and seals one snapshot in a private staging directory, then removes the staging copy. */
-export async function withRelaySnapshot<T>(options: { relayPath: string; stagingDirectory: string; key: Buffer; release: string },
-  deliver: (snapshot: SealedRelaySnapshot) => Promise<T>): Promise<T> {
+export async function withRelaySnapshot<T>(options: { relayPath: string; stagingDirectory: string; key: Buffer; release: string;
+  space?: (path: string) => Promise<FilesystemSpace> }, deliver: (snapshot: SealedRelaySnapshot) => Promise<T>): Promise<T> {
   await mkdir(options.stagingDirectory, { recursive: true, mode: 0o700 });
+  const databaseBytes = await fileSize(options.relayPath) + await fileSize(`${options.relayPath}-wal`);
+  const { free, total } = await (options.space ?? filesystemSpace)(options.stagingDirectory);
+  const needed = relaySnapshotSpaceNeeded(databaseBytes, total);
+  if (free < needed) {
+    throw new Error(`A snapshot needs ${gibText(needed)} free on the relay's disk and ${gibText(free)} is free. ` +
+      "No snapshot was taken, so the relay keeps that space. Free space on the disk or move the data to a larger one.");
+  }
   const run = join(options.stagingDirectory, randomUUID());
   await mkdir(run, { mode: 0o700 });
   try {
@@ -304,7 +342,11 @@ export async function uploadRelaySnapshot(snapshot: SealedRelaySnapshot, storage
   if (size > RELAY_SNAPSHOT_UPLOAD_LIMIT) throw new Error("The sealed snapshot is larger than 5 GB, the single upload limit. Save it with --directory instead.");
   const objectKey = `${snapshot.manifest.namespace}/${snapshot.name}`;
   const path = `/${encodeSegment(storage.bucket)}/${objectKey.split("/").map(encodeSegment).join("/")}`;
+  const md5 = createHash("md5");
+  for await (const chunk of createReadStream(snapshot.path)) md5.update(chunk);
   const headers: Record<string, string> = {
+    // S3 refuses uploads to a bucket with Object Lock retention without Content-MD5.
+    "content-md5": md5.digest("base64"),
     host: storage.endpoint.host,
     "x-amz-content-sha256": await digest(snapshot.path),
     "x-amz-date": now.toISOString().replace(/[-:]|\.\d{3}/g, ""),

@@ -65,7 +65,7 @@ test("canonical repository checks include every script contract except the Docke
   for (const [path] of tree.matchAll(/[^\s]+\.test\.mjs/gu)) assert.ok(manifest.scripts["test:repo"].split(/\s+/u).includes(path), `test:repo omits ${path}`);
   const listed = new Set([...manifest.scripts["test:repo"].matchAll(/[^\s]+\.test\.mjs/gu),
     ...manifest.scripts["test:repo:source"].matchAll(/[^\s]+\.test\.mjs/gu)].map(([path]) => path));
-  const optIn = new Set(["scripts/self-host/recovery.docker.test.mjs", "scripts/self-host/drill.docker.test.mjs"]);
+  const optIn = new Set(["scripts/self-host/recovery.docker.test.mjs", "scripts/self-host/drill.docker.test.mjs", "scripts/self-host/snapshot.docker.test.mjs"]);
   const tracked = execFileSync("git", ["ls-files", "-z", "--", ":(glob)scripts/**/*.test.mjs", ":(glob)tools/**/*.test.mjs"],
     { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }).split("\0").filter(Boolean);
   assert.ok(tracked.includes("scripts/build-slot.test.mjs"));

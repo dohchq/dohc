@@ -1,16 +1,28 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+/** What each removed directory held at removal: what a run interrupted at that point would leave behind. */
+const removed = vi.hoisted(() => new Map<string, string[]>());
+vi.mock("node:fs/promises", async importOriginal => {
+  const fs = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...fs, rm: async (...args: Parameters<typeof fs.rm>) => {
+    const listing = await fs.readdir(args[0]).catch(() => undefined);
+    if (listing) removed.set(String(args[0]), listing);
+    return fs.rm(...args);
+  } };
+});
+
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment";
 import { checkRelayBackup, restoreRelayDeployment } from "./relayDeploymentRecovery";
-import { captureRelaySnapshot, openRelaySnapshot, relaySnapshotKey, saveRelaySnapshot, sealRelaySnapshot, signS3Request, snapshotStorageFromEnv,
-  uploadRelaySnapshot, withRelaySnapshot, type SnapshotStorage } from "./relaySnapshot";
+import { captureRelaySnapshot, clearRelaySnapshotStaging, filesystemSpace, openRelaySnapshot, relaySnapshotKey, relaySnapshotSpaceNeeded, saveRelaySnapshot,
+  sealRelaySnapshot, signS3Request, snapshotStorageFromEnv, uploadRelaySnapshot, withRelaySnapshot, type SnapshotStorage } from "./relaySnapshot";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -19,8 +31,12 @@ function fixture() {
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   const input = { configPath: join(root, "control", "deployment.json"), relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") };
   initializeRelayDeployment(input);
-  return { ...input, root, staging: join(root, "staging"), key: randomBytes(32) };
+  const staging = join(root, "staging"), key = randomBytes(32);
+  // The free-space check reads the real disk only in its own tests, so a full development disk does not fail the others.
+  const options = { relayPath: input.relayPath, stagingDirectory: staging, key, release: "r", space: async () => ({ free: 1024 * gib, total: 1024 * gib }) };
+  return { ...input, root, staging, key, options };
 }
+const gib = 1024 ** 3;
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 /** Commits marker and evidence together, the way relay writes advance their stamp. */
@@ -73,11 +89,12 @@ async function fakeS3(behavior: { dropAfterBytes?: number } = {}) {
     });
     request.on("end", () => {
       const body = Buffer.concat(chunks), headers = request.headers;
-      const signed = { host: headers.host!, "x-amz-content-sha256": String(headers["x-amz-content-sha256"]), "x-amz-date": String(headers["x-amz-date"]) };
+      const signed = { "content-md5": String(headers["content-md5"]), host: headers.host!,
+        "x-amz-content-sha256": String(headers["x-amz-content-sha256"]), "x-amz-date": String(headers["x-amz-date"]) };
       const expected = signS3Request({ method: request.method!, path: request.url!, headers: signed, ...credentials });
-      // S3 stores an object only when the body is whole and matches its signed checksum.
+      // S3 stores an object only when the body is whole and matches its signed checksums. A bucket with Object Lock requires Content-MD5.
       if (request.method !== "PUT" || headers.authorization !== expected || sha256(body) !== signed["x-amz-content-sha256"] ||
-          body.length !== Number(headers["content-length"])) {
+          createHash("md5").update(body).digest("base64") !== signed["content-md5"] || body.length !== Number(headers["content-length"])) {
         response.writeHead(400).end("<Error><Code>BadDigest</Code></Error>");
         return;
       }
@@ -102,7 +119,7 @@ describe("online relay snapshots", () => {
     const writer = startWriter(f.relayPath);
     await writer.reached(200);
     const output = join(f.root, "verified");
-    const manifest = await withRelaySnapshot({ relayPath: f.relayPath, stagingDirectory: f.staging, key: f.key, release: "test-release" },
+    const manifest = await withRelaySnapshot({ ...f.options, release: "test-release" },
       async snapshot => {
         // Writes continue after the copy; the snapshot did not hold the writer back.
         await writer.reached(snapshot.manifest.stamp + 100);
@@ -124,7 +141,7 @@ describe("online relay snapshots", () => {
     let snapshotPath: string;
     try {
       live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
-      snapshotPath = await withRelaySnapshot({ relayPath: f.relayPath, stagingDirectory: f.staging, key: f.key, release: "r" },
+      snapshotPath = await withRelaySnapshot(f.options,
         snapshot => saveRelaySnapshot(snapshot, join(f.root, "saved")));
     } finally { live.storage.close(); }
     const verified = join(f.root, "verified");
@@ -142,9 +159,36 @@ describe("online relay snapshots", () => {
 
   it("refuses a stopped relay and leaves no staging copy behind", async () => {
     const f = fixture();
-    await expect(withRelaySnapshot({ relayPath: f.relayPath, stagingDirectory: f.staging, key: f.key, release: "r" }, async () => "unused"))
-      .rejects.toThrow(/running relay/);
+    await expect(withRelaySnapshot(f.options, async () => "unused")).rejects.toThrow(/running relay/);
     expect(readdirSync(f.staging)).toEqual([]);
+  });
+
+  it("refuses before copying unless the disk holds two copies plus the relay's headroom", async () => {
+    expect(relaySnapshotSpaceNeeded(3 * gib, 100 * gib)).toBe(16 * gib);
+    expect(relaySnapshotSpaceNeeded(3 * gib, 5 * gib)).toBe(7 * gib);
+    const f = fixture(), live = openRelayDeployment(f.configPath);
+    try {
+      live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
+      const database = statSync(f.relayPath).size + statSync(`${f.relayPath}-wal`).size, total = 100 * gib;
+      const attempt = (free: number) => withRelaySnapshot({ ...f.options, space: async () => ({ free, total }) }, async snapshot => snapshot.manifest.stamp);
+      await expect(attempt(2 * database + 10 * gib - 1)).rejects.toThrow(/No snapshot was taken, so the relay keeps that space/);
+      expect(readdirSync(f.staging)).toEqual([]);
+      expect(await attempt(2 * database + 10 * gib)).toBeGreaterThan(0);
+    } finally { live.storage.close(); }
+    const space = await filesystemSpace(f.root);
+    expect(space.free).toBeGreaterThan(0);
+    expect(space.total).toBeGreaterThanOrEqual(space.free);
+  });
+
+  it("gives the hourly job and a manual snapshot separate staging, each cleared on start", async () => {
+    const f = fixture();
+    const manual = await clearRelaySnapshotStaging(f.root, "manual");
+    mkdirSync(join(manual, "in-progress"), { recursive: true });
+    const hourly = await clearRelaySnapshotStaging(f.root, "hourly");
+    mkdirSync(join(hourly, "interrupted"), { recursive: true });
+    expect(await clearRelaySnapshotStaging(f.root, "hourly")).toBe(hourly);
+    expect(readdirSync(join(f.root, "staging")).sort()).toEqual(["manual"]);
+    expect(readdirSync(manual)).toEqual(["in-progress"]);
   });
 });
 
@@ -153,8 +197,7 @@ describe("sealed snapshot packages", () => {
     const live = openRelayDeployment(f.configPath);
     try {
       live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
-      return await withRelaySnapshot({ relayPath: f.relayPath, stagingDirectory: f.staging, key: f.key, release: "r" },
-        snapshot => saveRelaySnapshot(snapshot, join(f.root, "saved")));
+      return await withRelaySnapshot(f.options, snapshot => saveRelaySnapshot(snapshot, join(f.root, "saved")));
     } finally { live.storage.close(); }
   }
 
@@ -170,6 +213,8 @@ describe("sealed snapshot packages", () => {
     };
     const body = Buffer.from(original); body[body.length - 100] ^= 1;
     expect(await attempt(body)).toMatch(/could not be decrypted/);
+    // The whole plaintext was written before the tag check failed, and never under the name restore reads.
+    expect([...removed.values()].at(-1)).toEqual(["relay.sqlite.partial"]);
     const tag = Buffer.from(original); tag[tag.length - 1] ^= 1;
     expect(await attempt(tag)).toMatch(/could not be decrypted/);
     const headerLength = original.readUInt32BE(8);
@@ -231,7 +276,7 @@ describe("off-site upload", () => {
     try {
       for (const createdAtMs of [1, 2]) {
         live.storage.claimWorkspace({ workspaceId: `w${createdAtMs}`, ownerUserId: "owner", createdAtMs });
-        await withRelaySnapshot({ relayPath: f.relayPath, stagingDirectory: f.staging, key: f.key, release: "r" }, async snapshot => {
+        await withRelaySnapshot(f.options, async snapshot => {
           keys.push(await uploadRelaySnapshot(snapshot, s3.storage));
           paths.push(await saveRelaySnapshot(snapshot, saved));
         });
@@ -255,7 +300,7 @@ describe("off-site upload", () => {
     const f = fixture(), s3 = await fakeS3({ dropAfterBytes: 1024 }), live = openRelayDeployment(f.configPath);
     try {
       live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
-      await expect(withRelaySnapshot({ relayPath: f.relayPath, stagingDirectory: f.staging, key: f.key, release: "r" },
+      await expect(withRelaySnapshot(f.options,
         snapshot => uploadRelaySnapshot(snapshot, s3.storage))).rejects.toThrow();
     } finally { live.storage.close(); }
     expect(s3.objects.size).toBe(0);

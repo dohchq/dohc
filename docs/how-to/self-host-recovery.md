@@ -83,9 +83,13 @@ The service stays off until you configure the bucket.
 1. Create a private bucket for snapshots.
 2. Add a bucket lifecycle rule that deletes objects 30 days after creation.
    The job never deletes snapshots, so the lifecycle rule controls retention.
-3. Create credentials that can write objects to that bucket.
+3. Lock the bucket's objects for at least 30 days.
+   On Cloudflare R2, add a bucket lock rule. On Amazon S3, turn on Object Lock with a default retention.
+   R2 tokens cannot be limited to writing, and S3 write access can replace an object.
+   The host holds these credentials, so without a lock an attacker who controls the host can delete or replace your snapshots.
+4. Create credentials that can write objects to that bucket.
    The job does not read, list or delete objects.
-4. Set these values in `.env.self-host`:
+5. Set these values in `.env.self-host`:
 
 ```dotenv
 DOHC_SNAPSHOT_S3_ENDPOINT=https://ACCOUNT_ID.r2.cloudflarestorage.com
@@ -99,7 +103,8 @@ DOHC_SNAPSHOT_ALERT_EMAIL=you@your-domain.com
 For Amazon S3, use the regional endpoint, such as `https://s3.us-east-1.amazonaws.com`, and that region.
 Cloudflare R2 uses the region `auto`.
 
-5. Stop and start the deployment:
+6. Set `DOHC_SNAPSHOT_HEARTBEAT_URL` to an HTTPS monitoring URL, as described below.
+7. Stop and start the deployment:
 
 ```sh
 node tools/self-host/bootstrap.mjs stop
@@ -108,6 +113,8 @@ node tools/self-host/bootstrap.mjs start
 
 The job takes the first snapshot after the relay is healthy, then one every hour.
 Each upload uses a new object name under the deployment's namespace.
+The storage provider can read each object name, which holds the deployment's namespace, the time and the stamp.
+The stamp counts the relay's accepted writes.
 An interrupted upload leaves no object under its name.
 A single upload is limited to 5 GB. A larger snapshot fails; save it with `snapshot` instead.
 
@@ -115,9 +122,15 @@ If a snapshot fails, the job emails `DOHC_SNAPSHOT_ALERT_EMAIL` through the serv
 It sends at most one failure email a day, and one email when snapshots work again.
 It keeps this record in the `dohc_self_host_snapshots` volume, so restarts do not repeat the email.
 With a [data disk](self-host.md#keep-server-data-on-an-attached-disk), that volume is the `snapshots` folder on the disk.
-Each snapshot is copied there before it is encrypted, so keep free space of about twice the relay database's size.
-A stopped job cannot send email.
-To detect that, set `DOHC_SNAPSHOT_HEARTBEAT_URL` to an HTTPS monitoring URL.
+
+Each snapshot is copied there before it is encrypted, on the same disk as the relay database.
+Before it copies, the job checks the disk's free space.
+It needs twice the relay database's size, plus 1 GiB or a tenth of the disk, whichever is larger.
+With less, the job takes no snapshot and sends the failure email, so a snapshot never takes the relay's space.
+
+The job cannot email you when it stops.
+A setting it refuses also stops it before the first snapshot, and Docker restarts it again and again without an email.
+The heartbeat URL detects both.
 The job requests that URL after each successful snapshot.
 Configure the monitoring service to alert you when the requests stop.
 
@@ -147,6 +160,7 @@ node scripts/self-host/recovery.mjs snapshot /srv/dohc-backups/offsite
 
 The command writes the same encrypted package that the hourly job uploads.
 The services keep running.
+It makes the same free-space check as the hourly job.
 The directory can already exist; each run adds a new file and never replaces one.
 A file ending in `.partial` is an incomplete copy.
 The directory parent needs the same UID 1000 write access as a relay snapshot.
@@ -171,6 +185,8 @@ Its contents are unencrypted. Restrict the directory and delete it after use.
 
 Verification runs without network access and mounts no deployment volume.
 On a replacement host, load the release image and restore `.env.self-host` before you verify.
+If only the snapshot key survived, [create the configuration](self-host.md#create-the-configuration) on the new host.
+Then set `DOHC_SNAPSHOT_KEY` in the new `.env.self-host` to the key you kept.
 
 An hourly snapshot does not include authentication, live-host data, configuration or continuity.
 Server accounts are stored in Postgres and need a separate backup.
@@ -401,9 +417,11 @@ Run focused source checks after changing this procedure's commands:
 ```sh
 pnpm --filter @dohc/sync-relay exec vitest run src/relayDeployment.test.ts src/relayDeploymentRecovery.test.ts src/relayContentSalvage.test.ts src/relaySnapshot.test.ts src/relaySnapshotJob.test.ts
 node --test scripts/self-host/recovery.test.mjs scripts/self-host/move.test.mjs scripts/self-host-compose.test.mjs
+pnpm --filter @dohc/app-backend-runtime build
 pnpm --filter @dohc/sync-relay build
 DOHC_RECOVERY_TEST_IMAGE=YOUR_DOHC_IMAGE node --test scripts/self-host/recovery.docker.test.mjs
 DOHC_RECOVERY_TEST_IMAGE=YOUR_DOHC_IMAGE node --test scripts/self-host/drill.docker.test.mjs
+DOHC_SNAPSHOT_DOCKER_TEST=1 node --test scripts/self-host/snapshot.docker.test.mjs
 ```
 
 The Docker tests use isolated volumes and folders and remove them afterward.
@@ -419,3 +437,9 @@ It also checks that a missing folder fails to start and that the move command re
 It checks that the move command refuses existing volumes stored elsewhere and leaves them unchanged.
 It carries the accounts volume over by name, so it does not prove the accounts volume copy commands.
 A killed container does not lose the host's write cache, so the drill does not prove survival of a power loss.
+
+The snapshot test runs on any Docker host with Linux containers and needs no dohc image.
+It uses the bundles that `pnpm --filter @dohc/app-backend-runtime build` and `pnpm --filter @dohc/sync-relay build` write.
+It takes online snapshots through a read-only relay mount while another container keeps writing.
+It checks that each snapshot holds one complete transaction and passes `check-backup`'s check.
+It checks that verification without network access or deployment volumes refuses a wrong key and a changed byte, and leaves no output.

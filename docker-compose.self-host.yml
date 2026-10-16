@@ -136,6 +136,8 @@ services:
       DOHC_SMTP_FROM: ${DOHC_SMTP_FROM:?Set DOHC_SMTP_FROM}
     depends_on:
       sync-relay: {condition: service_healthy}
+    # Storage, SMTP and the heartbeat are outside; nothing on the internal network is reachable from here.
+    networks: [snapshots]
     # The relay database is read-only here; continuity is never mounted.
     volumes:
       - dohc_self_host_sync_relay:/data:ro
@@ -194,6 +196,7 @@ networks:
       config:
         - subnet: ${DOHC_NETWORK_SUBNET:-10.233.42.0/24}
           ip_range: ${DOHC_NETWORK_IP_RANGE:-10.233.42.128/25}
+  snapshots: {}
 
 volumes:
   dohc_self_host_postgres:

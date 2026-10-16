@@ -205,7 +205,8 @@ Both services must use the same `BETTER_AUTH_SECRET`.
 To keep server data on an attached disk, set it up before the first start.
 You can then [move the server to a new host](self-host-recovery.md#move-to-a-new-host) by moving the disk.
 The disk holds the relay database with its files, the continuity record, and the server's session host and automation copies.
-It also holds the working space for [hourly snapshots](self-host-recovery.md#take-hourly-off-site-snapshots), which needs about twice the relay database's size.
+It also holds the working space for [hourly snapshots](self-host-recovery.md#take-hourly-off-site-snapshots).
+A snapshot runs only while the disk has free space of twice the relay database's size, plus 1 GiB or a tenth of the disk, whichever is larger.
 Caddy's certificates stay in a Docker volume on the host.
 Accounts stay in a Docker volume on the host too, unless you [keep them in an external Postgres](#keep-accounts-in-an-external-postgres).
 Docker names the accounts volume `<DOHC_DEPLOYMENT_NAME>_dohc_self_host_postgres`, which is `dohc-self-host_dohc_self_host_postgres` by default.
