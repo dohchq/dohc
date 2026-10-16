@@ -177,6 +177,100 @@ pub fn hosted_document_parkable(
     store.read_with(|conn| parkable(conn, workspace_id, object_id))
 }
 
+/// The page that finishes `object_id`'s files in `version_id`, the version
+/// the root holds, before it parks, or `None` when every row it applied
+/// had its files written by a committed pass. A pass can stop after its rows
+/// applied and before their files were written, and a document can leave the
+/// scope while held, its files only partly written; either way no pass serves
+/// its rows again. So this is the page of the pass that makes a document
+/// ready, read from its journal instead of the relay: the decisions its
+/// journaled rows stored that still stand ([`super::redelivered_unready`]),
+/// and a write of each of its heads nothing else holds.
+pub fn departed_hosted_materialization(
+    store: &EngineStore,
+    workspace_id: &str,
+    object_id: &str,
+    version_id: &str,
+) -> Result<Option<Vec<crate::MomentMaterializationChange>>, SyncError> {
+    let unmaterialized: bool = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hosted_documents WHERE workspace_id=?1 \
+             AND object_id=?2 AND unmaterialized_seq IS NOT NULL)",
+            params![workspace_id, object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)
+    })?;
+    if !unmaterialized {
+        return Ok(None);
+    }
+    let rows = store.read_with(|conn| {
+        conn.prepare_cached(JOURNALED_SQL)
+            .map_err(SyncError::corrupt)?
+            .query_map(params![workspace_id, version_id, object_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SyncError::corrupt)
+    })?;
+    let mut stored = crate::relay::ChangedPaths::new();
+    for (origin_id, origin_seq, op_kind, payload, recorded_at_ms) in rows {
+        let op = crate::ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
+            workspace_id: workspace_id.to_owned(),
+            origin_id,
+            origin_seq,
+            relay_seq: None,
+            op_kind,
+            payload: serde_json::from_str(&payload).map_err(SyncError::corrupt)?,
+            recorded_at_ms,
+        };
+        for change in crate::router::redelivered_materialization_changes(store, &op)? {
+            if change.version_id == version_id {
+                crate::relay::insert_changed_path(&mut stored, change);
+            }
+        }
+    }
+    let page = store.read_with(|conn| {
+        let mut occupancy = Occupancy::new(conn, workspace_id);
+        let mut page = crate::relay::ChangedPaths::new();
+        for change in super::redelivered_unready(&mut occupancy, object_id, stored.into_values())? {
+            crate::relay::insert_changed_path(&mut page, change);
+        }
+        for head in super::head_writes(conn, workspace_id, object_id)? {
+            if head.version_id == version_id
+                && occupancy
+                    .hold(object_id, &head.version_id, &head.path)?
+                    .is_none()
+            {
+                crate::relay::insert_changed_path(&mut page, head);
+            }
+        }
+        Ok::<_, SyncError>(page)
+    })?;
+    Ok(Some(page.into_values().collect()))
+}
+
+/// Each row journaled for a document in a version that can carry a
+/// materialization decision, read through the indexes on its version and
+/// document. `?1` is the workspace, `?2` the version and `?3` the document.
+const JOURNALED_SQL: &str = "SELECT origin_id,origin_seq,op_kind,payload_json,recorded_at_ms \
+     FROM replication_log WHERE workspace_id=?1 AND op_kind='moment.append' \
+       AND json_extract(payload_json,'$.versionId')=?2 \
+       AND json_extract(payload_json,'$.objectId')=?3 \
+     UNION ALL SELECT origin_id,origin_seq,op_kind,payload_json,recorded_at_ms \
+     FROM replication_log WHERE workspace_id=?1 AND op_kind='ydoc.update' \
+       AND json_extract(payload_json,'$.versionId')=?2 \
+       AND json_extract(payload_json,'$.objectId')=?3";
+
 /// A file a parked document left in the root: its path, and the digest of
 /// the head it held. No moment takes the path until the file is forgotten.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -651,7 +745,7 @@ const PARK: [&str; 9] = [
     "DELETE FROM capture_file_holds WHERE workspace_id=?1 AND object_id=?2",
     "DELETE FROM share_direct_write_marks WHERE workspace_id=?1 AND object_id=?2",
     "UPDATE hosted_documents SET state='parked',held_reason=NULL,held_path=NULL,held_by=NULL, \
-     held_conflict_id=NULL WHERE workspace_id=?1 AND object_id=?2",
+     held_conflict_id=NULL,unmaterialized_seq=NULL WHERE workspace_id=?1 AND object_id=?2",
 ];
 
 /// The documents of the scope whose heads are parked. `?1` is the workspace.
@@ -785,11 +879,16 @@ mod tests {
     }
 
     /// A return reads its own heads, and each version's occupants, through
-    /// their tables' keys, never by scanning the workspace.
+    /// their tables' keys, never by scanning the workspace; so does parking
+    /// read a document's journal.
     #[test]
     fn a_returns_reads_search_by_key() {
         let (_scratch, _path, store) = dohc_engine_testkit::open_store();
-        for sql in [super::super::HEADS_SQL, super::OCCUPANTS_SQL] {
+        for sql in [
+            super::super::HEADS_SQL,
+            super::OCCUPANTS_SQL,
+            super::JOURNALED_SQL,
+        ] {
             let plan = store
                 .read_with(|conn| {
                     let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;

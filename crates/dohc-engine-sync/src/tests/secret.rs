@@ -1908,12 +1908,6 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
     let expected = vec![
         MomentMaterializationChange {
             version_id: "feature".to_owned(),
-            path: "stale.env".to_owned(),
-            operation: "delete",
-            content_kind: "secret",
-        },
-        MomentMaterializationChange {
-            version_id: "feature".to_owned(),
             path: "app/.env".to_owned(),
             operation: "write",
             content_kind: "secret",
@@ -1922,6 +1916,12 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
             version_id: "feature".to_owned(),
             path: "config/prod.env".to_owned(),
             operation: "write",
+            content_kind: "secret",
+        },
+        MomentMaterializationChange {
+            version_id: "feature".to_owned(),
+            path: "stale.env".to_owned(),
+            operation: "delete",
             content_kind: "secret",
         },
     ];

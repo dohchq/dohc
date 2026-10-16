@@ -2682,11 +2682,14 @@ fn release_unready_hosted(
 /// to settle, deliver or push: no live session holds it, the unload checks
 /// pass, and its file holds its head or nothing. Each parks in its own
 /// transaction, which records its file as retired; the file goes after, and
-/// a file an earlier pass could not remove goes first. A file holding
-/// anything else is a bug in a service root nothing else writes to, so its
-/// document stays departed, the others still park, and the pass names the
-/// first such file. Answers whether any document parked or any path came
-/// free.
+/// a file an earlier pass could not remove goes first. A pass can stop after
+/// it applied a document's rows and before it wrote their files, and once it
+/// leaves the scope no pass serves those rows again, so such a document's
+/// files are first written as the pass that makes it ready writes them. A
+/// file holding anything else after that is a bug in a service root nothing
+/// else writes to, so its document stays departed, the others still park,
+/// and the pass names the first such file, or else the first such write that
+/// failed. Answers whether any document parked or any path came free.
 fn park_departed_hosted(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
@@ -2699,6 +2702,7 @@ fn park_departed_hosted(
         .get_active_version(workspace_id)?
         .version_id;
     let mut unexpected = None;
+    let mut unwritten = None;
     let mut parked = remove_retired_files(store, workspace_id, root, &mut unexpected)?;
     'departed: for document in dohc_engine_sync::departed_hosted_documents(store, workspace_id)? {
         let versions = document
@@ -2726,6 +2730,29 @@ fn park_departed_hosted(
             if super::ydoc::ydoc_unload_pending(store, key, root, now_ms)?.is_some() {
                 continue 'departed;
             }
+        }
+        let finished = dohc_engine_sync::departed_hosted_materialization(
+            store,
+            workspace_id,
+            &document.object_id,
+            &active,
+        )
+        .map_err(RuntimeError::from)
+        .and_then(|page| match page {
+            Some(page) => super::versions::materialize_relay_page_on_store(
+                store,
+                workspace_id,
+                root,
+                page,
+                &(),
+                now_ms,
+                &CancellationToken::new(),
+            ),
+            None => Ok(()),
+        });
+        if let Err(error) = finished {
+            unwritten.get_or_insert(error);
+            continue;
         }
         let files = document
             .heads
@@ -2765,9 +2792,10 @@ fn park_departed_hosted(
         }
         remove_retired_files(store, workspace_id, root, &mut unexpected)?;
     }
-    match unexpected {
-        Some(path) => Err(RuntimeError::HostedFileUnexpected { path }),
-        None => Ok(parked),
+    match (unexpected, unwritten) {
+        (Some(path), _) => Err(RuntimeError::HostedFileUnexpected { path }),
+        (None, Some(error)) => Err(error),
+        (None, None) => Ok(parked),
     }
 }
 

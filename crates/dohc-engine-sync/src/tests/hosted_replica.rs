@@ -1405,6 +1405,81 @@ fn interrupted_hosted_passes_resume_to_the_same_content_once() {
     }
 }
 
+/// What a pass applied stays unwritten for its document until a committed
+/// read covers it, so a document that leaves the scope first finishes it
+/// before it parks: every decision its journal stored, and its head. One
+/// whose files a committed pass wrote has nothing to finish, and a parked
+/// one has nothing left.
+#[test]
+fn a_document_finishes_on_parking_only_what_no_commit_wrote() {
+    let (_scratch, path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(hosted_feed());
+    let finish = |store: &EngineStore| {
+        departed_hosted_materialization(store, "ws", "doc-a", "main")
+            .unwrap()
+            .map(|page| {
+                page.into_iter()
+                    .map(|change| change.path)
+                    .collect::<Vec<_>>()
+            })
+    };
+    sync(&client, &mut store);
+    assert_eq!(
+        finish(&store),
+        None,
+        "the commit that made it ready wrote it"
+    );
+
+    let feed = client.transport();
+    feed.rename(
+        "owner",
+        4,
+        "doc-a",
+        "a.md",
+        "c.md",
+        "hosted a",
+        "moment-owner-1",
+    );
+    assert_eq!(pass(&client, &mut store, &NoFaults).unwrap().applied, 1);
+    drop(store);
+    let mut store = EngineStore::open(&path, 3_000).unwrap();
+    assert_eq!(
+        finish(&store),
+        Some(vec!["a.md".to_owned(), "c.md".to_owned()])
+    );
+    sync(&client, &mut store);
+    assert_eq!(finish(&store), None, "a commit that read it again wrote it");
+
+    feed.rename(
+        "owner",
+        5,
+        "doc-a",
+        "c.md",
+        "d.md",
+        "hosted a",
+        "moment-owner-4",
+    );
+    assert_eq!(pass(&client, &mut store, &NoFaults).unwrap().applied, 1);
+    feed.unshare("doc-a");
+    assert_eq!(
+        pass(&client, &mut store, &NoFaults).unwrap().pending_cursor,
+        None
+    );
+    assert_eq!(
+        finish(&store),
+        Some(vec![
+            "a.md".to_owned(),
+            "c.md".to_owned(),
+            "d.md".to_owned()
+        ])
+    );
+    assert_eq!(
+        park_hosted_document(&mut store, "ws", "doc-a", "main", &NoFaults).unwrap(),
+        TxnOutcome::Committed(true)
+    );
+    assert_eq!(finish(&store), None);
+}
+
 /// The slice-2 re-review's reproduction: after an epoch rotation the feed
 /// reads above the old log, so it never serves `workspace.init` again. A
 /// replica created then holds `main` from its creation.

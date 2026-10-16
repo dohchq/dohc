@@ -643,6 +643,17 @@ fn document_state(scratch: &ScratchDir, object_id: &str) -> Option<String> {
     .ok()
 }
 
+/// The path of the document's head on the hosted replica.
+fn head_path(scratch: &ScratchDir, object_id: &str) -> Option<String> {
+    let conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
+    conn.query_row(
+        "SELECT path FROM snapshots WHERE workspace_id=?1 AND object_id=?2",
+        [WORKSPACE, object_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 /// Journal a live Y.Doc update of `object_id` as its session would.
 fn journal_live_update(scratch: &ScratchDir, object_id: &str, path: &str, update: &[u8]) -> i64 {
     let mut conn = Connection::open(engine_db_path(scratch).expect("db path")).expect("open db");
@@ -1409,8 +1420,8 @@ async fn a_return_whose_old_path_became_a_folder_holds_only_its_document() {
 /// parked at `a.md`, which `doc-a` took. On its return, the pass dropped
 /// every decision its history stored, the delete of `x.md` included, so
 /// `x.md` stayed behind once `doc-b` came back at `a.md`, and a document
-/// created at `x.md/child.md` could not materialize. The return's pass now
-/// removes `x.md` while `doc-b` is still held.
+/// created at `x.md/child.md` could not materialize. Parking now finishes
+/// the move, and the held return keeps `x.md` free.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_interrupted_move_is_finished_by_the_documents_held_return() {
     let mut relay = HostedRelay::default();
@@ -1463,14 +1474,16 @@ async fn an_interrupted_move_is_finished_by_the_documents_held_return() {
         id: 1,
     };
 
-    relay.relay().unshare("doc-b");
-    host.sync().await;
-    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
     assert_eq!(
         read("x.md").as_deref(),
         Some("hosted b"),
         "the move never landed"
     );
+    relay.relay().unshare("doc-b");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
+    assert_eq!(read("x.md"), None, "parking finished the move");
+    assert_eq!(read("a.md"), None, "and its file went with the document");
     {
         let mut relay = relay.relay();
         relay.create("owner", 3, "doc-a", "a.md", "hosted a");
@@ -1515,9 +1528,9 @@ async fn an_interrupted_move_is_finished_by_the_documents_held_return() {
 /// before materializing. `doc-b` parked, `doc-a` took `a.md`, and `doc-b`
 /// returned held. Its history stored deletes of both `x.md` and
 /// `x.md/child.md`, and the delete of `x.md`, a folder on disk, failed every
-/// pass, so the file it left stayed and the pass never committed. Both
-/// deletes now land, the emptied folder goes, and later documents take
-/// `x.md/child.md` and then `x.md`.
+/// pass, so the file it left stayed and the pass never committed. Parking
+/// now finishes the move, and the held return's deletes land too, so later
+/// documents take `x.md/child.md` and then `x.md`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_held_returns_nested_history_clears_its_files_and_their_folder() {
     let mut relay = HostedRelay::default();
@@ -1579,13 +1592,17 @@ async fn a_held_returns_nested_history_clears_its_files_and_their_folder() {
         id: 1,
     };
 
-    relay.relay().unshare("doc-b");
-    host.sync().await;
-    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
     assert_eq!(
         read("x.md/child.md").as_deref(),
         Some("hosted b"),
         "the move never landed"
+    );
+    relay.relay().unshare("doc-b");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("parked"));
+    assert!(
+        !scratch.path().join("x.md").exists(),
+        "parking finished the move, and its file went with the document"
     );
     {
         let mut relay = relay.relay();
@@ -1650,8 +1667,9 @@ enum Step {
 
 /// Each history a returning document runs through: into a child path, out
 /// of one, out of two levels, a case-only rename, a delete then a recreate,
-/// and a plain move. The first step is synced before the rest.
-const HISTORIES: [&[Step]; 6] = [
+/// a plain move, and out of a child path into its folder's name in another
+/// case. The first step is synced before the rest.
+const HISTORIES: [&[Step]; 7] = [
     &[Step::Create("x.md"), Step::Move("x.md", "x.md/child.md")],
     &[
         Step::Create("x.md/child.md"),
@@ -1668,6 +1686,10 @@ const HISTORIES: [&[Step]; 6] = [
         Step::Create("x.md"),
     ],
     &[Step::Create("x.md"), Step::Move("x.md", "y.md")],
+    &[
+        Step::Create("X.md/child.md"),
+        Step::Move("X.md/child.md", "x.md"),
+    ],
 ];
 
 /// Where the host stops in the matrix.
@@ -1680,8 +1702,27 @@ enum Stop {
     /// The same, having removed the file the history left but not the
     /// folders above it.
     BetweenFileAndFolder,
+    /// After applying the rest of the history, before materializing it; the
+    /// documents leave the scope before any pass retries, so parking
+    /// finishes it.
+    ParkedBeforeRetry,
+    /// The same, with parking's finish stopped after removing the file the
+    /// history left but not the folders above it.
+    ParkedMidFinish,
     /// After applying the return's first pass, before materializing it.
     InReturn,
+}
+
+impl Stop {
+    /// Whether the host stops after applying the rest of the history.
+    fn before_materialized(self) -> bool {
+        !matches!(self, Self::None | Self::InReturn)
+    }
+
+    /// Whether the documents leave the scope before a pass retries.
+    fn parks_first(self) -> bool {
+        matches!(self, Self::ParkedBeforeRetry | Self::ParkedMidFinish)
+    }
 }
 
 /// What holds a returning document's path when it returns.
@@ -1872,7 +1913,8 @@ async fn reopen(host: Host, scratch: &ScratchDir, relay: &FakeRelay) -> Host {
 /// returning document's stored decisions. Every history above runs, beside
 /// every occupant, through one stop. Each pass commits, a document is ready
 /// only once its path is free, the disk holds exactly the heads, and no file
-/// or empty folder of a history stays at a free path.
+/// or empty folder of a history stays at a free path, also when a document
+/// parks before its interrupted history was retried.
 async fn returning_document_matrix(stop: Stop) {
     let rows: Vec<Row> = HISTORIES
         .iter()
@@ -1910,7 +1952,7 @@ async fn returning_document_matrix(stop: Stop) {
         .iter()
         .map(|row| (row.start(), owner.text(&row.doc())))
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(disk(scratch.path()), (started, vec![]));
+    assert_eq!(disk(scratch.path()), (started.clone(), vec![]));
 
     {
         let mut relay = relay.relay();
@@ -1922,13 +1964,18 @@ async fn returning_document_matrix(stop: Stop) {
         }
     }
     let ended = owner.heads(&rows);
-    if stop == Stop::BeforeLastMaterialized || stop == Stop::BetweenFileAndFolder {
+    if stop.before_materialized() {
         assert!(
             host.pull().await["pendingCursor"].is_null(),
             "adopts the scope"
         );
         assert!(host.pull().await["pendingCursor"].is_object());
-        if stop == Stop::BetweenFileAndFolder {
+        // The pass applied the rest of every history and wrote none of it.
+        for row in &rows {
+            assert_eq!(head_path(&scratch, &row.doc()), Some(row.end()));
+        }
+        assert_eq!(disk(scratch.path()), (started, vec![]));
+        if matches!(stop, Stop::BetweenFileAndFolder | Stop::ParkedMidFinish) {
             // The file the history left is gone, and each folder above it
             // but the outermost.
             for row in &rows {
@@ -1952,16 +1999,18 @@ async fn returning_document_matrix(stop: Stop) {
         }
         host = reopen(host, &scratch, &relay).await;
     }
-    host.sync().await;
-    for row in &rows {
-        assert_eq!(
-            document_state(&scratch, &row.doc()).as_deref(),
-            Some("ready"),
-            "{}",
-            row.prefix
-        );
+    if !stop.parks_first() {
+        host.sync().await;
+        for row in &rows {
+            assert_eq!(
+                document_state(&scratch, &row.doc()).as_deref(),
+                Some("ready"),
+                "{}",
+                row.prefix
+            );
+        }
+        assert_eq!(disk(scratch.path()), (ended.clone(), vec![]));
     }
-    assert_eq!(disk(scratch.path()), (ended.clone(), vec![]));
 
     {
         let mut relay = relay.relay();
@@ -2115,6 +2164,58 @@ async fn a_returning_document_settles_after_a_stop_between_a_file_and_its_folder
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_returning_document_settles_after_a_stop_in_its_return() {
     returning_document_matrix(Stop::InReturn).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_document_parked_before_a_retry_settles() {
+    returning_document_matrix(Stop::ParkedBeforeRetry).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_document_whose_finish_stopped_while_parking_settles() {
+    returning_document_matrix(Stop::ParkedMidFinish).await;
+}
+
+/// Sol's fifth park review: the host applied the deletion of `x.md` and
+/// closed before materializing it, then `doc-x` left the scope. Parking
+/// checked only its heads, of which it had none, so `doc-x` parked and
+/// `x.md` stayed on disk with no document. Parking now finishes the
+/// deletion first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deletion_applied_before_a_restart_lands_when_its_document_parks() {
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.create("owner", 1, "doc-x", "x.md", "hosted x");
+    relay.share("doc-x", "x.md");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay).await;
+    let mut host = Host {
+        transport,
+        handle,
+        id: 1,
+    };
+    host.create().await;
+    host.sync().await;
+    let x = BTreeMap::from([("x.md".to_owned(), "hosted x".to_owned())]);
+    assert_eq!(disk(scratch.path()), (x.clone(), vec![]));
+
+    relay
+        .relay()
+        .delete("owner", 2, "doc-x", "x.md", "hosted x", "moment-owner-1");
+    assert!(host.pull().await["pendingCursor"].is_object());
+    assert_eq!(head_path(&scratch, "doc-x"), None, "the deletion applied");
+    assert_eq!(disk(scratch.path()), (x, vec![]), "and never landed");
+    host = reopen(host, &scratch, &relay).await;
+
+    relay.relay().unshare("doc-x");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-x").as_deref(), Some("parked"));
+    assert_eq!(disk(scratch.path()), (BTreeMap::new(), vec![]));
 }
 
 /// The durability review of parking, on disk: a return held at its path

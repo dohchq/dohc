@@ -3267,7 +3267,10 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
 /// Its heads and path aliases move to the parked tables, whose blob keys keep
 /// their bytes, so its paths come free while its history, Y.Doc and
 /// activation stay for its return. A returning document whose history holds
-/// a live edit the host never admitted is held.
+/// a live edit the host never admitted is held. `unmaterialized_seq` is the
+/// relay position of the newest row of a document a pass applied before any
+/// committed pass wrote its files, so a document that leaves the scope first
+/// can still finish them before it parks.
 const V2_HOSTED_PARKED_DOCUMENTS_DDL: &str = "\
 CREATE TABLE hosted_documents_next (
     workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
@@ -3282,13 +3285,15 @@ CREATE TABLE hosted_documents_next (
     held_conflict_id TEXT CHECK (length(held_conflict_id) > 0),
     backfill_cursor INTEGER NOT NULL DEFAULT 0 CHECK (backfill_cursor >= 0),
     scope_generation INTEGER NOT NULL CHECK (scope_generation >= 0),
+    unmaterialized_seq INTEGER CHECK (unmaterialized_seq > 0),
     PRIMARY KEY (workspace_id, object_id),
     CHECK ((state = 'held') = (held_reason IS NOT NULL)),
     CHECK ((held_by IS NOT NULL) = (held_reason IS 'hosted-backfill-path-held')),
     CHECK ((held_conflict_id IS NOT NULL) = (held_reason IS 'hosted-conflict-parent-withheld')),
     CHECK (held_reason IS NOT 'hosted-backfill-path-held' OR held_path IS NOT NULL),
     CHECK (held_reason NOT IN ('hosted-backfill-work-waiting','hosted-conflict-parent-withheld',
-      'hosted-live-edit-unadmitted') OR held_path IS NULL)
+      'hosted-live-edit-unadmitted') OR held_path IS NULL),
+    CHECK (state <> 'parked' OR unmaterialized_seq IS NULL)
 ) STRICT;
 INSERT INTO hosted_documents_next (workspace_id,object_id,path,state,held_reason,held_path,
     held_by,held_conflict_id,backfill_cursor,scope_generation)
@@ -4156,7 +4161,7 @@ mod tests {
             ),
             (
                 "v2-hosted-parked-documents",
-                "a6e80178e07cc6f87c290de0fe89172900d0028889646923555e95dee534ff03",
+                "d6090f08905899107200c732a3c4301d726213b87489861b1af664515bcf5b44",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4472,6 +4477,7 @@ mod tests {
              WHERE object_id='held'",
             "UPDATE hosted_documents SET state='held',held_reason='hosted-live-edit-unadmitted' \
              WHERE object_id='ready'",
+            "UPDATE hosted_documents SET unmaterialized_seq=9 WHERE object_id='ready'",
         ] {
             conn.execute(valid, []).unwrap();
         }
@@ -4479,6 +4485,8 @@ mod tests {
             "UPDATE hosted_documents SET held_path='b.md' WHERE object_id='ready'",
             "UPDATE hosted_documents SET state='parked' WHERE object_id='ready'",
             "UPDATE hosted_documents SET state='retired' WHERE object_id='held'",
+            "UPDATE hosted_documents SET unmaterialized_seq=0 WHERE object_id='ready'",
+            "UPDATE hosted_documents SET unmaterialized_seq=9 WHERE object_id='held'",
         ] {
             assert!(conn.execute(invalid, []).is_err(), "{invalid}");
         }

@@ -29,8 +29,8 @@ use crate::{ReplicationEnvelope, SyncError};
 pub(crate) use park::OCCUPANTS_READ;
 pub use park::{
     DepartedDocument, DepartedHead, RetiredFile, departed_hosted_documents,
-    departed_hosted_object_ids, forget_retired_hosted_file, hosted_document_parkable,
-    park_hosted_document, retired_hosted_files,
+    departed_hosted_materialization, departed_hosted_object_ids, forget_retired_hosted_file,
+    hosted_document_parkable, park_hosted_document, retired_hosted_files,
 };
 pub(crate) use park::{Occupancy, unpark_returned, unparks_next};
 
@@ -145,6 +145,26 @@ fn document_named<'a>(op_kind: &str, payload: &'a serde_json::Value) -> Option<&
         _ => return None,
     }
     .as_str()
+}
+
+/// Record that a pass journaled `op`, a row of the document it names, which
+/// no committed pass has written the files of yet. Until a commit's read
+/// covers it, that document finishes its files before it parks, since once
+/// it leaves the scope no pass serves the row again ([`commit_hosted_cursor`]).
+pub(crate) fn record_unmaterialized_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    op: &ReplicationEnvelope,
+) -> Result<(), SyncError> {
+    let (Some(object_id), Some(relay_seq)) = (hosted_document(op), op.relay_seq) else {
+        return Ok(());
+    };
+    tx.execute(
+        "UPDATE hosted_documents SET unmaterialized_seq=MAX(COALESCE(unmaterialized_seq,0),?3) \
+         WHERE workspace_id=?1 AND object_id=?2 AND state<>'parked' AND ?3>0",
+        params![op.workspace_id, object_id, relay_seq],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
 }
 
 /// The longest refusal reason a hosted push response may carry.
@@ -977,6 +997,18 @@ pub fn commit_hosted_cursor(
             )
             .map_err(SyncError::persist)?;
         }
+        // A ready document's files are written through its read position:
+        // the pass that made it ready wrote its heads, and every committed
+        // pass since materialized what it read. One not ready keeps what
+        // it applied unwritten until then.
+        tx.execute(
+            "UPDATE hosted_documents SET unmaterialized_seq=NULL \
+             WHERE workspace_id=?1 AND scope_generation=?2 AND state='ready' \
+               AND unmaterialized_seq<=MAX(backfill_cursor, \
+                 (SELECT main_cursor FROM hosted_replicas WHERE workspace_id=?1))",
+            params![workspace_id, generation],
+        )
+        .map_err(SyncError::persist)?;
         if let Some(report_id) = &cursor.settlement_report_id {
             crate::cursor::release_settlement_report_in_tx(tx, workspace_id, report_id)?;
         }
@@ -1090,7 +1122,7 @@ const HEADS_SQL: &str = "SELECT s.version_id,s.path,s.content_kind FROM versions
 /// path: the pass that makes it ready writes that, and a document still held
 /// writes nothing. One at a current head's path in another case, or inside
 /// or above it, stands: its delete clears what is in the way of that head's
-/// write, and the page runs deletes first.
+/// write, and the materializer runs it first.
 pub(crate) fn redelivered_unready(
     occupancy: &mut Occupancy<'_>,
     object_id: &str,
