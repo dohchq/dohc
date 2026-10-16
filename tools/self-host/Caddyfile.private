@@ -4,6 +4,10 @@
 }
 
 :8080 {
+  @internal path /internal/*
+  handle @internal {
+    respond 404
+  }
   @home path /
   redir @home /account 302
   @account path /account /account/* /device /api/auth/* /.well-known/dohc-server

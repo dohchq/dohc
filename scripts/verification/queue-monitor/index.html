@@ -22,9 +22,21 @@
   </nav>
   <div class="tools">
     <span id="updated" class="updated"></span>
+    <button id="pause" class="pause" type="button" hidden></button>
     <button id="theme" class="theme" type="button" aria-label="Theme"></button>
   </div>
 </header>
+
+<dialog id="pause-dialog" class="pause-dialog" aria-labelledby="pause-title">
+  <h2 id="pause-title">Pause the queue</h2>
+  <p class="muted">Runs in progress finish. No new run starts until you resume.</p>
+  <label for="pause-reason">Reason (optional)</label>
+  <input id="pause-reason" type="text" maxlength="300" autocomplete="off" spellcheck="false">
+  <div class="dialog-actions">
+    <button id="pause-cancel" class="close" type="button">Cancel</button>
+    <button id="pause-confirm" class="primary" type="button">Pause</button>
+  </div>
+</dialog>
 
 <div id="banners"></div>
 <section id="strip" class="strip" aria-label="Key numbers"></section>
@@ -98,6 +110,10 @@
   </section>
 
   <section id="view-tests" class="view" role="tabpanel" aria-labelledby="tab-tests" hidden>
+    <div class="panel">
+      <div class="panel-head"><h2>Failing on several branches</h2><span class="muted">Last 24 hours. Main or a flaky test, more often than the branch's change.</span></div>
+      <div class="table-wrap"><table id="shared-table" class="table"></table></div>
+    </div>
     <div class="panel">
       <div class="panel-head"><h2>Where a passing gate spends its time</h2><span class="muted">Median per step, this week</span></div>
       <div id="step-times"></div>

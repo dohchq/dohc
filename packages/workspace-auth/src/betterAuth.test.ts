@@ -104,6 +104,7 @@ if (pgAvailable) {
       "utf8",
     );
     await pool.query(migration);
+    await pool.query(await readFile(new URL("../../workspace-postgres/src/db/migrations/0004_account_deletion.sql", import.meta.url), "utf8"));
     auth = createWorkspaceAuth({
       pool,
       baseURL: "http://localhost:1786",

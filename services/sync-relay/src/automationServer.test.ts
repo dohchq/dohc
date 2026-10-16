@@ -196,7 +196,8 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
     startReplicas: async (options) => {
       hooks = options;
       if (input.startReplicas) return await input.startReplicas(options);
-      return { unavailable: false, replica: (id) => open.get(id), reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
+      return { unavailable: false, replica: (id) => open.get(id), reconcile: () => undefined, deleteWorkspaces: async () => undefined,
+      failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
     },
     ...(input.live ? { live: input.live } : {}),
     ...(input.recordDelivery ? {recordDelivery: input.recordDelivery} : {}),
