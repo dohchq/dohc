@@ -18,7 +18,7 @@ const dm: ChatsNav = { level: "dm", dm: {
 } };
 const draft: ChatsDrafts = {
   composer: "Unsent reply", newThreadBody: "", dmRecipients: "", dmDraft: "",
-  replyTarget: null, resolveTargetMessageId: null,
+  replyTarget: null, resolveTargetMessageId: null, poll: null, newThreadPoll: null,
 };
 const thread: ChatsNav = { level: "thread", channel: general.channel, thread: {
   id: "thread", channelId: general.channel.id, title: "Discussion", createdAtMs: 0,
@@ -253,13 +253,17 @@ describe("chat editor tabs", () => {
     expect(result.current.get(path).drafts).toBe(draft);
     expect(onOpen).toHaveBeenLastCalledWith(path);
 
-    // An empty reply gives way, and the channel's unsent new post stays.
+    // An empty reply gives way, and the channel's unsent new post stays with
+    // its poll. The reply's poll goes with the reply.
     act(() => result.current.get(path).onDraftsChange({
       ...draft, composer: "  ", newThreadBody: "Half a post", replyTarget: { messageId: "m", authorLabel: "Ana" },
+      poll: ["Yes", "No"], newThreadPoll: ["Lisbon", "Porto"],
     }));
     act(() => { opened = result.current.open(general, "Request"); });
     expect(opened).toBe(true);
     expect(result.current.get(path).nav).toBe(general);
-    expect(result.current.get(path).drafts).toEqual({ ...draft, composer: "", newThreadBody: "Half a post\n\nRequest" });
+    expect(result.current.get(path).drafts).toEqual({
+      ...draft, composer: "", newThreadBody: "Half a post\n\nRequest", newThreadPoll: ["Lisbon", "Porto"],
+    });
   });
 });

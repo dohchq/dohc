@@ -5,7 +5,7 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { MentionComposer } from "./MentionComposer";
-import { activeCatalogQuery, pollChoicesToSend, type PollDraft } from "./chatPoll";
+import { activeCatalogQuery, pollChoicesToSend, repeatedPollChoices, type PollDraft } from "./chatPoll";
 
 const candidates: MentionCandidate[] = [
   { id: "agent:default", kind: "agent", handle: "agent", label: "Your agent", description: "your agent" },
@@ -72,6 +72,23 @@ describe("the / query", () => {
     // The caret, not the end of the text, ends the query.
     expect(activeCatalogQuery("/po later", 3)).toEqual({ start: 0, query: "po" });
     expect(activeCatalogQuery("/po later", 9)).toBeNull();
+  });
+
+  it("needs its word to end at the caret, so a path's start is not a query", () => {
+    expect(activeCatalogQuery("/poll/results.md", 5)).toBeNull();
+    expect(activeCatalogQuery("see /pollresults", 9)).toBeNull();
+    expect(activeCatalogQuery("/poll\nnext line", 5)).toEqual({ start: 0, query: "poll" });
+  });
+
+  it("does not open a poll from the start of a path", async () => {
+    render(<Harness initialValue="/poll/results.md" />);
+    const node = composer();
+    node.focus();
+    node.setSelectionRange(5, 5);
+    fireEvent.click(node);
+    expect(screen.queryByTestId("chats-catalog")).toBeNull();
+    fireEvent.keyDown(node, { key: "Enter" });
+    expect(pollState()).toBeNull();
   });
 
   it.each(["https://", "a/b", "@agent/"])("never opens the catalog for %s", async (typed) => {
@@ -305,5 +322,16 @@ describe("pollChoicesToSend", () => {
     expect(pollChoicesToSend(["Soup", "two\nlines"])).toBeNull();
     expect(pollChoicesToSend(["Soup", "x".repeat(201)])).toBeNull();
     expect(pollChoicesToSend(Array.from({ length: 13 }, (_, index) => `${index}`))).toBeNull();
+  });
+
+  // The engine trims with Rust's `str::trim`: Unicode White_Space, which
+  // includes U+0085 (next line) and leaves U+FEFF (byte order mark).
+  it("trims the way the engine does", () => {
+    expect(pollChoicesToSend(["\u0085Soup", "Soup"])).toBeNull();
+    expect(pollChoicesToSend(["\u0085", "Soup", "Salad"])).toEqual(["Soup", "Salad"]);
+    expect(pollChoicesToSend([" Soup　", "Salad"])).toEqual(["Soup", "Salad"]);
+    expect(pollChoicesToSend(["﻿Soup", "Soup"])).toEqual(["﻿Soup", "Soup"]);
+    expect(repeatedPollChoices(["Soup", "Soup\u0085"])).toEqual(new Set([1]));
+    expect(repeatedPollChoices(["Soup", "Soup﻿"])).toEqual(new Set());
   });
 });

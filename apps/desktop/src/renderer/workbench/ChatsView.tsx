@@ -71,6 +71,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -214,6 +215,9 @@ export interface ChatsDrafts {
   resolveTargetMessageId: string | null;
   // The poll choice taken with the answer, when the poll had choices.
   resolveChosenOption?: string | null;
+  // The choices of a poll drafted in the comment and new-post composers.
+  poll: PollDraft | null;
+  newThreadPoll: PollDraft | null;
 }
 
 interface ThreadSnapshot {
@@ -603,6 +607,15 @@ export function ChatsView(props: {
   const [sending, setSending] = useState(false);
   const [newThreadBody, setNewThreadBody] = useState("");
   const [newThreadPoll, setNewThreadPoll] = useState<PollDraft | null>(null);
+  // A poll stays with the conversation it was drafted in: the thread for a
+  // comment's poll and the group for a new post's. Opening another drops it
+  // before the next paint.
+  const pollThreadId = useRef<string | null>(null);
+  const newThreadPollChannelId = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (nav.level === "thread" && nav.thread.id !== pollThreadId.current) setPoll(null);
+    if (nav.level === "channel" && nav.channel.id !== newThreadPollChannelId.current) setNewThreadPoll(null);
+  }, [nav]);
   const [startingThread, setStartingThread] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
   const [newGroupType, setNewGroupType] = useState<"posts" | "chat" | "both">("posts");
@@ -2051,11 +2064,17 @@ export function ChatsView(props: {
   }, [props.suspendPolling, refreshForActivity]);
 
   // The view holds the decisions it loaded, so a poll just posted reads its
-  // thread's decisions again to show its choices.
-  const showPostedPoll = useCallback((threadId: string, token: number) => {
+  // thread's decisions again to show its choices. It adds only that poll,
+  // and only when the view lacks it: a thread refresh or an answer that
+  // landed first is newer and stays.
+  const showPostedPoll = useCallback((threadId: string, messageId: string, token: number) => {
     void bridge().listChatThreadDecisions({ workspaceId, threadId }).then(
       ({ decisions: listed }) => {
-        if (token === liveToken.current) setDecisions(listed);
+        const posted = listed.find((decision) => decision.messageId === messageId);
+        if (!posted || token !== liveToken.current) return;
+        setDecisions((current) =>
+          current.some((decision) => decision.messageId === messageId) ? current : [...current, posted],
+        );
       },
       () => {
         // The next refresh of this thread shows the poll.
@@ -2112,7 +2131,7 @@ export function ChatsView(props: {
       setResolveTargetMessageId(null);
       messageNodes.current.clear();
       setChannelThreads((current) => [result.thread, ...current]);
-      if (options) showPostedPoll(result.thread.id, token);
+      if (options) showPostedPoll(result.thread.id, result.message.id, token);
     } catch (error) {
       if (token !== liveToken.current) return;
       props.onError(ipcErrorMessage(error, "Could not start that chat."), error);
@@ -2237,7 +2256,7 @@ export function ChatsView(props: {
       }
       clearMatchingComposer();
       threadComposerRef.current?.scrollIntoView({ block: "end" });
-      if (options) showPostedPoll(nav.thread.id, token);
+      if (options) showPostedPoll(nav.thread.id, result.message.id, token);
     } catch (error) {
       if (!requestOwnsActiveContext()) return;
       if (sentMessage && resolvingMessageId) {
@@ -2472,13 +2491,17 @@ export function ChatsView(props: {
       replyTarget,
       resolveTargetMessageId,
       resolveChosenOption,
+      poll,
+      newThreadPoll,
     });
   }, [
     composer,
     dmDraft,
     dmRecipients,
     newThreadBody,
+    newThreadPoll,
     onDraftsChange,
+    poll,
     replyTarget,
     resolveChosenOption,
     resolveTargetMessageId,
@@ -2531,6 +2554,11 @@ export function ChatsView(props: {
       setReplyTarget(drafts.replyTarget);
       setResolveTargetMessageId(drafts.resolveTargetMessageId);
       setResolveChosenOption(drafts.resolveChosenOption ?? null);
+      // The drafts belong to the seeded conversation, so its polls do too.
+      pollThreadId.current = seed?.level === "thread" ? seed.thread.id : null;
+      newThreadPollChannelId.current = seed?.level === "thread" || seed?.level === "channel" ? seed.channel.id : null;
+      setPoll(drafts.poll);
+      setNewThreadPoll(drafts.newThreadPoll);
     }
   }, [
     openChannel,
@@ -2669,7 +2697,7 @@ export function ChatsView(props: {
       ]);
       // The completion is the user's command landing (see openConversation).
       if (props.editorTabPath && props.onOpenInTab) {
-        onDraftsChange?.({ composer: "", newThreadBody: "", dmRecipients: "", dmDraft: "", replyTarget: null, resolveTargetMessageId: null });
+        onDraftsChange?.({ composer: "", newThreadBody: "", dmRecipients: "", dmDraft: "", replyTarget: null, resolveTargetMessageId: null, poll: null, newThreadPoll: null });
         props.onOpenInTab({ level: "dm", dm: result.dm });
       } else {
         props.onNavCommand?.({ level: "dm", dm: result.dm });
@@ -4324,7 +4352,10 @@ export function ChatsView(props: {
                   presence.setTyping(value.trim().length > 0);
                 }}
                 poll={poll}
-                onPollChange={setPoll}
+                onPollChange={(next) => {
+                  pollThreadId.current = nav.thread.id;
+                  setPoll(next);
+                }}
                 onEscape={() => {
                   setReplyTarget(null);
                   setResolveTargetMessageId(null);
@@ -4680,7 +4711,10 @@ export function ChatsView(props: {
                   loadFileHeadings={loadFileHeadings}
                   onChange={setNewThreadBody}
                   poll={newThreadPoll}
-                  onPollChange={setNewThreadPoll}
+                  onPollChange={(next) => {
+                    newThreadPollChannelId.current = nav.channel.id;
+                    setNewThreadPoll(next);
+                  }}
                   onSend={() => void startThread()}
                   onRosterPick={agentOffer.onRosterPick}
                   rosterScope={agentOffer.scope}

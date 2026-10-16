@@ -1327,7 +1327,8 @@ describe("ChatsLiveAdapter", () => {
 
 describe("loopback poll validation", () => {
   it.each([
-    { name: "non-string", options: [7], sentence: "invalid-poll-options" },
+    { name: "non-string", options: [7], sentence: "invalid parameters" },
+    { name: "non-array", options: "a", sentence: "invalid parameters" },
     { name: "empty", options: ["  "], sentence: "Each choice is one line of at most 200 characters." },
     { name: "duplicate", options: [" a ", "a"], sentence: "Each choice appears once." },
     { name: "too many", options: Array.from({ length: 13 }, (_, index) => String(index)), sentence: "A poll has at most twelve choices." },

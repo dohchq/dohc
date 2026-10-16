@@ -313,6 +313,8 @@ describe("ChatsView expand-to-tab", () => {
         dmDraft: "",
         replyTarget: null,
         resolveTargetMessageId: null,
+        poll: ["Thursday", "Friday"],
+        newThreadPoll: null,
       },
     });
 
@@ -322,6 +324,10 @@ describe("ChatsView expand-to-tab", () => {
         (screen.getByTestId("chats-composer") as HTMLTextAreaElement).value,
       ).toBe("half-typed reply"),
     );
+    // A poll's choices come back with its question, so Send still asks it.
+    expect(
+      screen.getAllByTestId("chats-poll-choice").map((input) => (input as HTMLInputElement).value),
+    ).toEqual(["Thursday", "Friday"]);
   });
 
   it("restores the composer's reply/resolve mode, not just its text", async () => {
@@ -338,6 +344,8 @@ describe("ChatsView expand-to-tab", () => {
         dmDraft: "",
         replyTarget: { messageId: "message-1", authorLabel: "You" },
         resolveTargetMessageId: "message-1",
+        poll: null,
+        newThreadPoll: null,
       },
     });
 
