@@ -158,8 +158,14 @@ pub fn apply_remote_update(
         attribution,
         faults,
         now_ms,
-        |_| Ok(()),
+        |_| Ok(RemoteUpdateGuard::Ordinary),
     )
+}
+
+pub enum RemoteUpdateGuard {
+    Ordinary,
+    /// The caller authenticated the deferred release coordinate in this transaction.
+    ReleaseGeneration(Option<i64>),
 }
 
 /// Recheck a caller's document reservation in the append transaction.
@@ -173,12 +179,19 @@ pub fn apply_remote_update_with_guard(
     attribution: Option<&ChangeAttribution>,
     faults: &dyn FaultInjector,
     now_ms: i64,
-    guard: impl FnOnce(&Transaction<'_>) -> Result<(), CollabError>,
+    guard: impl FnOnce(&Transaction<'_>) -> Result<RemoteUpdateGuard, CollabError>,
 ) -> Result<RemoteUpdateApplied, CollabError> {
     let mut candidate = None;
     let mut record_facts = None;
     let outcome = store.write_with(faults, |tx| {
-        guard(tx)?;
+        match guard(tx)? {
+            RemoteUpdateGuard::Ordinary => {
+                crate::live_update_application::require_restore_open(tx, key)?
+            }
+            RemoteUpdateGuard::ReleaseGeneration(generation) => {
+                crate::live_update_application::require_restore_generation(tx, key, generation)?
+            }
+        }
         let (outcome, facts) = apply_remote_update_in_transaction(
             tx,
             key,
@@ -263,7 +276,6 @@ fn apply_remote_update_in_transaction(
     ),
     CollabError,
 > {
-    crate::live_update_application::require_restore_open(tx, key)?;
     validate_update_bytes(&remote.bytes)?;
     if remote.origin_id.is_empty()
         || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES

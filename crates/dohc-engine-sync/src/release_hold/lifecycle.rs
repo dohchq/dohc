@@ -16,7 +16,10 @@ pub fn begin_release_hold_in(
     namespace: &str,
     digest: &str,
 ) -> Result<ReleaseHold, SyncError> {
-    open_in(tx, binding, namespace, digest, true)
+    let hold = open_in(tx, binding, namespace, digest, true)?;
+    let snapshot = prefix::effective_in(tx, binding).map_err(SyncError::corrupt)?;
+    tx.execute("UPDATE release_holds SET owner_snapshot_json=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![binding.workspace_id,binding.main_version_id,binding.object_id,serde_json::to_string(&snapshot).map_err(SyncError::corrupt)?]).map_err(SyncError::persist)?;
+    Ok(hold)
 }
 
 /// Each page owns at most 64 previously validated coordinates, with their exact envelopes.
@@ -156,6 +159,8 @@ pub fn unbind_release_in(
     if !saved {
         return Err(waiting());
     }
+    let snapshot = prefix::effective_in(tx, b).map_err(SyncError::corrupt)?;
+    tx.execute("UPDATE release_holds SET owner_snapshot_json=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id,serde_json::to_string(&snapshot).map_err(SyncError::corrupt)?]).map_err(SyncError::persist)?;
     owner_outbox::release::require_not_host_in(tx, &key).map_err(SyncError::corrupt)?;
     let encoded = serde_json::to_string(b).map_err(SyncError::corrupt)?;
     let removed=tx.execute("DELETE FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND json(binding_json)=json(?4) AND relay_database_namespace=?5",params![b.workspace_id,b.main_version_id,b.object_id,encoded,hold.namespace]).map_err(SyncError::persist)?;
@@ -179,12 +184,116 @@ pub fn abandon_release_hold_in(
     Ok(())
 }
 
+/// Re-key every continuation atomically. A released restore transfers only the hold.
+pub fn successor_release_hold_in(
+    tx: &Transaction<'_>,
+    old: &ReleaseHold,
+    input: &owner_outbox::enrollment::OwnerEnrollmentInput,
+    digest: &str,
+    now_ms: i64,
+) -> Result<ReleaseHold, SyncError> {
+    old.check_identity_in(tx)?;
+    let b = &old.binding;
+    let released: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND state='released' AND json_extract(binding_json,'$.binding')=json(?4))",params![b.workspace_id,b.main_version_id,b.object_id,serde_json::to_string(b).map_err(SyncError::corrupt)?],|r|r.get(0)).map_err(SyncError::corrupt)?;
+    if released {
+        if !input.recovery
+            || !restored_release_ready_in(tx, &input.binding, &input.relay_database_namespace)?
+        {
+            return Err(waiting());
+        }
+    } else {
+        owner_outbox::enrollment::enroll_release_successor_in_tx(tx, input, &old.digest, now_ms)
+            .map_err(SyncError::corrupt)?;
+    }
+    rekey_release_hold_in(
+        tx,
+        old,
+        &input.binding,
+        &input.relay_database_namespace,
+        digest,
+    )
+}
+
+/// A completed restore can authorize ordinary replay without enrolling an owner.
+pub(super) fn restored_release_ready_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    namespace: &str,
+) -> Result<bool, SyncError> {
+    let json = serde_json::to_string(binding).map_err(SyncError::corrupt)?;
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM owner_live_stops s
+        JOIN live_restore_fences f ON f.workspace_id=s.workspace_id AND f.main_version_id=s.main_version_id AND f.object_id=s.object_id
+        JOIN ydoc_docs d ON d.workspace_id=s.workspace_id AND d.version_id=s.main_version_id AND d.object_id=s.object_id
+        WHERE s.workspace_id=?1 AND s.main_version_id=?2 AND s.object_id=?3 AND s.state='released'
+          AND s.relay_database_namespace=?4 AND f.relay_database_namespace=?4 AND f.new_generation=?5
+          AND json_extract(f.input_json,'$.oldBinding')=json_extract(s.binding_json,'$.binding')
+          AND json_remove(json_extract(s.binding_json,'$.binding'),'$.restoreFenceGeneration')=json_remove(json(?6),'$.restoreFenceGeneration')
+          AND json_extract(s.binding_json,'$.binding.restoreFenceGeneration')<?5
+          AND json_extract(f.resume_receipt_json,'$.binding')=json(?6)
+          AND d.lineage_claim_id=?7 AND d.path=?8)
+        AND NOT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
+        AND NOT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND available=1)
+        AND NOT EXISTS(SELECT 1 FROM live_owner_adoptions WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",params![binding.workspace_id,binding.main_version_id,binding.object_id,namespace,binding.restore_fence_generation,json,binding.lineage_claim_id,binding.current_path],|r|r.get(0)).map_err(SyncError::corrupt)
+}
+
+/// Require either successor enrollment or the completed binding-free restore handoff.
+fn rekey_release_hold_in(
+    tx: &Transaction<'_>,
+    old: &ReleaseHold,
+    binding: &LiveObjectBinding,
+    namespace: &str,
+    digest: &str,
+) -> Result<ReleaseHold, SyncError> {
+    old.check_identity_in(tx)?;
+    binding
+        .validate_canonical()
+        .map_err(|_| SyncError::CoordinateDiverged)?;
+    let b = &old.binding;
+    if binding.workspace_id != b.workspace_id
+        || binding.main_version_id != b.main_version_id
+        || binding.object_id != b.object_id
+        || binding.lineage_claim_id != b.lineage_claim_id
+        || binding.restore_fence_generation < b.restore_fence_generation
+        || namespace != old.namespace
+        || digest == old.digest
+        || digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return Err(SyncError::CoordinateDiverged);
+    }
+    let json = serde_json::to_string(binding).map_err(SyncError::corrupt)?;
+    let installed:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND json(binding_json)=json(?4) AND relay_database_namespace=?5)",params![b.workspace_id,b.main_version_id,b.object_id,json,namespace],|r|r.get(0)).map_err(SyncError::corrupt)?;
+    let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
+        .map_err(SyncError::corrupt)?;
+    let expected =
+        (binding.restore_fence_generation > 0).then_some(binding.restore_fence_generation);
+    dohc_engine_collab::live_update_application::require_restore_generation(tx, &key, expected)
+        .map_err(crate::ydoc_apply::map_collab_hard_error)?;
+    if !installed && !restored_release_ready_in(tx, binding, namespace)? {
+        return Err(waiting());
+    }
+    let changed=tx.execute("UPDATE release_holds SET release_digest=?4,binding_json=?5,relay_namespace=?6,anchor_cursor=NULL,anchor_sha256=NULL,replay_ready=1,successor_ready=1,remote_closed=0,abandoned=0 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND abandoned=1",params![b.workspace_id,b.main_version_id,b.object_id,digest,json,namespace]).map_err(SyncError::persist)?;
+    if changed != 1 {
+        return Err(waiting());
+    }
+    tx.execute("UPDATE release_held_ops SET release_digest=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?5",params![b.workspace_id,b.main_version_id,b.object_id,digest,old.digest]).map_err(SyncError::persist)?;
+    tx.execute("UPDATE owner_pending_settlements SET binding_json=?4 WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND json(binding_json)=json(?5) AND relay_namespace=?6 AND EXISTS(SELECT 1 FROM release_held_ops r WHERE r.workspace_id=owner_pending_settlements.workspace_id AND r.origin_id=owner_pending_settlements.origin_id AND r.origin_seq=owner_pending_settlements.origin_seq AND r.release_digest=?7)",params![b.workspace_id,b.main_version_id,b.object_id,json,serde_json::to_string(b).map_err(SyncError::corrupt)?,namespace,digest]).map_err(SyncError::persist)?;
+    tx.execute("UPDATE ydoc_deferred_updates SET release_generation=?6,release_digest=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?5",params![b.workspace_id,b.main_version_id,b.object_id,digest,old.digest,binding.restore_fence_generation]).map_err(SyncError::persist)?;
+    Ok(ReleaseHold {
+        binding: binding.clone(),
+        namespace: namespace.into(),
+        digest: digest.into(),
+    })
+}
+
 pub(crate) fn check_deferred_release_in(
     conn: &Connection,
     key: &DocKey,
     origin: &str,
     seq: i64,
-) -> Result<(), SyncError> {
+) -> Result<Option<i64>, SyncError> {
     let saved:Option<(String,i64,Option<String>,bool,bool)>=conn.query_row("SELECT d.release_digest,d.release_generation,h.release_digest,COALESCE(h.replay_ready,0),COALESCE(h.abandoned,0) FROM ydoc_deferred_updates d LEFT JOIN release_holds h ON h.workspace_id=d.workspace_id AND h.version_id=d.version_id AND h.object_id=d.object_id WHERE d.workspace_id=?1 AND d.origin_id=?2 AND d.origin_seq=?3 AND d.release_digest IS NOT NULL",params![key.workspace_id,origin,seq],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(SyncError::corrupt)?;
     if let Some((digest, generation, held, ready, abandoned)) = saved {
         if held.is_some_and(|held| held != digest || abandoned || !ready) {
@@ -196,8 +305,30 @@ pub(crate) fn check_deferred_release_in(
             (generation > 0).then_some(generation),
         )
         .map_err(crate::ydoc_apply::map_collab_hard_error)?;
+        return Ok((generation > 0).then_some(generation));
     }
-    Ok(())
+    Ok(None)
+}
+
+/// Closed-session recovery may follow a resumed, binding-free release handoff.
+pub(crate) fn restored_release_recovery_in(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<bool, SyncError> {
+    let row: Option<(String, String)> = conn.query_row("SELECT binding_json,relay_namespace FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND abandoned=0 AND replay_ready=1 AND successor_ready=1",params![key.workspace_id,key.version_id,key.object_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(SyncError::corrupt)?;
+    if let Some((json, namespace)) = row {
+        let binding = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
+        if restored_release_ready_in(conn, &binding, &namespace)? {
+            dohc_engine_collab::live_update_application::require_restore_generation(
+                conn,
+                key,
+                Some(binding.restore_fence_generation),
+            )
+            .map_err(crate::ydoc_apply::map_collab_hard_error)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Durable dependency rows are the wake source after a crash or a report acknowledgement.
@@ -233,7 +364,7 @@ pub(crate) fn deferred_release_ready_in(
     seq: i64,
 ) -> Result<bool, SyncError> {
     match check_deferred_release_in(conn, key, origin, seq) {
-        Ok(()) => Ok(true),
+        Ok(_) => Ok(true),
         Err(SyncError::RetryableState { .. }) => Ok(false),
         Err(error) => Err(error),
     }

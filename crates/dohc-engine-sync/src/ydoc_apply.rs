@@ -865,8 +865,15 @@ fn require_recovery_closed(
             reason: "local-document-unsettled",
         });
     }
-    dohc_engine_collab::live_update_application::require_restore_open(conn, key)
-        .map_err(map_collab_hard_error)
+    match dohc_engine_collab::live_update_application::require_restore_open(conn, key) {
+        Ok(()) => Ok(()),
+        Err(CollabError::RestoreFenced)
+            if crate::release_hold::restored_release_recovery_in(conn, key)? =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(map_collab_hard_error(error)),
+    }
 }
 
 /// Whether [`drain_deferred_ydoc_for_live_session`] would drain anything into
@@ -1114,8 +1121,14 @@ fn drain_deferred_ydoc(
         let bytes = store
             .get_binary_blob(&payload.update_blob_sha256)?
             .ok_or(SyncError::BlobInvalid)?;
-        let live_classification =
-            store.read_with(|conn| live_ordinary_classification(conn, key, &payload, &bytes))?;
+        let restored_release = release
+            && store
+                .read_with(|conn| crate::release_hold::restored_release_recovery_in(conn, key))?;
+        let live_classification = if restored_release {
+            None
+        } else {
+            store.read_with(|conn| live_ordinary_classification(conn, key, &payload, &bytes))?
+        };
         if let DeferredDrainMode::Live(expected_claim_id) = mode
             && Some(lineage_claim_id.as_str()) != expected_claim_id
             && live_classification.is_none()
@@ -1316,14 +1329,19 @@ fn drain_deferred_ydoc(
             faults,
             recorded_at_ms,
             |tx| {
-                if release {
-                    crate::release_hold::check_deferred_release_in(tx, key, &origin_id, origin_seq)
-                        .map_err(|_| CollabError::RestoreFenced)?;
-                }
                 if recovery_leases.is_some_and(|leases| leases.is_live(key)) {
-                    Err(CollabError::LeaseHeld)
+                    return Err(CollabError::LeaseHeld);
+                }
+                if release {
+                    let generation = crate::release_hold::check_deferred_release_in(
+                        tx, key, &origin_id, origin_seq,
+                    )
+                    .map_err(|_| CollabError::RestoreFenced)?;
+                    Ok(dohc_engine_collab::RemoteUpdateGuard::ReleaseGeneration(
+                        generation,
+                    ))
                 } else {
-                    Ok(())
+                    Ok(dohc_engine_collab::RemoteUpdateGuard::Ordinary)
                 }
             },
         );
@@ -1611,6 +1629,7 @@ fn write_final_drained_projection(
                 .iter()
                 .try_for_each(|(origin, seq)| {
                     crate::release_hold::check_deferred_release_in(tx, key, origin, *seq)
+                        .map(|_| ())
                 })?;
         }
         if let Some(leases) = recovery_leases {

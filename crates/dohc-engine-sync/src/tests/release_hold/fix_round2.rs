@@ -715,6 +715,31 @@ fn hold_capacity_defers_fetch_while_another_origin_advances() {
 }
 
 #[test]
+fn fix1_restore_successor_settlement_cannot_be_retained_under_old_hold() {
+    let (_dir, mut store, owner, _) = owner_publication::fixture();
+    let hold = open(&mut store, &owner);
+    let mut next = owner.clone();
+    next.binding.restore_fence_generation += 1;
+    let op = audited(&mut store, &next, 1);
+    assert!(matches!(
+        apply_replication_envelope_with_release_hold(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+            &hold
+        ),
+        Err(SyncError::RetryableState { .. })
+    ));
+    assert_eq!(store.table_row_count("release_held_ops").unwrap(), 0);
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        0
+    );
+}
+
+#[test]
 fn fix1_abandoned_inactive_lineage_keeps_row_without_stopping_workspace_drain() {
     let (_dir, mut store, owner, _) = owner_publication::fixture();
     let hold = open(&mut store, &owner);

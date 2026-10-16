@@ -17,6 +17,7 @@ pub struct NativeRestoreSource {
     pub byte_length: i64,
     pub created_at_ms: i64,
     pub source: OwnerOutboxSource,
+    pub person_edit: Option<bool>,
     pub accepted_receipt: Option<LiveUpdateReceipt>,
 }
 
@@ -50,11 +51,89 @@ pub(super) fn classify(
     origin_sequence: i64,
     event_count: usize,
     context: &Ydoc,
+    folded: &[NativeRestoreFoldedSource],
     budget: &mut Budget,
     max_events: usize,
 ) -> Result<ClassifiedNativeSources, ApplicationError> {
+    let b = &input.fence.operation.old_binding;
+    let mut query=conn.prepare("SELECT current_path,selector_paths_json FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND pending_entry_count>0 ORDER BY created_at_ms,outbox_id LIMIT ?6").map_err(read_sql)?;
+    let mut rows = query
+        .query(params![
+            b.workspace_id,
+            b.main_version_id,
+            b.object_id,
+            b.lineage_claim_id,
+            b.restore_fence_generation,
+            max_events as i64 + 1
+        ])
+        .map_err(read_sql)?;
+    let mut sources = Vec::new();
+    let mut bytes = Vec::new();
+    let mut private_context = None;
+    let mut parents = 0;
+    while let Some(row) = rows.next().map_err(read_sql)? {
+        if parents >= max_events {
+            return Err(invalid("restore source count exceeds configured budget"));
+        }
+        parents += 1;
+        let path = row
+            .get_ref(0)
+            .map_err(read_sql)?
+            .as_str()
+            .map_err(|_| ApplicationError::Corrupt)?;
+        let selectors = row
+            .get_ref(1)
+            .map_err(read_sql)?
+            .as_str()
+            .map_err(|_| ApplicationError::Corrupt)?;
+        budget.charge(path.len() + selectors.len())?;
+        let binding = LiveObjectBinding {
+            current_path: path.into(),
+            selector_paths: serde_json::from_str(selectors)
+                .map_err(|_| ApplicationError::Corrupt)?,
+            ..b.clone()
+        };
+        binding.validate_canonical().map_err(invalid)?;
+        let (part, updates) = classify_parent(
+            conn,
+            held,
+            input,
+            &binding,
+            origin_sequence,
+            event_count + sources.len(),
+            context,
+            &mut private_context,
+            budget,
+            max_events,
+        )?;
+        sources.extend(part);
+        bytes.extend(updates);
+    }
+    if private_context.is_some_and(|draft: Ydoc| draft.has_pending_dependencies()) {
+        return Err(invalid("restore private draft has missing dependencies"));
+    }
+    let digest = hex_sha256(&budget.json(&(&input.fence, &sources, folded))?);
+    Ok(ClassifiedNativeSources {
+        sources,
+        bytes,
+        digest,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_parent(
+    conn: &Connection,
+    held: &Registration,
+    input: &NativeRestorePreparation,
+    b: &LiveObjectBinding,
+    origin_sequence: i64,
+    event_count: usize,
+    context: &Ydoc,
+    private_context: &mut Option<Ydoc>,
+    budget: &mut Budget,
+    max_events: usize,
+) -> Result<(Vec<NativeRestoreSource>, Vec<Vec<u8>>), ApplicationError> {
     let operation = &input.fence.operation;
-    let b = &operation.old_binding;
     let parent_length: Option<i64> = conn.query_row(
         "SELECT length(CAST(outbox_id AS BLOB))+length(CAST(current_path AS BLOB))+length(CAST(selector_paths_json AS BLOB))+length(CAST(base_update_digest AS BLOB))+length(CAST(base_blob_digest AS BLOB))+length(CAST(state AS BLOB))+coalesce(length(CAST(quarantine_reason AS BLOB)),0)+coalesce(length(CAST(observed_binding_json AS BLOB)),0) FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND current_path=?6 AND selector_paths_json=?7",
         params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation,b.current_path,serde_json::to_string(&b.selector_paths).map_err(|_| ApplicationError::Corrupt)?],|row|row.get(0),
@@ -94,9 +173,10 @@ pub(super) fn classify(
         }
         let selectors: Vec<String> =
             serde_json::from_str(&selectors).map_err(|_| ApplicationError::Corrupt)?;
-        let observed: LiveObjectBinding =
-            serde_json::from_str(observed.as_deref().ok_or(ApplicationError::Corrupt)?)
-                .map_err(|_| ApplicationError::Corrupt)?;
+        let observed: Option<LiveObjectBinding> = observed
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|_| ApplicationError::Corrupt)?;
         let mut stopped = b.clone();
         stopped.restore_fence_generation = operation.new_fence;
         let actual_base_length: i64 = conn
@@ -113,8 +193,11 @@ pub(super) fn classify(
             || blob != base
             || base_length != actual_base_length
             || state != "quarantined"
-            || reason.as_deref() != Some("restore-fenced")
-            || observed != stopped
+            || !matches!(
+                reason.as_deref(),
+                Some("restore-fenced" | "stale-binding" | "binding-changed")
+            )
+            || (reason.as_deref() == Some("restore-fenced") && observed.as_ref() != Some(&stopped))
             || next < 1
         {
             return Err(ApplicationError::Conflict);
@@ -159,11 +242,15 @@ pub(super) fn classify(
                     .map_err(read_sql)?;
                 let observed: LiveObjectBinding =
                     serde_json::from_str(&observed).map_err(|_| ApplicationError::Corrupt)?;
-                (observed == *b || crate::owner_outbox::enrollment::restore_successor(b, &observed))
-                    .then_some(revision)
+                (observed == operation.old_binding
+                    || crate::owner_outbox::enrollment::restore_successor(
+                        &operation.old_binding,
+                        &observed,
+                    ))
+                .then_some(revision)
             }
         };
-        let mut query=conn.prepare("SELECT sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,length(CAST(native_source_json AS BLOB)),length(CAST(append_key AS BLOB))+length(CAST(delivery_id AS BLOB))+length(CAST(update_digest AS BLOB))+length(CAST(update_blob_digest AS BLOB)),length(CAST(agent_declaration_json AS BLOB)),draft_binding_revision,length(CAST(automation_declaration_json AS BLOB)) FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT ?2").map_err(read_sql)?;
+        let mut query=conn.prepare("SELECT sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,length(CAST(native_source_json AS BLOB)),length(CAST(append_key AS BLOB))+length(CAST(delivery_id AS BLOB))+length(CAST(update_digest AS BLOB))+length(CAST(update_blob_digest AS BLOB)),length(CAST(agent_declaration_json AS BLOB)),draft_binding_revision,length(CAST(automation_declaration_json AS BLOB)),person_edit FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT ?2").map_err(read_sql)?;
         let mut rows = query
             .query(params![outbox, max_events as i64 + 1])
             .map_err(read_sql)?;
@@ -305,7 +392,7 @@ pub(super) fn classify(
                 return Err(ApplicationError::Corrupt);
             }
             let update = budget.blob(conn, &update_digest)?;
-            if update.len() as i64 != length {
+            if update.len() as i64 != length || hex_sha256(&update) != update_digest {
                 return Err(ApplicationError::Corrupt);
             }
             let admitted = accepted_history::accepted_source(conn, held, &delivery_id, budget)?;
@@ -325,8 +412,19 @@ pub(super) fn classify(
             } else {
                 None
             };
-            crate::validate_replay_parity(context, &update)?;
-            context.apply(&update)?;
+            let person_edit: Option<bool> = row.get(12).map_err(read_sql)?;
+            if source.native().is_some() || accepted_receipt.is_some() {
+                crate::validate_replay_parity(context, &update)?;
+                context.apply(&update)?;
+            } else if private_context.is_none() {
+                let draft = Ydoc::wire();
+                draft.apply(&budget.state(context)?)?;
+                *private_context = Some(draft);
+            }
+            if let Some(draft) = private_context.as_ref() {
+                crate::validate_replay_parity(draft, &update)?;
+                draft.apply(&update)?;
+            }
             total = total.checked_add(length).ok_or(ApplicationError::Corrupt)?;
             observed_oldest =
                 Some(observed_oldest.map_or(created, |value: i64| value.min(created)));
@@ -340,6 +438,7 @@ pub(super) fn classify(
                 byte_length: length,
                 created_at_ms: created,
                 source,
+                person_edit,
                 accepted_receipt,
             });
             bytes.push(update);
@@ -348,10 +447,5 @@ pub(super) fn classify(
             return Err(ApplicationError::Corrupt);
         }
     }
-    let digest = hex_sha256(&budget.json(&(&input.fence, &sources))?);
-    Ok(ClassifiedNativeSources {
-        sources,
-        bytes,
-        digest,
-    })
+    Ok((sources, bytes))
 }

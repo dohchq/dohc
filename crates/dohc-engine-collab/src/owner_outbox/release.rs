@@ -50,7 +50,7 @@ pub struct OwnerStopDocument {
     pub current_path: String,
 }
 
-pub(super) fn read_in(
+pub(crate) fn read_in(
     conn: &Connection,
     key: &DocKey,
 ) -> Result<Option<OwnerLiveStop>, OwnerOutboxError> {

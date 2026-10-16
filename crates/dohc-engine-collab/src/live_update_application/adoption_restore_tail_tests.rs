@@ -1393,14 +1393,7 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
             };
             (Some(receipt), ack.local_ydoc_sequence)
         } else {
-            let key = f.key.clone();
-            f.store
-                .write_with(&NoFaults, |tx| {
-                    durable::record_authorized_update_in_tx(
-                        tx, &key, &update, true, None, None, false, 11,
-                    )
-                })
-                .unwrap();
+            // The unaccepted owner draft stays outside the native head.
             (None, 0)
         };
         // An enrollment observes this binding, and the entry keeps the agent

@@ -54,9 +54,9 @@ pub use bootstrap::{
     bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
 };
 pub use restore_content::{
-    NativeRestoreApplication, NativeRestoreApplicationReceipt, NativeRestorePoint,
-    NativeRestorePreparation, NativeRestoreProposal, NativeRestoreProposalReceipt,
-    NativeRestoreSource,
+    NativeRestoreApplication, NativeRestoreApplicationReceipt, NativeRestoreFoldedSource,
+    NativeRestorePoint, NativeRestorePreparation, NativeRestoreProposal,
+    NativeRestoreProposalReceipt, NativeRestoreSource,
 };
 pub use restore_fence::require_open as require_restore_open;
 pub(crate) use restore_fence::require_registration as require_restore_registration;

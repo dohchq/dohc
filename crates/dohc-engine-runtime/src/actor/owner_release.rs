@@ -1,6 +1,9 @@
 //! Lifecycle commands for the future release runner. No RPC or startup task calls these.
 use super::*;
-use dohc_engine_collab::{DocKey, LiveObjectBinding, owner_outbox::prefix};
+use dohc_engine_collab::{
+    DocKey, LiveObjectBinding,
+    owner_outbox::{enrollment, prefix},
+};
 use dohc_engine_storage::TxnOutcome;
 use dohc_engine_sync::{self as sync, ReleaseHold};
 use tokio_util::sync::CancellationToken;
@@ -16,6 +19,12 @@ pub enum OwnerReleaseLifecycle {
     Abandon {
         hold: ReleaseHold,
         resolved_digest: String,
+    },
+    /// After final release, a completed restore transfers only the hold, without enrollment.
+    Successor {
+        hold: ReleaseHold,
+        input: Box<enrollment::OwnerEnrollmentInput>,
+        digest: String,
     },
     CloseSession {
         hold: ReleaseHold,
@@ -95,6 +104,7 @@ impl ActorHandle {
                 | OwnerReleaseLifecycle::Unbind(h)
                 | OwnerReleaseLifecycle::FinishCleanup(h) => h.binding(),
                 OwnerReleaseLifecycle::Abandon { hold, .. }
+                | OwnerReleaseLifecycle::Successor { hold, .. }
                 | OwnerReleaseLifecycle::CloseSession { hold, .. }
                 | OwnerReleaseLifecycle::CleanupSession { hold, .. } => hold.binding(),
             };
@@ -125,6 +135,13 @@ impl ActorHandle {
                         sync::abandon_release_hold_in(tx, &h, &resolved_digest)?;
                         h
                     }
+                    OwnerReleaseLifecycle::Successor {
+                        hold,
+                        input,
+                        digest,
+                    } => {
+                        return sync::successor_release_hold_in(tx, &hold, &input, &digest, now_ms);
+                    }
                     OwnerReleaseLifecycle::CloseSession { hold, outbox } => {
                         require_cleanup_hold(tx, &key, &hold)?;
                         let released: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND state='released')",rusqlite::params![key.workspace_id,key.version_id,key.object_id],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
@@ -137,8 +154,13 @@ impl ActorHandle {
                         require_cleanup_hold(tx, &key, &hold)?;
                         prefix::cleanup_consumed_in_tx(tx, &key, &outbox)
                             .map_err(StorageError::corrupt_public)?;
-                        prefix::cleanup_session_page_in_tx(tx, hold.binding())
-                            .map_err(StorageError::corrupt_public)?;
+                        if prefix::progress_in(tx, &key)
+                            .map_err(StorageError::corrupt_public)?
+                            .is_some()
+                        {
+                            prefix::cleanup_session_page_in_tx(tx, hold.binding())
+                                .map_err(StorageError::corrupt_public)?;
+                        }
                         hold
                     }
                     OwnerReleaseLifecycle::FinishCleanup(h) => {
@@ -231,5 +253,10 @@ fn require_cleanup_hold(
     {
         return Ok(());
     }
-    Err(sync::SyncError::CoordinateDiverged)
+    let successor:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND release_digest=?4 AND json(binding_json)=json(?5) AND successor_ready=1 AND abandoned=0)",rusqlite::params![key.workspace_id,key.version_id,key.object_id,hold.digest(),serde_json::to_string(hold.binding()).map_err(StorageError::corrupt_public)?],|r|r.get(0)).map_err(StorageError::corrupt_public)?;
+    if successor {
+        Ok(())
+    } else {
+        Err(sync::SyncError::CoordinateDiverged)
+    }
 }

@@ -3259,7 +3259,37 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_OWNER_RELEASE_LIFECYCLE_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 57,
+        id: "v2-owner-release-successor",
+        sql: V2_OWNER_RELEASE_SUCCESSOR_DDL,
+        sets_user_version: None,
+    },
 ];
+
+const V2_OWNER_RELEASE_SUCCESSOR_DDL: &str = "\
+ALTER TABLE owner_prefix_consumed ADD COLUMN publication_coordinate_json TEXT CHECK(publication_coordinate_json IS NULL OR json_valid(publication_coordinate_json));
+CREATE INDEX owner_prefix_native ON owner_prefix_consumed(workspace_id,version_id,object_id,native_sequence);
+ALTER TABLE release_holds ADD COLUMN owner_snapshot_json TEXT CHECK(owner_snapshot_json IS NULL OR json_valid(owner_snapshot_json));
+ALTER TABLE release_holds ADD COLUMN successor_ready INTEGER NOT NULL DEFAULT 0 CHECK(successor_ready IN (0,1));
+CREATE TABLE owner_release_recoveries (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    release_digest TEXT NOT NULL,
+    stop_json TEXT NOT NULL CHECK(json_valid(stop_json)),
+    native_blob_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY(workspace_id,version_id,object_id,release_digest)
+) STRICT;
+CREATE TABLE owner_release_recovery_entries (
+    workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, object_id TEXT NOT NULL, release_digest TEXT NOT NULL,
+    outbox_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+    blob_sha256 TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    entry_json TEXT NOT NULL CHECK(json_valid(entry_json)),
+    PRIMARY KEY(workspace_id,version_id,object_id,release_digest,outbox_id,sequence),
+    FOREIGN KEY(workspace_id,version_id,object_id,release_digest) REFERENCES owner_release_recoveries ON DELETE CASCADE
+) STRICT;
+";
 
 const V2_OWNER_RELEASE_LIFECYCLE_DDL: &str = "\
 ALTER TABLE release_holds ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0 CHECK(abandoned IN (0,1));
@@ -4104,6 +4134,10 @@ mod tests {
             (
                 "v2-owner-release-lifecycle",
                 "1eba7c3bcfc7521f9e0a1668da9597caaa98d7bdabe814d0625f30fb2485fc81",
+            ),
+            (
+                "v2-owner-release-successor",
+                "f710341685d05f4434f8635ff1d6ef6159dadc23e32dd63981899e5356956c93",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

@@ -128,6 +128,18 @@ impl ReleaseHold {
         dohc_engine_collab::live_update_application::require_restore_generation(tx, &key, expected)
             .map_err(crate::ydoc_apply::map_collab_hard_error)?;
         let encoded = serde_json::to_string(b).map_err(SyncError::corrupt)?;
+        let successor:bool=tx.query_row("SELECT successor_ready FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id],|r|r.get(0)).map_err(SyncError::corrupt)?;
+        if successor {
+            if restored_release_ready_in(tx, b, &self.namespace)? {
+                return Ok(());
+            }
+            let installed = dohc_engine_collab::owner_outbox::prefix::effective_in(tx, b)
+                .map_err(SyncError::corrupt)?;
+            if installed.relay_database_namespace != self.namespace {
+                return Err(waiting());
+            }
+            return Ok(());
+        }
         let released: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_live_stops s JOIN ydoc_docs d ON d.workspace_id=s.workspace_id AND d.version_id=s.main_version_id AND d.object_id=s.object_id
             WHERE s.workspace_id=?1 AND s.main_version_id=?2 AND s.object_id=?3 AND s.state='released' AND json_extract(s.binding_json,'$.binding')=json(?4) AND s.relay_database_namespace=?5 AND d.lineage_claim_id=?6)
             AND NOT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)
@@ -249,7 +261,7 @@ pub fn prepare_release_hold_replay_in(
 ) -> Result<(), SyncError> {
     hold.check_in(tx, false)?;
     hold.check_released_in(tx)?;
-    let sealed: bool = tx.query_row("SELECT anchor_cursor IS NOT NULL AND anchor_sha256 IS NOT NULL FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+    let sealed: bool = tx.query_row("SELECT (anchor_cursor IS NOT NULL AND anchor_sha256 IS NOT NULL) OR successor_ready=1 FROM release_holds WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![hold.binding.workspace_id,hold.binding.main_version_id,hold.binding.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
     if !sealed {
         return Err(waiting());

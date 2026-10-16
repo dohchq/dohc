@@ -4,8 +4,10 @@ use dohc_engine_storage::put_binary_blob;
 use std::io::Write;
 
 pub(super) mod application;
+mod folded_sources;
 mod native_sources;
 pub use application::{NativeRestoreApplication, NativeRestoreApplicationReceipt};
+pub use folded_sources::NativeRestoreFoldedSource;
 #[cfg(test)]
 pub(super) mod tests;
 pub use native_sources::NativeRestoreSource;
@@ -44,6 +46,7 @@ pub struct NativeRestoreProposalReceipt {
     pub selected_history: NativeRestoreHistoryProof,
     pub accepted_history: NativeRestoreHistoryProof,
     pub native_sources: Vec<NativeRestoreSource>,
+    pub folded_sources: Vec<NativeRestoreFoldedSource>,
     pub native_source_manifest_digest: String,
 }
 
@@ -365,6 +368,14 @@ fn prepare_in(
     let accepted = accepted_history.doc;
     let point = selected_history.doc;
     let event_count = accepted_history.proof.suffix.len() + selected_history.proof.suffix.len();
+    let folded_sources = folded_sources::classify(
+        tx,
+        input,
+        &accepted,
+        &mut budget,
+        max_events.saturating_sub(event_count),
+    )?;
+    let event_count = event_count + folded_sources.len();
     let native_sources::ClassifiedNativeSources {
         sources: native_sources,
         bytes: native_source_bytes,
@@ -376,6 +387,7 @@ fn prepare_in(
         origin_sequence,
         event_count,
         &accepted,
+        &folded_sources,
         &mut budget,
         max_events,
     )?;
@@ -409,6 +421,7 @@ fn prepare_in(
             return Err(ApplicationError::Conflict);
         }
         if receipt.origin_evidence_digest != origin_digest
+            || receipt.folded_sources != folded_sources
             || receipt.native_sources != native_sources
             || receipt.native_source_manifest_digest != native_source_manifest_digest
             || receipt.accepted_history != accepted_history.proof
@@ -501,6 +514,7 @@ fn prepare_in(
         accepted_history: accepted_history.proof,
         selected_history: selected_history.proof,
         native_sources,
+        folded_sources,
         native_source_manifest_digest,
     };
     let check = Ydoc::wire();

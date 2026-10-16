@@ -39,7 +39,7 @@ pub use release_hold::{
     begin_release_hold_in, close_release_hold_in, pending_release_blocked_in,
     prepare_release_hold_replay_in, read_release_hold, read_release_hold_page,
     release_deferred_wakes_in, replay_release_held_envelope, seal_release_hold_cut_in,
-    unbind_release_in,
+    successor_release_hold_in, unbind_release_in,
 };
 mod settlement_publication;
 pub use owner_publication::{

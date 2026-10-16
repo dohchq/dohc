@@ -137,7 +137,22 @@ fn prefix_restore_refusal(resumed: bool) {
             &"c".repeat(64),
             95,
             &NoFaults,
-            |tx, _, _, _| prefix::test_publication(tx, &observed.binding)
+            |tx, bytes, actor, attribution| {
+                let coordinate = prefix::test_publication(tx, &observed.binding)?;
+                let (origin, seq, _) = coordinate.as_ref().unwrap();
+                let publication = serde_json::json!({
+                    "versionId": observed.binding.main_version_id,
+                    "objectId": observed.binding.object_id,
+                    "lineageClaimId": observed.binding.lineage_claim_id,
+                    "contentKind": "richdoc", "isBaseState": false,
+                    "updateBlobSha256": hex_sha256(bytes),
+                    "actorOriginId": actor, "attribution": attribution,
+                    "release": prefix::publication_tag(&observed.binding, &"c".repeat(64))
+                });
+                tx.execute("UPDATE replication_log SET payload_json=?1 WHERE workspace_id='workspace' AND origin_id=?2 AND origin_seq=?3", params![publication.to_string(),origin,seq])
+                    .map_err(|e| CollabError::Storage(StorageError::persist_public(e)))?;
+                Ok(coordinate)
+            }
         )
         .is_ok());
 

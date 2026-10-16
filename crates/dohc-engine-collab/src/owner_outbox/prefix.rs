@@ -595,13 +595,15 @@ pub fn commit_prefix(
             warm.apply(&bytes).map_err(collab)?;
             let seq = crate::durable::append_row(tx,&key,&entry.3,actor.as_deref(),attribution.as_ref(),true,now_ms).map_err(collab)?;
             if actor.is_none() { crate::author_coverage::retain_pending_in(tx,&key,&[author]).map_err(collab)?; }
+            let publication;
             if let Some((origin, seq, wrote)) = journal(tx,&bytes,actor.as_deref(),attribution.as_ref()).map_err(collab)? {
                 if !wrote {
                     require_publication_tag_in_tx(tx, binding, &progress.release_digest, &origin, seq)?;
                 }
+                publication = (origin.clone(), seq);
                 progress.publication_frontier.entry(origin).and_modify(|head| *head = (*head).max(seq)).or_insert(seq);
             } else { return Err(OwnerOutboxError::Corrupt); }
-            tx.execute("INSERT INTO owner_prefix_consumed (workspace_id,version_id,object_id,outbox_id,append_key,update_digest,native_sequence,delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![key.workspace_id,key.version_id,key.object_id,entry.0,entry.2,entry.3,seq,delivery_id,entry.1,result_pending_bytes,result_oldest_entry_at_ms,result_state]).map_err(write_sql)?;
+            tx.execute("INSERT INTO owner_prefix_consumed (workspace_id,version_id,object_id,outbox_id,append_key,update_digest,native_sequence,delivery_id,sequence,result_pending_bytes,result_oldest_entry_at_ms,result_state,publication_coordinate_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![key.workspace_id,key.version_id,key.object_id,entry.0,entry.2,entry.3,seq,delivery_id,entry.1,result_pending_bytes,result_oldest_entry_at_ms,result_state,serde_json::to_string(&publication).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
             tx.execute("DELETE FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2 AND pending=1",params![entry.0,entry.1]).map_err(write_sql)?;
             *touched.entry(entry.0).or_insert(0) += entry.4;
             used += entry.4;
@@ -857,6 +859,17 @@ fn require_not_abandoned_in(
     if abandoned {
         return Err(OwnerOutboxError::Stopping);
     }
+    Ok(())
+}
+
+pub fn quarantine_successor_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+) -> Result<(), OwnerOutboxError> {
+    if let Some(observed) = read_observed_in(tx, binding)? {
+        tx.execute("UPDATE release_holds SET owner_snapshot_json=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![binding.workspace_id,binding.main_version_id,binding.object_id,serde_json::to_string(&observed).map_err(|_|OwnerOutboxError::Corrupt)?]).map_err(write_sql)?;
+    }
+    tx.execute("UPDATE owner_ydoc_outboxes SET state='quarantined',quarantine_reason='stale-binding' WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND state!='quarantined'",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation]).map_err(write_sql)?;
     Ok(())
 }
 
