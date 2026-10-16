@@ -160,7 +160,7 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
       await mkdir(dirname(target), { recursive: true });
       if (!resuming || !(await info(target))?.isDirectory()) await mkdir(target);
       for (const name of await readdir(source)) await place(join(source, name), join(target, name));
-    } else if (!await alreadyPlaced(source, target)) {
+    } else if (!resuming || !await alreadyPlaced(source, target)) {
       if (stat.isSymbolicLink()) { await mkdir(dirname(target), { recursive: true }); await symlink(await readlink(source), target); }
       else await placeFile(root, source, target, true, () => checkedTarget(root, path, record.base));
     }

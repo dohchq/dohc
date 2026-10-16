@@ -134,6 +134,20 @@ describe("delete recovery", () => {
     expect(await f.undo(id)).toEqual({ ok: false, reason: "Cannot undo: tracked.txt occupies the old path" });
     expect(existsSync(join(f.root, "folder/rowless.txt"))).toBe(false);
   });
+  it.each(["not retained", "different bytes"])("keeps an occupant created after engine Undo in place (%s)", async body => {
+    const f = await fixture();
+    const id = recovery(await f.remove());
+    const undo = f.history.undoHistoryOperation.getMockImplementation()!;
+    f.history.undoHistoryOperation.mockImplementationOnce(async input => {
+      const result = await undo(input);
+      await f.write("folder/rowless.txt", body);
+      return result;
+    });
+    expect(await f.undo(id)).toMatchObject({ ok: true, restored: [], remaining: [{ path: "folder/rowless.txt", reason: expect.stringContaining("now occupies") }] });
+    expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe(body);
+    const entry = (await readdir(join(f.root, ".dohc/trash"))).find(name => name.endsWith("-folder"))!;
+    expect(await readFile(join(f.root, ".dohc/trash", entry, "rowless.txt"), "utf8")).toBe("not retained");
+  });
   it("keeps a raced file in trash without replacing its new occupant", async () => {
     const f = await fixture();
     const id = recovery(await f.remove());
