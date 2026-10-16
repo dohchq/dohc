@@ -355,6 +355,8 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
     const retired = !enabled && (current.retired || ownerStop === "retire");
     storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,enabled=?,retired=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
       .run(ownerStop, Number(enabled), Number(retired), Math.max(nowMs, current.updatedAtMs), workspaceId, current.objectId);
+    // Stop retires at once, so the release that clears upload proof never sees this row.
+    if (!currentServiceHostWorkspace(storage, workspaceId)) forgetServiceHostUploads(storage, workspaceId);
     return {...read(storage, workspaceId, current.path)!, ...(acceptedCursor === undefined ? {} : {acceptedCursor})};
   });
 }
