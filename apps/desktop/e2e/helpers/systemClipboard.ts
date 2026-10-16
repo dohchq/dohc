@@ -1,7 +1,11 @@
 import type { TestInfo } from "@playwright/test";
 import { systemClipboardLockPath, withSystemClipboardLock } from "./systemClipboardLock.mjs";
 
-/** Hold only the copy/read or write/paste span, including its assertions. */
+/**
+ * Hold only the copy/read or write/paste span, including its assertions.
+ * Every action and assertion inside the span must pass remainingMs() as its timeout.
+ * Do not release on a timer: a click still running could write during another lane's span.
+ */
 export async function holdSystemClipboard<T>(
   testInfo: TestInfo,
   use: (remainingMs: () => number) => Promise<T>,

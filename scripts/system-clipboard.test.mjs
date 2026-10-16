@@ -127,6 +127,13 @@ test("failure releases the lock for a waiting process", { timeout: 15_000 }, asy
   await withSystemClipboardLock({ lockPath: paths.lockPath, holder: "after release", timeoutMs: 1_000 }, async () => {});
 });
 
+test("a free lock can be acquired with no wait budget", { timeout: 15_000 }, async t => {
+  const paths = await fixture(t);
+  const options = { lockPath: paths.lockPath, holder: "no wait", timeoutMs: 0 };
+  assert.equal(await withSystemClipboardLock(options, async () => "acquired"), "acquired");
+  assert.equal(await withSystemClipboardLock(options, async () => "reacquired"), "reacquired");
+});
+
 test("the wait obeys its budget and identifies the holder", { timeout: 15_000 }, async t => {
   const paths = await fixture(t);
   const first = holder(t, paths, "occupied clipboard test");

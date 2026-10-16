@@ -53,18 +53,18 @@ export async function withSystemClipboardLock({ timeoutMs, holder, lockPath = sy
   const deadline = performance.now() + timeoutMs;
   const owner = { pid: process.pid, holder };
   for (;;) {
-    if (performance.now() >= deadline) {
-      const observed = await readHolder(lockPath, 200);
-      const name = observed
-        ? `${observed.holder} (pid ${observed.pid}, acquired ${observed.acquiredAt})`
-        : "an owner whose name is not yet readable";
-      throw new Error(`Timed out waiting for the system clipboard lock; held by ${name}.`);
-    }
     let release;
     try {
       release = await listen(lockPath, owner);
     } catch (error) {
       if (error.code !== "EADDRINUSE") throw error;
+      if (performance.now() >= deadline) {
+        const observed = await readHolder(lockPath, 200);
+        const name = observed
+          ? `${observed.holder} (pid ${observed.pid}, acquired ${observed.acquiredAt})`
+          : "an owner whose name is not yet readable";
+        throw new Error(`Timed out waiting for the system clipboard lock; held by ${name}.`);
+      }
       await poll(Math.min(50, Math.max(0, deadline - performance.now())));
       continue;
     }
