@@ -433,8 +433,8 @@ test('the data directory must be an absolute folder without parent segments', ()
   }
 });
 
-test('both gateways refuse internal paths before proxy handles', () => {
-  for (const file of ['Caddyfile', 'Caddyfile.private']) {
+test('every gateway refuses internal paths before proxy handles', () => {
+  for (const file of ['Caddyfile', 'Caddyfile.private', 'Caddyfile.cloudflare']) {
     const config = readFileSync(`tools/self-host/${file}`, 'utf8');
     assert.match(config, /@internal path \/internal\/\*\s+handle @internal \{\s+respond 404\s+\}/);
     assert.ok(config.indexOf('handle @internal') < config.indexOf('handle @account'));

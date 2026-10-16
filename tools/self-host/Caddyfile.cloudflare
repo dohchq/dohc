@@ -7,6 +7,10 @@
 }
 
 {$DOHC_PUBLIC_HOST} {
+  @internal path /internal/*
+  handle @internal {
+    respond 404
+  }
   @home path /
   redir @home /account 302
   @account path /account /account/* /device /api/auth/* /.well-known/dohc-server
