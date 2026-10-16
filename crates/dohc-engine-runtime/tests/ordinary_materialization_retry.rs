@@ -215,6 +215,55 @@ async fn materialize_pages(
     scratch
 }
 
+/// A delete means no tracked file at its path. A folder there already holds
+/// none, even named before the files inside it, and a delete takes the
+/// folders it leaves empty with it, so a later file can take their name. A
+/// folder with anything else in it stays. A delete whose file is already
+/// gone still clears the empty folders a stopped page left above it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_at_a_folder_is_done_and_leaves_no_empty_folder() {
+    const GONE: [&str; 3] = ["x.md/child.md", "d/a/b.md", "kept.md/gone.md"];
+    let scratch = materialize_page(
+        |domain| {
+            for (step, path) in (1..).zip(GONE) {
+                let object = format!("o-{step}");
+                let (written, deleted) = (format!("w{step}"), format!("d{step}"));
+                domain
+                    .write_text(&write_at(path, &object, "left", &written, step), &NoFaults)
+                    .unwrap();
+                domain
+                    .delete_text_file(&delete_at(path, &deleted, step), &NoFaults)
+                    .unwrap();
+            }
+        },
+        |root| {
+            for path in GONE {
+                std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+                std::fs::write(root.join(path), "left").unwrap();
+            }
+            std::fs::write(root.join("kept.md/other.txt"), "untracked").unwrap();
+            std::fs::create_dir_all(root.join("y.md/sub")).unwrap();
+        },
+        vec![
+            change("x.md", "delete"),
+            change("x.md/child.md", "delete"),
+            change("d/a/b.md", "delete"),
+            change("kept.md", "delete"),
+            change("kept.md/gone.md", "delete"),
+            change("y.md/sub/child.md", "delete"),
+        ],
+    )
+    .await;
+    let root = scratch.path();
+    for gone in ["x.md", "d", "kept.md/gone.md", "y.md"] {
+        assert!(!root.join(gone).exists(), "{gone}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("kept.md/other.txt")).unwrap(),
+        "untracked"
+    );
+}
+
 /// One page turns the file `notes` into a directory holding `work.md`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_page_turns_a_file_into_a_directory() {
@@ -474,13 +523,16 @@ async fn directory_replacement_retries_after_the_delete_batch() {
             std::fs::create_dir_all(root.join("d/sub")).unwrap();
             std::fs::write(root.join("d/sub/a.md"), "a").unwrap();
         },
-        // Stop at the crash boundary: the delete batch has committed, but
-        // the next batch has not removed the directory or written its file.
         vec![change("d/sub/a.md", "delete")],
     )
     .await;
-    assert!(scratch.path().join("d/sub").is_dir());
-    assert!(!scratch.path().join("d/sub/a.md").exists());
+    assert!(
+        !scratch.path().join("d").exists(),
+        "the delete takes the folders it emptied"
+    );
+    // Stop at the crash boundary: the delete batch has committed, but its
+    // folders have not gone and the next batch has not written its file.
+    std::fs::create_dir_all(scratch.path().join("d/sub")).unwrap();
 
     let db = engine_db_path(&scratch).unwrap();
     let supervisor = WorkspaceSupervisor::new();

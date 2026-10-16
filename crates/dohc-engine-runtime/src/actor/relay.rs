@@ -1717,9 +1717,9 @@ pub enum RelayOperationOutcome {
         departed: Vec<String>,
     },
     HostedCursorCommitted {
-        /// `false` when the scope moved since the pass fetched; nothing
-        /// committed.
-        committed: bool,
+        /// Not committed when the scope moved since the pass fetched; and
+        /// whether a document it kept held waits for the next pass.
+        commit: dohc_engine_sync::HostedCommit,
         /// Parking after the commit: `Ok(true)` when a document that left the
         /// scope parked or its file's path came free, so work that waited for
         /// its path can apply and the caller pulls again. Its failure leaves
@@ -2636,11 +2636,11 @@ fn run_relay_operation(
             root,
             now_ms,
         } => match client.commit_hosted_cursor(store, &workspace_id, &cursor, &NoFaults)? {
-            TxnOutcome::Committed(committed) => {
+            TxnOutcome::Committed(commit) => {
                 let retirement =
                     park_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms);
                 Ok(RelayOperationOutcome::HostedCursorCommitted {
-                    committed,
+                    commit,
                     retirement,
                     unready: release_unready_hosted(store, registrations, &workspace_id),
                     departed: dohc_engine_sync::departed_hosted_object_ids(store, &workspace_id)

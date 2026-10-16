@@ -320,9 +320,22 @@ fn relay_delete_precedes_write(
             .any(|other| other.operation == "write" && is_inside(&change.path, &other.path))
 }
 
+/// Remove each folder above `path` that is empty, nearest first, so a file can
+/// take its name. Stops at the first that stays: one with content, or one
+/// that cannot go, which a later write there reports.
+fn remove_emptied_folders(root_dir: &std::path::Path, path: &str) {
+    let mut parent = path;
+    while let Some((folder, _)) = parent.rsplit_once('/') {
+        if !matches!(remove_empty_directory_target(root_dir, folder), Ok(true)) {
+            break;
+        }
+        parent = folder;
+    }
+}
+
 /// Enqueue one batch of a sync page in one transaction and materialize it in
-/// one replay. Clears `projections` and adds the batch's deletes to
-/// `deleted`.
+/// one replay. Clears `projections`, and removes the folders the batch's
+/// deletes left empty.
 #[allow(
     clippy::too_many_arguments,
     reason = "relay pages reuse one hold snapshot across dependent batches"
@@ -334,7 +347,6 @@ fn run_relay_batch(
     self_writes: &dyn SelfWriteRecorder,
     holds: &PlacementHolds,
     projections: &mut Vec<SwitchProjection>,
-    deleted: &mut Vec<String>,
     now_ms: i64,
 ) -> Result<(), RuntimeError> {
     if projections.is_empty() {
@@ -366,15 +378,14 @@ fn run_relay_batch(
     if matches!(outcome, TxnOutcome::Crashed { .. }) {
         return Err(RuntimeError::OperationCrashed);
     }
-    for projection in &batch {
+    let mut deleted = Vec::new();
+    let mut selected = HashSet::new();
+    for projection in batch {
         if projection.operation == MaterializationOperation::Delete {
-            deleted.push(projection.spec.target_path.clone());
+            deleted.push(projection.spec.target_path);
         }
+        selected.insert(projection.spec.job_id);
     }
-    let selected: HashSet<String> = batch
-        .into_iter()
-        .map(|projection| projection.spec.job_id)
-        .collect();
     let replay = replay_pending_materializations(
         store,
         root_dir,
@@ -394,6 +405,9 @@ fn run_relay_batch(
     let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
     if failed_jobs > 0 {
         return Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs });
+    }
+    for path in &deleted {
+        remove_emptied_folders(root_dir, path);
     }
     Ok(())
 }
@@ -1088,7 +1102,8 @@ impl ActorHandle {
             // run first, and the page runs in batches that each hold no two
             // paths that alias or where one is inside the other. Aliases keep
             // their page order, matching sequential replay. Every probe sees
-            // earlier batches.
+            // earlier batches, and a delete removes the folders it leaves
+            // empty, so a file can take their name.
             let mut changes = changes;
             changes.retain(|change| change.version_id == active);
             let first: Vec<bool> = changes
@@ -1116,26 +1131,13 @@ impl ActorHandle {
             });
             let mut projections: Vec<SwitchProjection> = Vec::new();
             let mut batch_aliases = HashSet::new();
-            let mut deleted: Vec<String> = Vec::new();
             for (key, change) in keyed {
                 if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
                 if batch_aliases.iter().any(|planned: &Vec<String>| {
                     planned.starts_with(&key) || key.starts_with(planned)
                 }) {
-                    run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &holds, &mut projections, &mut deleted, now_ms)?;
+                    run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &holds, &mut projections, now_ms)?;
                     batch_aliases.clear();
-                }
-                // A file replacing a directory whose tracked files this page
-                // deleted: the empty directory gives way.
-                if root_dir.join(&change.path).is_dir() {
-                    for path in deleted.iter().filter(|path| is_inside(path, &change.path)) {
-                        let mut parent = path.as_str();
-                        while let Some((directory, _)) = parent.rsplit_once('/') {
-                            remove_empty_directory_target(&root_dir, directory)?;
-                            if directory.split('/').count() == change.path.split('/').count() { break; }
-                            parent = directory;
-                        }
-                    }
                 }
                 let secret = change.content_kind == "secret";
                 if !secret && !resolve_effective_policy(&change.path, policy.files_policy.as_deref(), policy.visibility_policy.as_deref()).tracked {
@@ -1146,9 +1148,6 @@ impl ActorHandle {
                     probe_projection_target(&root_dir, &change.path,
                         if secret { ProjectionTargetKind::Secret } else { ProjectionTargetKind::Plaintext })
                 };
-                let preimage = held.map(|(_, hold)| hold.preimage.clone()).or_else(|| projection_preimage(&state)).ok_or(DomainError::InvalidPath {
-                    reason: "ordinary materialization target is unsafe or unreadable",
-                })?;
                 let desired = if secret {
                     if secret_key.is_none() { secret_key = Some(load_projection_secret_key(&root_dir)?); }
                     let plaintext = SecretFileStore::new(store, secret_key.as_ref().expect("secret key loaded"))
@@ -1167,11 +1166,16 @@ impl ActorHandle {
                         .map(|head| { let equal = projection_matches(&state, &head.blob_sha256);
                             (head.blob_sha256, Some(head.text.into_bytes()), equal) })
                 } else { return Err(DomainError::StateCorrupt { reason: "ordinary materialization kind is invalid" }.into()); };
+                // A path with no head needs no file there, and a folder is none.
+                if desired.is_none() && root_dir.join(&change.path).is_dir() { continue; }
+                let preimage = held.map(|(_, hold)| hold.preimage.clone()).or_else(|| projection_preimage(&state)).ok_or(DomainError::InvalidPath {
+                    reason: "ordinary materialization target is unsafe or unreadable",
+                })?;
                 let (operation, sha, inline) = match (change.operation, desired) {
                     ("write" | "delete", Some((_, _, true))) => continue,
                     ("write" | "delete", Some((sha, inline, false))) => (MaterializationOperation::Write, sha, inline),
                     ("write" | "delete", None) if matches!(state, ProjectionTargetState::Absent) => {
-                        deleted.push(change.path);
+                        remove_emptied_folders(&root_dir, &change.path);
                         continue;
                     }
                     ("write" | "delete", None) => (MaterializationOperation::Delete, hex_sha256(&[]), Some(Vec::new())),
@@ -1182,7 +1186,7 @@ impl ActorHandle {
                     preimage, now_ms, now_ms, secret, inline));
             }
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-            run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &holds, &mut projections, &mut deleted, now_ms)?;
+            run_relay_batch(store, &root_dir, &workspace_id, self_writes.as_ref(), &holds, &mut projections, now_ms)?;
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
             Ok(())
         }).await

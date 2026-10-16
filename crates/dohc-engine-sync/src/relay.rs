@@ -2129,6 +2129,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let redelivered = std::mem::take(&mut pass.redelivered);
         let (reads, held, unparks, standing, heads) = store
             .read_with(|conn| {
+                // What holds each path, read once for every document.
+                let mut occupancy = crate::hosted::Occupancy::new(conn, workspace_id);
                 let mut held = BTreeMap::new();
                 let mut settled = BTreeMap::new();
                 // A document whose parked heads this pass freed the paths of
@@ -2139,8 +2141,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 let mut standing = Vec::new();
                 for (object_id, stored) in redelivered {
                     standing.extend(crate::hosted::redelivered_unready(
-                        conn,
-                        workspace_id,
+                        &mut occupancy,
                         &object_id,
                         stored.into_values(),
                     )?);
@@ -2149,7 +2150,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 // can make a document ready writes each of its heads.
                 let mut heads = Vec::new();
                 for (object_id, (cursor, more)) in reads {
-                    unparks |= crate::hosted::unparks_next(conn, workspace_id, &object_id)?;
+                    unparks |= crate::hosted::unparks_next(&mut occupancy, &object_id)?;
                     let mut read = match pass.stopped.get(&object_id) {
                         Some(op) => crate::HostedRead {
                             // Commit refuses one below its document's read
@@ -2157,7 +2158,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             cursor: op
                                 .relay_seq
                                 .map_or(0, |seq| cursor.min(seq.saturating_sub(1))),
-                            stopped: Some(crate::hosted::stopped_hold(conn, &object_id, op)?),
+                            stopped: Some(crate::hosted::stopped_hold(
+                                &mut occupancy,
+                                &object_id,
+                                op,
+                            )?),
                             complete: false,
                             heads_written: false,
                         },
@@ -2168,7 +2173,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             heads_written: false,
                         },
                     };
-                    match read.hold(conn, workspace_id, &object_id)? {
+                    match read.hold(&mut occupancy, &object_id)? {
                         Some(hold) => {
                             held.insert(object_id.clone(), hold);
                         }
@@ -2226,16 +2231,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
-    /// Commit a hosted pass's cursor after its work materialized. Answers
-    /// `false`, committing nothing, when the scope moved or another pass
-    /// committed since its fetch.
+    /// Commit a hosted pass's cursor after its work materialized. Commits
+    /// nothing when the scope moved or another pass committed since its
+    /// fetch.
     pub fn commit_hosted_cursor(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         cursor: &crate::HostedCursor,
         faults: &dyn FaultInjector,
-    ) -> Result<TxnOutcome<bool>, RelayError> {
+    ) -> Result<TxnOutcome<crate::HostedCommit>, RelayError> {
         crate::commit_hosted_cursor(store, workspace_id, cursor, faults).map_err(
             |error| match error {
                 SyncError::InvalidInput {

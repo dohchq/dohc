@@ -987,7 +987,7 @@ fn commit(
         .commit_hosted_cursor(store, "ws", pending, &NoFaults)
         .unwrap()
     {
-        TxnOutcome::Committed(committed) => committed,
+        TxnOutcome::Committed(commit) => commit.committed,
         TxnOutcome::Crashed { .. } => panic!("no fault was injected"),
     }
 }
@@ -4329,6 +4329,44 @@ fn documents_parked_at_one_path_return_in_turn() {
     assert!(is_parked(&store, "doc-c"));
 }
 
+/// Opus's third park review: one reading of the workspace serves a pass's
+/// whole unparking, so each return it brings back holds its paths against
+/// the next. Two documents parked at one path that return together come
+/// back one at a time: `doc-b` first, and `doc-c` stays parked behind it.
+#[test]
+fn documents_parked_at_one_path_that_return_together_come_back_one_at_a_time() {
+    let (_scratch, _path, mut store, client) = departing_b();
+    let feed = client.transport();
+    feed.unshare("doc-b");
+    feed.replace(
+        "owner",
+        2,
+        "doc-c",
+        "a.md",
+        "hosted c",
+        ("doc-b", "hosted b", "moment-owner-1"),
+    );
+    feed.share("doc-c", "a.md");
+    sync_parking(&client, &mut store);
+    feed.unshare("doc-c");
+    sync_parking(&client, &mut store);
+    assert!(is_parked(&store, "doc-b") && is_parked(&store, "doc-c"));
+
+    feed.share("doc-b", "a.md");
+    feed.share("doc-c", "a.md");
+    sync_parking(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(content(&store).0, heads(&[("doc-b", "hosted b")]));
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM hosted_parked_snapshots WHERE object_id='doc-c'"
+        ),
+        1
+    );
+    assert_eq!(hold(&store, "doc-c"), Some(path_held("a.md", "doc-b")));
+}
+
 /// Parking: a return stops at its unparking, before it commits or after it
 /// commits but before its pass does, and the host restarts. Either way the
 /// return finishes once: its head comes back, the pass names its file, and
@@ -4496,14 +4534,49 @@ fn no_stored_decision_names_a_parked_path() {
     let standing = store
         .read_with(|conn| {
             crate::hosted::redelivered_unready(
-                conn,
-                "ws",
+                &mut crate::hosted::Occupancy::new(conn, "ws"),
                 "doc-b",
                 [change("A.md", "write"), change("x.md", "delete")],
             )
         })
         .unwrap();
     assert_eq!(standing, [change("x.md", "delete")]);
+}
+
+/// Opus's third park review: only a stored decision at exactly a document's
+/// own head was set apart. One there still wrote while the document was
+/// held, and one at the same path in another case, or a path inside or above
+/// it, counted as free: on a case-insensitive disk the delete of `p.md`
+/// removed `P.md`, and one of `d` against `d/x.md` failed its page. None
+/// stands now; the pass that makes the document ready writes its heads.
+#[test]
+fn no_stored_decision_names_a_path_of_its_documents_own_head() {
+    let change = |path: &str, operation: &'static str| crate::MomentMaterializationChange {
+        version_id: "main".to_owned(),
+        path: path.to_owned(),
+        operation,
+        content_kind: "text",
+    };
+    for (head, near) in [
+        ("P.md", ["P.md", "p.md", "P.md/x.md"]),
+        ("d/x.md", ["d", "D", "d/X.md"]),
+    ] {
+        let (_scratch, _path, store, _client) = departing_b_at(head);
+        let stored = near
+            .iter()
+            .map(|path| change(path, "delete"))
+            .chain([change(head, "write"), change("free.md", "delete")]);
+        let standing = store
+            .read_with(|conn| {
+                crate::hosted::redelivered_unready(
+                    &mut crate::hosted::Occupancy::new(conn, "ws"),
+                    "doc-b",
+                    stored,
+                )
+            })
+            .unwrap();
+        assert_eq!(standing, [change("free.md", "delete")], "{head}");
+    }
 }
 
 /// Opus's second park review: a return checked each stored decision of each
@@ -4513,9 +4586,13 @@ fn no_stored_decision_names_a_parked_path() {
 /// once. `doc-b` moved along `p0.md` .. `p24.md` and parked at the last;
 /// on its return, beside 24 other documents, the pass reads each of their
 /// heads and aliases a bounded number of times, however long its history.
+/// Opus's third review: each document asking read the workspace again, so
+/// a return of many documents at once cost each of them the workspace. Eight
+/// more return with `doc-b`, and the bound still holds.
 #[test]
 fn a_returns_history_is_checked_against_the_workspace_once() {
     const MOVES: i64 = 24;
+    const RETURNS: i64 = 8;
     let (_scratch, _path, mut store) = hosted_store();
     let client = RelaySyncClient::new(HostedFeed::new());
     let feed = client.transport();
@@ -4540,28 +4617,46 @@ fn a_returns_history_is_checked_against_the_workspace_once() {
         feed.create("owner", MOVES + 2 + other, &object_id, &path, "other");
         feed.share(&object_id, &path);
     }
+    let returning: Vec<_> = (0..RETURNS)
+        .map(|back| (format!("ret-{back}"), format!("back/{back}.md")))
+        .collect();
+    for ((object_id, path), seq) in returning.iter().zip(2 * MOVES + 2..) {
+        feed.create("owner", seq, object_id, path, "back");
+        feed.share(object_id, path);
+    }
     sync(&client, &mut store);
     assert!(ready(&store, "doc-b"));
     feed.unshare("doc-b");
+    for (object_id, _) in &returning {
+        feed.unshare(object_id);
+    }
     sync_parking(&client, &mut store);
-    assert!(is_parked(&store, "doc-b"));
+    assert!(is_parked(&store, "doc-b") && is_parked(&store, "ret-0"));
 
     feed.share("doc-b", &last);
+    for (object_id, path) in &returning {
+        feed.share(object_id, path);
+    }
     assert_eq!(
         pass(&client, &mut store, &NoFaults).unwrap().pending_cursor,
         None
     );
+    crate::hosted::OCCUPANTS_READ.with(|read| read.set(0));
+    let back = pass(&client, &mut store, &NoFaults).unwrap();
+    let read = crate::hosted::OCCUPANTS_READ.with(|read| read.get());
     let occupants = count(
         &store,
         "SELECT (SELECT COUNT(*) FROM snapshots) + (SELECT COUNT(*) FROM path_aliases)",
     ) as usize;
-    crate::hosted::OCCUPANTS_READ.with(|read| read.set(0));
-    let back = pass(&client, &mut store, &NoFaults).unwrap();
-    let read = crate::hosted::OCCUPANTS_READ.with(|read| read.get());
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM hosted_parked_snapshots"),
+        0,
+        "every return comes back in this pass"
+    );
     assert_eq!(back.skipped, MOVES as usize + 1);
     assert!(
         read <= 4 * occupants,
-        "read {read} occupants of {occupants} for {MOVES} moves"
+        "read {read} occupants of {occupants} for {MOVES} moves and {RETURNS} more returns"
     );
     assert_eq!(
         back.changed_paths
@@ -5091,10 +5186,23 @@ fn richdoc_edit_made_while_parked(admitted: bool) {
 /// Opus's second park review: a pass writes the heads only of a document
 /// nothing held when it read it, and only that read's commit makes it ready.
 /// What held `doc-b` when its pass read it is gone by its commit: it stays
-/// held, and the next pass writes its heads and makes it ready.
+/// held, and the commit says there is more, so the next pass, which writes
+/// its heads and makes it ready, comes.
 #[test]
 fn a_hold_gone_by_commit_leaves_its_document_for_the_pass_that_writes_its_heads() {
     let (_scratch, _path, mut store, client) = departing_b();
+    let commit = |store: &mut EngineStore, outcome: &HostedPassOutcome| match client
+        .commit_hosted_cursor(
+            store,
+            "ws",
+            outcome.pending_cursor.as_ref().unwrap(),
+            &NoFaults,
+        )
+        .unwrap()
+    {
+        TxnOutcome::Committed(commit) => commit,
+        TxnOutcome::Crashed { .. } => panic!("no fault was injected"),
+    };
     let feed = client.transport();
     feed.unshare("doc-b");
     sync_parking(&client, &mut store);
@@ -5114,7 +5222,13 @@ fn a_hold_gone_by_commit_leaves_its_document_for_the_pass_that_writes_its_heads(
     assert!(read.complete && read.heads_written);
     // As if a hold seen when the pass read it, which wrote no heads, went.
     read.heads_written = false;
-    assert!(commit(&client, &mut store, &back));
+    assert_eq!(
+        commit(&mut store, &back),
+        crate::HostedCommit {
+            committed: true,
+            has_more: true
+        }
+    );
     assert_eq!(hold(&store, "doc-b"), Some(HostedHold::WorkWaiting));
 
     let again = pass(&client, &mut store, &NoFaults).unwrap();
@@ -5124,7 +5238,13 @@ fn a_hold_gone_by_commit_leaves_its_document_for_the_pass_that_writes_its_heads(
             .iter()
             .any(|change| change.path == "a.md")
     );
-    assert!(commit(&client, &mut store, &again));
+    assert_eq!(
+        commit(&mut store, &again),
+        crate::HostedCommit {
+            committed: true,
+            has_more: false
+        }
+    );
     assert!(ready(&store, "doc-b"));
 }
 

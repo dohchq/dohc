@@ -32,7 +32,7 @@ pub use park::{
     departed_hosted_object_ids, forget_retired_hosted_file, hosted_document_parkable,
     park_hosted_document, retired_hosted_files,
 };
-pub(crate) use park::{unpark_returned, unparks_next};
+pub(crate) use park::{Occupancy, unpark_returned, unparks_next};
 
 /// The origin prefix the relay reserves for a service host's writes.
 pub const SERVICE_HOST_ORIGIN_PREFIX: &str = "service-host:";
@@ -424,7 +424,8 @@ pub(crate) fn held_before_routing(
         return Ok(None);
     }
     if let Some(object_id) = hosted_document(op).filter(|id| unready.contains(*id))
-        && let Some(hold) = park::parked_hold(conn, &op.workspace_id, object_id)?
+        && let Some(hold) =
+            park::parked_hold(&mut Occupancy::new(conn, &op.workspace_id), object_id)?
     {
         return Ok(Some(match hold {
             HostedHold::PathHeld { .. } => BACKFILL_PATH_HELD,
@@ -839,35 +840,44 @@ impl HostedRead {
     /// What holds its document once this read commits, if anything.
     pub(crate) fn hold(
         &self,
-        conn: &Connection,
-        workspace_id: &str,
+        occupancy: &mut Occupancy<'_>,
         object_id: &str,
     ) -> Result<Option<HostedHold>, SyncError> {
         match &self.stopped {
             Some(hold) => Ok(Some(hold.clone())),
-            None if self.complete => completed_hold(conn, workspace_id, object_id),
+            None if self.complete => completed_hold(occupancy, object_id),
             None => Ok(None),
         }
     }
 }
 
-/// Commit a hosted pass's position. Answers `false`, committing nothing, when
-/// the scope moved since the pass fetched, since its page may hold rows the
-/// current scope withholds, or when another pass committed since it read the
-/// replica, since it read from a position and states that one replaced: its
-/// caller pulls again. Each document read is settled in the same transaction:
-/// held where its read stopped, ready once its read completes with nothing of
-/// it waiting in deferred work and its head at its scope's path, both when
-/// the pass read it and now, and still backfilling otherwise. So readiness
-/// never precedes its content, nor the pass that wrote its files. A held
-/// document releases the deferred work it still has to apply, and its read
-/// restarts before it.
+/// What a hosted pass's commit did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostedCommit {
+    /// `false` when the scope moved or another pass committed since the pass
+    /// read the replica; nothing committed.
+    pub committed: bool,
+    /// A document the pass found held is free now, but the pass wrote none
+    /// of its files, so it stays held for the next pass, which writes them.
+    pub has_more: bool,
+}
+
+/// Commit a hosted pass's position. Commits nothing when the scope moved since
+/// the pass fetched, since its page may hold rows the current scope
+/// withholds, or when another pass committed since it read the replica, since
+/// it read from a position and states that one replaced: its caller pulls
+/// again. Each document read is settled in the same transaction: held where
+/// its read stopped, ready once its read completes with nothing of it waiting
+/// in deferred work and its head at its scope's path, both when the pass read
+/// it and now, and still backfilling otherwise. So readiness never precedes
+/// its content, nor the pass that wrote its files. A held document releases
+/// the deferred work it still has to apply, and its read restarts before it.
 pub fn commit_hosted_cursor(
     store: &mut EngineStore,
     workspace_id: &str,
     cursor: &HostedCursor,
     faults: &dyn FaultInjector,
-) -> Result<TxnOutcome<bool>, SyncError> {
+) -> Result<TxnOutcome<HostedCommit>, SyncError> {
     crate::model::bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     let positions = cursor
         .main_cursor
@@ -895,7 +905,10 @@ pub fn commit_hosted_cursor(
         // Only a scope change or a commit changes the scope's documents, so
         // the pass's reads still name documents in the states it read.
         if generation != cursor.scope_generation || commits != cursor.cursor_commits {
-            return Ok(false);
+            return Ok(HostedCommit {
+                committed: false,
+                has_more: false,
+            });
         }
         let commits = commits
             .checked_add(1)
@@ -906,11 +919,16 @@ pub fn commit_hosted_cursor(
             params![workspace_id, commits, cursor.main_cursor],
         )
         .map_err(SyncError::persist)?;
+        let mut occupancy = Occupancy::new(tx, workspace_id);
+        let mut has_more = false;
         for (object_id, read) in &cursor.reads {
-            let hold = match read.hold(tx, workspace_id, object_id)? {
+            let hold = match read.hold(&mut occupancy, object_id)? {
                 // What held it when the pass read it is gone; the next pass
                 // writes its heads.
-                None if read.complete && !read.heads_written => Some(HostedHold::WorkWaiting),
+                None if read.complete && !read.heads_written => {
+                    has_more = true;
+                    Some(HostedHold::WorkWaiting)
+                }
                 hold => hold,
             };
             let state = match &hold {
@@ -962,20 +980,24 @@ pub fn commit_hosted_cursor(
         if let Some(report_id) = &cursor.settlement_report_id {
             crate::cursor::release_settlement_report_in_tx(tx, workspace_id, report_id)?;
         }
-        Ok(true)
+        Ok(HostedCommit {
+            committed: true,
+            has_more,
+        })
     })
 }
 
 /// What holds a document whose read stopped at `op`, its first row that
 /// could not apply.
 pub(crate) fn stopped_hold(
-    conn: &Connection,
+    occupancy: &mut Occupancy<'_>,
     object_id: &str,
     op: &ReplicationEnvelope,
 ) -> Result<HostedHold, SyncError> {
-    if let Some(hold) = park::parked_hold(conn, &op.workspace_id, object_id)? {
+    if let Some(hold) = park::parked_hold(occupancy, object_id)? {
         return Ok(hold);
     }
+    let conn = occupancy.conn;
     let unready = BTreeSet::from([object_id.to_owned()]);
     if let Some(hold) = backfill_path_held(conn, &unready, op)? {
         return Ok(hold);
@@ -993,15 +1015,15 @@ pub(crate) fn stopped_hold(
 /// it refused, or a head away from the path its scope names. `None` once
 /// nothing does.
 fn completed_hold(
-    conn: &Connection,
-    workspace_id: &str,
+    occupancy: &mut Occupancy<'_>,
     object_id: &str,
 ) -> Result<Option<HostedHold>, SyncError> {
-    if let Some(hold) = park::parked_hold(conn, workspace_id, object_id)? {
+    let (conn, workspace_id) = (occupancy.conn, occupancy.workspace_id);
+    if let Some(hold) = park::parked_hold(occupancy, object_id)? {
         return Ok(Some(hold));
     }
     if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
-        return stopped_hold(conn, object_id, &waiting).map(Some);
+        return stopped_hold(occupancy, object_id, &waiting).map(Some);
     }
     if live_edit_unadmitted(conn, workspace_id, object_id)? {
         return Ok(Some(HostedHold::LiveEditUnadmitted));
@@ -1060,32 +1082,37 @@ const HEADS_SQL: &str = "SELECT s.version_id,s.path,s.content_kind FROM versions
 
 /// Which of `stored`, the decisions journaled rows of `object_id`, a document
 /// that is not ready, recorded when they applied, its pass materializes
-/// again. Materializing a path brings its file to the head there, so a
-/// decision at one of its own heads stands. Its history since may have left
-/// the others to another document or a retired file, so one stands only
-/// where nothing holds its path now ([`park::Occupancy`]), and never at a
-/// path its parked heads come back to with their own writes. The delete of
-/// a path it left that is free still removes its file.
+/// again. Materializing a path brings its file to the head there. Its history
+/// since may have left those paths to another document or a retired file, so
+/// one stands only where nothing holds its path now ([`park::Occupancy`]),
+/// and never at a path that collides with one of its own heads, current or
+/// parked: the pass that makes it ready writes those, and a document still
+/// held writes nothing. The delete of a path it left that is free still
+/// removes its file.
 pub(crate) fn redelivered_unready(
-    conn: &Connection,
-    workspace_id: &str,
+    occupancy: &mut Occupancy<'_>,
     object_id: &str,
     stored: impl IntoIterator<Item = crate::MomentMaterializationChange>,
 ) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
     use dohc_engine_storage::capture_file_holds::path_is_held;
-    let own = head_writes(conn, workspace_id, object_id)?;
-    let parked = park::parked_paths(conn, workspace_id, object_id)?;
-    let mut occupancy = park::Occupancy::new(conn, workspace_id, object_id);
+    let (conn, workspace_id) = (occupancy.conn, occupancy.workspace_id);
+    let mut own = park::parked_paths(conn, workspace_id, object_id)?;
+    own.extend(
+        head_writes(conn, workspace_id, object_id)?
+            .into_iter()
+            .map(|head| (head.version_id, head.path)),
+    );
     let mut standing = Vec::new();
     for change in stored {
-        let own_head = own
-            .iter()
-            .any(|head| head.version_id == change.version_id && head.path == change.path);
-        let parked_at = parked.iter().any(|(version_id, path)| {
+        let own_at = own.iter().any(|(version_id, path)| {
             *version_id == change.version_id
                 && (path_is_held(path, &change.path) || path_is_held(&change.path, path))
         });
-        if own_head || (!parked_at && occupancy.hold(&change.version_id, &change.path)?.is_none()) {
+        if !own_at
+            && occupancy
+                .hold(object_id, &change.version_id, &change.path)?
+                .is_none()
+        {
             standing.push(change);
         }
     }

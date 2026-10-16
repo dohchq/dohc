@@ -4558,7 +4558,13 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
             &NoFaults,
         )
         .unwrap();
-        assert_eq!(committed, TxnOutcome::Committed(true));
+        assert_eq!(
+            committed,
+            TxnOutcome::Committed(crate::HostedCommit {
+                committed: true,
+                has_more: false
+            })
+        );
         crate::read_hosted_replica(store, "ws")
             .unwrap()
             .unwrap()
