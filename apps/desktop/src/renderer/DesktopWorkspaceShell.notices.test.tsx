@@ -1657,7 +1657,8 @@ describe("file transfers", () => {
   });
 
   // Try again removes the row before it runs. When the shared view cannot
-  // refresh first, the person still learns why no file picker opened.
+  // refresh first, the person still learns why no file picker opened. A
+  // damaged share offers no import, so the share is damaged after the import.
   it("says why no file picker opened when the shared view does not refresh before Try again", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.importWorkspaceFiles.mockResolvedValueOnce({
@@ -1665,14 +1666,24 @@ describe("file transfers", () => {
       skipped: 0,
       interrupted: true,
     });
-    renderShell(bridge, {
-      ...WORKSPACE,
-      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", damaged: true as const },
-    });
+    const shareView = { shareId: "share-1", granterEmail: "granter@dohc.test", access: "edit" as const };
+    const view = renderShell(bridge, { ...WORKSPACE, shareView });
     const user = userEvent.setup();
 
     await user.keyboard("{Control>}k{/Control}");
     await user.click(await screen.findByText("Import files"));
+    const damaged = { ...WORKSPACE, shareView: { ...shareView, damaged: true as const } };
+    view.rerender(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell
+          workspace={damaged}
+          workspaces={[damaged]}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={() => {}}
+        />
+      </>,
+    );
     const toast = await screen.findByTestId("workspace-shell-error");
     await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
 
