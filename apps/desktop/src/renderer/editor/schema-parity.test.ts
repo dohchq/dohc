@@ -13,6 +13,7 @@ import * as Y from "yjs";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocBodyFragment,
+  markdownToYDoc,
   parseRichdocMarkdown,
   serializeRichdocBody,
   yDocToMarkdown as projectYDocToMarkdown,
@@ -528,17 +529,26 @@ describe("desktop editor schema parity", () => {
     const expected = 'sourceCanonical' in item ? item.sourceCanonical! : item.canonical!;
     const canonicalBody = parseFrontmatter(expected).body
       .replaceAll('\r\n', '\n').replace(/^\n+/u, '');
-    render(createElement(MarkdownEditor, {
-      ref, value: sourceBody, onDirty: vi.fn(), workspaceId: "workspace-1", path: "notes/nested.md", knownFiles: [],
+    const projected = 'projected' in item && item.projected
+      ? markdownToYDoc(item.source, { reading: "projection" })
+      : undefined;
+    const view = render(createElement(MarkdownEditor, {
+      ref, value: projected ? "" : sourceBody, onDirty: vi.fn(), workspaceId: "workspace-1", path: "notes/nested.md", knownFiles: [],
+      ...(projected ? { collab: { ydoc: projected, status: "connected" as const, peerCount: 0, synced: true } } : {}),
     }));
-    await screen.findByTestId("markdown-editor");
-    expect(ref.current!.getMarkdown().trimEnd()).toBe(canonicalBody);
-    const editor = mountedEditor();
-    expect(() => editor.state.doc.check()).not.toThrow();
-    act(() => editor.commands.insertContentAt(editor.state.doc.content.size, {
-      type: "paragraph", content: [{ type: "text", text: "!" }],
-    }));
-    expect(ref.current!.getMarkdown()).toContain("!");
+    try {
+      await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(ref.current!.getMarkdown().trimEnd()).toBe(canonicalBody));
+      const editor = mountedEditor();
+      expect(() => editor.state.doc.check()).not.toThrow();
+      act(() => editor.commands.insertContentAt(editor.state.doc.content.size, {
+        type: "paragraph", content: [{ type: "text", text: "!" }],
+      }));
+      expect(ref.current!.getMarkdown()).toContain("!");
+    } finally {
+      view.unmount();
+      projected?.destroy();
+    }
   });
 
   it("builds the projection's nodes, marks, and attributes", async () => {

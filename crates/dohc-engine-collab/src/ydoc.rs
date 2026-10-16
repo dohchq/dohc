@@ -1315,10 +1315,9 @@ impl Ydoc {
                     None => None,
                 };
                 let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
-                let (blocks, refused) = parse_markdown_blocks_checked(
-                    normalized_body.as_deref().unwrap_or(body),
-                    reading,
-                );
+                let normalized_body =
+                    normalize_list_tabs(normalized_body.as_deref().unwrap_or(body), reading);
+                let (blocks, refused) = parse_markdown_blocks_checked(&normalized_body, reading);
                 if refused || (fold == FileFold::Strict && refused_fold_item_bodies(&blocks)) {
                     return Err(CollabError::MarkdownNotRepresentable);
                 }
@@ -2001,16 +2000,21 @@ enum MarkdownReading {
 /// the engine keeps as written must then resolve to the same text and hold
 /// the same syntax in the same order. See [`read_text`].
 fn markdown_reads_alike(source: &str, projection: &str, reading: MarkdownReading) -> bool {
-    let normalize = |markdown: &str| {
+    let normalize = |markdown: &str, reading| {
         let (_, _, body) = split_markdown_frontmatter(markdown);
-        body.replace("\r\n", "\n")
+        let body = body.replace("\r\n", "\n");
+        if reading == MarkdownReading::ProjectedSource || !body.contains('\t') {
+            body
+        } else {
+            normalize_list_tabs(&body, reading).into_owned()
+        }
     };
     let projected = match reading {
         MarkdownReading::Source => MarkdownReading::ProjectedSource,
         reading => reading,
     };
-    let source_body = normalize(source);
-    let projected_body = normalize(projection);
+    let source_body = normalize(source, reading);
+    let projected_body = normalize(projection, projected);
     let syntax_changed = encoded_tag_span(&projected_body).is_some()
         && read_text(&source_body, TextPlace::Inline).1
             != read_text(&projected_body, TextPlace::Inline).1;
@@ -2555,9 +2559,193 @@ fn parse_markdown_blocks_checked(body: &str, reading: MarkdownReading) -> (Vec<M
     (blocks, refused)
 }
 
+// Marked expands item headers at tab stops, and every continuation tab to four
+// spaces before removing the content indent. Root code bodies stay literal.
+fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow<'_, str> {
+    // Projected indentation is spaces; its literal tabs belong to content.
+    if reading == MarkdownReading::ProjectedSource || !body.contains('\t') {
+        return body.into();
+    }
+    let mut output = String::with_capacity(body.len());
+    let mut in_list = false;
+    let mut blank = false;
+    let mut empty = false;
+    let mut fence: Option<(u8, usize, bool)> = None;
+    let mut quote_depth = 0;
+    let mut list_indent = 0;
+    let mut list_column = 0;
+    for line in body.split_inclusive('\n') {
+        let mut quoted = line;
+        let mut quotes = 0;
+        while fence.is_none() || quotes < quote_depth {
+            let Some(rest) = quoted.trim_start_matches(' ').strip_prefix('>') else {
+                break;
+            };
+            quoted = rest.strip_prefix(' ').unwrap_or(rest);
+            quotes += 1;
+        }
+        let quote_prefix = line.len() - quoted.len();
+        if quotes != quote_depth {
+            in_list = false;
+            fence = None;
+            quote_depth = quotes;
+        }
+        if let Some((character, width, list)) = fence {
+            let rest = quoted.trim_start_matches([' ', '\t']);
+            let run = rest.bytes().take_while(|byte| *byte == character).count();
+            let closes = if !list && reading == MarkdownReading::Source {
+                quoted.trim_end_matches('\n') == "```"
+            } else {
+                run >= width && rest[run..].trim().is_empty()
+            };
+            if closes {
+                fence = None;
+            }
+            if list {
+                if reading == MarkdownReading::Projection {
+                    let indent = quoted
+                        .bytes()
+                        .take_while(|b| matches!(b, b' ' | b'\t'))
+                        .count();
+                    output.push_str(&line[..quote_prefix]);
+                    output.push_str(&quoted[..indent].replace('\t', "    "));
+                    output.push_str(&quoted[indent..]);
+                } else {
+                    output.push_str(&line.replace('\t', "    "));
+                }
+            } else {
+                output.push_str(line);
+            }
+            continue;
+        }
+        let indent = quoted
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        let rest = &quoted[indent..];
+        let columns = quoted[..indent].bytes().fold(0, |column, byte| {
+            if byte == b'\t' {
+                column + 4 - column % 4
+            } else {
+                column + 1
+            }
+        });
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let marker_width = if rest.starts_with(['-', '+', '*']) {
+            1
+        } else if (1..=9).contains(&digits) && rest[digits..].starts_with(['.', ')']) {
+            digits + 1
+        } else {
+            0
+        };
+        let marker = marker_width > 0
+            && rest
+                .as_bytes()
+                .get(marker_width)
+                .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
+            && !thematic_break(rest.trim_end_matches('\n'));
+        if indent == 0 && (rest.starts_with(['>', '#', '`', '~'])) {
+            in_list = false;
+        }
+        let continuation_columns = quoted[..indent]
+            .bytes()
+            .map(|byte| if byte == b'\t' { 4 } else { 1 })
+            .sum::<usize>();
+        let continuation = in_list && continuation_columns >= list_column;
+        if marker && (columns < 4 || in_list) {
+            if !in_list || columns <= list_indent {
+                list_indent = columns;
+                let column = columns + marker_width;
+                let padded = rest[marker_width..]
+                    .bytes()
+                    .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                    .fold(column, |column, byte| {
+                        column + if byte == b'\t' { 4 - column % 4 } else { 1 }
+                    });
+                let padding = padded - column;
+                list_column = column
+                    + if (1..=4).contains(&padding) && !rest[marker_width..].trim().is_empty() {
+                        padding
+                    } else {
+                        1
+                    };
+            }
+            in_list = true;
+        } else if (blank || empty || thematic_break(rest.trim_end_matches('\n')))
+            && indent == 0
+            && !rest.trim().is_empty()
+        {
+            in_list = false;
+        }
+        blank = line.trim().is_empty();
+        if !in_list {
+            fence = markdown_fence(
+                quoted.trim_end_matches('\n'),
+                reading == MarkdownReading::Source,
+            )
+            .map(|(character, width, _)| (character, width, false));
+            output.push_str(line);
+            continue;
+        }
+        let item = if marker { &rest[marker_width..] } else { rest };
+        fence = markdown_fence(
+            item.trim_start_matches([' ', '\t']).trim_end_matches('\n'),
+            false,
+        )
+        .map(|(character, width, _)| (character, width, true));
+        if !marker && !continuation {
+            output.push_str(line);
+            continue;
+        }
+        // Projection folds still accept tabbed markers, but content tabs are
+        // literal. Include compact child markers in the syntax prefix.
+        let mut prefix = indent;
+        if marker {
+            let mut width = marker_width;
+            loop {
+                prefix += width;
+                prefix += quoted[prefix..]
+                    .bytes()
+                    .take_while(|b| matches!(b, b' ' | b'\t'))
+                    .count();
+                let rest = &quoted[prefix..];
+                let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+                width = if rest.starts_with(['-', '+', '*']) {
+                    1
+                } else if (1..=9).contains(&digits) && rest[digits..].starts_with(['.', ')']) {
+                    digits + 1
+                } else {
+                    break;
+                };
+                if !rest
+                    .as_bytes()
+                    .get(width)
+                    .is_some_and(|b| matches!(b, b' ' | b'\t'))
+                {
+                    break;
+                }
+            }
+        }
+        output.push_str(&line[..quote_prefix]);
+        let mut column = 0;
+        for (at, character) in quoted.char_indices() {
+            if character == '\t' && (reading != MarkdownReading::Projection || at < prefix) {
+                let width = if continuation { 4 } else { 4 - column % 4 };
+                output.extend(std::iter::repeat_n(' ', width));
+                column += width;
+            } else {
+                output.push(character);
+                column += 1;
+            }
+        }
+        empty = marker && item.trim().is_empty();
+    }
+    output.into()
+}
+
 fn unsupported_markdown_line(line: &str) -> bool {
     let rest = line.trim_start_matches(' ');
-    if rest.starts_with('\t') || rest.starts_with("~~~") {
+    if rest.starts_with("~~~") {
         return true;
     }
     if rest.starts_with(['*', '_']) && thematic_break(rest) {
@@ -2576,14 +2764,6 @@ fn unsupported_markdown_line(line: &str) -> bool {
             .take_while(|byte| matches!(byte, b' ' | b'\t'))
             .any(|byte| byte == b'\t')
     }) {
-        return true;
-    }
-    if rest.as_bytes().first().is_some_and(u8::is_ascii_digit)
-        && parse_ordered_item(rest, false).is_some_and(|(_, text)| {
-            matches!(text.get(..3), Some("[ ]" | "[x]" | "[X]"))
-                && (text.len() == 3 || text.as_bytes().get(3) == Some(&b' '))
-        })
-    {
         return true;
     }
     false
@@ -2642,6 +2822,8 @@ fn markdown_fence(line: &str, source: bool) -> Option<(u8, usize, &str)> {
     if source {
         return line.strip_prefix("```").map(|language| (b'`', 3, language));
     }
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    let line = if indent <= 3 { &line[indent..] } else { line };
     let delimiter = *line.as_bytes().first()?;
     if !matches!(delimiter, b'`' | b'~') {
         return None;
@@ -2759,7 +2941,24 @@ fn parse_markdown_blocks_at<'src>(
                         fence_language.trim_start()
                     }
                     .to_string(),
-                    content: lines[index + 1..closer].join("\n"),
+                    content: {
+                        let indent = if source_fences {
+                            0
+                        } else {
+                            line.bytes().take_while(|byte| *byte == b' ').count().min(3)
+                        };
+                        lines[index + 1..closer]
+                            .iter()
+                            .map(|line| {
+                                &line[line
+                                    .bytes()
+                                    .take_while(|byte| *byte == b' ')
+                                    .count()
+                                    .min(indent)..]
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    },
                 });
                 index = closer + 1;
                 continue;
@@ -3333,7 +3532,11 @@ fn list_marker(line: &str, reading: MarkdownReading) -> Option<ListMarker<'_>> {
         };
         let text = &text[padding..];
         let task = if text.starts_with('[')
-            && (text.len() == 3 || text.as_bytes().get(3) == Some(&b' '))
+            && (text.len() == 3
+                || text
+                    .as_bytes()
+                    .get(3)
+                    .is_some_and(|byte| matches!(byte, b' ' | b'\t')))
         {
             match text.get(..3) {
                 Some("[ ]") => Some(false),
@@ -3354,7 +3557,7 @@ fn list_marker(line: &str, reading: MarkdownReading) -> Option<ListMarker<'_>> {
             width: 2 + padding,
             checked: task.unwrap_or(false),
             text: if task.is_some() {
-                text.get(4..).unwrap_or_default()
+                text[3..].trim_start_matches([' ', '\t'])
             } else {
                 text
             },
@@ -3477,10 +3680,6 @@ fn parse_list<'src>(
         if marker.indent != first.indent || marker.kind != first.kind {
             break;
         }
-        if matches!(marker.kind, ListKind::Ordered(_)) {
-            *refused |= matches!(marker.text.get(..3), Some("[ ]" | "[x]" | "[X]"))
-                && (marker.text.len() == 3 || marker.text.as_bytes().get(3) == Some(&b' '));
-        }
         at += 1;
         let mut continued = Vec::new();
         // The checkbox is content after the bullet marker, not part of its width.
@@ -3534,11 +3733,24 @@ fn parse_list<'src>(
                     at = next;
                     continue;
                 }
-                if next.is_some_and(|next| {
+                if let Some(next) = next {
                     let indent = lines[next].bytes().take_while(|byte| *byte == b' ').count();
-                    indent > marker.indent && indent < content_indent
-                }) {
-                    *refused = true;
+                    *refused |= indent > marker.indent
+                        && indent < content_indent
+                        && continued
+                            .iter()
+                            .rposition(|line| !blank_line(line))
+                            .and_then(|at| {
+                                list_marker(
+                                    continued[at],
+                                    if at > 0 && blank_line(continued[at - 1]) {
+                                        MarkdownReading::ProjectedSource
+                                    } else {
+                                        reading
+                                    },
+                                )
+                            })
+                            .is_some_and(|child| child.text.trim().is_empty());
                 }
                 break;
             }
@@ -3558,9 +3770,6 @@ fn parse_list<'src>(
                 blocks: None,
             }
         } else {
-            *refused |= !matches!(marker.kind, ListKind::Task(_))
-                && marker.text.as_bytes().get(3) == Some(&b'\t')
-                && matches!(marker.text.get(..3), Some("[ ]" | "[x]" | "[X]"));
             let mut body = Vec::with_capacity(continued.len() + 1);
             body.push(marker.text);
             body.extend(continued);

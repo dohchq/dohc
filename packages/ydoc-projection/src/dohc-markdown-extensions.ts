@@ -995,12 +995,22 @@ function markdownLists(projected = false) {
   name: 'dohcMarkdownLists', priority: 1001, markdownTokenName: 'list',
   markdownTokenizer: { name: 'list', level: 'block', start: () => -1, tokenize(src, _tokens, helpers) {
     if (!' -+*0123456789'.includes(src[0]) || !/^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|\n|$)/u.test(src)) return undefined
-    if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?![ \t]*(?:\n|$)|\[[ xX]\][ \t]*(?:\n|$))[^\n]+(?:\n|$))+(?:\n|$)(?![ \t\n0-9*+-])/u.test(src)) return undefined
+    // The upstream scanner is cheaper for flat ordered items. Limit it to
+    // one delimiter and ordinary item starts, so it cannot flatten boundaries.
+    if (/^[0-9]{1,9}([.)]) [A-Za-z][^\n\t]*(?:\n[0-9]{1,9}\1 [A-Za-z][^\n\t]*)*\n?$/u.test(src)) {
+      const list = OrderedList.config.markdownTokenizer!.tokenize(src, _tokens, helpers) as Tokens.List
+      list.start = Number(/^[0-9]+/u.exec(src)![0])
+      return list
+    }
+    if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?![ \t]*(?:\n|$)|\[[ xX]\](?:[ \t]|\n|$))[^\n]+(?:\n|$))+(?:\n|$)(?![ \t\n0-9*+-])/u.test(src)) return undefined
+    // Marked otherwise strips a checkbox from ordered item text as GFM tasks.
+    tokenizer.options.gfm = !/^ {0,3}[0-9]/u.test(src)
     const list = tokenizer.list(src)
     if (!list) return undefined
     for (const item of list.items) {
       const task = /^\[([ xX])\][ \t]*(?:\n|$)/u.exec(item.text)
-      if (task) { item.task = true; item.checked = task[1].toLowerCase() === 'x'; item.text = item.text.slice(task[0].length) }
+      if (list.ordered) { item.task = false }
+      else if (task) { item.task = true; item.checked = task[1].toLowerCase() === 'x'; item.text = item.text.slice(task[0].length) }
       item.tokens = helpers.blockTokens(item.text) as Tokens.ListItem['tokens']
     }
     return list
@@ -1011,7 +1021,7 @@ function markdownLists(projected = false) {
     let separate = false
     for (const item of token.items ?? []) {
       const emptyTask = /^[ ]*[-+*] \[([ xX])\] *\n?$/u.exec(item.raw ?? '')
-      const task = item.task || !!emptyTask
+      const task = !token.ordered && (item.task || !!emptyTask)
       const type = token.ordered ? 'orderedList' : task ? 'taskList' : 'bulletList'
       let list = lists.at(-1)
       if (list?.type !== type || (projected && separate)) {

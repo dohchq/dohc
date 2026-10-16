@@ -94,11 +94,19 @@ fn nested_contract_file_fold_accepts_rules_and_prose() {
         let source = case["source"].as_str().unwrap();
         doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
             .expect(source);
-        assert_eq!(
-            doc.project_richdoc().unwrap(),
-            case["canonical"].as_str().unwrap(),
-            "{source}"
-        );
+        let canonical = case["foldCanonical"]
+            .as_str()
+            .unwrap_or_else(|| case["canonical"].as_str().unwrap());
+        assert_eq!(doc.project_richdoc().unwrap(), canonical, "{source}");
+        if case["foldCanonical"].is_string() {
+            // Production skips a source witness when the fold already writes
+            // the chosen bytes. Source import and projected reading differ here.
+            assert_eq!(canonical, source);
+            assert!(doc.preserved_markdown_source(canonical).is_none());
+            doc.validate_public_baseline(&doc.encode_full_state())
+                .unwrap();
+            continue;
+        }
         doc.preserve_folded_markdown_source(source).expect(source);
         assert_eq!(
             doc.preserved_markdown_source(&doc.project_richdoc().unwrap())
@@ -169,6 +177,40 @@ fn nested_contract_seeds_schema_version() {
         doc.canonical_content()["meta"]["value"]["schemaVersion"]["value"],
         json!(1)
     );
+}
+
+#[test]
+fn nested_contract_marker_tabs_after_legacy_source_fence() {
+    // Source keeps main's three-backtick closer even for a wider opener.
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown_as(
+        ContentKind::Richdoc,
+        "````\nbody\ttext\n```\n-\titem",
+        MarkdownReading::Source,
+    )
+    .unwrap();
+    let canonical = doc.project_richdoc().unwrap();
+    assert!(canonical.contains("body\ttext"));
+    assert!(canonical.ends_with("\n\n- item"), "{canonical}");
+}
+
+#[test]
+fn nested_contract_projected_lazy_tabs_remain_content() {
+    for source in ["- a\nlazy\ttext", "- a\n b\tc", "1. a\nlazy\ttext"] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
+            .unwrap();
+        let canonical = doc.project_richdoc().unwrap();
+        assert!(canonical.contains('\t'));
+        for reading in [
+            MarkdownReading::Projection,
+            MarkdownReading::ProjectedSource,
+        ] {
+            doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, &canonical, reading)
+                .unwrap();
+            assert_eq!(doc.project_richdoc().unwrap(), canonical);
+        }
+    }
 }
 
 #[test]

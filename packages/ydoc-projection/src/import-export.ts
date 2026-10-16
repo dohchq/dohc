@@ -478,6 +478,8 @@ export function markdownToYDoc(
 // Admission is independent of canonical serialization. Code bodies are opaque;
 // blank lines end lazy continuation, but not an indented continuation block.
 function assertSupportedListMarkdown(markdown: string): string {
+  // Flat items beginning with ordinary text cannot introduce child blocks.
+  if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) [A-Za-z][^\n\t]*(?:\n|$))+$/u.test(markdown)) return markdown
   const parents: Array<{ indent: number; column: number; content?: number }> = []
   const lines = markdown.split('\n')
   let changed = false
@@ -487,7 +489,15 @@ function assertSupportedListMarkdown(markdown: string): string {
   let fenceInList = false
   const refuse = () => { throw new Error('Markdown is not representable by the live document contract') }
   for (let at = 0; at < lines.length; at += 1) {
-    const line = lines[at].replace(/\r$/u, '')
+    let line = lines[at].replace(/\r$/u, '')
+    if (line.includes('\t')) line = line.replace(/^[ \t]*(?:(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)?/u, prefix => {
+      let column = 0
+      return Array.from(prefix, character => {
+        const width = character === '\t' ? 4 - column % 4 : 1
+        column += width
+        return character === '\t' ? ' '.repeat(width) : character
+      }).join('')
+    })
     if (line && !' \t>_-+*0123456789`~#'.includes(line[0])) {
       if (!fence) { if (open) { parents.pop(); open = undefined } if (blank) parents.length = 0; blank = false }
       continue
@@ -509,6 +519,7 @@ function assertSupportedListMarkdown(markdown: string): string {
     let marker = rule ? null : /^(?:[-+*]|[0-9]{1,9}[.)])(?: |$)/u.exec(rest)
     if (marker && !marker[0].endsWith(' ') && at > 0 && !blank) marker = null
     if (marker && indent >= 4 && indent >= (parents.at(-1)?.content ?? parents.at(-1)?.column ?? 0) + 4) marker = null
+    const emptyEnded = !!open && blank
     if (open && (blank || (!marker && indent < open.column))) {
       if (blank ? indent > open.indent && indent < open.column : rest.startsWith('\t')) refuse()
       parents.pop()
@@ -522,15 +533,11 @@ function assertSupportedListMarkdown(markdown: string): string {
     if (quotes > 120) refuse()
     if (run) { fence = run; fenceInList = inList; blank = false; continue }
     if (!inList && rule) { blank = false; continue }
-    if ((inList || marker || /^[-+*]\t/u.test(rest))
-      && (rest.startsWith('\t') || /^(?:[-+*]|[0-9]{1,9}[.)])[ \t]*\t/u.test(rest)
-        || /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest))) refuse()
-    if (/^[0-9]{1,9}[.)] \[[ xX]\](?: |$)/u.test(rest)) refuse()
+    if ((inList || marker)
+      && /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)) refuse()
     if (marker) {
       const itemBody = rest.slice(marker[0].length)
-      if (/^\[[ xX]\]\t/u.test(itemBody)) refuse()
-      let body = itemBody.replace(/^\[[ xX]\] /u, '')
-      if (/^[ \t]*\t/u.test(body)) refuse()
+      let body = itemBody.replace(/^\[[ xX]\][ \t]+/u, '')
       let emptyChild: { indent: number; column: number } | undefined
       let quoted = false
       let depth = quotes + (parents.length + 1) * 2
@@ -538,14 +545,12 @@ function assertSupportedListMarkdown(markdown: string): string {
       while (true) {
         if (depth > 128) refuse()
         if (body.startsWith('> ')) { body = body.slice(2); depth += 1; quoted = true; continue }
-        const child = /^(?:[-+*] |[0-9]{1,9}[.)] )/u.exec(body)
+        const child = /^(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/u.exec(body)
         if (!child) break
-        if (/^[0-9]/u.test(child[0]) && /^\[[ xX]\](?: |$)/u.test(body.slice(child[0].length))) refuse()
         body = body.slice(child[0].length); depth += 2
         if (!quoted && !body.trim()) emptyChild = { indent: indent + rest.length - body.length - child[0].length, column: indent + rest.length - body.length }
       }
-      if (/^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(body)
-        || /^[0-9]{1,9}[.)] \[[ xX]\](?: |$)/u.test(body)) refuse()
+      if (/^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(body)) refuse()
       const itemFence = /^(?:`{3,}|~{3,})/u.exec(body)?.[0] ?? ''
       if (itemFence) { fence = itemFence; fenceInList = true }
       if (parents.length && indent < parents.at(-1)!.column) refuse()
@@ -556,7 +561,10 @@ function assertSupportedListMarkdown(markdown: string): string {
       if (itemBody === '') { lines[at] = lines[at].trimEnd(); changed = true }
     } else if (parents.length) {
       const parent = parents.at(-1)!
-      if (indent > parent.indent && blank && indent < parent.column) refuse()
+      if (indent > parent.indent && blank && indent < parent.column) {
+        if (emptyEnded) refuse()
+        parents.length = 0
+      }
     }
     blank = false
   }
@@ -586,6 +594,16 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
     return sentinel
   }
 
+  // Canonical list indentation must not make Marked expand a content tab.
+  const projectionTabs = new Map<string, string>()
+  if (reading === 'projection' && markdown.includes('\t')) {
+    markdown = markdown.replace(/\t/gu, () => {
+      const sentinel = reserveSentinel()
+      projectionTabs.set(sentinel, '\t')
+      return sentinel
+    })
+  }
+
   // A block escape reads as its character anywhere, as does a leading space or
   // tab. Any other reference reads so only inside a tag the text holds.
   const tagReferences = new Set<string>()
@@ -607,13 +625,14 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
   )
   const markup = { lt: reserveSentinel(), gt: reserveSentinel(), used: false }
   const markupEntities = [[markup.lt, '<'], [markup.gt, '>']] as const
-  const encodedEntities = new Map([...entitySentinels, ...markupEntities])
+  const encodedEntities = new Map([...entitySentinels, ...markupEntities, ...projectionTabs])
   const tagEntities = new Map([
     ...Array.from(
       entitySentinels,
       ([sentinel, entity]) => [sentinel, decodeBlockEntity(entity)] as const,
     ),
     ...markupEntities,
+    ...projectionTabs,
   ])
   const decodedEntities = new Map(
     Array.from(tagEntities, ([sentinel, value]) => [
@@ -638,7 +657,7 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
     writtenLinks = { openers: new Set(), runs: new Map(), length: -1, sentinels: new WeakMap() }
   }
   return ensureListItemParagraphs(
-    entitySentinels.size || markup.used
+    entitySentinels.size || markup.used || projectionTabs.size
       ? restoreBlockEntityParseSentinels(parsed, { decodedEntities, encodedEntities, tagEntities, itemWhitespaceEntities })
       : parsed,
   )

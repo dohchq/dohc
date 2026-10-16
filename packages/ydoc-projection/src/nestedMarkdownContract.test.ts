@@ -95,3 +95,9 @@ it.each(['-\n     ' + '- '.repeat(5000) + 'x', '1.\n      ' + '- '.repeat(5000) 
 it.each(['- a\n     &#32;b', '- a\n &#32;b', 'a\n  &#32;x', 'a\n  &#9;x', '- a\n  b &#32;c'])('keeps a whitespace entity outside an item line start: %s', source => {
   expect(JSON.stringify(parseRichdocMarkdown(source))).toContain(source.match(/&#(?:9|32);/u)![0])
 })
+
+it.each(['- a\nlazy\ttext', '- a\n b\tc', '1. a\nlazy\ttext'])('keeps a lazy continuation tab in projected reading: %s', source => {
+  const original = parseRichdocMarkdown(source)
+  const canonical = serializeRichdocBody(original)
+  expect(parseRichdocMarkdown(canonical, 'projection')).toEqual(original)
+})

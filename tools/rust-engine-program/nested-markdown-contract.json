@@ -78,8 +78,13 @@
     { "name": "ordered-two-spaces", "source": "1. a\n  - b",
       "refuse": true
     },
-    { "name": "ordered-blank-under-indent", "source": "1. a\n\n  next paragraph",
-      "refuse": true
+    {
+      "name": "ordered-blank-under-indent",
+      "source": "1. a\n\n  next paragraph",
+      "canonical": "1. a\n\n&#32; next paragraph",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQq6tNfm7MPWBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAurTX5uzD1gQBBXN0YXJ0AX0BBwC6tNfm7MPWBAEDCGxpc3RJdGVtBwC6tNfm7MPWBAMDCXBhcmFncmFwaAcAurTX5uzD1gQEBgQAurTX5uzD1gQFAWGHurTX5uzD1gQBAwlwYXJhZ3JhcGgHALq01+bsw9YEBwYEALq01+bsw9YECBAgIG5leHQgcGFyYWdyYXBoAA=="
     },
     { "name": "letter-item", "source": "1. a\n   a. b",
       "canonical": "1. a\n   a. b",
@@ -89,8 +94,13 @@
       "canonical": "1. a\n   iv) b",
       "rustBase64": "AQe70Kzxl9+tAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAu9Cs8ZffrQIBBXN0YXJ0AX0BBwC70Kzxl9+tAgEDCGxpc3RJdGVtBwC70Kzxl9+tAgMDCXBhcmFncmFwaAcAu9Cs8ZffrQIEBgQAu9Cs8ZffrQIFB2EKaXYpIGIA"
     },
-    { "name": "tab-item", "source": "- a\n\t- b",
-      "refuse": true
+    {
+      "name": "tab-item",
+      "source": "- a\n\t- b",
+      "canonical": "- a\n  - b",
+      "exactSource": true,
+      "foldRefuse": true,
+      "rustBase64": "AQv4nqGd65TtBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD4nqGd65TtBQEDCGxpc3RJdGVtBwD4nqGd65TtBQIDCXBhcmFncmFwaAcA+J6hneuU7QUDBgQA+J6hneuU7QUEAWGH+J6hneuU7QUDAwpidWxsZXRMaXN0BwD4nqGd65TtBQYDCGxpc3RJdGVtBwD4nqGd65TtBQcDCXBhcmFncmFwaAcA+J6hneuU7QUIBgQA+J6hneuU7QUJAWIA"
     },
     { "name": "tilde-fence", "source": "- a\n  ~~~\n  b\n  ~~~",
       "canonical": "- a\n  ```\n  b\n  ```",
@@ -126,11 +136,21 @@
       "canonical": "1. a\n\n2. b",
       "rustBase64": "AQ2P9rHtzsCGBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAj/ax7c7AhgYBBXN0YXJ0AX0BBwCP9rHtzsCGBgEDCGxpc3RJdGVtBwCP9rHtzsCGBgMDCXBhcmFncmFwaAcAj/ax7c7AhgYEBgQAj/ax7c7AhgYFAWGHj/ax7c7AhgYBAwtvcmRlcmVkTGlzdCgAj/ax7c7AhgYHBXN0YXJ0AX0CBwCP9rHtzsCGBgcDCGxpc3RJdGVtBwCP9rHtzsCGBgkDCXBhcmFncmFwaAcAj/ax7c7AhgYKBgQAj/ax7c7AhgYLAWIA"
     },
-    { "name": "tab-after-marker", "source": "-\titem\n",
-      "refuse": true
+    {
+      "name": "tab-after-marker",
+      "source": "-\titem\n",
+      "canonical": "- item",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQbT0Z6SjsEeACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHANPRnpKOwR4BAwhsaXN0SXRlbQcA09Geko7BHgIDCXBhcmFncmFwaAcA09Geko7BHgMGBADT0Z6SjsEeBARpdGVtAA=="
     },
-    { "name": "tab-item-padding", "source": "- a\n-  \tb\n",
-      "refuse": true
+    {
+      "name": "tab-item-padding",
+      "source": "- a\n-  \tb\n",
+      "canonical": "- a\n- b",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQrI8d7foff4AgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDI8d7foff4AgEDCGxpc3RJdGVtBwDI8d7foff4AgIDCXBhcmFncmFwaAcAyPHe36H3+AIDBgQAyPHe36H3+AIEAWGHyPHe36H3+AICAwhsaXN0SXRlbQcAyPHe36H3+AIGAwlwYXJhZ3JhcGgHAMjx3t+h9/gCBwYEAMjx3t+h9/gCCAFiAA=="
     },
     { "name": "fence-first-in-item", "source": "- ```js\n  i. not a list\n  ```\n",
       "canonical": "- \n  ```js\n  i. not a list\n  ```",
@@ -145,18 +165,33 @@
     { "name": "quote-overflow", "source": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > item\n",
       "refuse": true
     },
-    { "name": "ordered-checkbox", "source": "1. [x] task\n",
-      "refuse": true
+    {
+      "name": "ordered-checkbox",
+      "source": "1. [x] task\n",
+      "canonical": "1. \\[x] task",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQfT07DO5aTrCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA09OwzuWk6woBBXN0YXJ0AX0BBwDT07DO5aTrCgEDCGxpc3RJdGVtBwDT07DO5aTrCgMDCXBhcmFncmFwaAcA09OwzuWk6woEBgQA09OwzuWk6woFCFt4XSB0YXNrAA=="
     },
-    { "name": "ordered-checkbox-sibling", "source": "1. plain\n2. [X] task\n",
-      "refuse": true
+    {
+      "name": "ordered-checkbox-sibling",
+      "source": "1. plain\n2. [X] task\n",
+      "canonical": "1. plain\n2. \\[X] task",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQujmfyZzM2HBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAo5n8mczNhwUBBXN0YXJ0AX0BBwCjmfyZzM2HBQEDCGxpc3RJdGVtBwCjmfyZzM2HBQMDCXBhcmFncmFwaAcAo5n8mczNhwUEBgQAo5n8mczNhwUFBXBsYWluh6OZ/JnMzYcFAwMIbGlzdEl0ZW0HAKOZ/JnMzYcFCwMJcGFyYWdyYXBoBwCjmfyZzM2HBQwGBACjmfyZzM2HBQ0IW1hdIHRhc2sA"
     },
     { "name": "collection-record", "source": "---\nid: nested-record\n---\n\n+ parent\n  - child\n",
       "canonical": "---\nid: nested-record\n---\n\n- parent\n  - child",
       "rustBase64": "AQzLq+j99JT1DQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQtmcm9udG1hdHRlcgJpZAF3DW5lc3RlZC1yZWNvcmQHAQRib2R5AwpidWxsZXRMaXN0BwDLq+j99JT1DQIDCGxpc3RJdGVtBwDLq+j99JT1DQMDCXBhcmFncmFwaAcAy6vo/fSU9Q0EBgQAy6vo/fSU9Q0FBnBhcmVudIfLq+j99JT1DQQDCmJ1bGxldExpc3QHAMur6P30lPUNDAMIbGlzdEl0ZW0HAMur6P30lPUNDQMJcGFyYWdyYXBoBwDLq+j99JT1DQ4GBADLq+j99JT1DQ8FY2hpbGQA"
     },
-    { "name": "task-checkbox-tab", "source": "- normal\n- [X]\ttask\n",
-      "refuse": true
+    {
+      "name": "task-checkbox-tab",
+      "source": "- normal\n- [X]\ttask\n",
+      "canonical": "- normal\n\n- [x] task",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQzy8PCSyKPABAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDy8PCSyKPABAEDCGxpc3RJdGVtBwDy8PCSyKPABAIDCXBhcmFncmFwaAcA8vDwksijwAQDBgQA8vDwksijwAQEBm5vcm1hbIfy8PCSyKPABAEDCHRhc2tMaXN0BwDy8PCSyKPABAsDCHRhc2tJdGVtKADy8PCSyKPABAwHY2hlY2tlZAF4BwDy8PCSyKPABAwDCXBhcmFncmFwaAcA8vDwksijwAQOBgQA8vDwksijwAQPBHRhc2sA"
     },
     { "name": "ordered-first-in-bullet", "source": "- 1. child\n- sibling\n",
       "canonical": "- \n  1. child\n- sibling",
@@ -169,8 +204,13 @@
     { "name": "underscore-rule-first-in-bullet", "source": "- ___\n- sibling\n",
       "refuse": true
     },
-    { "name": "ordered-checkbox-first-in-bullet", "source": "- 1. [x] task\n- sibling\n",
-      "refuse": true
+    {
+      "name": "ordered-checkbox-first-in-bullet",
+      "source": "- 1. [x] task\n- sibling\n",
+      "canonical": "- \n  1. \\[x] task\n- sibling",
+      "exactSource": true,
+      "foldRefuse": true,
+      "rustBase64": "AQ6j1I799cfWAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCj1I799cfWAQEDCGxpc3RJdGVtBwCj1I799cfWAQIDCXBhcmFncmFwaIej1I799cfWAQMDC29yZGVyZWRMaXN0KACj1I799cfWAQQFc3RhcnQBfQEHAKPUjv31x9YBBAMIbGlzdEl0ZW0HAKPUjv31x9YBBgMJcGFyYWdyYXBoBwCj1I799cfWAQcGBACj1I799cfWAQgIW3hdIHRhc2uHo9SO/fXH1gECAwhsaXN0SXRlbQcAo9SO/fXH1gERAwlwYXJhZ3JhcGgHAKPUjv31x9YBEgYEAKPUjv31x9YBEwdzaWJsaW5nAA=="
     },
     { "name": "ordinary-abbreviations", "source": "Mr. Smith arrived.\nDr. Jones\nSt. Louis\nI. Overview",
       "canonical": "Mr. Smith arrived.\nDr. Jones\nSt. Louis\nI. Overview",
@@ -576,15 +616,21 @@
       "note": "CommonMark 0.31.2: <ol> <li> <p>Step one</p> <ul> <li> <p>detail a</p> </li> <li> <p>detail b</p> </li> </ul> </li> <li> <p>Step two</p> </li> </ol>",
       "rustBase64": "ARTcj/nQ6viICQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA3I/50Or4iAkBBXN0YXJ0AX0BBwDcj/nQ6viICQEDCGxpc3RJdGVtBwDcj/nQ6viICQMDCXBhcmFncmFwaAcA3I/50Or4iAkEBgQA3I/50Or4iAkFCFN0ZXAgb25lh9yP+dDq+IgJBAMKYnVsbGV0TGlzdAcA3I/50Or4iAkOAwhsaXN0SXRlbQcA3I/50Or4iAkPAwlwYXJhZ3JhcGgHANyP+dDq+IgJEAYEANyP+dDq+IgJEQhkZXRhaWwgYYfcj/nQ6viICQ8DCGxpc3RJdGVtBwDcj/nQ6viICRoDCXBhcmFncmFwaAcA3I/50Or4iAkbBgQA3I/50Or4iAkcCGRldGFpbCBih9yP+dDq+IgJAwMIbGlzdEl0ZW0HANyP+dDq+IgJJQMJcGFyYWdyYXBoBwDcj/nQ6viICSYGBADcj/nQ6viICScIU3RlcCB0d28A"
     },
-    { "name": "empty-bullet-tab-continuation", "source": "- \n\tfoo",
+    {
+      "name": "empty-bullet-tab-continuation",
+      "source": "- \n\tfoo",
+      "canonical": "- \n    foo",
+      "exactSource": true,
       "foldRefuse": true,
-      "note": "CommonMark 0.31.2: <ul> <li>foo</li> </ul>",
-      "refuse": true
+      "rustBase64": "AQfG99mPtJWyBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDG99mPtJWyBQEDCGxpc3RJdGVtBwDG99mPtJWyBQIDCXBhcmFncmFwaIfG99mPtJWyBQMDCXBhcmFncmFwaAcAxvfZj7SVsgUEBgQAxvfZj7SVsgUFBSAgZm9vAA=="
     },
-    { "name": "empty-bullet-space-tab-continuation", "source": "- \n \tfoo",
+    {
+      "name": "empty-bullet-space-tab-continuation",
+      "source": "- \n \tfoo",
+      "canonical": "- \n     foo",
+      "exactSource": true,
       "foldRefuse": true,
-      "note": "CommonMark 0.31.2: <ul> <li>foo</li> </ul>",
-      "refuse": true
+      "rustBase64": "AQf8lZyh1/m5DQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD8lZyh1/m5DQEDCGxpc3RJdGVtBwD8lZyh1/m5DQIDCXBhcmFncmFwaIf8lZyh1/m5DQMDCXBhcmFncmFwaAcA/JWcodf5uQ0EBgQA/JWcodf5uQ0FBiAgIGZvbwA="
     },
     { "name": "empty-bullet-underindent-after-blank", "source": "- \n\n x",
       "foldRefuse": true,
@@ -798,6 +844,126 @@
       "foldRefuse": true,
       "note": "CommonMark 0.31.2: empty ordered list, then a bullet list with a child.",
       "rustBase64": "AQ/s5qX5iMzcAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA7Oal+YjM3AIBBXN0YXJ0AX0BBwDs5qX5iMzcAgEDCGxpc3RJdGVtBwDs5qX5iMzcAgMDCXBhcmFncmFwaIfs5qX5iMzcAgEDCmJ1bGxldExpc3QHAOzmpfmIzNwCBQMIbGlzdEl0ZW0HAOzmpfmIzNwCBgMJcGFyYWdyYXBoBwDs5qX5iMzcAgcGBADs5qX5iMzcAggBYofs5qX5iMzcAgcDCmJ1bGxldExpc3QHAOzmpfmIzNwCCgMIbGlzdEl0ZW0HAOzmpfmIzNwCCwMJcGFyYWdyYXBoBwDs5qX5iMzcAgwGBADs5qX5iMzcAg0BYwA="
+    },
+    {
+      "name": "tab-fence-continuation",
+      "source": "- Item one\n- x\n\t```ts\n\tconst target = true;\n\t```\n- Item three",
+      "canonical": "- Item one\n- x\n  ```ts\n  const target = true;\n  ```\n- Item three",
+      "exactSource": true,
+      "foldRefuse": true,
+      "rustBase64": "ARKytc6q7q20AgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCytc6q7q20AgEDCGxpc3RJdGVtBwCytc6q7q20AgIDCXBhcmFncmFwaAcAsrXOqu6ttAIDBgQAsrXOqu6ttAIECEl0ZW0gb25lh7K1zqrurbQCAgMIbGlzdEl0ZW0HALK1zqrurbQCDQMJcGFyYWdyYXBoBwCytc6q7q20Ag4GBACytc6q7q20Ag8BeIeytc6q7q20Ag4DCWNvZGVCbG9jaygAsrXOqu6ttAIRCGxhbmd1YWdlAXcCdHMHALK1zqrurbQCEQYEALK1zqrurbQCExRjb25zdCB0YXJnZXQgPSB0cnVlO4eytc6q7q20Ag0DCGxpc3RJdGVtBwCytc6q7q20AigDCXBhcmFncmFwaAcAsrXOqu6ttAIpBgQAsrXOqu6ttAIqCkl0ZW0gdGhyZWUA"
+    },
+    {
+      "name": "paren-underindented-continuation",
+      "source": "1) item\n\n  para\n\nAfter",
+      "canonical": "1. item\n\n&#32; para\n\nAfter",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQ2xzc2IjcijDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAsc3NiI3Iow0BBXN0YXJ0AX0BBwCxzc2IjcijDQEDCGxpc3RJdGVtBwCxzc2IjcijDQMDCXBhcmFncmFwaAcAsc3NiI3Iow0EBgQAsc3NiI3Iow0FBGl0ZW2Hsc3NiI3Iow0BAwlwYXJhZ3JhcGgHALHNzYiNyKMNCgYEALHNzYiNyKMNCwYgIHBhcmGHsc3NiI3Iow0KAwlwYXJhZ3JhcGgHALHNzYiNyKMNEgYEALHNzYiNyKMNEwVBZnRlcgA="
+    },
+    {
+      "name": "tab-inline-child",
+      "source": "- -\tchild",
+      "canonical": "- \n  - child",
+      "exactSource": true,
+      "foldRefuse": true,
+      "rustBase64": "AQnxlMz8tJWADAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDxlMz8tJWADAEDCGxpc3RJdGVtBwDxlMz8tJWADAIDCXBhcmFncmFwaIfxlMz8tJWADAMDCmJ1bGxldExpc3QHAPGUzPy0lYAMBAMIbGlzdEl0ZW0HAPGUzPy0lYAMBQMJcGFyYWdyYXBoBwDxlMz8tJWADAYGBADxlMz8tJWADAcFY2hpbGQA"
+    },
+    {
+      "name": "tab-item-text",
+      "source": "- a\tb",
+      "foldCanonical": "- a\tb",
+      "canonical": "- a b",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQbPy8Ld/7/XBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDPy8Ld/7/XBQEDCGxpc3RJdGVtBwDPy8Ld/7/XBQIDCXBhcmFncmFwaAcAz8vC3f+/1wUDBgQAz8vC3f+/1wUEA2EgYgA="
+    },
+    {
+      "name": "tab-continuation-text",
+      "source": "- a\n  b\tc",
+      "foldCanonical": "- a\n  b\tc",
+      "canonical": "- a\n  b    c",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQbj0uLZ8/rmBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDj0uLZ8/rmBAEDCGxpc3RJdGVtBwDj0uLZ8/rmBAIDCXBhcmFncmFwaAcA49Li2fP65gQDBgQA49Li2fP65gQECGEKYiAgICBjAA=="
+    },
+    {
+      "name": "tab-root-fence-opaque",
+      "source": "```\n-\tcode\n```",
+      "canonical": "```\n-\tcode\n```",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQTl6/7s8qriAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2sHAOXr/uzyquICAQYEAOXr/uzyquICAgYtCWNvZGUA"
+    },
+    {
+      "name": "tab-root-fence-quote-text",
+      "source": "```\n> literal\n-\tcode\n```",
+      "canonical": "```\n> literal\n-\tcode\n```",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQTz9d3KsZWhCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2sHAPP13cqxlaEJAQYEAPP13cqxlaEJAhA+IGxpdGVyYWwKLQljb2RlAA=="
+    },
+    {
+      "name": "tab-nested-fence-text",
+      "source": "- a\n  ```\n  -\tcode\n  ```",
+      "canonical": "- a\n  ```\n  -    code\n  ```",
+      "exactSource": true,
+      "foldRefuse": true,
+      "rustBase64": "AQmAyOnWipv8AQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCAyOnWipv8AQEDCGxpc3RJdGVtBwCAyOnWipv8AQIDCXBhcmFncmFwaAcAgMjp1oqb/AEDBgQAgMjp1oqb/AEEAWGHgMjp1oqb/AEDAwljb2RlQmxvY2sHAIDI6daKm/wBBgYEAIDI6daKm/wBBwktICAgIGNvZGUA"
+    },
+    {
+      "name": "tab-quoted-marker",
+      "source": "> -\titem",
+      "canonical": "> - item",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQe8tc6PntDzDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwC8tc6PntDzDQEDCmJ1bGxldExpc3QHALy1zo+e0PMNAgMIbGlzdEl0ZW0HALy1zo+e0PMNAwMJcGFyYWdyYXBoBwC8tc6PntDzDQQGBAC8tc6PntDzDQUEaXRlbQA="
+    },
+    {
+      "name": "lazy-bullet-interior-tab",
+      "source": "- a\nlazy\ttext",
+      "canonical": "- a\n  lazy\ttext",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQbvq/bUhufjCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDvq/bUhufjCwEDCGxpc3RJdGVtBwDvq/bUhufjCwIDCXBhcmFncmFwaAcA76v21Ibn4wsDBgQA76v21Ibn4wsEC2EKbGF6eQl0ZXh0AA=="
+    },
+    {
+      "name": "lazy-underindented-interior-tab",
+      "source": "- a\n b\tc",
+      "canonical": "- a\n   b\tc",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQavgcTs1PLxDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCvgcTs1PLxDAEDCGxpc3RJdGVtBwCvgcTs1PLxDAIDCXBhcmFncmFwaAcAr4HE7NTy8QwDBgQAr4HE7NTy8QwEBmEKIGIJYwA="
+    },
+    {
+      "name": "lazy-ordered-interior-tab",
+      "source": "1. a\nlazy\ttext",
+      "canonical": "1. a\n   lazy\ttext",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQeukbn4v7LNDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgArpG5+L+yzQ0BBXN0YXJ0AX0BBwCukbn4v7LNDQEDCGxpc3RJdGVtBwCukbn4v7LNDQMDCXBhcmFncmFwaAcArpG5+L+yzQ0EBgQArpG5+L+yzQ0FC2EKbGF6eQl0ZXh0AA=="
+    },
+    {
+      "name": "projected-item-header-literal-tab",
+      "source": "- a\tb",
+      "canonical": "- a\tb",
+      "projected": true,
+      "rustBase64": "AQbv4+ioqcT5AwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDv4+ioqcT5AwEDCGxpc3RJdGVtBwDv4+ioqcT5AwIDCXBhcmFncmFwaAcA7+PoqKnE+QMDBgQA7+PoqKnE+QMEA2EJYgA="
+    },
+    {
+      "name": "projected-item-continuation-literal-tab",
+      "source": "- a\n  b\tc",
+      "canonical": "- a\n  b\tc",
+      "projected": true,
+      "rustBase64": "AQas+tiOruXIAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCs+tiOruXIAwEDCGxpc3RJdGVtBwCs+tiOruXIAwIDCXBhcmFncmFwaAcArPrYjq7lyAMDBgQArPrYjq7lyAMEBWEKYgljAA=="
+    },
+    {
+      "name": "projected-item-code-literal-tab",
+      "source": "- a\n  ```\n  literal\ttext\n  ```",
+      "canonical": "- a\n  ```\n  literal\ttext\n  ```",
+      "projected": true,
+      "foldRefuse": true,
+      "rustBase64": "AQmA0vjFyeyJBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCA0vjFyeyJBAEDCGxpc3RJdGVtBwCA0vjFyeyJBAIDCXBhcmFncmFwaAcAgNL4xcnsiQQDBgQAgNL4xcnsiQQEAWGHgNL4xcnsiQQDAwljb2RlQmxvY2sHAIDS+MXJ7IkEBgYEAIDS+MXJ7IkEBwxsaXRlcmFsCXRleHQA"
     }
   ],
   "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."
