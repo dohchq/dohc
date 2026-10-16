@@ -69,7 +69,7 @@ describe("delete recovery", () => {
     const f = await fixture();
     const id = recovery(await f.remove(hand));
     const result = await f.undo(id);
-    expect(result).toMatchObject({ ok: true, tracked: { state: "restoring", count: 1 }, restored: ["folder/rowless.txt"], remaining: [] });
+    expect(result).toMatchObject({ ok: true, tracked: { state: "restoring", momentCount: 1 }, restored: ["folder/rowless.txt"], remaining: [] });
     expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("not retained");
     expect(existsSync(join(f.root, "folder/tracked.txt"))).toBe(false);
     await f.placeTracked();
@@ -80,14 +80,14 @@ describe("delete recovery", () => {
     const result = await f.remove(hand);
     const where = process.platform === "win32" ? "in the Recycle Bin" : "in the Trash";
     expect(result).toMatchObject({ undo: { available: false, paths: ["folder/rowless.txt"],
-      reason: `Cannot undo this delete. folder/rowless.txt is ${where}. Restore it there.` } });
-    expect(await f.undo(result.operationId!)).toMatchObject({ ok: false, reason: expect.stringContaining(where) });
+      reason: `Cannot undo the delete. folder/rowless.txt is ${where}. Restore it there.` } });
+    expect(await f.undo(result.operationId!)).toMatchObject({ ok: false, reason: expect.stringContaining("missing or expired") });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
   it("offers Undo for tracked-only files even after OS trash accepts", async () => {
     const f = await fixture(["folder/tracked.txt", "folder/rowless.txt"], true);
     const id = recovery(await f.remove());
-    expect(await f.undo(id)).toMatchObject({ ok: true, tracked: { state: "restoring", count: 2 }, restored: [] });
+    expect(await f.undo(id)).toMatchObject({ ok: true, tracked: { state: "restoring", momentCount: 2 }, restored: [] });
     await f.placeTracked();
     expect(await readFile(join(f.root, "folder/tracked.txt"), "utf8")).toBe("tracked");
   });
@@ -106,7 +106,7 @@ describe("delete recovery", () => {
     const first = await f.undo(id);
     await f.write("folder/rowless.txt", "later edit");
     expect(await f.undo(id)).toEqual(first);
-    expect(f.history.undoHistoryOperation).toHaveBeenCalledTimes(1);
+    expect(f.history.undoHistoryOperation).toHaveBeenCalledTimes(2);
     expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("later edit");
   });
   it("finishes moves after interruption between engine commit and the recovery receipt", async () => {
@@ -117,7 +117,7 @@ describe("delete recovery", () => {
     expect(existsSync(join(f.root, "folder/rowless.txt"))).toBe(false);
     expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
     expect(f.history.undoHistoryOperation).toHaveBeenCalledTimes(2);
-    expect(f.history.undoHistoryOperation.mock.calls.map(([input]) => input.requestId)).toEqual(["undo-request", "undo-request"]);
+    expect(f.history.undoHistoryOperation.mock.calls.map(([input]) => input.requestId)).toEqual([`delete-undo:${id}`, `delete-undo:${id}`]);
   });
   it("groups the delete with the minted id, never the caller request id", async () => {
     const f = await fixture();
@@ -125,7 +125,7 @@ describe("delete recovery", () => {
     expect(f.groups).toEqual([id]);
     expect(id).not.toBe("caller-request");
     expect(await f.undo(id)).toMatchObject({ ok: true });
-    expect(f.history.undoHistoryOperation).toHaveBeenCalledWith(expect.objectContaining({ operationId: id, requestId: "undo-request" }));
+    expect(f.history.undoHistoryOperation).toHaveBeenCalledWith(expect.objectContaining({ operationId: id, requestId: `delete-undo:${id}` }));
   });
   it("moves nothing when the engine refuses, retaining its words", async () => {
     const f = await fixture();
@@ -167,7 +167,7 @@ describe("recovery durability and path authority", () => {
   it("restores rowless-only deletes without inventing a History operation", async () => {
     const f = await fixture([]);
     const id = recovery(await f.remove());
-    expect(await f.undo(id)).toMatchObject({ ok: true, tracked: { state: "restored", count: 0 }, restored: ["folder"] });
+    expect(await f.undo(id)).toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 0 }, restored: ["folder"] });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
     expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("not retained");
   });
