@@ -212,7 +212,8 @@ function createVerificationFixtures(directory) {
         writeFileSync(join(repoRoot,'.dohc-dev/database-stopped'),'yes');return {stdout:''};
       }
       if(command==='pnpm' && args[0]==='run') {
-        assert.ok(['typecheck','test:repo'].includes(args[1]));
+        assert.ok(['typecheck','test:repo','test:repo:tree'].includes(args[1]));
+        if(args[1]!=='typecheck')assert.equal(args[1],fixture.repositoryTests,'Selected repository tests');
         if(args[1]==='typecheck' && fixture.rust && fixture.js) {
           await rustStarted;
           assert.equal(readFileSync(join(repoRoot,'.dohc-dev/rust-running'),'utf8'),'yes');
@@ -343,8 +344,10 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
     ["pr", "js", "native-skipped"], ["pr", "js", "accounts-cancelled"], ["pr", "js", "desktop-cancelled"],
     // The gallery is required only where it runs, so its missing-proof case exists only there.
     ...(process.platform === "win32" ? [["pr", "js", "gallery-missing"]] : []),
-    // A change to one package selects only the JavaScript gate, which still runs everything.
+    // A change to one package selects only the JavaScript gate, which runs that package and its dependents, and only the repository tests that read the source tree.
     ["pr", null, null, "packages/fixture/src/index.ts"],
+    // A run that keeps going runs every repository test.
+    ["pr", "js", null, "packages/fixture/src/index.ts", false, true],
     ["pr", null, null, null, true], ["pr", "js", null, null, true], ["pr", "rust", null, null, true],
     ["pr", "js", null, null],
     ["pr", null, "warm"], ["pr", null, "pre-typecheck"], ["pr", "rust", "pre-clippy"],
@@ -357,6 +360,8 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
   ]) cases.push(t.test([mode, job, fault, changed ?? "empty diff", full ? "full" : "", keepGoing ? "keep-going" : ""].filter(Boolean).join(" "), async (context) => {
     const rust = mode === "pr" && job !== "js" && (full || job === "rust" || changed === "pnpm-lock.yaml");
     const js = mode === "pr" && job !== "rust";
+    // The lockfile is a tooling input; a package's source is not. An empty diff narrows nothing.
+    const repositoryTests = changed === "packages/fixture/src/index.ts" && !full && !keepGoing ? "test:repo:tree" : "test:repo";
     const warm = ["warm", "pre-typecheck"].includes(fault);
     const preQueueFault = ["pre-typecheck", "pre-clippy"].includes(fault);
     // Desktop smoke and e2e, and the JavaScript gate, prepare the engine and desktop.
@@ -409,7 +414,7 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         }
       `, ...args], { cwd: root, timeout: 120_000, signal: context.signal, env: { ...process.env,
         NODE_PATH: join(dirname(require.resolve("js-yaml/package.json")), ".."), FIXTURE_MODE: mode, FIXTURE_FAULT: fault ?? "",
-        FIXTURE_CASE: JSON.stringify({ rust, js, desktop, warm, keepGoing, gallery, incremental: expectedIncremental }),
+        FIXTURE_CASE: JSON.stringify({ rust, js, desktop, warm, keepGoing, gallery, incremental: expectedIncremental, repositoryTests }),
         CARGO_INCREMENTAL: previousIncremental, ...(fault === "shared" ? { DOHC_VERIFICATION_QUEUE_ROOT: queue } : {}),
         POSTGRES_URL:"postgres://must-not-use-inherited-database/foreign" } });
       assert.equal(result.error, undefined, result.stderr);
@@ -543,6 +548,8 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
         assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), js);
         assert.deepEqual(report.gates,{rust,js});
         assert.equal(report.full,full);
+        assert.equal(report.repositoryTests, js ? repositoryTests : undefined);
+        assert.equal(result.stdout.includes("[verification] repository tests: tree set only (no tooling change)."), js && repositoryTests === "test:repo:tree");
         if (js) {
           if (process.platform !== "win32") {
             assert.equal(report.statesPage, `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`);
