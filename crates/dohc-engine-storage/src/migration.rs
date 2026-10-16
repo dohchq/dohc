@@ -3256,7 +3256,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     // A file retired before this names no document. It keeps its row, so
     // its path stays held and the file still goes; its document is unknown.
     Migration {
-        ordinal: 55,
+        ordinal: 57,
         id: "v2-hosted-retired-file-object",
         sql: "ALTER TABLE hosted_retired_files ADD COLUMN object_id TEXT CHECK (length(object_id) > 0);",
         sets_user_version: None,
@@ -4270,7 +4270,7 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-hosted-retired-file-object");
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 55);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 57);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch(
             "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
