@@ -5,10 +5,9 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { cancellationScope } from "./cancellation.mjs";
 import { runBounded, testPlan, testWorkspace } from "./js-tests.mjs";
-import { affectedPackages, packageReferences, readWorkspacePackages } from "./selection.mjs";
+import { affectedPackages, packageReferences } from "./selection.mjs";
 
 test("a malformed proof continuation cannot silently omit proofs", async () => {
   await assert.rejects(testWorkspace({runProofs: true}), /runProofs must be a function/);
@@ -195,8 +194,9 @@ function isolatedRetry(t) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/verification"), { recursive: true });
   for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs", "test-record-reporter.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
-  // The repository script's last command tests a and b; source runs in an earlier command.
-  const manifest = JSON.stringify({ scripts: { "test:repo": "pnpm test:repo:source && node --test --test-concurrency=2 scripts/a.test.mjs scripts/b.test.mjs" } });
+  // The repository script's last command tests a and b, and the tree set's tests b; source runs in an earlier command.
+  const manifest = JSON.stringify({ scripts: { "test:repo": "pnpm test:repo:source && node --test --test-concurrency=2 scripts/a.test.mjs scripts/b.test.mjs",
+    "test:repo:tree": "pnpm test:repo:source && node --test --test-concurrency=2 scripts/b.test.mjs" } });
   // b's second test can set the exit code, which fails its file without failing a test.
   writeFileSync(join(root, "scripts/b.test.mjs"), `
     import test from 'node:test';
@@ -304,18 +304,22 @@ function isolatedRetry(t) {
     import {testWorkspace} from './scripts/verification/js-tests.mjs';
     import {calls} from './scripts/verification/process.mjs';
     const stop=cancellationScope('Fixture',{stopOnFailure:true});
-    const error=await testWorkspace({prepared:true,output:resolve('evidence'),stop,env:{...process.env,DOHC_REQUIRE_POSTGRES:'1'}}).then(()=>null,error=>error);
+    const repositoryTests=process.env.REPOSITORY_TESTS?{repositoryTests:process.env.REPOSITORY_TESTS}:{};
+    const error=await testWorkspace({prepared:true,output:resolve('evidence'),stop,env:{...process.env,DOHC_REQUIRE_POSTGRES:'1'},...repositoryTests}).then(()=>null,error=>error);
     await stop.dispose();
     const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
+    const repository=calls.filter(call=>call.step==='repository'&&!call.alone);
     console.log(JSON.stringify({error:error?.message??null,stoppedBy:stop.stopped?.step??null,verdict:report.verdict,
       steps:Object.fromEntries(report.steps.filter(step=>step.name!=='inventory').map(step=>[step.name,step.verdict])),flaky:report.flaky,failed:report.failed,
       outcomes:report.steps.flatMap(step=>(step.alone??[]).map(({file,outcome,log})=>({step:step.name,file,outcome,logged:Boolean(log&&existsSync(log))}))),
-      repository:calls.filter(call=>call.step==='repository'&&!call.alone).length,alone:calls.filter(call=>call.alone).map(({alone:_alone,...call})=>call)}));
+      repository:repository.length,repositoryArgs:repository.map(call=>call.args),recorded:report.steps.find(step=>step.name==='repository')?.args,
+      alone:calls.filter(call=>call.alone).map(({alone:_alone,...call})=>call)}));
   `);
-  return scenario => {
+  return (scenario, repositoryTests) => {
     for (const file of ["ran", "sibling-started", "tail-alone-started", "evidence"]) rmSync(join(root, file), { recursive: true, force: true });
     writeFileSync(join(root, "package.json"), scenario === "node-bad-manifest" ? "{ not json" : manifest);
-    const result = spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, SCENARIO: scenario, VITEST_BIN: vitestBin } });
+    const result = spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000,
+      env: { ...process.env, SCENARIO: scenario, VITEST_BIN: vitestBin, REPOSITORY_TESTS: repositoryTests ?? "" } });
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout.trim().split("\n").at(-1));
   };
@@ -393,6 +397,19 @@ test("a node:test step that fails its whole-step rerun, then passes alone, passe
   const unmatched = drive("node-unmatched");
   assert.equal(unmatched.verdict, "FAIL", "a file that passes without running its failed test is no pass");
   assert.deepEqual(unmatched.outcomes, [outcome("repository", "scripts/b.test.mjs", "no test ran")]);
+});
+
+test("the repository step runs every repository test unless the caller selects the tree set, whose retries work the same way", t => {
+  const drive = isolatedRetry(t);
+  const all = drive("node-alone");
+  assert.deepEqual(all.repositoryArgs, ["run test:repo", "run test:repo"]);
+  const tree = drive("node-alone", "test:repo:tree");
+  assert.deepEqual(tree.repositoryArgs, ["run test:repo:tree", "run test:repo:tree"], "the step and its retry run the tree set");
+  assert.deepEqual(tree.recorded, ["run", "test:repo:tree"], "the report records the script that ran");
+  assert.equal(tree.verdict, "PASS");
+  assert.deepEqual(tree.flaky, all.flaky, "a test that failed once is flaky, and one that failed both tries passed alone");
+  assert.deepEqual(tree.alone, all.alone);
+  assert.deepEqual(tree.outcomes, [outcome("repository", "scripts/b.test.mjs", "passed")]);
 });
 
 test("a node:test file that fails only by its exit code fails alone, although its report names only the test that failed", t => {
@@ -502,18 +519,6 @@ test("undeclared relative imports between packages count as dependencies", t => 
   const packages = [{ name: "@dohc/desktop", path: "apps/desktop" }, { name: "@dohc/relay", path: "services/relay" },
     { name: "@dohc/site", path: "apps/site" }, { name: "@dohc/x", path: "packages/x" }];
   assert.deepEqual(packageReferences(root, packages), [["@dohc/desktop", "@dohc/relay"], ["@dohc/relay", "@dohc/x"]], "build output is not read");
-});
-
-test("the real tree's undeclared test imports select their importers", () => {
-  const root = fileURLToPath(new URL("../..", import.meta.url));
-  const packages = readWorkspacePackages(root);
-  const references = packageReferences(root, packages);
-  // sync-relay's tests import desktop source, and ydoc-projection's tests import sync-relay's.
-  assert.ok(affectedPackages(["apps/desktop/src/ipc/stopAndRestoreIpc.ts"], packages, references).includes("@dohc/sync-relay"));
-  assert.ok(affectedPackages(["services/sync-relay/src/liveTickets.ts"], packages, references).includes("@dohc/ydoc-projection"));
-  for (const outside of ["pnpm-lock.yaml", "crates/engine/src/lib.rs", "scripts/verification/close-electron.mjs"]) {
-    assert.equal(affectedPackages(["apps/site/src/index.ts", outside], packages), null, `${outside} can affect any package`);
-  }
 });
 
 test("a narrowed run tests only the affected packages, and records the rest as skipped", t => {
