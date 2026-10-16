@@ -30,7 +30,6 @@ save("generation.json", {
   command: `pnpm --filter @dohc/cli exec tsx ../../scripts/capabilities/generate-main-inventories.ts ${output}`,
   generatorSha256: createHash("sha256").update(readFileSync("scripts/capabilities/generate-main-inventories.ts")).digest("hex"),
   fixtureSha256: Object.fromEntries([
-    "packages/mcp/src/capabilityExposure.fixture.ts",
     "services/share-web/src/remoteMcpInventory.fixture.ts",
   ].map(path => [path, createHash("sha256").update(readFileSync(path)).digest("hex")])),
   files: hashes,

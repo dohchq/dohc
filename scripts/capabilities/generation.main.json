@@ -2,7 +2,7 @@
   "sourceCommit": "a4be19d5bc2c3581aca2d4b2bfb66af8b06b9945",
   "trackedSourcesClean": true,
   "command": "pnpm --filter @dohc/cli exec tsx ../../scripts/capabilities/generate-main-inventories.ts <absolute-output-directory>",
-  "generatorSha256": "3c7d107dd9bb1ec10ab0612c47bf2fbb02b97fc0d91b763220c89f69c752b0f6",
+  "generatorSha256": "c26692574be58e051c01928c1823297375ffd8edb130fe2c8decbe5ffcc2eba0",
   "fixtureSha256": {
     "services/share-web/src/remoteMcpInventory.fixture.ts": "d44d0c617df23e4819d13b8f16b58ac2623590358debf2426c40248f84686a80"
   },
