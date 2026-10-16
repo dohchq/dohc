@@ -154,13 +154,14 @@ test("Playwright and vitest reports name their flaky and failed tests", t => {
   assert.deepEqual(vitestFailures(join(root, "missing.json")), []);
 });
 
-test("the vitest reporter records the tests that passed on retry, failed both tries, and the slow ones", t => {
+test("the vitest reporter records the tests that passed on retry, failed both tries, and the slow ones, and every test in a run alone", t => {
   const root = mkdtempSync(join(tmpdir(), "dohc-flaky-"));
   const log = join(root, "tests.jsonl");
   const previous = process.env.DOHC_TEST_RECORD;
   process.env.DOHC_TEST_RECORD = log;
   t.after(() => { rmSync(root, { recursive: true, force: true }); if (previous === undefined) delete process.env.DOHC_TEST_RECORD; else process.env.DOHC_TEST_RECORD = previous; });
-  const testCase = (fullName, flaky, duration, state = "passed") => ({ fullName, module: { moduleId: join(process.cwd(), "src", "a.test.ts") }, diagnostic: () => ({ flaky, duration }), result: () => ({ state }) });
+  const testCase = (fullName, flaky, duration, state = "passed") => ({ fullName, module: { moduleId: join(process.cwd(), "src", "a.test.ts") },
+    diagnostic: () => state === "skipped" ? undefined : { flaky, duration }, result: () => ({ state }) });
   const reporter = new TestRecordReporter();
   reporter.onTestCaseResult(testCase("steady", false, 30));
   reporter.onTestCaseResult(testCase("settles on retry", true, 40));
@@ -169,14 +170,25 @@ test("the vitest reporter records the tests that passed on retry, failed both tr
   reporter.onTestCaseResult(testCase("fails both tries", false, 25, "failed"));
   // The run ends with a file that failed to load, a failed beforeAll, and an unhandled error, none of which a test owns.
   const suite = errors => ({ errors: () => errors });
-  const module = (errors, passed, suites = []) => ({ ...suite(errors), children: { allSuites: () => suites.values(), allTests: state => Array(state === "passed" ? passed : 0).fill({}).values() } });
-  reporter.onTestRunEnd([module([], 2, [suite([{ message: "beforeAll failed" }])]), module([{ message: "SyntaxError" }], 0)], [{ message: "unhandled" }], "failed");
+  const module = (errors, suites = []) => ({ ...suite(errors), children: { allSuites: () => suites.values() } });
+  reporter.onTestRunEnd([module([], [suite([{ message: "beforeAll failed" }])]), module([{ message: "SyntaxError" }])], [{ message: "unhandled" }], "failed");
   assert.deepEqual(readTestRecord(log), [
-    { test: "src/a.test.ts › settles on retry", flaky: true, failed: false, seconds: 0.04 },
-    { test: "src/a.test.ts › drives a whole scenario", flaky: false, failed: false, seconds: 12.5 },
-    { test: "src/a.test.ts › fails both tries", flaky: false, failed: true, seconds: 0.025 },
+    { test: "src/a.test.ts › settles on retry", flaky: true, failed: false, passed: true, seconds: 0.04 },
+    { test: "src/a.test.ts › drives a whole scenario", flaky: false, failed: false, passed: true, seconds: 12.5 },
+    { test: "src/a.test.ts › fails both tries", flaky: false, failed: true, passed: false, seconds: 0.025 },
   ]);
-  assert.deepEqual(recordedRun(log), { run: "failed", outside: 3, passed: 2 });
+  assert.deepEqual(recordedRun(log), { run: "failed", outside: 3 });
+  // A run alone records every test, so a test that skipped itself is no pass.
+  const alone = join(root, "alone.jsonl");
+  process.env.DOHC_TEST_RECORD = alone;
+  process.env.DOHC_TEST_RECORD_ALL = "1";
+  t.after(() => { delete process.env.DOHC_TEST_RECORD_ALL; });
+  reporter.onTestCaseResult(testCase("steady", false, 30));
+  reporter.onTestCaseResult(testCase("skips itself", false, 0, "skipped"));
+  assert.deepEqual(readTestRecord(alone), [
+    { test: "src/a.test.ts › steady", flaky: false, failed: false, passed: true, seconds: 0.03 },
+    { test: "src/a.test.ts › skips itself", flaky: false, failed: false, passed: false, seconds: 0 },
+  ]);
   assert.deepEqual(readTestRecord(join(root, "missing.jsonl")), []);
   assert.equal(recordedRun(join(root, "missing.jsonl")), null, "a run that never ended has no end");
 });

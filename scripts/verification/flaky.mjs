@@ -82,10 +82,10 @@ export function vitestFailures(path) {
 
 const recordLines = path => read(path).split(/\r?\n/u).filter(Boolean).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
 
-/** The tests the vitest reporter recorded in `path`: { test, flaky, failed, seconds }. */
+/** The tests the vitest reporter recorded in `path`: { test, flaky, failed, passed, seconds }. */
 export const readTestRecord = path => recordLines(path).filter(line => typeof line?.test === "string");
 
-/** How the recorded vitest run ended: { run, outside, passed }, with `outside` counting the errors no test owns. Null when it never ended. */
+/** How the recorded vitest run ended: { run, outside }, with `outside` counting the errors no test owns. Null when it never ended. */
 export const recordedRun = path => recordLines(path).findLast(line => typeof line?.run === "string") ?? null;
 
 /**

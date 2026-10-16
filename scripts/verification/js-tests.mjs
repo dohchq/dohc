@@ -118,6 +118,8 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       const nodeTest = [...(testFile.endsWith(".ts") ? ["--experimental-transform-types"] : []), "--test", "--test-concurrency=1", testFile];
       return name === "repository" ? [process.execPath, nodeTest] : pnpm(["--filter", "@dohc/desktop", "exec", "node", ...nodeTest]);
     }
+    // The failures each file names when it fails alone, which can be other tests than the ones it reran.
+    const failedAlone = [];
     // Load from other steps can fail a test on both tries. Its file alone shows whether the file fails by itself.
     async function passAlone(testFile, tests, base) {
       const log = `${base}.log`, aloneRecord = `${base}.tests.jsonl`;
@@ -125,14 +127,18 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       (row.alone ??= []).push(alone);
       await checkpoint();
       alone.log = log;
-      try { await run(...wholeFile(testFile), { env: { ...env, DOHC_TEST_RECORD: aloneRecord }, log, signal: stopper.signal }); }
+      try { await run(...wholeFile(testFile), { env: { ...env, DOHC_TEST_RECORD: aloneRecord, DOHC_TEST_RECORD_ALL: "1" }, log, signal: stopper.signal }); }
       catch (error) {
-        if (!error.interrupted) alone.outcome = "failed";
+        if (!error.interrupted) {
+          alone.outcome = "failed";
+          failedAlone.push(...rerun ? nodeTestFailures(readLog(log)) : readTestRecord(aloneRecord).filter(test => test.failed).map(test => test.test));
+        }
         throw error;
       }
       // Both runners pass a file whose tests did not run, so the report must show each failed test passed.
-      const report = readLog(log), ended = recordedRun(aloneRecord);
-      const passed = rerun ? !nodeTestFailures(report).length && tests.every(test => nodeTestPassed(report, test)) : ended?.outside === 0 && ended.passed > 0;
+      const report = readLog(log), recorded = readTestRecord(aloneRecord);
+      const passed = rerun ? !nodeTestFailures(report).length && tests.every(test => nodeTestPassed(report, test))
+        : recordedRun(aloneRecord)?.outside === 0 && tests.every(test => recorded.some(row => row.test === test && row.passed));
       alone.outcome = passed ? "passed" : "no test ran";
       if (!passed) throw new Error(`${testFile} did not pass its failed tests alone.`);
     }
@@ -157,7 +163,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       if (flaky.length) row.flaky = flaky;
       // vitest's failed and slow tests come from its reporter; node:test's from the spec report of the attempt that ran last.
       const last = readLog(row.retryLog ?? row.log);
-      const failed = [...recorded.filter(test => test.failed).map(test => test.test), ...(rerun ? nodeTestFailures(last) : [])]
+      const failed = [...new Set([...recorded.filter(test => test.failed).map(test => test.test), ...(rerun ? nodeTestFailures(last) : []), ...failedAlone])]
         .filter(test => !row.passedAlone?.includes(test));
       if (failed.length) row.failed = failed;
       const times = [...recorded.filter(test => test.seconds >= 2), ...nodeTestTimes(last).filter(test => test.seconds >= 2)];

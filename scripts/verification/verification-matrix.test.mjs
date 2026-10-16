@@ -275,8 +275,8 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
             assert.equal(options.env.POSTGRES_URL,'postgres://dohc:dohc@127.0.0.1:1234/dohc');
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
             if(['shared','passed-alone'].includes(process.env.FIXTURE_FAULT) && args[1]==='@dohc/fixture') {
-              const ended=process.env.FIXTURE_FAULT==='passed-alone'?JSON.stringify({run:'failed',outside:0,passed:3})+'\\n':'';
-              appendFileSync(options.env.DOHC_TEST_RECORD,JSON.stringify({test:'src/index.test.ts › keeps its value',flaky:false,failed:true,seconds:0.1})+'\\n'+ended);
+              const ended=process.env.FIXTURE_FAULT==='passed-alone'?JSON.stringify({run:'failed',outside:0})+'\\n':'';
+              appendFileSync(options.env.DOHC_TEST_RECORD,JSON.stringify({test:'src/index.test.ts › keeps its value',flaky:false,failed:true,passed:false,seconds:0.1})+'\\n'+ended);
               throw Object.assign(Error('fixture package test failed'),{commandExitFailure:true});
             }
             return {stdout:''};
@@ -284,8 +284,8 @@ test("verification prepares before parallel jobs and runs every JavaScript packa
           if(command==='pnpm' && args[1]==='@dohc/fixture' && args[2]==='exec') {
             assert.equal(process.env.FIXTURE_FAULT,'passed-alone','Unexpected isolated retry');
             assert.deepEqual(args.slice(0,10),['--filter','@dohc/fixture','exec','vitest','run','src/index.test.ts','--maxWorkers=1','--no-file-parallelism','--retry=0','--reporter=default']);
-            for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
-            appendFileSync(options.env.DOHC_TEST_RECORD,JSON.stringify({run:'passed',outside:0,passed:1})+'\\n');
+            for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E','DOHC_TEST_RECORD_ALL'])assert.equal(options.env[flag],'1');
+            appendFileSync(options.env.DOHC_TEST_RECORD,[{test:'src/index.test.ts › keeps its value',flaky:false,failed:false,passed:true,seconds:0.1},{run:'passed',outside:0}].map(line=>JSON.stringify(line)+'\\n').join(''));
             return {stdout:''};
           }
           if(command==='pnpm' && args[0]==='exec') {
