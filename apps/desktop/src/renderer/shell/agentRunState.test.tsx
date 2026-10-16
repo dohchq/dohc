@@ -46,7 +46,7 @@ afterEach(() => {
 it("reads once, then changes only on pushes, with no timer", async () => {
   vi.useFakeTimers();
   const { desktop, answer, push } = stubDesktop();
-  const { result } = renderHook(() => useAgentRunActive("ws-a", vi.fn()));
+  const { result } = renderHook(() => useAgentRunActive("ws-a", true, vi.fn()));
   await answer({ workspaceId: "ws-a", revision: 0, active: false });
   expect(result.current).toBe(false);
   expect(vi.getTimerCount()).toBe(0);
@@ -63,7 +63,7 @@ it("reads once, then changes only on pushes, with no timer", async () => {
 
 it("drops older revisions and other workspaces", async () => {
   const { answer, push } = stubDesktop();
-  const { result } = renderHook(() => useAgentRunActive("ws-a", vi.fn()));
+  const { result } = renderHook(() => useAgentRunActive("ws-a", true, vi.fn()));
   // A push that lands before the first read's answer outranks it.
   push({ workspaceId: "ws-a", revision: 4, active: true });
   await answer({ workspaceId: "ws-a", revision: 3, active: false });
@@ -78,7 +78,7 @@ it("drops older revisions and other workspaces", async () => {
 it("never paints a slow answer for the last workspace", async () => {
   const { listeners, answer } = stubDesktop();
   const { result, rerender } = renderHook(
-    ({ workspaceId }: { workspaceId: string }) => useAgentRunActive(workspaceId, vi.fn()),
+    ({ workspaceId }: { workspaceId: string }) => useAgentRunActive(workspaceId, true, vi.fn()),
     { initialProps: { workspaceId: "ws-a" } },
   );
   rerender({ workspaceId: "ws-b" });
@@ -88,12 +88,32 @@ it("never paints a slow answer for the last workspace", async () => {
   expect(listeners.size).toBe(1);
 });
 
+it("reads and shows nothing until the workspace is ready", async () => {
+  const { desktop, listeners, answer, push } = stubDesktop();
+  const { result, rerender } = renderHook(
+    ({ ready }: { ready: boolean }) => useAgentRunActive("ws-a", ready, vi.fn()),
+    { initialProps: { ready: false } },
+  );
+  expect(desktop.readAgentRunState).not.toHaveBeenCalled();
+  expect(listeners.size).toBe(0);
+  rerender({ ready: true });
+  expect(desktop.readAgentRunState).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
+  await answer({ workspaceId: "ws-a", revision: 1, active: true });
+  expect(result.current).toBe(true);
+  // Leaving readiness, as a reselect does, hides the dot and stops listening.
+  rerender({ ready: false });
+  expect(result.current).toBe(false);
+  expect(listeners.size).toBe(0);
+  push({ workspaceId: "ws-a", revision: 2, active: true });
+  expect(result.current).toBe(false);
+});
+
 it("reports a failed read with a retry while the workspace shows, and not after", async () => {
   const { desktop, answer } = stubDesktop();
   const failure = new Error("main refused");
   desktop.readAgentRunState.mockRejectedValueOnce(failure);
   const onReadError = vi.fn();
-  const { result, unmount } = renderHook(() => useAgentRunActive("ws-a", onReadError));
+  const { result, unmount } = renderHook(() => useAgentRunActive("ws-a", true, onReadError));
   await vi.waitFor(() => expect(onReadError).toHaveBeenCalledOnce());
   const [cause, retry] = onReadError.mock.calls[0] as [unknown, () => void];
   expect(cause).toBe(failure);

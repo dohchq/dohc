@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentRunsIpc } from "./agentRunsIpc";
 import { CHANNELS } from "./channels";
@@ -41,6 +41,8 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
     ...(shared ? { shareView: sharedView } : {}),
   };
   registry.register(workspace);
+  await mkdir(join(rootPath, "other"));
+  registry.register({ ...workspace, workspaceId: "other", rootPath: join(rootPath, "other") });
   const sender = new Sender(7);
   const events: string[] = [];
   const authority = createWorkspaceAuthorityOwner({
@@ -113,7 +115,7 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
     withRendererWorkspaceOperation,
     requireEngineCapture: requireCapture, linkedChatStoreFor: () => ({ ensureOpen }),
     agentDispatchStoreHandleFor: () => ({ store: { runRecordsForThread: records } }),
-    requireWorkspace, assertAgentRunnableWorkspace: runnable, assertChatRunnerIdle: idle,
+    assertAgentRunnableWorkspace: runnable, assertChatRunnerIdle: idle,
     startAgentRunWithWorkspaceActivity: start,
     agentIntegration: integration,
     mcpShareAccessOf: shareAccess, mcpConfigFor: config,
@@ -167,6 +169,47 @@ const detectionRetirements: ReadonlyArray<{ readonly path: string; readonly reti
 ];
 
 describe("agent run IPC registrations", () => {
+  it.each([
+    CHANNELS.startAgentRun, CHANNELS.endAgentRun, CHANNELS.getAgentRunStatus,
+    CHANNELS.getMcpConfig, CHANNELS.runnerSelfTest, CHANNELS.chatRunRecordsForThread,
+    CHANNELS.chatDispatchStateForThread, CHANNELS.resumeThreadDispatch,
+  ])("binds %s to the sender before calling services", async channel => {
+    const h = await harness();
+    const end = vi.spyOn(h.integration, "endAgentRun");
+    const status = vi.spyOn(h.integration, "getAgentRunStatus");
+    const input = { workspaceId: "workspace-a",
+      ...(channel === CHANNELS.endAgentRun ? { runId: "run-1" } : {}),
+      ...(channel === CHANNELS.chatRunRecordsForThread || channel === CHANNELS.chatDispatchStateForThread || channel === CHANNELS.resumeThreadDispatch
+        ? { threadId: "thread-1" } : {}) };
+    if (channel === CHANNELS.endAgentRun) await h.invoke(CHANNELS.startAgentRun);
+    await h.invoke(channel, input);
+    const services = [h.requireWorkspace, h.requireCapture, h.ensureOpen, h.records,
+      h.runnable, h.idle, h.start, end, status, h.shareAccess, h.config,
+      h.writable, h.activity, ...Object.values(h.dispatch)];
+    services.forEach(service => service.mockClear());
+    await expect(h.invoke(channel, { ...input, workspaceId: "other" })).rejects.toThrow("no longer active");
+    services.forEach(service => expect(service).not.toHaveBeenCalled());
+  });
+  it("releases admission before a held runner self-test so retirement can finish", async () => {
+    const disposed = vi.fn();
+    const h = await harness(false, { disposeState: disposed });
+    const entered = deferred<void>();
+    const drain = deferred<{ ok: boolean; detail: string }>();
+    h.dispatch.runnerSelfTest.mockImplementation(() => { entered.resolve(); return drain.promise; });
+    const result = h.invoke(CHANNELS.runnerSelfTest);
+    let retiring: Promise<void> | undefined;
+    try {
+      await entered.promise;
+      retiring = h.authority.invalidate(h.workspace.workspaceId);
+      await vi.waitFor(() => expect(disposed).toHaveBeenCalledOnce());
+      await retiring;
+    } finally {
+      drain.resolve({ ok: true, detail: "Ready" });
+      await Promise.allSettled([result, retiring]);
+    }
+    await expect(result).resolves.toEqual({ ok: true, detail: "Ready" });
+  });
+
   it("registers each original group and rejects untrusted callers before parsing", async () => {
     const h = await harness();
     expect(h.groupSizes).toEqual([1, 10]);

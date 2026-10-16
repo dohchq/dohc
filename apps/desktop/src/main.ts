@@ -1,3 +1,4 @@
+import { createHistoryCollectionRemote } from "./workspaces/historyCollectionRemote";
 import { forgetWorkspacePresentation } from "./workspaces/actorPresentation";
 import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { createTypingQuitRecovery } from "./workspaces/typingQuitRecovery";
@@ -84,6 +85,7 @@ import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
 import { registerShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
 import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChannelSync";
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
+import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { registerWorkspaceGraphIpcHandlers } from "./ipc/workspaceGraphIpc";
 import { registerNativeMenusIpcHandlers } from "./ipc/nativeMenusIpc";
 import {
@@ -169,6 +171,7 @@ import { collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/
 import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./workspaces/desktopRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
+import { scheduleHostHandlers } from "./ipc/scheduleHostIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
 import { createUsageStore, USAGE_SNAPSHOT_NAME } from "./usage/usageStore";
 import { createRendererUsage } from "./usage/rendererUsage";
@@ -341,8 +344,11 @@ import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationI
 import { createLocalAuthorship } from "./workspaces/localAuthorship";
 import {
   createCloudLogin,
+  runCloudLogoutTransition,
   type CloudLogin,
 } from "./workspaces/cloudLogin";
+import { createServerAccountDeletion } from "./workspaces/serverAccountDeletion";
+import { registerServerAccountIpc } from "./ipc/serverAccountIpc";
 import { createJoinedWorkspaceRunner } from "./workspaces/createJoinedWorkspace";
 import { registerRelaySharesIpcHandlers } from "./ipc/relaySharesIpc";
 import { requireCredentials } from "./workspaces/credentialScopedOperation";
@@ -2054,9 +2060,9 @@ const { queueChatBookmarkProjection, projectPendingChatBookmarks } = desktopChat
 const {
   runWorkspaceSharedChannelPass,
   syncWorkspaceSharedChannels,
-  syncRendererWorkspaceSharedChannels,
   syncSharedChannelsForChatTarget,
   syncRendererSharedChannelsForChatTarget,
+  syncRendererWorkspaceSharedChannels,
 } = createDesktopSharedChannelSync<
   DesktopWorkspaceAuthorityState,
   DesktopRendererWorkspaceOperation
@@ -4578,10 +4584,38 @@ const shareCopyReader = createShareCopyReader<RegistryEntry>({
   remoteForWorkspace, currentCredentialGeneration: () => credentialCacheGeneration,
   relayJson: (credentials, path) => relayShareJsonWithCredentials(credentials, path),
 });
+// The desktop window and the CLI delete the account through this one client.
+// Afterwards this computer forgets every session of the deleted account, even
+// one another window signed in with while deletion ran, and keeps another
+// account's. Local workspaces stay.
+const serverAccountDeletion = createServerAccountDeletion({
+  credentials: loadAndCacheCurrentCredentials,
+  workspaces: listWorkspaces,
+  disconnect: async (deleted) => {
+    if (cachedCredentials?.serverUrl !== deleted.serverUrl || cachedCredentials.userId !== deleted.userId) {
+      try {
+        await cloudLogin().invalidateAccount(deleted);
+      } finally {
+        notifyCloudSessionChanged("ready");
+      }
+      return;
+    }
+    await runCloudLogoutTransition({
+      clearCachedCredentials: () => clearCachedCredentials(),
+      logout: () => cloudLogin().invalidateAccount(deleted),
+      stopEngines: () => activity.stopEngines(),
+      closeRelayTransportWorkspaces: () => closeAllRelayTransportWorkspaces({ accountChanged: true }),
+      notifyWorkspaceActivity: () => notifyRenderer(),
+      notifyCloudSessionChanged: () => notifyCloudSessionChanged("ready"),
+    });
+  },
+});
+
 const { startDesktopCliServer } = createDesktopCliServer({
   shareCopy: shareCopyReader,
   access: workspaceId => accessCliQueries(accessOwner, work => withPhysicalWorkspaceOperation(workspaceId, work)),
   recordSuccess: invocation => usageStore?.recordSuccess(invocation),
+  serverAccount: serverAccountDeletion,
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
     return datasetForCli(input, agent);
@@ -5780,6 +5814,7 @@ async function currentDiagnostics(): Promise<string> {
 
 function registerIpcHandlers(): void {
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
+  registerServerAccountIpc(operationBoundary, serverAccountDeletion);
   shareDirectWriteDelivery.register(operationBoundary);
   const shareCopyHandler = createShareCopyHandler<WebContents, RegistryEntry, DesktopRendererWorkspaceOperation>({
     currentSession: sender => rendererWorkspaceSessions.current(sender) ?? null,
@@ -5847,8 +5882,6 @@ function registerIpcHandlers(): void {
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
-    registerHandler: handleIpc,
-    assertTrustedSender,
     app,
     dialog,
     shell,
@@ -5865,8 +5898,9 @@ function registerIpcHandlers(): void {
     renderHtmlToPdf,
     notifyRenderer,
   });
-  workspaceFilesIpc.registerListing();
+  registerOperations(operationBoundary, workspaceFileOperations, workspaceFilesIpc);
 
+  const historyScopeIds = new WeakMap<object, string>();
   const workspaceEngineIpc = createWorkspaceEngineIpc<
     WebContents,
     IpcMainInvokeEvent,
@@ -5878,6 +5912,32 @@ function registerIpcHandlers(): void {
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
+    historyCollections: async operation => {
+      const { workspace } = operation;
+      const local = await localDatasetHostFor(workspace, operation.signal);
+      operation.assertCurrent();
+      const generation = credentialCacheGeneration;
+      let remoteReady: ReturnType<typeof remoteForWorkspace> | undefined;
+      let scope = historyScopeIds.get(operation.state);
+      if (!scope) { scope = randomUUID(); historyScopeIds.set(operation.state, scope); }
+      return {
+        scope: JSON.stringify([scope, generation]),
+        local: (positions, limit, sourceIds) => local.historyHeads({ positions, limit, sourceIds }),
+        remote: createHistoryCollectionRemote({
+          expected: operation, generation, currentGeneration: () => credentialCacheGeneration,
+          withOperation: work => withPhysicalWorkspaceOperation(workspace.workspaceId, work),
+          dataFor: (signal, current) => createDatasetAuthorityRouter(local, {
+            status: async id => { current(); return local.transferStatus(id); },
+            remote: async targetOrigin => {
+              const remote = await (remoteReady ??= remoteForWorkspace(workspace)); current();
+              if (!remote.credentials.relayUrl || new URL(remote.credentials.relayUrl).origin !== targetOrigin) throw new Error("Collection host unavailable.");
+              return createRemoteDatasetData({ workspaceId: workspace.workspaceId, ...remote, signal,
+                currentCredentialGeneration: () => credentialCacheGeneration, assertCurrent: current, relayJson: relayShareJsonWithCredentials });
+            },
+          }),
+        }),
+      };
+    },
     recordHistoryPersonName: (workspaceId, userId, sender) => {
       const workspace = findWorkspace(workspaceId);
       if (!recordHistoryPersonIsNamed(userId, workspace?.remote?.ownerUserId ?? localUserId())) return null;
@@ -5910,7 +5970,7 @@ function registerIpcHandlers(): void {
     automationRunOnThisComputer: async (workspaceId, automationId, claimId) =>
       !sharedViewOf(workspaceId) && (await collectionAutomationsOf(workspaceId)?.hasRun(automationId, claimId) ?? false),
     serverRuns,
-    requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
+    assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
     retryOwnerLiveDelivery: workspaceId => desktopEngine.retryOwnerDelivery(workspaceId),
     retryCloudSync: (workspaceId, reason) => activity.retryCloudSync(workspaceId, reason),
     retryFileObservation: workspaceId => activity.retryFileObservation(workspaceId),
@@ -5919,8 +5979,6 @@ function registerIpcHandlers(): void {
     openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
   });
   workspaceEngineIpc.registerCollections();
-
-  workspaceFilesIpc.registerExports();
 
   registerNativeMenusIpcHandlers<
     WebContents,
@@ -5939,8 +5997,6 @@ function registerIpcHandlers(): void {
     ensureOwnedProjectionCurrent,
     shell,
   });
-
-  workspaceFilesIpc.registerAccess();
 
   registerWorkspaceGraphIpcHandlers<
     WebContents,
@@ -5978,7 +6034,7 @@ function registerIpcHandlers(): void {
     notifyRenderer, findWorkspace,
     engineDaemonStartup: () => desktopEngine.startup,
     requireEngineSessions, currentEngineSessions: () => desktopEngine.sessions,
-    withPhysicalWorkspaceOperation, withRendererWorkspaceOperation, receivedShareEngine,
+    withRendererWorkspaceOperation, receivedShareEngine,
     readWorkspaceSecretState, readWorkspaceDataKeyForEnrollment, assertWritableWorkspace,
     relayClientForWorkspace, enrollWorkspaceKeyEnvelope, installWorkspaceDataKey,
     setWorkspaceRemote: async (workspaceId, remote) => {
@@ -6376,7 +6432,7 @@ function registerIpcHandlers(): void {
       detectAgentTools(workspaceRoot, signal, resourcesBasePath()),
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, requireEngineCapture,
-    linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace, assertAgentRunnableWorkspace,
+    linkedChatStoreFor, agentDispatchStoreHandleFor, assertAgentRunnableWorkspace,
     assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
     agentIntegration, mcpShareAccessOf, mcpConfigFor,
     senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
@@ -6822,17 +6878,9 @@ function registerIpcHandlers(): void {
     },
   }));
 
-  registerOperations(operationBoundary, scheduleHostOperations, {
-    readScheduleHost: (input) => scheduleHostState(input.workspaceId),
-    chooseScheduleHost: (input) => scheduleHostState(input.workspaceId, {
-      action: "choose",
-      body: { installId: input.installId, generation: input.generation },
-    }),
-    takeOverScheduleHost: (input) => scheduleHostState(input.workspaceId, {
-      action: "take-over",
-      body: { generation: input.generation },
-    }),
-  });
+  registerOperations(operationBoundary, scheduleHostOperations, scheduleHostHandlers<WebContents, IpcMainInvokeEvent>({
+    currentRendererSession: sender => rendererWorkspaceSessions.current(sender), scheduleHostState,
+  }));
 
   registerOperations(operationBoundary, chatDispatchNoticeOperations, {
     registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),

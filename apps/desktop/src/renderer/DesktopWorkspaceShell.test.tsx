@@ -1416,6 +1416,59 @@ describe("native workbench context menus", () => {
 });
 
 describe("settings entry points", () => {
+  it("shows Settings Agents as unavailable after the workspace fails to open", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace.mockRejectedValue(new Error("Workspace unavailable"));
+    renderShell(bridge);
+    await screen.findByTestId("workspace-open-failed");
+    const user = userEvent.setup();
+    await user.keyboard("{Control>},{/Control}");
+    await screen.findByTestId("settings-dialog");
+    await user.click(screen.getByRole("button", { name: "Agents" }));
+    expect(screen.getByText("Couldn’t open this workspace. Close Settings to try again.")).toBeTruthy();
+    expect(screen.queryByText("Loading settings...")).toBeNull();
+    expect(bridge.getMcpConfig).not.toHaveBeenCalled();
+    expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
+  });
+
+  it("holds Settings Agents before admission without a toast or Notice, then loads", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const admitted = deferred<Awaited<ReturnType<typeof bridge.openWorkspace>>>();
+    bridge.openWorkspace.mockReturnValue(admitted.promise);
+    const config = await bridge.getMcpConfig();
+    bridge.getMcpConfig.mockClear();
+    let ready = false;
+    bridge.getMcpConfig.mockImplementation(async () => {
+      if (!ready) throw new Error("This workspace is no longer active.");
+      return config;
+    });
+    bridge.getAgentRunStatus.mockImplementation(async () => {
+      if (!ready) throw new Error("This workspace is no longer active.");
+      return { activeRun: null, lastRun: null };
+    });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.keyboard("{Control>},{/Control}");
+    await screen.findByTestId("settings-dialog");
+    await user.click(screen.getByRole("button", { name: "Agents" }));
+    expect(bridge.getMcpConfig).not.toHaveBeenCalled();
+    expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByText(/no longer active/)).toBeNull();
+    await act(async () => {
+      ready = true;
+      admitted.resolve(await bridge.getSyncStatus());
+    });
+    await screen.findByTestId("settings-section-agents");
+    await waitFor(() => expect(bridge.getMcpConfig).toHaveBeenCalledOnce());
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByText(/no longer active/)).toBeNull();
+    await user.click(screen.getByLabelText("Close settings"));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(within(notices).queryByText(/agent settings|refresh agent runs|no longer active/)).toBeNull();
+  });
+
   it("opens settings from the activity bar", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();

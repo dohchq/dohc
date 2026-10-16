@@ -7,13 +7,15 @@
     "./betterAuth": "./src/betterAuth.ts",
     "./session": "./src/session.ts",
     "./signUp": "./src/signUp.ts",
-    "./smtp": "./src/smtp.ts"
+    "./smtp": "./src/smtp.ts",
+    "./accountDeletion": "./src/accountDeletion.ts"
   },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@dohc/security-contract": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "better-auth": "^1.6.26",
     "nodemailer": "10.0.10"

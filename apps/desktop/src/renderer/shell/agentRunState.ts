@@ -50,15 +50,22 @@ export function createAgentRunStateStore(
   };
 }
 
+const listenToNothing = () => () => undefined;
+const idle = () => false;
+
+// Nothing is read or shown until the workspace is ready in this window.
 export function useAgentRunActive(
   workspaceId: string,
+  workspaceIsReady: boolean,
   onReadError: (error: unknown, retry: () => void) => void,
 ): boolean {
   const report = useRef(onReadError);
   report.current = onReadError;
   const store = useMemo(
-    () => createAgentRunStateStore(workspaceId, (error, retry) => report.current(error, retry)),
-    [workspaceId],
+    () => workspaceIsReady
+      ? createAgentRunStateStore(workspaceId, (error, retry) => report.current(error, retry))
+      : null,
+    [workspaceId, workspaceIsReady],
   );
-  return useSyncExternalStore(store.subscribe, store.active);
+  return useSyncExternalStore(store?.subscribe ?? listenToNothing, store?.active ?? idle);
 }

@@ -81,6 +81,9 @@ export function createNamedLiveBrowserSessions(options: Parameters<typeof create
       return context;
     },
 
+    deleteAccount(userId: string, workspaceIds: readonly string[]) {
+      for (const [key, session] of sessions) if (session.context.userId === userId || workspaceIds.includes(session.context.workspaceId)) sessions.delete(key);
+    },
     remove(discriminator: string): boolean {
       return sessions.delete(discriminator);
     },

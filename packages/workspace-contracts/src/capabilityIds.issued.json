@@ -147,5 +147,16 @@
   "usage.start",
   "usage.restore",
   "capture.held.retry",
+  "file.create",
+  "file.zip.export",
+  "document.file.export",
+  "file.import",
+  "file.text.read",
+  "file.text.write",
+  "file.asset.write",
+  "file.image.pick",
+  "file.external.open",
+  "account.delete.preview",
+  "account.delete",
   "agent.run.state.read"
 ]

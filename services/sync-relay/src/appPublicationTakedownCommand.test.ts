@@ -83,7 +83,8 @@ it("takes down one publication through the running relay without adding a TCP li
   const env = {...process.env, NODE_OPTIONS: "", NODE_ENV: "test", SYNC_RELAY_TEST_AUTH: "1", SYNC_RELAY_PORT: "0", SYNC_RELAY_BIND: "127.0.0.1",
     SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: config, DOHC_RELAY_LINK_KEY: key, DOHC_RELAY_APP_PUBLICATIONS: "1",
     DOHC_SELF_HOST_LIVE: "0", DOHC_RELAY_AUTOMATIONS: "0", DOHC_PUBLIC_EDIT_RELEASE: undefined, DOHC_RELAY_ENGINE_EXECUTABLE: undefined,
-    DOHC_RELAY_SERVICE_HOST_CONFIG: undefined, DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined, DOHC_RELAY_SHARE_WEB_ORIGIN: "http://127.0.0.1:48123"};
+    DOHC_RELAY_SERVICE_HOST_CONFIG: undefined, DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined, DOHC_RELAY_SHARE_WEB_ORIGIN: "http://127.0.0.1:48123",
+    DOHC_RELAY_SHARE_WEB_URL: "http://127.0.0.1:48123"};
   const bootstrap = join(root, "observe-listeners.mjs");
   await writeFile(bootstrap, `import {Server} from "node:net";
 const listen = Server.prototype.listen;
