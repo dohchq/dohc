@@ -828,9 +828,11 @@ const canonical = path => {
 };
 const verifierEntry = fileURLToPath(new URL("../../scripts/verification/verify.mjs", import.meta.url));
 
+export const maxVerificationLanes = 4;
+
 /**
- * The host's verification lane count. It is 1 unless `verification-lanes` in
- * the verification slot root contains 2, so every verifier on the host agrees.
+ * The host's verification lane count, from 1 to 4. It is 1 unless `verification-lanes`
+ * in the verification slot root says otherwise, so every verifier on the host agrees.
  */
 export function verificationLanes(env = process.env) {
   const trialRoot = env.DOHC_VERIFICATION_SLOT_ROOT;
@@ -839,33 +841,48 @@ export function verificationLanes(env = process.env) {
     throw new Error("A verification trial requires DOHC_VERIFICATION_TRIAL=1 and an isolated DOHC_VERIFICATION_SLOT_ROOT; keep Cargo on its shared root.");
   }
   const root = trialRoot ?? cargoRoot;
-  if (!root) return 1;
+  return root ? readVerificationLanes(root) : 1;
+}
+
+/** The lane count in `root`'s `verification-lanes`, 1 when the file is absent. Any other content throws. */
+export function readVerificationLanes(root) {
   const path = join(root, "verification-lanes");
   let setting;
   try { setting = readFileSync(path, "utf8").trim(); }
   catch (error) { if (error.code === "ENOENT") return 1; throw error; }
-  if (!["1", "2"].includes(setting)) throw new Error(`${path} must contain 1 or 2.`);
-  return Number(setting);
+  const count = /^\d+$/u.test(setting) ? Number(setting) : 0;
+  if (count < 1 || count > maxVerificationLanes) throw new Error(`${path} must contain a lane count from 1 to ${maxVerificationLanes}.`);
+  return count;
 }
+
+/** The verification slots held in `root`, by number, including slots above a lowered or unreadable setting. */
+export const heldVerificationSlots = root => Array.from({ length: maxVerificationLanes }, (_, index) => index + 1)
+  .filter(slot => existsSync(slotDir(root, slot, "verification-slot")));
 
 /**
  * Hold one of the host's verification lanes for a whole PR gate, so gates
  * never exceed the host's lane count. Null on a single-tenant host.
  * A gate can wait behind several others, so this waits up to six hours.
  * Only this checkout's PR verifier may hold it; `entry` is the caller's script.
- * `lanes` replaces the host setting for a caller that has already read it, such as the queue service.
+ * `lanes` replaces reading the host setting for a caller that tracks it already, such as the
+ * queue service: it returns the current lane count each time admission is checked.
+ * `hold()` returns why the caller must not take a lane now, such as a paused queue, or null.
  */
-export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1], signal, lanes } = {}) {
+export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1], signal, lanes, hold } = {}) {
   if (!entry || canonical(entry) !== canonical(verifierEntry)) {
     throw new Error(`Only the PR verifier (${verifierEntry}) may hold a verification lane. Run pnpm verify:pr, or take a build slot for other Cargo work.`);
   }
-  const slots = lanes ?? verificationLanes(env);
+  const current = lanes ?? (() => verificationLanes(env));
+  const slots = current();
   const budget = resolveBuildBudget(env);
   if (!budget) return null;
+  // A lowered count also holds back runs already waiting; an unreadable one keeps the last count read.
+  let last = slots;
+  const limit = () => { try { last = current(); } catch { /* Keep the last count. */ } return last; };
   // Verifiers older than the lane setting used one slot and record no count.
-  return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots, legacySlots: 1,
+  return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots, maxSlots: maxVerificationLanes, limit, legacySlots: 1,
     kind: "verification-slot", lanes: "verification runs", metadata,
-    waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket, signal });
+    waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket, signal, hold });
 }
 
 /** A ticket observer failed, so acquisition stopped before admission instead of retrying. */
@@ -883,10 +900,14 @@ export class TicketEvidenceError extends Error {}
  * admission removes its ticket within milliseconds, so no later reader can
  * rely on seeing it. A throwing or Promise-returning observer rejects
  * acquisition with TicketEvidenceError.
+ * While `hold()` returns a reason, the waiter says it once and waits without a
+ * ticket, so it reserves no slot. Its wait limit starts again when the hold ends.
  */
 async function acquireSlot({
   root,
   slots,
+  maxSlots = slots,
+  limit = () => slots,
   legacySlots = slots,
   kind,
   lanes,
@@ -900,10 +921,12 @@ async function acquireSlot({
   identityDelayMs,
   goneMs,
   signal,
+  hold,
 }) {
   mkdirSync(root, { recursive: true });
   const label = kind.replace("-", " ");
-  const deadline = Date.now() + waitMs;
+  let deadline = Date.now() + waitMs;
+  let holding = false;
   let denied = false;
   let nextMessageAt = 0;
   let lastSweepAt = -Infinity;
@@ -936,6 +959,17 @@ async function acquireSlot({
   process.on("SIGTERM", onSigterm);
   try { for (;;) {
     cancellation.signal.throwIfAborted();
+    const held = hold?.();
+    if (held) {
+      removeTicket();
+      ticket = undefined;
+      if (!holding) console.log(`  ${held}`);
+      holding = true;
+      deadline = Date.now() + waitMs;
+      await sleep(Math.min(pollMs, 1000), undefined, { signal: cancellation.signal });
+      continue;
+    }
+    holding = false;
     let ahead = -1;
     let free = [];
     let slot;
@@ -943,9 +977,13 @@ async function acquireSlot({
       const tickets = queueTickets(root, kind);
       ahead = tickets.indexOf(ticket.name);
       free = [];
-      for (let i = 1; i <= slots; i += 1) {
-        if (!existsSync(slotDir(root, i, kind))) free.push(i);
+      let held = 0;
+      for (let i = 1; i <= maxSlots; i += 1) {
+        if (existsSync(slotDir(root, i, kind))) held += 1;
+        else if (i <= slots) free.push(i);
       }
+      // Every held slot counts against the current limit, so lowering it admits nothing until the runs in flight fall under it.
+      free = free.slice(0, Math.max(0, limit() - held));
       // Waiting code can use fewer slots than this one only when older code may be waiting too.
       const counts = slots === legacySlots ? tickets.map(() => slots) : tickets.map(name => name === ticket.name ? slots : ticketSlots(root, kind, name, legacySlots));
       slot = ahead < 0 ? undefined : admissionSlot(free, counts, ahead);
@@ -964,7 +1002,7 @@ async function acquireSlot({
       const sweepMs = reserved ? Math.min(pollMs, 1000) : pollMs;
       if (Date.now() - lastSweepAt >= sweepMs) {
         lastSweepAt = Date.now();
-        reclaimStaleSlots({ root, slots, staleMs, goneMs, kind, ownTicket: ticket.name });
+        reclaimStaleSlots({ root, slots: maxSlots, staleMs, goneMs, kind, ownTicket: ticket.name });
         refreshQueue();
       }
       if (ahead < 0) {
@@ -983,6 +1021,8 @@ async function acquireSlot({
         } catch (error) {
           if (error.code !== "EEXIST") throw error;
         }
+        // A hold that began during this pass gets the slot back before anything runs in it.
+        if (created && hold?.()) { rmSync(dir, { recursive: true, force: true }); continue; }
         if (created) return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata, identityDelayMs);
       }
     } catch (error) {
@@ -1040,9 +1080,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   let verificationConfigurationError = null;
   try { verificationSlots = verificationLanes(); }
   catch (error) { verificationConfigurationError = error.message; }
-  // Inspect any existing second lane even when this shell cannot admit one.
-  const inspectedVerificationSlots = verificationRoot && existsSync(join(verificationRoot, "verification-slot-2"))
-    ? Math.max(2, verificationSlots) : verificationSlots;
+  // Show every held lane, including lanes above a lowered or unreadable setting.
+  const inspectedVerificationSlots = Math.max(verificationSlots, ...(verificationRoot ? heldVerificationSlots(verificationRoot) : []));
   const lanes = [
     ...(cargoRoot ? [buildQueueStatus({root: cargoRoot, slots: budget?.slots ?? 4})] : []),
     ...(verificationRoot ? [

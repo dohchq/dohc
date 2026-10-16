@@ -7,7 +7,7 @@ use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[path = "relay_cache_tests.rs"]
-mod cache_tests;
+pub(super) mod cache_tests;
 
 const WORKSPACE: &str = "ws";
 const ORIGIN: &str = "local";

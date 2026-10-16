@@ -631,6 +631,8 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   flashMessageId?: string | null;
   // A "New" hairline sits before this message, the first the reader has not seen.
   firstUnreadMessageId?: string | null;
+  // Room under the last message, in pixels, that the list always keeps.
+  bottomSpace?: number;
 }) {
   const candidates = props.mentionCandidates ?? EMPTY_MENTION_CANDIDATES;
   const reactionsByMessage = useMemo(() => {
@@ -885,7 +887,7 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
     recycleItems={false}
     alwaysRender={pinned}
     className="min-h-0 flex-1 overflow-y-auto"
-    style={{ paddingTop: 8, paddingBottom: 8, paddingLeft: 12, paddingRight: 12 }}
+    style={{ paddingTop: 8, paddingBottom: props.bottomSpace ?? 8, paddingLeft: 12, paddingRight: 12 }}
     role="list"
     data-chat-virtualized="true"
     onKeyDown={event => {

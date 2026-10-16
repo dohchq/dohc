@@ -4,23 +4,28 @@
 //
 // Layout under the queue root. Each file has one writer.
 //   inbox/<key>.json             a client's submission (client)
-//   keys/<key>                   the request id a submission became (service)
+//   moves/<key>.json             a client's request to move a queued request (client)
+//   keys/<key>                   the request id a submission became, or the answer to a move (service)
 //   requests/<id>/request.json   the accepted request, never changed (service)
-//   requests/<id>/status.json    its state and attempts (service)
+//   requests/<id>/status.json    its state, attempts, and any place a move gave it (service)
 //   requests/<id>/cancel         a cancellation request (client)
 //   requests/<id>/attempts/<n>/  one worker's evidence (worker)
 //   service.json                 service identity, heartbeat, and health (service)
 //   monitor-load.json            the dashboard's minute samples of host load (service)
+//   control/restart              exit once the runs in flight end (client)
+//   control/pause                start no run until resume (client, the dashboard, or the service after the computer restarts)
 //   lane/                        the checkout the service verifies in
 //   service/<commit>/, current   installed service checkouts, and the active one
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
-import { resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
+import { buildQueueStatus, heldVerificationSlots, maxVerificationLanes, readVerificationLanes, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { git } from "./process.mjs";
 
 export const protocol = 1;
@@ -39,6 +44,7 @@ export function queueRoot(env = process.env, platform = process.platform) {
 
 export const queuePaths = root => ({
   inbox: join(root, "inbox"),
+  moves: join(root, "moves"),
   keys: join(root, "keys"),
   requests: join(root, "requests"),
   service: join(root, "service.json"),
@@ -47,6 +53,7 @@ export const queuePaths = root => ({
   installs: join(root, "service"),
   current: join(root, "current"),
   control: join(root, "control"),
+  pause: join(root, "control", "pause"),
   request: id => join(root, "requests", id),
   attempt: (id, n) => join(root, "requests", id, "attempts", String(n)),
 });
@@ -64,17 +71,25 @@ export async function withFileRetry(action, attempts = 8) {
   }
 }
 
-/** Write JSON so readers see the old or the new bytes, never a mix, and so it survives a crash. */
-export async function writeJson(path, value) {
+/** Write a file so readers see the old or the new bytes, never a mix, and so it survives a crash. */
+export async function writeText(path, text) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID().slice(0, 8)}.tmp`;
   const fd = openSync(temporary, "w");
   try {
-    writeSync(fd, JSON.stringify(value, null, 2) + "\n");
+    writeSync(fd, text);
     fsyncSync(fd);
   } finally { closeSync(fd); }
   try { await withFileRetry(() => renameSync(temporary, path)); }
   catch (error) { rmSync(temporary, { force: true }); throw error; }
+}
+
+export const writeJson = (path, value) => writeText(path, JSON.stringify(value, null, 2) + "\n");
+
+/** Add an event to the queue's history. Losing a line must not stop the queue. */
+export function recordHistory(root, event) {
+  try { appendFileSync(queuePaths(root).history, JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n"); }
+  catch { /* History informs estimates and records moves and lane changes. A request keeps its last move in its status. */ }
 }
 
 /** A JSON file, or null when it does not exist or is torn. Torn files are rewritten by their one writer. */
@@ -123,16 +138,151 @@ export function placeSubmission(requests, submission) {
   return { supersede: replaced.map(entry => entry.id), sequence: replaced[0]?.request.sequence ?? null };
 }
 
+/** A request's place in line: the order a move gave it, else its sequence. A move changes no id or sequence. */
+export const orderOf = entry => entry.status.order ?? entry.request.sequence;
+export const lineOrder = (a, b) => orderOf(a) - orderOf(b) || a.id.localeCompare(b.id);
+
+// One line of text: whitespace and control characters become one space, so a field cannot fake a row in status.
+const oneLine = (value, length) => typeof value === "string" ? [...value.replace(/[\s\p{Cc}\p{Cf}]+/gu, " ").trim()].slice(0, length).join("") : null;
+
+// A request without a checkout, written by hand, must not stop the line.
+const checkoutOwner = (checkout = "unknown checkout") => ({ key: `checkout:${String(checkout).toLowerCase()}`, title: String(checkout), source: "checkout" });
+
+/** Whose turn a request waits for. A request accepted before owners existed belongs to its checkout. */
+export const ownerOf = request => request.owner ?? checkoutOwner(request.checkout);
+
 /**
- * The oldest request that can run now, the nightly run of main first. A request
- * waiting on Docker does not hold back one that needs none.
+ * The owner of a new request: the T3 thread a person started for its work, with a subagent's thread
+ * counted under it, else the name it was submitted with by --owner, else its checkout.
+ * A T3 lookup that fails names no thread.
  */
-export function nextRequest(requests, { diskOk, dockerOk }, now = Date.now()) {
+export function ownerFor(submission, threadOf) {
+  let thread = null;
+  try { thread = submission.nightly ? null : threadOf(submission.branch?.replace(/^refs\/heads\//u, "") ?? null, submission.checkout)?.root ?? null; }
+  catch { /* T3's database can be locked or migrating. */ }
+  const name = oneLine(submission.ownerName, 100);
+  return thread ? { key: `thread:${thread.id}`, title: oneLine(thread.title, 200) || thread.id, source: "thread" }
+    : name ? { key: `flag:${name.toLowerCase()}`, title: name, source: "flag" }
+    : checkoutOwner(submission.checkout);
+}
+
+const movedFirst = entry => Boolean(entry.status.moved) && !entry.status.moved.before;
+
+/**
+ * Every live request in the order it runs: the running ones, the nightly run, the requests moved
+ * first to unblock others, then the owners' turns. Owners with no run in progress go before owners
+ * with one. Among each, the owner who has gone longest without a start goes next, and an owner that
+ * never started goes first. Each owner's requests keep line order. A request ahead of the turns counts
+ * as a run its owner starts before them, so the line is the order the service starts it while no run
+ * ends. An attempt that failed because of the machine uses no turn. Requests accepted before owners
+ * existed record no starts, so right after an upgrade they keep the line order they had.
+ * A waiting request that fails `canStart` takes no place in the line, but its runs still count.
+ */
+export function runOrder(requests, { canStart = () => true } = {}) {
+  const live = requests.filter(entry => !terminalStates.has(entry.status.state)).sort(lineOrder);
+  const waiting = live.filter(entry => entry.status.state !== "running" && canStart(entry));
+  const front = waiting.filter(entry => entry.request.nightly || movedFirst(entry));
+  const ahead = [...front.filter(entry => entry.request.nightly), ...front.filter(entry => !entry.request.nightly)];
+  const lastStart = new Map();
+  const busy = new Set();
+  for (const entry of requests.filter(entry => entry.request.owner)) {
+    const { key } = entry.request.owner;
+    if (entry.status.state === "running") busy.add(key);
+    for (const attempt of entry.status.attempts) {
+      const at = Date.parse(attempt.startedAt);
+      if (attempt.outcome !== "environment" && at > (lastStart.get(key) ?? 0)) lastStart.set(key, at);
+    }
+  }
+  // The requests ahead of the turns start first, so their owners have a run in progress, started last, when the turns begin.
+  let latest = Math.max(0, ...lastStart.values());
+  for (const entry of ahead.filter(entry => entry.request.owner)) {
+    busy.add(entry.request.owner.key);
+    lastStart.set(entry.request.owner.key, latest += 1);
+  }
+  // Each owner's waiting requests, the owners in line order of their first request, which settles a tie.
+  const owners = new Map();
+  for (const entry of waiting) {
+    if (ahead.includes(entry)) continue;
+    const { key } = ownerOf(entry.request);
+    if (!owners.has(key)) owners.set(key, []);
+    owners.get(key).push(entry);
+  }
+  const turns = [...owners].sort(([a], [b]) => Number(busy.has(a)) - Number(busy.has(b)) || (lastStart.get(a) ?? 0) - (lastStart.get(b) ?? 0)).map(([, entries]) => entries);
+  const line = [...live.filter(entry => entry.status.state === "running"), ...ahead];
+  for (let round = 0; turns.some(entries => round < entries.length); round += 1) {
+    for (const entries of turns) if (round < entries.length) line.push(entries[round]);
+  }
+  return line;
+}
+
+/** A move as a client wrote it, checked and cleaned: `{ id, before, reason, by }`, or `{ rejected }`. */
+export function parseMove(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { rejected: "The move is not a JSON object." };
+  const by = raw.by ?? {};
+  const id = oneLine(raw.id, 64);
+  // An empty --before is a mistake, never --first.
+  const named = raw.before !== null && raw.before !== undefined;
+  const before = named ? oneLine(raw.before, 64) : null;
+  const reason = oneLine(raw.reason, 300);
+  if (!id) return { rejected: "The move names no request to move." };
+  if (named && !before) return { rejected: "The move's --before names no request. Use --first to move a request to the front." };
+  if (!reason) return { rejected: "A move needs a reason." };
+  if (typeof by !== "object" || Array.isArray(by) || ["name", "user", "cwd"].some(field => by[field] != null && typeof by[field] !== "string")) {
+    return { rejected: "The move's by field must hold name, user, and cwd, each text or null." };
+  }
+  return { id, before, reason, by: { name: oneLine(by.name, 200) || null, user: oneLine(by.user, 200) || null, cwd: oneLine(by.cwd, 200) || null } };
+}
+
+/**
+ * The line after a move: `{ orders }`, each queued request's order by id, or `{ rejected }` with the reason.
+ * A move only brings a queued request forward, to the front or just ahead of another queued request.
+ * `starting` names requests the service has started that still read as queued.
+ */
+export function placeMove(requests, { id, before = null }, starting = new Set()) {
+  const waiting = entry => entry.status.state === "queued" && !starting.has(entry.id);
+  const why = entry => entry.status.state === "running" || starting.has(entry.id) ? "it is running"
+    : entry.status.state === "superseded" ? `it was replaced by ${entry.status.supersededBy}, a newer commit on its branch`
+    : `it has already finished: ${entry.status.state}`;
+  const entry = requests.find(candidate => candidate.id === id);
+  const target = before && requests.find(candidate => candidate.id === before);
+  if (!entry) return { rejected: `No verification request ${id}.` };
+  if (before && !target) return { rejected: `No verification request ${before}.` };
+  if (!waiting(entry)) return { rejected: `Cannot move ${id}: ${why(entry)}. Only a queued request can move.` };
+  if (target === entry) return { rejected: `Cannot move ${id} before itself.` };
+  if (target && !waiting(target)) return { rejected: `Cannot move ${id} before ${before}: ${why(target)}. Move it before a queued request, or use --first.` };
+  // The nightly runs first whatever its place in the line, so a move before it would change nothing.
+  if (target?.request.nightly) return { rejected: `Cannot move ${id} before ${before}: the nightly run always goes first. Use --first to put ${id} at the front of the rest of the line.` };
+  // A request moved first runs ahead of every turn; one moved before it would only take its owner's turn.
+  if (target && movedFirst(target)) return { rejected: `Cannot move ${id} before ${before}: ${before} was moved first, ahead of every owner's turn. Use --first for ${id} if it also unblocks others.` };
+  // Owners take turns, so --before can order only one owner's requests.
+  if (target && ownerOf(target.request).key !== ownerOf(entry.request).key) {
+    return { rejected: `Cannot move ${id} before ${before}: ${before} belongs to ${ownerOf(target.request).title}, and owners take turns. --before orders one owner's requests. Use --first only to unblock others.` };
+  }
+  const line = requests.filter(waiting).sort(lineOrder);
+  if (target && line.indexOf(entry) < line.indexOf(target)) return { rejected: `Cannot move ${id} before ${before}: ${id} is already ahead of ${before}. A move only brings a request forward.` };
+  // The line hands its own order values out again in the new order. They stay whole numbers however many
+  // moves there are, and stay comparable with the sequence of a request running now, which comes back to
+  // its place if it is retried, and with every later submission, which goes behind.
+  const values = line.map(orderOf);
+  const next = line.filter(candidate => candidate !== entry);
+  next.splice(target ? next.indexOf(target) : 0, 0, entry);
+  return { orders: new Map(next.map((candidate, index) => [candidate.id, values[index]])) };
+}
+
+/**
+ * The first request in run order that can run now. Only the requests that can run now take turns,
+ * so a request waiting on Docker, a retry's backoff, or the removal of its containers (`cleaning`)
+ * does not hold back one that needs none, of its own owner or another. Its runs still count.
+ * `started` names requests the service has started that may still read as queued; each counts as a
+ * run its owner started now.
+ */
+export function nextRequest(requests, { diskOk, dockerOk }, now = Date.now(), started = new Set(), cleaning = new Set()) {
   if (!diskOk) return null;
-  const ready = ({ request, status }) => status.state === "queued"
-    && (!status.notBefore || Date.parse(status.notBefore) <= now)
-    && (!request.gates?.js || dockerOk);
-  return requests.find(entry => entry.request.nightly && ready(entry)) ?? requests.find(ready) ?? null;
+  const ready = ({ id, request, status }) => !cleaning.has(id) && (!status.notBefore || Date.parse(status.notBefore) <= now) && (!request.gates?.js || dockerOk);
+  const startedAt = new Date(now).toISOString();
+  const view = requests.map(entry => entry.status.state === "queued" && started.has(entry.id)
+    ? { ...entry, status: { ...entry.status, state: "running", attempts: [...entry.status.attempts, { startedAt }] } } : entry);
+  return runOrder(view, { canStart: ready }).find(entry => entry.status.state === "queued") ?? null;
 }
 
 /** Backoff after an environment failure: 30 s, 2 min, 5 min, then every 15 min. */
@@ -157,12 +307,9 @@ export function attemptOutcome(result, grant, { stopped } = {}) {
   return { outcome: "environment", cause: "unfinished", reason: "The receipt has no verdict." };
 }
 
-/** Position among live requests, counting the running ones first, then the nightly run. */
+/** Position among live requests in run order, counting the running ones first. */
 export function position(requests, id) {
-  const rank = entry => entry.status.state === "running" ? 0 : entry.request.nightly ? 1 : 2;
-  const live = requests.filter(entry => !terminalStates.has(entry.status.state))
-    .sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
-  const index = live.findIndex(entry => entry.id === id);
+  const index = runOrder(requests).findIndex(entry => entry.id === id);
   return index < 0 ? null : index + 1;
 }
 
@@ -200,10 +347,126 @@ export async function cancel(root, id) {
   await withFileRetry(() => closeSync(openSync(join(queuePaths(root).request(id), "cancel"), "a")));
 }
 
+/**
+ * Ask the service to move a queued request first in line, or before `before`. The service
+ * answers under keys/<key>. A key starts with the time, so moves apply in the order they were asked.
+ */
+export async function requestMove(root, { id, before = null, reason, by }) {
+  const key = `move-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  await writeJson(join(queuePaths(root).moves, `${key}.json`), { id, before, reason, by, requestedAt: new Date().toISOString() });
+  return key;
+}
+
+/**
+ * How status and the dashboard describe a request's last move. Every agent on the host runs as the same
+ * user, so the checkout that asked always shows, with the --by name or else the user.
+ */
+export const movedNote = ({ before, by, reason }, separator = ": ") =>
+  `moved ${before ? `before ${before}` : "first"} by ${by?.name ?? by?.user ?? "unknown"} (${by?.cwd ?? "unknown checkout"})${separator}${reason}`;
+
 /** The service's own record, and whether its heartbeat is current. */
 export function serviceState(root, now = Date.now()) {
   const record = readJson(queuePaths(root).service);
   return { record, alive: Boolean(record && now - Date.parse(record.heartbeatAt) < 60_000) };
+}
+
+/** The queue's pause, `{ at, reason, by? }`, or null when the line moves. */
+export function readPause(root) {
+  const path = queuePaths(root).pause;
+  // A marker that antivirus holds for a moment still pauses the queue.
+  return readJson(path) ?? (existsSync(path) ? { at: null, reason: null } : null);
+}
+
+// The reason the service records when it holds the line after the computer restarts.
+export const restartReason = "the computer restarted";
+
+/**
+ * Hold the line: runs in flight finish, and no run starts until resumeQueue, even after the
+ * service or the computer restarts. Pausing a paused queue keeps its first record. The reason
+ * is kept to one line; `by` optionally records who paused, such as the dashboard and its host name.
+ */
+export async function pauseQueue(root, { reason = null, by = null } = {}) {
+  const current = readPause(root);
+  if (current) return { pause: current, changed: false };
+  const pause = { at: new Date().toISOString(), reason: oneLine(reason, 300) || null, ...(by ? { by } : {}) };
+  await writeJson(queuePaths(root).pause, pause);
+  return { pause, changed: true };
+}
+
+/** Let the line move again. Returns the pause it ended, or null. */
+export async function resumeQueue(root) {
+  const pause = readPause(root);
+  if (pause) await withFileRetry(() => rmSync(queuePaths(root).pause, { force: true }));
+  return pause;
+}
+
+const pausedSince = pause => `paused${pause.at ? ` since ${pause.at}` : ""}${pause.reason ? ` (${pause.reason})` : ""}`;
+
+/** For an inline gate's lane wait: why it must not take a lane now, or null. */
+export const pauseHold = root => () => {
+  const pause = readPause(root);
+  return pause && `waiting: the verification queue is ${pausedSince(pause)}; this gate starts after pnpm verify:queue resume`;
+};
+
+// The service holds a lane under this purpose for each of its runs. Every other holder is an inline gate.
+export const queueLanePurpose = "PR verification (queue)";
+
+/** The root that holds the verification slots and the lane setting: an isolated trial root, else the build slot root. */
+export const verificationSlotRoot = (env = process.env) => env.DOHC_VERIFICATION_SLOT_ROOT ?? resolveBuildBudget(env)?.root ?? null;
+
+/** Inline gates holding one of the host's verification lanes, in any lane whatever the lane setting. */
+export function inlineRuns(env = process.env) {
+  const root = verificationSlotRoot(env);
+  return root ? buildQueueStatus({ root, slots: maxVerificationLanes, kind: "verification-slot" }).owners.filter(owner => owner.purpose !== queueLanePurpose).length : 0;
+}
+
+/**
+ * The lane setting in the slot root, `{ lanes, error, closing }`, or null without a slot root. `lanes` is
+ * null when the setting cannot be read, and `error` says why. `closing` lists the held lanes above the
+ * setting: each finishes its current gate and takes no more.
+ */
+export function laneSetting(slotRoot) {
+  if (!slotRoot) return null;
+  try {
+    const lanes = readVerificationLanes(slotRoot);
+    return { lanes, error: null, closing: heldVerificationSlots(slotRoot).filter(slot => slot > lanes) };
+  } catch (error) { return { lanes: null, error: error.message, closing: [] }; }
+}
+
+/** The closing lanes in the words status and the dashboard use, or null when none is closing. */
+export const closingNote = closing => !closing?.length ? null : closing.length === 1 ? `lane ${closing[0]} closes after its current gate`
+  : `lanes ${closing.slice(0, -1).join(", ")} and ${closing.at(-1)} close after their current gates`;
+
+/**
+ * Set the host's lane count, which every verifier and the queue service read. Lowering it stops nothing: a lane
+ * above the new count finishes its current gate and takes no more. A change goes to the queue's history with
+ * who made it. Returns the count it replaced, null when that one could not be read, and whether it changed.
+ */
+export async function setLanes({ root, slotRoot, lanes, by }) {
+  const { lanes: previous } = laneSetting(slotRoot);
+  if (previous === lanes) return { previous, changed: false };
+  await writeText(join(slotRoot, "verification-lanes"), `${lanes}\n`);
+  recordHistory(root, { event: "lanes", lanes, previous, by });
+  return { previous, changed: true };
+}
+
+/**
+ * The pause with the runs it waits for, `{ at, reason, by?, running, idle }`, or null when the queue
+ * is not paused. Only a heartbeat that shows this pause can say idle: the service records the pause
+ * and its runs together. `inline` counts the inline gates that hold a lane.
+ */
+export function pauseState(root, { record, alive } = serviceState(root), inline = inlineRuns()) {
+  const pause = readPause(root);
+  if (!pause) return null;
+  const running = (alive ? serviceRuns(record).runs.length : 0) + inline;
+  const seen = !alive || record.paused?.at === pause.at;
+  return { ...pause, running, idle: !running && seen };
+}
+
+/** The pause as status shows it, or null when the queue is not paused. */
+export function pauseStatus(root, service = serviceState(root), inline = inlineRuns()) {
+  const pause = pauseState(root, service, inline);
+  return pause && (pause.idle ? "paused and idle: safe to restart" : `${pausedSince(pause)}: ${pause.running} running, no new runs start`);
 }
 
 export const taskName = "dohc-verification-queue";
@@ -287,6 +550,8 @@ export async function verifyThroughQueue({ root, submission, detach = false, che
   if (answer?.rejected) throw new Error(answer.rejected);
   id = answer.id;
   log(`request ${id}. Follow it with pnpm verify:queue status, stop it with pnpm verify:queue cancel ${id}.`);
+  // A service older than owners answers without one.
+  if (answer.owner) log(`owner: ${answer.owner.title}${answer.owner.source === "checkout" ? " (its checkout). Pass --owner <name> with your next branch to group a thread's requests under one owner." : ""}`);
   if (detach) return { id, state: "queued" };
   let shown = "";
   let shownAt = 0;
@@ -431,16 +696,21 @@ function printStatus(root) {
   const { lanes, runs } = serviceRuns(record);
   console.log(`service: ${alive ? `running ${record.commit?.slice(0, 12) ?? ""} (pid ${record.pid})` : record ? `not responding since ${record.heartbeatAt}` : "never started"}`);
   if (alive) console.log(`monitor: http://127.0.0.1:${monitorPort}`);
+  const pause = pauseStatus(root, { record, alive });
+  if (pause) console.log(pause);
   if (record?.health?.reason) console.log(`health: ${record.health.reason}`);
   if (record?.health?.diskFreeGb != null) console.log(`free disk: ${record.health.diskFreeGb.toFixed(1)} GB`);
-  if (record) console.log(`host: ${lanes} lane(s), ${record.health?.cpuBusyPercent ?? "unknown"}% CPU, ${record.health?.freeMemGb ?? "unknown"} GB free memory`);
-  const live = requests.filter(entry => !terminalStates.has(entry.status.state));
-  for (const entry of live.sort((a, b) => position(requests, a.id) - position(requests, b.id))) {
-    const place = position(requests, entry.id);
+  // The setting, which the service reads each tick, and any lane above it still finishing a gate.
+  const setting = laneSetting(verificationSlotRoot());
+  console.log(`lanes: ${setting?.error ? `${lanes}, the service's last count. ${setting.error}` : [setting?.lanes ?? lanes, closingNote(setting?.closing)].filter(Boolean).join(", ")}`);
+  if (record) console.log(`host: ${record.health?.cpuBusyPercent ?? "unknown"}% CPU, ${record.health?.freeMemGb ?? "unknown"} GB free memory`);
+  const live = runOrder(requests);
+  for (const [index, entry] of live.entries()) {
+    const place = index + 1;
     // The service's heartbeat says what a running attempt is doing, such as waiting for the host lane.
     const phase = runs.find(row => row.id === entry.id)?.phase;
-    const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase ? `, ${phase}` : ""}` : `#${place}${typical ? `, starts in about ${minutes(startsInMs(place, typical, lanes))}` : ""}`;
-    console.log(`${entry.id}  ${where}  ${entry.request.scope}  ${entry.request.head.slice(0, 12)}  ${entry.request.branch?.replace("refs/heads/", "") ?? entry.request.checkout}${entry.status.waiting ? `  (${entry.status.waiting})` : ""}`);
+    const where = entry.status.state === "running" ? `running attempt ${entry.status.attempts.at(-1)?.n}${phase ? `, ${phase}` : ""}` : `#${place}${typical ? `, starts ${pause ? "about " : "in about "}${minutes(startsInMs(place, typical, lanes))}${pause ? " after resume" : ""}` : ""}`;
+    console.log(`${entry.id}  ${where}  ${entry.request.scope}  ${entry.request.head.slice(0, 12)}  ${entry.request.branch?.replace("refs/heads/", "") ?? entry.request.checkout}  owner: ${ownerOf(entry.request).title}${entry.status.waiting ? `  (${entry.status.waiting})` : ""}${entry.status.moved ? `  (${movedNote(entry.status.moved)})` : ""}`);
   }
   if (!live.length) console.log("no requests waiting");
   const nightly = lastNightlyPass(requests);
@@ -450,18 +720,55 @@ function printStatus(root) {
   }
 }
 
+/** Ask the service to move a queued request, and report where it went once the service applies it. */
+async function move(root, args) {
+  const usage = 'Use move <id> --first, or move <id> --before <other-id>, with --reason "<why>" and optionally --by "<name>". --before orders one owner\'s requests. Use --first only to unblock other work.';
+  let parsed;
+  try { parsed = parseArgs({ args, allowPositionals: true, options: { first: { type: "boolean" }, before: { type: "string" }, reason: { type: "string" }, by: { type: "string" } } }); }
+  catch { throw new Error(usage); }
+  const { positionals: [id], values: { first = false, before = null, reason, by = null } } = parsed;
+  if (!id || first === Boolean(before) || !reason?.trim()) throw new Error(usage);
+  // The service makes the same checks when it applies the move; these answer at once, even while it is down.
+  const asked = parseMove({ id, before, reason, by: { name: by, user: userInfo().username, cwd: process.cwd() } });
+  if (asked.rejected) throw new Error(asked.rejected);
+  const { record, alive } = serviceState(root);
+  const check = placeMove(listRequests(root), asked, new Set(alive ? serviceRuns(record).runs.map(run => run.id) : []));
+  if (check.rejected) throw new Error(check.rejected);
+  const key = await requestMove(root, asked);
+  if (!alive) return console.log(`The verification queue service is not running. The move of ${id} applies when the service starts.`);
+  for (let waited = 0; waited < 30_000; waited += 500) {
+    const answer = readJson(join(queuePaths(root).keys, key));
+    if (answer?.rejected) throw new Error(answer.rejected);
+    if (answer) return console.log(`moved ${id} ${before ? `before ${before}` : "first"}: now #${answer.to} in line, was #${answer.from}`);
+    await sleep(500);
+  }
+  console.log(`The service has not applied the move of ${id} yet. It applies on the service's next pass; pnpm verify:queue status shows the line. A service older than this checkout applies no moves until pnpm verify:queue upgrade.`);
+}
+
 async function main([command, ...args]) {
   const root = queueRoot();
   if (!root) throw new Error("This host has no verification queue. pnpm verify:pr runs inline here.");
   const ref = args.includes("--ref") ? args[args.indexOf("--ref") + 1] : "origin/main";
   if (command === "status" || !command) return printStatus(root);
   if (command === "cancel") { await cancel(root, args[0]); return console.log(`asked the service to stop ${args[0]}`); }
+  if (command === "pause") {
+    const reason = args.includes("--reason") ? args[args.indexOf("--reason") + 1] : null;
+    if (args.includes("--reason") && (!reason || reason.startsWith("--"))) throw new Error("Use pause [--reason <text>].");
+    const { changed } = await pauseQueue(root, { reason });
+    console.log(changed ? "paused the verification queue. Runs in progress finish, and no run starts until pnpm verify:queue resume." : "the verification queue was already paused.");
+    return console.log(pauseStatus(root));
+  }
+  if (command === "resume") {
+    const ended = await resumeQueue(root);
+    return console.log(ended ? `resumed the verification queue, which was ${pausedSince(ended)}.` : "the verification queue was not paused.");
+  }
   if (command === "install" || command === "upgrade") return install(root, ref);
   if (command === "nightly") {
     const here = fileURLToPath(new URL("../..", import.meta.url));
     const { head, base } = await submitNightly(root, resolve(git(["rev-parse", "--git-common-dir"], here), ".."));
     return console.log(`submitted the nightly verification of main at ${head.slice(0, 12)}, against ${base.slice(0, 12)}`);
   }
+  if (command === "move") return move(root, args);
   if (command === "restart") {
     const { record, alive } = serviceState(root);
     if (serviceRuns(record).runs.length && !args.includes("--now")) throw new Error("A run is in progress. Wait for it, or pass --now to stop it; it will be retried.");
@@ -499,7 +806,7 @@ async function main([command, ...args]) {
     }
     return console.log("asked Task Scheduler to restart the verification queue service; it starts within five minutes");
   }
-  throw new Error("Use status, cancel <id>, install [--ref <ref>], upgrade [--ref <ref>], restart [--now], or nightly.");
+  throw new Error("Use status, pause [--reason <text>], resume, cancel <id>, move <id> --first|--before <id> --reason <text>, install [--ref <ref>], upgrade [--ref <ref>], restart [--now], or nightly.");
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

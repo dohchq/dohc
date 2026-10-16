@@ -22,6 +22,12 @@ pub struct RelayCursor {
     pub settlement_report_id: Option<String>,
 }
 
+#[derive(Debug)]
+pub struct CursorCommit {
+    pub sharing_declined: Vec<crate::SharingDeclined>,
+    pub writer_cache_changed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedPeerPosition {
     pub applied_origin_seq: i64,
@@ -77,7 +83,7 @@ pub fn commit_relay_cursor(
     faults: &dyn FaultInjector,
     leases: &dyn crate::LeaseProbe,
     now_ms: i64,
-) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, SyncError> {
+) -> Result<TxnOutcome<CursorCommit>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     if !(0..=crate::MAX_WIRE_INTEGER).contains(&cursor.cursor) {
         return Err(SyncError::InvalidInput {
@@ -95,6 +101,11 @@ pub fn commit_relay_cursor(
     let passive = store.is_passive();
     store
         .write_with(faults, |tx| {
+            if crate::hosted::is_hosted(tx, workspace_id)? {
+                return Err(SyncError::InvalidInput {
+                    reason: "a hosted replica commits its position with commit_hosted_cursor",
+                });
+            }
             let was_enrolled =
                 crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)?;
             tx.execute(
@@ -123,18 +134,24 @@ pub fn commit_relay_cursor(
             }
             // Cursor commit is the per-pass level trigger. Re-scan here so an
             // oversized unclaimed base stays visible until it can originate.
+            let mut writer_cache_changed = cursor.settlement_report_id.is_some();
             let sharing_declined = if passive {
                 Vec::new()
             } else if was_enrolled {
+                // Count writes, including triggers, so ABA changes still invalidate.
+                let before_origination = tx.total_changes();
                 let declined = crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(
                     tx,
                     workspace_id,
                     leases,
                     now_ms,
                 )?;
+                writer_cache_changed |= tx.total_changes() != before_origination;
                 crate::enrolment::export_covered_heads_in_tx(tx, workspace_id, leases)?;
                 declined
             } else {
+                // Enrollment can claim lineages until it completes.
+                writer_cache_changed = true;
                 crate::enrolment::backfill_enrolment_window_in_tx(
                     tx,
                     workspace_id,
@@ -143,19 +160,33 @@ pub fn commit_relay_cursor(
                 )?
             };
             if let Some(report_id) = &cursor.settlement_report_id {
-                tx.execute(
-                    "DELETE FROM relay_deferred_ops WHERE workspace_id=?1 AND report_id=?2",
-                    params![workspace_id, report_id],
-                ).map_err(SyncError::persist)?;
-                tx.execute(
-                    "DELETE FROM owner_pending_settlements \
-                     WHERE workspace_id=?1 AND report_id=?2 AND applied=1",
-                    params![workspace_id, report_id],
-                )
-                .map_err(SyncError::persist)?;
+                release_settlement_report_in_tx(tx, workspace_id, report_id)?;
             }
-            Ok::<_, SyncError>(sharing_declined)
+            Ok::<_, SyncError>(CursorCommit {
+                sharing_declined,
+                writer_cache_changed,
+            })
     })
+}
+
+/// Drop the deferred work and applied settlements a committed pass reported.
+pub(crate) fn release_settlement_report_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    report_id: &str,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "DELETE FROM relay_deferred_ops WHERE workspace_id=?1 AND report_id=?2",
+        params![workspace_id, report_id],
+    )
+    .map_err(SyncError::persist)?;
+    tx.execute(
+        "DELETE FROM owner_pending_settlements \
+         WHERE workspace_id=?1 AND report_id=?2 AND applied=1",
+        params![workspace_id, report_id],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
 }
 
 fn parse_relay_cursor(value: &str) -> Result<i64, SyncError> {
