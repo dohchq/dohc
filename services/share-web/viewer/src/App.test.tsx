@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import {SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER} from "@dohc/workspace-contracts/relay-values";
 // App discovery has its own request, cancellation, and rendering tests.
 vi.mock("./PublishedApps", () => ({PublishedApps: () => null}));
 import { jsonResponse, requestPath as fullRequestPath, settle, setControlValue } from "./testing";
@@ -406,8 +407,8 @@ describe("App", () => {
     expect(init?.method).toBe("POST");
     expect(init?.credentials).toBe("same-origin");
     expect(init).not.toHaveProperty("body");
-    expect(init?.headers).toEqual({ "x-dohc-link-session": SESSION });
-    expect(Object.keys(init?.headers ?? {})).toEqual(["x-dohc-link-session"]);
+    expect(init?.headers).toEqual({ "x-dohc-link-session": SESSION, [SHARE_WEB_API_VERSION_HEADER]: String(SHARE_WEB_API_VERSION) });
+    expect(Object.keys(init?.headers ?? {}).sort()).toEqual(["x-dohc-link-session", SHARE_WEB_API_VERSION_HEADER].sort());
 
     expect(navigate).toHaveBeenCalledWith(FIRST_HANDOFF_CODE, PUBLIC_RELAY_URL);
     const launchedCode = String(navigate.mock.calls[0]?.[0]);
@@ -1586,9 +1587,9 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
-  it.each(["exchange", "current"] as const)("says which server part needs an update when its versions disagree at %s", async (step) => {
-    const message = "This server's sync service needs an update to match its share page. Ask the person who runs the server to update it.";
-    const mismatch = () => jsonResponse({ ok: false, code: "api_version_too_new", error: message }, 409);
+  it.each(["exchange", "current"] as const)("renders server-supplied reload recovery for a share-web mismatch at %s", async (step) => {
+    const message = "Reload this share page to use the supported API version.";
+    const mismatch = () => jsonResponse({ ok: false, api: "share-web", code: "api_version_too_new", error: message }, 409);
     history.replaceState(null, "", `/s/#${"v".repeat(43)}`);
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
       const path = requestPath(input);
@@ -1602,9 +1603,9 @@ describe("App", () => {
     expect(container.textContent).not.toContain("This link isn't available.");
   });
 
-  it.each(["log", "meta"] as const)("stops following an open page when the server's versions start to disagree at %s", async (step) => {
-    const message = "This server's share page needs an update to match its sync service. Ask the person who runs the server to update it.";
-    const mismatch = () => jsonResponse({ ok: false, code: "api_version_too_old", error: message }, 409);
+  it.each(["log", "meta"] as const)("shows server-supplied recovery and stops following after a share-web mismatch at %s", async (step) => {
+    const message = "Reload this share page to use the supported API version.";
+    const mismatch = () => jsonResponse({ ok: false, api: "share-web", code: "api_version_too_old", error: message }, 409);
     vi.useFakeTimers();
     history.replaceState(null, "", `/s/${SESSION}`);
     let logRequests = 0;

@@ -8,13 +8,14 @@ import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { cpus, freemem } from "node:os";
+import { cpus, freemem, uptime } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
 import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
-import { attemptOutcome, lastNightlyPass, listRequests, nextRequest, placeSubmission, protocol, queuePaths, readJson, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, lastNightlyPass, lineOrder, listRequests, monitorPort, nextRequest, orderOf, parseMove, pauseQueue, placeMove, placeSubmission, position, protocol, queueLanePurpose, queuePaths, readJson, readPause, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { startMonitor } from "./queue-monitor.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
 const sha = /^[0-9a-f]{40}$/u;
@@ -89,7 +90,7 @@ export async function dockerResponds(command = run) {
 async function holdLegacyLane({ entry, signal, lanes }) {
   // No wait limit: a timeout would only send a durable request to the back of the line. Cancel still stops the wait.
   return acquireVerificationSlot(process.env, { lanes, entry: verifierEntry, signal, waitMs: Infinity,
-    metadata: { purpose: "PR verification (queue)", checkout: entry.request.checkout, commit: entry.request.head, phase: `request ${entry.id}` } });
+    metadata: { purpose: queueLanePurpose, checkout: entry.request.checkout, commit: entry.request.head, phase: `request ${entry.id}` } });
 }
 
 /** Run the lane's own verifier for one attempt. */
@@ -128,21 +129,30 @@ function holdInstance(root) {
  */
 export async function runService({
   root, repo, lane = queuePaths(root).lane, commit = null,
-  tickMs = 2000, timeLimitMs = 120 * 60_000, floorGb = resolveBuildBudget()?.diskFloorGb ?? 40,
+  tickMs = 2000, heartbeatMs = 10_000, timeLimitMs = 120 * 60_000, floorGb = resolveBuildBudget()?.diskFloorGb ?? 40,
   // Another run starts only with this much free memory; a check that failed after it fell under the second floor is not trusted.
   memoryFloorGb = 10, memoryFailGb = 3, freeMemory = () => freemem() / 1024 ** 3,
   freeDisk = () => freeDiskGb(lane) ?? freeDiskGb(root), docker = dockerResponds,
   prepare = prepareLane, sweep = sweepContainers, holdLane = holdLegacyLane,
   worker = defaultWorker, retryDelay = retryDelayMs, cleanupRetryMs = 60_000, prepareLimitMs = 45 * 60_000, stop, log = defaultLog(root),
-  lanes = () => 1,
+  lanes = () => 1, monitor = null, bootedAt = Date.now() - uptime() * 1000,
 }) {
   const paths = queuePaths(root);
   for (const path of [paths.inbox, paths.keys, paths.requests, paths.control]) mkdirSync(path, { recursive: true });
   const instance = await holdInstance(root);
   if (!instance) { log("another service already serves this queue root"); return 0; }
+  // The page only reads the queue's files, so it starts with the service and never holds up its loop.
+  const page = monitor === null ? null : startMonitor({ root, port: monitor, log });
   const startedAt = new Date().toISOString();
+  const previous = readJson(paths.service);
   // The previous service's last heartbeat says how long its interrupted runs had been awake.
-  const previousRuns = serviceRuns(readJson(paths.service)).runs;
+  const previousRuns = serviceRuns(previous).runs;
+  // A computer restart since that heartbeat holds the line until someone resumes it, so no run starts
+  // by itself after logon. A service restart within one boot, or a first start, holds nothing.
+  if (previous?.heartbeatAt && bootedAt > Date.parse(previous.heartbeatAt)) {
+    await pauseQueue(root, { reason: "the computer restarted" });
+    log("the computer restarted since the last heartbeat; no run starts until pnpm verify:queue resume");
+  }
   const health = { diskFreeGb: null, diskOk: true, dockerOk: true, dockerCheckedAt: 0, pausedUntil: 0, environmentStreak: 0, reason: null };
   // A request may use twice the per-run limit across all its attempts.
   const requestBudgetMs = 2 * timeLimitMs;
@@ -172,9 +182,11 @@ export async function runService({
 
   const statusPath = id => join(paths.request(id), "status.json");
   const setStatus = (id, status) => writeJson(statusPath(id), { ...status, updatedAt: new Date().toISOString() });
-  const history = event => { try { appendFileSync(paths.history, JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n"); } catch { /* History informs estimates only. */ } };
+  const history = event => { try { appendFileSync(paths.history, JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n"); } catch { /* History informs estimates and records moves; losing a line must not stop the queue. A request keeps its last move in its status. */ } };
   const beat = () => writeJson(paths.service, {
     protocol, pid: process.pid, commit, startedAt, heartbeatAt: new Date().toISOString(), lanes: laneCount,
+    // Read with the runs: once a heartbeat shows the pause, no run starts that it does not list.
+    paused: readPause(root),
     running: [...running.values()].map(current => ({ id: current.id, attempt: current.attempt, checkout: current.checkout, phase: current.phase, startedAt: current.startedAt, awakeMs: current.awakeMs })),
     health: { diskFreeGb: health.diskFreeGb, diskOk: health.diskOk, dockerOk: health.dockerOk, cpuBusyPercent: host.cpuBusyPercent, freeMemGb: host.freeMemGb,
       pausedUntil: health.pausedUntil ? new Date(health.pausedUntil).toISOString() : null, reason: health.reason },
@@ -187,7 +199,7 @@ export async function runService({
 
   async function finish(entry, attempt, outcome, { cleanup = false } = {}) {
     const status = readJson(statusPath(entry.id)) ?? entry.status;
-    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load ?? null, flaky: attempt.flaky ?? [],
+    const attempts = status.attempts.map(row => row.n === attempt?.n ? { ...row, endedAt: new Date().toISOString(), awakeMs: attempt.awakeMs, load: attempt.load ?? null, flaky: attempt.flaky ?? [], failed: attempt.failed ?? [],
       steps: attempt.steps ?? {}, slowest: attempt.slowest ?? [], ...outcome } : row);
     // Only the JavaScript gate starts containers.
     if (cleanup && entry.request.gates?.js) status.cleanupPending = await cleanUp(entry.id);
@@ -208,7 +220,7 @@ export async function runService({
         verdict: outcome.outcome === "passed" ? "PASS" : outcome.outcome === "failed" ? "FAIL" : null,
         result: attempt ? join(paths.attempt(entry.id, attempt.n), "result.json") : null, cause: outcome.cause, reason: outcome.reason ?? null });
     }
-    history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, load: attempt?.load ?? null, flaky: attempt?.flaky ?? [],
+    history({ event: "finished", id: entry.id, attempt: attempt?.n, awakeMs: attempt?.awakeMs, load: attempt?.load ?? null, flaky: attempt?.flaky ?? [], failed: attempt?.failed ?? [],
       steps: attempt?.steps ?? {}, slowest: attempt?.slowest ?? [], ...outcome });
   }
 
@@ -222,7 +234,7 @@ export async function runService({
       const last = previousRuns.find(row => row.id === entry.id && row.attempt === attempt?.n)?.awakeMs ?? 0;
       const stopped = entry.status.stopping ?? "service restart";
       // A recovery that cannot be recorded would repeat every tick; restart under the supervisor's backoff instead.
-      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last, flaky: result?.flaky ?? [], ...timesOf(result) }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
+      try { await finish(entry, attempt && { n: attempt.n, awakeMs: last, flaky: result?.flaky ?? [], failed: result?.failed ?? [], ...timesOf(result) }, attemptOutcome(result, grant, { stopped }), { cleanup: true }); }
       catch (error) { fatal = error; return; }
     }
   }
@@ -273,6 +285,8 @@ export async function runService({
         place.sequence = requests.find(candidate => candidate.id === place.supersede[0])?.request.sequence ?? null;
       }
       if (place.attach) { await answer({ id: place.attach }); return; }
+      // A newer commit takes the place of the request it replaces that is furthest ahead, and the record of any move that put it there.
+      const ahead = requests.filter(candidate => place.supersede.includes(candidate.id)).sort(lineOrder)[0];
       const order = place.sequence ?? ++sequence;
       const id = `${String(order).padStart(9, "0")}-${randomBytes(3).toString("hex")}`;
       // Pin both commits before accepting, so an accepted request can always be verified.
@@ -281,12 +295,58 @@ export async function runService({
       const { key: _key, protocol: _protocol, ...fields } = submission;
       await writeJson(join(paths.request(id), "request.json"), { ...fields, id, sequence: order, acceptedAt: new Date().toISOString(), supersedes: place.supersede });
       try {
-        await setStatus(id, { state: "queued", attempts: [] });
+        await setStatus(id, { state: "queued", attempts: [], order: ahead && orderOf(ahead), moved: ahead?.status.moved });
         for (const old of place.supersede) await setStatus(old, { ...requests.find(entry => entry.id === old).status, state: "superseded", supersededBy: id });
         await answer({ id });
       } catch (error) { error.acceptedId = id; throw error; }
       history({ event: "accepted", id, head: submission.head, scope: submission.scope, supersedes: place.supersede });
     }
+  }
+
+  // A move changes only the order of queued requests. One this service has started cannot move, even before its status says so.
+  async function applyMoves() {
+    for (const name of names(paths.moves).filter(name => name.startsWith("move-") && name.endsWith(".json")).sort()) {
+      try { await applyMove(name); }
+      catch (error) {
+        // Like a submission, a move that fails here is answered and removed, so it never stops the tick again.
+        log(`move ${name} could not be applied: ${error.stack ?? error.message}`);
+        const key = join(paths.keys, name.slice(0, -5));
+        try { if (!existsSync(key)) await writeJson(key, { rejected: `The service could not apply it: ${error.message}` }); rmSync(join(paths.moves, name), { force: true }); }
+        catch { /* It stays and is tried again. */ }
+      }
+    }
+  }
+
+  async function applyMove(name) {
+    const path = join(paths.moves, name);
+    const key = join(paths.keys, name.slice(0, -5));
+    // A later tick removes an answered move that antivirus held.
+    const discard = () => { try { rmSync(path, { force: true }); } catch { /* Removed later. */ } };
+    const answer = async value => { await writeJson(key, value); discard(); };
+    if (existsSync(key)) { discard(); return; }
+    const raw = readJson(path);
+    if (raw === null) {
+      // Antivirus can hold a new file for a moment. One that stays unreadable for a minute is answered and removed.
+      const age = (() => { try { return Date.now() - statSync(path).mtimeMs; } catch { return 0; } })();
+      if (age > 60_000) await answer({ rejected: "The service could not read the move." });
+      return;
+    }
+    const move = parseMove(raw);
+    const requests = load();
+    const placed = move.rejected ? move : placeMove(requests, move, new Set(running.keys()));
+    if (placed.rejected) { log(`move ${name} refused: ${placed.rejected}`); await answer({ rejected: placed.rejected }); return; }
+    const moved = { at: new Date().toISOString(), before: move.before, reason: move.reason, by: move.by };
+    const after = requests.map(entry => {
+      const order = placed.orders.get(entry.id) ?? orderOf(entry);
+      return entry.id === move.id ? { ...entry, status: { ...entry.status, order, moved } }
+        : order === orderOf(entry) ? entry : { ...entry, status: { ...entry.status, order } };
+    });
+    // Each request whose order changed is rewritten, in one pass. Moves are rare and the line is about 50 requests.
+    for (const [index, entry] of after.entries()) if (entry !== requests[index]) await setStatus(entry.id, entry.status);
+    const from = position(requests, move.id);
+    const to = position(after, move.id);
+    history({ event: "moved", id: move.id, from, to, before: moved.before, reason: moved.reason, by: moved.by });
+    await answer({ moved: move.id, from, to });
   }
 
   async function attempt(entry) {
@@ -307,8 +367,9 @@ export async function runService({
     running.set(entry.id, current);
     let lease;
     try {
-      await setStatus(entry.id, { ...entry.status, state: "running", attempts: [...entry.status.attempts, { n, startedAt: current.startedAt }], notBefore: null, waiting: null });
-      history({ event: "started", id: entry.id, attempt: n });
+      const laneNumber = checkouts.indexOf(checkout) + 1;
+      await setStatus(entry.id, { ...entry.status, state: "running", attempts: [...entry.status.attempts, { n, startedAt: current.startedAt, lane: laneNumber }], notBefore: null, waiting: null });
+      history({ event: "started", id: entry.id, attempt: n, lane: laneNumber });
       mkdirSync(output, { recursive: true });
       await prepare({ lane: checkout, repo, head: entry.request.head, signal: current.abort.signal });
       current.phase = "waiting for the host lane";
@@ -336,7 +397,7 @@ export async function runService({
       }
       // The attempt stays owned until its outcome is on disk. If that write fails, the
       // service stops, and its replacement recovers the request from the receipt.
-      await finish({ ...entry, status: readJson(statusPath(entry.id)) ?? entry.status }, { n, awakeMs: current.awakeMs, load: runLoad(current), flaky: receipt?.flaky ?? [], ...timesOf(receipt) }, outcome, { cleanup: true });
+      await finish({ ...entry, status: readJson(statusPath(entry.id)) ?? entry.status }, { n, awakeMs: current.awakeMs, load: runLoad(current), flaky: receipt?.flaky ?? [], failed: receipt?.failed ?? [], ...timesOf(receipt) }, outcome, { cleanup: true });
       running.delete(entry.id);
     }
   }
@@ -410,7 +471,7 @@ export async function runService({
   const pulse = setInterval(() => {
     if (Date.now() - tickAt > 15 * 60_000) return;
     beating ??= beat().catch(error => log(`heartbeat failed: ${error.message}`)).finally(() => { beating = null; });
-  }, 10_000);
+  }, heartbeatMs);
   // Awake time has its own clock too, so slow work in the loop never shortens a run's time.
   // Only awake time counts against a run. A gap of over a minute between ticks is the machine sleeping;
   // a shorter one is a busy host delaying the timer, and the run was working through it.
@@ -457,6 +518,7 @@ export async function runService({
       for (const entry of load().filter(entry => entry.status.state === "queued" && existsSync(join(paths.request(entry.id), "cancel")))) {
         await finish(entry, null, { outcome: "cancelled", cause: "cancelled" });
       }
+      await applyMoves();
       const requests = load();
       // An attempt can finish during the status write below, so each check keeps its own reference.
       for (const current of [...running.values()].filter(current => !current.stopped)) {
@@ -495,10 +557,10 @@ export async function runService({
       await checkHealth(requests);
       // Fill free lanes in line order. A request started here still reads as queued in `requests`. A request whose
       // containers are not yet removed waits, because they carry its id and their removal would stop its next run.
-      // A restart, even one requested during this tick, starts nothing new and waits for the runs in flight.
+      // A restart or a pause, even one requested during this tick, starts nothing new and waits for the runs in flight.
       const started = new Set([...running.keys(), ...cleanupPending]);
       // A lone run always starts; another one waits while free memory is low.
-      while (running.size < laneCount && (running.size === 0 || freeMemory() >= memoryFloorGb) && health.pausedUntil <= now && !existsSync(restart)) {
+      while (running.size < laneCount && (running.size === 0 || freeMemory() >= memoryFloorGb) && health.pausedUntil <= now && !existsSync(restart) && !existsSync(paths.pause)) {
         const entry = nextRequest(requests.filter(candidate => !started.has(candidate.id)), health, now);
         if (!entry) break;
         started.add(entry.id);
@@ -514,6 +576,7 @@ export async function runService({
   } finally {
     clearInterval(pulse);
     clearInterval(clock);
+    page?.close();
     instance.close();
   }
 }
@@ -536,7 +599,7 @@ async function main(argv) {
     if (!go) throw new Error("The supervisor never said go; this process may be outside its job.");
   }
   const repo = resolve(git(["rev-parse", "--git-common-dir"], here), "..");
-  return runService({ root, repo, commit: git(["rev-parse", "HEAD"], here), lanes: () => verificationLanes(process.env) });
+  return runService({ root, repo, commit: git(["rev-parse", "HEAD"], here), lanes: () => verificationLanes(process.env), monitor: monitorPort });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
