@@ -19,7 +19,7 @@ function runFixture(command, args, options) {
     child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
     child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
     child.once("error", (failure) => { error = failure; });
-    // A timeout or a cancelled test stops the child with a signal, which is never an ordinary exit.
+    // A child that a signal ended reports no exit status, so it never counts as an ordinary exit.
     child.once("close", (status, signal) => resolve({ status, signal, stdout, stderr,
       error: error ?? (status === null ? new Error(`The fixture stopped on ${signal}.`) : undefined) }));
   });
