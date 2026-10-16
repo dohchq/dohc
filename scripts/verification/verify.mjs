@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
-import { nextestFailures, nextestFlaky, nextestTimes, playwrightFailures, playwrightFlaky, playwrightTimes, readLog, readTestRecord, slowest, testRecordReporter, vitestFailures } from "./flaky.mjs";
+import { nextestFailures, nextestFlaky, nextestTimes, playwrightFailures, playwrightFlaky, playwrightTimes, readLog, readTestRecord, rerunCommand, slowest, testRecordReporter, vitestFailures } from "./flaky.mjs";
 import { prepare, assertPrepared, assertIndependentStagedEngine, sourceFingerprint, buildEnvironment, stagedEnginePath, hashFile, withBuildBudget } from "./build.mjs";
 import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
@@ -570,12 +570,15 @@ export async function verify(args) {
       // The run that submitted to the queue reports this, not the lane's worker, which runs detached and knows no branch.
       const queue = report.verdict === "FAIL" && failed.length && !grant ? queueRoot() : null;
       if (queue) report.shared = sharedFailures(queue, failed, { branch: branch ?? repoRoot });
+      const rerun = report.verdict === "FAIL" ? [...new Set(failed.map(rerunCommand).filter(Boolean))] : [];
+      if (rerun.length) report.rerun = rerun;
       save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
       if (report.stopped?.notRun.length) console.log(`[verification] Stopped after ${report.stopped.after} failed. These steps did not finish, so coverage is partial (--keep-going runs them):\n${report.stopped.notRun.map(name => `  ${name}`).join("\n")}`);
       if (report.slowest.length) console.log(`[verification] slowest tests:\n${report.slowest.slice(0, 5).map(row => `  ${row.seconds}s ${row.step}: ${row.test}`).join("\n")}`);
       if (flaky.length) console.log(`[verification] ${flaky.length} flaky test(s) passed only on retry. Each one is a defect to fix:\n${flaky.map(row => `  ${row.step}: ${row.test}`).join("\n")}`);
       const shared = report.shared ?? [];
       if (shared.length) console.log(`[verification] ${shared.length === 1 ? "1 failed test" : `${shared.length} failed tests`} also failed on other branches in the last day. A failure that other branches share often comes from main or a flaky test, not from this change. Check origin/main and the nightly before you change this branch to fix ${shared.length === 1 ? "it" : "them"}:\n${shared.map(row => `  ${row.step}: ${row.test} (also ${row.branches.join(", ")})`).join("\n")}`);
+      if (rerun.length) console.log(`[verification] Rerun the failed tests locally before resubmitting. Set DOHC_REQUIRE_POSTGRES=1 and DOHC_REQUIRE_ENGINE_E2E=1, as the gate does, so a missing database or engine fails instead of skipping:\n${rerun.map(command => `  ${command}`).join("\n")}`);
     } finally { checkoutOwner?.release(); }
   }
 }

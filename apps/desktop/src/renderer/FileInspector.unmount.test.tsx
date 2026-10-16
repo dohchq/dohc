@@ -4817,7 +4817,10 @@ describe("markdown editor unmount flush", () => {
     const serialize = vi.spyOn(delimitedTextCodec, "serialize");
     try {
       for (const [rowIndex, value] of [[1, "first"], [0, '😀,"header"'], [500, 'last,"visible"'], [1, ""]] as const) {
-        const cell = screen.getByLabelText(rowIndex === 0 ? "Header column 1" : `Row ${rowIndex} column 1`);
+        // getByLabelText checks the labels of every element, which takes seconds over 500 rows.
+        const label = rowIndex === 0 ? "Header column 1" : `Row ${rowIndex} column 1`;
+        const cell = view.container.querySelector(`[aria-label="${label}"]`);
+        if (!cell) throw new Error(`No cell labeled ${label}`);
         fireEvent.change(cell, { target: { value } });
         expectedRows[rowIndex]![0] = value;
       }
