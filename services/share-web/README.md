@@ -5,7 +5,7 @@ it exchanges a fragment secret with the sync relay, stores the returned relay ca
 bounded in-memory session, and sends only an HttpOnly session cookie to the
 browser.
 
-Production operators must set four values:
+Production operators must set five values:
 
 - `DOHC_SHARE_WEB_RELAY_URL`: the internal relay origin that `share-web` calls.
 - `DOHC_SHARE_WEB_PUBLIC_RELAY_URL`: the relay origin a desktop client can
@@ -15,6 +15,10 @@ Production operators must set four values:
 - `DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY`: the same workload secret configured as
   `DOHC_RELAY_EXCHANGE_KEY` on the relay, with at least 32 characters. Never
   expose it to the browser.
+- `DOHC_SHARE_WEB_INTERNAL_HOSTS`: exact comma-separated HTTP `Host` values
+  for internal deletion calls, such as `share-web:1790`. Startup requires this
+  list when the relay exchange key is configured. The public proxy must answer
+  404 for `/internal/*`.
 
 `DOHC_SHARE_WEB_PORT` defaults to `1790`.
 

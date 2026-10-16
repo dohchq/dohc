@@ -75,6 +75,12 @@ pub enum RuntimeError {
         record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
     },
 
+    /// A hosted document that left the scope cannot retire: the file at its
+    /// path holds bytes other than its head. Nothing but the engine writes to
+    /// a session host's root, so this is a bug, never a person's edit.
+    #[error("hosted-file-unexpected: {path} holds bytes other than its document's head")]
+    HostedFileUnexpected { path: String },
+
     /// Sync delivered a drawing delete before one of its owned asset deletes.
     /// The rollback must wait so its normal compensation can converge on peers.
     #[error(
@@ -157,6 +163,7 @@ impl RuntimeError {
             RuntimeError::YdocArtifactAssetsPending => "ydoc-artifact-assets-pending",
             RuntimeError::YdocArtifactAssetsInvalid => "ydoc-artifact-assets-invalid",
             RuntimeError::YdocOpenConflict { .. } => "ydoc-conflict-open",
+            RuntimeError::HostedFileUnexpected { .. } => "hosted-file-unexpected",
             RuntimeError::SceneAssetDeletePending => "scene-asset-delete-pending",
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",
             RuntimeError::ActorUnavailable => "actor-unavailable",

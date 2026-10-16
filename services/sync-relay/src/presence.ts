@@ -277,6 +277,16 @@ export class PresenceHub {
 
   // In-memory footprint, for tests/no-leak assertions. There is no durable
   // counterpart anywhere — this IS the entire presence state.
+  deleteAccount(userId: string, workspaceIds: readonly string[]): void {
+    const groups = new Set(workspaceIds);
+    for (const [key, scope] of this.scopes) {
+      let changed = false;
+      for (const [entryKey, entry] of scope.entries) if (entry.userId === userId || groups.has(scope.group)) changed = this.deleteEntry(scope, entryKey) || changed;
+      if (changed) this.bump(key, scope);
+      this.gc(key, scope);
+    }
+  }
+
   stats(): { scopes: number; entries: number; waiters: number } {
     return {
       scopes: this.scopes.size,
