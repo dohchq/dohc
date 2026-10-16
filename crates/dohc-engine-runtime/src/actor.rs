@@ -33,6 +33,8 @@ pub use recovery_import::{
 };
 mod chats;
 mod collections;
+mod history_operations;
+pub use history_operations::{HistoryOperation, HistoryUndoResult};
 mod journal;
 mod live_application;
 mod materialization;

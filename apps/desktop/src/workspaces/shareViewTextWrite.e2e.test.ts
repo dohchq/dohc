@@ -194,6 +194,7 @@ function shareViewFilesOwner(input: {
     schedulingRootPath: input.rootPath,
     rootPath: input.rootPath,
     shareId: SHARE_ID,
+    recipientUserId: "recipient-a",
     granterEmail: "granter@example.com",
     grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
     ended: false,

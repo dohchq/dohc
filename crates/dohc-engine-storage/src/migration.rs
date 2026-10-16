@@ -2,8 +2,8 @@
 //!
 //! [`BASELINE_MIGRATIONS`] is the frozen list. The baseline (ordinal 0)
 //! assembles the whole schema and stamps `user_version = 2`. A later schema
-//! change appends a new migration with the next ordinal and flows through the
-//! same runner.
+//! change appends a new migration with a unique ordinal and flows through the
+//! same runner. Reserved ordinals can land after higher shipped ordinals.
 //!
 //! Before the runner, the open ritual refuses a store whose ledger holds a
 //! migration this list does not define, completed or not: a newer build ran
@@ -3275,6 +3275,18 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
+        ordinal: 55,
+        id: "v2-history-operation-correlation",
+        sql: "CREATE INDEX idx_moments_operation_correlation ON moments(workspace_id, metadata_correlation_id);",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 56,
+        id: "v2-hosted-replica",
+        sql: V2_HOSTED_REPLICA_DDL,
+        sets_user_version: None,
+    },
+    Migration {
         ordinal: 54,
         id: "v2-retained-materialization-displacements",
         sql: V2_RETAINED_DISPLACEMENTS_DDL,
@@ -3340,6 +3352,70 @@ CREATE TABLE owner_live_stops (
     FOREIGN KEY(workspace_id,main_version_id,object_id) REFERENCES ydoc_docs(workspace_id,version_id,object_id) ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX idx_owner_live_stops_requested ON owner_live_stops(workspace_id,main_version_id,object_id) WHERE state='requested';
+";
+
+/// A session host's replica of the documents the relay's scoped feed serves
+/// it. The row is the replica kind: admission, deferred replay and outbound
+/// sequences read it, never an inference from other state.
+const V2_HOSTED_REPLICA_DDL: &str = "\
+CREATE TABLE hosted_replicas (
+    workspace_id TEXT NOT NULL PRIMARY KEY REFERENCES sync_identity(workspace_id),
+    scope_token TEXT CHECK (scope_token IS NULL OR length(scope_token) > 0),
+    scope_generation INTEGER NOT NULL DEFAULT 0 CHECK (scope_generation >= 0),
+    main_cursor INTEGER NOT NULL DEFAULT 0 CHECK (main_cursor >= 0),
+    cursor_commits INTEGER NOT NULL DEFAULT 0 CHECK (cursor_commits >= 0),
+    last_outbound_seq INTEGER NOT NULL DEFAULT -1 CHECK (last_outbound_seq >= -1),
+    created_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE TABLE hosted_documents (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    object_id TEXT NOT NULL,
+    path TEXT NOT NULL CHECK (length(path) > 0),
+    state TEXT NOT NULL CHECK (state IN ('backfilling','held','ready')),
+    held_reason TEXT CHECK (held_reason IN
+      ('hosted-backfill-path-held','hosted-backfill-work-waiting','hosted-scope-path-mismatch',
+       'hosted-conflict-parent-withheld')),
+    held_path TEXT CHECK (length(held_path) > 0),
+    held_by TEXT CHECK (length(held_by) > 0),
+    held_conflict_id TEXT CHECK (length(held_conflict_id) > 0),
+    backfill_cursor INTEGER NOT NULL DEFAULT 0 CHECK (backfill_cursor >= 0),
+    scope_generation INTEGER NOT NULL CHECK (scope_generation >= 0),
+    PRIMARY KEY (workspace_id, object_id),
+    CHECK ((state = 'held') = (held_reason IS NOT NULL)),
+    CHECK ((held_by IS NOT NULL) = (held_reason IS 'hosted-backfill-path-held')),
+    CHECK ((held_conflict_id IS NOT NULL) = (held_reason IS 'hosted-conflict-parent-withheld')),
+    CHECK (held_reason IS NOT 'hosted-backfill-path-held' OR held_path IS NOT NULL),
+    CHECK (held_reason NOT IN ('hosted-backfill-work-waiting','hosted-conflict-parent-withheld')
+      OR held_path IS NULL)
+) STRICT;
+CREATE TABLE hosted_withheld_befores (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    moment_id TEXT NOT NULL,
+    before_object_id TEXT NOT NULL,
+    before_path TEXT NOT NULL,
+    before_sha256 TEXT NOT NULL,
+    before_content_kind TEXT NOT NULL CHECK (before_content_kind IN ('text','binary')),
+    PRIMARY KEY (workspace_id, moment_id),
+    FOREIGN KEY (workspace_id, moment_id)
+      REFERENCES moments(workspace_id, moment_id) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE hosted_deferred_ops (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    object_id TEXT NOT NULL,
+    relay_seq INTEGER NOT NULL CHECK (relay_seq > 0),
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, origin_id, origin_seq)
+      REFERENCES relay_deferred_ops(workspace_id, origin_id, origin_seq) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX hosted_deferred_ops_by_document ON hosted_deferred_ops(workspace_id, object_id, relay_seq);
+CREATE TABLE hosted_retired_files (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    path TEXT NOT NULL CHECK (length(path) > 0),
+    sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+    PRIMARY KEY (workspace_id, path)
+) STRICT;
 ";
 
 const V2_OPEN_DOCUMENT_ARTIFACTS_DDL: &str = "\
@@ -3475,21 +3551,13 @@ fn quick_check_ok(conn: &Connection) -> Result<bool, StorageError> {
     Ok(result.eq_ignore_ascii_case("ok"))
 }
 
-/// Assert the migration list is well-formed: strictly increasing ordinals and
-/// unique ids. The runner trusts slice order to be ordinal order, so a list
-/// appended out of order would otherwise apply DDL out of order with no other
-/// trip. Fail closed instead.
+/// Assert the migration list has unique ordinals and ids. Slice order is
+/// application order; a reserved ordinal can follow higher shipped ordinals.
 fn validate_migration_order(migrations: &[Migration]) -> Result<(), StorageError> {
     let mut seen_ids = std::collections::HashSet::new();
-    let mut prev_ordinal: Option<u32> = None;
+    let mut seen_ordinals = std::collections::HashSet::new();
     for migration in migrations {
-        if let Some(prev) = prev_ordinal
-            && migration.ordinal <= prev
-        {
-            return Err(StorageError::MigrationFailed { source: None });
-        }
-        prev_ordinal = Some(migration.ordinal);
-        if !seen_ids.insert(migration.id) {
+        if !seen_ordinals.insert(migration.ordinal) || !seen_ids.insert(migration.id) {
             return Err(StorageError::MigrationFailed { source: None });
         }
     }
@@ -3771,6 +3839,7 @@ mod tests {
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-retained-materialization-displacements");
         assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 54);
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 56);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         let sha = crate::blob::put_binary_blob(&conn, b"before").unwrap();
         let tx = conn.unchecked_transaction().unwrap();
@@ -3794,6 +3863,28 @@ mod tests {
         );
         let jobs:i64=conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE job_id='pending' AND status='pending'",[],|r|r.get(0)).unwrap();
         assert_eq!(jobs, 1);
+        for ordinal in [54, 55, 56] {
+            let applied: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM engine_migrations WHERE ordinal=?1 AND completed_at IS NOT NULL",
+                    [ordinal],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(applied, 1, "migration {ordinal} applied once");
+        }
+        let history_index: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='idx_moments_operation_correlation')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(history_index, "migration 55's index survives migration 54");
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
         for table in [
             "materialization_retained",
             "materialization_displacement_reads",
@@ -4102,6 +4193,14 @@ mod tests {
                 "fd9a692216dd5b73e9c3f08bee04b16dbcd313084e370a3592db4c8bc59d9adb",
             ),
             (
+                "v2-history-operation-correlation",
+                "c0f4d24b926a03be07f0999f3aab707da566b2de18654243031f0cb1b80a4819",
+            ),
+            (
+                "v2-hosted-replica",
+                "332fbe3728b51bdb26a1cc9cc0d8d1da4decd311aa991687be899f4def7c7468",
+            ),
+            (
                 "v2-retained-materialization-displacements",
                 "a3acee99edade72fc8fda127206bcf641f876ad08fb4b39ce96c50afc372a2b3",
             ),
@@ -4165,6 +4264,117 @@ mod tests {
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
         assert_eq!(state, (1, 0, 100));
+    }
+
+    #[test]
+    fn hosted_replica_applies_fresh_and_upgrades_a_store_at_its_predecessor() {
+        let hosted = |conn: &Connection| {
+            conn.execute_batch(
+                "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                 VALUES ('hosted','service-host:a','epoch','stream',1); \
+                 INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('hosted',1); \
+                 INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
+                 VALUES ('hosted','doc','doc.md','backfilling',0); \
+                 INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
+                 VALUES ('hosted','gone.md',printf('%064d',0));",
+            )
+            .unwrap();
+            let state: (Option<String>, i64, i64, i64, i64, i64) = conn
+                .query_row(
+                    "SELECT scope_token,scope_generation,main_cursor,cursor_commits, \
+                     last_outbound_seq,(SELECT backfill_cursor FROM hosted_documents) \
+                     FROM hosted_replicas",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(state, (None, 0, 0, 0, -1, 0));
+            for invalid in [
+                "INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('no-identity',1)",
+                "UPDATE hosted_documents SET state='retired'",
+                "UPDATE hosted_documents SET state='held'",
+                "UPDATE hosted_documents SET held_reason='hosted-backfill-work-waiting'",
+                "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-path-held',\
+                 held_path='a.md'",
+                "UPDATE hosted_documents SET state='held',held_reason='hosted-conflict-parent-withheld'",
+                "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting',\
+                 held_conflict_id='conflict'",
+                "UPDATE hosted_documents SET path=''",
+                "INSERT INTO hosted_deferred_ops (workspace_id,origin_id,origin_seq,object_id,relay_seq) \
+                 VALUES ('hosted','origin:a',0,'doc',1)",
+                "UPDATE hosted_replicas SET scope_token=''",
+                "UPDATE hosted_replicas SET cursor_commits=-1",
+                "UPDATE hosted_replicas SET last_outbound_seq=-2",
+                "INSERT INTO hosted_withheld_befores (workspace_id,moment_id,before_object_id,\
+                 before_path,before_sha256,before_content_kind) \
+                 VALUES ('hosted','no-moment','private','a.md','sha','text')",
+                "INSERT INTO hosted_retired_files (workspace_id,path,sha256) VALUES ('hosted','a.md','sha')",
+                "INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
+                 VALUES ('ordinary','a.md',printf('%064d',0))",
+            ] {
+                assert!(conn.execute(invalid, []).is_err(), "{invalid}");
+            }
+            conn.execute("DELETE FROM hosted_replicas", []).unwrap();
+            let documents: i64 = conn
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM hosted_documents) \
+                     + (SELECT COUNT(*) FROM hosted_retired_files)",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                documents, 0,
+                "documents and their files leave with their replica"
+            );
+        };
+        let ctx = MigrationContext::current(1);
+        let dir = tempdir();
+        let mut fresh = open_bare(&dir.join("fresh.db"));
+        fresh.pragma_update(None, "foreign_keys", true).unwrap();
+        run_migrations(&mut fresh, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        hosted(&fresh);
+
+        let mut upgraded = open_bare(&dir.join("upgraded.db"));
+        upgraded.pragma_update(None, "foreign_keys", true).unwrap();
+        let before = migration_index("v2-hosted-replica");
+        run_migrations(
+            &mut upgraded,
+            &BASELINE_MIGRATIONS[..before],
+            &ctx,
+            &NoFaults,
+        )
+        .unwrap();
+        upgraded
+            .execute_batch(
+                "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                 VALUES ('ordinary','origin:a','epoch','stream',1);",
+            )
+            .unwrap();
+        assert_eq!(
+            run_migrations(
+                &mut upgraded,
+                &BASELINE_MIGRATIONS[..=before],
+                &ctx,
+                &NoFaults
+            )
+            .unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let replicas: i64 = upgraded
+            .query_row("SELECT COUNT(*) FROM hosted_replicas", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(replicas, 0, "an existing replica stays ordinary");
+        hosted(&upgraded);
     }
 
     #[test]
@@ -5352,14 +5562,19 @@ mod tests {
     }
 
     #[test]
-    fn the_real_migration_ledger_has_unique_increasing_ordinals_and_ids() {
+    fn the_real_migration_ledger_has_unique_ordinals_and_ids() {
         validate_migration_order(BASELINE_MIGRATIONS).expect("well-formed migration list");
     }
 
     /// The ordinal a newer build's first migration takes: one past this
-    /// build's last, so the fixtures hold whatever this build ships.
+    /// build's highest, so the fixtures hold whatever this build ships.
     fn next_ordinal() -> u32 {
-        BASELINE_MIGRATIONS.last().expect("a migration").ordinal + 1
+        BASELINE_MIGRATIONS
+            .iter()
+            .map(|migration| migration.ordinal)
+            .max()
+            .expect("a migration")
+            + 1
     }
 
     /// This build's migrations plus newer stand-ins at the following ordinals.
@@ -5902,9 +6117,7 @@ mod tests {
     fn two_migrations() -> Vec<Migration> {
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: BASELINE_MIGRATIONS
-                .last()
-                .map_or(0, |last| last.ordinal + 1),
+            ordinal: next_ordinal(),
             id: "r04-probe",
             sql: M2_SQL,
             sets_user_version: None,
@@ -6012,6 +6225,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn history_operation_index_upgrades_across_reserved_ordinals() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("history-operation-index.db"));
+        let ctx = MigrationContext::current(1100);
+        let index = migration_index("v2-history-operation-correlation");
+        assert_eq!(BASELINE_MIGRATIONS[index].ordinal, 55);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..index], &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=index], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let plan: Vec<String> = conn.prepare("EXPLAIN QUERY PLAN SELECT moment_id FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2")
+            .unwrap().query_map(rusqlite::params!["ws", "dohc-operation:one"], |row| row.get(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("idx_moments_operation_correlation")),
+            "{plan:?}"
+        );
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=index], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+        // The real migration before 55 can arrive after it: it applies once,
+        // 55 doesn't apply twice, and the index survives it.
+        let late_dir = tempdir();
+        let mut late = open_bare(&late_dir.join("history-operation-late.db"));
+        let mut early = BASELINE_MIGRATIONS[..=index].to_vec();
+        early.remove(index - 1);
+        run_migrations(&mut late, &early, &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            run_migrations(&mut late, &BASELINE_MIGRATIONS[..=index], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        assert_eq!(
+            run_migrations(&mut late, &BASELINE_MIGRATIONS[..=index], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+        let late_plan: Vec<String> = late.prepare("EXPLAIN QUERY PLAN SELECT moment_id FROM moments WHERE workspace_id=?1 AND metadata_correlation_id=?2")
+            .unwrap().query_map(rusqlite::params!["ws", "dohc-operation:one"], |row| row.get(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert!(
+            late_plan
+                .iter()
+                .any(|line| line.contains("idx_moments_operation_correlation")),
+            "{late_plan:?}"
+        );
+    }
     #[test]
     fn collection_history_index_serves_newest_first_record_reads() {
         let dir = tempdir();
@@ -6434,13 +6694,12 @@ mod tests {
     }
 
     #[test]
-    fn out_of_order_or_duplicate_migration_list_fails_closed() {
+    fn duplicate_migration_ordinals_or_ids_fail_closed() {
         let dir = tempdir();
         let path = dir.join("engine.db");
         let ctx = MigrationContext::current(3_000);
 
-        // Ordinals [0, 2, 1]: a dev appended out of order. Must fail closed
-        // before applying anything (no partial out-of-order DDL).
+        // Duplicate ordinals fail before applying any DDL.
         let a = Migration {
             ordinal: 1,
             id: "a",
@@ -6448,14 +6707,14 @@ mod tests {
             sets_user_version: None,
         };
         let b = Migration {
-            ordinal: 2,
+            ordinal: 1,
             id: "b",
             sql: "CREATE TABLE b (x INTEGER);",
             sets_user_version: None,
         };
-        let out_of_order = &[BASELINE_MIGRATIONS[0], b, a];
+        let duplicate_ordinals = &[BASELINE_MIGRATIONS[0], b, a];
         let mut conn = open_bare(&path);
-        let err = run_migrations(&mut conn, out_of_order, &ctx, &NoFaults).unwrap_err();
+        let err = run_migrations(&mut conn, duplicate_ordinals, &ctx, &NoFaults).unwrap_err();
         assert_eq!(err.code(), "migration-failed");
         // Nothing was applied.
         let applied: Option<i64> = conn
@@ -6466,7 +6725,7 @@ mod tests {
             )
             .optional()
             .expect("q");
-        assert!(applied.is_none(), "out-of-order list must apply nothing");
+        assert!(applied.is_none(), "duplicate ordinals must apply nothing");
 
         // Duplicate id also fails closed.
         let dup = &[

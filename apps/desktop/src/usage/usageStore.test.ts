@@ -7,6 +7,8 @@ import { deferred } from "../testing/deferred";
 import { createTestScratch } from "../workspaces/testTemp";
 import { createUsageStore, usageAsideName, USAGE_PENDING_LIMIT, USAGE_SNAPSHOT_NAME, USAGE_WRITE_INTERVAL_MS, type UsageFileSystem } from "./usageStore";
 
+vi.mock("node:fs/promises", async importOriginal => ({ ...await importOriginal<typeof fs>() }));
+
 const pair = { capabilityId: "version.try", door: "renderer" } as const;
 const mapping: UsageBuildPair[] = [{ ...pair, status: "covered" }];
 const stores: ReturnType<typeof createUsageStore>[] = [];
@@ -29,6 +31,7 @@ function memoryStore(initial: unknown = seed(), buildMapping = mapping) {
   const missing = () => Object.assign(new Error("missing"), { code: "ENOENT" });
   // Names whose contents were written but never synced. A power cut empties them.
   const unsynced = new Set<string>();
+  const operations: string[] = [];
   const io = {
     readFile: vi.fn(async (path: string) => {
       alive("readFile", path);
@@ -43,8 +46,9 @@ function memoryStore(initial: unknown = seed(), buildMapping = mapping) {
       disk.set(to, disk.get(from)!); unsynced.add(to);
     }),
     mkdir: vi.fn(async () => {}),
-    writeFile: vi.fn(async (path: string, data: string) => { alive("writeFile", path); disk.set(path, data); unsynced.add(path); }),
+    writeFile: vi.fn(async (path: string, data: string) => { alive("writeFile", path); operations.push("write"); disk.set(path, data); unsynced.add(path); }),
     rename: vi.fn(async (from: string, to: string) => {
+      operations.push("rename");
       alive("rename", from);
       if (!disk.has(from)) throw missing();
       disk.set(to, disk.get(from)!); disk.delete(from);
@@ -63,8 +67,8 @@ function memoryStore(initial: unknown = seed(), buildMapping = mapping) {
       unsynced.delete(path);
     }),
     rm: vi.fn(async (path: string) => { alive("rm", path); disk.delete(path); unsynced.delete(path); }),
-    sync: vi.fn(async (path: string) => { alive("sync", path); unsynced.delete(path); }),
-    syncDirectory: vi.fn(async (directory: string) => { alive("syncDirectory", directory); }),
+    sync: vi.fn(async (path: string) => { alive("sync", path); operations.push("sync temp"); unsynced.delete(path); }),
+    syncDirectory: vi.fn(async (directory: string) => { alive("syncDirectory", directory); operations.push("sync directory"); }),
   } satisfies UsageFileSystem;
   const stateDir = vi.fn(() => "isolated-state");
   const onWriteFailure = vi.fn();
@@ -89,13 +93,129 @@ function memoryStore(initial: unknown = seed(), buildMapping = mapping) {
     for (const file of unsynced) disk.set(file, "");
     unsynced.clear();
   };
-  return { store, io, disk, path, stateDir, onWriteFailure, onStop, restart, crashOn, powerCut,
+  return { store, io, disk, path, stateDir, onWriteFailure, onStop, restart, crashOn, powerCut, operations,
     saved: () => UsageSnapshot.parse(JSON.parse(disk.get(path)!)) };
 }
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(2026, 9, 7, 12)); });
 afterEach(async () => { for (const store of stores.splice(0)) await store.close(); vi.useRealTimers(); });
 
 describe("local usage store", () => {
+  it("keeps the old record when file sync fails", async () => {
+    const { store, io, disk, path, operations, onWriteFailure } = memoryStore();
+    await store.load();
+    const previous = disk.get(path);
+    operations.length = 0;
+    store.recordSuccess(pair);
+    const failure = new Error("file sync failed");
+    io.sync.mockRejectedValueOnce(failure);
+    await expect(store.flush()).rejects.toBe(failure);
+    expect(disk.get(path)).toBe(previous);
+    expect(operations).toEqual(["write"]);
+    expect(onWriteFailure).toHaveBeenCalledOnce();
+    await store.flush();
+    expect(JSON.parse(disk.get(path)!).counts[0].count).toBe(1);
+  });
+  it.each(["clear", "off", "on", "flush"] as const)("keeps the published %s state and retries after directory sync fails", async action => {
+    const initial = seed(action !== "on");
+    initial.counts.push({ ...pair, day: today(), count: 3 });
+    const { store, io, saved, operations, onStop, onWriteFailure } = memoryStore(initial, mapping);
+    await store.load();
+    operations.length = 0;
+    if (action === "flush") store.recordSuccess(pair);
+    const failure = new Error("directory sync failed");
+    io.syncDirectory.mockRejectedValueOnce(failure);
+    const control = action === "clear" ? store.clear()
+      : action === "flush" ? store.flush() : store.setEnabled(action === "on");
+    await expect(control).rejects.toBe(failure);
+    const expected = {
+      enabled: action !== "off",
+      counts: action === "clear" ? [] : [{ ...pair, day: today(), count: action === "flush" ? 4 : 3 }],
+    };
+    expect(operations).toEqual(["write", "sync temp", "rename"]);
+    expect(saved()).toMatchObject(expected);
+    expect(await store.read()).toMatchObject(expected);
+    expect(onWriteFailure).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(USAGE_WRITE_INTERVAL_MS);
+    expect(saved()).toMatchObject(expected);
+    expect(io.syncDirectory).toHaveBeenCalledTimes(3);
+    expect(onStop).not.toHaveBeenCalled();
+  });
+  it.each(["linux", "darwin", "win32"] as const)("saves in durable order on %s", async platform => {
+    vi.useRealTimers();
+    const directory = await createTestScratch("usage-sync-order-");
+    const path = join(directory, USAGE_SNAPSHOT_NAME);
+    await fs.writeFile(path, JSON.stringify(seed()));
+    const operations: string[] = [];
+    const originalOpen = fs.open;
+    const originalRename = fs.rename;
+    const originalWrite = fs.writeFile;
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...descriptor, value: platform });
+    const open = vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      const kind = args[1] === "r+" ? "temp" : "directory";
+      operations.push("open " + kind + (kind === "temp" ? " for sync" : ""));
+      const sync = handle.sync.bind(handle);
+      const close = handle.close.bind(handle);
+      vi.spyOn(handle, "sync").mockImplementation(async () => { operations.push("sync " + kind); if (kind === "temp" || descriptor.value !== "win32") await sync(); });
+      vi.spyOn(handle, "close").mockImplementation(async () => { operations.push("close " + kind + (kind === "temp" ? " for sync" : "")); await close(); });
+      return handle;
+    });
+    const write = vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
+      if (file !== path + ".tmp") return originalWrite(file, data, options);
+      // writeFile closes its handle; the existing sync helper reopens it.
+      const handle = await originalOpen(file, "w", 0o600);
+      operations.push("open temp");
+      try { operations.push("write"); await handle.writeFile(data); }
+      finally { operations.push("close temp"); await handle.close(); }
+    });
+    const rename = vi.spyOn(fs, "rename").mockImplementation(async (...args) => {
+      operations.push("rename");
+      await originalRename(...args);
+    });
+    const store = createUsageStore({ stateDir: () => directory, appVersion: "0.1.0", coverage: mapping });
+    try {
+      await store.load();
+      operations.length = 0;
+      store.recordSuccess(pair);
+      await store.flush();
+      expect(operations).toEqual([
+        "open temp", "write", "close temp", "open temp for sync", "sync temp", "close temp for sync", "rename",
+        ...(platform === "win32" ? [] : ["open directory", "sync directory", "close directory"]),
+      ]);
+      expect(write).toHaveBeenLastCalledWith(path + ".tmp", expect.any(String), { mode: 0o600 });
+    } finally {
+      try { await store.close(); }
+      finally {
+        open.mockRestore(); write.mockRestore(); rename.mockRestore();
+        Object.defineProperty(process, "platform", descriptor);
+      }
+    }
+  });
+  it("keeps the old record readable after a power cut before rename", async () => {
+    const initial = seed();
+    initial.counts.push({ ...pair, day: today(), count: 7 });
+    const { store, crashOn, powerCut, restart } = memoryStore(initial);
+    await store.load();
+    store.recordSuccess(pair);
+    crashOn(operation => operation === "rename");
+    await expect(store.flush()).rejects.toThrow("dohc stopped");
+    powerCut();
+    expect((await restart().read()).counts).toEqual(initial.counts);
+  });
+  it("loads an existing record and keeps its saved counts after a power cut", async () => {
+    const initial = seed(false);
+    initial.counts.push({ ...pair, day: today(), count: 7 });
+    const { store, restart, powerCut } = memoryStore(initial);
+    expect((await store.read()).counts).toEqual(initial.counts);
+    await store.setEnabled(true);
+    store.recordSuccess(pair);
+    await store.flush();
+    powerCut();
+    const restored = await restart().read();
+    expect(restored.enabled).toBe(true);
+    expect(restored.counts).toEqual([{ ...pair, day: today(), count: 8 }]);
+  });
   it("loads lazily once, defaults On, and leaves the uninstrumented build uncovered", async () => {
     const { store, io, stateDir } = memoryStore(null, []);
     expect(stateDir).not.toHaveBeenCalled();

@@ -705,10 +705,24 @@ pub(super) fn replay_pending_materializations(
             }
         }
     }
-    let mut jobs = store.list_pending_materialization_jobs()?;
+    let mut jobs = if let Some(selected) = selected {
+        let mut jobs = selected
+            .iter()
+            .map(|id| store.load_materialization_job(id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        jobs.sort_by(|a, b| (a.created_at_ms, &a.job_id).cmp(&(b.created_at_ms, &b.job_id)));
+        jobs
+    } else {
+        store.list_pending_materialization_jobs()?
+    };
     // Legacy unscoped intents remain replayable in each workspace.
     jobs.retain(|job| {
-        (job.workspace_id.is_empty() || job.workspace_id == scope.workspace_id)
+        job.status == JobStatus::Pending
+            && !job.job_id.starts_with("restore-delete-mat_")
+            && (job.workspace_id.is_empty() || job.workspace_id == scope.workspace_id)
             && selected.is_none_or(|selected| selected.contains(&job.job_id))
     });
     let jobs = switch_parent_deletes_first(jobs);
