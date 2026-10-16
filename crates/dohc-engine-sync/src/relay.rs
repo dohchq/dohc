@@ -1869,6 +1869,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(local(error));
             }
         };
+        if settlements.report_id.is_some() {
+            cache.clear();
+        }
         let replay_more = crate::deferred::claim_report(
             store,
             workspace_id,
@@ -1970,7 +1973,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
-    ) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, RelayError> {
+    ) -> Result<TxnOutcome<crate::CursorCommit>, RelayError> {
         commit_relay_cursor(store, workspace_id, cursor, faults, leases, now_ms).map_err(local)
     }
 

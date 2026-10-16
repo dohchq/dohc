@@ -22,6 +22,12 @@ pub struct RelayCursor {
     pub settlement_report_id: Option<String>,
 }
 
+#[derive(Debug)]
+pub struct CursorCommit {
+    pub sharing_declined: Vec<crate::SharingDeclined>,
+    pub writer_cache_changed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedPeerPosition {
     pub applied_origin_seq: i64,
@@ -77,7 +83,7 @@ pub fn commit_relay_cursor(
     faults: &dyn FaultInjector,
     leases: &dyn crate::LeaseProbe,
     now_ms: i64,
-) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, SyncError> {
+) -> Result<TxnOutcome<CursorCommit>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     if !(0..=crate::MAX_WIRE_INTEGER).contains(&cursor.cursor) {
         return Err(SyncError::InvalidInput {
@@ -123,6 +129,7 @@ pub fn commit_relay_cursor(
             }
             // Cursor commit is the per-pass level trigger. Re-scan here so an
             // oversized unclaimed base stays visible until it can originate.
+            let mut writer_cache_changed = cursor.settlement_report_id.is_some();
             let sharing_declined = if passive {
                 Vec::new()
             } else if was_enrolled {
@@ -131,6 +138,7 @@ pub fn commit_relay_cursor(
                     workspace_id,
                     leases,
                     now_ms,
+                    &mut writer_cache_changed,
                 )?;
                 crate::enrolment::export_covered_heads_in_tx(tx, workspace_id, leases)?;
                 declined
@@ -140,6 +148,7 @@ pub fn commit_relay_cursor(
                     workspace_id,
                     leases,
                     now_ms,
+                    &mut writer_cache_changed,
                 )?
             };
             if let Some(report_id) = &cursor.settlement_report_id {
@@ -154,7 +163,10 @@ pub fn commit_relay_cursor(
                 )
                 .map_err(SyncError::persist)?;
             }
-            Ok::<_, SyncError>(sharing_declined)
+            Ok::<_, SyncError>(CursorCommit {
+                sharing_declined,
+                writer_cache_changed,
+            })
     })
 }
 
@@ -249,7 +261,7 @@ pub(crate) fn write_pushed_seq_with_refusals(
                 // update must not repeat that full-state work.
                 Ok(Vec::new())
             } else {
-                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, leases, now_ms)
+                crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, leases, now_ms, &mut false)
             }
         })
 }

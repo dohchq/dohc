@@ -4294,7 +4294,28 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             reason: "pulled ydoc.update is missing its relay sequence",
         });
     };
-    if crate::apply::is_acknowledged_envelope(store, envelope)? {
+    let has_deferred_updates = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(SyncError::corrupt)
+    })?;
+    let cheap_probe_allowed = !payload.is_base_state
+        && !leases.is_live(&key)
+        && dohc_engine_collab::read_marker(store, &key)
+            .map_err(map_collab_hard_error)?
+            .is_some_and(|marker| {
+                marker.regime == dohc_engine_collab::Regime::Replicated
+                    && marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
+                    && marker.lineage_claim_id.as_deref() == Some(payload.lineage_claim_id.as_str())
+            });
+    if !has_deferred_updates
+        && cheap_probe_allowed
+        && crate::apply::is_acknowledged_envelope(store, envelope)?
+    {
         let probe = crate::apply::apply_envelope_with_mutation_outcome::<()>(
             store,
             envelope,
@@ -4307,13 +4328,9 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         );
         match probe {
             Ok(outcome) => {
-                return Ok(outcome.map(|_| YdocApplyResult {
-                    deferred: false,
-                    reason: Some("ydoc-durable-echo"),
-                    conflicts_opened: 0,
-                    lineage_replacement: None,
-                    record_facts: Vec::new(),
-                }));
+                // The probe closure always returns RetryableState, so Applied
+                // cannot occur unless admission semantics change.
+                return Ok(outcome.map(|()| unreachable!("redelivery probe applied")));
             }
             Err(SyncError::RetryableState { reason }) if reason == REDELIVERY_PROBE => {}
             Err(error) => return Err(error),

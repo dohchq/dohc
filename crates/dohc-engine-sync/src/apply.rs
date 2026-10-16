@@ -234,7 +234,6 @@ pub(crate) fn is_acknowledged_envelope(
     store: &EngineStore,
     envelope: &ReplicationEnvelope,
 ) -> Result<bool, SyncError> {
-    let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
     store.read_with(|conn| {
         let acked: i64 = conn
             .query_row(
@@ -244,7 +243,7 @@ pub(crate) fn is_acknowledged_envelope(
                 |row| row.get(0),
             )
             .map_err(SyncError::corrupt)?;
-        if envelope.origin_seq > acked {
+        if envelope.origin_seq > acked.saturating_add(1) {
             return Ok(false);
         }
         let existing: Option<(String, String, i64)> = conn
@@ -261,8 +260,11 @@ pub(crate) fn is_acknowledged_envelope(
             .optional()
             .map_err(SyncError::corrupt)?;
         match existing {
-            Some(row) => coordinate_matches(&row, envelope, &canonical_payload),
-            None => Ok(true),
+            Some(row) => {
+                let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
+                coordinate_matches(&row, envelope, &canonical_payload)
+            }
+            None => Ok(false),
         }
     })
 }

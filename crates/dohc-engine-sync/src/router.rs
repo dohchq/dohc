@@ -153,6 +153,34 @@ pub(crate) fn apply_replication_envelope_in_batch(
             |_tx, _op| Err(SyncError::UnsupportedOperation),
         ));
     };
+    if matches!(route, OwnedRoute::Moment)
+        && crate::read_sync_identity(store, &envelope.workspace_id)
+            .ok()
+            .flatten()
+            .is_some_and(|identity| identity.origin_id == envelope.origin_id)
+        && crate::apply::is_acknowledged_envelope(store, envelope).unwrap_or(false)
+        && crate::moment_apply::stored_materialization_changes(store, envelope)
+            .is_ok_and(|changes| changes.is_empty())
+    {
+        // Admission skips an exact durable row before its mutation closure.
+        // Refusal/audit refresh changes metadata, not the cached Y.Doc.
+        let result = plain(crate::apply_envelope_with(
+            store,
+            envelope,
+            faults,
+            |_, _| Err(SyncError::CoordinateDiverged),
+        ));
+        if !matches!(
+            &result,
+            Ok(ApplyOutcome {
+                primary: crate::ApplyDisposition::Skipped,
+                ..
+            })
+        ) {
+            cache.clear();
+        }
+        return result;
+    }
     if !matches!(route, OwnedRoute::Ydoc | OwnedRoute::LiveAudit) {
         // Other replicated routes can archive or replace Y.Doc lineages. Clear
         // before their transactions so a later envelope in this pull cannot

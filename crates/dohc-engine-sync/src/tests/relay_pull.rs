@@ -2455,7 +2455,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
         } => cursor,
         other => panic!("unexpected retry outcome: {other:?}"),
     };
-    assert_eq!(
+    assert!(matches!(
         client
             .commit_pull_cursor(
                 &mut reopened,
@@ -2466,8 +2466,8 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
                 1_000
             )
             .expect("commit"),
-        TxnOutcome::Committed(Vec::new())
-    );
+        TxnOutcome::Committed(ref commit) if commit.sharing_declined.is_empty()
+    ));
 }
 
 #[test]
@@ -3102,6 +3102,44 @@ fn relay_pull_rejects_a_tampered_own_ydoc_echo() {
         &NoLiveLeases,
     )
     .expect("seed durable local coordinate");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_peers SET acked_seq=0 WHERE workspace_id='ws' AND origin_id='local'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("rewind acknowledgement for first-delivery proof");
+    assert!(
+        crate::apply::is_acknowledged_envelope(&engine, &local)
+            .expect("first delivery exact durable row"),
+        "the first owner delivery at acked_seq + 1 must use the durable echo path"
+    );
+    assert!(matches!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &local,
+            &NoFaults,
+            &NoLiveLeases,
+        ),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            ..
+        })
+    ));
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_peers SET acked_seq=1 WHERE workspace_id='ws' AND origin_id='local'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("restore acknowledgement");
 
     let tampered_doc = dohc_engine_collab::Ydoc::wire();
     tampered_doc.plaintext_insert(0, "tampered");
@@ -3113,6 +3151,22 @@ fn relay_pull_rejects_a_tampered_own_ydoc_echo() {
     tampered.payload["updateBlobSha256"] = json!(tampered_sha.clone());
     tampered.payload["lineageClaimId"] = json!(tampered_sha.clone());
     tampered.relay_seq = Some(2);
+
+    assert!(matches!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &tampered,
+            &NoFaults,
+            &NoLiveLeases,
+        ),
+        Err(SyncError::CoordinateDiverged)
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "local").expect("local ack after direct tamper"),
+        1,
+        "direct tampering must leave the acknowledgement unchanged"
+    );
 
     let mut relay = PagedRelay::new([(
         0,
@@ -3937,7 +3991,7 @@ fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
 
     assert!(matches!(
         crate::cursor::write_pushed_seq(&mut engine, "ws", "local", -1, &NoFaults, &crate::NoLiveLeases, 7_001),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.is_empty()
     ));
     let after_first: i64 = engine
         .read_with(|conn| {
@@ -3955,7 +4009,7 @@ fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
 
     assert!(matches!(
         crate::cursor::write_pushed_seq(&mut engine, "ws", "local", 0, &NoFaults, &crate::NoLiveLeases, 7_002),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.is_empty()
     ));
     let after_second: i64 = engine
         .read_with(|conn| {
@@ -4573,11 +4627,11 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(10), &NoFaults, &crate::NoLiveLeases, 1_000),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.sharing_declined.is_empty()
     ));
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &relay(4), &NoFaults, &crate::NoLiveLeases, 1_000),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.sharing_declined.is_empty()
     ));
     assert_eq!(
         read_relay_cursor(&engine, "ws")
@@ -5400,7 +5454,7 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
     };
     assert!(matches!(
         commit_relay_cursor(&mut engine, "ws", &cursor, &NoFaults, &crate::NoLiveLeases, 1_000),
-        Ok(TxnOutcome::Committed(ref declines)) if declines.is_empty()
+        Ok(TxnOutcome::Committed(ref commit)) if commit.sharing_declined.is_empty()
     ));
     let stored = engine
         .read_with(|conn| {

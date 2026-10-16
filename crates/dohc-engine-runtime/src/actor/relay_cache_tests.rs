@@ -109,6 +109,10 @@ async fn append(actor: &ActorHandle, bytes: Vec<u8>) -> CacheStats {
                     Ok(())
                 },
             )?;
+            let fresh = store
+                .read_with(|conn| load_doc_in(conn, &key()))?
+                .encode_full_state();
+            assert_eq!(cache.doc_full_state_for_test(&key()).unwrap(), fresh);
             Ok(cache.stats())
         })
         .await
@@ -176,29 +180,15 @@ async fn pull_of_own_echo_keeps_writer_cache_warm() {
     let (_scratch, path, producer) = document_fixture(true, true, 100);
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 1000).unwrap().actor;
+    full_cycle(&actor, Arc::new(Mutex::new(Vec::new()))).await;
     let before = append(&actor, producer.plaintext_insert(100, "b")).await;
     push(&actor).await;
-    actor
-        .run(move |store, _| {
-            store
-                .write_with(&NoFaults, |tx| {
-                    tx.execute(
-                        "INSERT INTO replication_peers (workspace_id,origin_id,acked_seq) VALUES (?1,?2,1) ON CONFLICT(workspace_id,origin_id) DO UPDATE SET acked_seq=1",
-                        rusqlite::params![WORKSPACE, ORIGIN],
-                    )
-                    .map_err(StorageError::persist_public)?;
-                    Ok::<_, StorageError>(())
-                })?;
-            Ok(())
-        })
-        .await
-        .unwrap();
     let own_echo = actor
         .run(|store, _| {
             dohc_engine_sync::list_replication_ops(store, WORKSPACE, ORIGIN, 0, 1)
                 .map(|mut ops| {
                     let mut op = ops.remove(0);
-                    op.relay_seq = Some(1);
+                    op.relay_seq = Some(2);
                     op
                 })
                 .map_err(RuntimeError::Sync)
@@ -221,7 +211,7 @@ async fn pull_of_own_echo_keeps_writer_cache_warm() {
                     match request {
                         RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
                             ops: vec![own_echo],
-                            next_cursor: 1,
+                            next_cursor: 2,
                             has_more: false,
                         })),
                         other => panic!("unexpected pull request: {other:?}"),
@@ -257,30 +247,16 @@ async fn pull_mixing_own_echo_and_foreign_edit_invalidates_writer_cache() {
     let (_scratch, path, producer) = document_fixture(true, true, 100);
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 1000).unwrap().actor;
+    full_cycle(&actor, Arc::new(Mutex::new(Vec::new()))).await;
     let before = append(&actor, producer.plaintext_insert(100, "b")).await;
     push(&actor).await;
-    actor
-        .run(|store, _| {
-            store
-                .write_with(&NoFaults, |tx| {
-                    tx.execute(
-                        "INSERT INTO replication_peers (workspace_id,origin_id,acked_seq) VALUES (?1,?2,1) ON CONFLICT(workspace_id,origin_id) DO UPDATE SET acked_seq=1",
-                        rusqlite::params![WORKSPACE, ORIGIN],
-                    )
-                    .map_err(StorageError::persist_public)?;
-                Ok::<_, StorageError>(())
-                })?;
-            Ok(())
-        })
-        .await
-        .unwrap();
     let foreign_bytes = producer.plaintext_insert(101, "remote");
     let (own_echo, foreign) = actor
         .run(move |store, _| {
             let own_echo = dohc_engine_sync::list_replication_ops(store, WORKSPACE, ORIGIN, 0, 1)
                 .map(|mut ops| {
                     let mut op = ops.remove(0);
-                    op.relay_seq = Some(1);
+                    op.relay_seq = Some(2);
                     op
                 })
                 .map_err(RuntimeError::Sync)?;
@@ -314,7 +290,7 @@ async fn pull_mixing_own_echo_and_foreign_edit_invalidates_writer_cache() {
                     false,
                 ),
                 recorded_at_ms: 1200,
-                relay_seq: Some(2),
+                relay_seq: Some(3),
             };
             Ok::<_, RuntimeError>((own_echo, foreign))
         })
@@ -337,7 +313,7 @@ async fn pull_mixing_own_echo_and_foreign_edit_invalidates_writer_cache() {
                     match request {
                         RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
                             ops: vec![own_echo, foreign],
-                            next_cursor: 2,
+                            next_cursor: 3,
                             has_more: false,
                         })),
                         other => panic!("unexpected pull request: {other:?}"),
@@ -355,8 +331,10 @@ async fn pull_mixing_own_echo_and_foreign_edit_invalidates_writer_cache() {
             ..
         })
     ));
+    assert!(actor.ydoc_cache_stats_for_test().await.unwrap().removes > before.removes);
+    let after_pull = actor.ydoc_cache_stats_for_test().await.unwrap();
     let after = append(&actor, producer.plaintext_insert(107, "c")).await;
-    assert_eq!(after.misses, before.misses + 1);
+    assert_eq!(after.misses, after_pull.misses + 1);
     supervisor.close(&path).unwrap();
 }
 
@@ -534,4 +512,402 @@ async fn writer_cache_push_benchmark() {
             );
         }
     }
+}
+
+pub(crate) struct CursorFaults;
+thread_local! { static CRASH_CURSOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+impl dohc_engine_storage::FaultInjector for CursorFaults {
+    fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+        if point == dohc_engine_storage::FaultPoint::StorageAfterCommitBeforeAck
+            && CRASH_CURSOR.replace(false)
+        {
+            dohc_engine_storage::FaultAction::Crash
+        } else {
+            dohc_engine_storage::FaultAction::Continue
+        }
+    }
+}
+fn cycle_cursor() -> RelayCursor {
+    RelayCursor {
+        cursor: 0,
+        replication_epoch: "epoch".into(),
+        stream_identity: "stream".into(),
+        bootstrap_complete: true,
+        settlement_report_id: None,
+    }
+}
+async fn commit_cycle(
+    actor: &ActorHandle,
+    cursor: RelayCursor,
+) -> Result<RelayOperationOutcome, RuntimeError> {
+    actor
+        .relay_with_io(
+            false,
+            RelayOperation::CommitCursor {
+                workspace_id: WORKSPACE.into(),
+                cursor,
+                now_ms: 2100,
+            },
+            LeaseRegistry::default(),
+            CancellationToken::new(),
+            None,
+            |_, _| async { panic!("cursor I/O") },
+        )
+        .await
+}
+
+async fn cycle_push(actor: &ActorHandle, state: Arc<Mutex<Vec<ReplicationEnvelope>>>) {
+    loop {
+        let before = state.lock().unwrap().len();
+        let rows = state.clone();
+        actor
+            .relay_with_io(
+                false,
+                push_operation(),
+                LeaseRegistry::default(),
+                CancellationToken::new(),
+                None,
+                move |request, _| {
+                    let state = rows.clone();
+                    async move {
+                        match request {
+                            RelayIoRequest::BlobsHave(_) => {
+                                Ok(RelayIoResponse::BlobsHave(BlobHaveResponse {
+                                    missing: Vec::new(),
+                                }))
+                            }
+                            RelayIoRequest::UploadBlob(_) => Ok(RelayIoResponse::UploadBlob),
+                            RelayIoRequest::Push(request) => {
+                                let n = request.ops.len();
+                                let max = request
+                                    .ops
+                                    .last()
+                                    .map_or(request.after_seq, |op| op.origin_seq);
+                                let mut state = state.lock().unwrap();
+                                for mut op in request.ops {
+                                    op.relay_seq = Some(state.len() as i64 + 1);
+                                    state.push(op);
+                                }
+                                Ok(RelayIoResponse::Push(PushResponse {
+                                    settlement_refusals: Vec::new(),
+                                    accepted: n,
+                                    inserted: n,
+                                    skipped: 0,
+                                    current_max_origin_seq: max,
+                                }))
+                            }
+                            other => panic!("unexpected push {other:?}"),
+                        }
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        if state.lock().unwrap().len() == before {
+            break;
+        }
+    }
+}
+
+async fn full_cycle(actor: &ActorHandle, state: Arc<Mutex<Vec<ReplicationEnvelope>>>) {
+    cycle_push(actor, state.clone()).await;
+
+    loop {
+        let rows = state.clone();
+        let outcome = actor
+            .relay_with_io(
+                false,
+                RelayOperation::Pull {
+                    workspace_id: WORKSPACE.into(),
+                    now_ms: 2000,
+                },
+                LeaseRegistry::default(),
+                CancellationToken::new(),
+                None,
+                move |request, _| {
+                    let rows = rows.clone();
+                    async move {
+                        match request {
+                            RelayIoRequest::Pull(pull) => {
+                                let rows = rows.lock().unwrap();
+                                let ops = rows
+                                    .iter()
+                                    .filter(|op| op.relay_seq.unwrap() > pull.cursor)
+                                    .take(pull.limit)
+                                    .cloned()
+                                    .collect::<Vec<_>>();
+                                let next = ops
+                                    .last()
+                                    .and_then(|op| op.relay_seq)
+                                    .unwrap_or(pull.cursor);
+                                let has_more =
+                                    rows.last().is_some_and(|op| op.relay_seq.unwrap() > next);
+                                Ok(RelayIoResponse::Pull(PullResponse {
+                                    ops,
+                                    next_cursor: next,
+                                    has_more,
+                                }))
+                            }
+                            other => panic!("unexpected pull {other:?}"),
+                        }
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        let (cursor, more) = match outcome {
+            RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                applied: 0,
+                pending_cursor: Some(cursor),
+                has_more,
+                ..
+            }) => (cursor, has_more),
+            other => panic!("unexpected outcome {other:?}"),
+        };
+        actor
+            .relay_with_io(
+                false,
+                RelayOperation::CommitCursor {
+                    workspace_id: WORKSPACE.into(),
+                    cursor,
+                    now_ms: 2000,
+                },
+                LeaseRegistry::default(),
+                CancellationToken::new(),
+                None,
+                |_, _| async { panic!("cursor I/O") },
+            )
+            .await
+            .unwrap();
+        if !more {
+            break;
+        }
+    }
+}
+
+async fn settle_for_cycle(actor: &ActorHandle, root: std::path::PathBuf) {
+    use rusqlite::OptionalExtension;
+    let (claim,head)=actor.run(|store,_| {
+        let claim=read_marker(store,&key())?.unwrap().lineage_claim_id;
+        let head=store.read_with(|conn| conn.query_row("SELECT blob_sha256 FROM snapshots WHERE workspace_id='ws' AND version_id='main' AND object_id='doc'",[],|row|row.get::<_,String>(0)).optional().map_err(StorageError::persist_public))?;
+        Ok((claim,head))
+    }).await.unwrap();
+    let settled = actor
+        .ydoc_settle(
+            root,
+            key(),
+            "doc.md".into(),
+            ContentKind::Plaintext,
+            claim,
+            head,
+            "round6".into(),
+            Arc::new(()),
+            1900,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap()
+        .settled()
+        .unwrap();
+    assert!(settled.materialized);
+    // Publish each settled moment once, including a no-op timer retry.
+    actor
+        .run(move |store, _| {
+            store.write_with(&NoFaults, |tx| {
+                let published: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND imported=0 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?2)",rusqlite::params![WORKSPACE,settled.moment_id],|row|row.get(0)).map_err(|error| dohc_engine_sync::SyncError::Storage(StorageError::persist_public(error)))?;
+                if !published { dohc_engine_sync::journal_moment_append_in_tx(tx, WORKSPACE, &settled.moment_id)?; }
+                Ok::<_,dohc_engine_sync::SyncError>(())
+            })?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn full_own_update_cycle_keeps_writer_cache() {
+    let (_scratch, path, producer) = document_fixture(true, true, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1000).unwrap().actor;
+    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    full_cycle(&actor, Arc::new(Mutex::new(Vec::new()))).await;
+    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
+    assert_eq!(
+        after.misses, before.misses,
+        "a completed own-update cycle must retain the cache"
+    );
+    assert_eq!(after.hits, before.hits + 1);
+    supervisor.close(&path).unwrap();
+}
+
+#[tokio::test]
+async fn full_own_settlement_cycle_keeps_writer_cache() {
+    let (scratch, path, producer) = document_fixture(true, false, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1000).unwrap().actor;
+    commit_cycle(&actor, cycle_cursor()).await.unwrap();
+    let state = Arc::new(Mutex::new(Vec::new()));
+    full_cycle(&actor, state.clone()).await;
+    append(&actor, producer.plaintext_insert(100, "b")).await;
+    settle_for_cycle(&actor, scratch.path().to_owned()).await;
+    let before = append(&actor, producer.plaintext_insert(101, "c")).await;
+    actor.run(|store,_| {let count=store.read_with(|conn|conn.query_row("SELECT COUNT(*) FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.objectId')='doc'",[],|row|row.get::<_,i64>(0)).map_err(StorageError::persist_public))?;assert!(count>0,"the desktop settle must journal its own moment");Ok(())}).await.unwrap();
+    full_cycle(&actor, state).await;
+    let after = append(&actor, producer.plaintext_insert(102, "d")).await;
+    assert_eq!(
+        after.misses, before.misses,
+        "an own settlement echo must retain the cache"
+    );
+    assert_eq!(after.hits, before.hits + 1);
+    supervisor.close(&path).unwrap();
+}
+
+#[tokio::test]
+async fn cursor_base_origination_invalidates_writer_cache() {
+    let (_scratch, path, producer) = document_fixture(true, false, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1000).unwrap().actor;
+    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    commit_cycle(&actor, cycle_cursor()).await.unwrap();
+    actor
+        .run(|store, _| {
+            assert!(
+                read_marker(store, &key())?
+                    .unwrap()
+                    .lineage_claim_id
+                    .is_some()
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(actor.ydoc_cache_stats_for_test().await.unwrap().removes > before.removes);
+    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
+    assert_eq!(after.misses, before.misses + 1);
+    supervisor.close(&path).unwrap();
+}
+
+#[tokio::test]
+async fn cursor_lineage_change_and_aba_invalidates_writer_cache() {
+    let (_scratch, path, producer) = document_fixture(true, true, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1000).unwrap().actor;
+    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    actor.run(|store,_|{
+        let second=DocKey::new(WORKSPACE,"main","second")?;
+        let doc=Ydoc::wire();let bytes=doc.plaintext_insert(0,"second");
+        record_local_update(store,&mut WriterDocCache::new(),&second,&bytes,LocalAppend { marker:Some(MarkerCreation {content_kind:ContentKind::Plaintext,regime:Regime::LocalOnly,path:Some("second.md")}),ensure_parent_row:true,..LocalAppend::default()},&NoFaults,1200,|_,_,_|Ok(()))?;
+        store.write_with(&NoFaults,|tx|{
+            tx.execute_batch("CREATE TEMP TABLE round6_saved_claim AS SELECT lineage_claim_id FROM ydoc_docs WHERE object_id='doc'; CREATE TEMP TRIGGER round6_aba AFTER UPDATE OF lineage_claim_id ON ydoc_docs WHEN NEW.object_id='second' BEGIN UPDATE ydoc_docs SET lineage_claim_id='0000000000000000000000000000000000000000000000000000000000000000' WHERE object_id='doc'; UPDATE ydoc_docs SET lineage_claim_id=(SELECT lineage_claim_id FROM round6_saved_claim) WHERE object_id='doc'; END;").map_err(StorageError::persist_public)?;Ok::<_,StorageError>(())})?;Ok(())}).await.unwrap();
+    commit_cycle(&actor, cycle_cursor()).await.unwrap();
+    actor
+        .run(|store, _| {
+            assert!(
+                read_marker(store, &DocKey::new(WORKSPACE, "main", "second")?)?
+                    .unwrap()
+                    .lineage_claim_id
+                    .is_some()
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(actor.ydoc_cache_stats_for_test().await.unwrap().removes > before.removes);
+    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
+    assert_eq!(after.misses, before.misses + 1);
+    supervisor.close(&path).unwrap();
+}
+
+#[tokio::test]
+async fn cursor_error_invalidates_writer_cache() {
+    let (_scratch, path, producer) = document_fixture(true, true, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1000).unwrap().actor;
+    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    actor.run(|store,_|{store.write_with(&NoFaults,|tx|{tx.execute_batch("CREATE TEMP TRIGGER round6_error BEFORE INSERT ON sync_relay_cursors BEGIN SELECT RAISE(ABORT,'round6 commit error'); END;").map_err(StorageError::persist_public)?;Ok::<_,StorageError>(())})?;Ok(())}).await.unwrap();
+    assert!(commit_cycle(&actor, cycle_cursor()).await.is_err());
+    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
+    assert_eq!(after.misses, before.misses + 1);
+    supervisor.close(&path).unwrap();
+}
+
+#[tokio::test]
+async fn cursor_committed_crash_invalidates_writer_cache() {
+    let (_scratch, path, producer) = document_fixture(true, true, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1000).unwrap().actor;
+    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    actor
+        .run(|_, _| {
+            CRASH_CURSOR.set(true);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        commit_cycle(&actor, cycle_cursor()).await,
+        Err(RuntimeError::OperationCrashed)
+    ));
+    actor
+        .run(|store, _| {
+            assert!(dohc_engine_sync::read_relay_cursor(store, WORKSPACE)?.is_some());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
+    assert_eq!(after.misses, before.misses + 1);
+    supervisor.close(&path).unwrap();
+}
+
+#[tokio::test]
+async fn own_moment_materialization_recovery_invalidates_writer_cache() {
+    let (_scratch, path, producer) = document_fixture(true, true, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1000).unwrap().actor;
+    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    actor.run(|store,_| {
+        let id=format!("sync-materialization:{}",hex_sha256(b"ws\0local\x000"));
+        store.write_with(&NoFaults,|tx|{tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES (?1,?2,0,1000,'sync-materialization')",rusqlite::params![id,r#"[{"versionId":"main","path":"files/0.bin","operation":"write","contentKind":"binary"}]"#]).map_err(StorageError::persist_public)?;Ok::<_,StorageError>(())})?;Ok(())
+    }).await.unwrap();
+    actor
+        .run(|store, cache| {
+            let mut own =
+                dohc_engine_sync::list_replication_ops(store, WORKSPACE, ORIGIN, -1, 1)?.remove(0);
+            own.relay_seq = Some(1);
+            let result = dohc_engine_sync::apply_replication_envelope(
+                store,
+                cache,
+                &own,
+                &NoFaults,
+                &dohc_engine_sync::NoLiveLeases,
+            )?;
+            assert!(matches!(
+                result.primary,
+                dohc_engine_sync::ApplyDisposition::Skipped
+            ));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(actor.ydoc_cache_stats_for_test().await.unwrap().removes > before.removes);
+    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
+    assert_eq!(after.misses, before.misses + 1);
+    supervisor.close(&path).unwrap();
+}
+
+#[tokio::test]
+async fn cursor_settlement_report_invalidates_writer_cache_even_without_rows() {
+    let (_scratch, path, producer) = document_fixture(true, true, 100);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&path, 1000).unwrap().actor;
+    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
+    let mut cursor = cycle_cursor();
+    cursor.settlement_report_id = Some("already-consumed-report".into());
+    commit_cycle(&actor, cursor).await.unwrap();
+    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
+    assert_eq!(after.misses, before.misses + 1);
+    supervisor.close(&path).unwrap();
 }
