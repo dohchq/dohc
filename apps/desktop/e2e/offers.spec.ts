@@ -77,13 +77,13 @@ test("@offers a pasted URL offers Link and Plain text, and Undo, from the keyboa
     const link = editor.locator(`a[href="${url}"]`);
     const row = page.getByTestId("url-paste-offer");
     const pasteOnNewLine = async () => {
-      await holdSystemClipboard(test.info(), async () => {
+      await holdSystemClipboard(test.info(), async (remainingMs) => {
         await desktop!.app.evaluate(({ clipboard }, text) => clipboard.writeText(text), url);
-        await editor.click();
+        await editor.click({ timeout: remainingMs() });
         await page.keyboard.press("Control+End");
         await page.keyboard.press("Enter");
         await page.keyboard.press("Control+V");
-        await expect(row).toBeVisible();
+        await expect(row).toBeVisible({ timeout: remainingMs() });
       });
     };
 

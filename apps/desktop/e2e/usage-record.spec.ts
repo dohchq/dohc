@@ -75,9 +75,9 @@ test("@usage-record Privacy shows a counted action, keeps it while Off, and clea
       await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
       await confirm.screenshot({ path: test.info().outputPath(`privacy-usage-clear-confirm-${colorScheme}.png`) });
     }
-    await holdSystemClipboard(test.info(), async () => {
-      await confirm.getByTestId("usage-record-clear-copy").click();
-      await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toContain("version.create\t1\t");
+    await holdSystemClipboard(test.info(), async (remainingMs) => {
+      await confirm.getByTestId("usage-record-clear-copy").click({ timeout: remainingMs() });
+      await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() }).toContain("version.create\t1\t");
       expect(await desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).not.toContain(temp.homeDir);
     });
     await page.getByTestId("usage-record-clear-action").click();

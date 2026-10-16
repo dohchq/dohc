@@ -11,12 +11,12 @@ import {
 
 const TITLE = "A deliberately long page title that keeps going well past the width of a narrow pane";
 
-function caret(title: Locator) {
+function caret(title: Locator, timeout?: number) {
   return title.evaluate((element: HTMLTextAreaElement) => ({
     start: element.selectionStart,
     end: element.selectionEnd,
     focused: document.activeElement === element,
-  }));
+  }), undefined, { timeout });
 }
 
 // A long title wraps in a narrow pane, and stays one line of text: ArrowDown
@@ -70,13 +70,13 @@ test("a wrapped page title keeps ArrowDown, selection, and paste inside the titl
     await expect(page.getByTestId("markdown-editor")).toBeFocused();
 
     // A pasted line break becomes a space, and the caret stays after the paste.
-    await holdSystemClipboard(test.info(), async () => {
+    await holdSystemClipboard(test.info(), async (remainingMs) => {
       await desktop!.app.evaluate(({ clipboard }) => clipboard.writeText("short\nand "));
-      await title.click();
-      await title.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(2, 2));
+      await title.click({ timeout: remainingMs() });
+      await title.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(2, 2), undefined, { timeout: remainingMs() });
       await page.keyboard.press("Control+V");
-      await expect(title).toHaveValue(`A short and ${TITLE.slice(2)}`);
-      expect(await caret(title)).toMatchObject({ start: "A short and ".length, focused: true });
+      await expect(title).toHaveValue(`A short and ${TITLE.slice(2)}`, { timeout: remainingMs() });
+      expect(await caret(title, remainingMs())).toMatchObject({ start: "A short and ".length, focused: true });
     });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

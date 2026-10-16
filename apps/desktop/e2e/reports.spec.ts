@@ -62,9 +62,9 @@ test("@telemetry-smoke report switches persist, and diagnostics show, copy, and 
       });
     }
 
-    await holdSystemClipboard(test.info(), async () => {
-      await page.getByTestId("diagnostics-copy").click();
-      await expect.poll(() => app.evaluate(({ clipboard }) => clipboard.readText())).toContain("dohc diagnostics");
+    await holdSystemClipboard(test.info(), async (remainingMs) => {
+      await page.getByTestId("diagnostics-copy").click({ timeout: remainingMs() });
+      await expect.poll(() => app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() }).toContain("dohc diagnostics");
     });
 
     const saved = join(temp.baseDir, "diagnostics.txt");

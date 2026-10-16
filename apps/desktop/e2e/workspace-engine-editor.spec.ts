@@ -84,10 +84,10 @@ async function restoreRestartTyping(desktop: Awaited<ReturnType<typeof launchDes
   }
   await expect(page.getByTestId("engine-diff-lines")).toContainText(human);
   // A shared live file's way back: Copy your version copies the kept file whole.
-  await holdSystemClipboard(test.info(), async () => {
-    await page.getByTestId("engine-diff-copy-typing").click();
+  await holdSystemClipboard(test.info(), async (remainingMs) => {
+    await page.getByTestId("engine-diff-copy-typing").click({ timeout: remainingMs() });
     // Windows hands clipboard text back with CRLF line endings.
-    await expect.poll(async () => (await app.evaluate(({clipboard}) => clipboard.readText())).replace(/\r\n/g, "\n")).toBe(detail.moment?.beforeText);
+    await expect.poll(async () => (await app.evaluate(({clipboard}) => clipboard.readText())).replace(/\r\n/g, "\n"), { timeout: remainingMs() }).toBe(detail.moment?.beforeText);
   });
   // Opening the recovery and copying it keep it listed until Restore.
   const kept = await page.evaluate(async workspaceId => (window as unknown as {dohcDesktop: DohcDesktopBridge}).dohcDesktop.getCaptureRecoveryStatus({workspaceId}), workspaceId);

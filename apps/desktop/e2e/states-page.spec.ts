@@ -270,8 +270,8 @@ async function closeMenu(page: Page, trigger: Locator, menu: Locator): Promise<v
 
 // Pressed from the keyboard for the same reason. The part says what it says
 // on its own: the capture only presses it and waits for the answer.
-async function press(page: Page, button: Locator): Promise<void> {
-  await button.focus();
+async function press(page: Page, button: Locator, timeout?: number): Promise<void> {
+  await button.focus({ timeout });
   await page.keyboard.press("Enter");
 }
 
@@ -353,20 +353,20 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     // capture; the parts are unchanged.
     await page.clock.pauseAt(CLOCK_START + HOUR_MS);
 
-    await holdSystemClipboard(test.info(), async () => {
+    await holdSystemClipboard(test.info(), async (remainingMs) => {
       for (const theme of THEMES) {
         const pane = page.getByTestId(`states-${theme}`);
         for (const [answer, words] of [["copied", "Copied"], ["failed", "Couldn't copy"]] as const) {
           const withWords = pane.getByTestId(`states-copy-words-${answer}-${theme}`);
-          await press(page, withWords);
-          await expect(withWords).toHaveText(words);
+          await press(page, withWords, remainingMs());
+          await expect(withWords).toHaveText(words, { timeout: remainingMs() });
           const icon = pane.getByTestId(`states-copy-icon-${answer}-${theme}`);
-          await press(page, icon);
-          await expect(icon).toHaveAttribute("title", words);
+          await press(page, icon, remainingMs());
+          await expect(icon).toHaveAttribute("title", words, { timeout: remainingMs() });
         }
         const field = pane.getByTestId(`states-copy-field-copied-${theme}`);
-        await press(page, field);
-        await expect(field).toHaveAttribute("title", "Copied");
+        await press(page, field, remainingMs());
+        await expect(field).toHaveAttribute("title", "Copied", { timeout: remainingMs() });
       }
     });
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());

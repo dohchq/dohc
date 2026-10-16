@@ -4,7 +4,7 @@ import { setTimeout as poll } from "node:timers/promises";
 // Both endpoints are host-wide and disappear when the listening process dies.
 export const systemClipboardLockPath = () => process.platform === "win32"
   ? "\\\\.\\pipe\\dohc-e2e-system-clipboard"
-  : { host: "127.0.0.1", port: 47653, exclusive: true };
+  : { host: "127.0.0.1", port: 24763, exclusive: true };
 
 function listen(address, owner) {
   const sockets = new Set();
@@ -18,6 +18,7 @@ function listen(address, owner) {
     server.once("error", reject);
     server.listen(address, () => {
       server.removeListener("error", reject);
+      owner.acquiredAt = new Date().toISOString();
       resolve(() => new Promise((closed, failed) => {
         server.close(error => error ? failed(error) : closed());
         for (const socket of sockets) socket.destroy();
@@ -50,12 +51,12 @@ function readHolder(address, timeoutMs) {
 /** Bound acquisition; always release before returning or propagating a span failure. */
 export async function withSystemClipboardLock({ timeoutMs, holder, lockPath = systemClipboardLockPath() }, use) {
   const deadline = performance.now() + timeoutMs;
-  const owner = { pid: process.pid, startedAt: new Date().toISOString(), holder };
-  let observed;
+  const owner = { pid: process.pid, holder };
   for (;;) {
     if (performance.now() >= deadline) {
+      const observed = await readHolder(lockPath, 200);
       const name = observed
-        ? `${observed.holder} (pid ${observed.pid}, started ${observed.startedAt})`
+        ? `${observed.holder} (pid ${observed.pid}, acquired ${observed.acquiredAt})`
         : "an owner whose name is not yet readable";
       throw new Error(`Timed out waiting for the system clipboard lock; held by ${name}.`);
     }
@@ -64,7 +65,6 @@ export async function withSystemClipboardLock({ timeoutMs, holder, lockPath = sy
       release = await listen(lockPath, owner);
     } catch (error) {
       if (error.code !== "EADDRINUSE") throw error;
-      observed = await readHolder(lockPath, Math.max(1, Math.min(200, deadline - performance.now()))) ?? observed;
       await poll(Math.min(50, Math.max(0, deadline - performance.now())));
       continue;
     }

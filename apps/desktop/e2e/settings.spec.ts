@@ -121,10 +121,10 @@ test("settings search, theme persistence, MCP config, and corrupt settings recov
     await expect(desktop.page.getByTestId("mcp-config-snippet")).toContainText(
       canonicalRootPath,
     );
-    await holdSystemClipboard(test.info(), async () => {
-      await desktop!.page.getByRole("button", { name: "Copy" }).click();
+    await holdSystemClipboard(test.info(), async (remainingMs) => {
+      await desktop!.page.getByRole("button", { name: "Copy" }).click({ timeout: remainingMs() });
       await expect
-        .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()))
+        .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() })
         .toContain(canonicalRootPath);
     });
 

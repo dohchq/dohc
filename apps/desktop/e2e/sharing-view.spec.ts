@@ -89,10 +89,10 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     // The row hands out the share's code from its actions, by keyboard.
     await page.keyboard.press("Tab");
     await expect(row.getByTestId("sharing-granted-actions").locator(":focus")).toHaveCount(1);
-    await holdSystemClipboard(test.info(), async () => {
-      await row.getByRole("button", { name: "Copy code" }).focus();
+    await holdSystemClipboard(test.info(), async (remainingMs) => {
+      await row.getByRole("button", { name: "Copy code" }).focus({ timeout: remainingMs() });
       await page.keyboard.press("Enter");
-      await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(shareCode);
+      await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() }).toBe(shareCode);
     });
 
     // The rail button closes and reopens the same view.

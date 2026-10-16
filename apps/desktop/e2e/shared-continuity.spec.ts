@@ -888,11 +888,11 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         for (const text of [H1, A1, HA, H2, A2, `${R2} ${RP}`]) expect(draft).toContain(text);
         expect(draft).not.toContain(R1);
         expect(draft).not.toContain("Typed after the share ended.");
-        await holdSystemClipboard(testInfo, async () => {
+        await holdSystemClipboard(testInfo, async (remainingMs) => {
           await desktop!.app.evaluate(({ clipboard }) => clipboard.writeText(""));
-          await page.getByTestId("orphaned-draft-copy").click();
+          await page.getByTestId("orphaned-draft-copy").click({ timeout: remainingMs() });
           // Chromium writes plain text with CRLF line endings on Windows.
-          await expect.poll(async () => (copied = await desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).replace(/\r\n/g, "\n"), { timeout: 30_000 })
+          await expect.poll(async () => (copied = await desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).replace(/\r\n/g, "\n"), { timeout: remainingMs() })
             .toBe(draft);
         });
         await attachScreen(testInfo, page, "new recipient's set-aside typing");

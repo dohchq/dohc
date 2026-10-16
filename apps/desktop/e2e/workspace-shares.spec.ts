@@ -422,9 +422,9 @@ confidentialTest.describe("View link lifecycle", () => {
       const oldSecret = oldUrl.hash.slice(1);
       expect(/^[A-Za-z0-9_-]{43}$/u.test(oldSecret)).toBe(true);
       const copyButton = dialog.getByRole("button", { name: "Copy", exact: true });
-      await holdSystemClipboard(test.info(), async () => {
-        await copyButton.click();
-        await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+      await holdSystemClipboard(test.info(), async (remainingMs) => {
+        await copyButton.click({ timeout: remainingMs() });
+        await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible({ timeout: remainingMs() });
       });
 
       const firstExchange = await exchangeViewLink(

@@ -308,11 +308,11 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
       }
     }
     // Keep both clears inside the copy/read span.
-    await holdSystemClipboard(test.info(), async () => {
+    await holdSystemClipboard(test.info(), async (remainingMs) => {
       await desktop!.app.evaluate(({ clipboard }) => clipboard.clear());
       try {
-        await page.getByTestId("workspace-shell-error-copy").click();
-        await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toContain(reason);
+        await page.getByTestId("workspace-shell-error-copy").click({ timeout: remainingMs() });
+        await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() }).toContain(reason);
       } finally {
         await desktop!.app.evaluate(({ clipboard }) => clipboard.clear()).catch(() => undefined);
       }
