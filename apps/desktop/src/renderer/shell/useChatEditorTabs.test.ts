@@ -257,13 +257,15 @@ describe("chat editor tabs", () => {
     // its poll. The reply's poll goes with the reply.
     act(() => result.current.get(path).onDraftsChange({
       ...draft, composer: "  ", newThreadBody: "Half a post", replyTarget: { messageId: "m", authorLabel: "Ana" },
-      poll: ["Yes", "No"], newThreadPoll: ["Lisbon", "Porto"],
+      poll: { threadId: "thread", choices: ["Yes", "No"] },
+      newThreadPoll: { channelId: general.channel.id, choices: ["Lisbon", "Porto"] },
     }));
     act(() => { opened = result.current.open(general, "Request"); });
     expect(opened).toBe(true);
     expect(result.current.get(path).nav).toBe(general);
     expect(result.current.get(path).drafts).toEqual({
-      ...draft, composer: "", newThreadBody: "Half a post\n\nRequest", newThreadPoll: ["Lisbon", "Porto"],
+      ...draft, composer: "", newThreadBody: "Half a post\n\nRequest",
+      newThreadPoll: { channelId: general.channel.id, choices: ["Lisbon", "Porto"] },
     });
   });
 });

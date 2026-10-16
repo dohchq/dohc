@@ -1,6 +1,6 @@
 import "../../testing/legendListMock";
 // @vitest-environment jsdom
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { deferred } from "../../testing/deferred";
@@ -24,14 +24,15 @@ const choiceValues = (prefix: string) =>
   screen.getAllByTestId(`${prefix}-poll-choice`).map((input) => (input as HTMLInputElement).value);
 
 describe("ChatsView polls", () => {
+  // The decisions list stays empty: the poll comes with its message.
   it("starts a post with a poll and shows its choices in the new thread", async () => {
     const user = userEvent.setup();
     bridgeMock.startChannelThread.mockResolvedValue({
       thread: thread({ title: "Lunch?" }),
       message: message({ body: "Lunch?" }),
       viewerAuthorId: "you@example.com",
+      decision,
     });
-    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [decision] });
     renderView();
     await user.click(await screen.findByTestId("chats-channel"));
     await user.type(await screen.findByTestId("chats-new-thread-composer"), "Lunch?");
@@ -48,7 +49,6 @@ describe("ChatsView polls", () => {
     );
     const posted = await screen.findAllByTestId("chats-message-poll-option");
     expect(posted.map((option) => option.textContent)).toEqual(["Soup", "Salad"]);
-    expect(bridgeMock.listChatThreadDecisions).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1" });
   });
 
   it("keeps a new post's poll when the start fails", async () => {
@@ -68,7 +68,10 @@ describe("ChatsView polls", () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
     if (outcome === "sent") {
-      bridgeMock.sendChatMessage.mockResolvedValue({ message: message({ id: "message-2", body: "Lunch?" }) });
+      bridgeMock.sendChatMessage.mockResolvedValue({
+        message: message({ id: "message-2", body: "Lunch?" }),
+        decision: { ...decision, messageId: "message-2" },
+      });
     } else {
       bridgeMock.sendChatMessage.mockRejectedValue(new Error("Engine busy"));
     }
@@ -77,7 +80,6 @@ describe("ChatsView polls", () => {
     await user.click(await screen.findByTestId("chats-thread"));
     await user.type(screen.getByTestId("chats-composer"), "Lunch?");
     fillPoll("chats", ["Soup", "Salad"]);
-    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [{ ...decision, messageId: "message-2" }] });
     fireEvent.keyDown(screen.getByTestId("chats-composer"), { key: "Enter" });
     await waitFor(() =>
       expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
@@ -177,42 +179,38 @@ describe("ChatsView polls", () => {
     fillPoll("chats-new-thread", ["Lisbon", "Porto"]);
     await waitFor(() =>
       expect(onDraftsChange).toHaveBeenLastCalledWith(
-        expect.objectContaining({ newThreadBody: "Where?", newThreadPoll: ["Lisbon", "Porto"] }),
+        expect.objectContaining({
+          newThreadBody: "Where?",
+          newThreadPoll: { channelId: "channel-1", choices: ["Lisbon", "Porto"] },
+        }),
       ),
     );
   });
 
-  // The read that shows a posted poll can land after the person answered
-  // another poll in the thread. It must not reopen that answer.
-  it("keeps an answer that lands before the posted poll's read", async () => {
+  // The person leaves the thread and comes back while the send is in flight.
+  // The reload on return read the thread before the write, so the poll's
+  // choices come only with the sent message.
+  it("shows a comment's poll when the person left and came back during the send", async () => {
     const user = userEvent.setup();
-    const earlier = { ...decision, options: ["Friday", "Monday"] };
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
-    bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [earlier] });
+    const held = deferred<{ message: ReturnType<typeof message>; decision: typeof decision }>();
+    bridgeMock.sendChatMessage.mockReturnValueOnce(held.promise);
     renderView();
     await user.click(await screen.findByTestId("chats-channel"));
     await user.click(await screen.findByTestId("chats-thread"));
-    await screen.findAllByTestId("chats-message-poll-option");
-
-    const postedRead = deferred<{ decisions: unknown[] }>();
-    bridgeMock.listChatThreadDecisions.mockReturnValueOnce(postedRead.promise);
-    bridgeMock.sendChatMessage.mockResolvedValueOnce({ message: message({ id: "message-2", body: "Lunch?" }) });
     await user.type(screen.getByTestId("chats-composer"), "Lunch?");
     fillPoll("chats", ["Soup", "Salad"]);
     fireEvent.keyDown(screen.getByTestId("chats-composer"), { key: "Enter" });
-    await waitFor(() => expect(screen.queryByTestId("chats-poll")).toBeNull());
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-message-body");
 
-    bridgeMock.sendChatMessage.mockResolvedValueOnce({ message: message({ id: "answer", body: "Monday" }) });
-    bridgeMock.resolveChatDecision.mockResolvedValueOnce({
-      decision: { ...earlier, state: "resolved", chosenOption: "Monday", resolvedByMessageId: "answer" },
-    });
-    await user.click(screen.getAllByTestId("chats-message-poll-option")[1]!);
-    await user.click(screen.getByTestId("chats-send"));
-    await screen.findByTestId("chats-message-decision-resolved");
-
-    postedRead.resolve({ decisions: [earlier, { ...decision, messageId: "message-2" }] });
+    await act(async () => held.resolve({
+      message: message({ id: "message-2", body: "Lunch?" }),
+      decision: { ...decision, messageId: "message-2" },
+    }));
     expect((await screen.findAllByTestId("chats-comment-poll-option")).map((node) => node.textContent)).toEqual(["Soup", "Salad"]);
-    expect(screen.getByTestId("chats-message-decision-resolved")).toBeTruthy();
+    expect(screen.queryByTestId("chats-poll")).toBeNull();
   });
 });

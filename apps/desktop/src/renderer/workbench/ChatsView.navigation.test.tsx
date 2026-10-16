@@ -313,7 +313,7 @@ describe("ChatsView expand-to-tab", () => {
         dmDraft: "",
         replyTarget: null,
         resolveTargetMessageId: null,
-        poll: ["Thursday", "Friday"],
+        poll: { threadId: "thread-1", choices: ["Thursday", "Friday"] },
         newThreadPoll: null,
       },
     });
@@ -328,6 +328,34 @@ describe("ChatsView expand-to-tab", () => {
     expect(
       screen.getAllByTestId("chats-poll-choice").map((input) => (input as HTMLInputElement).value),
     ).toEqual(["Thursday", "Friday"]);
+  });
+
+  // The tab went back to the group before the handoff, so the seed is the
+  // group, not the thread the poll was drafted in.
+  it("keeps a handed-off poll with its thread when the tab returns to the group", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "channel", channel: channel() },
+      initialDrafts: {
+        composer: "Lunch?",
+        newThreadBody: "",
+        dmRecipients: "",
+        dmDraft: "",
+        replyTarget: null,
+        resolveTargetMessageId: null,
+        poll: { threadId: "thread-1", choices: ["Soup", "Salad"] },
+        newThreadPoll: null,
+      },
+    });
+
+    await user.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-thread-view");
+    expect(
+      screen.getAllByTestId("chats-poll-choice").map((input) => (input as HTMLInputElement).value),
+    ).toEqual(["Soup", "Salad"]);
   });
 
   it("restores the composer's reply/resolve mode, not just its text", async () => {

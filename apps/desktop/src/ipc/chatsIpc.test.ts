@@ -630,6 +630,19 @@ describe("poll IPC writes", () => {
     }));
     expect(result.thread.openDecisionCount).toBe(count);
   });
+  it.each(doors)("returns no decision and reads none for a plain message on $name", async ({ channel, target }) => {
+    const test = fixture();
+    const result = await test.invoke(channel, { workspaceId: "workspace", ...target, body: "Hello" }) as { decision?: unknown };
+    expect(result).not.toHaveProperty("decision");
+    expect(test.storeMethods.listThreadDecisions).not.toHaveBeenCalled();
+  });
+  it.each(doors)("still answers a written poll when its decision cannot be read back on $name", async ({ channel, target }) => {
+    const test = fixture();
+    test.storeMethods.listThreadDecisions.mockRejectedValueOnce(new Error("engine busy"));
+    const result = await test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", options: ["Monday", "Tuesday"] }) as { message: unknown; decision?: unknown };
+    expect(result.message).toBeDefined();
+    expect(result).not.toHaveProperty("decision");
+  });
   it.each(doors)("refuses a poll in a share view on $name before persistence", async ({ channel, target, name }) => {
     const test = fixture("view");
     await expect(test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", needsDecision: true, options: ["Monday", "Tuesday"] }))
@@ -659,6 +672,9 @@ it("reads both IPC polls back with their decisions from the live chat store", as
     const second = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, {
       workspaceId: workspace.workspaceId, threadId: first.thread.id, body: "Which time?", options: ["Morning", "Afternoon"],
     }));
+    // Each write returns its poll as the engine stored it, choices trimmed.
+    expect(first.decision).toMatchObject({ messageId: first.message.id, state: "open", options: ["Monday", "Tuesday"] });
+    expect(second.decision).toMatchObject({ messageId: second.message.id, state: "open", options: ["Morning", "Afternoon"] });
     const messages = ListChatMessagesResult.parse(await test.invoke(chatOperations.listChatMessages.channel, {
       workspaceId: workspace.workspaceId, threadId: first.thread.id,
     }));

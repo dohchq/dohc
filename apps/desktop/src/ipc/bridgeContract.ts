@@ -2078,11 +2078,6 @@ export const SendChatMessagePayload = z.object({
 });
 export type SendChatMessagePayload = z.infer<typeof SendChatMessagePayload>;
 
-export const SendChatMessageResult = z.object({
-  message: ChatMessageRecord,
-});
-export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
-
 export const ChatDecisionRecord = z.object({
   threadId: OPAQUE_ID,
   messageId: OPAQUE_ID,
@@ -2094,6 +2089,14 @@ export const ChatDecisionRecord = z.object({
   chosenOption: z.string().min(1).max(200).optional(),
 });
 export type ChatDecisionRecord = z.infer<typeof ChatDecisionRecord>;
+
+export const SendChatMessageResult = z.object({
+  message: ChatMessageRecord,
+  // The question or poll the message asked, read back after the write.
+  // Absent when it asked none, or when that read failed.
+  decision: ChatDecisionRecord.optional(),
+});
+export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
 
 export const ListChatThreadDecisionsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -2429,6 +2432,8 @@ export const StartChannelThreadResult = z.object({
   message: ChatMessageRecord,
   // Main derives this from the author identity used for the opening message.
   viewerAuthorId: OPAQUE_ID,
+  // As on SendChatMessageResult: the opening message's question or poll.
+  decision: ChatDecisionRecord.optional(),
 });
 export type StartChannelThreadResult = z.infer<typeof StartChannelThreadResult>;
 

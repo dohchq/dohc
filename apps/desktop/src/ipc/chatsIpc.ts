@@ -1,6 +1,6 @@
 import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { createActorPresentationRequest } from "../workspaces/actorPresentation";
-import type { ActorPresentation } from "./bridgeContract";
+import type { ActorPresentation, ChatDecisionRecord } from "./bridgeContract";
 import { workspaceFileRef, type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import {
@@ -129,6 +129,40 @@ export function chatMessageForIpc(message: ChatMessage, collectionOf: Automation
     ...(message.automation ? { automation: automationForIpc(message.automation, collectionOf) } : {}),
     attachments: message.attachments.map(chatAttachmentForIpc),
   };
+}
+
+type StoreDecision = Awaited<ReturnType<DesktopLinkedChatStore["listThreadDecisions"]>>[number];
+
+function chatDecisionForIpc(decision: StoreDecision): ChatDecisionRecord {
+  return {
+    threadId: decision.threadId,
+    messageId: decision.messageId,
+    state: decision.state,
+    ...(decision.resolvedByMessageId
+      ? { resolvedByMessageId: decision.resolvedByMessageId }
+      : {}),
+    ...(decision.options && decision.options.length > 0 ? { options: [...decision.options] } : {}),
+    ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
+    atMs: decision.atMs,
+  };
+}
+
+// The question or poll a write asked, read back from the engine, which
+// normalizes its choices, so the renderer adds it with the message. A failed
+// read leaves it out instead of failing a send that already landed; the
+// thread's next refresh shows it.
+async function askedDecision(
+  store: Pick<DesktopLinkedChatStore, "listThreadDecisions">,
+  workspaceId: string,
+  asked: { needsDecision?: boolean; options?: string[] },
+  message: ChatMessage,
+): Promise<{ decision?: ChatDecisionRecord }> {
+  if (!asked.needsDecision && (asked.options?.length ?? 0) === 0) return {};
+  const decision = await store.listThreadDecisions(workspaceId, message.threadId).then(
+    (decisions) => decisions.find((entry) => entry.messageId === message.id),
+    () => undefined,
+  );
+  return decision ? { decision: chatDecisionForIpc(decision) } : {};
 }
 
 export function registerChatsIpcHandlers<
@@ -469,7 +503,10 @@ export function registerChatsIpcHandlers<
         ),
     });
     const presentation = await presentationRequest(scope.workspace, scope.store, operation.assertCurrent);
-    return SendChatMessageResult.parse({ message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId), await presentation(message, message.threadId)) });
+    return SendChatMessageResult.parse({
+      message: chatMessageForIpc(message, automationCollectionOf(scope.workspace.workspaceId), await presentation(message, message.threadId)),
+      ...await askedDecision(scope.store, scope.workspace.workspaceId, input, message),
+    });
   };
   registerHandler(CHANNELS.listChatThreadDecisions, workspaceHandler(async (event, payload) => {
     const input = ListChatThreadDecisionsPayload.parse(payload);
@@ -481,19 +518,7 @@ export function registerChatsIpcHandlers<
       workspace.workspaceId,
       input.threadId,
     );
-    return ListChatThreadDecisionsResult.parse({
-      decisions: decisions.map((decision) => ({
-        threadId: decision.threadId,
-        messageId: decision.messageId,
-        state: decision.state,
-        ...(decision.resolvedByMessageId
-          ? { resolvedByMessageId: decision.resolvedByMessageId }
-          : {}),
-        ...(decision.options && decision.options.length > 0 ? { options: [...decision.options] } : {}),
-        ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
-        atMs: decision.atMs,
-      })),
-    });
+    return ListChatThreadDecisionsResult.parse({ decisions: decisions.map(chatDecisionForIpc) });
   }));
 
   registerHandler(CHANNELS.resolveChatDecision, workspaceHandler(async (event, payload) => {
@@ -1002,6 +1027,7 @@ export function registerChatsIpcHandlers<
       message: chatMessageForIpc(started.message, automationCollectionOf(workspace.workspaceId), await presentation(started.message, started.message.threadId)),
       viewerAuthorId:
         started.message.authorUserId ?? localInstallationId(),
+      ...await askedDecision(linkedChatStoreFor(workspace), workspace.workspaceId, input, started.message),
     });
   };
   registerHandler(
