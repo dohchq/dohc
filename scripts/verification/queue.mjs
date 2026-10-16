@@ -166,12 +166,14 @@ const movedFirst = entry => Boolean(entry.status.moved) && !entry.status.moved.b
  * with one. Among each, the owner who has gone longest without a start goes next, and an owner that
  * never started goes first. Each owner's requests keep line order. A request ahead of the turns counts
  * as a run its owner starts before them, so the line is the order the service starts it while no run
- * ends. An attempt that failed because of the machine uses no turn. Only requests with a recorded
- * owner count their runs, so requests accepted before owners existed keep line order among themselves.
+ * ends. An attempt that failed because of the machine uses no turn. Requests accepted before owners
+ * existed record no starts, so right after an upgrade they keep the line order they had.
+ * A waiting request that fails `canStart` takes no place in the line, but its runs still count.
  */
-export function runOrder(requests) {
+export function runOrder(requests, { canStart = () => true } = {}) {
   const live = requests.filter(entry => !terminalStates.has(entry.status.state)).sort(lineOrder);
-  const front = live.filter(entry => entry.status.state !== "running" && (entry.request.nightly || movedFirst(entry)));
+  const waiting = live.filter(entry => entry.status.state !== "running" && canStart(entry));
+  const front = waiting.filter(entry => entry.request.nightly || movedFirst(entry));
   const ahead = [...front.filter(entry => entry.request.nightly), ...front.filter(entry => !entry.request.nightly)];
   const lastStart = new Map();
   const busy = new Set();
@@ -191,8 +193,8 @@ export function runOrder(requests) {
   }
   // Each owner's waiting requests, the owners in line order of their first request, which settles a tie.
   const owners = new Map();
-  for (const entry of live) {
-    if (entry.status.state === "running" || ahead.includes(entry)) continue;
+  for (const entry of waiting) {
+    if (ahead.includes(entry)) continue;
     const { key } = ownerOf(entry.request);
     if (!owners.has(key)) owners.set(key, []);
     owners.get(key).push(entry);
@@ -260,19 +262,19 @@ export function placeMove(requests, { id, before = null }, starting = new Set())
 }
 
 /**
- * The first request in run order that can run now. The turns count only the requests that can run
- * now, so a request waiting on Docker, a retry's backoff, or the removal of its containers (`cleaning`)
- * does not hold back one that needs none, of its own owner or another. `started` names requests the
- * service has started that may still read as queued; each counts as a run its owner started now.
+ * The first request in run order that can run now. Only the requests that can run now take turns,
+ * so a request waiting on Docker, a retry's backoff, or the removal of its containers (`cleaning`)
+ * does not hold back one that needs none, of its own owner or another. Its runs still count.
+ * `started` names requests the service has started that may still read as queued; each counts as a
+ * run its owner started now.
  */
 export function nextRequest(requests, { diskOk, dockerOk }, now = Date.now(), started = new Set(), cleaning = new Set()) {
   if (!diskOk) return null;
   const ready = ({ id, request, status }) => !cleaning.has(id) && (!status.notBefore || Date.parse(status.notBefore) <= now) && (!request.gates?.js || dockerOk);
   const startedAt = new Date(now).toISOString();
-  const view = requests.flatMap(entry => entry.status.state !== "queued" ? [entry]
-    : started.has(entry.id) ? [{ ...entry, status: { ...entry.status, state: "running", attempts: [...entry.status.attempts, { startedAt }] } }]
-    : ready(entry) ? [entry] : []);
-  return runOrder(view).find(entry => entry.status.state === "queued") ?? null;
+  const view = requests.map(entry => entry.status.state === "queued" && started.has(entry.id)
+    ? { ...entry, status: { ...entry.status, state: "running", attempts: [...entry.status.attempts, { startedAt }] } } : entry);
+  return runOrder(view, { canStart: ready }).find(entry => entry.status.state === "queued") ?? null;
 }
 
 /** Backoff after an environment failure: 30 s, 2 min, 5 min, then every 15 min. */
@@ -497,7 +499,7 @@ export async function verifyThroughQueue({ root, submission, detach = false, che
   id = answer.id;
   log(`request ${id}. Follow it with pnpm verify:queue status, stop it with pnpm verify:queue cancel ${id}.`);
   // A service older than owners answers without one.
-  if (answer.owner) log(`owner: ${answer.owner.title}${answer.owner.source === "checkout" ? " (its checkout). Pass --owner <name> to group a thread's requests under one owner." : ""}`);
+  if (answer.owner) log(`owner: ${answer.owner.title}${answer.owner.source === "checkout" ? " (its checkout). Pass --owner <name> with your next branch to group a thread's requests under one owner." : ""}`);
   if (detach) return { id, state: "queued" };
   let shown = "";
   let shownAt = 0;

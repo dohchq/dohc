@@ -190,6 +190,16 @@ test("a request whose containers are still being removed holds no turn", () => {
     "Bob has not had a turn, so his other request runs while the first one's cleanup waits");
 });
 
+test("a request that cannot start still counts its owner's last start", () => {
+  // Ann's first request waits on Docker, though she started it at 12:00. Bob last started at 11:00.
+  const at = time => new Date(`2026-10-16T${time}:00Z`).toISOString();
+  const a1 = owned("000000001-aaaaaa", "ann", "queued", { attempts: [{ n: 1, startedAt: at("12:00"), outcome: "passed" }] });
+  const bobRan = owned("000000002-bbbbbb", "bob", "passed", { attempts: [{ n: 1, startedAt: at("11:00"), outcome: "passed" }] });
+  const a2 = rustOnly(owned("000000003-aaaaaa", "ann"));
+  const b1 = rustOnly(owned("000000004-bbbbbb", "bob"));
+  assert.equal(nextRequest([a1, bobRan, a2, b1], { diskOk: true, dockerOk: false }, Date.parse(at("13:00"))).id, b1.id, "Bob has gone longer without a start than Ann");
+});
+
 test("an owner with a run in progress waits until every owner without one has had a turn", () => {
   const annRunning = owned("000000001-aaaaaa", "ann", "running", { attempts: [started(-30)] });
   const bobRan = owned("000000002-bbbbbb", "bob", "passed", { attempts: [started(-20, "passed")] });
@@ -199,7 +209,7 @@ test("an owner with a run in progress waits until every owner without one has ha
     "Ann started longer ago, but her run is still going, so Bob, whose run finished, takes the free lane");
 });
 
-test("requests accepted before owners existed keep line order, and they go before requests that have owners", () => {
+test("requests accepted before owners existed record no starts, so they keep the line order they had", () => {
   // Without a recorded owner, each belongs to its checkout. One checkout already ran a request.
   const legacy = (id, checkout, state = "queued", extra = {}) => entry(id, { checkout, branch: null }, state, extra);
   const ran = legacy("000000001-aaaaaa", "C:\\w\\one", "passed", { attempts: [started(-10, "passed")] });
@@ -1306,5 +1316,5 @@ test("pnpm verify:pr prints the owner the service recorded, and how to name one 
     return lines.filter(line => line.startsWith("owner: "));
   };
   assert.deepEqual(await owner({ branch: "refs/heads/named", ownerName: "Sol" }), ["owner: Sol"]);
-  assert.deepEqual(await owner({ branch: "refs/heads/unnamed" }), ["owner: pass (its checkout). Pass --owner <name> to group a thread's requests under one owner."]);
+  assert.deepEqual(await owner({ branch: "refs/heads/unnamed" }), ["owner: pass (its checkout). Pass --owner <name> with your next branch to group a thread's requests under one owner."]);
 });

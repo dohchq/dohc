@@ -272,7 +272,7 @@ A move only brings a waiting request forward. `--before` needs another waiting r
 A move never stops or starts a run. It changes only which request starts next, and the nightly run still goes first.
 The service applies the move within a few seconds, and the command prints the request's new place. If the service is not running, the move applies when it starts.
 A service installed before this command existed applies no moves. After 30 seconds the command says so. Run `pnpm verify:queue upgrade` from a checkout of `origin/main` to install a service that applies them.
-The command refuses to move a request that is unknown, running, or finished. It refuses `--before` a request with another owner, or one the request is already ahead of. It says why.
+The command refuses to move a request that is unknown, running, or finished. It refuses `--before` a request with another owner, a request moved with `--first`, or one the request is already ahead of. It says why.
 
 The service records each move in `history.jsonl` with its reason, the `--by` name, the OS user, and the checkout that asked. It keeps the reason to one line of at most 300 characters.
 `pnpm verify:queue status` shows the last move beside the request, such as `moved first by Ice (C:\w\fix-grid): fixes the grid test three branches fail`. Every agent on the host runs as the same OS user, so the checkout always shows.
