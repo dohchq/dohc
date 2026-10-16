@@ -60,7 +60,7 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
         if(args[0]==='inspect')return {stdout:'healthy'};
         if(args[0]==='port')return {stdout:'127.0.0.1:1234'};
         if(args[0]==='rm'){
-          if(args[2]!==readFileSync('container','utf8'))throw Error('wrong container');
+          if(args.at(-1)!==readFileSync('container','utf8'))throw Error('wrong container');
           if(${cleanupFails})throw Error('fixture cleanup rejected');
           rmSync('container');return {stdout:'removed'};
         }

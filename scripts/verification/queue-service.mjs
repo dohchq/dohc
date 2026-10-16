@@ -46,7 +46,8 @@ export async function sweepContainers({ request, command = run } = {}) {
   };
   const ids = new Set(request ? await list([`label=dohc.verification=${request}`]) : []);
   if (!request) for (const status of ["exited", "dead"]) for (const id of await list(["name=dohc-verify-", `status=${status}`])) ids.add(id);
-  if (ids.size) await command("docker", ["rm", "--force", ...ids], { timeoutMs: 60_000, quietStdout: true });
+  // --volumes also removes each container's anonymous data volume, which would otherwise stay on the disk.
+  if (ids.size) await command("docker", ["rm", "--force", "--volumes", ...ids], { timeoutMs: 60_000, quietStdout: true });
   return ids.size;
 }
 

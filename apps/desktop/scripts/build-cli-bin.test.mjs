@@ -4,10 +4,10 @@
 // beside it. Run via `node --test` beside the desktop suite.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import {
   NODE_MISSING_MESSAGE,
   POSIX_MCP_LAUNCHER,
@@ -15,8 +15,17 @@ import {
   posixMcpLauncher,
 } from "./build-cli-bin.mjs";
 
+// Every folder this file makes goes when its tests end; a fabricated node.exe is about 92 MB.
+const scratch = [];
+after(() => { for (const dir of scratch) rmSync(dir, { recursive: true, force: true }); });
+function scratchDir(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  scratch.push(dir);
+  return dir;
+}
+
 function launcherDir() {
-  const dir = mkdtempSync(join(tmpdir(), "dohc-mcp-launcher-"));
+  const dir = scratchDir("dohc-mcp-launcher-");
   writeFileSync(join(dir, "dohc-mcp"), POSIX_MCP_LAUNCHER, { mode: 0o755 });
   writeFileSync(join(dir, "dohc-mcp.cmd"), WINDOWS_MCP_LAUNCHER, { mode: 0o755 });
   // Stands in for the vite bundle the real build writes beside the
@@ -113,8 +122,15 @@ function skipUnlessShFabricated(majorMinor) {
   return windowsFabricatedVersionSkipReason(majorMinor) ?? false;
 }
 
+// Tests only put the folder on PATH, so each fabricated version is written once.
+const fabricatedByVersion = new Map();
 function fabricatedNodeDir(version) {
-  const dir = mkdtempSync(join(tmpdir(), "dohc-mcp-fabricated-node-"));
+  if (!fabricatedByVersion.has(version)) fabricatedByVersion.set(version, { dir: fabricateNode(version), version });
+  return fabricatedByVersion.get(version);
+}
+
+function fabricateNode(version) {
+  const dir = scratchDir("dohc-mcp-fabricated-node-");
   if (isWindows) {
     const binary = readFileSync(process.execPath);
     const realVersion = Buffer.from(process.version);
@@ -136,7 +152,7 @@ function fabricatedNodeDir(version) {
       { mode: 0o755 },
     );
   }
-  return { dir, version };
+  return dir;
 }
 
 function runSh(majorMinor) {
