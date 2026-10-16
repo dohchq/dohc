@@ -641,6 +641,7 @@ export interface WorkspaceEngineCapture {
   // With objectId, the page holds only that file's moments in the active
   // version, across its renames.
   listMoments(input?: {
+    versionId?: string;
     limit?: number;
     cursor?: HistoryCursor;
     objectId?: string;
@@ -6386,7 +6387,7 @@ export function createWorkspaceEngineCapture(
       const engine = await engineStore();
       const history = await engine.listHistoryPage({
         workspaceId,
-        ...(input.cursor !== undefined ? { versionId: input.cursor.versionId } : {}),
+        ...(input.versionId !== undefined || input.cursor !== undefined ? { versionId: input.versionId ?? input.cursor!.versionId } : {}),
         ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
         ...(input.cursor !== undefined
