@@ -3262,7 +3262,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-        ordinal: 56,
+        ordinal: 58,
         id: "v2-hosted-parked-documents",
         sql: V2_HOSTED_PARKED_DOCUMENTS_DDL,
         sets_user_version: None,
@@ -4409,7 +4409,7 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", true).unwrap();
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-hosted-parked-documents");
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 56);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 58);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch(
             "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
