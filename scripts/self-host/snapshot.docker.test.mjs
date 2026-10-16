@@ -96,9 +96,11 @@ test("online snapshots of a relay under constant writes, verified offline with o
     assert.ok(copies[0].tally > 0 && copies[0].tally < copies[1].tally && copies[1].tally < copies[2].tally, JSON.stringify(copies));
     writesPast(copies[2].tally);
     // check-backup's own check: integrity, the deployment marker against continuity, and the manifest checksum.
+    // Like recovery.mjs, it runs on the stopped deployment with its relay and continuity volumes.
+    docker(["stop", writer]);
     for (const index of [0, 1, 2]) {
       node(["/proof/relay-deployment.js", "check-backup", "--config", "/continuity/deployment.json", "--directory", `/backup/verified-${index}`],
-        { mounts: [mount("continuity", "/continuity"), mount("out", "/backup", true), proof] });
+        { mounts: [mount("relay", "/data"), mount("continuity", "/continuity"), mount("out", "/backup", true), proof] });
     }
 
     const wrongKey = verify(`/backup/saved/${names[0]}`, "/backup/wrong-key", randomBytes(32).toString("base64url"));
