@@ -65,7 +65,8 @@ test("native proof evidence rejects skips, wrong binaries, and incomplete delive
   };
   try {
     write(); assert.equal(readSelfHostNativeProof(output, executable, sha256).sha256, sha256);
-    for (const delta of [{numPendingTests: 1}, {numTotalTests: 0, numPassedTests: 0}, {success: false}, {numTodoTests: 1}]) {
+    write({...tests, numTotalTests: 5, numPassedTests: 5}); assert.equal(readSelfHostNativeProof(output, executable, sha256).tests.passed, 5);
+    for (const delta of [{numPendingTests: 1}, {numTotalTests: 0, numPassedTests: 0}, {success: false}, {numTodoTests: 1}, {numTotalTests: 5, numPassedTests: 4}]) {
       write({...tests, ...delta}); assert.throws(() => readSelfHostNativeProof(output, executable, sha256), /mandatory test/);
     }
     for (const delta of [{sha256: "b".repeat(64)}, {executable: join(output, "different")}, {results: {}}, {acceptance: "diagnostic only"}]) {
