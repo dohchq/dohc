@@ -1,11 +1,8 @@
 import { join } from "node:path";
 import { configuredRunnerCommand } from "../agents/agentToolCatalog";
-import {
-  DesktopUserSettingsResult, SetAppPinnedPayload, SetUserSettingsPayload, WorkspaceSettingsPayload,
-  SetWorkspaceSettingsPayload, WorkspaceSettingsResult, WorkspaceIdPayload,
-  GetWorkspaceUiStateResult, SetWorkspaceUiStatePayload,
-} from "./bridgeContract";
-import { CHANNELS } from "./channels";
+import { DesktopUserSettingsResult, WorkspaceSettingsResult, GetWorkspaceUiStateResult } from "./bridgeContract";
+import { settingsOperations } from "./settingsOperations";
+import type { OperationHandlers } from "./operationTable";
 import {
   DEFAULT_USER_SETTINGS,
   settingsDeepEqual,
@@ -40,8 +37,6 @@ export function createSettingsIpc<
   Event extends { sender: Sender },
   Operation extends { readonly workspace: { readonly rootPath: string } },
 >(dependencies: {
-  registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
-  assertTrustedSender(event: Event): void;
   stateDir(): string;
   setCachedPreferredName(preferredName: string | undefined, agentName: string | undefined): void;
   applyZoomLevelToWindows(zoomLevel: number): void;
@@ -62,7 +57,7 @@ export function createSettingsIpc<
   knownWorkspaceIds(): readonly string[];
 }) {
   const {
-    registerHandler, assertTrustedSender, stateDir,
+    stateDir,
     setCachedPreferredName, applyZoomLevelToWindows, refreshDispatchTray,
     openDispatchWorkspaces, chatDispatchService, withRendererWorkspaceOperation,
     broadcastUserSettings, notifyRenderer, openPath, knownWorkspaceIds,
@@ -180,61 +175,50 @@ export function createSettingsIpc<
     }
   }
 
-  function registerSettingsIpcHandlers(): void {
-    registerHandler(CHANNELS.getUserSettings, async (event) => {
-      assertTrustedSender(event);
+  const handlers: OperationHandlers<typeof settingsOperations, Event, Operation> = {
+    getUserSettings: async () => {
       return DesktopUserSettingsResult.parse(
         await readCachedUserSettingsFile(stateDir()),
       );
-    });
+    },
 
-    registerHandler(CHANNELS.reloadUserSettings, async (event) => {
-      assertTrustedSender(event);
+    reloadUserSettings: async () => {
       return reloadUserSettings();
-    });
+    },
 
-    registerHandler(CHANNELS.setUserSettings, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = SetUserSettingsPayload.parse(payload);
+    setUserSettings: async (input) => {
       return saveUserSettings(() =>
         writeUserSettingsFile(stateDir(), input.settings, input.base));
-    });
+    },
 
     // One pin at a time, applied to the file as it is now, so two quick pins
     // both land.
-    registerHandler(CHANNELS.setAppPinned, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = SetAppPinnedPayload.parse(payload);
+    setAppPinned: async (input) => {
       return saveUserSettings(() =>
         updateUserSettingsFile(stateDir(), (current) =>
           withAppPinned(current, input, knownWorkspaceIds())));
-    });
+    },
 
-    registerHandler(CHANNELS.resetUserSettings, async (event) => {
-      assertTrustedSender(event);
+    resetUserSettings: async () => {
       return saveUserSettings(() => replaceUserSettingsFile(stateDir(), DEFAULT_USER_SETTINGS));
-    });
+    },
 
-    registerHandler(CHANNELS.getUserSettingsFilePath, (event) => {
-      assertTrustedSender(event);
+    getUserSettingsFilePath: () => {
       return join(stateDir(), USER_SETTINGS_FILE);
-    });
+    },
 
     // The file lives in dohc's own folder, outside every workspace, so it
     // opens in the person's editor rather than dohc's: dohc's editor writes
     // only inside a workspace. The watcher applies the save.
-    registerHandler(CHANNELS.openUserSettingsFile, async (event) => {
-      assertTrustedSender(event);
+    openUserSettingsFile: async () => {
       await openSettingsFile(
         await enqueueUserSettingsWrite(() => ensureUserSettingsFile(stateDir())),
       );
-    });
+    },
 
     // `.dohc` is dohc's own folder, which dohc's editor does not write, so
     // this file opens in the person's editor too.
-    registerHandler(CHANNELS.openWorkspaceSettingsFile, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = WorkspaceSettingsPayload.parse(payload);
+    openWorkspaceSettingsFile: async (input, { event }) => {
       const path = await withRendererWorkspaceOperation(
         event.sender,
         input.workspaceId,
@@ -242,90 +226,40 @@ export function createSettingsIpc<
         (operation) => workspaceSettingsPath(operation.workspace.rootPath),
       );
       await openSettingsFile(path);
-    });
+    },
 
-    registerHandler(CHANNELS.getWorkspaceSettings, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = WorkspaceSettingsPayload.parse(payload);
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "Workspace settings read stopped because this window changed workspaces.",
-        async (operation) =>
-          WorkspaceSettingsResult.parse(
-            await readWorkspaceSettingsFile(operation.workspace.rootPath),
-          ),
-      );
-    });
+    getWorkspaceSettings: async (_input, { operation }) =>
+      WorkspaceSettingsResult.parse(
+        await readWorkspaceSettingsFile(operation.workspace.rootPath),
+      ),
 
-    registerHandler(CHANNELS.setWorkspaceSettings, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = SetWorkspaceSettingsPayload.parse(payload);
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "Workspace settings save stopped because this window changed workspaces.",
-        async (operation) =>
-          WorkspaceSettingsResult.parse(
-            await saveWorkspaceSettingsFile(
-              operation.workspace.rootPath,
-              input.patch,
-            ),
-          ),
-      );
-    });
+    setWorkspaceSettings: async (input, { operation }) =>
+      WorkspaceSettingsResult.parse(
+        await saveWorkspaceSettingsFile(operation.workspace.rootPath, input.patch),
+      ),
 
-    registerHandler(CHANNELS.resetWorkspaceSettings, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = WorkspaceSettingsPayload.parse(payload);
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "Workspace settings reset stopped because this window changed workspaces.",
-        async (operation) =>
-          WorkspaceSettingsResult.parse(
-            await resetWorkspaceSettingsFile(operation.workspace.rootPath),
-          ),
-      );
-    });
-  }
+    resetWorkspaceSettings: async (_input, { operation }) =>
+      WorkspaceSettingsResult.parse(
+        await resetWorkspaceSettingsFile(operation.workspace.rootPath),
+      ),
 
-  function registerWorkspaceUiStateIpcHandlers(): void {
     // Per-workspace workbench UI state (.dohc/ui-state.json). The renderer
     // cannot write .dohc through writeWorkspaceText (reserved path) — this
     // narrow pair is the only writer, same pattern as agent-runs.json. Both
     // directions are zod-bounded; a corrupt/foreign on-disk file reads as null
     // ("no saved state"), never an error.
-    registerHandler(CHANNELS.getWorkspaceUiState, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = WorkspaceIdPayload.parse(payload);
-      return withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "UI state read stopped because this window changed workspaces.",
-        async (operation) => {
-          const parsed = GetWorkspaceUiStateResult.safeParse(
-            await readUiStateFile(operation.workspace.rootPath),
-          );
-          return parsed.success ? parsed.data : null;
-        },
+    getWorkspaceUiState: async (_input, { operation }) => {
+      const parsed = GetWorkspaceUiStateResult.safeParse(
+        await readUiStateFile(operation.workspace.rootPath),
       );
-    });
+      return parsed.success ? parsed.data : null;
+    },
 
-    registerHandler(CHANNELS.setWorkspaceUiState, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = SetWorkspaceUiStatePayload.parse(payload);
-      await withRendererWorkspaceOperation(
-        event.sender,
-        input.workspaceId,
-        "UI state write stopped because this window changed workspaces.",
-        (operation) => writeUiStateFile(operation.workspace.rootPath, input.state),
-      );
-    });
-  }
+    setWorkspaceUiState: async (input, { operation }) => writeUiStateFile(operation.workspace.rootPath, input.state),
+  };
 
   return {
-    registerSettingsIpcHandlers, registerWorkspaceUiStateIpcHandlers,
+    ...handlers,
     watchUserSettingsFile, reloadUserSettings, stepWindowZoom,
   };
 }

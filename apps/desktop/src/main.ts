@@ -85,6 +85,7 @@ import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
 import { registerShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
 import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChannelSync";
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
+import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { registerWorkspaceGraphIpcHandlers } from "./ipc/workspaceGraphIpc";
 import { registerNativeMenusIpcHandlers } from "./ipc/nativeMenusIpc";
@@ -5778,8 +5779,7 @@ function afterRendererCrashLoop(): void {
 // The owner of the user settings file: every save, zoom step, reset, and
 // edit made in the file goes through it and takes effect there.
 const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-  registerHandler: handleIpc,
-  assertTrustedSender, stateDir,
+  stateDir,
   setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
   applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
@@ -6775,13 +6775,11 @@ function registerIpcHandlers(): void {
 
   agentRunsIpc.registerAgentRuns();
 
-  settingsIpc.registerSettingsIpcHandlers();
+  registerOperations(operationBoundary, settingsOperations, settingsIpc);
   // The settings file applies when saved. The watch lasts as long as main.
   settingsIpc.watchUserSettingsFile();
 
   windowIpc.registerWindowControls();
-
-  settingsIpc.registerWorkspaceUiStateIpcHandlers();
 
   registerOperations(operationBoundary, crashReportOperations, {
     readCrashReport: () => crashReports.read(),
