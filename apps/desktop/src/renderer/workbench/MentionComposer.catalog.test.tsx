@@ -320,8 +320,20 @@ describe("the poll block", () => {
     // Under the repeated row, before the choices that follow it.
     expect(choices()[1]!.closest("div")!.nextElementSibling).toBe(error);
     expect(choices()[1]!.className).toContain("focus:border-danger");
+    expect(choices()[1]!.className).toContain("focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]");
     expect(choices()[2]!.className).not.toContain("border-danger");
     expect(send().disabled).toBe(true);
+  });
+
+  it("names each repeated choice once, under its first repeat", () => {
+    render(<Harness initialValue="Lunch?" initialPoll={["Soup", "Soup", "Pie", "Pie", "Pie"]} />);
+    const errors = screen.getAllByTestId("chats-poll-error");
+    expect(errors.map((error) => error.textContent)).toEqual(["Soup is already a choice.", "Pie is already a choice."]);
+    expect(choices()[1]!.closest("div")!.nextElementSibling).toBe(errors[0]);
+    expect(choices()[3]!.closest("div")!.nextElementSibling).toBe(errors[1]);
+    // Every repeat of a choice points at that choice's message.
+    expect(choices()[4]!.getAttribute("aria-describedby")).toBe(errors[1]!.id);
+    expect(choices()[0]!.getAttribute("aria-invalid")).toBeNull();
   });
 
   it("brings back a removed poll's choices when a poll is opened again, by either door", () => {

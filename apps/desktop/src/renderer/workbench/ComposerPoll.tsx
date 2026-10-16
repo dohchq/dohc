@@ -40,10 +40,13 @@ export function ComposerPoll(props: {
     props.onChange([...props.choices, ""]);
   };
   const repeated = repeatedPollChoices(props.choices);
-  // One message, under the first repeat, naming the choice it repeats.
-  const firstRepeat = repeated.size > 0 ? Math.min(...repeated) : -1;
-  const repeatedText = firstRepeat >= 0 ? trimChoice(props.choices[firstRepeat]!) : null;
-  const errorId = `${props.testIdPrefix}-poll-error`;
+  // One message per repeated choice, under its first repeat, naming it.
+  const firstRepeatOf = new Map<string, number>();
+  for (const index of [...repeated].sort((a, b) => a - b)) {
+    const text = trimChoice(props.choices[index]!);
+    if (!firstRepeatOf.has(text)) firstRepeatOf.set(text, index);
+  }
+  const errorId = (index: number) => `${props.testIdPrefix}-poll-error-${index}`;
   const canAdd = props.choices.length < MAX_POLL_CHOICES;
   return (
     <fieldset
@@ -57,7 +60,7 @@ export function ComposerPoll(props: {
     >
       {props.choices.map((choice, index) => {
         const isRepeat = repeated.has(index);
-        const named = isRepeat && trimChoice(choice) === repeatedText;
+        const messageAt = isRepeat ? firstRepeatOf.get(trimChoice(choice)) : undefined;
         return (
           <Fragment key={index}>
             <div className="flex items-center gap-2">
@@ -67,7 +70,7 @@ export function ComposerPoll(props: {
                 data-testid={`${props.testIdPrefix}-poll-choice`}
                 aria-label={`Choice ${index + 1}`}
                 aria-invalid={isRepeat || undefined}
-                aria-describedby={named ? errorId : undefined}
+                aria-describedby={messageAt === undefined ? undefined : errorId(messageAt)}
                 placeholder={`Choice ${index + 1}`}
                 maxLength={MAX_POLL_CHOICE_LENGTH}
                 value={choice}
@@ -90,10 +93,10 @@ export function ComposerPoll(props: {
                   }
                 }}
                 // A repeat stays red while the person is still typing in it.
-                // dohc-focus-input sets the focused border too and comes later
-                // in the stylesheet, so the red is marked important.
+                // dohc-focus-input sets the focused border and its inner edge
+                // too and comes later in the stylesheet, so both are important.
                 className={`h-7 min-w-0 flex-1 rounded-md border bg-bg px-2.5 text-[13px] text-ink placeholder:text-subtle dohc-focus-input ${
-                  isRepeat ? "border-danger focus:border-danger!" : "border-line"
+                  isRepeat ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-line"
                 }`}
               />
               <button
@@ -108,9 +111,9 @@ export function ComposerPoll(props: {
                 <X size={12} aria-hidden />
               </button>
             </div>
-            {index === firstRepeat ? (
-              <p id={errorId} data-testid={`${props.testIdPrefix}-poll-error`} role="alert" className="m-0 pl-5.5 text-[11px] text-danger">
-                {repeatedText} is already a choice.
+            {messageAt === index ? (
+              <p id={errorId(index)} data-testid={`${props.testIdPrefix}-poll-error`} role="alert" className="m-0 pl-5.5 text-[11px] text-danger">
+                {trimChoice(choice)} is already a choice.
               </p>
             ) : null}
           </Fragment>
