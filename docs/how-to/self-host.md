@@ -270,10 +270,10 @@ Otherwise, a visitor can bypass Cloudflare and choose their own client-address h
 Caddy ignores those forged headers, but a direct connection still bypasses Cloudflare's controls.
 
 Configure Cloudflare to bypass caching for all account, relay, and share responses, including responses marked `private, no-store`.
-Disable bot challenges on `/sync/*` and `/s/*`.
-Agents use these routes with a share link alone and cannot complete browser challenges.
+Disable bot challenges for this hostname.
+The desktop app, the CLI, and agents with only a share link call it directly and cannot complete browser challenges.
 A Cloudflare-only allowlist also admits other Cloudflare customers who point their zone at this origin.
-They can bypass your zone's WAF and bot rules, although the services still receive truthful client addresses.
+They can bypass your zone's WAF and bot rules, and can choose the client address the services use for rate limits, for example through a Worker.
 Use a custom, zone-specific Authenticated Origin Pulls certificate to restrict access to your zone.
 A Cloudflare Tunnel is another option.
 Certificate setup, Authenticated Origin Pulls, and Cloudflare Tunnel configuration are not covered here yet.
