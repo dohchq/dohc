@@ -150,6 +150,7 @@ describe("capability identities and exposure", () => {
   const workspacePayload = z.object({ workspaceId: z.string() });
   const devicePayload = z.object({});
   it.each([
+    ["void", z.void(), false],
     ["pipe input", workspacePayload.pipe(workspacePayload), true],
     ["transform input", workspacePayload.transform(() => ({})), true],
     ["transform output only", devicePayload.transform(() => ({ workspaceId: "output-only" })), false],

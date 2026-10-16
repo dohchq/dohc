@@ -22,6 +22,7 @@ export const settingsOperations = {
     scope: "device", guard: "trusted-sender",
     payload: SetUserSettingsPayload, result: DesktopUserSettingsResult,
   },
+  // Pins an app in the user’s own sidebar settings; workspaceId was never bound to the window.
   setAppPinned: {
     capabilityId: "app.pin.set", channel: "desktop:set-app-pinned",
     scope: "device", guard: "trusted-sender",

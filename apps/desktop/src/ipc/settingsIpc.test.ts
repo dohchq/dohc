@@ -114,13 +114,12 @@ async function harness() {
     assertTrustedSender: event => { if (!event.trusted) throw new Error("untrusted"); },
     withActiveWorkspace: (event, id, message, work) => withRendererWorkspaceOperation(event.sender, id, message, work),
   }, settingsOperations, capability);
-  const firstGroup = [...handlers.keys()].slice(0, settingsRequests.length);
   dispose.push(async () => {
     await Promise.all([sessions.retireAfterCrash(first), sessions.retireAfterCrash(second)]);
     await authorities.close();
   });
   return {
-    handlers, firstGroup, effects, entries, authorities, sessions, first, second, open,
+    handlers, effects, entries, authorities, sessions, first, second, open,
     zoom: capability.stepWindowZoom, setCachedPreferredName, applyZoomLevelToWindows,
     refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings, notifyRenderer,
     openPath, reload: capability.reloadUserSettings,
@@ -141,9 +140,8 @@ afterEach(async () => {
 });
 
 describe("registered settings IPC", () => {
-  it("registers the settings callbacks and the later UI-state pair", async () => {
+  it("registers all settings operations", async () => {
     const h = await harness();
-    expect(h.firstGroup).toEqual(settingsRequests.map(([channel]) => channel));
     expect([...h.handlers.keys()]).toEqual(requests.map(([channel]) => channel));
   });
 

@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { configuredRunnerCommand } from "../agents/agentToolCatalog";
 import { DesktopUserSettingsResult, WorkspaceSettingsResult, GetWorkspaceUiStateResult } from "./bridgeContract";
-import { settingsOperations } from "./settingsOperations";
+import type { settingsOperations } from "./settingsOperations";
 import type { OperationHandlers } from "./operationTable";
 import {
   DEFAULT_USER_SETTINGS,
@@ -175,16 +175,14 @@ export function createSettingsIpc<
     }
   }
 
-  const handlers: OperationHandlers<typeof settingsOperations, Event, Operation> = {
+  const handlers = {
     getUserSettings: async () => {
       return DesktopUserSettingsResult.parse(
         await readCachedUserSettingsFile(stateDir()),
       );
     },
 
-    reloadUserSettings: async () => {
-      return reloadUserSettings();
-    },
+    reloadUserSettings,
 
     setUserSettings: async (input) => {
       return saveUserSettings(() =>
@@ -256,10 +254,10 @@ export function createSettingsIpc<
     },
 
     setWorkspaceUiState: async (input, { operation }) => writeUiStateFile(operation.workspace.rootPath, input.state),
-  };
+  } satisfies OperationHandlers<typeof settingsOperations, Event, Operation>;
 
   return {
     ...handlers,
-    watchUserSettingsFile, reloadUserSettings, stepWindowZoom,
+    watchUserSettingsFile, stepWindowZoom,
   };
 }
