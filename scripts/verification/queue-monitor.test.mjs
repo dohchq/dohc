@@ -279,9 +279,14 @@ test("status, positions, and the dashboard show the line in the order the servic
   // Cat and the legacy checkout never started, Bob started five hours ago, and Ann runs now.
   const line = [running, nightly, c7, legacy, b5, a3, b6, a4];
   const requests = listRequests(root);
-  const picked = new Set();
-  for (let next, n = 0; n < requests.length && (next = nextRequest(requests, { diskOk: true, dockerOk: true }, now, picked)); n += 1) picked.add(next.id);
-  assert.deepEqual([...picked], line.slice(1), "the service starts the line in this order");
+  // The service starts one request a minute, every run still going.
+  let queue = requests;
+  const picked = [];
+  for (let at = now, next; picked.length < requests.length && (next = nextRequest(queue, { diskOk: true, dockerOk: true }, at)); at += 60_000) {
+    picked.push(next.id);
+    queue = queue.map(row => row === next ? { ...row, status: { ...row.status, state: "running", attempts: [{ n: 1, startedAt: new Date(at).toISOString() }] } } : row);
+  }
+  assert.deepEqual(picked, line.slice(1), "the service starts the line in this order");
   assert.deepEqual(line.map(id => position(requests, id)), line.map((_, index) => index + 1));
   const state = monitorState(root, { now });
   assert.deepEqual(state.queued.map(entry => entry.id), line.slice(1), "the dashboard draws the same line");

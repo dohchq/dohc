@@ -241,13 +241,18 @@ The service records an owner for each request when it accepts it:
 2. If T3 does not know the thread, the name given with `pnpm verify:pr --owner <name>`.
 3. Otherwise, the checkout.
 
+`pnpm verify:pr` prints the owner when the service accepts the request.
+If T3 does not know your thread, pass the same `--owner` name for all of your thread's work. A new name for each request makes each request a new owner.
+
 The service starts the nightly run first, then any request [moved with `--first`](#move-a-waiting-request).
-Then the owner that has gone longest without a start gets the next lane. An owner that has never started goes first.
+Then the next lane goes to an owner with no run in progress, the one that has gone longest without a start. An owner that has never started goes first.
+An owner with a run in progress waits until every owner without one has had a turn.
 Each turn starts the owner's first request in line, so a thread with 30 waiting requests gets one start per turn, like a thread with one.
+A request that cannot start yet, because it needs Docker while Docker is down or waits for a retry, holds no turn. Its owner's next request can take the turn.
 An attempt that failed because of the machine uses no turn.
 The turns add no capacity. They give each thread quick feedback on its most important request, so put that request first with `move --before`.
 
-`pnpm verify:queue status`, the wait estimates, and the dashboard show the line in the order the service starts it.
+`pnpm verify:queue status`, the wait estimates, and the dashboard show the line in the order the service starts it when every request can start.
 The dashboard's Queue tab shows each request's owner and how many requests that owner has waiting.
 An [inline run](#the-verification-queue-on-the-shared-windows-host) takes no turn.
 

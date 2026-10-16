@@ -284,7 +284,7 @@ export async function runService({
         place.supersede = place.supersede.filter(id => !running.has(id));
         place.sequence = requests.find(candidate => candidate.id === place.supersede[0])?.request.sequence ?? null;
       }
-      if (place.attach) { await answer({ id: place.attach }); return; }
+      if (place.attach) { await answer({ id: place.attach, owner: ownerOf(requests.find(candidate => candidate.id === place.attach).request) }); return; }
       // A newer commit takes the place of the request it replaces that is furthest ahead, its owner, and the record of any move that put it there.
       const ahead = requests.filter(candidate => place.supersede.includes(candidate.id)).sort(lineOrder)[0];
       const order = place.sequence ?? ++sequence;
@@ -298,7 +298,7 @@ export async function runService({
       try {
         await setStatus(id, { state: "queued", attempts: [], order: ahead && orderOf(ahead), moved: ahead?.status.moved });
         for (const old of place.supersede) await setStatus(old, { ...requests.find(entry => entry.id === old).status, state: "superseded", supersededBy: id });
-        await answer({ id });
+        await answer({ id, owner });
       } catch (error) { error.acceptedId = id; throw error; }
       history({ event: "accepted", id, head: submission.head, scope: submission.scope, supersedes: place.supersede, owner: owner.key });
     }
@@ -556,14 +556,14 @@ export async function runService({
         }
       }
       await checkHealth(requests);
-      // Fill free lanes in run order. A request started here still reads as queued in `requests`, and keeps its owner's
-      // turn, so two free lanes go to two owners. A request whose containers are not yet removed waits, because they
-      // carry its id and their removal would stop its next run.
+      // Fill free lanes in run order. A request started here still reads as queued in `requests`, and counts as its
+      // owner's latest start, so two free lanes go to two owners. A request whose containers are not yet removed waits,
+      // because they carry its id and their removal would stop its next run; it holds no turn meanwhile.
       // A restart or a pause, even one requested during this tick, starts nothing new and waits for the runs in flight.
-      const started = new Set([...running.keys(), ...cleanupPending]);
+      const started = new Set(running.keys());
       // A lone run always starts; another one waits while free memory is low.
       while (running.size < laneCount && (running.size === 0 || freeMemory() >= memoryFloorGb) && health.pausedUntil <= now && !existsSync(restart) && !existsSync(paths.pause)) {
-        const entry = nextRequest(requests, health, now, started);
+        const entry = nextRequest(requests, health, now, started, cleanupPending);
         if (!entry) break;
         started.add(entry.id);
         attempt(entry).catch(error => { log(`attempt bookkeeping failed: ${error.stack ?? error.message}`); fatal = error; });

@@ -9,7 +9,7 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
-import { attemptOutcome, cancel, inlineRuns, lastNightlyPass, listRequests, movedNote, nextRequest, nightlyTaskDefinition, ownerFor, parseMove, pauseQueue, pauseStatus, placeMove, placeSubmission, position, queueLanePurpose, queuePaths, readJson, readPause, requestMove, resumeQueue, runOrder, serviceRuns, serviceState, sharedFailures, startsInMs, submit, submitNightly, taskDefinition, terminalStates, writeJson } from "./queue.mjs";
+import { attemptOutcome, cancel, inlineRuns, lastNightlyPass, listRequests, movedNote, nextRequest, nightlyTaskDefinition, ownerFor, parseMove, pauseQueue, pauseStatus, placeMove, placeSubmission, position, queueLanePurpose, queuePaths, readJson, readPause, requestMove, resumeQueue, runOrder, serviceRuns, serviceState, sharedFailures, startsInMs, submit, submitNightly, taskDefinition, terminalStates, verifyThroughQueue, writeJson } from "./queue.mjs";
 import { laneTemp, runService, sweepContainers } from "./queue-service.mjs";
 import { threadDirectory } from "./queue-monitor.mjs";
 import { failureKind, takeGrant } from "./verify.mjs";
@@ -131,14 +131,11 @@ test("the nightly run goes first, then a request moved --first, then the owner l
   const nightly = entry("000000010-nnnnnn", { nightly: true, checkout: "nightly" });
   const first = owned("000000011-bbbbbb", "bob", "queued", { order: 1, moved: { at: started(-1).startedAt, before: null, reason: "fixes main", by: { name: "Ice" } } });
   const requests = [running, a2, a3, bobRan, b5, b6, c7, danRan, d9, nightly, first];
-  const line = [running, nightly, first, c7, b5, d9, a2, b6, a3];
+  const line = [running, nightly, first, c7, d9, a2, b5, a3, b6];
   assert.deepEqual(runOrder(requests).map(row => row.id), line.map(row => row.id),
-    "Cat never started, Bob started longest ago, then Dan, then Ann, who runs now; each owner's second request waits for its next turn");
+    "Cat never started, and Dan has no run in progress. Ann runs now and Bob's request moved first starts before the turns, so they follow, Ann first because she started longer ago");
   assert.deepEqual(line.map(row => position(requests, row.id)), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
-  // Admission takes the same line: each pick is the next request in it.
-  const picked = new Set();
-  for (let next, n = 0; n < requests.length && (next = nextRequest(requests, { diskOk: true, dockerOk: true }, Date.now(), picked)); n += 1) picked.add(next.id);
-  assert.deepEqual([...picked], line.slice(1).map(row => row.id));
+  assert.deepEqual(startInTurn(requests, { diskOk: true, dockerOk: true }, { ending: false }), line.slice(1).map(row => row.id), "the service starts the line in this order");
 });
 
 test("--before orders one owner's requests, and a move before another owner's request is refused", () => {
@@ -150,6 +147,77 @@ test("--before orders one owner's requests, and a move before another owner's re
   assert.deepEqual(runOrder(requests).map(row => row.id), [a3.id, b4.id, a1.id, a2.id], "Ann's moved request takes Ann's turn, and Bob's turn comes next");
   assert.equal(placeMove(requests, { id: b4.id, before: a1.id }).rejected,
     `Cannot move ${b4.id} before ${a1.id}: ${a1.id} belongs to ann, and owners take turns. --before orders one owner's requests. Use --first only to unblock others.`);
+});
+
+const rustOnly = row => ({ ...row, request: { ...row.request, scope: "rust", gates: { rust: true, js: false } } });
+/**
+ * The ids the service starts, one a minute: by one lane, each run ending before the next starts, or,
+ * with `ending` false, by as many lanes as it takes, every run still going.
+ */
+function startInTurn(requests, health, { ending = true } = {}) {
+  const order = [];
+  for (let at = Date.parse("2026-10-16T09:00:00Z"), next; order.length < requests.length && (next = nextRequest(requests, health, at)); at += 60_000) {
+    order.push(next.id);
+    const attempt = { n: next.status.attempts.length + 1, startedAt: new Date(at).toISOString(), ...(ending ? { outcome: "passed" } : {}) };
+    requests = requests.map(row => row === next ? { ...row, status: { ...row.status, state: ending ? "passed" : "running", attempts: [...row.status.attempts, attempt] } } : row);
+  }
+  return order;
+}
+
+test("a request waiting on Docker holds no turn, so its owner's Rust-only request takes it", () => {
+  const b1 = owned("000000001-bbbbbb", "bob");
+  const [b2, a3, c4, a5, c6] = [["000000002-bbbbbb", "bob"], ["000000003-aaaaaa", "ann"], ["000000004-cccccc", "cat"], ["000000005-aaaaaa", "ann"], ["000000006-cccccc", "cat"]].map(([id, name]) => rustOnly(owned(id, name)));
+  assert.deepEqual(startInTurn([b1, b2, a3, c4, a5, c6], { diskOk: true, dockerOk: false }), [b2, a3, c4, a5, c6].map(row => row.id),
+    "Bob's JavaScript run waits for Docker, and Bob's Rust-only run takes Bob's turn instead of waiting behind every other start");
+});
+
+test("a request in its retry backoff holds no turn, so two free lanes go to two owners", () => {
+  const [a1, a2] = ["000000001-aaaaaa", "000000003-aaaaaa"].map(id => owned(id, "ann"));
+  const b1 = owned("000000002-bbbbbb", "bob", "queued", { notBefore: new Date(Date.now() + 60_000).toISOString(), attempts: [started(-5, "environment")] });
+  const b2 = owned("000000004-bbbbbb", "bob");
+  const requests = [a1, b1, a2, b2];
+  const health = { diskOk: true, dockerOk: true };
+  assert.equal(nextRequest(requests, health).id, a1.id);
+  assert.equal(nextRequest(requests, health, Date.now(), new Set([a1.id])).id, b2.id, "the second lane goes to Bob's request that can run, not to Ann's second");
+});
+
+test("a request whose containers are still being removed holds no turn", () => {
+  const annRan = owned("000000001-aaaaaa", "ann", "passed", { attempts: [started(-30, "passed")] });
+  const b2 = owned("000000002-bbbbbb", "bob", "queued", { attempts: [started(-10, "environment")] });
+  const a3 = owned("000000003-aaaaaa", "ann");
+  const b4 = owned("000000004-bbbbbb", "bob");
+  assert.equal(nextRequest([annRan, b2, a3, b4], { diskOk: true, dockerOk: true }, Date.now(), new Set(), new Set([b2.id])).id, b4.id,
+    "Bob has not had a turn, so his other request runs while the first one's cleanup waits");
+});
+
+test("an owner with a run in progress waits until every owner without one has had a turn", () => {
+  const annRunning = owned("000000001-aaaaaa", "ann", "running", { attempts: [started(-30)] });
+  const bobRan = owned("000000002-bbbbbb", "bob", "passed", { attempts: [started(-20, "passed")] });
+  const a3 = owned("000000003-aaaaaa", "ann");
+  const b4 = owned("000000004-bbbbbb", "bob");
+  assert.equal(nextRequest([annRunning, bobRan, a3, b4], { diskOk: true, dockerOk: true }).id, b4.id,
+    "Ann started longer ago, but her run is still going, so Bob, whose run finished, takes the free lane");
+});
+
+test("requests accepted before owners existed keep line order, and they go before requests that have owners", () => {
+  // Without a recorded owner, each belongs to its checkout. One checkout already ran a request.
+  const legacy = (id, checkout, state = "queued", extra = {}) => entry(id, { checkout, branch: null }, state, extra);
+  const ran = legacy("000000001-aaaaaa", "C:\\w\\one", "passed", { attempts: [started(-10, "passed")] });
+  const l2 = legacy("000000002-aaaaaa", "C:\\w\\one");
+  const l3 = legacy("000000003-aaaaaa", "C:\\w\\two");
+  const l4 = legacy("000000004-aaaaaa", "C:\\w\\three");
+  const annRan = owned("000000005-aaaaaa", "ann", "passed", { attempts: [started(-60, "passed")] });
+  const n6 = owned("000000006-aaaaaa", "ann");
+  const m7 = owned("000000007-bbbbbb", "bob");
+  assert.deepEqual(runOrder([ran, l2, l3, l4, annRan, n6, m7]).map(row => row.id), [l2, l3, l4, m7, n6].map(row => row.id));
+});
+
+test("a move before a request moved first is refused", () => {
+  const moved = { at: started(-1).startedAt, before: null, reason: "fixes main", by: { name: "Ice" } };
+  const first = owned("000000002-aaaaaa", "ann", "queued", { order: 1, moved });
+  const a3 = owned("000000003-aaaaaa", "ann");
+  assert.equal(placeMove([first, a3], { id: a3.id, before: first.id }).rejected,
+    `Cannot move ${a3.id} before ${first.id}: ${first.id} was moved first, ahead of every owner's turn. Use --first for ${a3.id} if it also unblocks others.`);
 });
 
 test("a new request's owner is its person's T3 thread, else its --owner name, else its checkout, and a failed lookup names no thread", () => {
@@ -605,7 +673,7 @@ test("a restarted service keeps a finished receipt and retries an interrupted ru
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100,
     docker: async () => true, prepare: async () => {}, sweep: async () => 0, holdLane: async () => ({ release() {} }), retryDelay: () => 0,
     worker: async ({ grant, output }) => { calls.push(grant); writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, verdict: "PASS", final: true })); },
-    stop: stop.signal, log: () => {} });
+    threadOf: () => null, stop: stop.signal, log: () => {} });
   const settled = count => waitFor(() => {
     const all = listRequests(root);
     return all.length === count && all.every(candidate => terminalStates.has(candidate.status.state)) ? all : null;
@@ -639,7 +707,7 @@ test("a newer commit submitted while the service was down replaces the request i
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100,
     docker: async () => true, prepare: async () => {}, sweep: async () => 0, holdLane: async () => ({ release() {} }), retryDelay: () => 0,
     worker: async ({ grant, output }) => { calls.push(grant.head); writeFileSync(join(output, "result.json"), JSON.stringify({ grant, commit: grant.head, baseCommit: grant.base, verdict: "PASS", final: true })); },
-    stop: stop.signal, log: () => {} });
+    threadOf: () => null, stop: stop.signal, log: () => {} });
   const id = (await waitFor(() => readJson(join(paths.keys, key)), "the newer commit must be accepted")).id;
   const all = await waitFor(() => {
     const requests = listRequests(root);
@@ -656,7 +724,7 @@ test("only one service serves a queue root", async t => {
   const fixture = fixtureRepo();
   const stop = new AbortController();
   t.after(() => { rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); rmSync(fixture.repo, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); });
-  const options = { root, repo: fixture.repo, tickMs: 20, freeDisk: () => 100, floorGb: 1, docker: async () => true, stop: stop.signal, log: () => {} };
+  const options = { root, repo: fixture.repo, tickMs: 20, freeDisk: () => 100, floorGb: 1, docker: async () => true, threadOf: () => null, stop: stop.signal, log: () => {} };
   const first = runService(options);
   await waitFor(() => existsSync(queuePaths(root).service), "the first service must start");
   assert.equal(await runService(options), 0, "a second service on the same root exits at once");
@@ -841,7 +909,7 @@ test("a stop decided before a restart is honored after it", async t => {
   const stop = new AbortController();
   const service = runService({ root, repo: fixture.repo, lane: join(root, "lane"), tickMs: 20, floorGb: 1, freeDisk: () => 100,
     docker: async () => true, prepare: async () => {}, sweep: async () => 0, holdLane: async () => ({ release() {} }),
-    worker: async ({ grant }) => { calls.push(grant); }, stop: stop.signal, log: () => {} });
+    worker: async ({ grant }) => { calls.push(grant); }, threadOf: () => null, stop: stop.signal, log: () => {} });
   const ended = await waitFor(() => terminalStates.has(listRequests(root)[0]?.status.state) && listRequests(root)[0], "the request must end");
   stop.abort();
   await service;
@@ -1226,4 +1294,17 @@ test("a newer commit keeps the owner and the place of the request it replaces", 
   finishHeld();
   for (const id of [newer.id, other.id]) assert.equal((await settled(id)).status.verdict, "PASS");
   assert.deepEqual(calls.map(call => call.id), [running.id, newer.id, other.id]);
+});
+
+test("pnpm verify:pr prints the owner the service recorded, and how to name one when only the checkout owns the request", async t => {
+  const { root, fixture } = harness(t);
+  const owner = async fields => {
+    fixture.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "owner");
+    const lines = [];
+    await verifyThroughQueue({ root, detach: true, pollMs: 20, log: line => lines.push(line),
+      submission: { head: fixture.git("rev-parse", "HEAD"), base: fixture.base, scope: "all", gates: { rust: true, js: true }, checkout: "pass", ...fields } });
+    return lines.filter(line => line.startsWith("owner: "));
+  };
+  assert.deepEqual(await owner({ branch: "refs/heads/named", ownerName: "Sol" }), ["owner: Sol"]);
+  assert.deepEqual(await owner({ branch: "refs/heads/unnamed" }), ["owner: pass (its checkout). Pass --owner <name> to group a thread's requests under one owner."]);
 });
