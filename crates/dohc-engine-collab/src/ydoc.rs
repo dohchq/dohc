@@ -2559,8 +2559,8 @@ fn parse_markdown_blocks_checked(body: &str, reading: MarkdownReading) -> (Vec<M
     (blocks, refused)
 }
 
-// Marked expands item headers at tab stops, and every continuation tab to four
-// spaces before removing the content indent. Root code bodies stay literal.
+// Marker tabs use tab stops; continuation indentation uses four spaces per tab.
+// Tabs after the syntax prefix remain content in every reading.
 fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow<'_, str> {
     // Projected indentation is spaces; its literal tabs belong to content.
     if reading == MarkdownReading::ProjectedSource || !body.contains('\t') {
@@ -2602,17 +2602,13 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
                 fence = None;
             }
             if list {
-                if reading == MarkdownReading::Projection {
-                    let indent = quoted
-                        .bytes()
-                        .take_while(|b| matches!(b, b' ' | b'\t'))
-                        .count();
-                    output.push_str(&line[..quote_prefix]);
-                    output.push_str(&quoted[..indent].replace('\t', "    "));
-                    output.push_str(&quoted[indent..]);
-                } else {
-                    output.push_str(&line.replace('\t', "    "));
-                }
+                let indent = quoted
+                    .bytes()
+                    .take_while(|b| matches!(b, b' ' | b'\t'))
+                    .count();
+                output.push_str(&line[..quote_prefix]);
+                output.push_str(&quoted[..indent].replace('\t', "    "));
+                output.push_str(&quoted[indent..]);
             } else {
                 output.push_str(line);
             }
@@ -2644,9 +2640,6 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
                 .get(marker_width)
                 .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n'))
             && !thematic_break(rest.trim_end_matches('\n'));
-        if indent == 0 && (rest.starts_with(['>', '#', '`', '~'])) {
-            in_list = false;
-        }
         let continuation_columns = quoted[..indent]
             .bytes()
             .map(|byte| if byte == b'\t' { 4 } else { 1 })
@@ -2671,9 +2664,11 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
                     };
             }
             in_list = true;
-        } else if (blank || empty || thematic_break(rest.trim_end_matches('\n')))
-            && indent == 0
-            && !rest.trim().is_empty()
+        } else if !rest.trim().is_empty()
+            && !continuation
+            && (blank
+                || empty
+                || block_start(quoted.trim_end_matches('\n'), false, false).is_some())
         {
             in_list = false;
         }
@@ -2697,17 +2692,30 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
             output.push_str(line);
             continue;
         }
-        // Projection folds still accept tabbed markers, but content tabs are
-        // literal. Include compact child markers in the syntax prefix.
+        // Include checkboxes and compact child markers in the syntax prefix.
         let mut prefix = indent;
         if marker {
             let mut width = marker_width;
             loop {
+                let bullet = quoted[prefix..].starts_with(['-', '+', '*']);
                 prefix += width;
                 prefix += quoted[prefix..]
                     .bytes()
                     .take_while(|b| matches!(b, b' ' | b'\t'))
                     .count();
+                if bullet
+                    && matches!(quoted.get(prefix..prefix + 3), Some("[ ]" | "[x]" | "[X]"))
+                    && quoted
+                        .as_bytes()
+                        .get(prefix + 3)
+                        .is_some_and(|b| matches!(b, b' ' | b'\t'))
+                {
+                    prefix += 3;
+                    prefix += quoted[prefix..]
+                        .bytes()
+                        .take_while(|b| matches!(b, b' ' | b'\t'))
+                        .count();
+                }
                 let rest = &quoted[prefix..];
                 let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
                 width = if rest.starts_with(['-', '+', '*']) {
@@ -2729,7 +2737,7 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
         output.push_str(&line[..quote_prefix]);
         let mut column = 0;
         for (at, character) in quoted.char_indices() {
-            if character == '\t' && (reading != MarkdownReading::Projection || at < prefix) {
+            if character == '\t' && at < prefix {
                 let width = if continuation { 4 } else { 4 - column % 4 };
                 output.extend(std::iter::repeat_n(' ', width));
                 column += width;
@@ -3027,11 +3035,7 @@ fn parse_markdown_blocks_at<'src>(
             }
             continue;
         }
-        let list_reading = if in_list {
-            MarkdownReading::ProjectedSource
-        } else {
-            reading
-        };
+        let list_reading = MarkdownReading::ProjectedSource;
         // Only the first marker needs the override; source_reproduces also tries Projection.
         if let Some(first) = list_marker(line, list_reading) {
             if let Some((list, next)) =
@@ -3452,6 +3456,11 @@ fn ends_table(line: &str) -> bool {
 }
 
 fn parse_heading(line: &str) -> Option<(i64, String)> {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let line = &line[indent..];
     let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
     if !(1..=6).contains(&hashes) {
         return None;
@@ -3632,6 +3641,22 @@ fn plain_bullet_prefix<'src>(
     (items, end)
 }
 
+fn empty_list_child(mut text: &str, reading: MarkdownReading) -> bool {
+    for _ in 0..MARKDOWN_XML_MAX_DEPTH {
+        let Some(child) = list_marker(text, reading) else {
+            break;
+        };
+        if matches!(child.kind, ListKind::Task(_)) {
+            return false;
+        }
+        if child.text.trim().is_empty() {
+            return true;
+        }
+        text = child.text;
+    }
+    false
+}
+
 fn parse_list<'src>(
     lines: &[&'src str],
     start: usize,
@@ -3740,17 +3765,19 @@ fn parse_list<'src>(
                         && continued
                             .iter()
                             .rposition(|line| !blank_line(line))
-                            .and_then(|at| {
-                                list_marker(
-                                    continued[at],
-                                    if at > 0 && blank_line(continued[at - 1]) {
-                                        MarkdownReading::ProjectedSource
-                                    } else {
-                                        reading
-                                    },
-                                )
-                            })
-                            .is_some_and(|child| child.text.trim().is_empty());
+                            .map_or_else(
+                                || empty_list_child(marker.text, reading),
+                                |at| {
+                                    empty_list_child(
+                                        continued[at],
+                                        if at > 0 && blank_line(continued[at - 1]) {
+                                            MarkdownReading::ProjectedSource
+                                        } else {
+                                            reading
+                                        },
+                                    )
+                                },
+                            );
                 }
                 break;
             }

@@ -386,6 +386,7 @@ export function blockForLine(body: string, line: number): LineBlock {
   let openKind: BlockKind = "other";
   let openMarker = "";
   let openIndent = 1;
+  let lazyAllowed = false;
   let quoteOpen = false;
   let quoteCallout = false;
   let quoteFence: Fence | null = null;
@@ -534,9 +535,8 @@ export function blockForLine(body: string, line: number): LineBlock {
           HTML_BLOCK_RE.test(text) ||
           (kind === "ordered" &&
             (quoteCallout || INTERRUPTING_ORDERED_RE.test(text))))) ||
-      // Indented, but not far enough to reach the open item's content. Column
-      // zero would be a lazy continuation of it; this is neither.
-      (open && listOpen && indent > 0 && indent < openIndent);
+      // Ordinary item paragraphs accept underindented lazy continuation.
+      (open && listOpen && !lazyAllowed && indent > 0 && indent < openIndent);
     // A heading opens a block wherever one can open — but indented into a
     // list item it is that item's own heading, which is what `resumes` says.
     const opens = (kind === "heading" || interrupts || !open) && !resumes;
@@ -570,6 +570,10 @@ export function blockForLine(body: string, line: number): LineBlock {
           indent < openIndent))
     ) {
       openIndent = continuationIndent(text);
+      const markerEnd = LIST_MARKER_RE.exec(text)![0].length;
+      const body = text.slice(markerEnd);
+      const padding = /^[ \t]*/.exec(body)![0].length;
+      lazyAllowed = !!body.trim() && columnAt(text, markerEnd + padding) - columnAt(text, markerEnd) < 4;
     }
     // An ATX heading and a thematic break are one line each. The next line
     // opens its own block, blank line or not — `# Plan\nBody` is two nodes.

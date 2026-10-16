@@ -995,31 +995,27 @@ function markdownLists(projected = false) {
   name: 'dohcMarkdownLists', priority: 1001, markdownTokenName: 'list',
   markdownTokenizer: { name: 'list', level: 'block', start: () => -1, tokenize(src, _tokens, helpers) {
     if (!' -+*0123456789'.includes(src[0]) || !/^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|\n|$)/u.test(src)) return undefined
-    // A whole tight list of ordinary single-line items needs only inline lexing.
-    // Keep marker changes, blank lines, indentation and complex starts on Marked.
-    const flatTasks = /^([-+*]) \[[ xX]\] [A-Za-z][^\n\t]*(?:\n\1 \[[ xX]\] [A-Za-z][^\n\t]*)*\n?$/u.test(src)
-    if (flatTasks || /^([-+*]) [A-Za-z][^\n\t]*(?:\n\1 [A-Za-z][^\n\t]*)*\n?$/u.test(src)) {
-      const lines = src.replace(/\n$/u, '').split('\n')
+    // Ordinary tight items need only inline lexing. A following root paragraph
+    // cannot continue the list across a blank; indented bodies stay on Marked.
+    const flatTasks = /^([-+*]) \[[ xX]\] [A-Za-z][^\n\t]*(?:\n\1 \[[ xX]\] [A-Za-z][^\n\t]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
+    const flat = flatTasks ?? /^([-+*]) [A-Za-z][^\n\t]*(?:\n\1 [A-Za-z][^\n\t]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
+      ?? /^[0-9]{1,9}([.)]) [A-Za-z][^\n\t]*(?:\n[0-9]{1,9}\1 [A-Za-z][^\n\t]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
+    if (flat) {
+      const raw = flat[0]
+      const ordered = /^[0-9]/u.test(raw)
+      const lines = raw.split('\n')
       return {
-        type: 'list', raw: src, ordered: false, start: '', loose: false,
+        type: 'list', raw, ordered, start: ordered ? Number.parseInt(raw, 10) : '', loose: false,
         items: lines.map((line, at) => {
-          const body = line.slice(flatTasks ? 6 : 2)
-          const text = at === lines.length - 1 ? body.trimEnd() : body
+          const text = line.slice(flatTasks ? 6 : ordered ? line.indexOf(' ') + 1 : 2)
           return {
             type: 'list_item', raw: line + (at < lines.length - 1 ? '\n' : ''),
-            task: flatTasks, ...(flatTasks ? { checked: line[3].toLowerCase() === 'x' } : {}),
+            task: !!flatTasks, ...(flatTasks ? { checked: line[3].toLowerCase() === 'x' } : {}),
             loose: false, text,
             tokens: [{ type: 'paragraph', raw: text, text, tokens: helpers.inlineTokens(text) }],
           }
         }),
       }
-    }
-    // The upstream scanner is cheaper for flat ordered items. Limit it to
-    // one delimiter and ordinary item starts, so it cannot flatten boundaries.
-    if (/^[0-9]{1,9}([.)]) [A-Za-z][^\n\t]*(?:\n[0-9]{1,9}\1 [A-Za-z][^\n\t]*)*\n?$/u.test(src)) {
-      const list = OrderedList.config.markdownTokenizer!.tokenize(src, _tokens, helpers) as Tokens.List
-      list.start = Number(/^[0-9]+/u.exec(src)![0])
-      return list
     }
     if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?![ \t]*(?:\n|$)|\[[ xX]\](?:[ \t]|\n|$))[^\n]+(?:\n|$))+(?:\n|$)(?![ \t\n0-9*+-])/u.test(src)) return undefined
     // Marked otherwise strips a checkbox from ordered item text as GFM tasks.
@@ -1028,8 +1024,7 @@ function markdownLists(projected = false) {
     if (!list) return undefined
     for (const item of list.items) {
       const task = /^\[([ xX])\][ \t]*(?:\n|$)/u.exec(item.text)
-      if (list.ordered) { item.task = false }
-      else if (task) { item.task = true; item.checked = task[1].toLowerCase() === 'x'; item.text = item.text.slice(task[0].length) }
+      if (!list.ordered && task) { item.task = true; item.checked = task[1].toLowerCase() === 'x'; item.text = item.text.slice(task[0].length) }
       item.tokens = helpers.blockTokens(item.text) as Tokens.ListItem['tokens']
     }
     return list
@@ -1040,7 +1035,7 @@ function markdownLists(projected = false) {
     let separate = false
     for (const item of token.items ?? []) {
       const emptyTask = /^[ ]*[-+*] \[([ xX])\] *\n?$/u.exec(item.raw ?? '')
-      const task = !token.ordered && (item.task || !!emptyTask)
+      const task = item.task || !!emptyTask
       const type = token.ordered ? 'orderedList' : task ? 'taskList' : 'bulletList'
       let list = lists.at(-1)
       if (list?.type !== type || (projected && separate)) {

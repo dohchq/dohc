@@ -1168,6 +1168,15 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
         [5, "After"],
       ],
     },
+    ...[
+      ["1. item\n  lazy\n\nAfter", 2, 4],
+      ["10. item\n   lazy\n\nAfter", 2, 4],
+      ["- item\n lazy\n\nAfter", 2, 4],
+    ].map(([body, lazy, after]) => ({
+      name: `an underindented lazy line stays in its item: ${body}`,
+      body: body as string,
+      lands: [[lazy as number, "lazy"], [after as number, "After"]] as [number, string][],
+    })),
     {
       name: "three lists, two marker changes",
       body: "- a\n\n* b\n\n- c\n\nAfter",

@@ -203,12 +203,33 @@ fn nested_contract_projected_lazy_tabs_remain_content() {
         let canonical = doc.project_richdoc().unwrap();
         assert!(canonical.contains('\t'));
         for reading in [
+            MarkdownReading::Successor,
+            MarkdownReading::Source,
             MarkdownReading::Projection,
             MarkdownReading::ProjectedSource,
         ] {
             doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, &canonical, reading)
                 .unwrap();
             assert_eq!(doc.project_richdoc().unwrap(), canonical);
+        }
+    }
+}
+
+#[test]
+fn nested_contract_tab_normalization_ends_with_the_list() {
+    for source in [
+        "- a\n\n b\n\tc",
+        "-\n b\n\tc",
+        "1. a\n\n  b\n\tc",
+        "- a\n # h\n\tx\ty",
+        "- a\n\nroot\n\ttext",
+    ] {
+        for reading in [
+            MarkdownReading::Source,
+            MarkdownReading::Projection,
+            MarkdownReading::Successor,
+        ] {
+            assert_eq!(normalize_list_tabs(source, reading), source, "{source}");
         }
     }
 }
@@ -226,24 +247,32 @@ fn regenerate_nested_contract_seeds() {
             continue;
         }
         let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown_as(
-            ContentKind::Richdoc,
-            case["nativeSeedSource"]
-                .as_str()
-                .unwrap_or(if case["nativeSourceRefuse"] == true {
-                    case["canonical"].as_str().unwrap()
+        if case["foldSeed"] == true {
+            doc.rewrite_content_to_markdown_for_fold(
+                ContentKind::Richdoc,
+                case["source"].as_str().unwrap(),
+            )
+            .unwrap();
+        } else {
+            doc.rewrite_content_to_markdown_as(
+                ContentKind::Richdoc,
+                case["nativeSeedSource"].as_str().unwrap_or(
+                    if case["nativeSourceRefuse"] == true {
+                        case["canonical"].as_str().unwrap()
+                    } else {
+                        case["source"].as_str().unwrap()
+                    },
+                ),
+                if case["projected"] == true && case["nativeSeedSource"].is_null()
+                    || case["nativeSourceRefuse"] == true
+                {
+                    MarkdownReading::ProjectedSource
                 } else {
-                    case["source"].as_str().unwrap()
-                }),
-            if case["projected"] == true && case["nativeSeedSource"].is_null()
-                || case["nativeSourceRefuse"] == true
-            {
-                MarkdownReading::ProjectedSource
-            } else {
-                MarkdownReading::Source
-            },
-        )
-        .unwrap();
+                    MarkdownReading::Source
+                },
+            )
+            .unwrap();
+        }
         assert_eq!(
             doc.project_richdoc().unwrap(),
             case["canonical"].as_str().unwrap()

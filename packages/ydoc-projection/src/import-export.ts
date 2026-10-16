@@ -477,9 +477,9 @@ export function markdownToYDoc(
 
 // Admission is independent of canonical serialization. Code bodies are opaque;
 // blank lines end lazy continuation, but not an indented continuation block.
-function assertSupportedListMarkdown(markdown: string): string {
+function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (text: string) => string): string {
   // Flat items beginning with ordinary text cannot introduce child blocks.
-  if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?:\[[ xX]\] )?[A-Za-z][^\n\t]*(?:\n|$))+$/u.test(markdown)) return markdown
+  if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?:\[[ xX]\] )?[A-Za-z][^\n\t]*(?:\n|$))+(?:\n[A-Za-z][^\n\t]*\n?)?$/u.test(markdown)) return markdown
   const parents: Array<{ indent: number; column: number; content?: number }> = []
   const lines = markdown.split('\n')
   let changed = false
@@ -487,19 +487,27 @@ function assertSupportedListMarkdown(markdown: string): string {
   let open: { indent: number; column: number } | undefined
   let fence = ''
   let fenceInList = false
+  const protectTabs = (at: number, opaque = false) => {
+    if (!preserveContentTabs || !lines[at].includes('\t')) return
+    lines[at] = lines[at].replace(opaque ? /^([ \t]*)([^\n]*)$/u : /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*][ \t]+(?:\[[ xX]\][ \t]+)?|[0-9]{1,9}[.)][ \t]+)(?:>[ \t]*)*)*)([^\n]*)$/u,
+      (_match, prefix: string, text: string) => prefix + preserveContentTabs(text))
+    changed = true
+  }
   const refuse = () => { throw new Error('Markdown is not representable by the live document contract') }
   for (let at = 0; at < lines.length; at += 1) {
     let line = lines[at].replace(/\r$/u, '')
     if (line.includes('\t')) line = line.replace(/^[ \t]*(?:(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)?/u, prefix => {
       let column = 0
+      const continuation = parents.length > 0 && Array.from(prefix.match(/^[ \t]*/u)![0], character => character === '\t' ? 4 : 1).reduce((sum, width) => sum + width, 0) >= parents.at(-1)!.column
       return Array.from(prefix, character => {
-        const width = character === '\t' ? 4 - column % 4 : 1
+        const width = character === '\t' ? continuation ? 4 : 4 - column % 4 : 1
         column += width
         return character === '\t' ? ' '.repeat(width) : character
       }).join('')
     })
     if (line && !' \t>_-+*0123456789`~#'.includes(line[0])) {
       if (!fence) { if (open) { parents.pop(); open = undefined } if (blank) parents.length = 0; blank = false }
+      if (parents.length || fenceInList && fence) protectTabs(at)
       continue
     }
     if (/^[ \t]*$/u.test(line)) { blank = true; continue }
@@ -512,6 +520,7 @@ function assertSupportedListMarkdown(markdown: string): string {
     rest = rest.slice(quoteIndent)
     const run = /^(?:`{3,}|~{3,})/u.exec(rest)?.[0] ?? ''
     if (fence) {
+      if (fenceInList) protectTabs(at, true)
       if (run[0] === fence[0] && run.length >= fence.length && rest.slice(run.length).trim() === '') fence = ''
       continue
     }
@@ -520,6 +529,7 @@ function assertSupportedListMarkdown(markdown: string): string {
     if (marker && !marker[0].endsWith(' ') && at > 0 && !blank) marker = null
     if (marker && indent >= 4 && indent >= (parents.at(-1)?.content ?? parents.at(-1)?.column ?? 0) + 4) marker = null
     const emptyEnded = !!open && blank
+    if (emptyEnded && parents.some(parent => indent > parent.indent && indent < parent.column)) refuse()
     if (open && (blank || (!marker && indent < open.column))) {
       if (blank ? indent > open.indent && indent < open.column : rest.startsWith('\t')) refuse()
       parents.pop()
@@ -563,9 +573,10 @@ function assertSupportedListMarkdown(markdown: string): string {
       const parent = parents.at(-1)!
       if (indent > parent.indent && blank && indent < parent.column) {
         if (emptyEnded) refuse()
-        parents.length = 0
+        while (parents.length && indent < parents.at(-1)!.column) parents.pop()
       }
     }
+    if (parents.length) protectTabs(at)
     blank = false
   }
   if (fence.startsWith('~') && fenceInList) refuse()
@@ -573,7 +584,6 @@ function assertSupportedListMarkdown(markdown: string): string {
 }
 
 export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'projection' = 'source'): JSONContent {
-  markdown = assertSupportedListMarkdown(markdown)
   const reservedSentinels = new Set(
     markdown.match(PARSE_SENTINEL_RE) ?? [],
   )
@@ -596,12 +606,14 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
 
   // Canonical list indentation must not make Marked expand a content tab.
   const projectionTabs = new Map<string, string>()
+  const preserveTabs = (text: string) => text.replace(/\t/gu, () => {
+    const sentinel = reserveSentinel()
+    projectionTabs.set(sentinel, '\t')
+    return sentinel
+  })
+  markdown = assertSupportedListMarkdown(markdown, reading === 'source' && markdown.includes('\t') ? preserveTabs : undefined)
   if (reading === 'projection' && markdown.includes('\t')) {
-    markdown = markdown.replace(/\t/gu, () => {
-      const sentinel = reserveSentinel()
-      projectionTabs.set(sentinel, '\t')
-      return sentinel
-    })
+    markdown = preserveTabs(markdown)
   }
 
   // A block escape reads as its character anywhere, as does a leading space or

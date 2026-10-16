@@ -101,3 +101,15 @@ it.each(['- a\nlazy\ttext', '- a\n b\tc', '1. a\nlazy\ttext'])('keeps a lazy con
   const canonical = serializeRichdocBody(original)
   expect(parseRichdocMarkdown(canonical, 'projection')).toEqual(original)
 })
+
+it.each(['1.', '-', '- [ ]'])('preserves every ordinary item text for %s', marker => {
+  for (const [first, last] of [['A  ', 'B'], ['A', 'B  '], ['A\u2028b', 'C'], ['A', 'C\u2029d']]) for (const suffix of ['', '\n\nAfter']) {
+    const root = parseRichdocMarkdown(`${marker} ${first}\n${marker === '1.' ? '2.' : marker} ${last}${suffix}`)
+    expect(root.content?.[0]?.content?.map(item => item.content?.[0]?.content?.[0]?.text)).toEqual([first, last])
+  }
+})
+
+it.each(['1.', '1)'])('keeps ordered checkbox content tabs for %s', marker => {
+  const root = parseRichdocMarkdown(`${marker} [ ]\tName\tValue`)
+  expect(root.content?.[0]?.content?.[0]?.content?.[0]?.content?.[0]?.text).toBe('[ ]\tName\tValue')
+})
