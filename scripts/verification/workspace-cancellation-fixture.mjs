@@ -15,12 +15,12 @@ export async function runCanonicalCancellationFixture(root, sourceRoot) {
   put('apps/desktop/scripts/ensure-electron-installed.mjs','');
   put('scripts/verification/rust-reuse.mjs', "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
   put('.github/workflows/pr-checks.yml','fixture workflow');
-  put('node_modules/js-yaml/index.js',"exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");
+  put('node_modules/js-yaml/index.js',"exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],repository:[]};");
   put('node_modules/pnpm/package.json',JSON.stringify({main:'package.json',bin:{pnpm:'fixture.mjs'}}));
   put('scripts/verification/doctor.mjs','export const doctor=()=>({checks:[]});');
   put('scripts/verification/admission.mjs',"export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;");
   put('scripts/verification/build.mjs',`export const prepare=async()=>{}; export const assertPrepared=()=>({}); export const sourceFingerprint=()=> 'fixture'; export const buildEnvironment=()=>process.env; export const withBuildBudget=action=>action(process.env); export const stagedEnginePath='fixture-engine'; export const assertIndependentStagedEngine=()=>{}; export const hashFile=()=>{throw Error('native proof started after cancellation');};`);
-  put('tools/rust-engine-program/build-slot.mjs','export const acquireExclusiveSlot=()=>null;export const acquireVerificationSlot=()=>null;export const resolveBuildBudget=()=>null;');
+  put('tools/rust-engine-program/build-slot.mjs','export const acquireExclusiveSlot=()=>null;export const acquireVerificationSlot=()=>null;export const resolveBuildBudget=()=>null;export const buildQueueStatus=()=>({owners:[]});export const maxVerificationLanes=4;export const readVerificationLanes=()=>1;export const heldVerificationSlots=()=>[];');
   put('tools/rust-engine-program/tree-provenance.mjs',"export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
   const packages = ['ydoc-projection','workspace-auth','z-queued'];
   for(const name of packages) put(`packages/${name}/package.json`,JSON.stringify({name:`@dohc/${name}`,scripts:{test:'vitest run'}}));

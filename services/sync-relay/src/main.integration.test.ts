@@ -1,3 +1,4 @@
+import {accountDeletionKey, ACCOUNT_DELETION_PATH, ACCOUNT_DELETION_KEY_HEADER} from "@dohc/security-contract/account-deletion";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { request as httpRequest } from "node:http";
@@ -102,6 +103,15 @@ function packageRoot(): string {
   return fileURLToPath(new URL("../", import.meta.url));
 }
 
+const EMPTY_DELETION_JOBS_BOOTSTRAP = `
+const {Pool} = await import("pg");
+const query = Pool.prototype.query;
+Pool.prototype.query = function (sql, ...args) {
+  if (sql === "SELECT user_id,email FROM account_deletion_jobs") return Promise.resolve({rows: []});
+  return query.call(this, sql, ...args);
+};
+`;
+
 const PROJECTION_HANDSHAKE_BOOTSTRAP = `
 // Route coverage uses a fake isolated-engine handshake on every host.
 Object.defineProperty(process, "platform", {value: "linux"});
@@ -150,7 +160,7 @@ async function spawnRelay(
 async function spawnRunningRelay(
   dbPath: string,
   envOverrides: Record<string, string | undefined> = {},
-  bootstrap: { rejectPoolEnd?: boolean; sourceEntry?: boolean; projectionHandshake?: boolean } = {},
+  bootstrap: { rejectPoolEnd?: boolean; sourceEntry?: boolean; projectionHandshake?: boolean; emptyDeletionJobs?: boolean } = {},
 ): Promise<RunningRelay> {
   const mainUrl = bootstrap.sourceEntry
     ? new URL("./main.ts", import.meta.url)
@@ -184,6 +194,7 @@ async function spawnRunningRelay(
         throw new Error("injected pool shutdown failure");
       };
     }
+    ${bootstrap.emptyDeletionJobs ? EMPTY_DELETION_JOBS_BOOTSTRAP : ""}
     ${bootstrap.projectionHandshake ? PROJECTION_HANDSHAKE_BOOTSTRAP : ""}
     await import(${JSON.stringify(mainUrl.href)});`,
   ];
@@ -202,6 +213,7 @@ async function spawnRunningRelay(
       SYNC_RELAY_PORT: "0",
       SYNC_RELAY_DB_PATH: dbPath,
       DOHC_RELAY_SHARE_WEB_ORIGIN: "http://127.0.0.1:48123",
+      DOHC_RELAY_SHARE_WEB_URL: "http://127.0.0.1:48123",
       FORCE_COLOR: "0",
       ...envOverrides,
     },
@@ -556,7 +568,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
       BETTER_AUTH_SECRET: "test-secret-that-is-at-least-32-characters",
       POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc",
       SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(TEST_SHUTDOWN_GRACE_PERIOD_MS),
-    });
+    }, {emptyDeletionJobs: true});
     const exited = waitForExit(relay.child);
 
     sendDoubleTerminationSignal(relay.child);
@@ -581,7 +593,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
         POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc",
         SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(TEST_SHUTDOWN_GRACE_PERIOD_MS),
       },
-      { rejectPoolEnd: true },
+      { rejectPoolEnd: true, emptyDeletionJobs: true },
     );
     const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
       (resolve) => relay.child.once("close", (code, signal) => resolve({ code, signal })),
@@ -959,15 +971,15 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
 // and captured stderr instead of a listening URL.
 async function spawnRelayExpectExit(
   envOverrides: Record<string, string | undefined>,
-  bootstrap: { projectionHandshake?: boolean } = {},
+  bootstrap: { projectionHandshake?: boolean; emptyDeletionJobs?: boolean } = {},
 ): Promise<{ code: number | null; stderr: string }> {
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries({ ...process.env, DOHC_RELAY_DEPLOYMENT_CONFIG: undefined, DOHC_RELAY_SERVICE_HOST_CONFIG: undefined, DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined, ...envOverrides })) {
+  for (const [key, value] of Object.entries({ ...process.env, DOHC_RELAY_DEPLOYMENT_CONFIG: undefined, DOHC_RELAY_SERVICE_HOST_CONFIG: undefined, DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined, DOHC_RELAY_SHARE_WEB_URL: "http://share-web:1790", ...envOverrides })) {
     if (value !== undefined) env[key] = value;
   }
   const mainPath = join(buildDirectory, "main.js");
-  const args = bootstrap.projectionHandshake
-    ? ["--input-type=module", "--eval", `${PROJECTION_HANDSHAKE_BOOTSTRAP}\nawait import(${JSON.stringify(pathToFileURL(mainPath).href)});`]
+  const args = bootstrap.projectionHandshake || bootstrap.emptyDeletionJobs
+    ? ["--input-type=module", "--eval", `${bootstrap.emptyDeletionJobs ? EMPTY_DELETION_JOBS_BOOTSTRAP : ""}\n${bootstrap.projectionHandshake ? PROJECTION_HANDSHAKE_BOOTSTRAP : ""}\nawait import(${JSON.stringify(pathToFileURL(mainPath).href)});`]
     : [mainPath];
   const child = spawn(process.execPath, args, {
     cwd: packageRoot(),
@@ -1026,13 +1038,24 @@ function sendDoubleTerminationSignal(child: ChildProcess): void {
 }
 
 describe("sync relay startup guards", () => {
+  it.each(["", "short"])("does not mount account deletion with test auth and a short secret: %s",async secret=>{
+    const root=await tempRoot("deletion-short-secret");
+    const relay=await spawnRunningRelay(join(root,"relay.sqlite"),{BETTER_AUTH_SECRET:secret});
+    const response=await fetch(relay.baseUrl+ACCOUNT_DELETION_PATH,{method:"POST",headers:{"content-type":"application/json",[ACCOUNT_DELETION_KEY_HEADER]:accountDeletionKey(secret)},body:JSON.stringify({operation:"purge",userId:"person",email:"person@example.test"})});
+    expect(response.status).toBe(404);
+  });
+  it("requires an internal share-web URL when its public origin is set",async()=>{
+    const {code,stderr}=await spawnRelayExpectExit({NODE_ENV:"test",SYNC_RELAY_TEST_AUTH:"1",DOHC_RELAY_SHARE_WEB_ORIGIN:"https://share.example.test",DOHC_RELAY_SHARE_WEB_URL:undefined});
+    expect(code).toBe(1);expect(stderr).toContain("requires DOHC_RELAY_SHARE_WEB_URL");
+  });
   it("starts an empty self-host deployment with supported live defaults and reports readiness", async () => {
     const root = await tempRoot("self-host-ready"), configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
     initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
     const relay = await spawnRunningRelay(relayPath, {DOHC_SELF_HOST_LIVE: "1", SYNC_RELAY_DB_PATH: undefined,
       DOHC_RELAY_DEPLOYMENT_CONFIG: configPath, DOHC_RELAY_SERVICE_HOST_ROOT: root,
       DOHC_RELAY_ENGINE_EXECUTABLE: projectionEngine.require(), DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1", DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
-      DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test", DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.test",
+      DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test",
+      DOHC_RELAY_SHARE_WEB_URL: "http://share-web:1790", DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.test",
       DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)});
     expect(relay.stderr()).toContain("WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1");
     // The empty deployment must complete its engine handshake and first pass.
@@ -1200,7 +1223,7 @@ describe("sync relay startup guards", () => {
       DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
       DOHC_PUBLIC_EDIT_RELEASE: undefined, DOHC_RELAY_LINK_LIVE: undefined,
       DOHC_RELAY_NAMED_LIVE_CONFIG: undefined, DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: undefined,
-    }, {projectionHandshake: true});
+    }, {projectionHandshake: true, emptyDeletionJobs: true});
     const baseUrl = relay.baseUrl;
     expect((await fetch(baseUrl + "/health")).status).toBe(200);
     for (const path of ["/sync/live/link-tickets", "/sync/live/link-session", "/sync/live/link-document"]) {
@@ -1218,7 +1241,7 @@ describe("sync relay startup guards", () => {
       DOHC_RELAY_NAMED_LIVE_CONFIG: undefined,
       DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: JSON.stringify({maxSessions: 4, retentionMs: 60000,
         maxPendingRequests: 2, maxRequestBytes: 1038, maxResponseBytes: 4152, timeoutMs: 1000}),
-    }, {projectionHandshake: true});
+    }, {projectionHandshake: true, emptyDeletionJobs: true});
     expect(code).toBe(1);
     expect(stderr).toContain("Public Edit release requires link live routes and the configured service host");
   });

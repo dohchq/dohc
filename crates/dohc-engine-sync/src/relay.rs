@@ -225,6 +225,18 @@ pub struct BlobHaveResponse {
     pub missing: Vec<String>,
 }
 
+impl BlobHaveResponse {
+    /// Reject duplicate or unrequested digests before using a presence answer.
+    pub fn validated_missing(&self, requested: &[String]) -> Result<BTreeSet<&String>, RelayError> {
+        let missing = self.missing.iter().collect::<BTreeSet<_>>();
+        if missing.len() != self.missing.len() || missing.iter().any(|sha| !requested.contains(sha))
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        Ok(missing)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobUploadRequest {
     pub workspace_id: String,
@@ -672,6 +684,14 @@ pub trait RelayTransport {
     fn rotate_epoch(&self, req: EpochRequest) -> Result<EpochResponse, RelayError>;
     fn blobs_have(&self, req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError>;
     fn upload_blob(&self, req: BlobUploadRequest) -> Result<(), RelayError>;
+    fn upload_blobs(&self, requests: Vec<BlobUploadRequest>) -> Result<(), RelayError> {
+        if requests.is_empty() || requests.len() > MAX_BLOB_UPLOAD_BATCH {
+            return Err(RelayError::InvalidResponse);
+        }
+        requests
+            .into_iter()
+            .try_for_each(|request| self.upload_blob(request))
+    }
     fn download_blobs(
         &self,
         req: BlobDownloadBatchRequest,
@@ -753,6 +773,13 @@ pub struct RelaySyncClient<T> {
     automation_claims: std::sync::Mutex<Vec<dohc_engine_domain::AutomationClaim>>,
 }
 
+#[cfg(test)]
+#[path = "relay_prepared_tests.rs"]
+mod prepared_tests;
+
+pub const MAX_BLOB_UPLOAD_BATCH: usize = 4;
+const MAX_BLOB_UPLOAD_BATCH_BYTES: usize = 1024 * 1024;
+
 const MAX_PUSH_OPS_PER_PASS: usize = crate::MAX_PUSH_OPS_PER_BATCH;
 // Soft limit on preparation and blob uploads, reserving 10 seconds of the
 // desktop's 30-second RPC deadline for append and durable acknowledgement.
@@ -764,6 +791,8 @@ const PUSH_PRE_APPEND_BUDGET: std::time::Duration = std::time::Duration::from_se
 pub struct PushWorkspaceProgress {
     started: std::time::Instant,
     acknowledged: usize,
+    confirmed_identity: Option<crate::SyncIdentity>,
+    confirmed_blobs: BTreeSet<String>,
     page: Option<PreparedPushPage>,
     batch_size: usize,
     file_versions_selected: bool,
@@ -771,6 +800,25 @@ pub struct PushWorkspaceProgress {
 }
 
 impl PushWorkspaceProgress {
+    /// Record validated successful responses from this push's transport only.
+    pub fn confirm_blob_presence(
+        &mut self,
+        workspace: &str,
+        epoch: &str,
+        stream: &str,
+        sha256s: impl IntoIterator<Item = String>,
+    ) -> bool {
+        if !self.confirmed_identity.as_ref().is_some_and(|identity| {
+            identity.workspace_id == workspace
+                && identity.replication_epoch == epoch
+                && identity.stream_identity == stream
+        }) {
+            return false;
+        }
+        self.confirmed_blobs.extend(sha256s);
+        true
+    }
+
     /// Sticky across I/O continuations, including failed enrollment work.
     pub fn writer_cache_reset_required(&self) -> bool {
         self.writer_cache_reset_required
@@ -782,6 +830,8 @@ impl Default for PushWorkspaceProgress {
         Self {
             started: std::time::Instant::now(),
             acknowledged: 0,
+            confirmed_identity: None,
+            confirmed_blobs: BTreeSet::new(),
             page: None,
             batch_size: crate::MAX_PUSH_OPS_PER_BATCH,
             file_versions_selected: false,
@@ -825,7 +875,8 @@ struct PreparedPushPage {
     ops: Vec<ReplicationEnvelope>,
     prefix: crate::OwnerPublicationPrefix,
     blob_refs: BTreeMap<String, BTreeSet<BlobKind>>,
-    missing: Option<BTreeSet<String>>,
+    missing: BTreeSet<String>,
+    inventory: VecDeque<Vec<String>>,
     uploaded_ops: usize,
     sending: Option<usize>,
 }
@@ -1407,6 +1458,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .ok_or(RelayError::InvalidResponse)?;
             return Err(RelayError::ClaimRefused(Box::new(refusal.clone())));
         }
+        if !progress
+            .confirmed_identity
+            .as_ref()
+            .is_some_and(|confirmed| {
+                confirmed.workspace_id == identity.workspace_id
+                    && confirmed.replication_epoch == identity.replication_epoch
+                    && confirmed.stream_identity == identity.stream_identity
+            })
+        {
+            progress.confirmed_blobs.clear();
+            progress.confirmed_identity = Some(identity.clone());
+        }
         // A hosted replica holds the owner's documents, not its own: it
         // enrolls nothing and only sends what its live sessions journal.
         let hosted = store
@@ -1519,21 +1582,23 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .map_err(local)?;
                 // An in-flight append can consume its original response after
                 // local edits, but never under a different workspace identity.
-                let cached = progress.page.as_ref().is_some_and(|page| {
+                let previous = progress.page.as_ref().filter(|page| {
                     page.identity == identity
                         && page.origin_id == origin_id
                         && page.cursor == cursor
-                        && (page.sending.is_some() || page.revision == revision)
                 });
+                let cached = previous
+                    .is_some_and(|page| page.sending.is_some() || page.revision == revision);
                 if !cached {
-                    let mut ops = list_replication_ops(
-                        store,
-                        workspace_id,
-                        &origin_id,
-                        cursor,
-                        MAX_PUSH_OPS_PER_PASS - progress.acknowledged,
-                    )
-                    .map_err(local)?;
+                    // Reprove the original bounded page after every write. New
+                    // appends enter the next page, after this one is acknowledged.
+                    let limit = previous
+                        .map_or(MAX_PUSH_OPS_PER_PASS - progress.acknowledged, |page| {
+                            page.ops.len()
+                        });
+                    let mut ops =
+                        list_replication_ops(store, workspace_id, &origin_id, cursor, limit)
+                            .map_err(local)?;
                     if ops.is_empty() {
                         break;
                     }
@@ -1554,18 +1619,38 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     let revision = store
                         .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
                         .map_err(local)?;
-                    progress.page = Some(PreparedPushPage {
+                    let blob_refs = collect_blob_refs(&ops[..prefix.allowed_ops])?;
+                    let retained =
+                        previous.is_some_and(|page| page.ops == ops && page.prefix == prefix);
+                    let mut page = PreparedPushPage {
                         identity: identity.clone(),
                         origin_id: origin_id.clone(),
                         cursor,
                         revision,
-                        blob_refs: collect_blob_refs(&ops[..prefix.allowed_ops])?,
+                        blob_refs,
+                        inventory: VecDeque::new(),
                         ops,
                         prefix,
-                        missing: None,
+                        missing: BTreeSet::new(),
                         uploaded_ops: 0,
                         sending: None,
-                    });
+                    };
+                    if retained && let Some(previous) = progress.page.take() {
+                        page.missing = previous.missing;
+                        page.inventory = previous.inventory;
+                        page.uploaded_ops = previous.uploaded_ops;
+                    } else {
+                        page.inventory = page
+                            .blob_refs
+                            .keys()
+                            .filter(|sha| !progress.confirmed_blobs.contains(*sha))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .chunks(crate::MAX_BLOB_HAVE_BATCH)
+                            .map(<[String]>::to_vec)
+                            .collect();
+                    }
+                    progress.page = Some(page);
                 }
                 let page = progress.page.as_mut().ok_or(RelayError::InvalidResponse)?;
                 let count = match page.sending {
@@ -1576,6 +1661,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         &identity,
                         page,
                         progress.started,
+                        &mut progress.confirmed_blobs,
                     )?,
                 };
                 page.sending = Some(count);
@@ -1859,6 +1945,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             settlement_report_id,
             has_more: settled_more,
             stopped: _,
+            // Only a hosted pass has documents that are not ready.
+            redelivered: _,
         } = self.apply_pulled(
             store,
             cache,
@@ -2064,6 +2152,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             ops.extend(response.ops);
             reads.insert(object_id.clone(), (response.next_cursor, response.has_more));
         }
+        // A returning document's heads come back before its rows route, so
+        // the rows it applied skip as redelivered against them.
+        crate::hosted::unpark_returned(store, workspace_id, faults).map_err(local)?;
 
         // Every document with retained work may retain more behind it; one
         // whose retained work runs past this replay holds from where it stops.
@@ -2100,7 +2191,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         // Relay order is each document's order, across origins.
         ops.sort_by_key(|op| op.relay_seq);
-        let pass = self.apply_pulled(
+        let mut pass = self.apply_pulled(
             store,
             cache,
             workspace_id,
@@ -2127,39 +2218,85 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         // A read stops before its document's first row that did not apply;
         // nothing of it was retained, so its next read fetches it again.
-        let (reads, held) = store
+        let redelivered = std::mem::take(&mut pass.redelivered);
+        let (reads, held, unparks, standing, heads) = store
             .read_with(|conn| {
+                // What holds each path, read once for every document.
+                let mut occupancy = crate::hosted::Occupancy::new(conn, workspace_id);
                 let mut held = BTreeMap::new();
                 let mut settled = BTreeMap::new();
+                // A document whose parked heads this pass freed the paths of
+                // comes back on the next pass.
+                let mut unparks = false;
+                // What its history stored that still stands, checked once
+                // per document against what the pass left holding its paths.
+                let mut standing = Vec::new();
+                for (object_id, stored) in redelivered {
+                    standing.extend(crate::hosted::redelivered_unready(
+                        &mut occupancy,
+                        &object_id,
+                        stored.into_values(),
+                    )?);
+                }
+                // Readiness never precedes its files, so a pass whose commit
+                // can make a document ready writes each of its heads.
+                let mut heads = Vec::new();
                 for (object_id, (cursor, more)) in reads {
-                    let read = match pass.stopped.get(&object_id) {
+                    unparks |= crate::hosted::unparks_next(&mut occupancy, &object_id)?;
+                    let mut read = match pass.stopped.get(&object_id) {
                         Some(op) => crate::HostedRead {
                             // Commit refuses one below its document's read
                             // that is not explained by work it releases.
                             cursor: op
                                 .relay_seq
                                 .map_or(0, |seq| cursor.min(seq.saturating_sub(1))),
-                            stopped: Some(crate::hosted::stopped_hold(conn, &object_id, op)?),
+                            stopped: Some(crate::hosted::stopped_hold(
+                                &mut occupancy,
+                                &object_id,
+                                op,
+                            )?),
                             complete: false,
+                            heads_written: false,
                         },
                         None => crate::HostedRead {
                             cursor,
                             stopped: None,
                             complete: !more,
+                            heads_written: false,
                         },
                     };
-                    if let Some(hold) = read.hold(conn, workspace_id, &object_id)? {
-                        held.insert(object_id.clone(), hold);
+                    match read.hold(&mut occupancy, &object_id)? {
+                        Some(hold) => {
+                            held.insert(object_id.clone(), hold);
+                        }
+                        None if read.complete => {
+                            heads.extend(crate::hosted::head_writes(
+                                conn,
+                                workspace_id,
+                                &object_id,
+                            )?);
+                            read.heads_written = true;
+                        }
+                        None => {}
                     }
                     settled.insert(object_id, read);
                 }
-                Ok::<_, SyncError>((settled, held))
+                Ok::<_, SyncError>((settled, held, unparks, standing, heads))
             })
             .map_err(local)?;
+        for change in standing {
+            pass.changed_paths
+                .entry((change.version_id.clone(), change.path.clone()))
+                .or_insert(change);
+        }
+        for change in heads {
+            insert_changed_path(&mut pass.changed_paths, change);
+        }
         // A finished backfill still leaves the main feed or another document,
         // and a held document whose read went on backfills again.
         let more = has_more
             || pass.has_more
+            || unparks
             || backfill.is_some()
             || reads
                 .values()
@@ -2186,16 +2323,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
-    /// Commit a hosted pass's cursor after its work materialized. Answers
-    /// `false`, committing nothing, when the scope moved or another pass
-    /// committed since its fetch.
+    /// Commit a hosted pass's cursor after its work materialized. Commits
+    /// nothing when the scope moved or another pass committed since its
+    /// fetch.
     pub fn commit_hosted_cursor(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         cursor: &crate::HostedCursor,
         faults: &dyn FaultInjector,
-    ) -> Result<TxnOutcome<bool>, RelayError> {
+    ) -> Result<TxnOutcome<crate::HostedCommit>, RelayError> {
         crate::commit_hosted_cursor(store, workspace_id, cursor, faults).map_err(
             |error| match error {
                 SyncError::InvalidInput {
@@ -2359,12 +2496,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         accumulate_pull_outcome(
                             store,
                             op,
+                            holding.unready(op),
                             outcome,
                             &mut pass.applied,
                             &mut pass.refused,
                             &mut pass.skipped,
                             &mut pass.conflicts_opened,
                             &mut pass.changed_paths,
+                            &mut pass.redelivered,
                             &mut pass.refusals,
                             &mut pass.sharing_declined,
                             &mut pass.record_facts,
@@ -2467,7 +2606,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
-    ) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, RelayError> {
+    ) -> Result<TxnOutcome<crate::CursorCommit>, RelayError> {
         commit_relay_cursor(store, workspace_id, cursor, faults, leases, now_ms).map_err(local)
     }
 
@@ -3443,35 +3582,36 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         identity: &crate::SyncIdentity,
         page: &mut PreparedPushPage,
         started: std::time::Instant,
+        confirmed: &mut BTreeSet<String>,
     ) -> Result<usize, RelayError> {
         let ops = &page.ops[..page.prefix.allowed_ops];
-        if page.missing.is_none() {
-            let all = page.blob_refs.keys().cloned().collect::<Vec<_>>();
-            let mut missing = BTreeSet::new();
-            for chunk in all.chunks(crate::MAX_BLOB_HAVE_BATCH) {
-                let response = self.transport.blobs_have(BlobHaveRequest {
-                    workspace_id: workspace_id.to_owned(),
-                    replication_epoch: identity.replication_epoch.clone(),
-                    stream_identity: identity.stream_identity.clone(),
-                    sha256s: chunk.to_vec(),
-                })?;
-                let requested = chunk.iter().collect::<BTreeSet<_>>();
-                for sha in response.missing {
-                    if !requested.contains(&sha) || !missing.insert(sha) {
-                        return Err(RelayError::InvalidResponse);
-                    }
-                }
-            }
-            page.missing = Some(missing);
+        let missing = &mut page.missing;
+        while let Some(chunk) = page.inventory.front() {
+            let response = self.transport.blobs_have(BlobHaveRequest {
+                workspace_id: workspace_id.to_owned(),
+                replication_epoch: identity.replication_epoch.clone(),
+                stream_identity: identity.stream_identity.clone(),
+                sha256s: chunk.clone(),
+            })?;
+            let returned = response.validated_missing(chunk)?;
+            confirmed.extend(chunk.iter().filter(|sha| !returned.contains(sha)).cloned());
+            missing.extend(response.missing);
+            page.inventory.pop_front();
         }
-        let missing = page.missing.as_mut().ok_or(RelayError::InvalidResponse)?;
+        missing.retain(|sha| !confirmed.contains(sha));
         while page.uploaded_ops < ops.len() {
-            // Finish at least one operation, then reserve time for append and
-            // durable acknowledgement before the caller's 30-second deadline.
             if page.uploaded_ops > 0 && started.elapsed() >= PUSH_PRE_APPEND_BUDGET {
                 break;
             }
-            for sha256 in collect_blob_refs(&ops[page.uploaded_ops..=page.uploaded_ops])?.keys() {
+            let width = if started.elapsed() >= PUSH_PRE_APPEND_BUDGET {
+                1
+            } else {
+                MAX_BLOB_UPLOAD_BATCH
+            };
+            let end = (page.uploaded_ops + width).min(ops.len());
+            let mut uploads = Vec::new();
+            let mut upload_bytes = 0;
+            'blobs: for sha256 in collect_blob_refs(&ops[page.uploaded_ops..end])?.keys() {
                 if !missing.contains(sha256) {
                     continue;
                 }
@@ -3481,21 +3621,46 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     .get(sha256)
                     .ok_or(RelayError::InvalidResponse)?;
                 for kind in kinds {
+                    if !uploads.is_empty()
+                        && local_blob_length(store, sha256, *kind, false)?.is_some_and(|length| {
+                            length > MAX_BLOB_UPLOAD_BATCH_BYTES - upload_bytes
+                        })
+                    {
+                        break 'blobs;
+                    }
                     if let Some(local) = local_blob_bytes(store, sha256, *kind)? {
                         bytes = Some(local);
                         break;
                     }
                 }
-                self.transport.upload_blob(BlobUploadRequest {
+                let bytes = bytes.ok_or(RelayError::BlobInvalid)?;
+                upload_bytes += bytes.len();
+                uploads.push(BlobUploadRequest {
                     workspace_id: workspace_id.to_owned(),
                     replication_epoch: identity.replication_epoch.clone(),
                     stream_identity: identity.stream_identity.clone(),
                     sha256: sha256.clone(),
-                    bytes: bytes.ok_or(RelayError::BlobInvalid)?,
-                })?;
-                missing.remove(sha256);
+                    bytes,
+                });
+                if uploads.len() == MAX_BLOB_UPLOAD_BATCH
+                    || upload_bytes >= MAX_BLOB_UPLOAD_BATCH_BYTES
+                {
+                    break;
+                }
             }
-            page.uploaded_ops += 1;
+            if !uploads.is_empty() {
+                let uploaded = uploads
+                    .iter()
+                    .map(|upload| upload.sha256.clone())
+                    .collect::<Vec<_>>();
+                self.transport.upload_blobs(uploads)?;
+                for sha in uploaded {
+                    missing.remove(&sha);
+                    confirmed.insert(sha);
+                }
+                continue;
+            }
+            page.uploaded_ops = end;
         }
         Ok(page.uploaded_ops)
     }
@@ -3519,7 +3684,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         for (sha256, kinds) in blob_refs_to_apply(store, ops)? {
             let mut missing = Vec::new();
             for kind in kinds {
-                if !local_blob_present(store, &sha256, kind)? {
+                if local_blob_length(store, &sha256, kind, true)?.is_none() {
                     missing.push(kind);
                 }
             }
@@ -3897,7 +4062,9 @@ pub(crate) fn take_local_blob_bytes_call_count() -> usize {
     })
 }
 
-/// Is this digest already hydrated and valid for the kind being asked for?
+/// Read the stored length; with `validate_ceiling`, refuse one over the kind's
+/// ceiling. Upload passes `false` and only needs the length;
+/// `local_blob_bytes` refuses its bytes.
 ///
 /// Both questions, because they stopped being the same one. `Binary` and
 /// `Ydoc` share `binary_blobs` and no longer share a ceiling, so bare table
@@ -3908,15 +4075,16 @@ pub(crate) fn take_local_blob_bytes_call_count() -> usize {
 /// `hydrate_blob_content`, the only place `MAX_CAPTURE_BINARY_FILE_BYTES` is
 /// enforced — and materialize as an oversized captured file.
 ///
-/// So stored bytes over the requested kind's ceiling are refused here, by
+/// So pull's stored bytes over the requested kind's ceiling are refused here, by
 /// name, rather than reported present. Refused rather than re-fetched: the
 /// length is already known, and downloading identical bytes to reject them
 /// would only make the observed size less exact.
-fn local_blob_present(
+fn local_blob_length(
     store: &EngineStore,
     sha256: &str,
     kind: BlobKind,
-) -> Result<bool, RelayError> {
+    validate_ceiling: bool,
+) -> Result<Option<usize>, RelayError> {
     let (constraint, limit_bytes) = blob_ceiling(kind);
     let stored: Option<i64> = store
         .read_with(|conn| {
@@ -3934,17 +4102,17 @@ fn local_blob_present(
         })
         .map_err(local)?;
     let Some(byte_length) = stored else {
-        return Ok(false);
+        return Ok(None);
     };
     let observed = usize::try_from(byte_length).map_err(|_| RelayError::BlobInvalid)?;
-    if observed > limit_bytes {
+    if validate_ceiling && observed > limit_bytes {
         return Err(RelayError::BlobTooLarge {
             constraint,
             limit_bytes,
             observed: ObservedBytes::Exact(observed),
         });
     }
-    Ok(true)
+    Ok(Some(observed))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -4275,7 +4443,7 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
 
 /// Whether a held op is retained across passes, so the cursor can move past
 /// it: work behind a live session, and a hosted moment or Y.Doc row whose
-/// path waits for a departed document to retire. A hosted document that is
+/// path waits for a departed document to park. A hosted document that is
 /// not ready retains nothing.
 fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
     match reason {
@@ -4353,7 +4521,11 @@ struct AppliedPass {
     refused: usize,
     skipped: usize,
     conflicts_opened: i64,
-    changed_paths: BTreeMap<(String, String), crate::MomentMaterializationChange>,
+    changed_paths: ChangedPaths,
+    /// The decisions journaled rows of each hosted document that is not
+    /// ready stored, which the pass has yet to check against what holds
+    /// their paths.
+    redelivered: BTreeMap<String, ChangedPaths>,
     refusals: Vec<crate::ReplicationRefusal>,
     sharing_declined: Vec<crate::SharingDeclined>,
     record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
@@ -5907,16 +6079,22 @@ pub(crate) fn replayed_domain(error: DomainError) -> RelayError {
     }
 }
 
+/// Fold one routed op into its pass. `unready` names its hosted document when
+/// that is not ready; the decisions a row of it the journal already held
+/// stored go to `redelivered`, by document, for its pass to keep what still
+/// stands of them once it has applied ([`crate::hosted::redelivered_unready`]).
 #[allow(clippy::too_many_arguments)]
 fn accumulate_pull_outcome(
     store: &EngineStore,
     op: &ReplicationEnvelope,
+    unready: Option<&str>,
     outcome: ApplyOutcome<crate::RoutedApply>,
     applied: &mut usize,
     refused: &mut usize,
     skipped: &mut usize,
     conflicts_opened: &mut i64,
-    changed_paths: &mut BTreeMap<(String, String), crate::MomentMaterializationChange>,
+    changed_paths: &mut ChangedPaths,
+    redelivered: &mut BTreeMap<String, ChangedPaths>,
     refusals: &mut Vec<crate::ReplicationRefusal>,
     sharing_declined: &mut Vec<crate::SharingDeclined>,
     record_facts: &mut Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
@@ -5961,10 +6139,14 @@ fn accumulate_pull_outcome(
             if let Some(refusal) = crate::apply::read_replayed_refusal(store, op).map_err(local)? {
                 push_refusal_once(refusals, refusal);
             }
+            let stored = match unready {
+                Some(object_id) => redelivered.entry(object_id.to_owned()).or_default(),
+                None => &mut *changed_paths,
+            };
             for change in
                 crate::router::redelivered_materialization_changes(store, op).map_err(local)?
             {
-                insert_changed_path(changed_paths, change);
+                insert_changed_path(stored, change);
             }
             *skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?;
         }
@@ -5975,8 +6157,11 @@ fn accumulate_pull_outcome(
     Ok(())
 }
 
-fn insert_changed_path(
-    changed_paths: &mut BTreeMap<(String, String), crate::MomentMaterializationChange>,
+/// A pass's materialization decisions, by version and path.
+pub(crate) type ChangedPaths = BTreeMap<(String, String), crate::MomentMaterializationChange>;
+
+pub(crate) fn insert_changed_path(
+    changed_paths: &mut ChangedPaths,
     change: crate::MomentMaterializationChange,
 ) {
     changed_paths.insert((change.version_id.clone(), change.path.clone()), change);
@@ -6120,7 +6305,8 @@ mod push_budget_tests {
                     pending: None,
                     budget_exhausted: false,
                 },
-                missing: Some(BTreeSet::from([sha])),
+                missing: BTreeSet::from([sha]),
+                inventory: VecDeque::new(),
                 uploaded_ops: 0,
                 sending: None,
             };
@@ -6132,12 +6318,13 @@ mod push_budget_tests {
                         "ws",
                         &identity,
                         &mut page,
-                        std::time::Instant::now()
+                        std::time::Instant::now(),
+                        &mut BTreeSet::new(),
                     )
                     .unwrap(),
                 2
             );
-            assert!(page.missing.unwrap().is_empty());
+            assert!(page.missing.is_empty());
         }
     }
 
@@ -6174,7 +6361,8 @@ mod push_budget_tests {
                 budget_exhausted: false,
             },
             blob_refs: BTreeMap::new(),
-            missing: None,
+            inventory: VecDeque::new(),
+            missing: BTreeSet::new(),
             uploaded_ops: 0,
             sending: None,
         };
@@ -6182,7 +6370,14 @@ mod push_budget_tests {
         let started = std::time::Instant::now() - PUSH_PRE_APPEND_BUDGET;
         assert_eq!(
             client
-                .upload_push_prefix(&store, "ws", &identity, &mut page, started)
+                .upload_push_prefix(
+                    &store,
+                    "ws",
+                    &identity,
+                    &mut page,
+                    started,
+                    &mut BTreeSet::new()
+                )
                 .unwrap(),
             1
         );

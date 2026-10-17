@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import * as Y from "yjs";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
-import { startServiceLiveHost, type ServiceWorkspace } from "./serviceLiveHost.js";
+import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots, type ServiceWorkspace } from "./serviceLiveHost.js";
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
@@ -837,6 +837,21 @@ it("keeps the daemon after a refused attach and retires it when the engine expir
   refuse("SESSION_EXPIRED");
   await expect(o.host.update({workspaces, documents: [o.sibling]})).rejects.toThrow("SESSION_EXPIRED");
   expect(o.host.invalidated.aborted).toBe(true);
+});
+
+it("removes a detached configured root after restart and keeps unrelated roots", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-configured-root-deletion-"));
+  cleanup.push(() => rm(root,{recursive:true,force:true}));
+  const deleted = join(root,"deleted"), kept = join(root,"kept");
+  await mkdir(deleted);await mkdir(kept);await writeFile(join(deleted,"account"),"deleted-person");
+  const configPath = join(root,"host.json");
+  await writeFile(configPath,JSON.stringify({workspaces:[{root:deleted,workspaceId:"deleted",maxRegistrations:1},{root:kept,workspaceId:"kept",maxRegistrations:1}]}));
+  await deleteConfiguredServiceWorkspaceRoots(configPath,["deleted"]);
+  await deleteConfiguredServiceWorkspaceRoots(configPath,["deleted"]);
+  expect(existsSync(deleted)).toBe(false);expect(existsSync(kept)).toBe(true);
+  await writeFile(configPath,JSON.stringify({workspaces:[{root,workspaceId:"deleted",maxRegistrations:1},{root:kept,workspaceId:"kept",maxRegistrations:1}]}));
+  await expect(deleteConfiguredServiceWorkspaceRoots(configPath,["deleted"])).rejects.toThrow("overlap");
+  expect(existsSync(kept)).toBe(true);
 });
 
 // An empty host holding the real document and a held one, on a manual clock.

@@ -1,5 +1,6 @@
 import { createRemoteDatasetData, DatasetCatalogPage, type OwnerDatasetData } from "./remoteDataset";
 import { recordedShareSelector } from "./shareViewRecords";
+import { SHARE_VIEW_REOPEN_MESSAGE, shareViewIdentityIsIntact } from "./shareViewMarker";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { readDatasetResponse } from "../ipc/readDatasetResponse";
 import { DatasetInvocationResult } from "@dohc/cli/dataset";
@@ -14,16 +15,18 @@ export function createNamedDatasetData(input: {
   relayJson(credentials: CloudCredentials, path: string, init: RequestInit): Promise<unknown>;
   offline?: { cache: NamedDatasetPageCache; relayResponse(credentials: CloudCredentials, path: string, init: RequestInit): Promise<Response> };
 }): Pick<OwnerDatasetData, "list" | "describe" | "inspect" | "invoke" | "upload" | "file"> {
-  const marker = input.shareView as { shareId?: unknown; relayUrl?: unknown; grantedSelector?: unknown; ended?: unknown } | null;
+  const marker = input.shareView as { shareId?: unknown; recipientUserId?: unknown; relayUrl?: unknown; grantedSelector?: unknown; ended?: unknown } | null;
   if (marker?.ended === true) throw new Error("Your access to this share ended. Ask the owner to share it again.");
-  if (!marker || typeof marker !== "object" || Array.isArray(marker) || typeof marker.shareId !== "string" || !marker.shareId || marker.shareId.length > 200 ||
-    marker.ended !== undefined && marker.ended !== false || !recordedShareSelector(marker.grantedSelector) || typeof marker.relayUrl !== "string" || !input.credentials.relayUrl) {
+  // Reads too: the renderer reads no Collection in a damaged view.
+  if (!marker || typeof marker !== "object" || Array.isArray(marker) || !shareViewIdentityIsIntact(marker)) throw new Error(SHARE_VIEW_REOPEN_MESSAGE);
+  if (marker.ended !== undefined && marker.ended !== false || !recordedShareSelector(marker.grantedSelector) || typeof marker.relayUrl !== "string" || !input.credentials.relayUrl) {
     throw new Error("This shared workspace is unavailable. Open its current share again.");
   }
   const relay = new URL(marker.relayUrl), credentialsRelay = new URL(input.credentials.relayUrl);
   if (!["http:", "https:"].includes(relay.protocol) || relay.username || relay.password || relay.search || relay.hash ||
     relay.href.replace(/\/+$/, "") !== credentialsRelay.href.replace(/\/+$/, "")) throw new Error("Sign in to the server this shared workspace uses.");
-  const data = createRemoteDatasetData({ ...input, shareId: marker.shareId });
+  const shareId = marker.shareId;
+  const data = createRemoteDatasetData({ ...input, shareId });
   const exposed = { list: data.list, describe: data.describe, invoke: data.invoke, upload: data.upload, file: data.file };
   if (!input.offline) return exposed;
   const { cache, relayResponse } = input.offline;
@@ -36,7 +39,7 @@ export function createNamedDatasetData(input: {
     current();
     const epoch = await cache.begin();
     let fingerprint: string | null = null;
-    const remote = createRemoteDatasetData({ ...input, shareId: marker!.shareId as string, relayJson: async (credentials, path, init) => {
+    const remote = createRemoteDatasetData({ ...input, shareId, relayJson: async (credentials, path, init) => {
       const response = await relayResponse(credentials, path, init);
       try {
         current();

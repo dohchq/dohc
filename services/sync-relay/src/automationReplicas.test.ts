@@ -1,3 +1,6 @@
+import {createAccountDeletionRoute} from "./accountDeletionRoute";
+import {initializeAccountDeletion} from "./storage/accountDeletion";
+import type {StorageContext} from "./storage/context";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -9,7 +12,7 @@ import { createServiceHostReplication } from "./serviceHostReplication";
 import { deriveServiceHostBearer } from "./serviceHostCredential";
 import type { SyncRelayStorage } from "./storage";
 import { AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS, AUTOMATION_WORKSPACE_LEAVE_AFTER_MS } from "./storage/automationWorkspaces";
-import { closeTestStorages, inspectDatabase, storagePath, testStorage } from "./testing";
+import { closeTestStorages, inspectDatabase, storagePath, testStorage, closeTestStorage, reopenTestStorage } from "./testing";
 import { notifyRelayWrite } from "./relayWriteChanges";
 
 const spawn = vi.hoisted(() => vi.fn());
@@ -73,6 +76,19 @@ describe("the workspaces this server keeps a replica of", () => {
     expect(pressState(raw, "taken-here")).toEqual({ state: "settled", outcome: "ended" });
     expect(pressState(raw, "taken-there")).toEqual({ state: "accepted", outcome: null });
     expect(storage.joinAutomationWorkspace({ workspaceId: "unknown", nowMs: 1 })).toBeNull();
+  });
+
+  it("replaces a lost replica only once the server began running automations in its incarnation", async () => {
+    const { storage, raw } = await relay();
+    const first = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 10 })!;
+    acceptedPress(raw, "taken-here", "server");
+    expect(storage.replaceLostAutomationReplica({ workspaceId: WORKSPACE, incarnation: 1, nowMs: 20 }), "nothing ran in it").toEqual(first);
+    storage.beginAutomationServerCopy({ workspaceId: WORKSPACE, incarnation: 1 });
+    const second = storage.replaceLostAutomationReplica({ workspaceId: WORKSPACE, incarnation: 1, nowMs: 30 })!;
+    expect(second).toMatchObject({ incarnation: 2, startedAtMs: 30 });
+    expect(second.credentialNonce).not.toBe(first.credentialNonce);
+    expect(pressState(raw, "taken-here")).toEqual({ state: "settled", outcome: "ended" });
+    expect(storage.replaceLostAutomationReplica({ workspaceId: WORKSPACE, incarnation: 1, nowMs: 40 }), "already replaced").toEqual(second);
   });
 
   it("leaves a day after no condition needs it, and rejoins as it was", async () => {
@@ -282,6 +298,46 @@ describe("the automation replicas", () => {
     return { replicas: started, root };
   }
 
+  it("deletes an account's replica immediately and never reopens it", async () => {
+    const {storage} = await relay();
+    storage.claimWorkspace({workspaceId: "survivor", ownerUserId: "other", createdAtMs: 1});
+    storage.claimWorkspaceIdentity({workspaceId: "survivor", replicationEpoch: "epoch", streamIdentity: "stream"});
+    const engine = fakeEngine();
+    const {replicas: running} = await replicas(storage, () => [WORKSPACE, "survivor"], {ms: 0});
+    const deletedRoot = running.replica(WORKSPACE)!.root;
+    const survivorRoot = running.replica("survivor")!.root;
+    const deletion=createAccountDeletionRoute({storage:storage as StorageContext,key:"bearer",fenceKey:"fence",invalidate(){},deleteRuntime:async()=>running.deleteWorkspaces([WORKSPACE])});
+    deletion.fence("owner","owner@example.test");
+    await running.deleteWorkspaces([WORKSPACE]);
+    expect(running.replica(WORKSPACE)).toBeUndefined();
+    expect(existsSync(deletedRoot)).toBe(false);
+    expect(existsSync(survivorRoot)).toBe(true);
+    const opens = engine.methods().filter(method => method === "workspace.open").length;
+    running.reconcile();
+    await running.settled();
+    expect(engine.methods().filter(method => method === "workspace.open")).toHaveLength(opens);
+    expect(existsSync(deletedRoot)).toBe(false);
+    await running.deleteWorkspaces([WORKSPACE]);
+    expect(running.replica("survivor")).toBeDefined();
+  });
+
+  it("does not recreate a copy after a restart between runtime and SQL deletion",async()=>{
+    const {storage}=await relay();fakeEngine();
+    const {replicas:running,root}=await replicas(storage,()=>[WORKSPACE],{ms:0});
+    const deletedRoot=running.replica(WORKSPACE)!.root;
+    const deletion=createAccountDeletionRoute({storage:storage as StorageContext,key:"bearer",fenceKey:"fence",invalidate(){},deleteRuntime:async()=>running.deleteWorkspaces([WORKSPACE]),afterPhase(phase){if(phase==="runtime")throw Error("crash after runtime");}});
+    await expect(deletion.purge("owner","owner@example.test")).rejects.toThrow("crash after runtime");
+    expect(storage.listAutomationWorkspaces()).toHaveLength(1);
+    expect(existsSync(deletedRoot)).toBe(false);
+    await running.close();const path=storagePath(storage);closeTestStorage(storage);
+    const restartedStorage=reopenTestStorage(path) as StorageContext;
+    initializeAccountDeletion(restartedStorage,"fence");
+    const restarted=await startAutomationReplicas({storage:restartedStorage,root,engineExecutable:process.execPath,relayOrigin:"https://relay.example",key,namespace,wanted:()=>[WORKSPACE],onError:unexpectedErrors()});
+    cleanup.push(()=>restarted.close());await restarted.settled();
+    expect(restarted.replica(WORKSPACE)).toBeUndefined();expect(existsSync(deletedRoot)).toBe(false);
+    const resume=createAccountDeletionRoute({storage:restartedStorage,key:"bearer",fenceKey:"fence",invalidate(){},deleteRuntime:async()=>{throw Error("runtime must not repeat");}});
+    await resume.purge("owner","owner@example.test");expect(restartedStorage.listAutomationWorkspaces()).toEqual([]);
+  });
   it("checks the daemon even without workspaces, and reports its exit until it restarts", async () => {
     const { storage } = await relay();
     const engine = fakeEngine();
@@ -1102,6 +1158,35 @@ describe("the automation replicas", () => {
     await running.settled();
     expect(spawn).toHaveBeenCalledTimes(2);
     expect(running.replica(WORKSPACE)).toMatchObject({ incarnation: 2, workspace: "handle-1" });
+  });
+
+  it("starts a new incarnation that ends the presses the server took when the copy it began lost its folder", async () => {
+    const { storage, raw } = await relay();
+    fakeEngine();
+    const clock = { ms: 1 };
+    const { replicas: first, root } = await replicas(storage, () => [WORKSPACE], clock);
+    storage.beginAutomationServerCopy({ workspaceId: WORKSPACE, incarnation: 1 });
+    acceptedPress(raw, "taken-here", "server");
+    await first.close();
+
+    clock.ms = 2;
+    const kept = await start(storage, { root, wanted: () => [WORKSPACE], nowMs: () => clock.ms });
+    await kept.settled();
+    expect(kept.replica(WORKSPACE), "a restart that kept its host data").toMatchObject({ incarnation: 1, startedAtMs: 1 });
+    expect(pressState(raw, "taken-here")).toEqual({ state: "accepted", outcome: null });
+    await kept.close();
+
+    // The server restarts with empty host data and the same relay.
+    clock.ms = 3;
+    const { replicas: emptied } = await replicas(storage, () => [WORKSPACE], clock);
+    expect(emptied.replica(WORKSPACE)).toMatchObject({ incarnation: 2, startedAtMs: 3 });
+    expect(pressState(raw, "taken-here")).toEqual({ state: "settled", outcome: "ended" });
+    await emptied.close();
+
+    // Nothing ran in incarnation 2, so losing its folder too starts no third.
+    clock.ms = 4;
+    const { replicas: again } = await replicas(storage, () => [WORKSPACE], clock);
+    expect(again.replica(WORKSPACE)).toMatchObject({ incarnation: 2, startedAtMs: 3 });
   });
 
   it("closes a replica that never opened fully, and tries again later", async () => {
