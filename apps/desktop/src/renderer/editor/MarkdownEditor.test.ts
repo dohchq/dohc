@@ -32,6 +32,7 @@ import { marked } from "marked";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { NodeSelection } from "@tiptap/pm/state";
+import { closeHistory } from "@tiptap/pm/history";
 import {
   prosemirrorJSONToYXmlFragment,
   yXmlFragmentToProseMirrorRootNode,
@@ -874,6 +875,138 @@ describe("MarkdownEditor empty list item focus", () => {
 // binding converts the Y.Doc through that schema. A `paragraph+` task item
 // makes the indented list schema-invalid, so binding drops the whole task list
 // and the document opens empty.
+describe.each(["local", "collaboration"])("MarkdownEditor nested list interactions (%s)", (mode) => {
+  let ydoc: Y.Doc | undefined;
+  afterEach(() => { cleanup(); ydoc?.destroy(); ydoc = undefined; });
+
+  async function mount(markdown: string) {
+    ydoc = mode === "collaboration" ? markdownToYDoc(markdown) : undefined;
+    render(createElement(MarkdownEditor, {
+      value: markdown, onDirty: vi.fn(), workspaceId: "workspace-1",
+      path: "nested.md", knownFiles: [],
+      collab: ydoc ? { ydoc, status: "connected", peerCount: 0, synced: true } : undefined,
+    }));
+    const surface = await screen.findByTestId("markdown-editor");
+    const editor = editorBehind(surface);
+    return { surface, editor };
+  }
+
+  function caret(editor: Editor, text: string) {
+    let position = -1;
+    editor.state.doc.descendants((node, pos) => {
+      if (node.isTextblock && node.textContent === text) position = pos + 1;
+    });
+    expect(position).toBeGreaterThan(0);
+    act(() => { editor.commands.setTextSelection(position); editor.view.focus(); });
+  }
+
+  function reversible(surface: HTMLElement, editor: Editor, action: () => void, check: () => void) {
+    // Isolate the action from fixture edits in either history implementation.
+    fireEvent.focus(surface);
+    editor.view.dispatch(closeHistory(editor.state.tr));
+    const before = editor.getJSON();
+    act(action);
+    check();
+    const after = editor.getJSON();
+    expect(after).not.toEqual(before);
+    fireEvent.keyDown(surface, { key: "z", ctrlKey: true });
+    expect(editor.getJSON()).toEqual(before);
+    fireEvent.keyDown(surface, { key: "y", ctrlKey: true });
+    expect(editor.getJSON()).toEqual(after);
+  }
+
+  it.each(["bullet", "ordered", "task"])("indents and outdents %s items with Tab and Shift-Tab", async (kind) => {
+    const marker = kind === "task" ? "- [ ]" : kind === "ordered" ? "1." : "-";
+    const { surface, editor } = await mount(`${marker} parent\n${marker} child`);
+    caret(editor, "child");
+    reversible(surface, editor, () => { fireEvent.keyDown(surface, { key: "Tab" }); }, () => {
+      expect(surface.querySelector("li li")?.textContent).toContain("child");
+    });
+    caret(editor, "child");
+    reversible(surface, editor, () => { fireEvent.keyDown(surface, { key: "Tab", shiftKey: true }); }, () => {
+      expect(surface.querySelector("li li")).toBeNull();
+    });
+  });
+
+  it.each(["Enter", "Backspace"])("lifts an empty child with %s", async (key) => {
+    const { surface, editor } = await mount("- parent\n  - child");
+    caret(editor, "child");
+    act(() => { editor.commands.deleteRange({ from: editor.state.selection.from, to: editor.state.selection.from + 5 }); });
+    reversible(surface, editor, () => { fireEvent.keyDown(surface, { key }); }, () => {
+      expect(surface.querySelector("li li")).toBeNull();
+      expect(surface.querySelectorAll("li")).toHaveLength(2);
+    });
+  });
+
+  it("joins a child at its start with Backspace", async () => {
+    const { surface, editor } = await mount("- parent\n  - child");
+    caret(editor, "child");
+    reversible(surface, editor, () => { fireEvent.keyDown(surface, { key: "Backspace" }); }, () => {
+      expect(surface.querySelector("li li")).toBeNull();
+      expect(surface.textContent).toContain("child");
+    });
+  });
+
+  it("toggles a child checkbox without changing its parent", async () => {
+    const { surface, editor } = await mount("- [ ] parent\n  - [ ] child");
+    reversible(surface, editor, () => { fireEvent.click(surface.querySelectorAll("input[type=checkbox]")[1]!); }, () => {
+      expect(surface.querySelector("li li")?.getAttribute("data-checked")).toBe("true");
+      expect(surface.querySelector("li")?.getAttribute("data-checked")).toBe("false");
+    });
+  });
+
+  it.each([
+    ["bullet", "numbered-list"], ["bullet", "task-list"],
+    ["ordered", "bulleted-list"], ["ordered", "task-list"],
+    ["task", "bulleted-list"], ["task", "numbered-list"],
+  ] as const)("turns a %s child into %s and keeps its descendants", async (from, kind) => {
+    const child = from === "task" ? "- [x] child" : from === "ordered" ? "1. child" : "- child";
+    const { surface, editor } = await mount(`- parent\n  ${child}\n${" ".repeat(from === "ordered" ? 5 : 4)}- grandchild`);
+    caret(editor, "child");
+    reversible(surface, editor, () => {
+      runSlashCommand(editor, kind, {
+        open: true, query: "", selected: 0, x: 0, y: 0,
+        bottom: null, maxHeight: 300, placement: "below",
+        from: editor.state.selection.from, to: editor.state.selection.from,
+      }, vi.fn());
+    }, () => {
+      const node = surface.querySelector("li > " + (kind === "numbered-list" ? "ol" : kind === "task-list" ? 'ul[data-type="taskList"]' : 'ul'));
+      expect(node?.textContent).toContain("child");
+      expect(node?.querySelector("li li")?.textContent).toContain("grandchild");
+      expect(editor.state.selection.$from.parent.textContent).toBe("child");
+      expect(editor.state.doc.firstChild?.type.name).toBe("bulletList");
+    });
+  });
+
+  it.each(["plain", "code"])("keeps Markdown literal when pasting as %s text", async (context) => {
+    const { surface, editor } = await mount(context === "code" ? "```\nseed\n```" : "");
+    caret(editor, context === "code" ? "seed" : "");
+    if (context === "plain") fireEvent.keyDown(surface, { key: "Shift", shiftKey: true });
+    fireEvent.paste(surface, { clipboardData: {
+      files: [], types: ["text/plain"],
+      getData: (type: string) => type === "text/plain" ? "- parent\n  - child" : "",
+    } });
+    expect(surface.querySelector("li")).toBeNull();
+    expect(surface.textContent).toContain("- parent");
+  });
+
+  it.each(["markdown", "html"])("pastes a nested list from %s", async (format) => {
+    const { surface, editor } = await mount("");
+    act(() => { editor.view.focus(); });
+    reversible(surface, editor, () => {
+      const markdown = "- parent\n  - child\n    - grandchild";
+      fireEvent.paste(surface, { clipboardData: {
+        files: [], types: [format === "html" ? "text/html" : "text/plain"],
+        getData: (type: string) => type === "text/html" && format === "html"
+          ? "<ul><li><p>parent</p><ul><li><p>child</p><ul><li><p>grandchild</p></li></ul></li></ul></li></ul>"
+          : type === "text/plain" ? markdown : "",
+      } });
+    }, () => {
+      expect(surface.querySelector("li li li")?.textContent).toBe("grandchild");
+    });
+  });
+});
+
 describe("MarkdownEditor nested checklists", () => {
   it("binds an indented list under a checkbox from the Y.Doc", async () => {
     const markdown = ["- [ ] parent", "  - child one", "  - child two"].join("\n");
