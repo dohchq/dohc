@@ -121,6 +121,7 @@ describe("stop one workspace's sync", () => {
     });
     try {
       await h.stop(h.operation());
+      expect(h.cleanupFailed).not.toHaveBeenCalled();
       expect(h.service.agentRunState(h.workspace, h.state).active).toBe(false);
       expect(h.service.dispatchedAgentRun(h.state)).toBe(false);
       expect(h.runStates.map(event => event.active)).toEqual([true, false]);

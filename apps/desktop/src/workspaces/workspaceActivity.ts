@@ -404,6 +404,11 @@ export function createWorkspaceActivity(
           // The error itself stays in the log: it is developer-facing, and
           // the notice owes the user a state and a next step, not a stack.
           entry.historyRecordingUnavailable = true;
+          const capture = entry.capture;
+          entry.capture = null;
+          await capture?.stop().catch(error => {
+            console.error("[desktop] failed to stop unavailable workspace capture:", error);
+          });
         }
       }
       // stopAll may have raced the capture build; do not start a watcher no

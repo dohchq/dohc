@@ -402,6 +402,43 @@ describe("workspaceActivity agent run state", () => {
     return { activity, capture, pushed };
   }
 
+  it("stops recording when restoring the agent author fails during reopen", async () => {
+    const setActiveAgentRun = vi.fn(async (_run: ActiveAgentRun | null) => {});
+    const start = vi.fn();
+    const stop = vi.fn(async () => {});
+    const observeFileEvents = vi.fn();
+    let observation!: WorkspaceObservationCallbacks;
+    const activity = createPhysicalWorkspaceActivity(vi.fn(), {
+      observationFor: (w, callbacks) => {
+        observation = callbacks;
+        return idleObservation(w, callbacks);
+      },
+      captureFor: () => ({ shareView: false, capture: {
+        start, stop, observeFileEvents, setActiveAgentRun,
+        settleAndCloseAllLiveSessions: async () => {},
+      } as never }),
+    });
+    const w = workspace();
+    const state = new WorkspaceActivityState();
+    try {
+      await activity.open(w, state);
+      await activity.claimAgentRun(w, state, { ...run("dispatch-1"), dispatch: "run" });
+      await activity.close(w, state, { preserveAgentRun: true });
+      start.mockClear();
+      stop.mockClear();
+      setActiveAgentRun.mockRejectedValueOnce(new Error("author unavailable"));
+      const status = await activity.open(w, state);
+      expect(status.historyRecordingUnavailable).toBe(true);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(start).not.toHaveBeenCalled();
+      expect(activity.dispatchedAgentRun(state)).toBe(true);
+      observation.facts([{ path: "note.md", kind: "changed" }]);
+      expect(observeFileEvents).not.toHaveBeenCalled();
+    } finally {
+      await activity.close(w, state);
+    }
+  });
+
   it("pushes once when a run starts and once when it ends, read from the slot", async () => {
     const { activity, pushed } = await opened();
     expect(activity.agentRunState(id)).toEqual({ workspaceId: id, revision: 0, active: false });
