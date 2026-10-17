@@ -13,13 +13,16 @@ import * as Y from "yjs";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocBodyFragment,
+  markdownToYDoc,
   parseRichdocMarkdown,
   serializeRichdocBody,
   yDocToMarkdown as projectYDocToMarkdown,
 } from "@dohc/ydoc-projection";
 import { escapeHighlightMarkdown } from "@dohc/ydoc-projection/markdown-extensions";
+import nestedMarkdown from "../../../../../tools/rust-engine-program/nested-markdown-contract.json";
 import rawHtml from "../../../../../packages/ydoc-projection/src/fixtures/raw-html.json";
 import { EDGE_FRONTMATTER, receivedYDoc } from "../markdown/frontmatter.edge-fixture";
+import { parseFrontmatter } from "../markdown/frontmatter";
 import { yDocToMarkdown } from "./import-export";
 import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
 
@@ -520,6 +523,34 @@ describe("literal link source in a browser", () => {
 });
 
 describe("desktop editor schema parity", () => {
+  it.each(nestedMarkdown.cases.filter(item => !('refuse' in item)))("opens and edits the shared $name contract", async item => {
+    const ref = createRef<MarkdownEditorHandle>();
+    const sourceBody = parseFrontmatter(item.source).body;
+    const expected = 'sourceCanonical' in item ? item.sourceCanonical! : item.canonical!;
+    const canonicalBody = parseFrontmatter(expected).body
+      .replaceAll('\r\n', '\n').replace(/^\n+/u, '');
+    const projected = 'projected' in item && item.projected
+      ? markdownToYDoc(item.source, { reading: "projection" })
+      : undefined;
+    const view = render(createElement(MarkdownEditor, {
+      ref, value: projected ? "" : sourceBody, onDirty: vi.fn(), workspaceId: "workspace-1", path: "notes/nested.md", knownFiles: [],
+      ...(projected ? { collab: { ydoc: projected, status: "connected" as const, peerCount: 0, synced: true } } : {}),
+    }));
+    try {
+      await screen.findByTestId("markdown-editor");
+      await waitFor(() => expect(ref.current!.getMarkdown().trimEnd()).toBe(canonicalBody));
+      const editor = mountedEditor();
+      expect(() => editor.state.doc.check()).not.toThrow();
+      act(() => editor.commands.insertContentAt(editor.state.doc.content.size, {
+        type: "paragraph", content: [{ type: "text", text: "!" }],
+      }));
+      expect(ref.current!.getMarkdown()).toContain("!");
+    } finally {
+      view.unmount();
+      projected?.destroy();
+    }
+  });
+
   it("builds the projection's nodes, marks, and attributes", async () => {
     render(
       createElement(MarkdownEditor, {

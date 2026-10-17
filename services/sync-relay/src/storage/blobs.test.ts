@@ -170,6 +170,27 @@ it("keeps every locked retention predicate after initial discovery", async () =>
   for (const sha of [hash, proposalHash, publicationHash]) expect(f.storage.getBlob("w", sha)).not.toBeNull();
 });
 
+it.each([["SQL", false], ["bulk scan", true]])("keeps an aged blob uploaded again after discovery through the %s delete", async (_name, large) => {
+  const f = await fixture();
+  if (large) addRetainedInventory(f);
+  for (const sha of [hash, orphan]) f.put(sha);
+  const context = f.storage as StorageContext;
+  const originalTx = context.tx.bind(context);
+  vi.spyOn(context, "tx").mockImplementationOnce(run => {
+    expect(f.put(hash, 950)).toEqual({ byteLength: 5, alreadyHad: true });
+    return originalTx(run);
+  });
+  expect(await f.storage.collectUnreferencedBlobs("w", { nowMs: 1_000 }))
+    .toEqual({ removed: 1, removedSha256s: [orphan] });
+  expect(f.storage.getBlob("w", hash)).not.toBeNull();
+  // An older upload time never shortens the refreshed window.
+  f.put(hash, 1);
+  expect(await f.storage.collectUnreferencedBlobs("w", { nowMs: 1_000 }))
+    .toEqual({ removed: 0, removedSha256s: [] });
+  expect(await f.storage.collectUnreferencedBlobs("w", { nowMs: 1_050 }))
+    .toEqual({ removed: 1, removedSha256s: [hash] });
+});
+
 it("rolls back a failed delete transaction and rejects the GC result", async () => {
   const f = await fixture();
   f.put(hash);

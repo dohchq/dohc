@@ -22,6 +22,11 @@ use dohc_engine_sync_http::HttpRelayTransport;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(not(test))]
+use dohc_engine_storage::NoFaults as CursorFaults;
+#[cfg(test)]
+use relay_push_tests::cache_tests::CursorFaults;
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayConfiguration {
     pub base_url: String,
@@ -247,6 +252,7 @@ enum RelayIoRequest {
     RotateEpoch(EpochRequest),
     BlobsHave(BlobHaveRequest),
     UploadBlob(BlobUploadRequest),
+    UploadBlobs(Vec<BlobUploadRequest>),
     DownloadBlobs(BlobDownloadBatchRequest),
     UploadKeyEnvelope(KeyEnvelopeRequest),
     DownloadKeyEnvelope(KeyEnvelopeDownloadRequest),
@@ -320,40 +326,18 @@ impl DeferredRelayTransport {
                     RelayIoRequest::Push(_)
                         | RelayIoRequest::PushHosted(_)
                         | RelayIoRequest::ShareLogPush(_)
-                        | RelayIoRequest::UploadBlob(_)
                         | RelayIoRequest::DownloadBlobs(_)
                         | RelayIoRequest::UploadKeyEnvelope(_)
                         | RelayIoRequest::DownloadKeyEnvelope(_)
                         | RelayIoRequest::ShareBlob(_)
                         | RelayIoRequest::ShareProposalSubmit(_)
                 );
-            let uploaded = match &state.completed[index].0 {
-                RelayIoRequest::UploadBlob(upload) => Some((
-                    upload.workspace_id.clone(),
-                    upload.replication_epoch.clone(),
-                    upload.stream_identity.clone(),
-                    upload.sha256.clone(),
-                )),
-                _ => None,
-            };
             let projected = match &mut state.completed[index].1 {
                 Ok(response) => project(response).ok_or(RelayError::InvalidResponse),
                 Err(error) => Err(error.clone()),
             };
             if release && projected.is_ok() {
                 let _ = state.completed.swap_remove(index);
-                if let Some((workspace, epoch, stream, sha)) = uploaded {
-                    for (request, result) in &mut state.completed {
-                        if let RelayIoRequest::BlobsHave(have) = request
-                            && have.workspace_id == workspace
-                            && have.replication_epoch == epoch
-                            && have.stream_identity == stream
-                            && let Ok(RelayIoResponse::BlobsHave(response)) = result
-                        {
-                            response.missing.retain(|missing| missing != &sha);
-                        }
-                    }
-                }
             }
             return projected;
         }
@@ -377,6 +361,53 @@ impl DeferredRelayTransport {
     }
 
     fn complete(&self, request: RelayIoRequest, result: Result<RelayIoResponse, RelayError>) {
+        if let (RelayIoRequest::BlobsHave(have), Ok(RelayIoResponse::BlobsHave(response))) =
+            (&request, &result)
+        {
+            if let Ok(missing) = response.validated_missing(&have.sha256s) {
+                self.push_progress
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .confirm_blob_presence(
+                        &have.workspace_id,
+                        &have.replication_epoch,
+                        &have.stream_identity,
+                        have.sha256s
+                            .iter()
+                            .filter(|sha| !missing.contains(sha))
+                            .cloned(),
+                    );
+            }
+        }
+        let uploads = match (&request, &result) {
+            (RelayIoRequest::UploadBlob(upload), Ok(RelayIoResponse::UploadBlob)) => {
+                std::slice::from_ref(upload)
+            }
+            (RelayIoRequest::UploadBlobs(uploads), Ok(RelayIoResponse::UploadBlob)) => {
+                uploads.as_slice()
+            }
+            _ => &[],
+        };
+        if !uploads.is_empty() {
+            let mut progress = self
+                .push_progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let confirmed = uploads.iter().all(|upload| {
+                progress.confirm_blob_presence(
+                    &upload.workspace_id,
+                    &upload.replication_epoch,
+                    &upload.stream_identity,
+                    [upload.sha256.clone()],
+                )
+            });
+            debug_assert!(
+                confirmed,
+                "a successful upload belongs to the active push identity"
+            );
+            // The native continuation consumes presence, without retaining blob bytes.
+            return;
+        }
         let mut state = self
             .state
             .lock()
@@ -570,6 +601,15 @@ impl RelayTransport for DeferredRelayTransport {
         BlobHaveResponse,
         BlobsHave
     );
+
+    fn upload_blobs(&self, mut requests: Vec<BlobUploadRequest>) -> Result<(), RelayError> {
+        if requests.len() == 1 {
+            return self.upload_blob(requests.remove(0));
+        }
+        self.resolve(RelayIoRequest::UploadBlobs(requests), |response| {
+            matches!(response, RelayIoResponse::UploadBlob).then_some(())
+        })
+    }
 
     fn upload_blob(&self, request: BlobUploadRequest) -> Result<(), RelayError> {
         self.resolve(RelayIoRequest::UploadBlob(request), |response| {
@@ -1678,6 +1718,7 @@ pub enum RelayOperationOutcome {
     Sync(SyncPassOutcome),
     CursorCommitted {
         sharing_declined: Vec<dohc_engine_sync::SharingDeclined>,
+        writer_cache_changed: bool,
     },
     Probe(bool),
     Claimed,
@@ -1895,6 +1936,7 @@ impl ActorHandle {
                 .run(move |store, cache| {
                     let _reservation = queued_reservation;
                     let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
+                    let is_pull = matches!(&queued_operation, RelayOperation::Pull { .. });
                     let outcome = if queued_token.is_cancelled() {
                         Err(RuntimeError::Cancelled)
                     } else {
@@ -1907,9 +1949,37 @@ impl ActorHandle {
                             &queued_claims,
                         )
                     };
-                    // Push handles enrollment resets below. Every other
-                    // operation clears by default.
-                    if !is_push {
+                    // Push handles enrollment resets below. A pull that only
+                    // redelivers durable echoes leaves the writer cache valid;
+                    // applied or materialized work still invalidates it.
+                    let pull_changed = match &outcome {
+                        Ok(RelayOperationOutcome::Sync(
+                            SyncPassOutcome::Complete {
+                                applied,
+                                changed_paths,
+                                ..
+                            }
+                            | SyncPassOutcome::CrashedAfterApply {
+                                applied,
+                                changed_paths,
+                                ..
+                            },
+                        )) => *applied > 0 || !changed_paths.is_empty(),
+                        Err(RuntimeError::Relay(RelayError::Local(reason)))
+                            if reason == RELAY_IO_PENDING =>
+                        {
+                            false
+                        }
+                        _ => true,
+                    };
+                    let unchanged_commit = matches!(
+                        &outcome,
+                        Ok(RelayOperationOutcome::CursorCommitted {
+                            writer_cache_changed: false,
+                            ..
+                        })
+                    );
+                    if !is_push && !unchanged_commit && (!is_pull || pull_changed) {
                         cache.clear();
                     }
                     outcome
@@ -2207,6 +2277,9 @@ fn execute_blocking_http_request(
         RelayIoRequest::BlobsHave(request) => transport
             .blobs_have(request)
             .map(RelayIoResponse::BlobsHave),
+        RelayIoRequest::UploadBlobs(requests) => transport
+            .upload_blobs(requests)
+            .map(|()| RelayIoResponse::UploadBlob),
         RelayIoRequest::UploadBlob(request) => transport
             .upload_blob(request)
             .map(|()| RelayIoResponse::UploadBlob),
@@ -2331,13 +2404,14 @@ fn run_relay_operation(
             store,
             &workspace_id,
             &cursor,
-            &NoFaults,
+            &CursorFaults,
             leases,
             now_ms,
         )? {
-            TxnOutcome::Committed(sharing_declined) => {
-                Ok(RelayOperationOutcome::CursorCommitted { sharing_declined })
-            }
+            TxnOutcome::Committed(commit) => Ok(RelayOperationOutcome::CursorCommitted {
+                sharing_declined: commit.sharing_declined,
+                writer_cache_changed: commit.writer_cache_changed,
+            }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
         RelayOperation::Probe { workspace_id } => {
@@ -2557,6 +2631,7 @@ fn run_relay_operation(
         } => match client.commit_share_view_cursor(store, &workspace_id, &cursor, &NoFaults)? {
             TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted {
                 sharing_declined: Vec::new(),
+                writer_cache_changed: true,
             }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },

@@ -556,6 +556,41 @@ test("a narrowed run tests only the affected packages, and records the rest as s
   assert.deepEqual(drive(null), { ran: ["@dohc/head", "@dohc/tail"], skipped: null, verdict: "PASS" }, "--full runs every package");
 });
 
+test("a full run gives each desktop unit test file a worker of its own, and other runs do not", t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-js-isolation-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "scripts/verification"), { recursive: true });
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "flaky.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  for (const [name, scripts] of [["desktop", { test: "unit then scripts", "test:unit": "vitest run" }], ["tail", { test: "vitest run" }]]) {
+    mkdirSync(join(root, "packages", name), { recursive: true });
+    writeFileSync(join(root, "packages", name, "package.json"), JSON.stringify({ scripts }));
+  }
+  writeFileSync(join(root, "scripts/verification/process.mjs"), `
+    import {resolve} from 'node:path';
+    export const repoRoot=resolve(import.meta.dirname,'../..');
+    export const pnpm=args=>['pnpm',args];
+    export const calls=[];
+    export async function run(_command,args,options){
+      calls.push({call:args.slice(0,4).join(' '),isolation:options?.env?.DOHC_DESKTOP_TEST_ISOLATION??null});
+      if(args.includes('list'))return {stdout:JSON.stringify(['desktop','tail'].map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
+      return {stdout:''};
+    }
+  `);
+  writeFileSync(join(root, "driver.mjs"), `
+    import {testWorkspace} from './scripts/verification/js-tests.mjs';
+    import {calls} from './scripts/verification/process.mjs';
+    await testWorkspace({prepared:true,output:'evidence',full:process.env.FULL==='1'});
+    console.log(JSON.stringify(calls.filter(({isolation})=>isolation!==null)));
+  `);
+  const drive = full => {
+    const env = { ...process.env, FULL: full ? "1" : "0" };
+    delete env.DOHC_DESKTOP_TEST_ISOLATION;
+    return JSON.parse(spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000, env }).stdout.trim().split("\n").at(-1));
+  };
+  assert.deepEqual(drive(true), [{ call: "--filter @dohc/desktop run test:unit", isolation: "all" }], "only the desktop unit tests run isolated");
+  assert.deepEqual(drive(false), [], "a PR run lets desktop test files share workers");
+});
+
 test("the plan retains every package test and preserves stricter worker caps", () => {
   const pkg = (name, scripts = {test: "vitest run"}) => ({name: `@dohc/${name}`, manifest: {scripts}});
   const tasks = testPlan([pkg("future-package"), pkg("workspace-auth"), pkg("workspace-postgres"), pkg("share-web"), pkg("workspace-api"),

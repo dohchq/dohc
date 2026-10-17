@@ -2692,9 +2692,29 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
             )?;
             recovered_sibling = true;
         }
-        let mut update = doc
-            .rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text)
-            .map_err(map_fold_edit_error)?;
+        let mut update =
+            match doc.rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text) {
+                Err(CollabError::MarkdownNotRepresentable)
+                    if pristine_empty && empty_seed_never_replicated_in_tx(tx, key)? =>
+                {
+                    retire_complete_ydoc_lineage_in_tx(tx, complete)?;
+                    return Ok(LineageFold::NoContent);
+                }
+                // Peers already hold the settled body, so an outside edit that
+                // keeps it, such as a frontmatter change, may fold its nested
+                // items. Parse refusals and quote overflow still apply; the
+                // settled-rule exception below then keeps the exact bytes.
+                Err(CollabError::MarkdownNotRepresentable)
+                    if marker.content_kind == ContentKind::Richdoc
+                        && last_settled_text_in_tx(tx, key)?.is_some_and(|settled| {
+                            markdown_body(&settled) == markdown_body(chosen_text)
+                        }) =>
+                {
+                    doc.rewrite_settled_body_for_fold(chosen_text)
+                        .map_err(map_fold_edit_error)?
+                }
+                result => result.map_err(map_fold_edit_error)?,
+            };
         // Check the delta before projection, which has a separate byte cap.
         if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(SyncError::BlobTooLarge {
@@ -2724,17 +2744,7 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
             let mut projection = canonical;
             if marker.content_kind == ContentKind::Richdoc
                 && let Some(source) = doc.settled_markdown_source(&projection.content, || {
-                    tx.query_row(
-                        "SELECT b.text FROM ydoc_docs d JOIN blobs b \
-                         ON b.sha256=COALESCE(d.last_settled_sha, \
-                           CASE WHEN d.settle_seq=0 THEN d.seed_source_sha256 END) \
-                         WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
-                        params![key.workspace_id, key.version_id, key.object_id],
-                        |row| row.get::<_, Option<String>>(0),
-                    )
-                    .optional()
-                    .map(Option::flatten)
-                    .map_err(SyncError::corrupt)
+                    last_settled_text_in_tx(tx, key)
                 })?
             {
                 projection.content = source;
@@ -4219,6 +4229,7 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
     leases: &dyn LeaseProbe,
     batch_inactive: bool,
 ) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
+    const REDELIVERY_PROBE: &str = "ydoc-redelivery-probe";
     if envelope.op_kind != "ydoc.update" {
         return Err(SyncError::UnsupportedOperation);
     }
@@ -4292,12 +4303,58 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         // Invalidate before any transaction so a committed crash stays safe.
         cache.remove(&key);
     }
-    // The blob is validated before any ack path — including the live-lease
-    // defer. A defer acks the coordinate with the imported log as the durable
-    // queue; if the referenced blob were missing or tampered, the peer cursor
-    // would already be past a row the drain can never apply, and the bad
-    // coordinate cannot be re-fetched. Missing/corrupt blob leaves the
-    // coordinate unacked instead.
+    let Some(relay_seq) = envelope.relay_seq else {
+        return Err(SyncError::RetryableState {
+            reason: "pulled ydoc.update is missing its relay sequence",
+        });
+    };
+    let has_deferred_updates = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(SyncError::corrupt)
+    })?;
+    let cheap_probe_allowed = !payload.is_base_state
+        && !leases.is_live(&key)
+        && dohc_engine_collab::read_marker(store, &key)
+            .map_err(map_collab_hard_error)?
+            .is_some_and(|marker| {
+                marker.regime == dohc_engine_collab::Regime::Replicated
+                    && marker.lineage_claim_status == dohc_engine_collab::LineageClaimStatus::Exact
+                    && marker.lineage_claim_id.as_deref() == Some(payload.lineage_claim_id.as_str())
+            });
+    if !has_deferred_updates
+        && cheap_probe_allowed
+        && crate::apply::is_acknowledged_envelope(store, envelope)?
+    {
+        let probe = crate::apply::apply_envelope_with_mutation_outcome::<()>(
+            store,
+            envelope,
+            faults,
+            |_tx, _op| {
+                Err(SyncError::RetryableState {
+                    reason: REDELIVERY_PROBE,
+                })
+            },
+        );
+        match probe {
+            Ok(outcome) => {
+                // The probe closure always returns RetryableState, so Applied
+                // cannot occur unless admission semantics change.
+                return Ok(outcome.map(|()| unreachable!("redelivery probe applied")));
+            }
+            Err(SyncError::RetryableState { reason }) if reason == REDELIVERY_PROBE => {}
+            Err(error) => return Err(error),
+        }
+    }
+    // A non-acknowledged or divergent row takes the full integrity path.
+    // Normal blob writes verify their claimed digest, so a changed payload
+    // cannot enter the cheap exact-envelope path.
+    // Missing or corrupt blobs, and all divergent envelopes, remain on the
+    // full path so their coordinate stays retryable.
     let bytes: Vec<u8> = store.read_with(|conn| {
         conn.query_row(
             "SELECT bytes FROM binary_blobs WHERE sha256=?1",
@@ -4319,11 +4376,6 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
             hard => Err(hard),
         };
     }
-    let Some(relay_seq) = envelope.relay_seq else {
-        return Err(SyncError::RetryableState {
-            reason: "pulled ydoc.update is missing its relay sequence",
-        });
-    };
     if let Some(echo) =
         store.read_with(|conn| live_ordinary_classification(conn, &key, &payload, &bytes))?
     {
@@ -5537,6 +5589,29 @@ fn refuse_ydoc_with_reason(
     })
 }
 
+/// The lineage's last settled text, or its seed source before any settle.
+fn last_settled_text_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<String>, SyncError> {
+    tx.query_row(
+        "SELECT b.text FROM ydoc_docs d JOIN blobs b \
+         ON b.sha256=COALESCE(d.last_settled_sha, \
+           CASE WHEN d.settle_seq=0 THEN d.seed_source_sha256 END) \
+         WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(SyncError::corrupt)
+}
+
+fn markdown_body(markdown: &str) -> &str {
+    dohc_engine_domain::collections::markdown_frontmatter_json_with_body(markdown)
+        .map_or(markdown, |(_, body)| body)
+}
+
 fn map_fold_edit_error(error: CollabError) -> SyncError {
     match error {
         CollabError::UpdateTooLarge { actual, max } => SyncError::BlobTooLarge {
@@ -5549,9 +5624,11 @@ fn map_fold_edit_error(error: CollabError) -> SyncError {
             limit_bytes: max,
             observed_bytes: actual,
         },
-        CollabError::MarkdownQuoteDepthExceeded => SyncError::InvalidInput {
-            reason: "ydoc-resolution-not-representable",
-        },
+        CollabError::MarkdownQuoteDepthExceeded | CollabError::MarkdownNotRepresentable => {
+            SyncError::InvalidInput {
+                reason: "ydoc-resolution-not-representable",
+            }
+        }
         CollabError::MarkdownRewriteUnsupported { .. } => SyncError::InvalidInput {
             reason: "the content kind does not support Markdown conflict resolution",
         },

@@ -1,5 +1,6 @@
 import {accountIsFenced} from "./storage/accountDeletion";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
+import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
 import {prepareHostedSettlements} from "./storage/hostedSettlement";
 import * as shareLabelsStorage from "./storage/shareLabels";
@@ -9,6 +10,8 @@ import type {ShareLabels} from "@dohc/security-contract/share-labels";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
+import * as serviceHostFeedStorage from "./storage/serviceHostFeed";
+import * as serviceHostUploadStorage from "./storage/serviceHostUploads";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
 import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
@@ -394,6 +397,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     const row = serviceHostEnrollmentStorage.currentServiceHostWorkspace(this, workspaceId);
     return row && !accountIsFenced(this, row.ownerUserId) ? row : null;
   }
+  readServiceHostFeedScope(workspaceId: string) {
+    return serviceHostFeedStorage.readServiceHostFeedScope(this, workspaceId);
+  }
+  listServiceHostDocumentRows(input: Parameters<typeof serviceHostFeedStorage.listServiceHostDocumentRows>[1]) {
+    return serviceHostFeedStorage.listServiceHostDocumentRows(this, input);
+  }
+  putServiceHostBlob(input: Parameters<typeof serviceHostUploadStorage.putServiceHostBlob>[1]) {
+    return serviceHostUploadStorage.putServiceHostBlob(this, input);
+  }
+  serviceHostUploaded(workspaceId: string, sha256: string) {
+    return serviceHostUploadStorage.serviceHostUploaded(this, workspaceId, sha256);
+  }
   scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
     return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);
   }
@@ -590,7 +605,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   discardReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.discardReplicaCurrentView>[1]) { return replicaCurrentViews.discardReplicaCurrentView(this,lease); }
-  releaseReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.releaseReplicaCurrentView>[1]) { return replicaCurrentViews.releaseReplicaCurrentView(this,lease); }
+  releaseReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.releaseReplicaCurrentView>[1]) {
+    replicaCurrentViews.releaseReplicaCurrentView(this,lease);
+    replicaCurrentViewReads.forgetReplicaCurrentViewCaches(this,lease.workspaceId);
+  }
   bindReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.bindReplicaCurrentView>[1]) { return replicaCurrentViews.bindReplicaCurrentView(this,lease); }
   replicaCurrentViewSelectors(workspaceId: string) { return replicaCurrentViews.replicaCurrentViewSelectors(this,workspaceId); }
   stageReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[1],view: Parameters<typeof replicaCurrentViews.stageReplicaCurrentView>[2]) { return replicaCurrentViews.stageReplicaCurrentView(this,lease,view); }
@@ -604,6 +622,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   currentViewFilesAtFences(workspaceId: string, files: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[2], previous: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[3], omitted: Parameters<typeof replicaCurrentViews.currentViewFilesAtFences>[4]) { return replicaCurrentViews.currentViewFilesAtFences(this,workspaceId,files,previous,omitted); }
   readReplicaCurrentViewText(workspaceId: string,sha: string) { return replicaCurrentViews.readReplicaCurrentViewText(this,workspaceId,sha); }
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string) { return replicaReads.readReplicaStanding(this, workspaceId, shareGrantBindings); }
+  listReplicaCurrentViewFiles(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) {
+    return replicaCurrentViewReads.listReplicaCurrentViewFiles(this, input, source);
+  }
+  readReplicaCurrentViewFile(input: replicaCurrentViewReads.ReplicaCurrentViewReadInput & {path: string}, source?: replicaCurrentViewReads.ReplicaCurrentViewSource) {
+    return replicaCurrentViewReads.readReplicaCurrentViewFile(this, input, source);
+  }
 
   postAutomationWake(input: noticeStorage.PostAutomationWakeInput): noticeStorage.PostedAutomationWake {
     return noticeStorage.postAutomationWake(this, input);
@@ -683,6 +707,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }) {
     return automationWorkspaceStorage.joinAutomationWorkspace(this, input);
+  }
+
+  replaceLostAutomationReplica(input: { workspaceId: string; incarnation: number; nowMs: number }) {
+    return automationWorkspaceStorage.replaceLostAutomationReplica(this, input);
   }
 
   unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }) {
