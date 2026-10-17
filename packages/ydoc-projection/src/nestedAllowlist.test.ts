@@ -81,6 +81,37 @@ const policy = {
 const validate = createLiveMarkdownJournalValidator(policy)
 const document = { workspaceId: 'workspace', mainVersionId: 'main', objectId: 'object', lineageClaimId: 'lineage' }
 
+const inlineDesktopProbes = [
+  ['- `Vec<T>`\n  - child', 'code', 'Vec<T>'],
+  ['- run `a -> b`\n  - child', 'code', 'a -> b'],
+  ['- `a && b`\n  - child', 'code', 'a && b'],
+  ['- $x > 0$\n  - child', 'mathInline', '$x > 0$'],
+  ['- $a < b$\n  - child', 'mathInline', '$a < b$'],
+  ['- see [[Tom & Jerry]]\n  - child', 'wikilink', '[[Tom & Jerry]]'],
+  ['- [[Meeting notes]]\n  - follow-up', 'wikilink', '[[Meeting notes]]'],
+  ['- ![](shot.png)\n  - caption', 'image', '![](shot.png)'],
+  ['- parent\n  [[Meeting notes]]\n  - child', 'wikilink', '[[Meeting notes]]'],
+  ['- parent\n  ![](shot.png)\n  - child', 'image', '![](shot.png)'],
+  ['- [x] [[Meeting notes]]\n  - child', 'wikilink', '[[Meeting notes]]'],
+  ['- [ ] ![](shot.png)\n  - child', 'image', '![](shot.png)'],
+  ['- {{atom:example name=Tom&Jerry}}\n  - child', 'inlineAtom', '{{atom:example name=Tom&Jerry}}'],
+  ['- {{atom:example}}\n  - child', 'inlineAtom', '{{atom:example}}'],
+  ['- $x$\n  - child', 'mathInline', '$x$'],
+] as const
+
+it('holds inline constructs on both native builders while desktop imports their nodes and original text', () => {
+  for (const [source, type, spelling] of inlineDesktopProbes) {
+    const row = cases.find(row => row.source === source)
+    expect(row, source).toMatchObject({ held: true, builders: [] })
+    const doc = markdownToYDoc(source, { reading: 'source' })
+    try {
+      const body = yXmlFragmentToProseMirrorRootNode(doc.getXmlFragment('body'), getDohcProseMirrorSchema()).toJSON()
+      expect(JSON.stringify(body), source).toContain(`"type":"${type}"`)
+      expect(yDocToMarkdown(doc), source).toContain(spelling)
+    } finally { doc.destroy() }
+  }
+})
+
 it('compares production successor and relation seed trees and witnesses with desktop imports', () => {
   expect(cases.length).toBeGreaterThan(2000)
   for (const row of cases) for (const builder of row.builders) {

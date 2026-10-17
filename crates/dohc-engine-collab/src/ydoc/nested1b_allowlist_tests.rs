@@ -239,9 +239,7 @@ fn generated_sources() -> Vec<String> {
             }
         }
     }
-    for parent in [
-        "-", "*", "+", "1.", "3)", "- [ ]", "* [x]", "+ [X]", "1. [ ]", "3) [X]",
-    ] {
+    for parent in ["-", "*", "+", "1.", "3)", "- [ ]", "* [x]", "+ [X]"] {
         let width = if parent.as_bytes()[0].is_ascii_digit() {
             4
         } else {
@@ -252,7 +250,7 @@ fn generated_sources() -> Vec<String> {
                 "plain",
                 "**bold** and *emphasis*",
                 "`code` and \\*literal\\*",
-                "~~strike~~ a & b",
+                "~~strike~~ and plain text",
             ] {
                 let mut source = String::new();
                 for depth in 0..4 {
@@ -313,11 +311,10 @@ fn generated_sources() -> Vec<String> {
     }
     sources.extend(
         [
-            "- a < b\n  - child",
-            "- Vec<T>\n  - child",
-            "- [literal brackets]\n  - child",
-            "- parent\n\n  <prelude>inline</prelude>\n  - child",
-            "- parent\n\n  <_foo>\n  - child",
+            "- plain text\n  - child",
+            "- **bold** and *emphasis*\n  - ~~strike~~",
+            "- parent\n\n  ```txt\n  [ < > & $ {{atom:example}}\n  ```\n  - child",
+            "```txt\n[ < > & $ {{atom:example}}\n```\n\n- parent\n  - child",
         ]
         .map(str::to_owned),
     );
@@ -482,7 +479,7 @@ fn nested1b_non_allowlisted_shapes() {
     }
 }
 
-fn inline_proof_held_sources() -> [&'static str; 6] {
+fn inline_proof_held_sources() -> [&'static str; 30] {
     [
         "- [label][ref]\n  - child\n\n[ref]: https://example.com",
         "- <https://example.com>\n  - child",
@@ -490,11 +487,35 @@ fn inline_proof_held_sources() -> [&'static str; 6] {
         "- parent\n\n  <span>inline</span>\n  - child",
         "- `Vec<T>`\n  - child",
         "- [link](https://example.com)\n  - child",
+        "- run `a -> b`\n  - child",
+        "- `a && b`\n  - child",
+        "- $x > 0$\n  - child",
+        "- $a < b$\n  - child",
+        "- see [[Tom & Jerry]]\n  - child",
+        "- [[Meeting notes]]\n  - follow-up",
+        "- ![](shot.png)\n  - caption",
+        "- parent\n  [[Meeting notes]]\n  - child",
+        "- parent\n  ![](shot.png)\n  - child",
+        "- [x] [[Meeting notes]]\n  - child",
+        "- [ ] ![](shot.png)\n  - child",
+        "- {{atom:example name=Tom&Jerry}}\n  - child",
+        "- {{atom:example}}\n  - child",
+        "- $x$\n  - child",
+        "- a > b\n  - child",
+        "- a & b\n  - child",
+        "- a < b\n  - child",
+        "- Vec<T>\n  - child",
+        "- [literal brackets]\n  - child",
+        "- parent\n\n  <prelude>inline</prelude>\n  - child",
+        "- parent\n\n  <_foo>\n  - child",
+        "- see [docs](https://example.com)\n  - child",
+        "1. [ ] parent\n    1. [X] child",
+        "3) [X] parent\n    1) [ ] child",
     ]
 }
 
 #[test]
-fn nested1b_inline_proofs_and_narrow_reader_holds() {
+fn nested1b_conservative_inline_holds_on_both_builders() {
     for source in inline_proof_held_sources() {
         assert!(successor(source).is_err(), "{source:?}");
         assert!(
@@ -504,14 +525,28 @@ fn nested1b_inline_proofs_and_narrow_reader_holds() {
             "{source:?}"
         );
     }
-    for source in &inline_proof_held_sources()[..4] {
-        assert!(
-            outside_markdown_is_allowlisted(source),
-            "proof must hold {source:?}"
-        );
-    }
-    for source in ["- a < b\n  - child", "- [literal brackets]\n  - child"] {
+    for source in [
+        "- plain text\n  - child",
+        "- **bold** and *emphasis*\n  - ~~strike~~",
+        "- parent\n\n  ```txt\n  [ < > & $ {{atom:example}}\n  ```\n  - child",
+        "```txt\n[ < > & $ {{atom:example}}\n```\n\n- parent\n  - child",
+    ] {
         assert!(outside_markdown_is_allowlisted(source));
+        production_docs(source);
+    }
+}
+
+#[test]
+fn nested1b_flat_inline_bodies_keep_existing_builder_behavior() {
+    for source in [
+        "- run `a -> b`",
+        "- `a && b`",
+        "- $a < b$",
+        "- [[Meeting notes]]",
+        "- ![](shot.png)",
+        "- {{atom:example name=Tom&Jerry}}",
+    ] {
+        assert_eq!(outside_markdown_allowlist(source), Some(false));
         production_docs(source);
     }
 }

@@ -2880,39 +2880,9 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
 // existing permissive proof, except for the desktop's quote depth limit.
 fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
     fn inline(text: &str) -> bool {
-        let spans = inline_code_spans(text);
-        if spans.iter().any(|span| text[span.clone()].contains('<')) {
-            return false;
-        }
-        // The strict proof accepts escaped nonempty destination links as text;
-        // the desktop gives them link marks instead.
-        let bytes = text.as_bytes();
-        let last_close = bytes.iter().rposition(|byte| *byte == b')');
-        let mut open = Vec::new();
-        let mut at = 0;
-        let mut spans = spans.into_iter().peekable();
-        while at < bytes.len() {
-            if spans.peek().is_some_and(|span| span.start == at) {
-                at = spans.next().unwrap().end;
-                continue;
-            }
-            match bytes[at] {
-                b'\\' => {
-                    at += 2;
-                    continue;
-                }
-                b'[' => open.push(at),
-                b']' if open.pop().is_some_and(|start| start + 1 < at)
-                    && bytes.get(at + 1) == Some(&b'(')
-                    && last_close.is_some_and(|close| close >= at + 2) =>
-                {
-                    return false;
-                }
-                _ => {}
-            }
-            at += 1;
-        }
-        true
+        // Native stores inline Markdown as text. The strict proof cannot
+        // establish agreement with desktop inline nodes for these characters.
+        !text.contains(['[', '<', '>', '&', '$']) && !text.contains("{{")
     }
     fn tree(blocks: &[MdBlock<'_>], in_item: bool) -> bool {
         blocks.iter().all(|block| match block {
