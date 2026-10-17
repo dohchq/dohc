@@ -834,6 +834,15 @@ async function openSelfHostProof(name: string) {
         if (submitted.result !== "success") throw new Error(`Live edit was not accepted: ${JSON.stringify(submitted)}`);
         return submitted.ack;
       }),
+      /** Opens the owner's live view of docs/a.md, runs `between`, then submits a live edit. Resolves to why it was refused, or "accepted". */
+      liveEditAfter: (between: () => unknown) => frameHost(first.document, async (host, doc) => {
+        await between();
+        const before = Y.encodeStateVector(doc);
+        doc.getMap("frontmatter").set("afterwards", "live");
+        const updateBytes = Y.encodeStateAsUpdate(doc, before);
+        return host.submit({deliveryId: randomUUID(), updateDigest: hash(updateBytes), updateBytes}, AbortSignal.timeout(30_000))
+          .then(submitted => submitted.result === "success" ? "accepted" : JSON.stringify(submitted), (error: Error) => error.message);
+      }),
       /** The session host's Y.Doc: the digest of its state as a fresh document encodes it, and its Markdown. */
       hostState: () => frameHost(first.document, async (_host, doc) => ({digest: hash(Y.encodeStateAsUpdate(doc)), markdown: yDocToMarkdown(doc)})),
       documents: async () => (await route("GET")).body.documents as {path: string; status: string; reason?: string}[],
@@ -1007,9 +1016,32 @@ it("settles a live edit its daemon applied before it went, after the share was d
     expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({retired: true, hostDrainedAtMs: expect.any(Number)});
   }, {timeout: 30000});
   expectParkedWith(proof, cursor, markdown);
-  // The owner's own binding outlives the share, but the replacement settled from durable state, loading no session that could deliver.
+  // The replacement settled from durable state, loading no session that could deliver.
   expect(harness.captures.length).toBe(captures);
   return {cursor};
+}), 120000);
+
+// Deleting the last Edit share cuts off admission at once, as Stop does. The
+// owner's live view, open across the deletion, cannot submit again. The edit
+// the running daemon accepted before it settles into the file, the document
+// parks, and the relay's journal holds nothing after that edit.
+it("refuses a live edit after the share was deleted, and parks with the edit accepted before it", () => withSelfHostProof("self-host-share-deleted-open", async proof => {
+  const markdown = await proof.markdownWith("beforeDeletion", "live");
+  const accepted = await proof.liveEdit("beforeDeletion", "live");
+  const document = {workspaceId: "workspace", objectId: proof.activation()!.source.objectId};
+  const refused = await proof.liveEditAfter(() => {
+    expect(proof.storage.revokeShare("share", Date.now())).toBe(true);
+    expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({enabled: true, retired: false});
+    expect(proof.storage.serviceHostDocumentEnabled(document)).toBe(false);
+  });
+  expect(refused).toBe("Named host standing changed.");
+  await vi.waitFor(() => {
+    expect(proof.hosted()?.state).toBe("parked");
+    expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({retired: true, hostDrainedAtMs: expect.any(Number)});
+  }, {timeout: 30000});
+  expectParkedWith(proof, accepted.journalCursor, markdown);
+  expect(proof.deliveryAt(accepted.journalCursor + 1).accepted).toBeUndefined();
+  return {cursor: accepted.journalCursor, refused};
 }), 120000);
 
 const bothReady = (proof: SelfHostProof) => vi.waitFor(async () => expect(await proof.documents()).toEqual([

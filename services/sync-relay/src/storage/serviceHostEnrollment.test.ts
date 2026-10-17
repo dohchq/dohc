@@ -474,6 +474,34 @@ it("retires an enrollment only once no active Edit grant on the owner's shares c
   expect(retire()).toBeNull();
 });
 
+// Proves: live admission needs an Edit grant of the enrollment's owner that
+// covers its path, as its departure does. Deleting the last one refuses the
+// owner's binding at once, though the enrollment stays enabled until its
+// release. Another covering Edit grant keeps it current, and Stop fences it either way.
+it("refuses a document's live binding once no Edit grant of its owner covers it, and keeps Stop's fence", async () => {
+  const f = await fixture(), enrolled = f.enroll();
+  const owner = () => f.storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner-1", shareId: scope.shareId}});
+  const enabled = () => serviceHostDocumentEnabled(f.storage as StorageContext, binding);
+  const refused = {kind: "refused", reason: "host-unavailable"};
+  expect(owner().kind).toBe("current");
+  expect(f.storage.revokeShare(scope.shareId, 30)).toBe(true);
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, enrolled.path)).toMatchObject({enabled: true, retired: false});
+  expect(enabled()).toBe(false);
+  expect(owner()).toEqual(refused);
+  // A View grant, or an Edit grant on another person's share, does not cover it.
+  f.raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('overlap',?,'owner-1',?,0),('foreign',?,'other',?,0)")
+    .run(scope.workspaceId, JSON.stringify({paths: ["docs"], versionId: null}), scope.workspaceId, JSON.stringify({paths: ["docs"], versionId: null}));
+  f.raw.prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES ('overlap-grant','overlap','user','reader',NULL,'view',1,'active',0,NULL,NULL),('foreign-grant','foreign','user','reader',NULL,'edit',1,'active',0,NULL,NULL)`).run();
+  expect(owner()).toEqual(refused);
+  f.raw.prepare("UPDATE sync_relay_share_grants SET access='edit' WHERE grant_id='overlap-grant'").run();
+  expect(enabled()).toBe(true);
+  expect(owner().kind).toBe("current");
+  f.stop();
+  expect(enabled()).toBe(false);
+  expect(owner()).toEqual(refused);
+});
+
 it("applies Pause after host release and fences Stop immediately", async () => {
   const f = await fixture(), enrolled = f.enroll();
   f.seed(scope.workspaceId, "stopped-object", "docs/stopped.md", "stopped-share");

@@ -478,14 +478,19 @@ export function releaseServiceHostEnrollment(storage: StorageContext, input: {wo
   });
 }
 
-/** Absence preserves explicitly configured hosts; a retained enrollment always fences its document. */
+/**
+ * Absence preserves explicitly configured hosts. A retained enrollment fences
+ * its document once its owner stops it, its workspace changes, or no Edit
+ * grant of its owner covers its enrolled path.
+ */
 export function serviceHostDocumentEnabled(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
-  const value = storage.db.prepare(`SELECT e.enabled,e.retired,e.owner_user_id,e.replication_epoch,e.stream_identity,
+  const value = storage.db.prepare(`SELECT e.enabled,e.retired,e.owner_user_id,e.path,e.replication_epoch,e.stream_identity,
     w.owner_user_id AS current_owner,w.replication_epoch AS current_epoch,w.stream_identity AS current_stream
     FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
     WHERE e.workspace_id=? AND e.object_id=?`).get(document.workspaceId, document.objectId);
   return !value || (value.enabled === 1 && value.retired === 0 && value.owner_user_id === value.current_owner &&
-    value.replication_epoch === value.current_epoch && value.stream_identity === value.current_stream);
+    value.replication_epoch === value.current_epoch && value.stream_identity === value.current_stream &&
+    coveredByEditGrant(storage, {workspaceId: document.workspaceId, ownerUserId: String(value.owner_user_id), path: String(value.path)}));
 }
 
 export function scanServiceHostCandidateShares(storage: StorageContext, after?: ServiceHostCandidateCursor, onlyWorkspaceId?: string): ServiceHostCandidatePage {

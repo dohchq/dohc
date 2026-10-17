@@ -11,6 +11,8 @@ import { startServiceLiveHost, type ServiceWorkspace } from "./serviceLiveHost.j
 import { EngineRequestError } from "@dohc/workspace-engine-client/daemon";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {createNamedFrameChanges} from "./liveHostChanges.js";
+import {captureOwnerLiveFrameHost} from "./namedLiveFrameHost.js";
+import type {LiveHostConnectionCoordinate} from "./storage.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
 import {liveEditors} from "./liveEditors.js";
 import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
@@ -584,6 +586,18 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     });
     return client;
   });
+  // An owner live edit, prepared under the current binding. Calling the result commits it as the host's submit does.
+  const prepareEdit = (value: string, coordinate: LiveHostConnectionCoordinate) => {
+    const live = f.storage.resolveCurrentLiveDocumentBinding({document, actor}), read = f.storage.readLiveUpdateJournalCut({document});
+    if (live.kind !== "current" || read.kind !== "cut") throw new Error("Missing live authority.");
+    const doc = new Y.Doc(), suffix = read.cut.suffix.map(row => row.bytes);
+    for (const bytes of [read.cut.checkpoint.bytes, ...suffix]) Y.applyUpdate(doc, bytes);
+    const vector = Y.encodeStateVector(doc); doc.getMap("frontmatter").set("edit", value);
+    const updateBytes = Buffer.from(Y.encodeStateAsUpdate(doc, vector)); doc.destroy();
+    const validation = validateJournal({document, currentPath: live.binding.currentPath, checkpoint: read.cut.checkpoint.bytes, suffix, candidate: updateBytes});
+    return () => f.storage.commitLiveUpdateJournal({host: coordinate, actor, expectedAuthority: live.authority,
+      metadata: {deliveryId: `edit-${value}`, updateDigest: sha256(updateBytes), binding: live.binding}, cutToken: read.cut, validation, updateBytes, receivedAtMs: 5});
+  };
   const host = await startServiceLiveHost({...f, ...(options.frameChanges ? {frameChanges: createNamedFrameChanges(16)} : {})});
   cleanup.push(() => host.close());
   // The activation pass publishes readiness before it pushes the hosted replica.
@@ -598,17 +612,11 @@ async function completedServiceOwner(options: {empty?: boolean; frameChanges?: b
     applied, lost,
     freshRegistrations() {registrations = {next: 100, live: 0};},
     liveRegistration: () => registrations?.live,
+    validateJournal,
+    prepareEdit: (value: string) => prepareEdit(value, host.coordinate),
     // An owner live edit the relay accepts under the running host, as the host's submit commits it.
     acceptEdit(value: string, coordinate = host.coordinate) {
-      const live = f.storage.resolveCurrentLiveDocumentBinding({document, actor}), read = f.storage.readLiveUpdateJournalCut({document});
-      if (live.kind !== "current" || read.kind !== "cut") throw new Error("Missing live authority.");
-      const doc = new Y.Doc(), suffix = read.cut.suffix.map(row => row.bytes);
-      for (const bytes of [read.cut.checkpoint.bytes, ...suffix]) Y.applyUpdate(doc, bytes);
-      const vector = Y.encodeStateVector(doc); doc.getMap("frontmatter").set("edit", value);
-      const updateBytes = Buffer.from(Y.encodeStateAsUpdate(doc, vector)); doc.destroy();
-      const validation = validateJournal({document, currentPath: live.binding.currentPath, checkpoint: read.cut.checkpoint.bytes, suffix, candidate: updateBytes});
-      const committed = f.storage.commitLiveUpdateJournal({host: coordinate, actor, expectedAuthority: live.authority,
-        metadata: {deliveryId: `edit-${value}`, updateDigest: sha256(updateBytes), binding: live.binding}, cutToken: read.cut, validation, updateBytes, receivedAtMs: 5});
+      const committed = prepareEdit(value, coordinate)();
       if (committed.result.kind !== "accepted") throw new Error(`Live edit was not accepted: ${JSON.stringify(committed.result)}`);
       return committed.result.receipt;
     },
@@ -827,8 +835,8 @@ it("keeps a workspace with no documents attached until its replica drains, then 
 });
 
 // An empty host with the document shared with Edit, enrolled and ready.
-async function enrolledServiceHost({freshRegistrations = false} = {}) {
-  const o = await emptyServiceHost();
+async function enrolledServiceHost({freshRegistrations = false, frameChanges = false} = {}) {
+  const o = await emptyServiceHost({frameChanges});
   if (freshRegistrations) o.freshRegistrations();
   o.f.storage.enrollServiceHostDocument({workspaceId: "workspace", ownerUserId: "owner", shareId: "share", path: o.sibling.path, nowMs: 10, guard() {}});
   await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
@@ -1015,7 +1023,7 @@ it("settles a document stopped while no daemon ran, which the daemon after it ne
   expect(o.client().sendLiveApplication).not.toHaveBeenCalled();
 });
 
-// Proves: deleting the share ends live authority as Stop does, while the
+// Proves: deleting the share ends live authority as Stop does, though the
 // enrollment stays enabled until its release. The document settles from
 // durable state, on this daemon and on one started after it.
 it.each([false, true])("settles a document whose share was deleted, after a restart: %s", async restart => {
@@ -1026,7 +1034,8 @@ it.each([false, true])("settles a document whose share was deleted, after a rest
   await vi.waitFor(() => expect(o.applied.has(edit.deliveryId)).toBe(true));
   if (restart) await o.host.close();
   expect(o.f.storage.revokeShare("share", 30)).toBe(true);
-  expect(o.f.storage.serviceHostDocumentEnabled(o.sibling)).toBe(true);
+  expect(o.f.storage.readServiceHostEnrollment("workspace", o.sibling.path)).toMatchObject({enabled: true, retired: false});
+  expect(o.f.storage.serviceHostDocumentEnabled(o.sibling)).toBe(false);
   o.lost.replies = false;
   let host = o.host;
   if (restart) {
@@ -1038,6 +1047,39 @@ it.each([false, true])("settles a document whose share was deleted, after a rest
   await vi.waitFor(() => expect(host.drained("workspace")).toBe(true));
   expect(o.tip()).toEqual(edit);
   expect(departed(o.calls(sent))).toEqual(departure);
+  expect(o.client().sendLiveApplication).toHaveBeenCalledTimes(applications);
+});
+
+// Proves: deleting the last Edit share cuts off admission at once, as Stop
+// does, while the owner's frame session is open and a drain waits in the
+// engine. The session's next frame, an owner edit prepared before the
+// deletion, and the drain all admit nothing. The edit the host applied before
+// it settles, the document leaves and its workspace drains.
+it("admits nothing after the last Edit share is deleted while a drain waits, and settles what the host applied before", async () => {
+  const o = await enrolledServiceHost({frameChanges: true});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const session = captureOwnerLiveFrameHost({authenticatedUserId: "owner", shareId: "share", storage: o.f.storage,
+    native: await o.host.captureNative(o.binding), validate: o.validateJournal,
+    bounds: {maxClientVectorBytes: 1_000, maxSyncOutputBytes: 10_000, maxAppliedUpdateBytes: 10_000, maxSubmissionBytes: 10_000, maxAdmissionBytes: 100_000}});
+  const edit = o.acceptEdit("before");
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+  expect(o.tip()).toEqual(edit);
+  const late = o.prepareEdit("after"), parked = o.park("liveApplication.ownerState"), held = o.host.drain(o.document);
+  await parked.entered.promise;
+  expect(o.f.storage.revokeShare("share", 30)).toBe(true);
+  expect(late().result).toEqual({kind: "refused", reason: "authority-refused"});
+  const frame = Buffer.from("frame");
+  await expect(session.submit({deliveryId: "frame-after", updateDigest: sha256(frame), updateBytes: frame}, new AbortController().signal))
+    .rejects.toThrow("Named host standing changed.");
+  expect(session.invalidated.aborted).toBe(true);
+  parked.release.resolve();
+  await expect(held).rejects.toThrow("Service document activation is incomplete.");
+  const cut = o.f.storage.readLiveUpdateJournalCut({document: o.document}), applications = o.client().sendLiveApplication.mock.calls.length;
+  await o.depart();
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true));
+  expect(o.tip()).toEqual(edit);
+  expect(o.ownerCalls().filter(([method]) => method === "liveApplication.settle").at(-1)).toEqual(["liveApplication.settle", {registrationId: 7, terminalReceipt: edit}]);
+  expect(o.f.storage.readLiveUpdateJournalCut({document: o.document})).toEqual(cut);
   expect(o.client().sendLiveApplication).toHaveBeenCalledTimes(applications);
 });
 
