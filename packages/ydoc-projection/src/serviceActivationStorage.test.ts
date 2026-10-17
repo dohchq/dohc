@@ -613,6 +613,8 @@ it('reports a restore fence that lands while a completed activation waits for do
     let drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
     expect(await d.driver.activate(d.target,signal,settle)).toMatchObject({kind:'done'})
     expect(settle).toHaveBeenCalledTimes(1)
+    // Only this first pass, which has no owner yet, catches up first.
+    expect(d.pull).toHaveBeenCalledTimes(1)
     drain.mockRestore()
 
     const queued=queueBehind(()=>{
@@ -634,7 +636,7 @@ it('reports a restore fence that lands while a completed activation waits for do
     expect(settle).toHaveBeenCalledTimes(2)
     expect(d.driver.workspaceReady('workspace')).toBe(true)
     expect(capture).toHaveBeenCalledTimes(1)
-    expect(d.pull).not.toHaveBeenCalled()
+    expect(d.pull).toHaveBeenCalledTimes(1)
     expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()).toEqual({n:1})
     expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_live_delivery_owners').get()).toEqual({n:1})
     expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
@@ -813,18 +815,29 @@ it('releases a real captured session after a stale cut without retaining another
     expect(f.storage.getLiveHostControl()!.registeredConnectionId).toBeNull()
   }finally{f.close()}
 })
-it('restarts a pending activation with its retained ID instead of pulling and selecting a new cut',async()=>{
+// Proves: a restarted driver catches its replica up before resuming, and the
+// resume keeps the retained activation ID and cut even when the relay advanced
+// past that cut, where a fresh capture would be stale.
+it('restarts a pending activation with its retained ID and cut after catching up, without selecting a new cut',async()=>{
   const f=fixture(),drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'pending',reason:'transport interrupted',continueDrain:false})
   try{
     const initial=activationDriver(f,vi.fn(async()=>f.capture))
     await initial.driver.activate(initial.target,new AbortController().signal)
     expect(()=>initial.driver.consumer(f.document)).toThrow('incomplete')
-    const capture=vi.fn(async()=>({...f.capture,sessionId:'reopened-native-session'}))
-    const resumed=activationDriver(f,capture)
-    await resumed.driver.activate(resumed.target,new AbortController().signal)
-    expect(resumed.pull).not.toHaveBeenCalled()
+    const order:string[]=[],send=vi.fn(async()=>({result:{released:true}}))
+    const capture=vi.fn(async()=>{order.push('capture');return {...f.capture,sessionId:'reopened-native-session'}})
+    const resumed=activationDriver(f,capture,send)
+    resumed.pull.mockImplementation(async()=>{
+      order.push('pull')
+      f.raw.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','other',1,'object.snapshot','{}',3)")
+      return {hasMore:false}
+    })
+    await expect(resumed.driver.activate(resumed.target,new AbortController().signal)).resolves.toMatchObject({kind:'pending',reason:'transport interrupted'})
+    expect(order).toEqual(['pull','capture'])
     expect(capture).toHaveBeenCalledWith(expect.objectContaining({workspace:'native-workspace'}),'docs/a.md',1_000_000,expect.any(AbortSignal),f.capture.activationId)
-    expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
+    expect(send).not.toHaveBeenCalled()
+    expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()).toEqual({n:1})
+    expect(f.store.read('workspace','docs/a.md',1_000_000)).toMatchObject({activationId:f.capture.activationId,source:f.capture.source})
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('refused')
   }finally{drain.mockRestore();f.close()}
 })
