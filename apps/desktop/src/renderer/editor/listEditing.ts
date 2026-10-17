@@ -62,7 +62,7 @@ type ClipboardParser = NonNullable<EditorProps["clipboardTextParser"]>;
 export const parseMarkdownListClipboard =
   ((text, context, plainText, view) => {
     if (plainText || !text.includes("\n") || context.parentOffset !== 0
-      || !/^\s*(?:[-+*]|\d+[.)])\s/.test(text)) return null;
+      || context.parent.type.name !== "paragraph" || !/^\s*(?:[-+*]|\d+[.)])\s/.test(text)) return null;
     const doc = parseRichdocMarkdown(text);
     if (!doc.content?.length || !doc.content.every(node => listTypes.has(node.type ?? ""))) return null;
     return new Slice(view.state.schema.nodeFromJSON(doc).content, 0, 0);

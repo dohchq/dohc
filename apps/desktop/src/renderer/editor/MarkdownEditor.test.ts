@@ -1036,6 +1036,19 @@ describe.each(["local", "collaboration"])("MarkdownEditor nested list interactio
     });
   });
 
+  it("keeps a list pasted at the start of a heading literal", async () => {
+    const { surface, editor } = await mount("# Title");
+    caret(editor, "Title", 0);
+    reversible(surface, editor, () => {
+      fireEvent.paste(surface, { clipboardData: {
+        files: [], types: ["text/plain"], getData: (type: string) => type === "text/plain" ? "- a\n- b" : "",
+      } });
+    }, () => {
+      expect(surface.querySelector("li")).toBeNull();
+      expect(surface.querySelector("h1")?.textContent).toContain("- a");
+    });
+  });
+
   it.each(["plain", "code"])("keeps Markdown literal when pasting as %s text", async (context) => {
     const { surface, editor } = await mount(context === "code" ? "```\nseed\n```" : "");
     caret(editor, context === "code" ? "seed" : "");
