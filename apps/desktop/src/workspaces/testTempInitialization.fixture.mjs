@@ -39,7 +39,8 @@ const setupUrl = new URL("../testSetup.ts", import.meta.url).href;
 const helperUrl = new URL("./testTemp.ts", import.meta.url).href;
 registerHooks({
   resolve(specifier, context, next) {
-    if (context.parentURL === setupUrl) {
+    // The next-file mode imports the setup again, as vitest runs it again for each file.
+    if (context.parentURL?.split("?")[0] === setupUrl) {
       if (specifier === "vitest") {
         return { url: "data:text/javascript,export function afterEach(){};export function afterAll(){};export function inject(){}", shortCircuit: true };
       }
@@ -54,6 +55,19 @@ if (mode.endsWith("failure")) {
   const first = await helper.createTestScratch("first-").catch((error) => error);
   const second = await helper.createTestScratch("second-").catch((error) => error);
   console.log(JSON.stringify({ scans, rootCreates, sameFailure: first === failure && second === failure }));
+} else if (mode === "next-file") {
+  // A shared worker's next file allocates after the last file's suite cleanup removed the empty root.
+  await import(setupUrl);
+  await helper.createTestScratch("first-file-");
+  await helper.cleanupTestScratch();
+  await helper.cleanupSuiteTestScratch();
+  const rootRemoved = !existsSync(helper.testScratchRunRoot());
+  await import(`${setupUrl}?next-file`);
+  const next = await helper.createTestScratch("next-file-");
+  const nextExists = existsSync(next);
+  await helper.cleanupTestScratch();
+  await helper.cleanupSuiteTestScratch();
+  console.log(JSON.stringify({ scans, rootCreates, rootRemoved, nextExists }));
 } else {
   if (mode === "setup") {
     await import(setupUrl);

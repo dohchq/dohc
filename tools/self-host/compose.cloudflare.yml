@@ -1,0 +1,15 @@
+services:
+  gateway:
+    volumes: !override
+      - type: bind
+        source: ./tools/self-host/Caddyfile.cloudflare
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./tools/self-host/cloudflare-proxies.caddy
+        target: /etc/caddy/cloudflare-proxies.caddy
+        read_only: true
+        bind: {create_host_path: false}
+      - dohc_self_host_tls:/data
+      - dohc_self_host_gateway_config:/config

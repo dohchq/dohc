@@ -83,7 +83,7 @@ The command creates `.env.self-host` and generates the deployment secrets.
 It refuses to replace an existing configuration.
 Restrict access to this file; it contains credentials.
 
-Edit these SMTP settings in `.env.self-host`:
+Edit these SMTP settings and your approved email in `.env.self-host`:
 
 ```dotenv
 DOHC_SMTP_HOST=smtp.your-provider.com
@@ -92,6 +92,7 @@ DOHC_SMTP_SECURE=false
 DOHC_SMTP_USER=your-smtp-user
 DOHC_SMTP_PASSWORD=your-smtp-password
 DOHC_SMTP_FROM=dohc <dohc@your-domain.com>
+DOHC_SIGN_UP_EMAILS=you@your-domain.com
 ```
 
 Port 587 uses STARTTLS. For implicit TLS, use port 465 and `DOHC_SMTP_SECURE=true`.
@@ -103,7 +104,8 @@ Print the network setup instructions:
 node tools/self-host/bootstrap.mjs network
 ```
 
-For public access, point your domain at the server and permit inbound TCP ports 80 and 443.
+For direct public access, point your domain at the server and permit inbound TCP ports 80 and 443.
+If you use Cloudflare, follow [Run behind Cloudflare](#run-behind-cloudflare) instead.
 Caddy obtains and renews the HTTPS certificate.
 
 For private access, follow the printed Tailscale Serve instructions on the deployment host.
@@ -127,9 +129,39 @@ It uses the peer address instead when the header is missing, is longer than 4,09
 It answers 400 to a connection without an IP address.
 The [proxy section of the share-web operations reference](../../services/share-web/README.md#public-origin-and-proxy) describes the `share-web` rules.
 
+## Delete a server account
+
+A signed-in person can preview deletion with `POST /api/auth/account/deletion-preview`.
+The preview lists the email, server origin, owned workspace IDs, stored bytes, and counts of shares and grants.
+It returns a preview token that expires after five minutes.
+
+Send the token and account password as `{"previewToken":"...","password":"..."}` to `POST /api/auth/account/delete`.
+The preview returns `passwordRequired: true`.
+The server verifies the password before recording deletion and rate limits attempts like password sign-in.
+An incorrect or missing password refuses deletion, including for sessions created through device approval.
+If the preview changed, request another preview before continuing.
+Share-link and app credentials cannot delete a server account.
+
+Deletion removes the server account, its owned workspaces, and their files, data, shares, apps, chats, and history.
+Local copies remain on each device.
+Received shares end, and their local copies remain readable.
+Contributions to another person's workspace stay in that workspace's history and discussion, including their stored authorship snapshots.
+
+Deletion first blocks account access, then removes server data.
+If another service is unavailable, deletion stays pending and account sessions remain blocked.
+After the account-session fence commits, share links and server automation access can remain active until the relay receives its fence, especially during a relay outage.
+The server resumes pending deletion after a restart.
+The response reports `finished: true` only after the relay purge and account cleanup finish.
+
+Account deletion does not edit backups.
+Backups keep the account's data until you delete them.
+Remove the person's email from `DOHC_SIGN_UP_EMAILS` yourself; the API does not change operator configuration.
+An empty list opens sign-up; keep at least one address if you want sign-up closed.
+
 ## Choose who can create an account
 
-By default, anyone who can reach the server can create an account on it.
+A nonempty `DOHC_SIGN_UP_EMAILS` list keeps sign-up closed to approved email addresses and pending invites.
+Add your email before the first start.
 To close sign-up, list the approved email addresses in `.env.self-host`, separated by commas:
 
 ```dotenv
@@ -166,11 +198,155 @@ Listed addresses can still sign up.
 Outside the self-host bundle, set `WORKSPACE_API_RELAY_URL` on `workspace-api` to the relay's internal origin.
 Both services must use the same `BETTER_AUTH_SECRET`.
 
+## Keep server data on an attached disk
+
+To keep server data on an attached disk, set it up before the first start.
+You can then [move the server to a new host](self-host-recovery.md#move-to-a-new-host) by moving the disk.
+The disk holds the relay database with its files, the continuity record, and the server's session host and automation copies.
+Caddy's certificates stay in a Docker volume on the host.
+Accounts stay in a Docker volume on the host too, unless you [keep them in an external Postgres](#keep-accounts-in-an-external-postgres).
+Docker names the accounts volume `<DOHC_DEPLOYMENT_NAME>_dohc_self_host_postgres`, which is `dohc-self-host_dohc_self_host_postgres` by default.
+
+Mount the disk on the host, for example at `/mnt/dohc-data`, and make the mount persist across restarts.
+Create a deployment folder on the mounted disk with one folder for each kind of data.
+The services run as UID 1000 and need to own these folders:
+
+```sh
+sudo install -d -m 0700 -o 1000 -g 1000 /mnt/dohc-data/dohc/sync-relay /mnt/dohc-data/dohc/continuity /mnt/dohc-data/dohc/host-data
+```
+
+Set the deployment folder in `.env.self-host`:
+
+```dotenv
+DOHC_DATA_DIRECTORY=/mnt/dohc-data/dohc
+```
+
+Name a folder on the disk, not the mount point.
+If the disk is not mounted, that folder is missing and the deployment fails to start.
+If a folder is missing, mount the disk. Never recreate the folders: a start on empty folders would create a new deployment.
+The setup and recovery commands add the data-disk Compose overlay when `DOHC_DATA_DIRECTORY` is set.
+Leave it empty to keep all data in Docker volumes on the host.
+
+Set `DOHC_DATA_DIRECTORY` before the first start, and do not change it afterward.
+Docker keeps a volume's storage from when it created the volume.
+If an existing volume keeps its data elsewhere, the setup and move commands refuse to start.
+Restore the previous setting. Never remove the volume: it holds the deployment's data.
+This guide does not move existing volumes onto a disk.
+
+## Keep accounts in an external Postgres
+
+By default, the deployment runs its own Postgres for accounts and sign-in sessions, in a Docker volume on the host.
+To keep them in a managed Postgres instead, set it up before the first start.
+A lost host or disk then loses no accounts.
+Relay data stays on the host or its attached disk either way.
+
+The database must accept TLS connections.
+Every service verifies the database's certificate and host name against your provider's CA certificate.
+The setup has no option to turn this check off.
+
+1. Create a database for this deployment only, and a user that owns it.
+   If your provider limits which addresses can connect, allow the server's address.
+2. Download your provider's CA certificate to the server.
+   The services run as UID 1000 and need to read it:
+
+   ```sh
+   sudo install -D -m 0644 provider-ca.pem /etc/dohc/postgres-ca.pem
+   ```
+
+3. Set the database in `.env.self-host`:
+
+   ```dotenv
+   DOHC_POSTGRES_HOST=db.your-provider.com
+   DOHC_POSTGRES_PORT=5432
+   DOHC_POSTGRES_CA_FILE=/etc/dohc/postgres-ca.pem
+   POSTGRES_DB=dohc
+   POSTGRES_USER=dohc
+   POSTGRES_PASSWORD='your-database-password'
+   ```
+
+   Use the host name that the provider's certificate names.
+   `POSTGRES_DB` and `POSTGRES_USER` can contain only letters, digits, underscores, hyphens and dots.
+   `POSTGRES_PASSWORD` replaces the password that `init` generated.
+   Keep it in single quotes: Docker Compose replaces `$` and the name after it in an unquoted value.
+
+With `DOHC_POSTGRES_HOST` set, the setup and recovery commands add the external-database Compose overlay.
+The deployment then does not start the bundled Postgres or create its volume.
+Migrations run against your database.
+Leave `DOHC_POSTGRES_HOST`, `DOHC_POSTGRES_PORT` and `DOHC_POSTGRES_CA_FILE` empty to use the bundled database.
+
+Your provider's backups are the only backups of these accounts.
+A deployment archive does not include them.
+This guide does not move accounts from the bundled database to an external one.
+
+## Run behind Cloudflare
+
+For a public server behind Cloudflare, set `DOHC_BEHIND_CLOUDFLARE=1` in `.env.self-host`.
+The setup and recovery commands then add the Cloudflare gateway overlay.
+Leave it at `0` for direct public access or private Tailscale access.
+Caddy trusts only the shipped Cloudflare IPv4 and IPv6 ranges and reads `CF-Connecting-IP` from those peers.
+It forwards the resolved address to the services for their per-address rate limits.
+From any other peer, Caddy ignores client-address headers and uses the connection's address.
+
+Give Cloudflare only the origin's IPv4 address through an A record.
+Do not configure an origin AAAA record.
+The Docker network is IPv4-only.
+IPv6 origin connections can arrive at Caddy from Docker's bridge gateway, losing the Cloudflare peer address.
+Those connections then share one address for rate limits.
+Cloudflare can still serve IPv6 visitors while connecting to the origin over IPv4.
+
+Restrict inbound origin connections to Cloudflare's ranges using your provider's network firewall or Docker's `DOCKER-USER` chain.
+Docker's published-port rules run before ufw and firewalld rules.
+An allowlist in ufw or firewalld alone can leave port 443 open.
+`DOCKER-USER` filters only IPv4, so also block inbound IPv6 on ports 80 and 443 in the host firewall, or use the provider's firewall.
+Otherwise, a visitor can bypass Cloudflare and choose their own client-address headers.
+Caddy ignores those forged headers, but a direct connection still bypasses Cloudflare's controls.
+
+Configure Cloudflare to bypass caching for all account, relay, and share responses, including responses marked `private, no-store`.
+Disable bot challenges for this hostname.
+The desktop app, the CLI, and agents with only a share link call it directly and cannot complete browser challenges.
+A Cloudflare-only allowlist also admits other Cloudflare customers who point their zone at this origin.
+They can bypass your zone's WAF and bot rules, and can choose the client address the services use for rate limits, for example through a Worker.
+Use a custom, zone-specific Authenticated Origin Pulls certificate to restrict access to your zone.
+A Cloudflare Tunnel is another option.
+Certificate setup, Authenticated Origin Pulls, and Cloudflare Tunnel configuration are not covered here yet.
+This overlay does not change Caddy's certificate handling.
+
+The release reads `tools/self-host/cloudflare-proxies.caddy` locally and never fetches ranges at startup.
+To refresh it from Cloudflare's published lists, run this command from the checkout or release bundle:
+
+```sh
+node scripts/self-host/refresh-cloudflare-ranges.mjs
+```
+
+Update the origin firewall to match the refreshed ranges.
+Restart the deployment to apply them:
+
+```sh
+node tools/self-host/bootstrap.mjs stop
+node tools/self-host/bootstrap.mjs start
+```
+
 ## Start and check the server
 
 ```sh
 node scripts/check-self-host.mjs --start
 ```
+
+With `DOHC_DATA_DIRECTORY` or `DOHC_POSTGRES_HOST` set, add `--first-start` for the first start only.
+After that, every start and upgrade refuses to run in these cases:
+
+- With `DOHC_DATA_DIRECTORY` set, the disk does not hold the relay deployment.
+- With only `DOHC_POSTGRES_HOST` set, the relay's Docker volumes do not hold the relay deployment, for example on a new host.
+- With `DOHC_POSTGRES_HOST` set, the external database is unreachable or holds no dohc accounts.
+- With only `DOHC_DATA_DIRECTORY` set, the accounts volume on the host holds no accounts database.
+
+The accounts check accepts any database that holds dohc accounts, including another deployment's, so check that `POSTGRES_DB` names this deployment's database.
+
+A first start refuses unless all three disk folders are empty, and names each folder that holds data.
+With `DOHC_POSTGRES_HOST` set and no data disk, a first start refuses if the relay's Docker volumes already hold relay data.
+Without a data disk, the relay deployment stays in the Docker volumes on its original host, so start it there.
+Add `--first-start` only to create a new relay deployment that holds none of the existing workspaces.
+A start also refuses when Docker cannot complete these checks.
 
 The deployment initializes fresh storage, applies authentication migrations, and starts the services.
 Keep the deployment secrets and volumes across restarts.

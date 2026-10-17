@@ -38,7 +38,10 @@ function fixture(options: Partial<CreateShareWebApplicationOptions> = {}) {
         body: JSON.stringify({ secret }),
       }));
       expect(response.status).toBe(200);
-      const { session } = await response.json() as { session: string };
+      const body = await response.json() as { session: string };
+      expect(body).toEqual({ ok: true, session: expect.any(String) });
+      const { session } = body;
+      expect(response.headers.get("set-cookie")).not.toContain("grant-alpha");
       const pairs = response.headers.getSetCookie().map(value => value.split(";", 1)[0]!);
       return { session, cookie: pairs.join("; "), pairs };
     },
@@ -59,11 +62,12 @@ describe("link browser credential material", () => {
     const { session, cookie } = await f.exchange();
     const resolve = () => f.application.resolveLinkBrowserMaterial(session, cookie, signal());
     const material = await resolve();
-    expect(material).toEqual({ ok: true, capabilityToken: capability, profileSecret: profile, setCookie: null, currentCapability: expect.any(Function) });
+    expect(material).toEqual({ ok: true, grantId: "grant-alpha", capabilityToken: capability, profileSecret: profile, setCookie: null, currentCapability: expect.any(Function) });
     if (!material.ok) throw new Error("missing material");
+    material.grantId = "changed";
     material.capabilityToken = "changed";
     material.profileSecret = "changed";
-    expect(await resolve()).toEqual({ ok: true, capabilityToken: capability, profileSecret: profile, setCookie: null, currentCapability: expect.any(Function) });
+    expect(await resolve()).toEqual({ ok: true, grantId: "grant-alpha", capabilityToken: capability, profileSecret: profile, setCookie: null, currentCapability: expect.any(Function) });
     expect(f.fetchRelay).toHaveBeenCalledTimes(1);
   });
 
@@ -118,7 +122,7 @@ describe("link browser credential material", () => {
     if (!result.ok) throw new Error("missing material");
     const httpResponse = await http;
     expect(httpResponse.status).toBe(200);
-    expect(result).toEqual({ ok: true, capabilityToken: renewed, profileSecret: profile, setCookie: httpResponse.headers.get("set-cookie"), currentCapability: expect.any(Function) });
+    expect(result).toEqual({ ok: true, grantId: "grant-alpha", capabilityToken: renewed, profileSecret: profile, setCookie: httpResponse.headers.get("set-cookie"), currentCapability: expect.any(Function) });
     expect(result.setCookie).toContain("Secure; HttpOnly; SameSite=Strict");
     expect(result.setCookie).toContain("Path=/; Max-Age=");
     expect(refreshRequest.headers.get("authorization")).toBe(`LinkCapability ${capability}`);
@@ -140,7 +144,7 @@ describe("link browser credential material", () => {
     const { session, cookie } = await f.exchange();
     f.setNow(601_001);
     f.fetchRelay.mockResolvedValue(new Response(null, { status: 503 }));
-    expect(await f.application.resolveLinkBrowserMaterial(session, cookie, signal())).toEqual({ ok: true, capabilityToken: capability, profileSecret: profile, setCookie: null, currentCapability: expect.any(Function) });
+    expect(await f.application.resolveLinkBrowserMaterial(session, cookie, signal())).toEqual({ ok: true, grantId: "grant-alpha", capabilityToken: capability, profileSecret: profile, setCookie: null, currentCapability: expect.any(Function) });
   });
 
   it("refuses after the renewal grace period without contacting the relay", async () => {

@@ -5,6 +5,7 @@ import { usableShareMountRecord } from "./shareMounts";
 import {
   readableShareLevel,
   shareViewGranterEmail,
+  shareViewIdentityIsIntact,
   shareViewIsPresent,
 } from "./shareViewMarker";
 
@@ -75,7 +76,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
     const recipientUserId = boundedString(raw.recipientUserId, 1, 200);
     const level = readableShareLevel(raw.grantedSelector);
     const genericChatWritable = raw.genericChatWritable === true;
-    const damaged = shareId === null || level === null || recipientUserId === null;
+    const damaged = level === null || !shareViewIdentityIsIntact(raw);
     // Ancillary metadata normalizes FAIL-SOFT and independently: each field
     // is kept when the wire schema will carry it and dropped when it will
     // not. Dropping one costs a line of display; rejecting the record costs

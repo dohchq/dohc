@@ -9,6 +9,7 @@ import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CHANNELS } from "./channels";
+import { SetAppPinnedPayload } from "./bridgeContract";
 import type { OperationDefinition } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import mainIpc from "./ipcExposure.main.json";
@@ -33,6 +34,7 @@ import { CLI_DISPATCH_ARGUMENTS } from "./cliDispatchInputs.fixture";
 import publicationCli from "./cliExposure.pr1659.json";
 import commentsCli from "./cliExposure.pr1700.json";
 import fileChatsCli from "./cliExposure.pr2000.json";
+import accountDeletion from "./cliExposure.accountDeletion.json";
 import admission from "./operationAdmission.json";
 import accessExposure from "./accessExposure.delta.json";
 import shareCopyExposure from "./ipcExposure.shareCopy.json";
@@ -46,6 +48,7 @@ const publicVerbs = Object.entries(CLI_COMMANDS).flatMap(([group, command]) => O
 const socketVerbs = cliRequestSchema.options.map(option => option.shape.verb.value).sort();
 
 function carriesWorkspaceId(payload: z.core.$ZodType): boolean {
+  if (payload instanceof z.ZodVoid) return false;
   if (payload instanceof z.ZodObject) return "workspaceId" in payload.shape;
   if (payload instanceof z.ZodUnion) return payload.options.map(carriesWorkspaceId).some(Boolean);
   if (payload instanceof z.ZodPipe) return carriesWorkspaceId(payload.in);
@@ -56,6 +59,13 @@ function carriesWorkspaceId(payload: z.core.$ZodType): boolean {
 function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "scope" | "payload"> & {
   readonly handlerCheck?: { readonly check: string; readonly reason: string };
 }) {
+  // The selector chooses a pin in the device's user settings, not workspace access.
+  if (row.channel === "desktop:set-app-pinned") {
+    expect(row.payload).toBe(SetAppPinnedPayload);
+    expect(row.scope).toBe("device");
+    expect(row.guard).toBe("trusted-sender");
+    return;
+  }
   const workspacePayload = carriesWorkspaceId(row.payload);
   expect(["device", "workspace"]).toContain(row.scope);
   if (row.guard === "active-workspace" || workspacePayload) expect(row.scope, row.channel).toBe("workspace");
@@ -69,8 +79,8 @@ describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves every IPC wire name and the 26 enforced table guards", () => {
     // Hand-reviewed #1639 removals and #1701, #1688, #1747, reports, save retry,
     // capture recovery, History names, shared write feedback, Stop and restore,
-    // usage record, share copy, early-quit typing recovery, offer and system motion additions,
-    // separate from the hashed main baseline.
+    // usage record, share copy, early-quit typing recovery, offer, system motion, and account
+    // deletion additions, separate from the hashed main baseline.
     const expectedNames = [...mainIpc.names];
     expectedNames.push("desktop:check-shared-view-access");
     expectedNames.push("desktop:dismiss-share-capture-notice");
@@ -78,7 +88,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...historyTimelineIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions, ...offersIpc.nameAdditions, ...systemMotionIpc.nameAdditions, ...captureHoldsIpc.nameAdditions]) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...historyTimelineIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions, ...offersIpc.nameAdditions, ...systemMotionIpc.nameAdditions, ...captureHoldsIpc.nameAdditions, ...accountDeletion.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }
@@ -96,17 +106,26 @@ describe("B1 main inventories (a4be19d5b)", () => {
     ].map(name => `desktop:${name}`);
     expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
   });
+  it("records the 13 migrated settings operations", () => {
+    const channels = [
+      "get-user-settings", "reload-user-settings", "set-user-settings", "set-app-pinned",
+      "reset-user-settings", "get-user-settings-file-path", "open-user-settings-file",
+      "open-workspace-settings-file", "get-workspace-settings", "set-workspace-settings",
+      "reset-workspace-settings", "get-workspace-ui-state", "set-workspace-ui-state",
+    ].map(name => `desktop:${name}`);
+    expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
+  });
   it("preserves socket verbs, public verbs, and all public help", () => {
-    expect(socketVerbs).toEqual([...mainCli.socketVerbs, ...accessExposure.socketVerbAdditions, ...shareCopyCli.socketVerbAdditions].sort());
+    expect(socketVerbs).toEqual([...mainCli.socketVerbs, ...accessExposure.socketVerbAdditions, ...shareCopyCli.socketVerbAdditions, ...accountDeletion.socketVerbAdditions].sort());
     const expectedGroups = [...accessExposure.publicGroupAdditions, ...mainCli.publicGroups];
     for (const { group, before } of shareCopyCli.publicGroupAdditions) {
       expect(expectedGroups).not.toContain(group);
       expect(expectedGroups).toContain(before);
       expectedGroups.splice(expectedGroups.indexOf(before), 0, group);
     }
-    expect(Object.keys(CLI_COMMANDS)).toEqual(expectedGroups);
+    expect(Object.keys(CLI_COMMANDS)).toEqual([...expectedGroups, ...accountDeletion.publicGroupAdditions]);
     // Hand-reviewed #1659 additions, separate from the hashed main baseline.
-    const expectedPublicVerbs = [...accessExposure.publicVerbAdditions, ...mainCli.publicVerbs];
+    const expectedPublicVerbs = [...accessExposure.publicVerbAdditions, ...mainCli.publicVerbs, ...accountDeletion.publicVerbAdditions];
     for (const { verb, before } of [...publicationCli.publicVerbAdditions, ...commentsCli.publicVerbAdditions, ...fileChatsCli.publicVerbAdditions, ...shareCopyCli.publicVerbAdditions]) {
       expect(expectedPublicVerbs).not.toContain(verb);
       expect(expectedPublicVerbs).toContain(before);
@@ -118,7 +137,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       help[group] = renderCliHelp({ help: [group] });
       for (const verb of Object.keys(command.verbs)) help[`${group} ${verb}`] = renderCliHelp({ help: [group, verb] });
     }
-    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help, ...commentsCli.help, ...accessExposure.help, ...shareCopyCli.help, ...fileChatsCli.help });
+    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help, ...commentsCli.help, ...accessExposure.help, ...shareCopyCli.help, ...fileChatsCli.help, ...accountDeletion.help });
   });
   it("pins each row's guard, scope, and handler check to the hand-edited admission record", () => {
     expect(Object.fromEntries(rows.map(row => [row.channel, {
@@ -131,6 +150,7 @@ describe("capability identities and exposure", () => {
   const workspacePayload = z.object({ workspaceId: z.string() });
   const devicePayload = z.object({});
   it.each([
+    ["void", z.void(), false],
     ["pipe input", workspacePayload.pipe(workspacePayload), true],
     ["transform input", workspacePayload.transform(() => ({})), true],
     ["transform output only", devicePayload.transform(() => ({ workspaceId: "output-only" })), false],
@@ -223,7 +243,7 @@ describe("capability identities and exposure", () => {
   });
 
   it("pins every internal-only socket verb in the main CLI inventory", () => {
-    const publicSocketVerbs = new Set([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...fileChatsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions, ...shareCopyCli.socketVerbAdditions]);
+    const publicSocketVerbs = new Set([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...fileChatsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions, ...shareCopyCli.socketVerbAdditions, ...accountDeletion.socketVerbAdditions]);
     const internalVerbs = socketVerbs.filter(verb => !publicSocketVerbs.has(verb));
     expect(internalVerbs).toEqual(mainCli.internalVerbs.filter(verb => ![...commentsCli.publicSocketPromotions, ...fileChatsCli.publicSocketPromotions].includes(verb)));
   });

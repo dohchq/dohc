@@ -90,6 +90,8 @@ const HostedHold = Schema.Union([
   mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-conflict-parent-withheld"), conflictId: Text }),
   mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-backfill-work-waiting") }),
   mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-scope-path-mismatch"), scopePath: Text, headPath: Schema.NullOr(Text) }),
+  // The host refused a live edit its session never admitted, so its copy is incomplete.
+  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-live-edit-unadmitted") }),
 ]);
 const RetirementError = mutableStruct({ code: Text, message: Text, retry: Text });
 
