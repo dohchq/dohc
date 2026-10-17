@@ -104,7 +104,8 @@ Print the network setup instructions:
 node tools/self-host/bootstrap.mjs network
 ```
 
-For public access, point your domain at the server and permit inbound TCP ports 80 and 443.
+For direct public access, point your domain at the server and permit inbound TCP ports 80 and 443.
+If you use Cloudflare, follow [Run behind Cloudflare](#run-behind-cloudflare) instead.
 Caddy obtains and renews the HTTPS certificate.
 
 For private access, follow the printed Tailscale Serve instructions on the deployment host.
@@ -276,6 +277,54 @@ Leave `DOHC_POSTGRES_HOST`, `DOHC_POSTGRES_PORT` and `DOHC_POSTGRES_CA_FILE` emp
 Your provider's backups are the only backups of these accounts.
 A deployment archive does not include them.
 This guide does not move accounts from the bundled database to an external one.
+
+## Run behind Cloudflare
+
+For a public server behind Cloudflare, set `DOHC_BEHIND_CLOUDFLARE=1` in `.env.self-host`.
+The setup and recovery commands then add the Cloudflare gateway overlay.
+Leave it at `0` for direct public access or private Tailscale access.
+Caddy trusts only the shipped Cloudflare IPv4 and IPv6 ranges and reads `CF-Connecting-IP` from those peers.
+It forwards the resolved address to the services for their per-address rate limits.
+From any other peer, Caddy ignores client-address headers and uses the connection's address.
+
+Give Cloudflare only the origin's IPv4 address through an A record.
+Do not configure an origin AAAA record.
+The Docker network is IPv4-only.
+IPv6 origin connections can arrive at Caddy from Docker's bridge gateway, losing the Cloudflare peer address.
+Those connections then share one address for rate limits.
+Cloudflare can still serve IPv6 visitors while connecting to the origin over IPv4.
+
+Restrict inbound origin connections to Cloudflare's ranges using your provider's network firewall or Docker's `DOCKER-USER` chain.
+Docker's published-port rules run before ufw and firewalld rules.
+An allowlist in ufw or firewalld alone can leave port 443 open.
+`DOCKER-USER` filters only IPv4, so also block inbound IPv6 on ports 80 and 443 in the host firewall, or use the provider's firewall.
+Otherwise, a visitor can bypass Cloudflare and choose their own client-address headers.
+Caddy ignores those forged headers, but a direct connection still bypasses Cloudflare's controls.
+
+Configure Cloudflare to bypass caching for all account, relay, and share responses, including responses marked `private, no-store`.
+Disable bot challenges for this hostname.
+The desktop app, the CLI, and agents with only a share link call it directly and cannot complete browser challenges.
+A Cloudflare-only allowlist also admits other Cloudflare customers who point their zone at this origin.
+They can bypass your zone's WAF and bot rules, and can choose the client address the services use for rate limits, for example through a Worker.
+Use a custom, zone-specific Authenticated Origin Pulls certificate to restrict access to your zone.
+A Cloudflare Tunnel is another option.
+Certificate setup, Authenticated Origin Pulls, and Cloudflare Tunnel configuration are not covered here yet.
+This overlay does not change Caddy's certificate handling.
+
+The release reads `tools/self-host/cloudflare-proxies.caddy` locally and never fetches ranges at startup.
+To refresh it from Cloudflare's published lists, run this command from the checkout or release bundle:
+
+```sh
+node scripts/self-host/refresh-cloudflare-ranges.mjs
+```
+
+Update the origin firewall to match the refreshed ranges.
+Restart the deployment to apply them:
+
+```sh
+node tools/self-host/bootstrap.mjs stop
+node tools/self-host/bootstrap.mjs start
+```
 
 ## Start and check the server
 
