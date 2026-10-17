@@ -217,6 +217,46 @@ describe("useShellError", () => {
     expect(result.current.shellErrors).toEqual([]);
   });
 
+  // A retry answers false when it could not run, such as during an account
+  // deletion review.
+  it("keeps a newer report of the same failure when an older row's retry cannot run", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    act(() => result.current.reportShellFailure({ message: "dohc could not finish disconnecting.", retry: () => false }));
+    const older = result.current.shellErrors[0]!;
+    const newer = vi.fn();
+    act(() => {
+      result.current.reportShellFailure({ message: "dohc could not finish disconnecting.", retry: newer });
+      result.current.retryShellError(older.id);
+    });
+    expect(result.current.shellErrors).toHaveLength(1);
+    expect(result.current.shellErrors[0]!.retry).toBe(newer);
+  });
+
+  // The toast is the newest unseen row, by time, then by place in the list.
+  it("keeps every row in place when a retry cannot run, so a same-time newer toast stays shown", () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      const { result } = renderHook(() => useShellError("ws-a"));
+      act(() => result.current.reportShellFailure({ message: "dohc could not finish disconnecting.", retry: () => false }));
+      act(() => result.current.reportShellFailure({ message: "dohc could not reach this server.", retry: vi.fn() }));
+      const before = result.current.shellErrors;
+      act(() => result.current.retryShellError(before[0]!.id));
+      expect(result.current.shellErrors).toEqual(before);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("keeps the row a retry files again before it returns", () => {
+    const { result } = renderHook(() => useShellError("ws-a"));
+    const report = (): void => result.current.reportShellFailure({
+      message: "Could not load History.", identity: "about-history:a.md", retry: report, repeat: true,
+    });
+    act(report);
+    act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
+    expect(result.current.shellErrors.map((error) => error.message)).toEqual(["Could not load History."]);
+  });
+
   it("offers Send as proposal on a direct-write row and clears those rows when it runs", () => {
     const send = vi.fn();
     const { result } = renderHook(() => useShellError("ws-a"));

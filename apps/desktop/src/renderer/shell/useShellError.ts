@@ -648,16 +648,15 @@ export function useShellError(workspaceId: string) {
 
   const retryShellError = useCallback((id: string) => {
     const target = shellErrorsRef.current.find((error) => error.id === id);
-    // Clearing first is what shows the control took: the read is on its
-    // way, and a failure that is being retried is no longer the newest
-    // thing this surface knows. The retry runs once, outside the updater.
-    // A retry that could not run puts its row back as it was.
+    // A retry that could not run leaves every row where it stands.
+    if (target?.retry?.() === false) return;
+    // Clearing is what shows the control took: the read is on its way, and
+    // a failure that is being retried is no longer the newest thing this
+    // surface knows. The retry runs once, outside the updater. Only the row
+    // retried goes, so a failure the retry has already reported again stays.
     setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held"
       ? current
-      : current.filter(error => error.id !== id));
-    if (target?.retry?.() === false) {
-      setShellErrors(current => current.some(error => error.id === id) ? current : [...current, target]);
-    }
+      : current.filter(error => error !== target));
   }, []);
 
   return {
