@@ -8,7 +8,9 @@ Use the same environment file and Compose overrides as your running deployment.
 
 | Operation | What it preserves or restores | Limit |
 | --- | --- | --- |
-| `backup` | A standalone relay database and checksum manifest | Does not include authentication, live-host data, configuration or continuity |
+| `backup` | A standalone relay database and checksum manifest | Stops the services. Does not include authentication, live-host data, configuration or continuity |
+| `snapshot` | An encrypted relay snapshot of the running deployment, the same package the hourly job uploads | Same contents as `backup` |
+| `verify` | Decrypts and checks an encrypted snapshot into a new directory | The output holds unencrypted relay data |
 | `check-backup` | Checks snapshot integrity against current independent continuity | Requires the original host's continuity |
 | `restore` | Repairs missing or corrupt relay storage from a matching snapshot | Refuses snapshots older than accepted relay writes |
 | `archive` | All named deployment volumes, configuration, secrets and image identities | Preserves evidence; no full-deployment restore command |
@@ -102,6 +104,140 @@ Use `--env-file PATH` for a different environment file.
 Use `--compose-file PATH` for each additional Compose override.
 Use `--project-name NAME` if your deployment overrides the Compose project name.
 The shared configuration reader includes the private-network and data-disk overlays automatically.
+
+## Take hourly off-site snapshots
+
+The `relay-snapshot` service copies the relay database every hour while the server keeps running.
+It opens the database read-only and does not mount continuity.
+It encrypts each copy and uploads it to an S3-compatible bucket, such as Cloudflare R2 or Amazon S3.
+The service stays off until you configure the bucket.
+
+1. Create a private bucket for snapshots.
+2. Add a bucket lifecycle rule that deletes objects 30 days after creation.
+   The job never deletes snapshots, so the lifecycle rule controls retention.
+   On Amazon S3, Object Lock turns on versioning, and that action alone keeps each snapshot as a noncurrent version.
+   Add a second action to the same rule that permanently deletes noncurrent versions 1 day after they become noncurrent.
+   S3 then removes the leftover delete markers itself, so each snapshot is gone about 31 days after it was taken.
+3. Lock the bucket's objects for 30 days, the same length as the lifecycle rule.
+   On Cloudflare R2, add a bucket lock rule.
+   On Amazon S3, turn on Object Lock with a default retention in compliance mode.
+   Governance mode also works if the snapshot credentials lack `s3:BypassGovernanceRetention`.
+   R2 tokens cannot be limited to writing, and S3 write access can replace an object.
+   The host holds these credentials, so without a lock an attacker who controls the host can delete or replace your snapshots.
+4. Create credentials that can write objects to that bucket.
+   The job does not read, list or delete objects.
+5. Set these values in `.env.self-host`:
+
+```dotenv
+DOHC_SNAPSHOT_S3_ENDPOINT=https://ACCOUNT_ID.r2.cloudflarestorage.com
+DOHC_SNAPSHOT_S3_REGION=auto
+DOHC_SNAPSHOT_S3_BUCKET=dohc-snapshots
+DOHC_SNAPSHOT_S3_ACCESS_KEY_ID=your-access-key-id
+DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY=your-secret-access-key
+DOHC_SNAPSHOT_ALERT_EMAIL=you@your-domain.com
+```
+
+For Amazon S3, use the regional endpoint, such as `https://s3.us-east-1.amazonaws.com`, and that region.
+Cloudflare R2 uses the region `auto`.
+
+6. Set `DOHC_SNAPSHOT_HEARTBEAT_URL` to an HTTPS monitoring URL, as described below.
+7. Stop and start the deployment:
+
+```sh
+node tools/self-host/bootstrap.mjs stop
+node tools/self-host/bootstrap.mjs start
+```
+
+The job takes the first snapshot after the relay is healthy, then one every hour.
+Each upload uses a new object name under the deployment's namespace.
+The storage provider can read each object name, which holds the deployment's namespace, the time and the stamp.
+The stamp counts the relay's accepted writes.
+An interrupted upload leaves no object under its name.
+A single upload is limited to 5 GB. A larger snapshot fails; save it with `snapshot` instead.
+
+If a snapshot fails, the job emails `DOHC_SNAPSHOT_ALERT_EMAIL` through the server's SMTP settings.
+It sends at most one failure email a day, and one email when snapshots work again.
+It keeps this record in the `dohc_self_host_snapshots` volume, so restarts do not repeat the email.
+With a [data disk](self-host.md#keep-server-data-on-an-attached-disk), that volume is the `snapshots` folder on the disk.
+If the job cannot save the record, for example because that disk is full, each restart of the job can send one more failure email.
+
+Each snapshot is copied there before it is encrypted, usually on the same disk as the relay database.
+Before it copies, the job checks free space on the relay's disk and on the disk that holds the snapshots folder.
+Each disk needs twice the relay database's size, plus headroom for the relay's own writes.
+The headroom is the database's size, capped at a tenth of the disk and never less than 1 GiB.
+With less, the job takes no snapshot and sends the failure email, so a snapshot never takes the relay's space.
+Only one snapshot runs at a time.
+If a `snapshot` command is running when the hourly snapshot starts, that hour's snapshot fails like any other.
+
+The job cannot email you when it stops.
+A setting it refuses also stops it before the first snapshot, and Docker restarts it again and again without an email.
+The heartbeat URL detects both.
+The job requests that URL after each successful snapshot.
+Configure the monitoring service to alert you when the requests stop.
+
+Online snapshots need the running relay.
+While the relay is stopped, the job fails; use `backup` instead.
+Read the job's log for each result:
+
+```sh
+docker compose --env-file .env.self-host -f docker-compose.self-host.yml --profile snapshots logs relay-snapshot
+```
+
+## Keep the snapshot key away from the server
+
+The bootstrap command writes `DOHC_SNAPSHOT_KEY` to `.env.self-host`.
+Every snapshot is encrypted with this key, using AES-256-GCM over the database and its manifest.
+Copy the key to a password manager or other storage that does not depend on this server.
+If you lose the key, you cannot open any snapshot encrypted with it.
+The hourly job, `snapshot` and `verify` refuse to run without it.
+A deployment without snapshots does not need it.
+If you replace the key, keep the old key until the lifecycle rule deletes its snapshots.
+
+## Save an encrypted snapshot locally
+
+```sh
+node scripts/self-host/recovery.mjs snapshot /srv/dohc-backups/offsite
+```
+
+The command writes the same encrypted package that the hourly job uploads.
+The services keep running.
+It makes the same free-space check as the hourly job.
+If the hourly job is taking a snapshot, the command refuses. Run it again after that snapshot finishes.
+The directory can already exist; each run adds a new file and never replaces one.
+A file ending in `.partial` is an incomplete copy.
+The directory parent needs the same UID 1000 write access as a relay snapshot.
+
+## Verify an encrypted snapshot
+
+Download an off-site snapshot with your storage provider's tools first.
+Then decrypt and check it into a new directory:
+
+```sh
+node scripts/self-host/recovery.mjs verify /srv/dohc-backups/relay-check \
+  --snapshot /srv/dohc-backups/offsite/SNAPSHOT_FILE.dohc-snapshot
+```
+
+The command reads `DOHC_SNAPSHOT_KEY` from the environment file.
+It refuses a snapshot that was changed, truncated or encrypted with a different key.
+It also checks the database checksum, SQLite integrity and the manifest.
+It reports the snapshot's namespace, generation, stamp, time and release.
+The new directory contains `relay.sqlite` and `manifest.json`.
+Use it with `check-backup`, `restore` or salvage like a relay snapshot.
+Its contents are unencrypted. Restrict the directory and delete it after use.
+
+Verification runs without network access and mounts no deployment volume.
+On a replacement host, load the release image and restore `.env.self-host` before you verify.
+If only the snapshot key survived, [create the configuration](self-host.md#create-the-configuration) on the new host.
+Then set `DOHC_SNAPSHOT_KEY` in the new `.env.self-host` to the key you kept.
+
+An hourly snapshot does not include authentication, live-host data, configuration or continuity.
+Server accounts are stored in Postgres and need a separate backup.
+With an [external database](#accounts-in-an-external-database), your provider's backups hold them.
+Repair with `restore` still requires the snapshot stamp and nonce to equal current continuity.
+An hourly snapshot usually falls behind within minutes, so it rarely qualifies.
+Restoring a lost server from an off-site snapshot is not supported yet.
+You can salvage files from a verified snapshot.
+Work that the server accepted after the snapshot can be lost with the server.
 
 ## Check and repair relay storage
 
@@ -208,7 +344,7 @@ The new host continues from the last write the relay committed to the disk. Noth
 Always move the live disk. Never start from a snapshot or copy of the disk.
 A copy rolls back the relay database and its continuity record together, and the relay cannot detect that.
 
-The disk carries the relay database, its continuity record, and the session host and automation copies.
+The disk carries the relay database, its continuity record, the session host and automation copies, and the snapshot job's state.
 Bring these separately:
 
 - `.env.self-host`, unchanged. It holds the configuration and the server secrets. Keep a private copy off the server.
@@ -324,11 +460,13 @@ Never start it with `--first-start` to get past this check: nobody could open th
 Run focused source checks after changing this procedure's commands:
 
 ```sh
-pnpm --filter @dohc/sync-relay exec vitest run src/relayDeployment.test.ts src/relayDeploymentRecovery.test.ts src/relayContentSalvage.test.ts
-node --test scripts/self-host/recovery.test.mjs scripts/self-host/move.test.mjs
+pnpm --filter @dohc/sync-relay exec vitest run src/relayDeployment.test.ts src/relayDeploymentRecovery.test.ts src/relayContentSalvage.test.ts src/relaySnapshot.test.ts src/relaySnapshotJob.test.ts
+node --test scripts/self-host/recovery.test.mjs scripts/self-host/move.test.mjs scripts/self-host-compose.test.mjs
+pnpm --filter @dohc/app-backend-runtime build
 pnpm --filter @dohc/sync-relay build
 DOHC_RECOVERY_TEST_IMAGE=YOUR_DOHC_IMAGE node --test scripts/self-host/recovery.docker.test.mjs
 DOHC_RECOVERY_TEST_IMAGE=YOUR_DOHC_IMAGE node --test scripts/self-host/drill.docker.test.mjs
+DOHC_SNAPSHOT_DOCKER_TEST=1 node --test scripts/self-host/snapshot.docker.test.mjs
 ```
 
 The Docker tests use isolated volumes and folders and remove them afterward.
@@ -344,3 +482,10 @@ It also checks that a missing folder fails to start and that the move command re
 It checks that the move command refuses existing volumes stored elsewhere and leaves them unchanged.
 It carries the accounts volume over by name, so it does not prove the accounts volume copy commands.
 A killed container does not lose the host's write cache, so the drill does not prove survival of a power loss.
+
+The snapshot test runs on any Docker host with Linux containers and needs no dohc image.
+It uses the bundles that `pnpm --filter @dohc/app-backend-runtime build` and `pnpm --filter @dohc/sync-relay build` write.
+It takes online snapshots through a read-only relay mount while another container keeps writing.
+It checks that each snapshot holds one complete transaction and passes `check-backup`'s check.
+It checks that a snapshot refuses while another container holds the snapshot lock, and runs once that container is killed.
+It checks that verification without network access or deployment volumes refuses a wrong key and a changed byte, and leaves no output.

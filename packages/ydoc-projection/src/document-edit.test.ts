@@ -234,9 +234,11 @@ describe('an edit while someone has the document open', () => {
     expect(markdownOf(edited(markdownToYDoc(markdown), edit, closed))).toBe(whenClosed)
   })
 
-  test('removes a leaf block, which nobody can type into', () => {
-    expect(markdownOf(edited(markdownToYDoc('Above.\n\n---\n\nBelow.'), { find: '\n\n---', replacement: '' })))
-      .toBe('Above.\n\nBelow.')
+  test.each([
+    ['Above.\n\n---\n\nBelow.', '\n\n---', 'Above.\n\nBelow.'],
+    ['***\n\nBelow.', '***\n\n', 'Below.'],
+  ])('removes a leaf block, which nobody can type into: %j', (source, find, expected) => {
+    expect(markdownOf(edited(markdownToYDoc(source), { find, replacement: '' }))).toBe(expected)
   })
 
   test('tells the agent what to do instead', () => {
