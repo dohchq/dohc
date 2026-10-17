@@ -2865,31 +2865,36 @@ describe("chatDispatchService", () => {
       ),
     );
 
+    const timeoutReported = Promise.withResolvers<void>();
+    vi.spyOn(fixture.errors, "push").mockImplementation((...errors) => {
+      const length = Array.prototype.push.apply(fixture.errors, errors);
+      if (errors.some(error => error instanceof Error && error.message === "sidecar unavailable during timeout persistence")) timeoutReported.resolve();
+      return length;
+    });
     await vi.advanceTimersByTimeAsync(60_000);
 
-    await vi.waitFor(
-      () => {
-        expect(fixture.failRunRequests).toBe(6);
-        expect(fixture.errors).toContainEqual(
-          expect.objectContaining({ message: "sidecar unavailable during timeout persistence" }),
-        );
-      },
-      { interval: 0 },
+    // Notice-file I/O precedes failRun. Join the notification before advancing recovery time.
+    await timeoutReported.promise;
+    expect(fixture.failRunRequests).toBe(6);
+    expect(fixture.errors).toContainEqual(
+      expect.objectContaining({ message: "sidecar unavailable during timeout persistence" }),
     );
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).not.toHaveProperty(
       "endedAtMs",
     );
 
     const updatesBeforeRetry = fixture.runUpdatedWorkspaces.length;
+    const retryReported = Promise.withResolvers<void>();
+    vi.spyOn(fixture.runUpdatedWorkspaces, "push").mockImplementation((...workspaces) => {
+      const length = Array.prototype.push.apply(fixture.runUpdatedWorkspaces, workspaces);
+      if (length === updatesBeforeRetry + 2) retryReported.resolve();
+      return length;
+    });
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
 
-    await vi.waitFor(
-      () => {
-        expect(fixture.failRunRequests).toBe(7);
-        expect(fixture.runUpdatedWorkspaces).toHaveLength(updatesBeforeRetry + 2);
-      },
-      { interval: 0 },
-    );
+    await retryReported.promise;
+    expect(fixture.failRunRequests).toBe(7);
+    expect(fixture.runUpdatedWorkspaces).toHaveLength(updatesBeforeRetry + 2);
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       endedAtMs: fixture.now.value,
       exitCode: 124,

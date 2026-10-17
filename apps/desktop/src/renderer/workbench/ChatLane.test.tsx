@@ -365,4 +365,78 @@ describe("ChatLane", () => {
     expect(bridgeMock.sendChatMessage.mock.invocationCallOrder[0]).toBeLessThan(bridgeMock.resolveChatDecision.mock.invocationCallOrder[0]!);
     await waitFor(() => expect(screen.getByRole("button", { name: "Monday" }).getAttribute("aria-pressed")).toBe("true"));
   });
+
+  function draftPoll(question: string, choices: string[]) {
+    const composer = screen.getByTestId("chats-lane-composer");
+    fireEvent.change(composer, { target: { value: question } });
+    fireEvent.mouseDown(screen.getByTestId("chats-lane-poll-toggle"));
+    choices.forEach((choice, index) => {
+      if (index >= 2) fireEvent.click(screen.getByTestId("chats-lane-poll-add"));
+      fireEvent.change(screen.getAllByTestId("chats-lane-poll-choice")[index]!, { target: { value: choice } });
+    });
+    return composer as HTMLTextAreaElement;
+  }
+  const choiceValues = () => screen.getAllByTestId("chats-lane-poll-choice").map((input) => (input as HTMLInputElement).value);
+
+  it.each(["sent", "failed"] as const)("asks a poll with its trimmed choices and keeps them until it has %s", async (outcome) => {
+    render(lane());
+    await screen.findByText("Old message");
+    const composer = draftPoll("Lunch?", [" Soup ", "", "Salad"]);
+    if (outcome === "sent") bridgeMock.sendChatMessage.mockResolvedValueOnce({ message: message({ id: "poll", body: "Lunch?" }) });
+    else bridgeMock.sendChatMessage.mockRejectedValueOnce(new Error("Engine busy"));
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", threadId: "thread-1", body: "Lunch?", needsDecision: true, options: ["Soup", "Salad"],
+    });
+    if (outcome === "sent") {
+      await waitFor(() => expect(screen.queryByTestId("chats-lane-poll")).toBeNull());
+      expect(composer.value).toBe("");
+    } else {
+      await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+      expect(composer.value).toBe("Lunch?");
+      expect(choiceValues()).toEqual([" Soup ", "", "Salad"]);
+    }
+  });
+
+  it("starts the lane with a poll", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    bridgeMock.startChannelThread.mockResolvedValueOnce({ thread: thread(), message: message({ id: "poll", body: "Lunch?" }), viewerAuthorId: "you" });
+    render(lane());
+    await screen.findByText("No messages in #general yet.");
+    fireEvent.keyDown(draftPoll("Lunch?", ["Soup", "Salad"]), { key: "Enter" });
+    expect(bridgeMock.startChannelThread).toHaveBeenCalledWith({
+      workspaceId: "workspace-a", channelId: "channel-1", body: "Lunch?", needsDecision: true, options: ["Soup", "Salad"], lane: "chat",
+    });
+    await waitFor(() => expect(screen.queryByTestId("chats-lane-poll")).toBeNull());
+  });
+
+  it("does not send a poll the engine would refuse", async () => {
+    render(lane());
+    await screen.findByText("Old message");
+    const composer = draftPoll("Lunch?", ["Soup", "Soup "]);
+    expect((screen.getByTestId("chats-lane-send") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(bridgeMock.sendChatMessage).not.toHaveBeenCalled();
+  });
+
+  it("sends a removed poll's question as a plain message, then forgets its choices", async () => {
+    render(lane());
+    await screen.findByText("Old message");
+    const composer = draftPoll("Lunch?", ["Soup", "Salad"]);
+    fireEvent.click(screen.getByRole("button", { name: "Remove poll" }));
+    bridgeMock.sendChatMessage.mockResolvedValueOnce({ message: message({ id: "plain", body: "Lunch?" }) });
+    fireEvent.keyDown(composer, { key: "Enter" });
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({ workspaceId: "workspace-a", threadId: "thread-1", body: "Lunch?" });
+    await waitFor(() => expect(composer.value).toBe(""));
+    fireEvent.mouseDown(screen.getByTestId("chats-lane-poll-toggle"));
+    expect(choiceValues()).toEqual(["", ""]);
+  });
+
+  it("drops the poll with the draft when the group changes", async () => {
+    const view = render(lane());
+    await screen.findByText("Old message");
+    draftPoll("Lunch?", ["Soup", "Salad"]);
+    view.rerender(lane("channel-2"));
+    expect(screen.queryByTestId("chats-lane-poll")).toBeNull();
+  });
 });

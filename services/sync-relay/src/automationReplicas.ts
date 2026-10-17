@@ -1,6 +1,6 @@
 import { workspaceIsDeleted } from "./storage/accountDeletion";
 import {createHash, randomBytes} from "node:crypto";
-import {mkdir, readdir, rm, writeFile} from "node:fs/promises";
+import {mkdir, readdir, rm, stat, writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -341,10 +341,17 @@ export async function startAutomationReplicas(options: {
         if (open_ && (row === null || open_.incarnation !== row.incarnation)) await open_.close();
         if (!canSync(workspaceId)) return;
         if (row !== null && !replicas.has(workspaceId)) {
-          try { await open(row); }
+          let opening: AutomationWorkspace | null = row;
+          try {
+            // The server lost this replica's folder, and its engine with it.
+            if (await missing(join(folderOf(workspaceId), String(row.incarnation)))) {
+              opening = storage.replaceLostAutomationReplica({workspaceId, incarnation: row.incarnation, nowMs: nowMs()});
+            }
+            if (opening !== null) await open(opening);
+          }
           catch (error) {
             if (!syncRetries.has(workspaceId)) {
-              syncRetries.set(workspaceId, { at: performance.now() + RETRY_FIRST_MS, delay: RETRY_FIRST_MS, incarnation: row.incarnation });
+              syncRetries.set(workspaceId, { at: performance.now() + RETRY_FIRST_MS, delay: RETRY_FIRST_MS, incarnation: (opening ?? row).incarnation });
             }
             throw error;
           }
@@ -582,6 +589,16 @@ export async function startAutomationReplicas(options: {
     /** Stops the passes, then closes every replica and the engine, waiting for work that ignores the abort. */
     close,
   };
+}
+
+async function missing(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
 }
 
 function replicaFolder(root: string, namespace: string, workspaceId: string): string {
