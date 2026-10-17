@@ -1152,6 +1152,135 @@ mod collection_adoption_update_tests {
     }
 
     #[test]
+    fn nested1b_relation_cleanup_skips_non_allowlisted_seed() {
+        let (scratch, mut store, mut cache) = fixture();
+        capture(
+            &mut store,
+            "tasks/collection.yaml",
+            "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+            3,
+        );
+        let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n- a\n  ---";
+        capture(&mut store, "tasks/a.md", text, 4);
+        std::fs::write(scratch.path().join("tasks/a.md"), text).unwrap();
+        let snapshot = VersionedTextStore::new(&mut store)
+            .read_text("workspace", "main", "tasks/a.md")
+            .unwrap()
+            .unwrap();
+        let result = cleanup_collection_relation_on_store(
+            &mut store,
+            &mut cache,
+            &CollectionRelationCleanupCandidate {
+                source_record_id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                source_file_path: "tasks/a.md".into(),
+                source_object_id: snapshot.object_id.clone(),
+                field_name: "related".into(),
+                target_record_id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                many: false,
+            },
+            "workspace",
+            "main",
+            scratch.path(),
+            &LeaseRegistry::new(),
+            &(),
+            5,
+            &dohc_engine_storage::NoFaults,
+            &CancellationToken::new(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            CollectionRelationCleanupExecution::Skipped
+        ));
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/a.md")).unwrap(),
+            text
+        );
+        let after = VersionedTextStore::new(&mut store)
+            .read_text("workspace", "main", "tasks/a.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.latest_moment_id, snapshot.latest_moment_id);
+        assert_eq!(after.text, text);
+        let key = DocKey::new("workspace", "main", &snapshot.object_id).unwrap();
+        assert!(
+            dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn nested1b_relation_cleanup_keeps_exact_allowed_body() {
+        let (scratch, mut store, mut cache) = fixture();
+        capture(
+            &mut store,
+            "tasks/collection.yaml",
+            "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+            3,
+        );
+        let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n* parent\n\n    * child\n";
+        capture(&mut store, "tasks/a.md", text, 4);
+        std::fs::write(scratch.path().join("tasks/a.md"), text).unwrap();
+        let snapshot = VersionedTextStore::new(&mut store)
+            .read_text("workspace", "main", "tasks/a.md")
+            .unwrap()
+            .unwrap();
+        let result = cleanup_collection_relation_on_store(
+            &mut store,
+            &mut cache,
+            &CollectionRelationCleanupCandidate {
+                source_record_id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                source_file_path: "tasks/a.md".into(),
+                source_object_id: snapshot.object_id.clone(),
+                field_name: "related".into(),
+                target_record_id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                many: false,
+            },
+            "workspace",
+            "main",
+            scratch.path(),
+            &LeaseRegistry::new(),
+            &(),
+            5,
+            &dohc_engine_storage::NoFaults,
+            &CancellationToken::new(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            CollectionRelationCleanupExecution::Applied(_)
+        ));
+        let expected = text.replace("related: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n", "");
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/a.md")).unwrap(),
+            expected
+        );
+        assert_eq!(
+            VersionedTextStore::new(&mut store)
+                .read_text("workspace", "main", "tasks/a.md")
+                .unwrap()
+                .unwrap()
+                .text,
+            expected
+        );
+        let key = DocKey::new("workspace", "main", &snapshot.object_id).unwrap();
+        drop(store);
+        let store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 6).unwrap();
+        let loaded = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap();
+        let canonical = loaded.doc.project(ContentKind::Richdoc).unwrap().content;
+        assert_eq!(
+            loaded.doc.preserved_markdown_source(&canonical).as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
     fn relation_cleanup_skips_a_symlink_referrer_then_retries_after_replacement() {
         let (scratch, mut store, mut cache) = fixture();
         seed_relation_referrers(&mut store, &mut cache, scratch.path());
@@ -1838,12 +1967,27 @@ fn cleanup_collection_relation_on_store(
             .ok_or(DomainError::StateCorrupt {
                 reason: "collection relation cleanup has no Markdown artifact seed",
             })?;
+        if !dohc_engine_collab::ydoc::outside_markdown_is_allowlisted(seed) {
+            return Ok(CollectionRelationCleanupExecution::Skipped);
+        }
         match doc.rewrite_content_to_markdown(ContentKind::Richdoc, seed) {
             Err(CollabError::MarkdownNotRepresentable) => {
                 return Ok(CollectionRelationCleanupExecution::Skipped);
             }
             result => {
                 result?;
+            }
+        }
+        let canonical = doc.project(ContentKind::Richdoc)?.content;
+        if canonical != seed {
+            if seed.len() > dohc_engine_collab::limits::MAX_PUBLIC_MARKDOWN_BYTES {
+                return Ok(CollectionRelationCleanupExecution::Skipped);
+            }
+            if doc.preserve_folded_markdown_source(seed).is_err() {
+                return Ok(CollectionRelationCleanupExecution::Skipped);
+            }
+            if doc.preserved_markdown_source(&canonical).as_deref() != Some(seed) {
+                return Ok(CollectionRelationCleanupExecution::Skipped);
             }
         }
         let seed_update = doc.encode_full_state();

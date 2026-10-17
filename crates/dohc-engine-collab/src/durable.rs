@@ -3411,8 +3411,23 @@ mod successor_validation_tests {
     }
 
     #[test]
-    fn markdown_successor_roundtrips_quote_nested_200_deep() {
-        assert_markdown_successor_roundtrip(&format!("{}quoted\n", "> ".repeat(200)));
+    fn markdown_successor_refuses_quote_beyond_source_reading_limit() {
+        let artifact = format!("{}quoted\n", "> ".repeat(200));
+        let key = DocKey::new("ws", "main", "markdown-object").unwrap();
+        let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
+            key: &key,
+            predecessor_claim_id: &"a".repeat(64),
+            predecessor_state_vector_sha256: &"b".repeat(64),
+            artifact_op_kind: "conflict.resolve",
+            artifact_id: "conflict",
+            artifact_preimage_sha256: &"c".repeat(64),
+            content_kind: ContentKind::Richdoc,
+            result_sha256: &crate::hex_sha256(artifact.as_bytes()),
+        });
+        assert!(matches!(
+            crate::fresh_successor_base(&identity, &artifact),
+            Err(CollabError::MarkdownNotRepresentable)
+        ));
     }
 
     #[test]

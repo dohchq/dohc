@@ -7079,3 +7079,9 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
             .contains(&json!({"kind":"unattributed"}))
     );
 }
+
+#[test]
+fn nested1b_frontmatter_only_unsupported_body_holds() {
+    let initial = "---\nstatus: todo\n---\n- a\n  ---";
+    assert_peer_fold(initial, &initial.replace("todo", "done"), true);
+}
