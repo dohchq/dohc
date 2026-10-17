@@ -8,6 +8,8 @@ import { startVitest } from "vitest/node";
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const files = process.argv.slice(2);
 process.env.DOHC_SHARED_WORKER_FILES = JSON.stringify(files);
+// A full verification run sets this, and then the config has no shared project to run in.
+delete process.env.DOHC_DESKTOP_TEST_ISOLATION;
 const vitest = await startVitest("test", [], {
   config: fileURLToPath(new URL("./vitest.config.mjs", import.meta.url)),
   watch: false,

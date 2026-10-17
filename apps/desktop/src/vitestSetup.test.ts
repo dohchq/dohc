@@ -12,14 +12,17 @@ const readSource = (path: string) => readFileSync(resolve(desktopRoot, path), "u
 
 interface ResolvedProject { name: string; maxWorkers: number; isolate: boolean; files: string[] }
 
-let resolved: ResolvedProject[] | undefined;
-function resolvedProjects(): ResolvedProject[] {
-  resolved ??= JSON.parse(execFileSync(process.execPath, [resolve(import.meta.dirname, "vitestProjects.fixture.mjs")], {
-    cwd: desktopRoot,
-    encoding: "utf8", timeout: 20_000, stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, VITEST_MAX_WORKERS: "" },
-  }).trim().split(/\r?\n/u).at(-1)!) as ResolvedProject[];
-  return resolved;
+// The projects as the real config resolves them, with DOHC_DESKTOP_TEST_ISOLATION set to `isolation`.
+const resolved = new Map<string, ResolvedProject[]>();
+function resolvedProjects(isolation = ""): ResolvedProject[] {
+  if (!resolved.has(isolation)) {
+    resolved.set(isolation, JSON.parse(execFileSync(process.execPath, [resolve(import.meta.dirname, "vitestProjects.fixture.mjs")], {
+      cwd: desktopRoot,
+      encoding: "utf8", timeout: 20_000, stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, VITEST_MAX_WORKERS: "", DOHC_DESKTOP_TEST_ISOLATION: isolation },
+    }).trim().split(/\r?\n/u).at(-1)!) as ResolvedProject[]);
+  }
+  return resolved.get(isolation)!;
 }
 
 // Guards that `vitest.setup.ts` is registered, not what it does.
@@ -95,6 +98,13 @@ describe("apps/desktop vitest projects", () => {
       expect(new Set(sources.map((source) => source.includes("@vitest-environment jsdom"))).size, project.name).toBe(1);
       expect(project.files.filter((_, index) => needsOwnWorker(sources[index], helpers)), project.name).toEqual([]);
     }
+  });
+
+  it("gives every desktop test file a worker of its own when DOHC_DESKTOP_TEST_ISOLATION is all", () => {
+    const projects = resolvedProjects("all");
+    expect(projects.filter((project) => !project.isolate)).toEqual([]);
+    expect(projects.find((project) => project.name === "desktop")?.files.toSorted())
+      .toEqual(sourcePaths("src/**/*.test.{ts,tsx}").filter((path) => path !== "src/renderer/FileInspector.test.tsx").toSorted());
   });
 });
 

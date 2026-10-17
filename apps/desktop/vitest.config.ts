@@ -23,6 +23,10 @@ const tests = desktopTestFiles(dirname(fileURLToPath(import.meta.url)), {
     "src/renderer/rendererErrorReport.bound.test.ts",
   ],
 });
+// A full verification run, the nightly included, sets this and gives every
+// file a worker of its own, so a test that passes only after another file in
+// its shared worker fails there.
+const ISOLATE_ALL = process.env.DOHC_DESKTOP_TEST_ISOLATION === "all";
 
 const common = {
   // Source-backed examples outside this package use the same React instance as their desktop tests.
@@ -64,31 +68,40 @@ export default defineConfig({
     // Keep the cap global so --maxWorkers also controls each inline project.
     maxWorkers: WORKER_CAP,
     projects: [
-      { ...common, test: { ...desktop, name: "desktop", include: tests.isolated } },
+      {
+        ...common,
+        test: {
+          ...desktop,
+          name: "desktop",
+          include: ISOLATE_ALL ? [...tests.isolated, ...tests.sharedDom, ...tests.sharedNode] : tests.isolated,
+        },
+      },
       // Files in a shared project run one after another in the same worker.
       // Each file starts from the worker's baseline: its environment
       // variables, globals, and real timers, and in jsdom an empty document,
       // empty storage, and its DOM prototypes.
-      {
-        ...common,
-        test: {
-          ...desktop,
-          name: "desktop-shared-dom",
-          include: tests.sharedDom,
-          isolate: false,
-          setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP, "./src/testSharedDomSetup.ts"],
+      ...ISOLATE_ALL ? [] : [
+        {
+          ...common,
+          test: {
+            ...desktop,
+            name: "desktop-shared-dom",
+            include: tests.sharedDom,
+            isolate: false,
+            setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP, "./src/testSharedDomSetup.ts"],
+          },
         },
-      },
-      {
-        ...common,
-        test: {
-          ...desktop,
-          name: "desktop-shared-node",
-          include: tests.sharedNode,
-          isolate: false,
-          setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP],
+        {
+          ...common,
+          test: {
+            ...desktop,
+            name: "desktop-shared-node",
+            include: tests.sharedNode,
+            isolate: false,
+            setupFiles: [...desktop.setupFiles, SHARED_WORKER_SETUP],
+          },
         },
-      },
+      ],
       {
         ...common,
         test: {

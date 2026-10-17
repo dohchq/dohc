@@ -52,7 +52,8 @@ export async function runBounded(tasks, execute, concurrency = 2) {
 }
 
 // `stop` is the caller's cancellation scope: its stop interrupts these commands, and their first confirmed failure stops it.
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null, stop } = {}) {
+// `full` runs each desktop unit test file in a worker of its own, so a test that passes only after another file in a shared worker fails.
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null, full = false, stop } = {}) {
   if (runProofs !== undefined && typeof runProofs !== "function") throw new Error("runProofs must be a function.");
   mkdirSync(output, { recursive: true });
   const report = { version: 1, concurrency: 2, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
@@ -76,13 +77,14 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     stopper.signal.throwIfAborted();
   }
   // `rerun` marks a node:test step with its package's directory: one that failed only in its tests runs once more.
-  async function command(name, args, { rerun } = {}) {
+  async function command(name, args, { rerun, stepEnv } = {}) {
     await checkpoint();
     const file = join(output, name.replaceAll(/[^\w.-]/gu, "_"));
-    const row = { name, args, log: `${file}.log` };
+    const row = { name, args, log: `${file}.log`, ...(stepEnv ? { env: stepEnv } : {}) };
     report.steps.push(row);
     const record = `${file}.tests.jsonl`;
-    const execute = log => run(...pnpm(args), { env: { ...env, DOHC_TEST_RECORD: record }, log, signal: stopper.signal });
+    const commandEnv = { ...env, ...stepEnv };
+    const execute = log => run(...pnpm(args), { env: { ...commandEnv, DOHC_TEST_RECORD: record }, log, signal: stopper.signal });
     async function attempts() {
       try { return await execute(row.log); }
       catch (error) {
@@ -127,7 +129,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       (row.alone ??= []).push(alone);
       await checkpoint();
       alone.log = log;
-      try { await run(...wholeFile(testFile), { env: { ...env, DOHC_TEST_RECORD: aloneRecord, DOHC_TEST_RECORD_ALL: "1" }, log, signal: stopper.signal }); }
+      try { await run(...wholeFile(testFile), { env: { ...commandEnv, DOHC_TEST_RECORD: aloneRecord, DOHC_TEST_RECORD_ALL: "1" }, log, signal: stopper.signal }); }
       catch (error) {
         if (!error.interrupted) {
           alone.outcome = "failed";
@@ -205,7 +207,8 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       const priority = task => task.name === "@dohc/desktop" ? 0 : task.resource === "postgres" ? 1 : 2;
       const scheduled = runProofs ? tasks.toSorted((a, b) => priority(a) - priority(b)) : tasks;
       await runBounded(scheduled, async task => {
-        try { await command(task.name, task.args); }
+        const stepEnv = full && task.name === "@dohc/desktop" ? { DOHC_DESKTOP_TEST_ISOLATION: "all" } : undefined;
+        try { await command(task.name, task.args, { stepEnv }); }
         finally {
           databasePending.delete(task.name);
           if (!databasePending.size) databaseFinished.resolve();
