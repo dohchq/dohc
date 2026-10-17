@@ -12,9 +12,7 @@ mod common;
 use common::*;
 use dohc_engine_collab::{CacheStats, Ydoc};
 use dohc_engine_protocol::{
-    transport::{
-        EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
-    },
+    transport::{InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
 use dohc_engine_testkit::ScratchDir;
@@ -61,21 +59,21 @@ async fn open_workspace(
     scratch: &ScratchDir,
     workspace_id: &str,
 ) -> WorkspaceHandle {
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_id,
-                }),
-            ),
-        )
-        .await
-        .expect("workspace.open");
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id,
+            }),
+        ),
+    )
+    .await
+    .expect("workspace.open");
     serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
 }
 
@@ -87,14 +85,14 @@ async fn call(
     params: Value,
     failure_context: &str,
 ) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{failure_context}: {method} failed: {error:?}"))
-        .result
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(id, method, Some(handle.clone()), params),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{failure_context}: {method} failed: {error:?}"))
+    .result
 }
 
 async fn call_ydoc_with_blob(
@@ -105,7 +103,7 @@ async fn call_ydoc_with_blob(
     params: Value,
     failure_context: &str,
 ) -> (Value, Vec<u8>) {
-    let output = ProtocolEngineService::call(
+    let output = service_call_with_busy_retry(
         service,
         RequestContext::unbounded().with_capability("blobs"),
         request(id, method, Some(handle.clone()), params),

@@ -1073,6 +1073,14 @@ fn select_released_switch_jobs(
 }
 
 impl ActorHandle {
+    #[cfg(feature = "fault-injection")]
+    pub async fn capture_phase_totals_for_harness(
+        &self,
+    ) -> Result<dohc_engine_storage::capture_phase::Snapshot, RuntimeError> {
+        self.run(|_, _| Ok(dohc_engine_storage::capture_phase::snapshot()))
+            .await
+    }
+
     pub async fn capture_notices(
         &self,
         workspace_id: String,
@@ -1252,15 +1260,25 @@ impl ActorHandle {
     /// per-item savepoints so successful siblings still commit.
     pub fn capture_ingest_batch_blocking(
         &self,
-        inputs: Vec<CaptureIngest>,
+        inputs: impl Into<Arc<[CaptureIngest]>>,
         search_policy: Arc<SearchPolicySnapshot>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         root_dir: PathBuf,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+        let inputs = inputs.into();
+        #[cfg(feature = "fault-injection")]
+        let mut roundtrip = dohc_engine_storage::capture_phase::Phase::new(
+            "queued_capture_batch",
+            inputs
+                .first()
+                .and_then(|i| i.metadata_correlation_id.as_deref()),
+            inputs.len(),
+            false,
+        );
         let token: CancellationToken = CancellationToken::new();
-        self.run_blocking(move |store, cache| {
+        let result = self.run_blocking(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {
                 capture_ingest_batch_on_store(
                     store,
@@ -1272,7 +1290,10 @@ impl ActorHandle {
                     (&root_dir, root_guard.as_ref()),
                 )
             })
-        })
+        });
+        #[cfg(feature = "fault-injection")]
+        roundtrip.finish(if result.is_ok() { "returned" } else { "error" });
+        result
     }
 
     /// Capture a binary file on the actor's writer, blocking the caller.
@@ -1475,6 +1496,15 @@ fn capture_ingest_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_text",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -1756,6 +1786,9 @@ fn capture_ingest_in_tx(
     let may_have_ydoc_state = batch
         .as_ref()
         .is_none_or(|batch| batch.has_ydoc_state != Some(false));
+    #[cfg(feature = "fault-injection")]
+    let domain_phase =
+        dohc_engine_storage::capture_phase::Measure::new("domain_and_lease_recovery");
     let mut result = match batch.as_deref_mut() {
         Some(batch) => capture_ingest_in_batch_with_admission_in_tx(
             tx,
@@ -1783,6 +1816,8 @@ fn capture_ingest_in_tx(
             },
         )?,
     };
+    #[cfg(feature = "fault-injection")]
+    drop(domain_phase);
     if let Some(batch) = batch.as_deref_mut() {
         batch.capture.commit_result(&result)?;
     }
@@ -1809,6 +1844,9 @@ fn capture_ingest_in_tx(
         }
     }
     if admitted {
+        #[cfg(feature = "fault-injection")]
+        let _collection_phase =
+            dohc_engine_storage::capture_phase::Measure::new("collection_and_lineage");
         let has_ydoc_state = match batch.as_deref_mut() {
             Some(batch) => match batch.has_ydoc_state {
                 Some(has_ydoc_state) => has_ydoc_state,
@@ -1881,6 +1919,8 @@ fn capture_ingest_in_tx(
         }
     }
     if !result.deduped {
+        #[cfg(feature = "fault-injection")]
+        let _search_phase = dohc_engine_storage::capture_phase::Measure::new("search");
         match indexing {
             CaptureIndexing::Skip => {}
             CaptureIndexing::ReadRoot(root_dir) => upsert_file_search_index(
@@ -1906,6 +1946,8 @@ fn capture_ingest_in_tx(
             .map_err(RuntimeError::from)?,
         }
     }
+    #[cfg(feature = "fault-injection")]
+    let journal_phase = dohc_engine_storage::capture_phase::Measure::new("outbound_journal");
     match batch {
         Some(batch) => journal_moment_outbound_with_batch_in_tx(
             tx,
@@ -1922,6 +1964,8 @@ fn capture_ingest_in_tx(
         ),
     }
     .map_err(RuntimeError::from)?;
+    #[cfg(feature = "fault-injection")]
+    drop(journal_phase);
     // An alias change may have released the hold before this observation.
     // Mark these captured bytes before replay can revive an older intent.
     let pending_placement = pending_placement_in(tx, &input.workspace_id, &input.path, held)?;
@@ -1966,6 +2010,15 @@ fn capture_ingest_batch_on_store(
     token: &CancellationToken,
     workspace_root: (&std::path::Path, &dyn WorkspaceRootGuard),
 ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_batch",
+        inputs
+            .first()
+            .and_then(|i| i.metadata_correlation_id.as_deref()),
+        inputs.len(),
+        true,
+    );
     let (root_dir, root_guard) = workspace_root;
     let Some(first) = inputs.first() else {
         return Ok(Vec::new());
@@ -2038,7 +2091,17 @@ fn capture_ingest_batch_on_store(
         }
     })?;
     match outcome {
-        TxnOutcome::Committed(results) => Ok(results),
+        TxnOutcome::Committed(results) => {
+            #[cfg(feature = "fault-injection")]
+            {
+                phase.field(
+                    "failed_items",
+                    results.iter().filter(|r| r.is_err()).count() as u64,
+                );
+                phase.finish("committed");
+            }
+            Ok(results)
+        }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }
@@ -2147,9 +2210,19 @@ mod capture_batch_fast_path_tests {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let begun_savepoints = Arc::new(Mutex::new(Vec::new()));
         let observed_savepoints = Arc::clone(&begun_savepoints);
+        let trigger_compiles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_compiles = Arc::clone(&trigger_compiles);
         store
             .read_with(|conn| {
                 conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                    if matches!(
+                        context.action,
+                        AuthAction::Insert {
+                            table_name: "link_pending"
+                        }
+                    ) {
+                        observed_compiles.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     if let AuthAction::Savepoint {
                         operation: TransactionOperation::Begin,
                         savepoint_name,
@@ -2193,6 +2266,13 @@ mod capture_batch_fast_path_tests {
         .expect("capture clean batch");
 
         assert!(results.iter().all(Result::is_ok));
+        let compiles = trigger_compiles.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            compiles > 0 && compiles <= 4,
+            "link queue trigger programs compiled {compiles} times for one capture batch"
+        );
+        assert_eq!(store.table_row_count("link_pending").unwrap(), 0);
+        assert_eq!(store.table_row_count("link_aliases").unwrap(), 0);
         assert_eq!(
             *begun_savepoints.lock().expect("read begun savepoints"),
             vec!["dohc_capture_batch_fast"],
@@ -2329,6 +2409,15 @@ fn capture_ingest_binary_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_binary",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -2492,6 +2581,15 @@ fn capture_secret_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<SecretWriteResult, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_secret",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -2519,6 +2617,15 @@ fn capture_secret_retire_on_store(
     root_guard: &dyn WorkspaceRootGuard,
     faults: &dyn FaultInjector,
 ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_secret_retire",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     root_guard.validate(root_dir)?;
     ensure_mutation_version_on_store(
         store,
@@ -2598,6 +2705,15 @@ fn capture_retire_on_store(
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
 ) -> Result<CaptureRetireResult, RuntimeError> {
+    #[cfg(feature = "fault-injection")]
+    let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+        "actor_capture_retire",
+        input.metadata_correlation_id.as_deref(),
+        1,
+        true,
+    );
+    #[cfg(feature = "fault-injection")]
+    phase.finish("attempted");
     root_guard.validate(root_dir)?;
     ensure_mutation_version_on_store(
         store,

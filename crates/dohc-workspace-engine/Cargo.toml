@@ -44,7 +44,7 @@ libc = "0.2"
 [features]
 # Enables capture probe state and controls plus marker hooks (`*_for_harness`).
 # The probe type exists in all builds; production builds must not enable this feature.
-harness = []
+harness = ["dohc-engine-runtime/fault-injection"]
 
 [dev-dependencies]
 dohc-engine-collab = { path = "../dohc-engine-collab", features = ["test-support"] }

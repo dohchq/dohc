@@ -517,6 +517,49 @@ mod tests {
     use super::COMPARED_TABLES;
 
     #[test]
+    fn vacuum_backup_includes_commits_retained_in_wal_after_actor_close() {
+        use crate::{EngineStore, NoFaults, StorageError};
+        use dohc_test_scratch::ScratchDir;
+        let dir = ScratchDir::new().unwrap();
+        let path = dir.join("engine.db");
+        let mut store = EngineStore::open_for_actor(&path, 0, None, None).unwrap();
+        store
+            .read_with(|c| c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)"))
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute_batch(
+                    "CREATE TABLE backup_wal_proof(id INTEGER PRIMARY KEY, body TEXT);
+                INSERT INTO backup_wal_proof VALUES(1,'committed')",
+                )
+                .map_err(StorageError::corrupt_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        let (log, backfilled): (i64, i64) = store
+            .read_with(|c| {
+                c.query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| {
+                    Ok((r.get(1)?, r.get(2)?))
+                })
+            })
+            .unwrap();
+        assert!(log > backfilled, "fixture must contain WAL-only commits");
+        drop(store);
+        assert!(std::fs::metadata(dir.join("engine.db-wal")).unwrap().len() > 0);
+        let store = EngineStore::open_read_only(&path).unwrap();
+        let snapshot = dir.join("snapshot.db");
+        store.vacuum_into(&snapshot).unwrap();
+        let restored = rusqlite::Connection::open(&snapshot).unwrap();
+        let value: String = restored
+            .query_row("SELECT body FROM backup_wal_proof WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(value, "committed");
+        assert!(!dir.join("snapshot.db-wal").exists());
+    }
+
+    #[test]
     fn restore_comparison_rejects_missing_or_lost_live_and_recovery_tables() {
         use crate::{EngineStore, NoFaults, StorageError};
         use dohc_test_scratch::ScratchDir;

@@ -19,6 +19,8 @@ impl CollectionProjectionWorker {
             let wake = Arc::clone(&wake);
             async move {
                 let mut previous = CollectionProjection::default();
+                let mut busy_delay = std::time::Duration::from_millis(100);
+                let mut busy_streak = false;
                 loop {
                     tokio::select! {
                         biased;
@@ -26,11 +28,13 @@ impl CollectionProjectionWorker {
                         () = wake.notified() => {}
                     }
                     match actor
-                        .project_collections(workspace_id.clone(), previous)
+                        .project_collections(workspace_id.clone(), previous.clone())
                         .await
                     {
                         Ok((next, paths)) => {
                             previous = next;
+                            busy_delay = std::time::Duration::from_millis(100);
+                            busy_streak = false;
                             if !paths.is_empty() {
                                 let count = paths.len();
                                 let paths = (count <= 32).then_some(paths);
@@ -39,8 +43,27 @@ impl CollectionProjectionWorker {
                             }
                         }
                         Err(error) => {
-                            previous = CollectionProjection::default();
-                            eprintln!("engine: received Collection projection failed: {error}");
+                            if error.code() == "file-locked" {
+                                if !busy_streak {
+                                    eprintln!(
+                                        "engine: received Collection projection waiting for store: {error}"
+                                    );
+                                    busy_streak = true;
+                                }
+                                tokio::select! {
+                                    biased;
+                                    () = cancel.cancelled() => break,
+                                    () = tokio::time::sleep(busy_delay) => {}
+                                }
+                                busy_delay =
+                                    (busy_delay * 2).min(std::time::Duration::from_secs(3));
+                                wake.notify_one();
+                            } else {
+                                previous = CollectionProjection::default();
+                                busy_delay = std::time::Duration::from_millis(100);
+                                busy_streak = false;
+                                eprintln!("engine: received Collection projection failed: {error}");
+                            }
                         }
                     }
                 }
