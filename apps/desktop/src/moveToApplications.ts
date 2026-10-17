@@ -29,13 +29,40 @@ export function compareAppVersions(left: string, right: string): number | null {
   return 0;
 }
 
+/** Why dohc must not replace the dohc in Applications, or null when it may. */
+export function moveRefusal(runningVersion: string, installed: string | null): string | null {
+  if (installed === null) return null;
+  if (installed === "") return "dohc cannot read the version of the dohc already in Applications. Open that copy, or replace it in Finder.";
+  return (compareAppVersions(runningVersion, installed) ?? 0) > 0
+    ? null
+    : `Applications already has dohc ${installed}. Open that copy instead.`;
+}
+
+/**
+ * Moves dohc to Applications, reading the dohc already there right before
+ * the move, so neither the first move nor a Try again replaces a copy as new
+ * or newer. Rejects with why it did not move.
+ */
+export async function guardedMoveToApplications(deps: {
+  runningVersion: string;
+  // The version of the app of this bundle's name in Applications: null when
+  // there is none, and "" when it cannot be read.
+  installedVersion(): Promise<string | null>;
+  move(): void;
+}): Promise<void> {
+  const refusal = moveRefusal(deps.runningVersion, await deps.installedVersion());
+  if (refusal) throw new Error(refusal);
+  deps.move();
+}
+
 /**
  * Offers once to move a packaged macOS dohc that runs outside Applications,
  * such as from its disk image or Downloads. Electron's move asks nothing
  * itself: this question is the person's only say. A decline is remembered.
  * Nothing is offered when Applications already holds this version of dohc
- * or a newer one, or one whose version cannot be read. After a move,
- * Electron quits dohc and opens the moved copy.
+ * or a newer one, or one whose version cannot be read. `move` is the guarded
+ * move, which checks again. After a move, Electron quits dohc and opens the
+ * moved copy.
  */
 export async function offerMoveToApplications(deps: {
   bundlePath: string;
@@ -43,9 +70,7 @@ export async function offerMoveToApplications(deps: {
   isInApplicationsFolder(): boolean;
   declined(): boolean;
   recordDecline(): void;
-  // The version of the app of this bundle's name in Applications: null when
-  // there is none, and "" when it cannot be read.
-  installedVersion(): string | null;
+  installedVersion(): Promise<string | null>;
   showMessageBox(options: {
     type: "question";
     message: string;
@@ -59,8 +84,8 @@ export async function offerMoveToApplications(deps: {
   reportMoveFailure(error: unknown): void;
 }): Promise<void> {
   if (deps.isInApplicationsFolder() || deps.declined()) return;
-  const installed = deps.installedVersion();
-  if (installed !== null && !((compareAppVersions(deps.runningVersion, installed) ?? 0) > 0)) return;
+  const installed = await deps.installedVersion();
+  if (moveRefusal(deps.runningVersion, installed) !== null) return;
   const { response } = await deps.showMessageBox({
     type: "question",
     message: "Move dohc to Applications?",

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { compareAppVersions, offerMoveToApplications } from "./moveToApplications";
+import { compareAppVersions, guardedMoveToApplications, offerMoveToApplications } from "./moveToApplications";
 
 function harness(overrides: {
   inApplications?: boolean;
@@ -14,7 +14,7 @@ function harness(overrides: {
     isInApplicationsFolder: () => overrides.inApplications ?? false,
     declined: () => overrides.declined ?? false,
     recordDecline: vi.fn(),
-    installedVersion: () => overrides.installedVersion ?? null,
+    installedVersion: async () => overrides.installedVersion ?? null,
     showMessageBox: vi.fn(async () => ({ response: overrides.response ?? 0 })),
     move: vi.fn(async (): Promise<void> => undefined),
     reportMoveFailure: vi.fn(),
@@ -29,6 +29,27 @@ describe("compareAppVersions", () => {
     expect(compareAppVersions("0.1.1-nightly.20261018.1.1", "0.1.1-nightly.20261017.12.1")).toBeGreaterThan(0);
     expect(compareAppVersions("1.0.0", "1.0.0")).toBe(0);
     expect(compareAppVersions("1.0.0", "")).toBeNull();
+  });
+});
+
+describe("guardedMoveToApplications", () => {
+  it("reads the dohc in Applications before every move, and refuses to replace one as new or newer", async () => {
+    let installed: string | null = null;
+    const installedVersion = vi.fn(async () => installed);
+    const move = vi.fn();
+    const attempt = () => guardedMoveToApplications({ runningVersion: "0.2.0", installedVersion, move });
+
+    await attempt();
+    installed = "0.1.0";
+    await attempt();
+    expect(move).toHaveBeenCalledTimes(2);
+    // A newer copy arrived since, as before a Try again.
+    installed = "0.3.0";
+    await expect(attempt()).rejects.toThrow("Applications already has dohc 0.3.0. Open that copy instead.");
+    installed = "";
+    await expect(attempt()).rejects.toThrow("dohc cannot read the version of the dohc already in Applications.");
+    expect(installedVersion).toHaveBeenCalledTimes(4);
+    expect(move).toHaveBeenCalledTimes(2);
   });
 });
 

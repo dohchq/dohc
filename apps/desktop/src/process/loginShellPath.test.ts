@@ -1,15 +1,17 @@
+import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   adoptLoginShellPath,
-  descendantGroups,
   loginShellEnvironment,
   mergeShellPath,
   parseShellPath,
   readLoginShellPath,
   registeredLoginShell,
+  type ShellProcess,
 } from "./loginShellPath";
 
 const LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -37,22 +39,6 @@ describe("mergeShellPath", () => {
   });
 });
 
-describe("descendantGroups", () => {
-  it("names the shell's group and the groups of everything below it, and nothing else", () => {
-    const table = [
-      "  100     1   100", // the shell
-      "  101   100   101", // a job in its own group
-      "  102   101   101", // that job's child
-      "  103   100   100", // a plain child
-      "  200     1   200", // not the shell's
-      "  201   200   100", // a stranger in a group number that matches
-      "garbage",
-    ].join("\n");
-    expect(descendantGroups(table, 100).sort()).toEqual([100, 101]);
-    expect(descendantGroups("", 100)).toEqual([100]);
-  });
-});
-
 describe("registeredLoginShell", () => {
   it("accepts only an absolute shell /etc/shells lists", () => {
     expect(registeredLoginShell("/bin/zsh", SHELLS)).toBe("/bin/zsh");
@@ -64,12 +50,12 @@ describe("registeredLoginShell", () => {
 });
 
 describe("loginShellEnvironment", () => {
-  it("passes a few account facts and nothing that steers the shell", () => {
+  it("passes the account's home and shell, a few facts, and nothing that steers the shell", () => {
     expect(loginShellEnvironment({
-      HOME: "/Users/sam", USER: "sam", LOGNAME: "sam", TMPDIR: "/var/folders/x/T/", LANG: "en_US.UTF-8",
+      HOME: "/tmp/elsewhere", USER: "sam", LOGNAME: "sam", TMPDIR: "/var/folders/x/T/", LANG: "en_US.UTF-8",
       PATH: LAUNCHD_PATH, SHELL: "/tmp/other", BASH_ENV: "/tmp/payload", ZDOTDIR: "/tmp/z", ENV: "/tmp/e",
       NODE_OPTIONS: "--require /tmp/x.js", TERM: "xterm",
-    }, "/bin/zsh")).toEqual({
+    }, { shell: "/bin/zsh", homedir: "/Users/sam" })).toEqual({
       HOME: "/Users/sam", USER: "sam", LOGNAME: "sam", TMPDIR: "/var/folders/x/T/", LANG: "en_US.UTF-8",
       SHELL: "/bin/zsh", TERM: "dumb",
     });
@@ -78,9 +64,9 @@ describe("loginShellEnvironment", () => {
 
 describe("adoptLoginShellPath", () => {
   it("reads the account's registered shell with the minimal environment and merges its PATH", async () => {
-    const env: NodeJS.ProcessEnv = { HOME: "/Users/sam", SHELL: "/tmp/other", BASH_ENV: "/tmp/payload", PATH: LAUNCHD_PATH };
+    const env: NodeJS.ProcessEnv = { HOME: "/tmp/elsewhere", SHELL: "/tmp/other", BASH_ENV: "/tmp/payload", PATH: LAUNCHD_PATH };
     const read = vi.fn(async () => ["/opt/homebrew/bin"]);
-    await adoptLoginShellPath(env, { accountShell: () => "/bin/zsh", readShells: () => SHELLS, read });
+    await adoptLoginShellPath(env, { account: () => ({ shell: "/bin/zsh", homedir: "/Users/sam" }), readShells: () => SHELLS, read });
     expect(read).toHaveBeenCalledWith({ shell: "/bin/zsh", env: { HOME: "/Users/sam", SHELL: "/bin/zsh", TERM: "dumb" } });
     expect(env.PATH).toBe(`/opt/homebrew/bin:${LAUNCHD_PATH}`);
   });
@@ -88,14 +74,95 @@ describe("adoptLoginShellPath", () => {
   it("keeps the PATH when the shell is unlisted, unreadable, or gives none", async () => {
     const read = vi.fn(async () => ["/opt/homebrew/bin"]);
     const env: NodeJS.ProcessEnv = { PATH: LAUNCHD_PATH };
-    await adoptLoginShellPath(env, { accountShell: () => "/tmp/evil-shell", readShells: () => SHELLS, read });
-    await adoptLoginShellPath(env, { accountShell: () => "/bin/zsh", readShells: () => { throw new Error("EACCES"); }, read });
+    const account = () => ({ shell: "/bin/zsh", homedir: "/Users/sam" });
+    await adoptLoginShellPath(env, { account: () => ({ shell: "/tmp/evil-shell", homedir: "/Users/sam" }), readShells: () => SHELLS, read });
+    await adoptLoginShellPath(env, { account, readShells: () => { throw new Error("EACCES"); }, read });
+    await adoptLoginShellPath(env, { account: () => { throw new Error("no passwd entry"); }, readShells: () => SHELLS, read });
     expect(read).not.toHaveBeenCalled();
-    await adoptLoginShellPath(env, { accountShell: () => "/bin/zsh", readShells: () => SHELLS, read: async () => null });
-    await adoptLoginShellPath(env, {
-      accountShell: () => "/bin/zsh", readShells: () => SHELLS, read: async () => { throw new Error("spawn EACCES"); },
-    });
+    await adoptLoginShellPath(env, { account, readShells: () => SHELLS, read: async () => null });
+    await adoptLoginShellPath(env, { account, readShells: () => SHELLS, read: async () => { throw new Error("spawn EACCES"); } });
     expect(env.PATH).toBe(LAUNCHD_PATH);
+  });
+});
+
+// A shell whose output, exit and close the test drives.
+function fakeShell() {
+  const events = new EventEmitter();
+  const stdout = new PassThrough();
+  const shell = {
+    pid: 4242,
+    exitCode: null as number | null,
+    signalCode: null as NodeJS.Signals | null,
+    stdout,
+    on: (event: "error" | "close", listener: () => void) => events.on(event, listener),
+    print: (text: string) => stdout.write(text),
+    exit: () => {
+      shell.exitCode = 0;
+    },
+    close: () => events.emit("close"),
+  };
+  return shell;
+}
+
+function readFake(shell: ReturnType<typeof fakeShell>, timeoutMs = 60_000) {
+  const kill = vi.fn((_pid: number, _signal: NodeJS.Signals) => undefined);
+  let command = "";
+  const read = readLoginShellPath({
+    shell: "/bin/zsh", env: {}, timeoutMs, kill,
+    spawn: (_shell, text): ShellProcess => {
+      command = text;
+      return shell;
+    },
+  });
+  const marker = /'(__dohc_path_[^']+)'/u.exec(command)![1]!;
+  return { read, kill, printPath: (path: string) => shell.print(`${marker}${path}\n${marker}`) };
+}
+
+describe("readLoginShellPath cleanup", () => {
+  it("kills the running shell's group once, when the PATH arrives", async () => {
+    const shell = fakeShell();
+    const f = readFake(shell);
+    f.printPath("/opt/homebrew/bin:/usr/bin");
+    await expect(f.read).resolves.toEqual(["/opt/homebrew/bin", "/usr/bin"]);
+    expect(f.kill.mock.calls).toEqual([[-4242, "SIGKILL"]]);
+    shell.close();
+    expect(f.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it("never signals a shell Node has seen exit, whose pid may name another process", async () => {
+    vi.useFakeTimers();
+    try {
+      const shell = fakeShell();
+      const f = readFake(shell, 1_000);
+      shell.exit();
+      f.printPath("/opt/homebrew/bin");
+      await expect(f.read).resolves.toEqual(["/opt/homebrew/bin"]);
+
+      const late = fakeShell();
+      const g = readFake(late, 1_000);
+      late.exit();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(g.read).resolves.toBeNull();
+      expect(f.kill).not.toHaveBeenCalled();
+      expect(g.kill).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("kills a shell still running at the deadline, and reads nothing after", async () => {
+    vi.useFakeTimers();
+    try {
+      const shell = fakeShell();
+      const f = readFake(shell, 1_000);
+      shell.print("Last login: today\n");
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(f.read).resolves.toBeNull();
+      expect(f.kill.mock.calls).toEqual([[-4242, "SIGKILL"]]);
+      expect(shell.stdout.destroyed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -132,44 +199,24 @@ describe.skipIf(process.platform === "win32")("readLoginShellPath", () => {
     expect(mergeShellPath(LAUNCHD_PATH, entries ?? []).startsWith("/opt/dohc-test/bin:")).toBe(true);
   });
 
-  it("stops a job in its own process group that the shell waits for at exit", async () => {
-    // With job control on, bash gives the job a group of its own, as it does
-    // an exit trap's command. Killing the shell's group alone would leave the
-    // job holding the output open.
+  it("keeps the PATH and ends a shell whose exit trap never returns", async () => {
+    // The trap runs in the shell itself, so the shell never exits on its own.
     const dir = profile([
       'echo $$ > "$HOME/shell.pid"',
-      "set -m",
-      'sleep 30 & echo $! > "$HOME/job.pid"',
-      "trap wait EXIT",
       'export PATH="/opt/dohc-test/bin:$PATH"',
+      "trap 'while :; do :; done' EXIT",
       "",
     ].join("\n"));
     const started = Date.now();
     const entries = await readLoginShellPath({ shell: "/bin/bash", env: { HOME: dir }, timeoutMs: 10_000 });
     expect(entries?.[0]).toBe("/opt/dohc-test/bin");
-    expect(Date.now() - started).toBeLessThan(10_000);
-    const job = Number(readFileSync(join(dir, "job.pid"), "utf8"));
-    await vi.waitFor(() => expect(() => process.kill(job, 0)).toThrow());
-    await vi.waitFor(() => groupGone(join(dir, "shell.pid")));
-  });
-
-  it("keeps the PATH and stops the shell when its exit hangs after printing", async () => {
-    const dir = profile([
-      'echo $$ > "$HOME/shell.pid"',
-      'export PATH="/opt/dohc-test/bin:$PATH"',
-      "trap 'sleep 30' EXIT",
-      "",
-    ].join("\n"));
-    const started = Date.now();
-    const entries = await readLoginShellPath({ shell: "/bin/bash", env: { HOME: dir }, timeoutMs: 10_000 });
-    expect(entries?.[0]).toBe("/opt/dohc-test/bin");
-    // The PATH arriving stops the group; the deadline is not what ended it.
+    // The PATH arriving ended it; the deadline did not.
     expect(Date.now() - started).toBeLessThan(10_000);
     await vi.waitFor(() => groupGone(join(dir, "shell.pid")));
   });
 
-  it("gives up on a profile that hangs before printing, and stops what it started", async () => {
-    const dir = profile('echo $$ > "$HOME/shell.pid"\nsleep 30 & wait\n');
+  it("gives up on a profile that hangs before printing, and ends its group", async () => {
+    const dir = profile('echo $$ > "$HOME/shell.pid"\nsleep 30\n');
     const started = Date.now();
     await expect(readLoginShellPath({ shell: "/bin/bash", env: { HOME: dir }, timeoutMs: 1_000 })).resolves.toBeNull();
     expect(Date.now() - started).toBeLessThan(5_000);

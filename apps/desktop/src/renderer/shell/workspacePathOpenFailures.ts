@@ -95,9 +95,8 @@ export function useWorkspacePathOpenFailures(workspaceId: string | null, report:
     };
     type MoveFailure = Extract<WorkspacePathOpenFailure, { moveToApplications: true }>;
     const reportMoveFailure = (failure: MoveFailure, cause: unknown, canRetry: boolean) => {
-      const said = withErrorWords("dohc could not move itself to Applications.", cause);
       report({
-        message: `${/[.!?]$/u.test(said) ? said : `${said}.`} To move it yourself, drag dohc into Applications in Finder.`,
+        message: withErrorWords("dohc could not move itself to Applications.", cause),
         cause,
         retry: canRetry ? () => {
           void bridge().retryWorkspacePathOpen({ attemptId: failure.attemptId }).catch((error: unknown) => {

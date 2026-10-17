@@ -16,14 +16,13 @@ export function isAppImageBoot(
 }
 
 /** True for a macOS app that runs from the temporary copy App Translocation
- * makes of a quarantined download, or from a mounted volume outside an
- * Applications folder, as from a disk image. Either path can go away, so
- * nothing that outlives this launch may name it. An app installed in a
- * volume's own Applications folder stays put. */
+ * makes of a quarantined download, or from a mounted volume outside the
+ * Applications folder at its top, as from a disk image. Either path can go
+ * away, so nothing that outlives this launch may name it. */
 export function isTemporaryMacAppPath(path: string): boolean {
   if (path.includes("/AppTranslocation/")) return true;
-  const [, volumes, volume, ...rest] = path.split("/");
-  return volumes === "Volumes" && volume !== undefined && volume !== "" && !rest.includes("Applications");
+  const [, volumes, volume, top] = path.split("/");
+  return volumes === "Volumes" && volume !== undefined && volume !== "" && top !== "Applications";
 }
 
 /**

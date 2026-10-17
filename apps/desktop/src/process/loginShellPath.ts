@@ -1,8 +1,9 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { posix } from "node:path";
+import type { Readable } from "node:stream";
 
 // Long enough for a profile that loads nvm or a plugin manager. A profile that
 // hangs costs agent runs this much once, then they use the PATH dohc has.
@@ -10,7 +11,7 @@ export const LOGIN_SHELL_PATH_TIMEOUT_MS = 3_000;
 const OUTPUT_LIMIT = 256 * 1024;
 // The login shell sees only these, so variables launchd or a parent process
 // set, such as BASH_ENV, ZDOTDIR, ENV or NODE_OPTIONS, cannot steer it.
-const SHELL_ENVIRONMENT = ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG"] as const;
+const SHELL_ENVIRONMENT = ["USER", "LOGNAME", "TMPDIR", "LANG"] as const;
 
 /** The absolute PATH entries a shell printed between two markers, or null. */
 export function parseShellPath(output: string, marker: string): string[] | null {
@@ -27,89 +28,73 @@ export function mergeShellPath(current: string | undefined, fromShell: readonly 
   return [...new Set([...fromShell, ...(current ?? "").split(":").filter((entry) => posix.isAbsolute(entry))])].join(":");
 }
 
-/**
- * The process groups of `root` and of every process descended from it, read
- * from `ps -A -o pid=,ppid=,pgid=` output. An interactive shell gives each
- * job, and an exit trap's command, a group of its own.
- */
-export function descendantGroups(table: string, root: number): number[] {
-  const rows = table.split("\n").map((line) => line.trim().split(/\s+/u).map(Number))
-    .filter((row) => row.length === 3 && row.every((value) => Number.isInteger(value) && value > 0));
-  const groups = new Set([root]);
-  const tree = new Set([root]);
-  for (let grew = true; grew;) {
-    grew = false;
-    for (const [pid, ppid, pgid] of rows) {
-      if (tree.has(ppid!) && !tree.has(pid!)) {
-        tree.add(pid!);
-        groups.add(pgid!);
-        grew = true;
-      }
-    }
-  }
-  return [...groups];
+// The part of a spawned shell this read uses.
+export interface ShellProcess {
+  readonly pid?: number | undefined;
+  readonly exitCode: number | null;
+  readonly signalCode: NodeJS.Signals | null;
+  readonly stdout: Readable | null;
+  on(event: "error" | "close", listener: () => void): unknown;
 }
 
-// Kills the shell's group and the groups its descendants started. The table
-// is read before the kill, while every descendant still names its parent.
-function stopShell(pid: number | undefined): Promise<void> {
-  if (pid === undefined) return Promise.resolve();
-  return new Promise((done) => {
-    execFile("/bin/ps", ["-A", "-o", "pid=,ppid=,pgid="], { timeout: 1_000 }, (_error, table) => {
-      for (const group of descendantGroups(typeof table === "string" ? table : "", pid)) {
-        try {
-          process.kill(-group, "SIGKILL");
-        } catch { /* The group already exited. */ }
-      }
-      done();
-    });
+function spawnShell(shell: string, command: string, env: NodeJS.ProcessEnv): ShellProcess {
+  return spawn(shell, ["-ilc", command], {
+    env,
+    stdio: ["ignore", "pipe", "ignore"],
+    // A process group of its own, whose id is the shell's pid.
+    detached: true,
   });
 }
 
 /**
  * Asks the person's login shell for its PATH, as Terminal would set it. The
- * markers keep a profile's own output out of the answer. Resolves null when
- * the shell fails, prints no PATH, or prints none within `timeoutMs`. Once the
- * PATH arrives, or the time runs out, the shell and everything it started are
- * killed, so nothing the profile started outlives the read.
+ * markers keep a profile's own output out of the answer. Resolves when the
+ * PATH arrives, the shell ends, or `timeoutMs` passes, and null without a
+ * PATH. When the PATH arrives or the time runs out, a shell that is still
+ * running is killed with its process group, which holds the profile and its
+ * exit trap. Jobs the profile moved into other groups, such as `set -m`
+ * background jobs and agents like ssh-agent, keep running, as they do after
+ * Terminal closes. dohc does not own them.
  */
 export function readLoginShellPath(options: {
   shell: string;
   env: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  spawn?: (shell: string, command: string, env: NodeJS.ProcessEnv) => ShellProcess;
+  kill?: (pid: number, signal: NodeJS.Signals) => void;
 }): Promise<string[] | null> {
   if (!posix.isAbsolute(options.shell)) return Promise.resolve(null);
   const marker = `__dohc_path_${randomUUID()}__`;
   const command = `printf '%s' '${marker}'; /usr/bin/printenv PATH; printf '%s' '${marker}'`;
+  const kill = options.kill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
   return new Promise((resolve) => {
     let output = "";
-    let entries: string[] | null = null;
     let settled = false;
-    const child = spawn(options.shell, ["-ilc", command], {
-      env: options.env,
-      stdio: ["ignore", "pipe", "ignore"],
-      // Its own session, apart from dohc's process group.
-      detached: true,
-    });
-    const finish = () => {
+    const child = (options.spawn ?? spawnShell)(options.shell, command, options.env);
+    const settle = (entries: string[] | null, stop: boolean) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      void stopShell(child.pid).then(() => resolve(entries));
+      child.stdout?.destroy();
+      // Once Node has seen the shell exit, its pid may name another process,
+      // so the group is signalled only before that.
+      if (stop && child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+        try {
+          kill(-child.pid, "SIGKILL");
+        } catch { /* The group already ended. */ }
+      }
+      resolve(entries);
     };
-    // Runs until the shell closes, even after the PATH arrived, so a profile
-    // that keeps the output open is still stopped.
-    const timer = setTimeout(finish, options.timeoutMs ?? LOGIN_SHELL_PATH_TIMEOUT_MS);
+    const timer = setTimeout(() => settle(parseShellPath(output, marker), true), options.timeoutMs ?? LOGIN_SHELL_PATH_TIMEOUT_MS);
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
-      if (entries) return;
       output += chunk;
-      entries = parseShellPath(output, marker);
-      if (entries) void stopShell(child.pid);
-      else if (output.length > OUTPUT_LIMIT) finish();
+      const entries = parseShellPath(output, marker);
+      if (entries) settle(entries, true);
+      else if (output.length > OUTPUT_LIMIT) settle(null, true);
     });
-    child.on("error", finish);
-    child.on("close", finish);
+    child.on("error", () => settle(null, false));
+    child.on("close", () => settle(parseShellPath(output, marker), false));
   });
 }
 
@@ -123,9 +108,12 @@ export function registeredLoginShell(
   return listed.includes(shell) ? shell : null;
 }
 
-/** What the login shell starts with: a few account facts and nothing that steers it. */
-export function loginShellEnvironment(env: NodeJS.ProcessEnv, shell: string): NodeJS.ProcessEnv {
-  const result: NodeJS.ProcessEnv = { SHELL: shell, TERM: "dumb" };
+/** What the login shell starts with: the account's facts and nothing that steers it. */
+export function loginShellEnvironment(
+  env: NodeJS.ProcessEnv,
+  account: { shell: string; homedir: string },
+): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = { HOME: account.homedir, SHELL: account.shell, TERM: "dumb" };
   for (const name of SHELL_ENVIRONMENT) {
     if (env[name] !== undefined) result[name] = env[name];
   }
@@ -141,22 +129,22 @@ export function loginShellEnvironment(env: NodeJS.ProcessEnv, shell: string): No
 export async function adoptLoginShellPath(
   env: NodeJS.ProcessEnv,
   deps: {
-    accountShell(): string | null | undefined;
+    account(): { shell: string | null; homedir: string };
     readShells(): string;
     read: typeof readLoginShellPath;
   } = {
-    accountShell: () => userInfo().shell,
+    account: () => userInfo(),
     readShells: () => readFileSync("/etc/shells", "utf8"),
     read: readLoginShellPath,
   },
 ): Promise<void> {
-  let shell: string | null;
+  let account: { shell: string; homedir: string } | null = null;
   try {
-    shell = registeredLoginShell(deps.accountShell(), deps.readShells());
-  } catch {
-    return;
-  }
-  if (!shell) return;
-  const entries = await deps.read({ shell, env: loginShellEnvironment(env, shell) }).catch(() => null);
+    const { shell, homedir } = deps.account();
+    const registered = registeredLoginShell(shell, deps.readShells());
+    if (registered && posix.isAbsolute(homedir)) account = { shell: registered, homedir };
+  } catch { /* No account record or no /etc/shells: keep the PATH dohc has. */ }
+  if (!account) return;
+  const entries = await deps.read({ shell: account.shell, env: loginShellEnvironment(env, account) }).catch(() => null);
   if (entries) env.PATH = mergeShellPath(env.PATH, entries);
 }

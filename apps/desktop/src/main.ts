@@ -143,7 +143,7 @@ import {
   type WebContents,
 } from "electron";
 import { watch, existsSync, lstatSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { hostname, release as osRelease, type as osType } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -527,7 +527,7 @@ import {
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import { adoptLoginShellPath } from "./process/loginShellPath";
-import { offerMoveToApplications } from "./moveToApplications";
+import { guardedMoveToApplications, offerMoveToApplications } from "./moveToApplications";
 import { installCrashCapture } from "./crashReports/crashCapture";
 import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
 import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
@@ -5436,22 +5436,46 @@ if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged) {
 // first window, whether to move there. A decline is remembered in this file.
 const MOVE_DECLINED_FILE = "move-to-applications-declined";
 
-// Electron quits dohc and opens the moved copy once the move succeeds.
-async function moveDohcToApplications(): Promise<void> {
-  try {
-    app.moveToApplicationsFolder();
-  } catch (error) {
-    console.error("[desktop] move to Applications:", error);
-    throw error;
-  }
+function runningBundlePath(): string {
+  return resolve(process.execPath, "..", "..", "..");
+}
+
+// The version of the dohc of this bundle's name in Applications: null when
+// there is none, and "" when it cannot be read.
+async function installedDohcVersion(): Promise<string | null> {
+  const installed = join("/Applications", basename(runningBundlePath()));
+  if (!(await lstat(installed).then(() => true, () => false))) return null;
+  return new Promise((done) => {
+    execFile("/usr/bin/plutil", [
+      "-extract", "CFBundleShortVersionString", "raw", "-o", "-", join(installed, "Contents", "Info.plist"),
+    ], { encoding: "utf8", timeout: 2_000 }, (error, stdout) => done(error ? "" : stdout.trim()));
+  });
+}
+
+// Every move, the first and each Try again, reads the dohc in Applications
+// right before it. Electron then quits dohc and opens the moved copy.
+function moveDohcToApplications(): Promise<void> {
+  return guardedMoveToApplications({
+    runningVersion: app.getVersion(),
+    installedVersion: installedDohcVersion,
+    move: () => {
+      try {
+        app.moveToApplicationsFolder();
+      } catch (error) {
+        console.error("[desktop] move to Applications:", error);
+        const said = error instanceof Error ? error.message.trim() : "";
+        const sentence = said === "" || /[.!?]$/u.test(said) ? said : `${said}.`;
+        throw new Error([sentence, "Drag dohc into Applications in Finder to move it yourself."].filter(Boolean).join(" "), { cause: error });
+      }
+    },
+  });
 }
 
 function offerMoveToApplicationsOn(window: BrowserWindow | undefined): void {
   if (process.platform !== "darwin" || !app.isPackaged || !window) return;
-  const bundlePath = resolve(process.execPath, "..", "..", "..");
   const declinedFile = () => join(stateDir(), MOVE_DECLINED_FILE);
   const offer = () => void offerMoveToApplications({
-    bundlePath,
+    bundlePath: runningBundlePath(),
     runningVersion: app.getVersion(),
     isInApplicationsFolder: () => app.isInApplicationsFolder(),
     // Any entry there means declined; it is never followed.
@@ -5465,17 +5489,7 @@ function offerMoveToApplicationsOn(window: BrowserWindow | undefined): void {
         }
       }
     },
-    installedVersion: () => {
-      const installed = join("/Applications", basename(bundlePath));
-      if (!existsSync(installed)) return null;
-      try {
-        return execFileSync("/usr/bin/plutil", [
-          "-extract", "CFBundleShortVersionString", "raw", "-o", "-", join(installed, "Contents", "Info.plist"),
-        ], { encoding: "utf8", timeout: 2_000 }).trim();
-      } catch {
-        return "";
-      }
-    },
+    installedVersion: installedDohcVersion,
     showMessageBox: (options) =>
       window.isDestroyed() ? dialog.showMessageBox(options) : dialog.showMessageBox(window, options),
     move: moveDohcToApplications,
