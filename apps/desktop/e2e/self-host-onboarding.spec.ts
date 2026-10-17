@@ -1,8 +1,9 @@
+import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { activityPin, settingsNavPin } from "../src/testPins";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test, type BrowserContext } from "@playwright/test";
+import { test, expect, type BrowserContext } from "@playwright/test";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack } from "./helpers/selfHostOnboarding";
@@ -65,9 +66,12 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     await syncSwitch.click();
     await expect(syncSwitch).toHaveAttribute("aria-checked", "true");
     await expect(left.page.getByTestId("cloud-sync-code")).toBeVisible();
-    await left.page.getByTestId("cloud-copy-sync-code").click();
-    await expect.poll(() => left!.app.evaluate(({ clipboard }) => clipboard.readText())).toBe(await left.page.getByTestId("cloud-sync-code").textContent());
-    const syncCode = await left.app.evaluate(({ clipboard }) => clipboard.readText());
+    const syncCode = await holdSystemClipboard(test.info(), async (remainingMs) => {
+      await left!.page.getByTestId("cloud-copy-sync-code").click({ timeout: remainingMs() });
+      const syncCode = await left!.page.getByTestId("cloud-sync-code").textContent({ timeout: remainingMs() });
+      await expect.poll(() => left!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() }).toBe(syncCode);
+      return await left!.app.evaluate(({ clipboard }) => clipboard.readText());
+    });
     expect(syncCode).toBe(await left.page.getByTestId("cloud-sync-code").textContent());
     expect(syncCode).toContain(stack.relayUrl);
     await left.page.keyboard.press("Escape");

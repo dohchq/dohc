@@ -1,3 +1,4 @@
+import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { activityPin, editorTabTestId, settingsNavPin } from "../src/testPins";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import { randomUUID } from "node:crypto";
@@ -5,7 +6,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { expect, test, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
+import { test, expect, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
 import type { DohcDesktopBridge, EngineMomentRecord } from "../src/ipc/bridgeContract";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { DohcCliFailure, runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
@@ -887,11 +888,13 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         for (const text of [H1, A1, HA, H2, A2, `${R2} ${RP}`]) expect(draft).toContain(text);
         expect(draft).not.toContain(R1);
         expect(draft).not.toContain("Typed after the share ended.");
-        await desktop.app.evaluate(({ clipboard }) => clipboard.writeText(""));
-        await page.getByTestId("orphaned-draft-copy").click();
-        // Chromium writes plain text with CRLF line endings on Windows.
-        await expect.poll(async () => (copied = await desktop.app.evaluate(({ clipboard }) => clipboard.readText())).replace(/\r\n/g, "\n"), { timeout: 30_000 })
-          .toBe(draft);
+        await holdSystemClipboard(testInfo, async (remainingMs) => {
+          await desktop!.app.evaluate(({ clipboard }) => clipboard.writeText(""));
+          await page.getByTestId("orphaned-draft-copy").click({ timeout: remainingMs() });
+          // Chromium writes plain text with CRLF line endings on Windows.
+          await expect.poll(async () => (copied = await desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).replace(/\r\n/g, "\n"), { timeout: remainingMs() })
+            .toBe(draft);
+        });
         await attachScreen(testInfo, page, "new recipient's set-aside typing");
         await expect(editor(owner!.page)).not.toContainText(RP);
         await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, H2, A2, R2], [R1, RP]), { timeout: 60_000 }).toBe(true);
