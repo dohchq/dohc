@@ -1474,9 +1474,8 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
       }
       const threads = await api.listFileChats({ workspaceId, path: "docs/shared.md" });
       if ("status" in threads) throw new Error(threads.code);
-      // The workspace-wide listing is not routed to a share view: a share
-      // view gets per-file chat only, and #627 is the reason the whole
-      // surface is refused rather than filtered.
+      // Listing is a read in a received share. It must answer without
+      // creating General or storing generic chat rows.
       let channels: string;
       try {
         await api.listChatChannels({ workspaceId });
@@ -1493,7 +1492,7 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
     });
     expect(chat.refusal).toContain("read-only");
     expect(chat.threadCount).toBe(0);
-    expect(chat.channels).not.toBe("answered");
+    expect(chat.channels).toBe("answered");
     await expect
       .poll(() => receivedShareGenericChatRows(chat.rootPath))
       .toEqual({ storedRows: 0, replicationRows: 0 });
