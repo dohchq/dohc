@@ -9,10 +9,9 @@ import { startSmtpCapture } from "./smtpCapture";
 
 export const ACCOUNT_TEST_SECRET = "disposable-account-browser-acceptance-secret-0123456789";
 
-// The relay and the account server read every table the migrations create, such
-// as account deletion's jobs, so the database gets all of them. Account servers in
-// parallel test workers share one database; the lock applies the migrations once.
-// One client holds the lock and each migration's transaction.
+// The relay and the account server read every migration's tables, such as account
+// deletion's jobs. Parallel account servers share a database, so all migrations
+// run under one session lock, on the client that holds it.
 async function migrate(pool: Pool): Promise<void> {
   const client = await pool.connect();
   try {
