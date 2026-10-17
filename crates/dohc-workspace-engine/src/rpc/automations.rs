@@ -186,6 +186,47 @@ mod durability_tests {
     }
 
     #[tokio::test]
+    async fn a_make_durable_cancelled_after_its_batch_ran_answers_with_the_batch() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        let workspaces: &'static dohc_engine_runtime::WorkspaceSupervisor =
+            Box::leak(Box::new(dohc_engine_runtime::WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(workspaces);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "durable-after-cancel",
+                    "captureMode": "none",
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        let ctx = RequestContext::unbounded();
+        let mut waiting =
+            Box::pin(service.automations_make_durable(&ctx, Some(handle.clone()), json!({})));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // The batch reached the actor first, so it has run once the hold enters.
+        let hold = service.hold_actor(&handle).await;
+        ctx.cancel.cancel();
+        tokio::task::yield_now().await;
+        drop(hold);
+        assert_eq!(
+            waiting
+                .await
+                .expect("a batch that ran answers with its outcome"),
+            json!({})
+        );
+        service.workspace_close(Some(handle)).await.expect("close");
+    }
+
+    #[tokio::test]
     async fn durability_queue_late_callers_share_the_following_barrier() {
         let queue = DurabilityQueue::default();
         let (send, mut batches) = tokio::sync::mpsc::unbounded_channel();
@@ -1121,18 +1162,26 @@ impl EngineService {
         let params: AutomationMakeDurableParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let reply = open.durability.submit(
-            open.actor.clone(),
-            open.workspace_id.clone(),
-            params.claim_id,
-            cancellation.token(),
-        );
-        let token = cancellation.token();
-        tokio::select! {
-            biased;
-            () = token.cancelled() => return Err(cancellation.interruption("automations.makeDurable")),
-            result = reply => result.map_err(|_| WireError::new(ErrorCode::WorkspaceUnavailable, "workspace actor is unavailable"))??,
-        }
+        // The batch skips a claim whose token fired before it ran, so its
+        // reply is the claim's real outcome.
+        open.durability
+            .submit(
+                open.actor.clone(),
+                open.workspace_id.clone(),
+                params.claim_id,
+                cancellation.token(),
+            )
+            .await
+            .map_err(|_| {
+                WireError::new(
+                    ErrorCode::WorkspaceUnavailable,
+                    "workspace actor is unavailable",
+                )
+            })?
+            .map_err(|error| match error.code {
+                ErrorCode::Cancelled => cancellation.interruption("automations.makeDurable"),
+                _ => error,
+            })?;
         Ok(json!({}))
     }
 

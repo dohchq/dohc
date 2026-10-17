@@ -171,5 +171,6 @@
   "file.external.open",
   "account.delete.preview",
   "account.delete",
+  "agent.run.state.read",
   "workspace.sync.stop"
 ]

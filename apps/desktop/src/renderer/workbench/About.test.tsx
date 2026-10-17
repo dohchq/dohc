@@ -4,11 +4,13 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/access";
-import type { EngineMomentRecord, ListEngineMomentsResponse } from "../../ipc/bridgeContract";
+import type { ActorPresentation, EngineMomentRecord, ListEngineMomentsResponse } from "../../ipc/bridgeContract";
+import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { deferred } from "../../testing/deferred";
 import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
 import { formatShortTime } from "../time";
-import { AboutAccess, AboutHistory, AboutHeader, accessReasonFor, type AboutFile, type AccessFacts } from "./About";
+import { AboutAccess, AboutHistory, AboutHistoryView, AboutHeader, accessReasonFor, type AboutFile, type AccessFacts } from "./About";
+import { setChosenColors } from "./chosenColors";
 
 const bridgeMock = {
   getObjectAccess: vi.fn<(input: { workspaceId: string; ref: unknown; cursor?: string }) => Promise<AccessAnswer>>(),
@@ -705,6 +707,62 @@ describe("About History", () => {
     expect(screen.getByTestId("about-history-open").textContent).toContain("Older");
     await act(async () => next.resolve(page([moment({ id: "moment-new", summary: "Newer" }), moment({ summary: "Older" })])));
     expect(screen.getAllByTestId("about-history-open")).toHaveLength(2);
+  });
+});
+
+describe("About History authors", () => {
+  const token = (hue: ActorPresentation["hue"], self = false): ActorPresentation => ({ group: "g", hue, self });
+  function row(fields: Partial<EngineMomentRecord>) {
+    render(<AboutHistoryView view={{ status: "ready", moments: [moment(fields)], more: false }}
+      expanded onToggle={() => undefined} onOpenMoment={() => undefined} />);
+    return screen.getByTestId("about-history-open");
+  }
+  afterEach(() => setChosenColors(DEFAULT_USER_SETTINGS.appearance));
+
+  it.each([
+    ["a person you shared with", { namedAuthor: { userId: "sam", label: "Sam Rivera" }, authors: [{ kind: "named", userId: "sam", grantId: "g", grantGeneration: 1 }] }, "Sam Rivera"],
+    ["a live account holder", { liveAuthorName: "Owner Account", authors: [{ kind: "human", humanId: "owner", humanName: "Owner Account" }] }, "Owner Account"],
+    ["this computer's person", { personAuthorName: "Ice", authors: [{ kind: "human", humanId: "device" }] }, "Ice"],
+  ] as const)("draws %s with the hue main gave them", (_kind, fields, name) => {
+    const plum = row({ ...fields, authors: [...fields.authors], authorPresentations: [token("plum")] }).querySelector(`[title="${name}"]`);
+    expect(plum?.className).toContain("text-hue-plum");
+    cleanup();
+    // A person main left neutral stays neutral; no name picks a colour here.
+    expect(row({ ...fields, authors: [...fields.authors], authorPresentations: [token(null)] }).querySelector(`[title="${name}"]`)?.className).toContain("bg-panel-2");
+  });
+
+  it("applies your chosen colour to your own moments only", () => {
+    setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourColor: "rose" });
+    const authors = [{ kind: "human" as const, humanId: "device" }];
+    expect(row({ personAuthorName: "Ice", authors, authorPresentations: [token("teal", true)] }).querySelector('[title="Ice"]')?.className).toContain("text-hue-rose");
+    cleanup();
+    expect(row({ namedAuthor: { userId: "sam", label: "Sam" }, authors: [{ kind: "named", userId: "sam", grantId: "g", grantGeneration: 1 }],
+      authorPresentations: [token("teal")] }).querySelector('[title="Sam"]')?.className).toContain("text-hue-teal");
+  });
+
+  it("keeps agents in the agent voice, automations bare, link holders marked, and several authors on the file mark", () => {
+    setChosenColors({ ...DEFAULT_USER_SETTINGS.appearance, yourAgentColor: "teal" });
+    const agent = { kind: "agent" as const, agentId: "nova", agentRunId: "run", onBehalfOf: "device" };
+    expect(row({ agentAuthorName: "Nova", authors: [agent], authorPresentations: [token(null, true)] }).querySelector('[title="Nova"]')?.className).toContain("text-hue-teal");
+    cleanup();
+    expect(row({ agentAuthorName: "Pat", authors: [agent], authorPresentations: [token(null)] }).querySelector('[title="Pat"]')?.className).toContain("text-agent");
+    cleanup();
+    const automation = row({ automationAuthor: { name: "Stamp" }, authors: [{ kind: "automation", automationId: "collection:Tasks#stamp", depth: 1 }], authorPresentations: [token(null)] });
+    expect(automation.querySelector('[title="Stamp"] svg')).not.toBeNull();
+    cleanup();
+    for (const fields of [
+      { linkAuthor: { kind: "link", grantId: "g", grantGeneration: 1, principalId: "p" }, authors: [{ kind: "link", grantId: "g", grantGeneration: 1, principalId: "p" }] },
+      { liveAuthorName: "Link holder Anonymous", authors: [{ kind: "link", publicPrincipalId: "public_1", label: "Anonymous" }] },
+    ] as const) {
+      const link = row({ ...fields, authors: [...fields.authors], authorPresentations: [token(null)] });
+      expect(link.querySelector(".border-dashed")).not.toBeNull();
+      expect(link.querySelector("span[title]")).toBeNull();
+      cleanup();
+    }
+    const several = row({ authors: [{ kind: "named", userId: "sam", grantId: "g", grantGeneration: 1 }, agent],
+      authorLabels: ["Sam", "Nova"], authorPresentations: [token("plum"), token(null, true)] });
+    expect(several.querySelector("span[title]")).toBeNull();
+    expect(several.querySelector(".lucide-file-text")).not.toBeNull();
   });
 });
 

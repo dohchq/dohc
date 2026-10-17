@@ -163,6 +163,7 @@ impl Relay {
                 self.skipped += skipped;
                 RelayIoResponse::Push(PushResponse {
                     settlement_refusals: Vec::new(),
+                    hosted_refusals: Vec::new(),
                     accepted: request.ops.len(),
                     inserted,
                     skipped,
@@ -198,6 +199,7 @@ fn step(
         push_operation(),
         &LeaseRegistry::default(),
         &ClaimAnnouncer::default(),
+        &mut crate::actor::live_application::Registry::default(),
     ) {
         Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING => None,
         Ok(mut outcome) => {
@@ -271,6 +273,7 @@ fn deferred_conflict_rewind_refetches_the_relay_maximum() {
             push_operation(),
             &LeaseRegistry::default(),
             &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
         ) {
             Err(RuntimeError::Relay(RelayError::OriginDiverged)) => {
                 assert_eq!(probes, 2, "the second conflict must recheck the relay");
@@ -288,6 +291,7 @@ fn deferred_conflict_rewind_refetches_the_relay_maximum() {
                 probes += 1;
                 Ok(RelayIoResponse::Push(PushResponse {
                     settlement_refusals: Vec::new(),
+                    hosted_refusals: Vec::new(),
                     accepted: 0,
                     inserted: 0,
                     skipped: 0,
@@ -305,6 +309,7 @@ fn deferred_conflict_rewind_refetches_the_relay_maximum() {
                 restored_prefixes += 1;
                 Ok(RelayIoResponse::Push(PushResponse {
                     settlement_refusals: Vec::new(),
+                    hosted_refusals: Vec::new(),
                     accepted: 1,
                     inserted: 1,
                     skipped: 0,
@@ -434,9 +439,19 @@ fn completed_have_confirmations_do_not_cross_blob_identities() {
     }
 }
 
-#[tokio::test]
-async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
-    let (_scratch, path, mut store) = fixture();
+/// Push after an acknowledged prefix, cancelling the request when `cancel_at`
+/// is first issued. Returns the outcome, the relay, and the digests the
+/// request at which it cancelled uploads.
+async fn push_cancelled_at(
+    cancel_at: fn(&RelayIoRequest) -> bool,
+) -> (
+    Result<RelayOperationOutcome, RuntimeError>,
+    ScratchDir,
+    std::path::PathBuf,
+    Relay,
+    Vec<String>,
+) {
+    let (scratch, path, mut store) = fixture();
     let mut relay = Relay::default();
     assert_eq!(pump_pass(&mut store, &mut relay), (PREFIX_OPS, true));
     drop(store);
@@ -444,10 +459,11 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&path, 2_100).expect("open actor").actor;
     let token = CancellationToken::new();
+    let request_token = token.clone();
     let relay = Arc::new(Mutex::new(relay));
-    let cancelled_upload = Arc::new(Mutex::new(None));
+    let cancelled_uploads = Arc::new(Mutex::new(Vec::new()));
     let io_relay = Arc::clone(&relay);
-    let io_cancelled_upload = Arc::clone(&cancelled_upload);
+    let io_cancelled_uploads = Arc::clone(&cancelled_uploads);
     let outcome = actor
         .relay_with_io(
             false,
@@ -455,42 +471,84 @@ async fn cancellation_during_deferred_upload_preserves_acknowledged_prefix() {
             LeaseRegistry::default(),
             token.clone(),
             None,
-            move |request, token| {
+            move |request, _token| {
                 let relay = Arc::clone(&io_relay);
-                let cancelled_upload = Arc::clone(&io_cancelled_upload);
+                let cancelled_uploads = Arc::clone(&io_cancelled_uploads);
+                let request_token = request_token.clone();
                 async move {
-                    let upload = match &request {
-                        RelayIoRequest::UploadBlob(upload) => Some(upload),
-                        RelayIoRequest::UploadBlobs(uploads) => uploads.first(),
-                        _ => None,
-                    };
-                    if let Some(upload) = upload {
-                        *cancelled_upload.lock().unwrap() = Some(upload.sha256.clone());
-                        token.cancel();
-                        std::future::pending::<Result<RelayIoResponse, RelayError>>().await
-                    } else {
-                        Ok(relay.lock().unwrap().answer(&request))
+                    if !request_token.is_cancelled() && cancel_at(&request) {
+                        let uploads = match &request {
+                            RelayIoRequest::UploadBlob(upload) => std::slice::from_ref(upload),
+                            RelayIoRequest::UploadBlobs(uploads) => uploads.as_slice(),
+                            _ => &[],
+                        };
+                        *cancelled_uploads.lock().unwrap() =
+                            uploads.iter().map(|upload| upload.sha256.clone()).collect();
+                        request_token.cancel();
                     }
+                    Ok(relay.lock().unwrap().answer(&request))
                 }
             },
         )
         .await;
-    assert!(matches!(outcome, Err(RuntimeError::Cancelled)));
-    assert!(token.is_cancelled());
-    let cancelled_upload = cancelled_upload
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("upload reached");
+    assert!(token.is_cancelled(), "the request was cancelled");
     supervisor.close(&path).expect("close actor");
+    let relay = std::mem::take(&mut *relay.lock().unwrap());
+    let cancelled_uploads = std::mem::take(&mut *cancelled_uploads.lock().unwrap());
+    (outcome, scratch, path, relay, cancelled_uploads)
+}
+
+#[tokio::test]
+async fn a_push_cancelled_after_its_upload_is_issued_answers_with_what_it_pushed() {
+    let (outcome, _scratch, path, mut relay, cancelled_uploads) = push_cancelled_at(|request| {
+        matches!(
+            request,
+            RelayIoRequest::UploadBlob(_) | RelayIoRequest::UploadBlobs(_)
+        )
+    })
+    .await;
+    assert!(!cancelled_uploads.is_empty(), "an upload was issued");
+    assert!(
+        cancelled_uploads
+            .iter()
+            .all(|sha| relay.blobs.contains(sha)),
+        "the upload issued before cancellation landed"
+    );
+    assert!(
+        matches!(
+            outcome,
+            Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                pushed: PREFIX_OPS,
+                has_more: true,
+                ..
+            }))
+        ),
+        "{outcome:?}"
+    );
+    let mut store = EngineStore::open(&path, 2_200).expect("reopen store");
+    assert_eq!(
+        read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(),
+        2 * PREFIX_OPS as i64 - 1
+    );
+    assert_eq!(relay.ops.len(), 2 * PREFIX_OPS);
+    finish(&mut store, &mut relay);
+    assert_eq!(relay.skipped, 0);
+}
+
+#[tokio::test]
+async fn a_push_cancelled_during_its_inventory_read_preserves_the_acknowledged_prefix() {
+    let (outcome, _scratch, path, mut relay, _) =
+        push_cancelled_at(|request| matches!(request, RelayIoRequest::BlobsHave(_))).await;
+    assert!(
+        matches!(outcome, Err(RuntimeError::Cancelled)),
+        "{outcome:?}"
+    );
     let mut store = EngineStore::open(&path, 2_200).expect("reopen store");
     assert_eq!(
         read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(),
         PREFIX_OPS as i64 - 1
     );
-    let mut relay = relay.lock().unwrap();
     assert_eq!(relay.ops.len(), PREFIX_OPS);
-    assert!(!relay.blobs.contains(&cancelled_upload));
     finish(&mut store, &mut relay);
     assert_eq!(relay.skipped, 0);
 }

@@ -1,3 +1,4 @@
+import { summarizePresence } from './packaged-presence.mjs';
 import { summarizeDocumentSize } from './document-size-summary.mjs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
@@ -32,6 +33,7 @@ export async function summarize(data, readLog = async () => '') {
     engineCommit: data.engineCommit, engineSha256: data.engineSha256,
     diagnostic: Boolean(data.settings?.profileMain || data.settings?.profileRenderer || data.settings?.heapSnapshotMinutes?.length || (data.settings?.scenario === 'document-size' && data.settings?.documentMode !== 'gate')),
     startupEvidence, settings: data.settings, documentSize: summarizeDocumentSize(data),
+    presence: data.settings?.scenario === 'presence' ? summarizePresence(data.runs) : null,
     freshEditableObservedMs: stats(data.runs.flatMap(r => r.freshStartup ? [r.freshStartup.editablePaintObservedMs] : [])),
     restartEditableObservedMs: stats(data.runs.flatMap(r => r.restartStartup ? [r.restartStartup.editablePaintObservedMs] : [])),
     startupWindowControlObservedMs: stats(data.runs.flatMap(r => [r.freshStartup, r.restartStartup].filter(Boolean).map(s => s.windowControlObservedMs).filter(Number.isFinite))),

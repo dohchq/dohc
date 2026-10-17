@@ -1189,6 +1189,26 @@ it("uses one tab stop and arrow, Home and End activation", () => {
     expect(document.activeElement?.getAttribute("aria-selected")).toBe("true");
   }
 });
+// The strip's scroller cuts off a tab's outset ring, and the pane edge the
+// last strip button's.
+it("draws the focus ring inside every tab and strip button", () => {
+  render(
+    <EditorTabs groupId="left" groupNumber={1} tabs={tabs} activeTab="b.md"
+      activeTabDirty={false} recoveryPaths={new Set<string>()}
+      onActivate={noop} onClose={noop} onContextMenu={noop} onMove={noop}
+      onMoveToGroup={noop} onCreateGroupRight={noop} onCloseGroup={noop} />,
+  );
+  const controls = [
+    ...screen.getAllByRole("tab"),
+    screen.getByRole("button", { name: "Close editor group" }),
+    screen.getByTestId("create-editor-group-right"),
+    screen.getByTestId("tabs-overflow"),
+  ];
+  expect(controls).toHaveLength(6);
+  for (const control of controls) {
+    expect(control.className.split(" ")).toContain("focus-visible:-outline-offset-2");
+  }
+});
 it("keeps focus on the surviving tab, then the editor when closing the last tab", async () => {
   render(<KeyboardTabs />);
   screen.getByTestId("tab-a.md").focus();
