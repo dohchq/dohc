@@ -987,6 +987,9 @@ export const DohcCodeBlock = Extension.create({
     ),
 })
 
+// Standalone editor managers must also wait for later reference definitions.
+export const markdownListParseState = { references: true }
+
 function markdownLists(projected = false) {
   const tokenizer = new Tokenizer()
   tokenizer.lexer = new Lexer({ ...getDefaults(), tokenizer })
@@ -998,10 +1001,10 @@ function markdownLists(projected = false) {
     // Ordinary tight items need only inline lexing. A following root paragraph
     // cannot continue the list across a blank; indented bodies stay on Marked.
     // Reference labels wait for later definitions through block lexing.
-    const flatTasks = /^([-+*]) \[[ xX]\] [A-Za-z][^\n\t\[]*(?:\n\1 \[[ xX]\] [A-Za-z][^\n\t\[]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
-    const flat = flatTasks ?? /^([-+*]) [A-Za-z][^\n\t\[]*(?:\n\1 [A-Za-z][^\n\t\[]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
-      ?? /^[0-9]{1,9}([.)]) [A-Za-z][^\n\t\[]*(?:\n[0-9]{1,9}\1 [A-Za-z][^\n\t\[]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
-    if (flat) {
+    const flatTasks = /^([-+*]) \[[ xX]\] [A-Za-z][^\n\t]*(?:\n\1 \[[ xX]\] [A-Za-z][^\n\t]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
+    const flat = flatTasks ?? /^([-+*]) [A-Za-z][^\n\t]*(?:\n\1 [A-Za-z][^\n\t]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
+      ?? /^[0-9]{1,9}([.)]) [A-Za-z][^\n\t]*(?:\n[0-9]{1,9}\1 [A-Za-z][^\n\t]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
+    if (flat && (!markdownListParseState.references || !flat[0].includes('['))) {
       const raw = flat[0]
       const ordered = /^[0-9]/u.test(raw)
       const lines = raw.split('\n')
@@ -1014,7 +1017,9 @@ function markdownLists(projected = false) {
             type: 'list_item', raw: line + (at < lines.length - 1 ? '\n' : ''),
             task: !!flatTasks, ...(flatTasks ? { checked: line[3].toLowerCase() === 'x' } : {}),
             loose: false, text,
-            tokens: [{ type: 'paragraph', raw: text, text, tokens: helpers.inlineTokens(text) }],
+            tokens: [{ type: 'paragraph', raw: text, text, tokens: /^[A-Za-z ]+$/u.test(text)
+              ? [{ type: 'text', raw: text, text }]
+              : helpers.inlineTokens(text) }],
           }
         }),
       }

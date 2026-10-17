@@ -701,3 +701,76 @@ fn folded_code_preserves_noncanonical_span_spelling() {
         );
     }
 }
+
+#[test]
+fn nested_contract_r24_boundaries_in_every_reading() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../../tools/rust-engine-program/nested-markdown-contract.json"
+    ))
+    .unwrap();
+    for case in corpus["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| case["name"].as_str().unwrap().starts_with("r24-"))
+    {
+        for reading in [
+            MarkdownReading::Source,
+            MarkdownReading::Projection,
+            MarkdownReading::ProjectedSource,
+            MarkdownReading::Successor,
+        ] {
+            let doc = Ydoc::wire();
+            let source = case["source"].as_str().unwrap();
+            doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                .expect(source);
+            let expected = if reading == MarkdownReading::Source {
+                &case["canonical"]
+            } else {
+                &case["projectedCanonical"]
+            };
+            assert_eq!(
+                doc.project_richdoc().unwrap(),
+                case["nativeReadingCanonical"]
+                    .as_str()
+                    .unwrap_or_else(|| expected.as_str().unwrap()),
+                "{:?}, {reading:?}",
+                case["name"]
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_contract_r24_block_paragraph_whitespace() {
+    for reading in [
+        MarkdownReading::Source,
+        MarkdownReading::Projection,
+        MarkdownReading::ProjectedSource,
+        MarkdownReading::Successor,
+    ] {
+        for source in ["- A\n- a\n  b\t", "- A\n- a\nb\t"] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                .unwrap();
+            let body = serde_json::to_string(&doc.canonical_content()["body"]).unwrap();
+            assert!(body.contains("b\\t"), "{reading:?}: {body}");
+        }
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, "- A\n- B\n\n  C\u{a0}", reading)
+            .unwrap();
+        assert!(!serde_json::to_string(&doc.canonical_content()["body"])
+            .unwrap()
+            .contains('\u{a0}'));
+        for source in [
+            "- a\n  -\n\n x",
+            "- a\n  b\n  -\n\n x",
+            "- a\n  *\n\n x",
+            "- a\n  1.\n\n x",
+        ] {
+            Ydoc::wire()
+                .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                .expect(source);
+        }
+    }
+}

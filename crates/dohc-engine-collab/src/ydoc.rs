@@ -3101,9 +3101,6 @@ fn parse_markdown_blocks_at<'src>(
             continue;
         }
         let mut paragraph = para.join("\n");
-        if in_list {
-            paragraph.truncate(paragraph.trim_end_matches([' ', '\t']).len());
-        }
         if reading != MarkdownReading::Source
             && paragraph.contains("&#")
             && !paragraph.as_bytes().windows(2).any(|pair| {
@@ -3641,9 +3638,9 @@ fn plain_bullet_prefix<'src>(
     (items, end)
 }
 
-fn empty_list_child(mut text: &str) -> bool {
+fn empty_list_child(mut text: &str, mut reading: MarkdownReading) -> bool {
     for _ in 0..MARKDOWN_XML_MAX_DEPTH {
-        let Some(child) = list_marker(text, MarkdownReading::ProjectedSource) else {
+        let Some(child) = list_marker(text, reading) else {
             break;
         };
         if matches!(child.kind, ListKind::Task(_)) {
@@ -3653,8 +3650,30 @@ fn empty_list_child(mut text: &str) -> bool {
             return true;
         }
         text = child.text;
+        reading = MarkdownReading::ProjectedSource;
     }
     false
+}
+
+// Marked keeps bullet/task switches and blank-separated items in one list.
+fn marked_list_continues(lines: &[&str], at: usize, first: ListMarker<'_>) -> bool {
+    lines[at..]
+        .iter()
+        .find(|line| !blank_line(line))
+        .is_some_and(|line| {
+            !thematic_break(line)
+                && list_marker(line, MarkdownReading::ProjectedSource).is_some_and(|next| {
+                    next.indent == first.indent
+                        && match (first.kind, next.kind) {
+                            (ListKind::Ordered(a), ListKind::Ordered(b)) => a == b,
+                            (
+                                ListKind::Bullet(a) | ListKind::Task(a),
+                                ListKind::Bullet(b) | ListKind::Task(b),
+                            ) => a == b,
+                            _ => false,
+                        }
+                })
+        })
 }
 
 fn trim_list_item_end(text: &str) -> &str {
@@ -3684,8 +3703,10 @@ fn parse_list<'src>(
                 && list_marker(lines[at], reading).is_none_or(|next| next.kind != first.kind)
         });
     if prefix_end == lines.len() || ends_before_block {
-        if let Some(last) = plain_items.last_mut() {
-            *last = trim_list_item_end(last);
+        if !marked_list_continues(lines, prefix_end, first) {
+            if let Some(last) = plain_items.last_mut() {
+                *last = trim_list_item_end(last);
+            }
         }
         return Some((
             MdBlock::BulletList(MdBulletItems::Plain(plain_items)),
@@ -3716,6 +3737,7 @@ fn parse_list<'src>(
         let mut continued = Vec::new();
         // The checkbox is content after the bullet marker, not part of its width.
         let content_indent = marker.indent + marker.width;
+        let mut previous_deep = marker.text.bytes().take_while(|byte| *byte == b' ').count() >= 4;
         while let Some(line) = lines.get(at) {
             if let Some(next) =
                 list_marker(line, reading).filter(|next| next.indent < content_indent)
@@ -3763,6 +3785,7 @@ fn parse_list<'src>(
                 }) {
                     continued.resize(continued.len() + next - at, "");
                     at = next;
+                    previous_deep = false;
                     continue;
                 }
                 if let Some(next) = next {
@@ -3773,8 +3796,17 @@ fn parse_list<'src>(
                             .iter()
                             .rposition(|line| !blank_line(line))
                             .map_or_else(
-                                || empty_list_child(marker.text),
-                                |at| empty_list_child(continued[at]),
+                                || empty_list_child(marker.text, MarkdownReading::ProjectedSource),
+                                |at| {
+                                    empty_list_child(
+                                        continued[at],
+                                        if at > 0 && blank_line(continued[at - 1]) {
+                                            MarkdownReading::ProjectedSource
+                                        } else {
+                                            MarkdownReading::Source
+                                        },
+                                    )
+                                },
                             );
                 }
                 break;
@@ -3782,11 +3814,12 @@ fn parse_list<'src>(
             let indent = line.bytes().take_while(|byte| *byte == b' ').count();
             if indent >= content_indent {
                 continued.push(&line[content_indent..]);
-            } else if block_start(line, false, false).is_none() {
+            } else if !previous_deep && block_start(line, false, false).is_none() {
                 continued.push(line);
             } else {
                 break;
             }
+            previous_deep = indent >= content_indent + 4;
             at += 1;
         }
         let item = if continued.is_empty() && !structural_item_start(marker.text) {
@@ -3833,10 +3866,18 @@ fn parse_list<'src>(
             next_marker = lines.get(at).and_then(|line| list_marker(line, reading));
         }
     }
-    if let Some(last) = items.last_mut().filter(|item| item.blocks.is_none()) {
-        let trimmed = trim_list_item_end(&last.paragraph);
-        if trimmed.len() != last.paragraph.len() {
-            last.paragraph = trimmed.into();
+    if !marked_list_continues(lines, at, first) {
+        if let Some(last) = items.last_mut() {
+            if let Some(blocks) = &mut last.blocks {
+                if let Some(MdBlock::Paragraph(text)) = blocks.last_mut() {
+                    text.truncate(trim_list_item_end(text).len());
+                }
+            } else {
+                let trimmed = trim_list_item_end(&last.paragraph);
+                if trimmed.len() != last.paragraph.len() {
+                    last.paragraph = trimmed.into();
+                }
+            }
         }
     }
     let block = match first.kind {

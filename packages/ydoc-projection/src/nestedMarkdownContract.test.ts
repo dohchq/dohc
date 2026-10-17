@@ -2,6 +2,9 @@ import { readFileSync } from 'node:fs'
 import { expect, it } from 'vitest'
 import * as Y from 'yjs'
 import { createHash } from 'node:crypto'
+import { MarkdownManager } from '@tiptap/markdown'
+import { StarterKit } from '@tiptap/starter-kit'
+import { DohcTaskItem, dohcMarkdownExtensions, MarkdownListItem, MarkdownOrderedList, MarkdownTaskList } from './dohc-markdown-extensions.js'
 import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from './liveDocumentValidation.js'
 import { markdownToYDoc, yDocToMarkdown, serializeRichdocBody, parseRichdocMarkdown } from './import-export.js'
 
@@ -114,6 +117,18 @@ it.each(['1.', '1)'])('keeps ordered checkbox content tabs for %s', marker => {
   expect(root.content?.[0]?.content?.[0]?.content?.[0]?.content?.[0]?.text).toBe('[ ]\tName\tValue')
 })
 
+it.each(['-', '1.', '- [ ]'])('resolves references in standalone Markdown managers for %s', marker => {
+  const manager = new MarkdownManager({ extensions: [
+    ...dohcMarkdownExtensions,
+    StarterKit.configure({ listItem: false, orderedList: false }),
+    MarkdownListItem, MarkdownOrderedList, MarkdownTaskList, DohcTaskItem,
+  ] })
+  const source = `${marker} See [docs]\n${marker} Next\n\nAfter\n\n[docs]: https://example.com`
+  expect(JSON.stringify(manager.parse(source))).toContain('"href":"https://example.com"')
+  parseRichdocMarkdown('- ordinary item')
+  expect(JSON.stringify(manager.parse(source))).toContain('"href":"https://example.com"')
+})
+
 it.each(['-', '1.', '- [ ]'])('resolves later reference definitions in every %s item', marker => {
   for (const source of [
     `${marker} See [docs]\n${marker} Next\n\nAfter\n\n[docs]: https://example.com`,
@@ -137,4 +152,10 @@ it.each(['source', 'projection'] as const)('keeps content-tab emphasis boundarie
     const source = `${marker} a\t\n\nAfter`
     expect(serializeRichdocBody(parseRichdocMarkdown(source, reading))).toBe(source)
   }
+})
+
+it.each(corpus.cases.filter(item => item.name.startsWith('r24-')))('keeps Marked item boundaries for $name in projected reading', item => {
+  const doc = markdownToYDoc(item.source, { reading: 'projection' })
+  try { expect(yDocToMarkdown(doc)).toBe((item as typeof item & { projectedCanonical: string }).projectedCanonical) }
+  finally { doc.destroy() }
 })

@@ -539,7 +539,7 @@ export function blockForLine(body: string, line: number): LineBlock {
           (kind === "ordered" &&
             (quoteCallout || INTERRUPTING_ORDERED_RE.test(text))))) ||
       // Ordinary item paragraphs accept underindented lazy continuation.
-      (open && listOpen && (!lazyAllowed || previousDeep) && indent > 0 && indent < openIndent);
+      (open && listOpen && (!lazyAllowed || previousDeep) && indent < openIndent);
     // A heading opens a block wherever one can open — but indented into a
     // list item it is that item's own heading, which is what `resumes` says.
     const opens = (kind === "heading" || interrupts || !open) && !resumes;
@@ -576,7 +576,7 @@ export function blockForLine(body: string, line: number): LineBlock {
       openIndent = continuation.indent;
       lazyAllowed = continuation.lazy;
     }
-    previousDeep = listOpen && indent >= openIndent + 4;
+    previousDeep = listOpen && leadingColumns(text.replace(/\t/g, "    ")) >= openIndent + 4;
     // An ATX heading and a thematic break are one line each. The next line
     // opens its own block, blank line or not — `# Plan\nBody` is two nodes.
     open = kind !== "heading" && kind !== "break";

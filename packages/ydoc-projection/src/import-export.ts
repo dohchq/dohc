@@ -20,6 +20,7 @@ import {
   DohcProjectedMarkdownLists,
   MarkdownParagraph,
   MarkdownTaskList,
+  markdownListParseState,
 } from './dohc-markdown-extensions.js'
 import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence, codeBlockFence } from './markdown-fence.js'
@@ -436,6 +437,7 @@ class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Le
     return super.inlineTokens(parseTabs.size ? restoreParseSentinels(src, parseTabs) : src, tokens)
   }
 }
+markdownParser.Lexer = ContentTabLexer
 
 const markdownManager = new MarkdownManager({
   marked: markdownParser as unknown as typeof marked,
@@ -658,7 +660,8 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
   )
   parseReferences = entitySentinels
   parseTabs = projectionTabs
-  markdownParser.Lexer = projectionTabs.size ? ContentTabLexer : Lexer
+  // Include escaped and multiline labels, including definitions inside quotes.
+  markdownListParseState.references = markdown.includes(']:')
   rawHtmlMarkup = markup
   writtenLinks = {
     openers: writtenOpeners(prepared, entitySentinels),
@@ -672,7 +675,7 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
   } finally {
     parseReferences = new Map()
     parseTabs = new Map()
-    markdownParser.Lexer = Lexer
+    markdownListParseState.references = true
     rawHtmlMarkup = { lt: '<', gt: '>', used: false }
     writtenLinks = { openers: new Set(), runs: new Map(), length: -1, sentinels: new WeakMap() }
   }

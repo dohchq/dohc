@@ -1249,7 +1249,9 @@
       "canonical": "- See [docs]\n- Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
       "sourceCanonical": "- See [docs](https://example.com)\n- Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
       "rustBase64": "ARDz4+7d17jqBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDz4+7d17jqBgEDCGxpc3RJdGVtBwDz4+7d17jqBgIDCXBhcmFncmFwaAcA8+Pu3de46gYDBgQA8+Pu3de46gYEClNlZSBbZG9jc12H8+Pu3de46gYCAwhsaXN0SXRlbQcA8+Pu3de46gYPAwlwYXJhZ3JhcGgHAPPj7t3XuOoGEAYEAPPj7t3XuOoGEQROZXh0h/Pj7t3XuOoGAQMJcGFyYWdyYXBoBwDz4+7d17jqBhYGBADz4+7d17jqBhcKTW9yZSB0ZXh0Lofz4+7d17jqBhYDCXBhcmFncmFwaAcA8+Pu3de46gYiBgQA8+Pu3de46gYjG1tkb2NzXTogaHR0cHM6Ly9leGFtcGxlLmNvbQA=",
-      "nativeRereadCanonical": "- See [docs]\n- Next\n\nMore text.\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+      "nativeRereadCanonical": "- See [docs]\n- Next\n\nMore text.\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com",
+      "fileFold": true,
+      "witnessRefuse": true
     },
     {
       "name": "r23-reference-nested-0",
@@ -1265,7 +1267,9 @@
       "canonical": "> - See [docs]\n> - Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
       "sourceCanonical": "> - See [docs](https://example.com)\n> - Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
       "rustBase64": "AQ7xxbbAwa+vCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwDxxbbAwa+vCQEDCmJ1bGxldExpc3QHAPHFtsDBr68JAgMIbGlzdEl0ZW0HAPHFtsDBr68JAwMJcGFyYWdyYXBoBwDxxbbAwa+vCQQGBADxxbbAwa+vCQUKU2VlIFtkb2NzXYfxxbbAwa+vCQMDCGxpc3RJdGVtBwDxxbbAwa+vCRADCXBhcmFncmFwaAcA8cW2wMGvrwkRBgQA8cW2wMGvrwkSBE5leHSH8cW2wMGvrwkBAwlwYXJhZ3JhcGgHAPHFtsDBr68JFwYEAPHFtsDBr68JGBtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
-      "nativeRereadCanonical": "> - See [docs]\n> - Next\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+      "nativeRereadCanonical": "> - See [docs]\n> - Next\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com",
+      "fileFold": true,
+      "witnessRefuse": true
     },
     {
       "name": "r23-reference-flat-1",
@@ -1273,7 +1277,9 @@
       "canonical": "1. See [docs]\n2. Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
       "sourceCanonical": "1. See [docs](https://example.com)\n2. Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
       "rustBase64": "ARGj3YHl4cToCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAo92B5eHE6AsBBXN0YXJ0AX0BBwCj3YHl4cToCwEDCGxpc3RJdGVtBwCj3YHl4cToCwMDCXBhcmFncmFwaAcAo92B5eHE6AsEBgQAo92B5eHE6AsFClNlZSBbZG9jc12Ho92B5eHE6AsDAwhsaXN0SXRlbQcAo92B5eHE6AsQAwlwYXJhZ3JhcGgHAKPdgeXhxOgLEQYEAKPdgeXhxOgLEgROZXh0h6PdgeXhxOgLAQMJcGFyYWdyYXBoBwCj3YHl4cToCxcGBACj3YHl4cToCxgKTW9yZSB0ZXh0Loej3YHl4cToCxcDCXBhcmFncmFwaAcAo92B5eHE6AsjBgQAo92B5eHE6AskG1tkb2NzXTogaHR0cHM6Ly9leGFtcGxlLmNvbQA=",
-      "nativeRereadCanonical": "1. See [docs]\n2. Next\n\nMore text.\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+      "nativeRereadCanonical": "1. See [docs]\n2. Next\n\nMore text.\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com",
+      "fileFold": true,
+      "witnessRefuse": true
     },
     {
       "name": "r23-reference-nested-1",
@@ -1289,7 +1295,9 @@
       "canonical": "> 1. See [docs]\n> 2. Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
       "sourceCanonical": "> 1. See [docs](https://example.com)\n> 2. Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
       "rustBase64": "AQ+ciJ7erZOzCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwCciJ7erZOzCQEDC29yZGVyZWRMaXN0KACciJ7erZOzCQIFc3RhcnQBfQEHAJyInt6tk7MJAgMIbGlzdEl0ZW0HAJyInt6tk7MJBAMJcGFyYWdyYXBoBwCciJ7erZOzCQUGBACciJ7erZOzCQYKU2VlIFtkb2NzXYeciJ7erZOzCQQDCGxpc3RJdGVtBwCciJ7erZOzCREDCXBhcmFncmFwaAcAnIie3q2TswkSBgQAnIie3q2TswkTBE5leHSHnIie3q2TswkBAwlwYXJhZ3JhcGgHAJyInt6tk7MJGAYEAJyInt6tk7MJGRtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
-      "nativeRereadCanonical": "> 1. See [docs]\n> 2. Next\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+      "nativeRereadCanonical": "> 1. See [docs]\n> 2. Next\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com",
+      "fileFold": true,
+      "witnessRefuse": true
     },
     {
       "name": "r23-reference-flat-2",
@@ -1297,7 +1305,9 @@
       "canonical": "- [ ] See [docs]\n- [ ] Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
       "sourceCanonical": "- [ ] See [docs](https://example.com)\n- [ ] Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
       "rustBase64": "ARLYn4S0/PifAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA2J+EtPz4nwIBAwh0YXNrSXRlbSgA2J+EtPz4nwICB2NoZWNrZWQBeQcA2J+EtPz4nwICAwlwYXJhZ3JhcGgHANifhLT8+J8CBAYEANifhLT8+J8CBQpTZWUgW2RvY3Ndh9ifhLT8+J8CAgMIdGFza0l0ZW0oANifhLT8+J8CEAdjaGVja2VkAXkHANifhLT8+J8CEAMJcGFyYWdyYXBoBwDYn4S0/PifAhIGBADYn4S0/PifAhMETmV4dIfYn4S0/PifAgEDCXBhcmFncmFwaAcA2J+EtPz4nwIYBgQA2J+EtPz4nwIZCk1vcmUgdGV4dC6H2J+EtPz4nwIYAwlwYXJhZ3JhcGgHANifhLT8+J8CJAYEANifhLT8+J8CJRtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
-      "nativeRereadCanonical": "- [ ] See [docs]\n- [ ] Next\n\nMore text.\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+      "nativeRereadCanonical": "- [ ] See [docs]\n- [ ] Next\n\nMore text.\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com",
+      "fileFold": true,
+      "witnessRefuse": true
     },
     {
       "name": "r23-reference-nested-2",
@@ -1313,7 +1323,9 @@
       "canonical": "> - [ ] See [docs]\n> - [ ] Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
       "sourceCanonical": "> - [ ] See [docs](https://example.com)\n> - [ ] Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
       "rustBase64": "ARCX++G/wJuCCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwCX++G/wJuCCgEDCHRhc2tMaXN0BwCX++G/wJuCCgIDCHRhc2tJdGVtKACX++G/wJuCCgMHY2hlY2tlZAF5BwCX++G/wJuCCgMDCXBhcmFncmFwaAcAl/vhv8CbggoFBgQAl/vhv8CbggoGClNlZSBbZG9jc12Hl/vhv8CbggoDAwh0YXNrSXRlbSgAl/vhv8CbggoRB2NoZWNrZWQBeQcAl/vhv8CbggoRAwlwYXJhZ3JhcGgHAJf74b/Am4IKEwYEAJf74b/Am4IKFAROZXh0h5f74b/Am4IKAQMJcGFyYWdyYXBoBwCX++G/wJuCChkGBACX++G/wJuCChobW2RvY3NdOiBodHRwczovL2V4YW1wbGUuY29tAA==",
-      "nativeRereadCanonical": "> - [ ] See [docs]\n> - [ ] Next\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+      "nativeRereadCanonical": "> - [ ] See [docs]\n> - [ ] Next\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com",
+      "fileFold": true,
+      "witnessRefuse": true
     },
     {
       "name": "r23-outer-0",
@@ -1467,6 +1479,141 @@
       "source": "- a\n  2024.\tyear",
       "canonical": "- a\n  2024&#46;    year",
       "rustBase64": "AQaMtpbQgbLRAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCMtpbQgbLRAwEDCGxpc3RJdGVtBwCMtpbQgbLRAwIDCXBhcmFncmFwaAcAjLaW0IGy0QMDBgQAjLaW0IGy0QMED2EKMjAyNC4gICAgeWVhcgA="
+    },
+    {
+      "name": "r24-bullet-task-spaces",
+      "source": "- A  \n- [ ] B",
+      "canonical": "- A  \n\n- [ ] B",
+      "fileFold": true,
+      "projectedCanonical": "- A  \n\n- [ ] B",
+      "rustBase64": "AQzprpr7jLXYCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDprpr7jLXYCwEDCGxpc3RJdGVtBwDprpr7jLXYCwIDCXBhcmFncmFwaAcA6a6a+4y12AsDBgQA6a6a+4y12AsEA0EgIIfprpr7jLXYCwEDCHRhc2tMaXN0BwDprpr7jLXYCwgDCHRhc2tJdGVtKADprpr7jLXYCwkHY2hlY2tlZAF5BwDprpr7jLXYCwkDCXBhcmFncmFwaAcA6a6a+4y12AsLBgQA6a6a+4y12AsMAUIA"
+    },
+    {
+      "name": "r24-task-bullet-spaces",
+      "source": "- [ ] A  \n- B",
+      "canonical": "- [ ] A  \n\n- B",
+      "fileFold": true,
+      "projectedCanonical": "- [ ] A  \n\n- B",
+      "rustBase64": "AQyhzYSgvr+qCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAoc2EoL6/qgoBAwh0YXNrSXRlbSgAoc2EoL6/qgoCB2NoZWNrZWQBeQcAoc2EoL6/qgoCAwlwYXJhZ3JhcGgHAKHNhKC+v6oKBAYEAKHNhKC+v6oKBQNBICCHoc2EoL6/qgoBAwpidWxsZXRMaXN0BwChzYSgvr+qCgkDCGxpc3RJdGVtBwChzYSgvr+qCgoDCXBhcmFncmFwaAcAoc2EoL6/qgoLBgQAoc2EoL6/qgoMAUIA"
+    },
+    {
+      "name": "r24-bare-text",
+      "source": "- a\n  -\n\n x",
+      "canonical": "- \n  ## a\n\n&#32;x",
+      "projectedCanonical": "- \n  ## a\n\n&#32;x",
+      "rustBase64": "AQuA2svG6KuDBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCA2svG6KuDBwEDCGxpc3RJdGVtBwCA2svG6KuDBwIDCXBhcmFncmFwaIeA2svG6KuDBwMDB2hlYWRpbmcoAIDay8boq4MHBAVsZXZlbAF9AgcAgNrLxuirgwcEBgQAgNrLxuirgwcGAWGHgNrLxuirgwcBAwlwYXJhZ3JhcGgHAIDay8boq4MHCAYEAIDay8boq4MHCQIgeAA="
+    },
+    {
+      "name": "r24-bare-star",
+      "source": "- a\n  *\n\n x",
+      "canonical": "- a\n  &#42;\n\n&#32;x",
+      "projectedCanonical": "- a\n  &#42;\n\n&#32;x",
+      "rustBase64": "AQm1z4m5k4r9DwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC1z4m5k4r9DwEDCGxpc3RJdGVtBwC1z4m5k4r9DwIDCXBhcmFncmFwaAcAtc+JuZOK/Q8DBgQAtc+JuZOK/Q8EA2EKKoe1z4m5k4r9DwEDCXBhcmFncmFwaAcAtc+JuZOK/Q8IBgQAtc+JuZOK/Q8JAiB4AA=="
+    },
+    {
+      "name": "r24-bare-structural",
+      "source": "- a\n  - b\n  -\n\n x",
+      "canonical": "- a\n  - b\n\n  - \n\n&#32;x",
+      "projectedCanonical": "- a\n  - b\n  - \n\n&#32;x",
+      "sourceCanonical": "- a\n  - b\n  - \n\n&#32;x",
+      "rustBase64": "ARGrmN2QhODVBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCrmN2QhODVBgEDCGxpc3RJdGVtBwCrmN2QhODVBgIDCXBhcmFncmFwaAcAq5jdkITg1QYDBgQAq5jdkITg1QYEAWGHq5jdkITg1QYDAwpidWxsZXRMaXN0BwCrmN2QhODVBgYDCGxpc3RJdGVtBwCrmN2QhODVBgcDCXBhcmFncmFwaAcAq5jdkITg1QYIBgQAq5jdkITg1QYJAWKHq5jdkITg1QYGAwpidWxsZXRMaXN0BwCrmN2QhODVBgsDCGxpc3RJdGVtBwCrmN2QhODVBgwDCXBhcmFncmFwaIermN2QhODVBgEDCXBhcmFncmFwaAcAq5jdkITg1QYOBgQAq5jdkITg1QYPAiB4AA=="
+    },
+    {
+      "name": "r24-parent-spaces",
+      "source": "- Parent  \n  - child\n- Next",
+      "canonical": "- Parent  \n  - child\n- Next",
+      "projectedCanonical": "- Parent  \n  - child\n- Next",
+      "foldRefuse": true,
+      "rustBase64": "AQ+jmsSMsLTcDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCjmsSMsLTcDQEDCGxpc3RJdGVtBwCjmsSMsLTcDQIDCXBhcmFncmFwaAcAo5rEjLC03A0DBgQAo5rEjLC03A0ECFBhcmVudCAgh6OaxIywtNwNAwMKYnVsbGV0TGlzdAcAo5rEjLC03A0NAwhsaXN0SXRlbQcAo5rEjLC03A0OAwlwYXJhZ3JhcGgHAKOaxIywtNwNDwYEAKOaxIywtNwNEAVjaGlsZIejmsSMsLTcDQIDCGxpc3RJdGVtBwCjmsSMsLTcDRYDCXBhcmFncmFwaAcAo5rEjLC03A0XBgQAo5rEjLC03A0YBE5leHQA"
+    },
+    {
+      "name": "r24-continued-tab",
+      "source": "- A\n- a\n  b\t\n\nAfter",
+      "canonical": "- A\n- a\n  b\t\n\nAfter",
+      "fileFold": true,
+      "projectedCanonical": "- A\n- a\n  b\t\n\nAfter",
+      "rustBase64": "AQ3C+Jrt9ox6ACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAML4mu32jHoBAwhsaXN0SXRlbQcAwvia7faMegIDCXBhcmFncmFwaAcAwvia7faMegMGBADC+Jrt9ox6BAFBh8L4mu32jHoCAwhsaXN0SXRlbQcAwvia7faMegYDCXBhcmFncmFwaAcAwvia7faMegcGBADC+Jrt9ox6CARhCmIJh8L4mu32jHoBAwlwYXJhZ3JhcGgHAML4mu32jHoNBgQAwvia7faMeg4FQWZ0ZXIA"
+    },
+    {
+      "name": "r24-lazy-tab",
+      "source": "- A\n- a\nb\t\n\nAfter",
+      "canonical": "- A\n- a\n  b\t\n\nAfter",
+      "fileFold": true,
+      "projectedCanonical": "- A\n- a\n  b\t\n\nAfter",
+      "rustBase64": "AQ3Cwqq9yLznDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDCwqq9yLznDQEDCGxpc3RJdGVtBwDCwqq9yLznDQIDCXBhcmFncmFwaAcAwsKqvci85w0DBgQAwsKqvci85w0EAUGHwsKqvci85w0CAwhsaXN0SXRlbQcAwsKqvci85w0GAwlwYXJhZ3JhcGgHAMLCqr3IvOcNBwYEAMLCqr3IvOcNCARhCmIJh8LCqr3IvOcNAQMJcGFyYWdyYXBoBwDCwqq9yLznDQ0GBADCwqq9yLznDQ4FQWZ0ZXIA"
+    },
+    {
+      "name": "r24-final-nbsp",
+      "source": "- A\n- B\n\n  C ",
+      "canonical": "- A\n- B\n\n  C",
+      "projectedCanonical": "- A\n- B\n\n  C",
+      "rustBase64": "AQ3djsig6YOwAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDdjsig6YOwAgEDCGxpc3RJdGVtBwDdjsig6YOwAgIDCXBhcmFncmFwaAcA3Y7IoOmDsAIDBgQA3Y7IoOmDsAIEAUGH3Y7IoOmDsAICAwhsaXN0SXRlbQcA3Y7IoOmDsAIGAwlwYXJhZ3JhcGgHAN2OyKDpg7ACBwYEAN2OyKDpg7ACCAFCh92OyKDpg7ACBwMJcGFyYWdyYXBoBwDdjsig6YOwAgoGBADdjsig6YOwAgsBQwA="
+    },
+    {
+      "name": "r24-final-block-spaces",
+      "source": "- a\n- b\n\n  c  \n\nAfter",
+      "canonical": "- a\n- b\n\n  c\n\nAfter",
+      "projectedCanonical": "- a\n- b\n\n  c\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "ARDut6moo/NiACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAO63qaij82IBAwhsaXN0SXRlbQcA7repqKPzYgIDCXBhcmFncmFwaAcA7repqKPzYgMGBADut6moo/NiBAFhh+63qaij82ICAwhsaXN0SXRlbQcA7repqKPzYgYDCXBhcmFncmFwaAcA7repqKPzYgcGBADut6moo/NiCAFih+63qaij82IHAwlwYXJhZ3JhcGgHAO63qaij82IKBgQA7repqKPzYgsBY4fut6moo/NiAQMJcGFyYWdyYXBoBwDut6moo/NiDQYEAO63qaij82IOBUFmdGVyAA=="
+    },
+    {
+      "name": "r24-deep-lazy",
+      "source": "- a\n      b\n lazy\n\nAfter",
+      "canonical": "- a\n  &#32;   b\n\n&#32;lazy\n\nAfter",
+      "projectedCanonical": "- a\n  &#32;   b\n\n&#32;lazy\n\nAfter",
+      "rustBase64": "AQy84bzrxfsFACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHALzhvOvF+wUBAwhsaXN0SXRlbQcAvOG868X7BQIDCXBhcmFncmFwaAcAvOG868X7BQMGBAC84bzrxfsFBAdhCiAgICBih7zhvOvF+wUBAwlwYXJhZ3JhcGgHALzhvOvF+wUMBgQAvOG868X7BQ0FIGxhenmHvOG868X7BQwDCXBhcmFncmFwaAcAvOG868X7BRMGBAC84bzrxfsFFAVBZnRlcgA="
+    },
+    {
+      "name": "r24-nested-deep-lazy",
+      "source": "- a\n  - b\n      c\n lazy\n\nAfter",
+      "canonical": "- a\n  - b\n      c\n\n&#32;lazy\n\nAfter",
+      "projectedCanonical": "- a\n  - b\n      c\n\n&#32;lazy\n\nAfter",
+      "rustBase64": "ARHgyYOcwru1DAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDgyYOcwru1DAEDCGxpc3RJdGVtBwDgyYOcwru1DAIDCXBhcmFncmFwaAcA4MmDnMK7tQwDBgQA4MmDnMK7tQwEAWGH4MmDnMK7tQwDAwpidWxsZXRMaXN0BwDgyYOcwru1DAYDCGxpc3RJdGVtBwDgyYOcwru1DAcDCXBhcmFncmFwaAcA4MmDnMK7tQwIBgQA4MmDnMK7tQwJBWIKICBjh+DJg5zCu7UMAQMJcGFyYWdyYXBoBwDgyYOcwru1DA8GBADgyYOcwru1DBAFIGxhenmH4MmDnMK7tQwPAwlwYXJhZ3JhcGgHAODJg5zCu7UMFgYEAODJg5zCu7UMFwVBZnRlcgA="
+    },
+    {
+      "name": "r24-autolink-tab",
+      "source": "- See https://x.com\tmore",
+      "canonical": "- See [https://x.com](https://x.com)\tmore",
+      "projectedCanonical": "- See [https://x.com](https://x.com)\tmore",
+      "nativeSeedSource": "- See [https://x.com](https://x.com)\tmore",
+      "nativeReadingCanonical": "- See https://x.com\tmore",
+      "rustBase64": "AQagwZDp99L0BgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCgwZDp99L0BgEDCGxpc3RJdGVtBwCgwZDp99L0BgIDCXBhcmFncmFwaAcAoMGQ6ffS9AYDBgQAoMGQ6ffS9AYEJ1NlZSBbaHR0cHM6Ly94LmNvbV0oaHR0cHM6Ly94LmNvbSkJbW9yZQA="
+    },
+    {
+      "name": "r24-blank-bullet-spaces",
+      "source": "- A  \n\n- B",
+      "canonical": "- A  \n- B",
+      "projectedCanonical": "- A  \n\n- B",
+      "rustBase64": "AQqfu4j/hsGACQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCfu4j/hsGACQEDCGxpc3RJdGVtBwCfu4j/hsGACQIDCXBhcmFncmFwaAcAn7uI/4bBgAkDBgQAn7uI/4bBgAkEA0EgIIefu4j/hsGACQIDCGxpc3RJdGVtBwCfu4j/hsGACQgDCXBhcmFncmFwaAcAn7uI/4bBgAkJBgQAn7uI/4bBgAkKAUIA"
+    },
+    {
+      "name": "r24-blank-ordered-spaces",
+      "source": "1. A  \n\n2. B",
+      "canonical": "1. A  \n2. B",
+      "projectedCanonical": "1. A  \n\n2. B",
+      "rustBase64": "AQuL95Gdjb8+ACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDC29yZGVyZWRMaXN0KACL95Gdjb8+AQVzdGFydAF9AQcAi/eRnY2/PgEDCGxpc3RJdGVtBwCL95Gdjb8+AwMJcGFyYWdyYXBoBwCL95Gdjb8+BAYEAIv3kZ2Nvz4FA0EgIIeL95Gdjb8+AwMIbGlzdEl0ZW0HAIv3kZ2Nvz4JAwlwYXJhZ3JhcGgHAIv3kZ2Nvz4KBgQAi/eRnY2/PgsBQgA="
+    },
+    {
+      "name": "r24-blank-task-spaces",
+      "source": "- A  \n\n- [ ] B",
+      "canonical": "- A  \n\n- [ ] B",
+      "projectedCanonical": "- A  \n\n- [ ] B",
+      "rustBase64": "AQz5tquT7ciKAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD5tquT7ciKAgEDCGxpc3RJdGVtBwD5tquT7ciKAgIDCXBhcmFncmFwaAcA+bark+3IigIDBgQA+bark+3IigIEA0EgIIf5tquT7ciKAgEDCHRhc2tMaXN0BwD5tquT7ciKAggDCHRhc2tJdGVtKAD5tquT7ciKAgkHY2hlY2tlZAF5BwD5tquT7ciKAgkDCXBhcmFncmFwaAcA+bark+3IigILBgQA+bark+3IigIMAUIA"
+    },
+    {
+      "name": "r24-end-continued-tab",
+      "source": "- A\n- a\n  b\t",
+      "canonical": "- A\n- a\n  b",
+      "projectedCanonical": "- A\n- a\n  b",
+      "rustBase64": "AQr/qYX6xdPDDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD/qYX6xdPDDwEDCGxpc3RJdGVtBwD/qYX6xdPDDwIDCXBhcmFncmFwaAcA/6mF+sXTww8DBgQA/6mF+sXTww8EAUGH/6mF+sXTww8CAwhsaXN0SXRlbQcA/6mF+sXTww8GAwlwYXJhZ3JhcGgHAP+phfrF08MPBwYEAP+phfrF08MPCARhCmIJAA=="
+    },
+    {
+      "name": "r24-end-lazy-tab",
+      "source": "- A\n- a\nb\t",
+      "canonical": "- A\n- a\n  b",
+      "projectedCanonical": "- A\n- a\n  b",
+      "rustBase64": "AQqrgZbVhu/7CAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCrgZbVhu/7CAEDCGxpc3RJdGVtBwCrgZbVhu/7CAIDCXBhcmFncmFwaAcAq4GW1Ybv+wgDBgQAq4GW1Ybv+wgEAUGHq4GW1Ybv+wgCAwhsaXN0SXRlbQcAq4GW1Ybv+wgGAwlwYXJhZ3JhcGgHAKuBltWG7/sIBwYEAKuBltWG7/sICARhCmIJAA=="
     }
   ],
   "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."
