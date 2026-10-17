@@ -144,13 +144,36 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     expect(screen.queryByTestId("quick-open")).toBeNull();
   });
 
-  it("blocks the toggle-sidebar menu command behind Settings", async () => {
+  it("runs an app-menu command over Settings while guarding shortcuts typed inside it", async () => {
     const bridge = await ready(platform);
     fireEvent(window, keyEvent(SHORTCUTS.settings.accelerators[0], platform));
-    await screen.findByTestId("settings-dialog");
+    const dialog = await screen.findByTestId("settings-dialog");
 
-    act(() => bridge.emitMenuCommand("toggle-sidebar"));
+    const binding = SHORTCUTS["toggle-sidebar"].accelerators[0];
+    const shortcut = keyEvent(binding, platform);
+    fireEvent(dialog, shortcut);
+    expect(shortcut.defaultPrevented).toBe(true);
     expect(screen.getByTestId("side-panel")).toBeTruthy();
+
+    const menu = buildMenuTemplate({
+      isDev: false, platform,
+      sendCommand: (_window, command) => bridge.emitMenuCommand(command),
+      stepZoom: vi.fn(), showAbout: vi.fn(),
+    });
+    const view = menu.find((item) => item.label === "View")!.submenu as MenuItemConstructorOptions[];
+    const toggle = view.find((item) => item.accelerator === binding)!;
+    act(() => (toggle.click as (item: unknown, window: unknown) => void)(undefined, undefined));
+    expect(screen.queryByTestId("side-panel")).toBeNull();
+    expect(screen.getByTestId("settings-dialog")).toBe(dialog);
+
+    fireEvent(dialog, keyEvent(binding, platform));
+    expect(screen.queryByTestId("side-panel")).toBeNull();
+
+    const input = document.createElement("input");
+    dialog.append(input);
+    const undo = keyEvent(SHORTCUTS["history-restore-undo"].accelerators[0], platform);
+    fireEvent(input, undo);
+    expect(undo.defaultPrevented).toBe(false);
   });
 
   it.each([

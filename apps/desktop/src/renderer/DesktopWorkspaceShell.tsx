@@ -3871,7 +3871,12 @@ export function DesktopWorkspaceShell(props: {
       // A modal owns the keyboard while it is visible. Native/main-owned
       // shortcuts such as Close Window and zoom never reach this listener,
       // so they continue to work over a modal.
-      if (hasBlockingModal()) return;
+      if (hasBlockingModal()) {
+        // Consume shell chords before macOS can route them through the menu.
+        // Text inputs keep native undo; history restore does not own it here.
+        if (command !== "history-restore-undo") event.preventDefault();
+        return;
+      }
       if (command === "settings") {
         event.preventDefault();
         openSettings();
@@ -3905,7 +3910,7 @@ export function DesktopWorkspaceShell(props: {
 
   useEffect(() => {
     return bridge().onMenuCommand((command) => {
-      if (hasBlockingModal()) return;
+      // App-menu commands originate outside the modal; only keydown is guarded.
       if (command === "command-palette") setPaletteOpen(true);
       else if (isCommandAvailable(command, commandContext)) commandHandlers[command]();
     });
