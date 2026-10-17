@@ -179,7 +179,7 @@ export async function startServiceLiveHost(options: {
   const parking = new Map<string, number>();
   // Whether an update completed on this daemon.
   let updated = false;
-  // The stores of workspaces whose replica diverged. None of these stores attaches again on this daemon, and each stays where it is.
+  // The stores whose replica diverged, with their workspaces. None of these stores attaches again on this daemon, and each stays where it is.
   const diverged = new Map<string, string>();
   // When each hosted document is due to unload with no live connection, and
   // the count of connection changes it last saw. An idle unload that started
@@ -625,7 +625,7 @@ export async function startServiceLiveHost(options: {
       }
       // A workspace stays wanted while anything of it may remain in its replica, so one that is not has nothing left to drain.
       for (const workspaceId of [...members.keys()]) if (!desired.has(workspaceId) || changed.includes(workspaceId)) await detach(workspaceId, joined);
-      for (const workspace of workspaces) if (!members.has(workspace.workspaceId) && diverged.get(workspace.workspaceId) !== workspace.root) await attach(workspace, joined);
+      for (const workspace of workspaces) if (!members.has(workspace.workspaceId) && !diverged.has(workspace.root)) await attach(workspace, joined);
       for (const [key, document] of wanted) {
         if (!hosted.has(key) && members.has(document.target.workspaceId)) {activation.addTarget(document.target, document.objectId); hosted.set(key, document); touch(key);}
       }
@@ -713,7 +713,7 @@ export async function startServiceLiveHost(options: {
         // It counts as diverged before the detach, which a lost reply or an exiting engine can fail.
         for(const [workspaceId,attached] of [...attachments]){
           if(attached.hosted.diverged)await step(async()=>{
-            diverged.set(workspaceId,members.get(workspaceId)!.workspace.root);
+            diverged.set(members.get(workspaceId)!.workspace.root,workspaceId);
             await detach(workspaceId,passSignal);
           });
         }
@@ -797,7 +797,7 @@ export async function startServiceLiveHost(options: {
       detachDrained,
       /** The workspaces whose replica diverged from the relay, with their stores. Each stays detached on this daemon. */
       diverged(): readonly {readonly workspaceId: string; readonly root: string}[] {
-        return [...diverged].map(([workspaceId, root]) => ({workspaceId, root}));
+        return [...diverged].map(([root, workspaceId]) => ({workspaceId, root}));
       },
       /** Why the hosted document failed the one capture it gets while it cannot progress and waits for its owner, if it did. */
       blocked(document: {workspaceId: string; objectId: string}): ServiceActivationBlock | undefined {

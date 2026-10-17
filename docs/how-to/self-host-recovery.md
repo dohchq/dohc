@@ -38,6 +38,20 @@ Due times missed while no computer or server runs schedules do not run later.
 Missed schedules produce a skipped-schedule notice; Group triggers start from the rejoin.
 These rules do not make an older relay snapshot safe to restore.
 
+## Keep a diverged live-editing copy
+
+The server keeps a copy of each workspace that has live documents in `dohc_self_host_host_data`.
+Each copy is a store directory named by a 64-character hash.
+If a copy no longer matches the relay, the server stops live editing for that workspace.
+The relay log then names the store and the workspace.
+The server writes a `<store>.diverged` marker file beside the store.
+The marker keeps the store detached after a restart.
+Recovery is not automatic yet.
+The store and every live edit in it stay unchanged.
+Preserve the volume in a private archive before you change anything.
+If you delete the marker, the next relay start attaches the store again.
+If the store still diverges, the server detaches it again and writes a new marker.
+
 ## Save a relay snapshot
 
 Choose a private backup parent directory outside the deployment's data volumes.

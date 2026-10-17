@@ -80,13 +80,16 @@ export function createServiceHostEnrollmentRoutes(options: {
 }) {
   const {storage, history, host} = options;
   const activation = storage.createServiceActivationStore(history);
+  const changed = (row: ServiceHostEnrollment) => !storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) || storage.verifyWorkspaceIdentity(row) !== "matched";
+  // Nothing its owner does, not even a Pause or Stop, continues a document
+  // whose hosted replica diverged. Its store stays for the operator.
+  const diverged = (row: ServiceHostEnrollment) => !changed(row) && host.diverged(row);
   function state(row: ServiceHostEnrollment) {
     const base = {path: row.path};
+    if (diverged(row)) return {...base, status: "unavailable", reason: "session-host-diverged"};
     // A Pause still waiting for its document to unload reads as paused.
     if (!row.enabled || row.ownerStop) return {...base, status: "paused"};
-    if (!storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) || storage.verifyWorkspaceIdentity(row) !== "matched") return {...base, status: "unavailable", reason: "workspace-changed"};
-    // Nothing its owner does continues a document whose hosted replica diverged. Its store stays for the operator.
-    if (host.diverged(row)) return {...base, status: "unavailable", reason: "session-host-diverged"};
+    if (changed(row)) return {...base, status: "unavailable", reason: "workspace-changed"};
     if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) !== row.objectId) return {...base, status: "unavailable", reason: "document-unavailable"};
     // Only the owner's Resume lets the host try a document it could not continue.
     // One with no live-editing history needs its owner to open it first.
@@ -120,9 +123,15 @@ export function createServiceHostEnrollmentRoutes(options: {
         url.searchParams.has("after") ? parseShareId(url.searchParams.get("after") ?? undefined) : undefined)});
       if (retiredPage) {
         const page = storage.listRetiredServiceHostEnrollments(workspaceId, url.searchParams.get("after") ?? undefined);
-        return response({ok: true, documents: page.documents.map(row => ({path: row.path, status: "retired"})), nextCursor: page.nextCursor});
+        return response({ok: true, documents: page.documents.map(row => ({path: row.path, status: "retired",
+          ...(diverged(row) ? {reason: "session-host-diverged"} : {})})), nextCursor: page.nextCursor});
       }
-      if (request.method === "GET") return response({ok: true, documents: storage.listServiceHostEnrollments(workspaceId).map(state)});
+      // Whether the workspace's hosted replica diverged, even once its owner stopped every document.
+      if (request.method === "GET") {
+        const identity = storage.getWorkspaceIdentity(workspaceId);
+        return response({ok: true, diverged: !!identity && host.diverged({workspaceId, ...identity}),
+          documents: storage.listServiceHostEnrollments(workspaceId).map(state)});
+      }
       if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw badRequest("Expected a JSON request.");
       const raw = await readBoundedJson(request, 16 * 1024, request.signal); guard();
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw badRequest("Invalid live host request.");

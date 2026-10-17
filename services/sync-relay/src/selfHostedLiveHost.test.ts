@@ -15,8 +15,21 @@ import {hasRelayWriteObservers, notifyRelayWrite} from "./relayWriteChanges";
 import {serviceHostDocumentEnabled} from "./storage/serviceHostEnrollment";
 import type {StorageContext} from "./storage/context";
 
+// While `error` is set, opening a divergence marker fails, as on a full disk.
+// `synced` counts the flushes of marker files.
+const markerFailure = vi.hoisted(() => ({error: undefined as Error | undefined, synced: 0}));
+vi.mock("node:fs/promises", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {...actual, open: async (...args: Parameters<typeof actual.open>) => {
+    if (!String(args[0]).endsWith(".diverged")) return actual.open(...args);
+    if (markerFailure.error) throw markerFailure.error;
+    const handle = await actual.open(...args), sync = handle.sync.bind(handle);
+    return Object.assign(handle, {sync: async () => {await sync(); markerFailure.synced++;}});
+  }};
+});
+
 const cleanup: Array<() => Promise<void>> = [];
-afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
+afterEach(async () => {Object.assign(markerFailure, {error: undefined, synced: 0}); vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
 type Configuration = {workspaces: unknown[]; activation: {targets: unknown[]}; hostId: string; instanceId: string};
 type Hosted = ServiceHostedSet["documents"][number];
 type Workspace = ServiceHostedSet["workspaces"][number];
@@ -575,15 +588,66 @@ it("keeps a diverged store detached and reported after the relay restarts", asyn
     root: f.data, engineExecutable: process.execPath, relayOrigin: "https://relay.test", key: new Uint8Array(32).fill(9), frameChanges: f.frameChanges, startHost: f.startHost, onError});
   cleanup.push(() => restarted.close());
   expect(restarted.diverged(f.enrollment()!)).toBe(true);
-  expect(onError.mock.calls).toEqual([[expect.objectContaining({message: `The live editing copy in store ${store} diverged from the relay earlier. It stays detached.`})]]);
+  expect(onError.mock.calls).toEqual([[expect.objectContaining({message: `The live editing copy in store ${store} diverged from the relay earlier. It stays detached. ` +
+    `Recovery is not automatic yet. The store and every edit in it are kept. Deleting ${marker} lets the next relay start attach the store again, and it detaches again if it still diverges.`})]]);
   const routes = createServiceHostEnrollmentRoutes({storage: f.storage, history: f.history, host: restarted,
     resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
   const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {headers: {authorization: "Bearer account-token"}}));
-  expect(await response.json()).toEqual({ok: true, documents: [{path: binding.currentPath, status: "unavailable", reason: "session-host-diverged"}]});
+  expect(await response.json()).toEqual({ok: true, diverged: true, documents: [{path: binding.currentPath, status: "unavailable", reason: "session-host-diverged"}]});
   const passes = vi.spyOn(f.storage, "listUndrainedServiceHostEnrollments");
   await vi.waitFor(() => {restarted.reconcile(); expect(passes.mock.calls.length).toBeGreaterThanOrEqual(3);}, {timeout: 10_000});
   expect(f.starts).toHaveLength(1);
   expect(onError).toHaveBeenCalledTimes(1);
+});
+
+// A relay that starts again on the fixture's storage and stores.
+async function restart(f: Awaited<ReturnType<typeof fixture>>, onError = vi.fn()) {
+  const restarted = await startSelfHostedLiveHost({trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), storage: f.storage, history: f.history,
+    root: f.data, engineExecutable: process.execPath, relayOrigin: "https://relay.test", key: new Uint8Array(32).fill(9), frameChanges: f.frameChanges, startHost: f.startHost, onError});
+  cleanup.push(() => restarted.close());
+  return restarted;
+}
+
+// Proves: a marker that could not be written is written on a later
+// reconciliation, and the store stays fenced meanwhile. Its failure is
+// reported once, and the relay that starts after it landed keeps the store detached.
+it("retries a divergence marker that could not be written, fencing the store meanwhile", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  const marker = `${join(f.data, storeName(scope.workspaceId))}.diverged`;
+  markerFailure.error = Object.assign(new Error("no space left on device"), {code: "ENOSPC"});
+  f.diverge();
+  const failed = (call: unknown[]) => (call[0] as Error).message.startsWith("Could not write");
+  await vi.waitFor(() => {f.host.reconcile(); expect(f.onError.mock.calls.filter(failed)).toHaveLength(1);}, {timeout: 10_000});
+  expect(f.onError.mock.calls.find(failed)![0]).toMatchObject({message: `Could not write ${marker}. It is retried while the relay runs; a relay restart before it lands attaches the store again.`,
+    cause: markerFailure.error});
+  await f.waitPasses();
+  expect(f.onError.mock.calls.filter(failed)).toHaveLength(1);
+  expect(f.host.diverged(f.enrollment()!)).toBe(true);
+  expect(f.attachedAfter.at(-1)).toEqual([]);
+  expect(existsSync(marker)).toBe(false);
+  markerFailure.error = undefined;
+  await vi.waitFor(() => {f.host.reconcile(); expect(markerFailure.synced).toBe(1);}, {timeout: 10_000});
+  expect(JSON.parse(await readFile(marker, "utf8"))).toEqual({workspaceId: scope.workspaceId});
+  await f.waitPasses();
+  expect(markerFailure.synced).toBe(1);
+  await f.host.close();
+  expect((await restart(f)).diverged(f.enrollment()!)).toBe(true);
+});
+
+// Proves: what a restart can know when the marker never landed. Nothing on
+// disk records the divergence, so the new relay attaches the store again; its
+// daemon pulls before the first capture, which finds a divergence that a pull can see.
+// The operator was told this when the write failed.
+it("attaches a diverged store again after a restart that came before its marker landed", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  markerFailure.error = new Error("read-only file system");
+  f.diverge();
+  await vi.waitFor(() => {f.host.reconcile(); expect(f.onError).toHaveBeenCalledWith(expect.objectContaining({cause: markerFailure.error}));}, {timeout: 10_000});
+  await f.host.close();
+  const restarted = await restart(f);
+  expect(restarted.diverged(f.enrollment()!)).toBe(false);
+  await vi.waitFor(() => expect(f.starts).toHaveLength(2), {timeout: 10_000});
+  await vi.waitFor(() => expect(f.attachedAfter.at(-1)).toEqual([scope.workspaceId]), {timeout: 10_000});
 });
 
 // Proves: startup deletes nothing: not a store no enrollment names, not what

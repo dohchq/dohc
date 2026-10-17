@@ -91,6 +91,25 @@ describe("LiveDocumentsDialog", () => {
     expect(stopped.textContent).not.toContain("1 unsent edits");
     expect(stopped.textContent).not.toContain("They are not in History");
   });
+  // Proves: a document stopped on a diverged server copy keeps the operator's
+  // explanation, and its deferred Stop keeps its facts without a Resume to try.
+  it.each([0, 2])("sends a document stopped on a diverged copy, with %s unsent edits, to the server's operator", async unsentEdits => {
+    const h=harness(), reason="session-host-diverged" as const;
+    h.load.mockResolvedValue(page([
+      row("deferred.md",{status:"retired",reason,deferredStop:{unsentEdits,editable:true}}),
+      row("stopped.md",{status:"retired",reason}),
+    ]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const deferred=await screen.findByTestId("live-document-row-deferred.md");
+    expect(deferred.textContent).toContain("The server's copy of this workspace no longer matches the synced one. Contact the server's operator.");
+    expect(deferred.textContent).toContain(unsentEdits===0 ? "Live editing stopped. You can keep editing." : "Live editing stopped. 2 unsent edits remain on this computer. You can keep editing.");
+    expect(deferred.textContent).not.toContain("Resume");
+    expect(screen.getByTestId("live-document-row-stopped.md").textContent).toContain("Contact the server's operator.");
+    for (const path of ["deferred.md","stopped.md"]) {
+      expect(screen.getByTestId(`live-document-row-${path}`).children[1]?.textContent).toBe("Server copy doesn't match");
+      expect(actions(path)).toEqual([]);
+    }
+  });
   it.each([true, false])("shows deferred unsent edits and truthful editability: %s", async editable => {
     const h=harness();
     h.load.mockResolvedValue(page([row("a.md", {status:"retired",canResume:true,deferredStop:{unsentEdits:65,editable}})]));
@@ -262,7 +281,8 @@ describe("LiveDocumentsDialog", () => {
       "The server's copy of this workspace no longer matches the synced one. Contact the server's operator.";
     expect(screen.getAllByText(operator)).toHaveLength(1);
     expect(screen.getByTestId("live-document-row-docs/diverged.md").textContent).toContain(operator);
-    expect(actions("docs/diverged.md")).toEqual(["Stop live editing"]);
+    // A Stop cannot finish on a diverged copy either.
+    expect(actions("docs/diverged.md")).toEqual([]);
     // Only the document dohc has never opened says to open it before Resume.
     const openFirst =
       "Live editing can't start until you open this document once in dohc. After you open it, resume live editing.";

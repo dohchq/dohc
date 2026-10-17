@@ -1,6 +1,6 @@
 import {createHash} from "node:crypto";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
-import {mkdir, mkdtemp, readdir, rm, writeFile} from "node:fs/promises";
+import {mkdir, mkdtemp, open, readdir, rm, writeFile} from "node:fs/promises";
 import {realpathSync, statSync} from "node:fs";
 import {basename, isAbsolute, join, posix, resolve} from "node:path";
 import type {Event} from "@dohc/workspace-engine-client";
@@ -92,8 +92,21 @@ export async function startSelfHostedLiveHost(options: {
   // stays detached, untouched, and releases nothing. A marker beside the store
   // keeps it so after a restart, before any pull could find the divergence again.
   const marker = (name: string) => join(root, `${name}.diverged`);
+  const recovery = (name: string) => `Recovery is not automatic yet. The store and every edit in it are kept. Deleting ${marker(name)} lets the next relay start attach the store again, and it detaches again if it still diverges.`;
   const diverged = new Set((await readdir(root)).flatMap(name => /^([0-9a-f]{64})\.diverged$/.exec(name)?.[1] ?? []));
-  for (const name of diverged) options.onError?.(new Error(`The live editing copy in store ${join(root, name)} diverged from the relay earlier. It stays detached.`));
+  for (const name of diverged) options.onError?.(new Error(`The live editing copy in store ${join(root, name)} diverged from the relay earlier. It stays detached. ${recovery(name)}`));
+  // Diverged stores whose marker is not yet durable, with whether its failure was reported.
+  // Each reconciliation tries again; until one succeeds, a restart attaches the store again.
+  const unmarked = new Map<string, {workspaceId: string; reported: boolean}>();
+  async function writeMarker(name: string, workspaceId: string) {
+    const handle = await open(marker(name), "w", 0o600);
+    try {await handle.writeFile(JSON.stringify({workspaceId})); await handle.sync();}
+    finally {await handle.close();}
+    // Windows cannot open directory handles for fsync through Node.
+    if (process.platform === "win32") return;
+    const directory = await open(root, "r");
+    try {await directory.sync();} finally {await directory.close();}
+  }
   // The documents this reconciliation released, or tried to.
   const left = new Set<string>();
   // Blocked documents already reported to the operator.
@@ -162,10 +175,15 @@ export async function startSelfHostedLiveHost(options: {
       for (const {workspaceId, root: store} of current?.diverged() ?? []) {
         const name = basename(store);
         if (diverged.has(name)) continue;
-        diverged.add(name);
-        try {await writeFile(marker(name), JSON.stringify({workspaceId}), {mode: 0o600});}
-        catch (error) {options.onError?.(error);}
-        options.onError?.(new Error(`The live editing copy of workspace ${workspaceId} diverged from the relay. It stays detached, and its store is kept at ${store}.`));
+        diverged.add(name); unmarked.set(name, {workspaceId, reported: false});
+        options.onError?.(new Error(`The live editing copy of workspace ${workspaceId} diverged from the relay. It stays detached, and its store is kept at ${store}. ${recovery(name)}`));
+      }
+      for (const [name, pending] of unmarked) {
+        try {await writeMarker(name, pending.workspaceId); unmarked.delete(name);}
+        catch (error) {
+          if (!pending.reported) options.onError?.(new Error(`Could not write ${marker(name)}. It is retried while the relay runs; a relay restart before it lands attaches the store again.`, {cause: error}));
+          pending.reported = true;
+        }
       }
       // Only a failed daemon restarts. Membership changes update the running one.
       if (current?.invalidated.aborted) {await stopCurrent(); signature = "";}

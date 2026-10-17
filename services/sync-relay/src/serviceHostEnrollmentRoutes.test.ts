@@ -164,12 +164,33 @@ it("reports a document whose hosted replica diverged, and nothing about its stor
   f.host.block(enrolled.objectId);
   f.host.diverged.mockImplementation(row => row.workspaceId === scope.workspaceId && row.replicationEpoch === "epoch" && row.streamIdentity === "stream");
   const response = await f.handle(f.request());
-  expect(await response.json()).toEqual({ok: true, documents: [diverged]});
+  expect(await response.json()).toEqual({ok: true, diverged: true, documents: [diverged]});
   const resumed = await f.handle(f.request("POST", {path: binding.currentPath}));
   expect(resumed.status).toBe(202);
   expect(await resumed.json()).toEqual({ok: true, ...diverged});
   f.raw.prepare("UPDATE sync_relay_workspaces SET replication_epoch='rotated' WHERE workspace_id=?").run(scope.workspaceId);
-  expect((await (await f.handle(f.request())).json()).documents).toEqual([{path: binding.currentPath, status: "unavailable", reason: "workspace-changed"}]);
+  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: false, documents: [{path: binding.currentPath, status: "unavailable", reason: "workspace-changed"}]});
+});
+
+// Proves: an owner's Pause or Stop records their intent but cannot hide a
+// diverged server copy. The paused and the retired document both keep the
+// reason, and the workspace still reads as diverged once no document is active.
+it("keeps a diverged document's reason after its owner pauses or stops it", async () => {
+  const f = await fixture(); f.seed("docs/b.md", "object-b");
+  f.storage.enrollServiceHostDocument(f.input); f.storage.enrollServiceHostDocument({...f.input, path: "docs/b.md"});
+  f.host.diverged.mockImplementation(row => row.workspaceId === scope.workspaceId && row.replicationEpoch === "epoch" && row.streamIdentity === "stream");
+  const reason = "session-host-diverged";
+  expect(await (await f.handle(f.request("DELETE", {path: binding.currentPath}))).json()).toEqual({ok: true, path: binding.currentPath, status: "unavailable", reason});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({ownerStop: "pause"});
+  const stopped = await f.handle(f.request("DELETE", {path: "docs/b.md", retire: true, restoreFenceGeneration: 0}));
+  expect(await stopped.json()).toMatchObject({ok: true, path: "docs/b.md", status: "retired"});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/b.md")).toMatchObject({ownerStop: "retire", retired: true});
+  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: true, documents: [{path: binding.currentPath, status: "unavailable", reason}]});
+  expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({ok: true, documents: [{path: "docs/b.md", status: "retired", reason}], nextCursor: null});
+  expect((await f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}))).status).toBe(200);
+  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: true, documents: []});
+  expect((await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).documents).toEqual([
+    {path: binding.currentPath, status: "retired", reason}, {path: "docs/b.md", status: "retired", reason}]);
 });
 
 it("lists automatic enrollment refusals without enrolling documents or exposing other workspaces", async () => {
@@ -354,7 +375,7 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   const bearer = deriveServiceHostBearer(first, {key, namespace});
   const stop = await f.handle(f.request("DELETE", {path: first.path, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}));
   expect(await stop.json()).toEqual({ok: true, path: first.path, objectId:first.objectId, status: "retired", acceptedCursor: 0});
-  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, documents: []});
+  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: false, documents: []});
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
   expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({ok: true, documents: [{path: first.path, status: "retired"}], nextCursor: null});

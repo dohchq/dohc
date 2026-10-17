@@ -182,6 +182,19 @@ describe("owner live document enrollment", () => {
     h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1") ? {ok:true,documents:[{path:"old.md",objectId:"object",status: "retired", acceptedCursor: 0}],nextCursor:null} : {ok:true,documents:[]});
     await expect(h.invoke(CHANNELS.listOwnerLiveDocuments,{workspaceId})).resolves.toEqual({documents:[{path:"old.md",status: "retired",canResume:true,deferredStop:{unsentEdits:65,editable:false}}],nextCursor:null});
   });
+  // Proves: a document stopped on a diverged server copy keeps the reason and
+  // offers no Resume, whether its Stop finished or waits on this computer.
+  it("offers no Resume for a document stopped on a diverged server copy, deferred or not",async () => {
+    const h=harness();
+    h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"deferred.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:2,editable:true}}]);
+    h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
+      ? {ok:true,documents:[{path:"deferred.md",status:"retired",reason:"session-host-diverged"},{path:"stopped.md",status:"retired",reason:"session-host-diverged"}],nextCursor:null}
+      : {ok:true,diverged:true,documents:[]});
+    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments,{workspaceId})).resolves.toEqual({documents:[
+      {path:"deferred.md",status:"retired",reason:"session-host-diverged",canResume:false,deferredStop:{unsentEdits:2,editable:true}},
+      {path:"stopped.md",status:"retired",reason:"session-host-diverged",canResume:false},
+    ],nextCursor:null});
+  });
   const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
 
   it("lists bounded owner refusals without treating an empty candidate page as complete", async () => {

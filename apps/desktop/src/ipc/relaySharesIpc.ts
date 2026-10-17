@@ -217,9 +217,10 @@ export function registerRelaySharesIpcHandlers<
         ...document, canResume: document.reason === "session-host-refused" || document.reason === "live-document-without-lineage" ||
           (!document.reason && (document.status === "retired" || document.status === "paused")),
       }]));
+      // A deferred Stop finishes through Resume, unless the server's copy diverged: then Resume cannot work.
       for (const row of documents.values()) {
         const deferred = localStops.find(stop => stop.document.currentPath === row.path)?.deferred;
-        if (deferred) Object.assign(row, {deferredStop: deferred, canResume: true});
+        if (deferred) Object.assign(row, {deferredStop: deferred, canResume: row.reason !== "session-host-diverged"});
       }
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);

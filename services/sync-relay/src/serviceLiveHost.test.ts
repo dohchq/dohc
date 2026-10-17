@@ -1431,6 +1431,24 @@ it("detaches a diverged workspace for good and retains its documents", async () 
   await o.host.update({workspaces: [{...o.workspace, root: rotatedRoot,
     hostedReplication: {...o.workspace.hostedReplication!, identity: {replicationEpoch: "epoch-2", streamIdentity: "stream-2"}}}], documents: [], ...stay});
   expect(o.membership).toEqual([o.attach, o.detach, {...o.attach, params: {...o.attach.params, root: rotatedRoot}}]);
+  // A second divergence, under the new identity, keeps the first store's.
+  o.replies.diverge = true;
+  await vi.waitFor(() => expect(o.host.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}, {workspaceId: "workspace", root: rotatedRoot}]));
+});
+
+// Proves: a fresh daemon, with no marker to say a store diverged, pulls
+// before the first activation captures anything. A divergence that pull finds
+// detaches the workspace before any document is ready for anyone to edit.
+it("finds a divergence on a fresh daemon before any document is ready", async () => {
+  const o = await emptyServiceHost();
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.replies.diverge = true;
+  await o.host.update({workspaces: [o.workspace], documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]));
+  // A document is ready only once captured.
+  expect(o.client().captureOwnerActivation).not.toHaveBeenCalled();
+  expect(o.host.isDocumentReady(o.document)).toBe(false);
+  expect(o.membership).toEqual([o.attach, o.detach]);
 });
 
 // Proves: a divergence counts before its detach, so a detach the exiting

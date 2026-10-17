@@ -814,17 +814,18 @@ describe("server owner peer lifecycle", () => {
       currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace", shareId: "share"};
     const refused = {path: "refused.md", status: "unavailable", reason: "session-host-refused"};
     const unopened = {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage"};
-    const diverged = {path: "diverged.md", status: "unavailable", reason: "session-host-diverged"};
+    const divergedRow = {path: "diverged.md", status: "unavailable", reason: "session-host-diverged"};
     const others = [{path: "changed.md", status: "unavailable", reason: "workspace-changed"}, {path: "moved.md", status: "unavailable", reason: "document-unavailable"}];
     const ready = {path: "a.md", status: "ready", document};
-    let rows: unknown[] = others;
+    // The server says the workspace diverged whenever any of its rows does, and after its owner stopped every one.
+    let rows: unknown[] = others, diverged = false;
     const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
       frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
         maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
       attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
     f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
       connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
-        retire: async () => 0, refusals: async () => {}, documents: async () => ({ok: true, documents: rows})})};
+        retire: async () => 0, refusals: async () => {}, documents: async () => ({ok: true, diverged, documents: rows})})};
     ownerDeliveryMock.pass.mockResolvedValue("frozen");
     try {
       expect(await f.engine.start()).toBe(true);
@@ -849,17 +850,23 @@ describe("server owner peer lifecycle", () => {
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
       // A diverged server copy outranks all of them, with or without a frozen document.
       // Each step changes the reason, so no step passes on the one before it.
-      rows = [...others, refused, unopened, diverged]; f.engine.retryOwnerDelivery("owner");
+      rows = [...others, refused, unopened, divergedRow]; diverged = true; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-diverged"));
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
-      rows = [ready, unopened]; f.engine.retryOwnerDelivery("owner");
+      rows = [ready, unopened]; diverged = false; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage"));
-      rows = [ready, diverged, ...others, unopened, refused]; f.engine.retryOwnerDelivery("owner");
+      rows = [ready, divergedRow, ...others, unopened, refused]; diverged = true; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-diverged"));
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
-      // The owner's retry succeeded, so the server no longer reports it.
-      rows = [ready, ...others]; f.engine.retryOwnerDelivery("owner");
+      rows = [ready, ...others]; diverged = false; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"));
+      // The owner stopped every document, and the server still reports its diverged copy.
+      rows = []; diverged = true; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-diverged"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      // The server no longer reports it.
+      diverged = false; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBeUndefined());
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 

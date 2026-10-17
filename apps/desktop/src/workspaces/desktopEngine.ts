@@ -182,14 +182,15 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const response = await session.documents(signal);
               const documents = readyOwnerDeliveryDocuments(response, workspaceId);
               check();
-              const rows = (response as {documents: {status: string; reason?: unknown}[]}).documents;
+              const {documents: rows, diverged} = response as {documents: {status: string; reason?: unknown}[]; diverged?: unknown};
               const preparing = rows.some(row => row.status === "preparing");
-              const unavailable = rows.some(row => row.status === "unavailable");
+              // The server reports a diverged copy even after its owner stopped every document.
+              const unavailable = diverged === true || rows.some(row => row.status === "unavailable");
               const unavailableFor = (reason: OwnerLiveDeliveryReason) => rows.some(row => row.status === "unavailable" && row.reason === reason);
               // A document the server refused stays stopped until its owner tries again, so no other reason hides it.
               // One it cannot start goes before it: the owner must open it before a Resume can help.
               // A diverged server copy goes first: only the server's operator can continue it.
-              const reason = unavailableFor("session-host-diverged") ? "session-host-diverged" :
+              const reason = diverged === true ? "session-host-diverged" :
                 unavailableFor("live-document-without-lineage") ? "live-document-without-lineage" :
                 unavailableFor("session-host-refused") ? "session-host-refused" :
                 unavailableFor("workspace-changed") ? "workspace-changed" :

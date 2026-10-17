@@ -161,12 +161,22 @@ function statusTone(row: LiveDocumentRow): string {
   return "text-muted";
 }
 
+// The server holds a diverged copy until its operator recovers it, so a Stop cannot finish.
 function canStop(row: LiveDocumentRow): boolean {
-  return row.status !== "retired" && !row.deferredStop;
+  return row.status !== "retired" && !row.deferredStop && row.reason !== "session-host-diverged";
 }
 
 function canResume(row: LiveDocumentRow): boolean {
   return row.canResume;
+}
+
+// A Resume finishes a deferred Stop, but not one on a server copy that diverged.
+function deferredStopNote(row: LiveDocumentRow, stop: NonNullable<LiveDocumentRow["deferredStop"]>): string {
+  const one = stop.unsentEdits === 1;
+  const unsent = stop.unsentEdits === 0 ? "" : `${stop.unsentEdits} unsent ${one ? "edit remains" : "edits remain"} on this computer. `;
+  const resume = row.reason === "session-host-diverged" ? ""
+    : stop.unsentEdits === 0 ? "Resume live editing to finish syncing. " : `Resume live editing to try sending ${one ? "it" : "them"}. `;
+  return `${row.status === "ready" ? "Live editing resumed. " : "Live editing stopped. "}${unsent}${resume}${stop.editable ? "You can keep editing." : "Editing is paused."}`;
 }
 
 function busyLabel(work: Work): string {
@@ -546,7 +556,7 @@ export function LiveDocumentsDialog({
                     Live editing can't start until you open this document once in dohc. After you open it, resume live editing.
                   </p>
                 ) : null}
-                {/* Resume can't help here, so the row offers none. */}
+                {/* Resume and Stop can't help here, so the row offers neither. */}
                 {row.reason === "session-host-diverged" ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
                     The server's copy of this workspace no longer matches the synced one. Contact the server's operator.
@@ -554,9 +564,7 @@ export function LiveDocumentsDialog({
                 ) : null}
                 {row.deferredStop ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    {row.status==="ready" ? "Live editing resumed. " : "Live editing stopped. "}
-                    {row.deferredStop.unsentEdits===0 ? "Resume live editing to finish syncing. " : `${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits===1 ? "edit remains" : "edits remain"} on this computer. Resume live editing to try sending ${row.deferredStop.unsentEdits===1 ? "it" : "them"}. `}
-                    {row.deferredStop.editable ? "You can keep editing." : "Editing is paused."}
+                    {deferredStopNote(row, row.deferredStop)}
                   </p>
                 ) : null}
               </li>
