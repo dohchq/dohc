@@ -209,6 +209,20 @@ describe("the active row inside a multi-selection", () => {
 describe("macOS file tree keys", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it.each([
+    ["darwin", "⌘⌫ asks", { key: "Backspace", metaKey: true }, true],
+    ["darwin", "⌫ alone does not ask", { key: "Backspace" }, false],
+    ["darwin", "Delete asks", { key: "Delete" }, true],
+    ["win32", "Meta+Backspace does not ask", { key: "Backspace", metaKey: true }, false],
+    ["win32", "Delete asks", { key: "Delete" }, true],
+  ] as const)("on %s, %s to delete the selection", (platform, _name, init, asks) => {
+    vi.stubGlobal("dohcDesktop", { platform });
+    render(<Fixture {...explorerProps()} />);
+    fireEvent.click(row("notes.md"));
+    fireEvent.keyDown(row("notes.md"), init);
+    expect(screen.queryByTestId("delete-confirm") !== null).toBe(asks);
+  });
+
   it("adds a row to the selection with ⌘-click on macOS", () => {
     vi.stubGlobal("dohcDesktop", { platform: "darwin" });
     render(<Fixture {...explorerProps({ expandedFolders: ["apps", "apps/reading-list"] })} />);

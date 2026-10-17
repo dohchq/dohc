@@ -382,6 +382,37 @@ describe("makeLinkMenuPlugin: click", () => {
     editor.destroy();
   });
 
+  it("leaves a macOS Control-click to the context menu", async () => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    const openExternalUrl = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(bridge).mockReturnValue({ openExternalUrl } as unknown as ReturnType<typeof bridge>);
+    const editor = makeEditor(
+      '<p><a href="https://example.com/">hello</a> world</p>',
+    );
+    const setState = vi.fn();
+    const plugin = makeLinkMenuPlugin({
+      stateRef: { current: CLOSED_LINK_MENU_STATE },
+      setState,
+    });
+    const anchor = editor.view.dom.querySelector("a")!;
+    const event = {
+      target: anchor,
+      button: 0,
+      metaKey: false,
+      ctrlKey: true,
+      preventDefault: vi.fn(),
+    } as unknown as MouseEvent;
+
+    const handled = callHandleClick(plugin, editor.view, editor.view.posAtDOM(anchor, 0), event);
+
+    expect(handled).toBe(false);
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    await flushExternalOpen();
+    expect(openExternalUrl).not.toHaveBeenCalled();
+    expect(setState).not.toHaveBeenCalled();
+    editor.destroy();
+  });
+
   it("keeps percent encoding when opening an external read-only link", async () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({

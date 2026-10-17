@@ -32,7 +32,7 @@ import {
   movedPointer,
   revealMenuRow,
 } from "../ui/Menu";
-import { isComposingKey } from "../ui/keys";
+import { isComposingKey, isSendKey } from "../ui/keys";
 
 export interface FileMentionCandidate {
   path: string;
@@ -479,9 +479,8 @@ export function MentionComposer(props: {
           return;
         }
       }
-      // isComposing: Enter during IME composition confirms characters — never
-      // sends. Matches the shared ChatComposer contract.
-      if (event.key === "Enter" && !event.shiftKey && !isComposingKey(event)) {
+      // Matches the shared ChatComposer contract.
+      if (isSendKey(event)) {
         event.preventDefault();
         props.onSend();
         return;

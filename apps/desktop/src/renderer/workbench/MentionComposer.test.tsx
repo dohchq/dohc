@@ -130,6 +130,20 @@ describe("MentionComposer autocomplete", () => {
     expect(screen.queryByTestId("chats-mention-menu")).not.toBeNull();
   });
 
+  it("starts a new line on Option+Return on macOS instead of sending", async () => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    try {
+      const onSend = vi.fn();
+      render(<Harness onSend={onSend} />);
+      const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+      await userEvent.type(composer, "hello");
+      fireEvent.keyDown(composer, { key: "Enter", altKey: true });
+      expect(onSend).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does not send on Enter while IME composing (no menu)", async () => {
     const onSend = vi.fn();
     render(<Harness onSend={onSend} />);

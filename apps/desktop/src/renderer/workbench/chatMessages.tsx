@@ -7,7 +7,7 @@ import { ChatAvatar } from "./ChatAvatar";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { basenameOf } from "../path";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { isComposingKey } from "../ui/keys";
+import { isComposingKey, isSendKey } from "../ui/keys";
 import { Database, File, FileText, Image, SmilePlus } from "lucide-react";
 import {
   memo,
@@ -944,9 +944,9 @@ export function ChatComposer(props: {
         placeholder={props.placeholder}
         onChange={(event) => props.onChange(event.target.value)}
         onKeyDown={(event) => {
-          // isComposing: Enter during IME composition (CJK input) confirms
-          // the composed characters — it must never submit the message.
-          if (event.key === "Enter" && !event.shiftKey && !isComposingKey(event)) {
+          // Enter during IME composition (CJK input) confirms the composed
+          // characters — it must never submit the message.
+          if (isSendKey(event)) {
             event.preventDefault();
             props.onSend();
           } else if (event.key === "Escape" && props.onEscape) {

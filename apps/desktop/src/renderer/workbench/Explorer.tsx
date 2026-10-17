@@ -1,7 +1,7 @@
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { useFocusSurface } from "../ui/focusReturn";
-import { isComposingKey } from "../ui/keys";
+import { isComposingKey, isDeleteKey } from "../ui/keys";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
@@ -1364,7 +1364,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         if (target) beginRename(target, isFolderPath(target));
         return;
       }
-      if (event.key === "Delete") {
+      if (isDeleteKey(event)) {
         event.preventDefault();
         const targets = selection.size > 0 ? [...selection] : focusedPath ? [focusedPath] : [];
         if (targets.length > 0) setConfirmDelete(targets);

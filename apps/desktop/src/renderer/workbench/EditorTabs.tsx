@@ -3,6 +3,7 @@ import { TabGlyph, tabMark, type TabMark } from "./tabGlyph";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { editorTabTestId } from "../../testPins";
 import { focusSurface, useFocusSurface } from "../ui/focusReturn";
+import { isMacContextClick } from "../ui/keys";
 import { Menu } from "../ui/Menu";
 import { ChevronDown, Columns2, X } from "lucide-react";
 import {
@@ -185,7 +186,8 @@ const Tab = memo(function Tab(props: {
         props.onContextMenu(props.groupId, props.path);
       }}
       onPointerDown={(event) => {
-        if (event.button !== 0) return;
+        // A Control press on macOS opens the context menu, as a right press does.
+        if (event.button !== 0 || isMacContextClick(event)) return;
         // Activate on press (VS Code behavior) — click can't be relied on
         // after a drag: the reorder re-inserts the DOM node, which cancels
         // both pointer capture and click synthesis in Chromium.

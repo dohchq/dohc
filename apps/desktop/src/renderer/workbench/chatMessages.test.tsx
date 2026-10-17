@@ -76,6 +76,20 @@ describe("ChatComposer Enter-to-send", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["darwin", "starts a new line", false],
+    ["win32", "still sends", true],
+  ] as const)("Option+Return on %s %s", (platform, _result, sends) => {
+    vi.stubGlobal("dohcDesktop", { platform });
+    try {
+      const { onSend } = renderComposer();
+      fireEvent.keyDown(screen.getByTestId("test-chat-composer"), { key: "Enter", altKey: true });
+      expect(onSend).toHaveBeenCalledTimes(sends ? 1 : 0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does not send on Shift+Enter (newline stays a newline)", () => {
     const { onSend } = renderComposer();
     fireEvent.keyDown(screen.getByTestId("test-chat-composer"), {

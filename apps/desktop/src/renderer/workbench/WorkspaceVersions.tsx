@@ -24,7 +24,7 @@ import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { SectionLabel } from "../ui/controls";
 import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
-import { isComposingKey } from "../ui/keys";
+import { isSendKey } from "../ui/keys";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import {
   CONFLICT_COMBINED_EDIT_MAX_BYTES,
@@ -627,7 +627,7 @@ export function TryTaskDialog(props: {
           placeholder="Tidy the meeting notes into one summary"
           onChange={(event) => setTask(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && !isComposingKey(event)) {
+            if (isSendKey(event)) {
               event.preventDefault();
               void start();
             }
