@@ -2880,15 +2880,66 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
 // existing permissive proof, except for the desktop's quote depth limit.
 fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
     fn inline(text: &str) -> bool {
-        // Native stores inline Markdown as text. The strict proof cannot
-        // establish agreement with desktop inline nodes for these characters.
-        !text.contains(['[', '<', '>', '&', '$']) && !text.contains("{{")
+        fn prose(character: char) -> bool {
+            character.is_alphanumeric()
+                || character.is_whitespace()
+                || matches!(
+                    character,
+                    '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '(' | ')' | '-' | '/' | '*'
+                )
+        }
+        if text.contains("://")
+            || text
+                .as_bytes()
+                .windows(4)
+                .any(|part| part.eq_ignore_ascii_case(b"www."))
+            || text.split_inclusive('\n').any(|line| {
+                line.strip_suffix('\n')
+                    .is_some_and(|content| content.ends_with("  "))
+            })
+        {
+            return false;
+        }
+        let mut rest = text;
+        while let Some(character) = rest.chars().next() {
+            if matches!(character, '`' | '~') {
+                let delimiter = if character == '`' { "`" } else { "~~" };
+                let Some(content) = rest.strip_prefix(delimiter) else {
+                    return false;
+                };
+                let Some(end) = content.find(delimiter) else {
+                    return false;
+                };
+                let value = &content[..end];
+                let spelling = &rest[..end + delimiter.len() * 2];
+                if value.trim().is_empty() || !value.chars().all(prose) {
+                    return false;
+                }
+                if character == '`' {
+                    if value.contains(['\r', '\n'])
+                        || render_inline_code(value).ok().as_deref() != Some(spelling)
+                    {
+                        return false;
+                    }
+                } else if value.trim() != value {
+                    return false;
+                }
+                rest = &rest[spelling.len()..];
+            } else if prose(character) {
+                rest = &rest[character.len_utf8()..];
+            } else {
+                return false;
+            }
+        }
+        true
     }
     fn tree(blocks: &[MdBlock<'_>], in_item: bool) -> bool {
         blocks.iter().all(|block| match block {
             MdBlock::Paragraph(text) => inline(text),
             MdBlock::Heading { text, .. } => !in_item && inline(text),
-            MdBlock::CodeBlock { .. } => true,
+            MdBlock::CodeBlock { language, .. } => language
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "_+.#-".contains(character)),
             MdBlock::BulletList(items) => items.iter().all(|(text, blocks)| {
                 !text.trim().is_empty() && inline(text) && tree(blocks, true)
             }),

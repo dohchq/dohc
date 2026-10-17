@@ -190,6 +190,25 @@ fn held_sources() -> Vec<&'static str> {
     ].into_iter().chain(inline_proof_held_sources()).collect()
 }
 
+fn inline_accepted_sources() -> [&'static str; 14] {
+    [
+        "- plain text\n  - child",
+        "- Café 中文 ١٢٣ . , ; : ! ? ' \" ( ) - / *\n  - child",
+        "- **bold**\n  - child",
+        "- *italic*\n  - child",
+        "- ~~strike~~\n  - child",
+        "- `code`\n  - child",
+        "- `*plain* / : -`\n  - child",
+        "- a  \n  - child",
+        "- **bold** and *emphasis*\n  - ~~strike~~",
+        "- parent\n\n  ```txt\n  [ < > & $ {{atom:example}}\n  ```\n  - child",
+        "```txt\n[ < > & $ {{atom:example}}\n```\n\n- parent\n  - child",
+        "- parent\n\n  ```c++\n  code\n  ```\n  - child",
+        "- parent\n\n  ```c#\n  code\n  ```\n  - child",
+        "- parent\n\n  ```lang_1.+#-\n  code\n  ```\n  - child",
+    ]
+}
+
 fn generated_sources() -> Vec<String> {
     let mut sources = Vec::new();
     for parent in ["-", "*", "+", "1.", "3)", "- [ ]", "* [x]", "+ [X]"] {
@@ -249,7 +268,7 @@ fn generated_sources() -> Vec<String> {
             for inline in [
                 "plain",
                 "**bold** and *emphasis*",
-                "`code` and \\*literal\\*",
+                "`code` and literal",
                 "~~strike~~ and plain text",
             ] {
                 let mut source = String::new();
@@ -309,15 +328,7 @@ fn generated_sources() -> Vec<String> {
             sources.push(source);
         }
     }
-    sources.extend(
-        [
-            "- plain text\n  - child",
-            "- **bold** and *emphasis*\n  - ~~strike~~",
-            "- parent\n\n  ```txt\n  [ < > & $ {{atom:example}}\n  ```\n  - child",
-            "```txt\n[ < > & $ {{atom:example}}\n```\n\n- parent\n  - child",
-        ]
-        .map(str::to_owned),
-    );
+    sources.extend(inline_accepted_sources().map(str::to_owned));
     sources.push("- p\n  more\n  - c".to_owned());
     sources
 }
@@ -479,7 +490,7 @@ fn nested1b_non_allowlisted_shapes() {
     }
 }
 
-fn inline_proof_held_sources() -> [&'static str; 30] {
+fn inline_proof_held_sources() -> [&'static str; 54] {
     [
         "- [label][ref]\n  - child\n\n[ref]: https://example.com",
         "- <https://example.com>\n  - child",
@@ -511,11 +522,35 @@ fn inline_proof_held_sources() -> [&'static str; 30] {
         "- see [docs](https://example.com)\n  - child",
         "1. [ ] parent\n    1. [X] child",
         "3) [X] parent\n    1) [ ] child",
+        "- see https://example.com\n  - child\n",
+        "- www.example.com\n  - child\n",
+        "- mail a@b.co\n  - child\n",
+        "- _note_\n  - child\n",
+        "- __note__\n  - child\n",
+        "- ``code``\n  - child",
+        "- ` x `\n  - child",
+        "- a  \n  b\n  - child",
+        "- a\\\n  b\n  - child",
+        "- ==a=b==\n  - child",
+        "- ++underline++\n  - child",
+        "- WWW.example.com\n  - child",
+        "- a ~ b\n  - child",
+        "- a # b\n  - child",
+        "- a = b\n  - child",
+        "- a + b\n  - child",
+        "- a | b\n  - child",
+        "- a \\ b\n  - child",
+        "- a ^ b\n  - child",
+        "- a % b\n  - child",
+        "- `code\n  more`\n  - child",
+        "- unmatched `code\n  - child",
+        "- `   `\n  - child",
+        "- parent\n\n  ```c\\+\\+\n  code\n  ```\n  - child",
     ]
 }
 
 #[test]
-fn nested1b_conservative_inline_holds_on_both_builders() {
+fn nested1b_positive_inline_allowlist_on_both_builders() {
     for source in inline_proof_held_sources() {
         assert!(successor(source).is_err(), "{source:?}");
         assert!(
@@ -525,12 +560,7 @@ fn nested1b_conservative_inline_holds_on_both_builders() {
             "{source:?}"
         );
     }
-    for source in [
-        "- plain text\n  - child",
-        "- **bold** and *emphasis*\n  - ~~strike~~",
-        "- parent\n\n  ```txt\n  [ < > & $ {{atom:example}}\n  ```\n  - child",
-        "```txt\n[ < > & $ {{atom:example}}\n```\n\n- parent\n  - child",
-    ] {
+    for source in inline_accepted_sources() {
         assert!(outside_markdown_is_allowlisted(source));
         production_docs(source);
     }
@@ -539,6 +569,11 @@ fn nested1b_conservative_inline_holds_on_both_builders() {
 #[test]
 fn nested1b_flat_inline_bodies_keep_existing_builder_behavior() {
     for source in [
+        "- see https://example.com",
+        "- www.example.com",
+        "- mail a@b.co",
+        "- _note_",
+        "- __note__",
         "- run `a -> b`",
         "- `a && b`",
         "- $a < b$",

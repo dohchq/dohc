@@ -82,6 +82,19 @@ const validate = createLiveMarkdownJournalValidator(policy)
 const document = { workspaceId: 'workspace', mainVersionId: 'main', objectId: 'object', lineageClaimId: 'lineage' }
 
 const inlineDesktopProbes = [
+  ['- see https://example.com\n  - child\n', 'link', '[https://example.com](https://example.com)'],
+  ['- www.example.com\n  - child\n', 'link', '[www.example.com](http://www.example.com)'],
+  ['- mail a@b.co\n  - child\n', 'link', '[a@b.co](mailto:a@b.co)'],
+  ['- _note_\n  - child\n', 'italic', '*note*'],
+  ['- __note__\n  - child\n', 'bold', '**note**'],
+  ['- ``code``\n  - child', 'code', '`code`'],
+  ['- ` x `\n  - child', 'code', '`x`'],
+  ['- a  \n  b\n  - child', 'hardBreak', 'a  \n  b'],
+  ['- a\\\n  b\n  - child', 'hardBreak', 'a  \n  b'],
+  ['- `   `\n  - child', 'code', '`   `'],
+  ['- ==a=b==\n  - child', 'highlight', '==a\\=b=='],
+  ['- ++underline++\n  - child', 'underline', '++underline++'],
+  ['- parent\n\n  ```c\\+\\+\n  code\n  ```\n  - child', 'codeBlock', '```c++'],
   ['- `Vec<T>`\n  - child', 'code', 'Vec<T>'],
   ['- run `a -> b`\n  - child', 'code', 'a -> b'],
   ['- `a && b`\n  - child', 'code', 'a && b'],
@@ -99,7 +112,7 @@ const inlineDesktopProbes = [
   ['- $x$\n  - child', 'mathInline', '$x$'],
 ] as const
 
-it('holds inline constructs on both native builders while desktop imports their nodes and original text', () => {
+it('holds inline constructs on both native builders and probes desktop nodes and serialized spellings', () => {
   for (const [source, type, spelling] of inlineDesktopProbes) {
     const row = cases.find(row => row.source === source)
     expect(row, source).toMatchObject({ held: true, builders: [] })
@@ -108,6 +121,29 @@ it('holds inline constructs on both native builders while desktop imports their 
       const body = yXmlFragmentToProseMirrorRootNode(doc.getXmlFragment('body'), getDohcProseMirrorSchema()).toJSON()
       expect(JSON.stringify(body), source).toContain(`"type":"${type}"`)
       expect(yDocToMarkdown(doc), source).toContain(spelling)
+    } finally { doc.destroy() }
+  }
+})
+
+it('accepts the positive inline alphabet and Tiptap spellings at their edges', () => {
+  for (const [source, mark] of [
+    ['- Café 中文 ١٢٣ . , ; : ! ? \' " ( ) - / *\n  - child', null],
+    ['- **bold**\n  - child', 'bold'],
+    ['- *italic*\n  - child', 'italic'],
+    ['- ~~strike~~\n  - child', 'strike'],
+    ['- `code`\n  - child', 'code'],
+    ['- `*plain* / : -`\n  - child', 'code'],
+    ['- a  \n  - child', null],
+  ] as const) {
+    const row = cases.find(row => row.source === source)
+    expect(row?.builders, source).toHaveLength(2)
+    const doc = markdownToYDoc(source, { reading: 'source' })
+    try {
+      expect(yDocToMarkdown(doc), source).toBe(source)
+      if (mark) {
+        const body = yXmlFragmentToProseMirrorRootNode(doc.getXmlFragment('body'), getDohcProseMirrorSchema()).toJSON()
+        expect(JSON.stringify(body), source).toContain(`"type":"${mark}"`)
+      }
     } finally { doc.destroy() }
   }
 })
