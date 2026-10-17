@@ -35,10 +35,9 @@ impl OperationCancellation {
         let hit = Arc::clone(&deadline_hit);
         let child = token.clone();
         let bridge = tokio::spawn(async move {
-            // The supervisor enforces deadlines non-cooperatively for wire
-            // requests; embedded callers (InProcessTransport, future
-            // mobile/WASM hosts) have no supervisor, so the deadline arms
-            // the same token here.
+            // Embedded callers (InProcessTransport, future mobile/WASM
+            // hosts) have no supervisor to signal expiry, so the deadline
+            // arms the same token here.
             match deadline {
                 Some(deadline) => {
                     tokio::select! {
@@ -82,6 +81,26 @@ impl Drop for OperationCancellation {
         self.token.cancel();
         self.bridge.abort();
     }
+}
+
+/// The context for work that follows a landed step. It ignores the request's
+/// cancellation and deadline, so the request answers with what landed.
+pub(super) fn after_landing(ctx: &RequestContext) -> RequestContext {
+    RequestContext {
+        cancel: dohc_engine_protocol::cancel::CancelSignal::new(),
+        deadline: None,
+        ..ctx.clone()
+    }
+}
+
+/// When a wait that follows a landed step gives up: the request's deadline,
+/// or two seconds from now for a request without one. The request then
+/// answers with what landed and leaves the rest to a later step.
+pub(super) fn landed_wait_until(ctx: &RequestContext) -> tokio::time::Instant {
+    ctx.deadline.map_or_else(
+        || tokio::time::Instant::now() + std::time::Duration::from_secs(2),
+        tokio::time::Instant::from_std,
+    )
 }
 
 pub(super) fn required_idempotency_key(request_id: Option<String>) -> Result<String, WireError> {
@@ -269,26 +288,62 @@ impl EngineService {
         format!("{prefix}-{}", dohc_engine_storage::hex(&digest.finalize()))
     }
 
-    /// Await an actor read under the request's cancellation/deadline — the
-    /// wait is abandoned (the actor's work completes and is discarded),
-    /// the same shape capture.flush uses. Read commands carry no token, so
-    /// abandoning the wait IS the cancellation semantics.
+    /// Await an actor command to its answer. A queued command still runs
+    /// after its caller leaves, so the caller never stops waiting: the
+    /// request answers with what the command did. A command that observes
+    /// the token and stops before any effect answers as interrupted.
     pub(super) async fn read_under_ctx<T>(
         cancellation: &OperationCancellation,
         what: &str,
         read: impl std::future::Future<Output = Result<T, RuntimeError>>,
     ) -> Result<T, WireError> {
-        tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => Err(cancellation.interruption(what)),
-            result = read => result.map_err(map_runtime),
-        }
+        read.await.map_err(|error| match error {
+            RuntimeError::Cancelled => cancellation.interruption(what),
+            error => map_runtime(error),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{required_idempotency_key, validated_author};
+
+    #[tokio::test]
+    async fn a_read_that_answered_is_not_reported_as_cancelled() {
+        let ctx = super::RequestContext::unbounded();
+        ctx.cancel.cancel();
+        let cancellation = super::OperationCancellation::new(&ctx);
+        let read = crate::EngineService::read_under_ctx(&cancellation, "read", async {
+            Ok::<_, super::RuntimeError>(7)
+        })
+        .await;
+        assert_eq!(read.ok(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_request_still_answers_with_its_command() {
+        let ctx = super::RequestContext::unbounded();
+        let cancellation = super::OperationCancellation::new(&ctx);
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        let command = crate::EngineService::read_under_ctx(&cancellation, "write", async {
+            answered
+                .await
+                .map_err(|_| super::RuntimeError::ActorUnavailable)
+        });
+        tokio::pin!(command);
+        ctx.cancel.cancel();
+        cancellation.token.cancelled().await;
+        std::future::poll_fn(|cx| {
+            assert!(
+                std::future::Future::poll(command.as_mut(), cx).is_pending(),
+                "the command has not answered yet"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+        answer.send(7).expect("command waits");
+        assert_eq!(command.await.ok(), Some(7));
+    }
 
     #[test]
     fn request_ids_cannot_claim_internal_durability_markers() {

@@ -1,3 +1,4 @@
+import { readDatasetHistoryHeads } from "@dohc/app-backend-runtime/dataset-history";
 import { createHash } from "node:crypto";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { createHistoryCollectionRemote } from "./historyCollectionRemote";
@@ -13,6 +14,7 @@ import { sharedViewHistory } from "./sharedViewHistory";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { createTestScratch } from "./testTemp";
 import { deferred } from "../testing/deferred";
+import { neutralHistoryPresentations } from "../testing/historyPageFixture";
 import { HISTORY_MAX_SOURCES, HISTORY_CURSOR_BYTES, TimelineCursor, ListHistoryResult, type ListHistoryPayload, type TimelineEntry } from "../ipc/bridgeContract";
 import { RELAY_FETCH_TIMEOUT_MS } from "./sharedChannels";
 import { createHistoryTimeline, HISTORY_REMOTE_DEADLINE_MS, type TimelineReads } from "./historyTimeline";
@@ -63,19 +65,20 @@ async function fixture() {
   const write = async (id: string, time: number, path = "notes.md") => { clock = time; return store.writeTextFile({ workspaceId: "workspace", versionId: "main", path, text: id, momentId: id, metadata: { origin: "api" } }); };
   const signal = new AbortController();
   const local: TimelineReads["local"] = (positions, limit) => {
-    const pages = host.historyHeads("owner", { workspaceId: "workspace", positions, limit });
+    const pages = transaction(() => readDatasetHistoryHeads(db, { workspaceId: "workspace", positions, limit }));
     return { pages, sourceIds: pages.map(page => page.datasetId), transferred: [],
       sourceCount: Number(db.prepare("SELECT count(*) AS count FROM dohc_dataset_catalog WHERE workspace_id=?").get("workspace")?.count) };
   };
   const reads: TimelineReads = { scope: "test", signal: signal.signal, assertCurrent() {}, engine: sharedViewHistory(store, "workspace"), local,
-    remote: async () => { throw new Error("unexpected remote"); }, names: { agent: () => undefined, person: () => undefined, automation: () => null, named: a => a.userId } };
+    remote: async () => { throw new Error("unexpected remote"); }, names: { agent: () => undefined, person: () => undefined, automation: () => null, named: a => a.userId, presentations: neutralHistoryPresentations } };
   const list = createHistoryTimeline();
   const page = async (input: Partial<ListHistoryPayload> = {}) => {
     const result = ListHistoryResult.parse(await list({ workspaceId: "workspace", ...input }, reads));
     if (!("entries" in result)) throw new Error("Expected ready History");
     return result;
   };
-  return { db, journal, host, heads, initialize, event, schema, reads, page, write, signal, transactions: () => transactions };
+  return { db, journal, host, heads, initialize, event, schema, reads, page, write, signal, transactions: () => transactions,
+    headsPage: (input: Parameters<typeof readDatasetHistoryHeads>[1]) => transaction(() => readDatasetHistoryHeads(db, input)) };
 }
 
 it("merges file and Collection streams with deterministic equal-time order and one metadata transaction", async () => {
@@ -127,7 +130,7 @@ it("fixes the source set and drops a deleted Collection without shifting other p
 it("excludes a deadline source for the rest of the chain and recovers only on refresh", async () => {
   const f = await fixture(), a = f.initialize(1), remote = uuid(8), started = deferred<void>();
   f.event(a, 100); f.event(a, 500);
-  f.reads.local = (positions, limit) => ({ pages: f.host.historyHeads("owner", { workspaceId: "workspace", positions, limit }), transferred: [remote], sourceIds: [a, remote], sourceCount: 2 });
+  f.reads.local = (positions, limit) => ({ pages: f.headsPage({ workspaceId: "workspace", positions, limit }), transferred: [remote], sourceIds: [a, remote], sourceCount: 2 });
   const remoteRead = vi.fn<TimelineReads["remote"]>(async (_id, _before, signal) => {
     started.resolve(); return new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
   });
@@ -251,7 +254,7 @@ it("discloses a local Collection transferred between pages instead of declaring 
   const f = await fixture(), a = f.initialize(1), b = f.initialize(2);
   f.event(a, 600); f.event(a, 500); f.event(b, 400);
   const first = await f.page({ limit: 1 });
-  f.reads.local = (positions, limit) => ({ transferred: [a], sourceIds: [a, b], sourceCount: 2, pages: f.host.historyHeads("owner", { workspaceId: "workspace", positions, limit, skip: [a] }) });
+  f.reads.local = (positions, limit) => ({ transferred: [a], sourceIds: [a, b], sourceCount: 2, pages: f.headsPage({ workspaceId: "workspace", positions, limit, skip: [a] }) });
   const next = await f.page({ cursor: first.nextCursor! });
   expect(next).toMatchObject({ completeness: "partial", unavailableSources: [{ datasetId: a, reason: "unavailable" }] });
   expect(next.entries.map(label)).not.toContain(a + ":1");

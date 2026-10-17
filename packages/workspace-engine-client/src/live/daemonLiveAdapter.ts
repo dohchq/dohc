@@ -217,7 +217,7 @@ function isLiveSettlementCapacityRefusal(error: unknown): boolean {
 }
 
 // Refusals that clear on their own: a program holding the artifact, busy
-// SQLite writers, occupied live capacity, or pending author coverage. MEMBERSHIP of
+// SQLite writers, occupied live or egress capacity, or pending author coverage. MEMBERSHIP of
 // that class lives here, at the protocol boundary, because three layers ask
 // the question — the settle ladder that re-arms, the journal write that must
 // be resent, and the session that must not be quarantined for one.
@@ -229,8 +229,14 @@ function isYdocSettlementPendingRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "settlement-materialization-pending";
 }
 
+// A Y.Doc open or resync stored its result, but other replies held the
+// daemon's outgoing byte budget until the deadline. The state stays stored.
+function isBlobEgressCapacityRefusal(error: unknown): boolean {
+  return refusalMessageOf(error, "OVERLOADED") === "blob-egress-capacity";
+}
+
 export function isTransientEngineRefusal(error: unknown): boolean {
-  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error);
+  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error) || isBlobEgressCapacityRefusal(error);
 }
 
 // Retryability does not prove non-admission: cancellation or an internal

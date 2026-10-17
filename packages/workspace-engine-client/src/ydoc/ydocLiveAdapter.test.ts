@@ -397,6 +397,37 @@ it.each(["recover", "close", "close-during-retry", "terminal", "wrong-code"] as 
   peer.destroy();
 });
 
+it("retries a resync refused for egress capacity and keeps the edit made meanwhile", async () => {
+  const engine = seedPlaintextEngine("seed"), scheduler = settleScheduler();
+  const refusal = new DaemonRefusalError({code: "OVERLOADED", message: "blob-egress-capacity", retry: "afterBackoff"},
+    new Error("daemon response"));
+  let resyncs = 0;
+  const transport: EngineTransport = {
+    ...forwardYdocBlobEgress(engine),
+    onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+      ? {...event, payload: {sessionId: (event.payload as {sessionId: string}).sessionId, resyncRequired: true}} : event)),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.resync && ++resyncs === 1) throw refusal;
+      return engine.sendRequest(request);
+    },
+  };
+  const provider = await openEngineYdocProviderSession({transport, workspace: WORKSPACE, versionId: VERSION, path: PATH,
+    contentKind: "plaintext", onRemoteUpdate() {}, scheduleSettle: scheduler.schedule});
+  const peer = new Y.Doc(); Y.applyUpdate(peer, provider.initialUpdate);
+  const vector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, "remote ");
+  engine.applyRemoteUpdate(provider.nativeOwner!.sessionId, Y.encodeStateAsUpdate(peer, vector));
+  await drain();
+  expect(resyncs).toBe(1);
+  await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(4, " local")), {armSettle: false});
+  expect(scheduler.armed, "drop blob-egress-capacity from the transient set -> no retry is armed").toHaveLength(1);
+  scheduler.fire(); await drain();
+  expect(resyncs).toBe(2);
+  expect(provider.doc.getText("plainText").toString()).toBe("remote seed local");
+  expect(engine.sessionText(provider.nativeOwner!.sessionId)).toBe("remote seed local");
+  await provider.close();
+  peer.destroy();
+});
+
 it("resyncs an invalidation queued as the previous state finishes applying", async () => {
   const engine = seedPlaintextEngine("seed");
   const adapter = new YdocLiveAdapter({...forwardYdocBlobEgress(engine), sendRequest: request => engine.sendRequest(request),

@@ -71,7 +71,7 @@ import { resolveAutomationInventory, type AutomationInventory } from "./automati
 import type { AutomationTarget } from "./automationTargets";
 
 export type RecordRunDependencies = Pick<CollectionAutomationRunDependencies,
-  "makeDurable" | "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
+  "makeDurable" | "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode" | "onUsageSuccess"
 > & Partial<Pick<CollectionAutomationRunDependencies,
   "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "isIndexReading" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset" | "isButtonField"
 >> & Partial<Pick<DatasetAutomationRunDependencies, "withHost" | "cachedRoster">>;
@@ -689,6 +689,10 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
       if (created?.kind === "created") return { id: created.recordId, path: created.path };
       if (created?.kind === "dataset-created") return { id: String(created.recordId), key: created.recordId, path: datasetRecordKey(created.rules.datasetId, created.tableId, created.recordId) };
       return null;
+    },
+    isWriteAction(effect) {
+      const dataset = [...inventory.datasets.values()].find(({ rules }) => rules.definition.datasetId === effect.rules.datasetId);
+      return dataset?.rules.definition.operations.find(operation => operation.operationId === effect.operationId)?.readOnly === false;
     },
     async apply(run, effect, place, chat) {
       if (current !== null && (effect.kind === "message" || effect.kind === "wake") && await deps.chat.hasMessage(effect.messageId)) {

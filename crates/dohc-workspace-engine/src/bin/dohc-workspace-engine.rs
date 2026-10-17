@@ -228,7 +228,7 @@ where
     let limits = WireLimits::default();
     let (output_tx, mut output_rx) =
         tokio::sync::mpsc::channel::<OutputItem>(OUTPUT_QUEUE_CAPACITY);
-    let active_egress = Arc::new(Mutex::new(HashMap::<u64, CancelSignal>::new()));
+    let active_egress: ActiveEgress = Arc::default();
     let (writer_gone_tx, mut writer_gone_rx) = tokio::sync::watch::channel(false);
     let writer_limits = limits.clone();
     let writer_signal = writer_gone_tx.clone();
@@ -623,11 +623,17 @@ fn reap_completed(tasks: &mut JoinSet<()>) {
     while tasks.try_join_next().is_some() {}
 }
 
+/// The output still owed to each answered request, by request id, which keeps
+/// the id in use until its output is written. A live acknowledgement's guard
+/// signal is what a `Cancel` stops. A blob has none: its request answered, so
+/// a later `Cancel` must not turn that answer into CANCELLED.
+type ActiveEgress = Arc<Mutex<HashMap<u64, Option<CancelSignal>>>>;
+
 async fn write_output<W: AsyncWrite + Unpin>(
     mut output: W,
     output_rx: &mut tokio::sync::mpsc::Receiver<OutputItem>,
     limits: &WireLimits,
-    active_egress: Arc<Mutex<HashMap<u64, CancelSignal>>>,
+    active_egress: ActiveEgress,
 ) -> Result<(), io::Error> {
     let mut negotiated_limits = limits.clone();
     'items: while let Some(item) = output_rx.recv().await {
@@ -1066,7 +1072,7 @@ async fn dispatch_authenticated<
     output: &tokio::sync::mpsc::Sender<OutputItem>,
     writer_gone: &tokio::sync::watch::Sender<bool>,
     active_requests: &Arc<Mutex<HashSet<u64>>>,
-    active_egress: &Arc<Mutex<HashMap<u64, CancelSignal>>>,
+    active_egress: &ActiveEgress,
     request_tasks: &mut JoinSet<()>,
     blobs_negotiated: bool,
     progress_negotiated: bool,
@@ -1122,19 +1128,15 @@ async fn dispatch_authenticated<
                     // Before the terminal response is queued, so no progress
                     // message can follow it.
                     finish_progress.finish();
-                    if let Ok(service_response) = outcome
-                        && let Some(guard) = &service_response.output_guard
-                    {
-                        lock(&completion_egress).insert(id, guard.cancel_signal());
-                    }
                     // The handoff runs before the supervisor drops its cancel
                     // registration. Cancel therefore always reaches either the
-                    // request signal, this egress signal, or both.
-                    if blobs_negotiated
-                        && let Ok(service_response) = outcome
-                        && let Some(egress) = &service_response.blob_egress
-                    {
-                        lock(&completion_egress).insert(id, egress.cancel.clone());
+                    // request signal, this guard signal, or both.
+                    if let Ok(service_response) = outcome {
+                        if let Some(guard) = &service_response.output_guard {
+                            lock(&completion_egress).insert(id, Some(guard.cancel_signal()));
+                        } else if blobs_negotiated && service_response.blob_egress.is_some() {
+                            lock(&completion_egress).insert(id, None);
+                        }
                     }
                 },
             ) {
@@ -1242,7 +1244,7 @@ async fn dispatch_authenticated<
         }
         Envelope::Cancel(cancel) => {
             let _ = supervisor.cancel(cancel.id);
-            if let Some(signal) = lock(active_egress).get(&cancel.id) {
+            if let Some(Some(signal)) = lock(active_egress).get(&cancel.id) {
                 signal.cancel();
             }
             true
@@ -1747,7 +1749,7 @@ mod tests {
                 .await
                 .unwrap();
                 drop(tx);
-                let active = Arc::new(Mutex::new(HashMap::from([(9, cancel.clone())])));
+                let active = Arc::new(Mutex::new(HashMap::from([(9, Some(cancel.clone()))])));
                 let (writer, mut reader) = tokio::io::duplex(4096);
                 let output = InterruptAfterFrame {
                     output: writer,
@@ -1843,7 +1845,7 @@ mod tests {
             .await
             .unwrap();
             drop(tx);
-            let active = Arc::new(Mutex::new(HashMap::from([(9, cancel.clone())])));
+            let active = Arc::new(Mutex::new(HashMap::from([(9, Some(cancel.clone()))])));
             let limits = WireLimits {
                 max_blob_chunk_bytes: 512 * 1024,
                 ..WireLimits::default()
@@ -2139,7 +2141,7 @@ mod tests {
             .await
             .unwrap();
             drop(tx);
-            let active = Arc::new(Mutex::new(HashMap::from([(9, CancelSignal::new())])));
+            let active = Arc::new(Mutex::new(HashMap::from([(9, Some(CancelSignal::new()))])));
             let mut output = Vec::new();
             let limits = WireLimits::default();
             write_output(&mut output, &mut rx, &limits, active.clone())
@@ -2581,9 +2583,9 @@ mod tests {
         }
         drop(output_tx);
         let active = Arc::new(Mutex::new(HashMap::from([
-            (3, CancelSignal::new()),
-            (4, CancelSignal::new()),
-            (5, CancelSignal::new()),
+            (3, Some(CancelSignal::new())),
+            (4, None),
+            (5, Some(CancelSignal::new())),
         ])));
         let (output, mut input) = tokio::io::duplex(4096);
         let mut transcript = Vec::new();
@@ -2901,6 +2903,89 @@ mod tests {
                 }),
             })
         }
+    }
+
+    /// A `Cancel` that arrives after a request answered with a blob, as a
+    /// scene open whose assets landed does, is too late: the blob and the
+    /// answer are still sent.
+    #[tokio::test]
+    async fn a_cancel_after_the_answer_still_delivers_its_blob() {
+        let supervisor = Arc::new(Supervisor::new(
+            SupervisorConfig::default(),
+            Arc::new(BlobService),
+        ));
+        let (queued, mut answers) = tokio::sync::mpsc::channel(1);
+        let (gone, _) = tokio::sync::watch::channel(false);
+        let active = Arc::new(Mutex::new(HashSet::new()));
+        let egress: ActiveEgress = Arc::default();
+        let mut tasks = JoinSet::new();
+        for envelope in [
+            Envelope::Request(WireRequest {
+                id: 31,
+                method: "test.blob".into(),
+                workspace: None,
+                deadline_ms: None,
+                idempotency_key: None,
+                progress: false,
+                params: serde_json::Value::Null,
+            }),
+            Envelope::Cancel(dohc_engine_protocol::wire::Cancel { id: 31 }),
+        ] {
+            let request = matches!(envelope, Envelope::Request(_));
+            assert!(
+                dispatch_authenticated(
+                    envelope,
+                    &supervisor,
+                    &queued,
+                    &gone,
+                    &active,
+                    &egress,
+                    &mut tasks,
+                    true,
+                    false,
+                    WireLimits::default().max_frame_bytes,
+                    None,
+                    None,
+                )
+                .await
+            );
+            if request {
+                // The answer is queued for the writer before the cancel arrives.
+                while answers.is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+        drop(queued);
+        let mut output = Vec::new();
+        let limits = WireLimits::default();
+        write_output(&mut output, &mut answers, &limits, Arc::clone(&egress))
+            .await
+            .expect("written");
+        assert!(lock(&egress).is_empty());
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(&output);
+        let Some(Frame::Control(start)) = decoder.next_frame().expect("frame") else {
+            panic!("blob start");
+        };
+        assert!(matches!(
+            decode_control(&start, &limits).expect("decode start"),
+            Envelope::BlobStart(BlobStart { request_id: 31, .. })
+        ));
+        let Some(Frame::BlobChunk {
+            fin: true, bytes, ..
+        }) = decoder.next_frame().expect("frame")
+        else {
+            panic!("the blob is sent");
+        };
+        assert_eq!(bytes, vec![0x7a; 64 * 1024]);
+        let Some(Frame::Control(response)) = decoder.next_frame().expect("frame") else {
+            panic!("response");
+        };
+        assert!(matches!(
+            decode_control(&response, &limits).expect("decode response"),
+            Envelope::Response(response) if response.id == 31
+        ));
     }
 
     /// Reports when its call starts, then blocks until released — lets a

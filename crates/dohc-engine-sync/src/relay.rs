@@ -55,6 +55,8 @@ pub struct PushRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushResponse {
     pub settlement_refusals: Vec<SettlementPublicationRefusal>,
+    /// Ops the scoped feed refused one at a time. Only a hosted push has any.
+    pub hosted_refusals: Vec<HostedPushRefusal>,
     pub accepted: usize,
     pub inserted: usize,
     pub skipped: usize,
@@ -70,6 +72,18 @@ pub struct SettlementPublicationRefusal {
     pub settlement_id: String,
     pub reason: String,
 }
+
+/// A hosted op the relay refused. It keeps the coordinate as a refusal, so
+/// the origin's later ops still land; the op itself never reaches the log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostedPushRefusal {
+    pub origin_id: String,
+    pub origin_seq: i64,
+    pub op_kind: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
     pub workspace_id: String,
@@ -1687,7 +1701,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         }
                         Err(error) => return Err(error),
                     };
-                    validate_push_response(&response, batch, local_max)?;
+                    validate_push_response(&response, batch, local_max, hosted)?;
                     if response.current_max_origin_seq > local_max {
                         return Err(RelayError::OriginDiverged);
                     }
@@ -1700,6 +1714,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         &origin_id,
                         response.current_max_origin_seq,
                         &response.settlement_refusals,
+                        &response.hosted_refusals,
                         faults,
                         leases,
                         now_ms,
@@ -1722,6 +1737,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             },
                         },
                     ));
+                    publication_refusals.extend(
+                        response
+                            .hosted_refusals
+                            .iter()
+                            .map(|refusal| crate::hosted::push_refusal(workspace_id, refusal)),
+                    );
                     if !enrollment_prepared {
                         sharing_declined.extend(
                             crate::live_audit::enrollment::prepare_exports(
@@ -1924,6 +1945,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             settlement_report_id,
             has_more: settled_more,
             stopped: _,
+            // Only a hosted pass has documents that are not ready.
+            redelivered: _,
         } = self.apply_pulled(
             store,
             cache,
@@ -2129,6 +2152,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             ops.extend(response.ops);
             reads.insert(object_id.clone(), (response.next_cursor, response.has_more));
         }
+        // A returning document's heads come back before its rows route, so
+        // the rows it applied skip as redelivered against them.
+        crate::hosted::unpark_returned(store, workspace_id, faults).map_err(local)?;
 
         // Every document with retained work may retain more behind it; one
         // whose retained work runs past this replay holds from where it stops.
@@ -2165,7 +2191,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         self.hydrate_missing_blobs(store, workspace_id, &identity, &ops, faults)?;
         // Relay order is each document's order, across origins.
         ops.sort_by_key(|op| op.relay_seq);
-        let pass = self.apply_pulled(
+        let mut pass = self.apply_pulled(
             store,
             cache,
             workspace_id,
@@ -2192,39 +2218,85 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         // A read stops before its document's first row that did not apply;
         // nothing of it was retained, so its next read fetches it again.
-        let (reads, held) = store
+        let redelivered = std::mem::take(&mut pass.redelivered);
+        let (reads, held, unparks, standing, heads) = store
             .read_with(|conn| {
+                // What holds each path, read once for every document.
+                let mut occupancy = crate::hosted::Occupancy::new(conn, workspace_id);
                 let mut held = BTreeMap::new();
                 let mut settled = BTreeMap::new();
+                // A document whose parked heads this pass freed the paths of
+                // comes back on the next pass.
+                let mut unparks = false;
+                // What its history stored that still stands, checked once
+                // per document against what the pass left holding its paths.
+                let mut standing = Vec::new();
+                for (object_id, stored) in redelivered {
+                    standing.extend(crate::hosted::redelivered_unready(
+                        &mut occupancy,
+                        &object_id,
+                        stored.into_values(),
+                    )?);
+                }
+                // Readiness never precedes its files, so a pass whose commit
+                // can make a document ready writes each of its heads.
+                let mut heads = Vec::new();
                 for (object_id, (cursor, more)) in reads {
-                    let read = match pass.stopped.get(&object_id) {
+                    unparks |= crate::hosted::unparks_next(&mut occupancy, &object_id)?;
+                    let mut read = match pass.stopped.get(&object_id) {
                         Some(op) => crate::HostedRead {
                             // Commit refuses one below its document's read
                             // that is not explained by work it releases.
                             cursor: op
                                 .relay_seq
                                 .map_or(0, |seq| cursor.min(seq.saturating_sub(1))),
-                            stopped: Some(crate::hosted::stopped_hold(conn, &object_id, op)?),
+                            stopped: Some(crate::hosted::stopped_hold(
+                                &mut occupancy,
+                                &object_id,
+                                op,
+                            )?),
                             complete: false,
+                            heads_written: false,
                         },
                         None => crate::HostedRead {
                             cursor,
                             stopped: None,
                             complete: !more,
+                            heads_written: false,
                         },
                     };
-                    if let Some(hold) = read.hold(conn, workspace_id, &object_id)? {
-                        held.insert(object_id.clone(), hold);
+                    match read.hold(&mut occupancy, &object_id)? {
+                        Some(hold) => {
+                            held.insert(object_id.clone(), hold);
+                        }
+                        None if read.complete => {
+                            heads.extend(crate::hosted::head_writes(
+                                conn,
+                                workspace_id,
+                                &object_id,
+                            )?);
+                            read.heads_written = true;
+                        }
+                        None => {}
                     }
                     settled.insert(object_id, read);
                 }
-                Ok::<_, SyncError>((settled, held))
+                Ok::<_, SyncError>((settled, held, unparks, standing, heads))
             })
             .map_err(local)?;
+        for change in standing {
+            pass.changed_paths
+                .entry((change.version_id.clone(), change.path.clone()))
+                .or_insert(change);
+        }
+        for change in heads {
+            insert_changed_path(&mut pass.changed_paths, change);
+        }
         // A finished backfill still leaves the main feed or another document,
         // and a held document whose read went on backfills again.
         let more = has_more
             || pass.has_more
+            || unparks
             || backfill.is_some()
             || reads
                 .values()
@@ -2251,16 +2323,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
-    /// Commit a hosted pass's cursor after its work materialized. Answers
-    /// `false`, committing nothing, when the scope moved or another pass
-    /// committed since its fetch.
+    /// Commit a hosted pass's cursor after its work materialized. Commits
+    /// nothing when the scope moved or another pass committed since its
+    /// fetch.
     pub fn commit_hosted_cursor(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         cursor: &crate::HostedCursor,
         faults: &dyn FaultInjector,
-    ) -> Result<TxnOutcome<bool>, RelayError> {
+    ) -> Result<TxnOutcome<crate::HostedCommit>, RelayError> {
         crate::commit_hosted_cursor(store, workspace_id, cursor, faults).map_err(
             |error| match error {
                 SyncError::InvalidInput {
@@ -2424,12 +2496,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         accumulate_pull_outcome(
                             store,
                             op,
+                            holding.unready(op),
                             outcome,
                             &mut pass.applied,
                             &mut pass.refused,
                             &mut pass.skipped,
                             &mut pass.conflicts_opened,
                             &mut pass.changed_paths,
+                            &mut pass.redelivered,
                             &mut pass.refusals,
                             &mut pass.sharing_declined,
                             &mut pass.record_facts,
@@ -3066,11 +3140,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 origin_id: identity.origin_id.clone(),
                 ops: batch.iter().map(|(_, op)| op.clone()).collect(),
             })?;
-            if push.accepted != batch.len()
-                || push.inserted.checked_add(push.skipped) != Some(push.accepted)
-            {
-                return Err(RelayError::InvalidResponse);
-            }
+            validate_share_push_response(&push, batch.len())?;
             Ok(push.inserted)
         };
         let mut after = scanned;
@@ -4373,7 +4443,7 @@ pub(crate) fn take_canonical_json_call_count() -> usize {
 
 /// Whether a held op is retained across passes, so the cursor can move past
 /// it: work behind a live session, and a hosted moment or Y.Doc row whose
-/// path waits for a departed document to retire. A hosted document that is
+/// path waits for a departed document to park. A hosted document that is
 /// not ready retains nothing.
 fn retained_while_held(op: &ReplicationEnvelope, reason: &str) -> bool {
     match reason {
@@ -4451,7 +4521,11 @@ struct AppliedPass {
     refused: usize,
     skipped: usize,
     conflicts_opened: i64,
-    changed_paths: BTreeMap<(String, String), crate::MomentMaterializationChange>,
+    changed_paths: ChangedPaths,
+    /// The decisions journaled rows of each hosted document that is not
+    /// ready stored, which the pass has yet to check against what holds
+    /// their paths.
+    redelivered: BTreeMap<String, ChangedPaths>,
     refusals: Vec<crate::ReplicationRefusal>,
     sharing_declined: Vec<crate::SharingDeclined>,
     record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
@@ -4562,8 +4636,10 @@ fn validate_push_response(
     response: &PushResponse,
     batch: &[ReplicationEnvelope],
     local_max: i64,
+    hosted: bool,
 ) -> Result<(), RelayError> {
     crate::settlement_publication::validate_push_refusals(&response.settlement_refusals, batch)?;
+    crate::hosted::validate_push_refusals(response, batch, hosted)?;
     let last = batch
         .last()
         .map(|op| op.origin_seq)
@@ -4584,8 +4660,23 @@ fn validate_push_response(
     Ok(())
 }
 
-fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
+/// A share log answers for its whole batch: only the hosted log refuses ops one at a time.
+pub(crate) fn validate_share_push_response(
+    push: &PushResponse,
+    batch_len: usize,
+) -> Result<(), RelayError> {
+    if push.accepted != batch_len
+        || push.inserted.checked_add(push.skipped) != Some(push.accepted)
+        || !push.hosted_refusals.is_empty()
+    {
+        return Err(RelayError::InvalidResponse);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_probe_response(response: &PushResponse) -> Result<(), RelayError> {
     if !response.settlement_refusals.is_empty()
+        || !response.hosted_refusals.is_empty()
         || response.accepted != 0
         || response.inserted != 0
         || response.skipped != 0
@@ -5988,16 +6079,22 @@ pub(crate) fn replayed_domain(error: DomainError) -> RelayError {
     }
 }
 
+/// Fold one routed op into its pass. `unready` names its hosted document when
+/// that is not ready; the decisions a row of it the journal already held
+/// stored go to `redelivered`, by document, for its pass to keep what still
+/// stands of them once it has applied ([`crate::hosted::redelivered_unready`]).
 #[allow(clippy::too_many_arguments)]
 fn accumulate_pull_outcome(
     store: &EngineStore,
     op: &ReplicationEnvelope,
+    unready: Option<&str>,
     outcome: ApplyOutcome<crate::RoutedApply>,
     applied: &mut usize,
     refused: &mut usize,
     skipped: &mut usize,
     conflicts_opened: &mut i64,
-    changed_paths: &mut BTreeMap<(String, String), crate::MomentMaterializationChange>,
+    changed_paths: &mut ChangedPaths,
+    redelivered: &mut BTreeMap<String, ChangedPaths>,
     refusals: &mut Vec<crate::ReplicationRefusal>,
     sharing_declined: &mut Vec<crate::SharingDeclined>,
     record_facts: &mut Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
@@ -6042,10 +6139,14 @@ fn accumulate_pull_outcome(
             if let Some(refusal) = crate::apply::read_replayed_refusal(store, op).map_err(local)? {
                 push_refusal_once(refusals, refusal);
             }
+            let stored = match unready {
+                Some(object_id) => redelivered.entry(object_id.to_owned()).or_default(),
+                None => &mut *changed_paths,
+            };
             for change in
                 crate::router::redelivered_materialization_changes(store, op).map_err(local)?
             {
-                insert_changed_path(changed_paths, change);
+                insert_changed_path(stored, change);
             }
             *skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?;
         }
@@ -6056,8 +6157,11 @@ fn accumulate_pull_outcome(
     Ok(())
 }
 
-fn insert_changed_path(
-    changed_paths: &mut BTreeMap<(String, String), crate::MomentMaterializationChange>,
+/// A pass's materialization decisions, by version and path.
+pub(crate) type ChangedPaths = BTreeMap<(String, String), crate::MomentMaterializationChange>;
+
+pub(crate) fn insert_changed_path(
+    changed_paths: &mut ChangedPaths,
     change: crate::MomentMaterializationChange,
 ) {
     changed_paths.insert((change.version_id.clone(), change.path.clone()), change);

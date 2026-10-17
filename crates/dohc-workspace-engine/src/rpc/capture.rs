@@ -4,6 +4,7 @@ use crate::lock;
 use crate::rpc::dispatch::initial_capture_phase_requires_fence;
 use crate::rpc::error::map_runtime;
 use crate::rpc::request::OperationCancellation;
+use crate::rpc::request::landed_wait_until;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::request::validated_author;
@@ -245,6 +246,56 @@ pub(super) fn reject_capture_origin(origin: Option<&str>) -> Result<(), WireErro
     }
 }
 
+const FLUSH_UNAVAILABLE: capture_driver::FlushOutcome = capture_driver::FlushOutcome {
+    settled: false,
+    running: false,
+    degraded: true,
+};
+
+/// Hand a flush to the driver and answer with its passes. A flush can sit
+/// behind a full flush queue, so a cancelled caller stops waiting for a
+/// place. A flush with `landed` follows a landed step: it ignores the
+/// cancellation and stops waiting for a place or for the passes at `landed`,
+/// answering `unsettled`; a queued flush still runs. Otherwise, once the
+/// driver holds the flush it runs its passes regardless, so the request
+/// answers with their outcome.
+async fn flush_through(
+    sender: &tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<capture_driver::FlushOutcome>>,
+    ctx: &RequestContext,
+    operation: &str,
+    landed: Option<tokio::time::Instant>,
+    unsettled: capture_driver::FlushOutcome,
+) -> Result<capture_driver::FlushOutcome, WireError> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let sent = match landed {
+        Some(until) => match tokio::time::timeout_at(until, sender.send(reply_tx)).await {
+            Ok(sent) => sent,
+            Err(_) => return Ok(unsettled),
+        },
+        None => {
+            let cancellation = OperationCancellation::new(ctx);
+            tokio::select! {
+                biased;
+                () = cancellation.token.cancelled() => {
+                    return Err(cancellation.interruption(&format!("{operation} (queued)")));
+                }
+                sent = sender.send(reply_tx) => sent,
+            }
+        }
+    };
+    if sent.is_err() {
+        return Ok(FLUSH_UNAVAILABLE);
+    }
+    let replied = match landed {
+        Some(until) => match tokio::time::timeout_at(until, reply_rx).await {
+            Ok(replied) => replied,
+            Err(_) => return Ok(unsettled),
+        },
+        None => reply_rx.await,
+    };
+    Ok(replied.unwrap_or(FLUSH_UNAVAILABLE))
+}
+
 impl EngineService {
     pub(super) async fn capture_retry_held(
         &self,
@@ -276,7 +327,9 @@ impl EngineService {
             driver.request_manifest_refresh();
         }
         drop(gate);
-        let mut response = self.capture_flush(ctx, handle).await?;
+        // A committed retry hands its flush to the driver whatever the caller does.
+        let landed = retried.then(|| landed_wait_until(ctx));
+        let mut response = self.capture_flush_after(ctx, handle, landed).await?;
         response["retried"] = json!(retried);
         Ok(response)
     }
@@ -362,8 +415,20 @@ impl EngineService {
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
     ) -> Result<Value, WireError> {
+        self.capture_flush_after(ctx, handle, None).await
+    }
+
+    /// `capture.flush`, or with `landed`, the flush that follows a landed step.
+    async fn capture_flush_after(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        landed: Option<tokio::time::Instant>,
+    ) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
-        let outcome = self.capture_flush_once(ctx, &open, "capture.flush").await?;
+        let outcome = self
+            .capture_flush_once(ctx, &open, "capture.flush", landed)
+            .await?;
         let held_files = held_files_json(
             &open
                 .actor
@@ -379,11 +444,13 @@ impl EngineService {
         }))
     }
 
+    /// Flush capture once; `landed` is as for [`flush_through`].
     pub(super) async fn capture_flush_once(
         &self,
         ctx: &RequestContext,
         open: &OpenWorkspace,
         operation: &'static str,
+        landed: Option<tokio::time::Instant>,
     ) -> Result<capture_driver::FlushOutcome, WireError> {
         // Clone the sender out of the lock and await outside it: a flush can
         // legitimately take many reconcile cycles, and the workspace table
@@ -392,50 +459,22 @@ impl EngineService {
             let snapshot = driver.status().snapshot();
             (driver.flush_sender(), snapshot)
         });
-        let unavailable = capture_driver::FlushOutcome {
-            settled: false,
-            running: false,
-            degraded: true,
-        };
         let Some((sender, initial_snapshot)) = capture else {
-            return Ok(unavailable);
+            return Ok(FLUSH_UNAVAILABLE);
+        };
+        let unsettled = capture_driver::FlushOutcome {
+            settled: false,
+            running: initial_snapshot.running,
+            degraded: initial_snapshot.degraded,
         };
         // `Degraded` is a settled startup DECISION, not a settled flush. Let
         // it reach the driver so a clean recovery tick can make the stronger
         // quiescence promise. Persistent failures still answer false through
         // the ordinary driver outcome; only Starting/Importing stay fenced.
         if initial_capture_phase_requires_fence(initial_snapshot.phase) {
-            return Ok(capture_driver::FlushOutcome {
-                settled: false,
-                running: initial_snapshot.running,
-                degraded: initial_snapshot.degraded,
-            });
+            return Ok(unsettled);
         }
-        // A flush can drive up to MAX_FLUSH_CYCLES reconciles or sit behind
-        // a full flush queue — a cancelled/deadlined caller must get its
-        // answer now, like every other workspace RPC. The driver still
-        // finishes its pass; only the wait is abandoned (the reply send
-        // fails harmlessly).
-        let cancellation = OperationCancellation::new(ctx);
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption(&format!("{operation} (queued)")));
-            }
-            sent = sender.send(reply_tx) => {
-                if sent.is_err() {
-                    return Ok(unavailable);
-                }
-            }
-        }
-        tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                Err(cancellation.interruption(operation))
-            }
-            outcome = reply_rx => Ok(outcome.unwrap_or(unavailable)),
-        }
+        flush_through(&sender, ctx, operation, landed, unsettled).await
     }
 
     /// Force the live capture manifest to rebuild, then answer after the first
@@ -448,6 +487,7 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
     ) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
+        let mut landed = None;
         if dohc_engine_files::workspace_recovery_unavailable(&open.root) {
             let cancellation = OperationCancellation::new(ctx);
             let _capture = tokio::select! {
@@ -469,11 +509,12 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
+            landed = Some(landed_wait_until(ctx));
         }
         if let Some(driver) = lock(&open.capture).as_ref() {
             driver.request_manifest_refresh();
         }
-        self.capture_flush(ctx, handle).await
+        self.capture_flush_after(ctx, handle, landed).await
     }
 
     pub(super) async fn capture_set_author(
@@ -640,6 +681,7 @@ impl EngineService {
 #[cfg(test)]
 mod tests {
     use crate::EngineService;
+    use crate::capture_driver;
     use crate::lock;
     use dohc_engine_protocol::transport::RequestContext;
     use dohc_engine_protocol::wire::Request;
@@ -752,6 +794,221 @@ mod tests {
             .workspace_close(Some(full_handle))
             .await
             .expect("close full workspace");
+    }
+
+    #[tokio::test]
+    async fn a_flush_cancelled_once_the_driver_holds_it_answers_with_its_passes() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": "flush" }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        // The initial import answers a flush without reaching the driver.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while service
+            .capture_flush(&RequestContext::unbounded(), Some(handle.clone()))
+            .await
+            .expect("flush")["settled"]
+            != json!(true)
+        {
+            assert!(tokio::time::Instant::now() < deadline, "capture settles");
+            tokio::task::yield_now().await;
+        }
+        let ctx = RequestContext::unbounded();
+        let mut waiting = Box::pin(service.capture_flush(&ctx, Some(handle.clone())));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        ctx.cancel.cancel();
+        tokio::task::yield_now().await;
+        let flushed = waiting
+            .await
+            .expect("a flush the driver holds answers with its outcome");
+        assert_eq!(flushed["settled"], json!(true));
+        service.workspace_close(Some(handle)).await.expect("close");
+    }
+
+    /// A flush that follows a landed step finds the flush queue full. It
+    /// ignores the request's cancellation and stops waiting at its bound,
+    /// answering that capture has not settled.
+    #[tokio::test(start_paused = true)]
+    async fn a_landed_flush_stops_waiting_for_a_full_queue_at_its_bound() {
+        let (sender, _queue) = tokio::sync::mpsc::channel(1);
+        let (taken, _) = tokio::sync::oneshot::channel();
+        sender.try_send(taken).expect("fill the queue");
+        let ctx = RequestContext::unbounded();
+        ctx.cancel.cancel();
+        let unsettled = capture_driver::FlushOutcome {
+            settled: false,
+            running: true,
+            degraded: false,
+        };
+        let bound = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            super::flush_through(&sender, &ctx, "capture.retryHeld", Some(bound), unsettled),
+        )
+        .await
+        .expect("the wait ends at its bound")
+        .expect("a landed flush answers");
+        assert!(!outcome.settled && outcome.running && !outcome.degraded);
+        assert_eq!(tokio::time::Instant::now(), bound);
+    }
+
+    /// A flush that follows a landed step enters the queue, and the driver
+    /// does not answer it before the bound. The request answers that capture
+    /// has not settled, and the queued flush stays for the driver to run.
+    #[tokio::test(start_paused = true)]
+    async fn a_landed_flush_stops_waiting_for_its_reply_at_its_bound() {
+        let (sender, mut queue) = tokio::sync::mpsc::channel(1);
+        let unsettled = capture_driver::FlushOutcome {
+            settled: false,
+            running: true,
+            degraded: false,
+        };
+        let bound = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            super::flush_through(
+                &sender,
+                &RequestContext::unbounded(),
+                "capture.retryHeld",
+                Some(bound),
+                unsettled,
+            ),
+        )
+        .await
+        .expect("the wait ends at its bound")
+        .expect("a landed flush answers");
+        assert!(!outcome.settled && outcome.running && !outcome.degraded);
+        assert_eq!(tokio::time::Instant::now(), bound);
+        let queued = queue.try_recv().expect("the flush stays queued");
+        // The driver finishes it later; the answer has nowhere to go.
+        assert!(
+            queued
+                .send(capture_driver::FlushOutcome {
+                    settled: true,
+                    running: true,
+                    degraded: false,
+                })
+                .is_err()
+        );
+    }
+
+    /// The retry is cancelled while it waits for the actor, so it commits
+    /// before it reaches its flush.
+    #[tokio::test]
+    async fn a_retry_cancelled_after_it_commits_answers_with_its_flush() {
+        use dohc_engine_domain::{VersionedTextStore, WriteText};
+        use dohc_engine_storage::capture_file_holds::{CaptureFileHold, NOT_REPRESENTABLE};
+        use dohc_engine_storage::{EngineStore, NoFaults};
+        let scratch = ScratchDir::new().expect("scratch");
+        let workspace_id = "retry-held-cancel";
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        crate::root_binding::write_root_binding(scratch.path(), token).expect("root binding");
+        {
+            let mut store =
+                EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1)
+                    .expect("store");
+            store.bind_root_token(token, &NoFaults).expect("bind root");
+            let mut domain = VersionedTextStore::new(&mut store);
+            domain
+                .ensure_main_version(workspace_id, "main", 1, &NoFaults)
+                .expect("main");
+            domain
+                .write_text(
+                    &WriteText {
+                        workspace_id: workspace_id.into(),
+                        version_id: "main".into(),
+                        object_id: "held".into(),
+                        path: "held.txt".into(),
+                        text: "Before".into(),
+                        moment_id: "held-seed".into(),
+                        request_id: None,
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                    },
+                    &NoFaults,
+                )
+                .expect("head");
+            store
+                .write_with(&NoFaults, |tx| {
+                    dohc_engine_storage::capture_file_holds::record_in(
+                        tx,
+                        &CaptureFileHold {
+                            workspace_id: workspace_id.into(),
+                            source_version_id: "main".into(),
+                            object_id: "held".into(),
+                            path: "held.txt".into(),
+                            observed_sha256: dohc_engine_storage::hex_sha256(b"Held outside"),
+                            observed_size: 12,
+                            reason: NOT_REPRESENTABLE.into(),
+                            observed_at_ms: 3,
+                            attempt_count: 1,
+                            retry_requested: false,
+                        },
+                    )
+                })
+                .expect("hold");
+        }
+        std::fs::write(scratch.path().join("held.txt"), "Held outside").expect("held file");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": workspace_id }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while service
+            .capture_flush(&RequestContext::unbounded(), Some(handle.clone()))
+            .await
+            .expect("flush")["settled"]
+            != json!(true)
+        {
+            assert!(tokio::time::Instant::now() < deadline, "capture settles");
+            tokio::task::yield_now().await;
+        }
+        let hold = service.hold_actor(&handle).await;
+        let ctx = RequestContext::unbounded();
+        let mut retrying = Box::pin(service.capture_retry_held(
+            &ctx,
+            Some(handle.clone()),
+            json!({ "path": "held.txt" }),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(retrying.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        ctx.cancel.cancel();
+        // Let the cancellation reach the request's token.
+        tokio::task::yield_now().await;
+        drop(hold);
+        let retried = retrying
+            .await
+            .expect("a committed retry answers with its flush");
+        assert_eq!(retried["retried"], json!(true));
+        assert!(retried.get("settled").is_some());
+        service.workspace_close(Some(handle)).await.expect("close");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

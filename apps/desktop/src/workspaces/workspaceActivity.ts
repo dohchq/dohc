@@ -4,7 +4,7 @@ import {
   type WatcherEvent,
 } from "@dohc/workspace-core";
 import type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
-import type { SyncStatusResult } from "../ipc/bridgeContract";
+import type { AgentRunStateEvent, SyncStatusResult } from "../ipc/bridgeContract";
 import type { CloudSyncEngine } from "./relaySyncEngine";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type {
@@ -105,6 +105,13 @@ export interface WorkspaceActivityOptions {
     workspace: ActivityWorkspace,
     events: readonly WatcherEvent[],
   ) => void;
+  // Whether this computer's agent is running changed in one workspace.
+  onAgentRunState?: (event: AgentRunStateEvent) => void;
+}
+
+// A local agent run is any run holding the slot except the runner self-test.
+function isAgentAtWork(run: ActiveAgentRun | null): boolean {
+  return run !== null && run.dispatch !== "self-test";
 }
 
 // What the open-time gate decided: the recorder, and why there is none.
@@ -165,6 +172,50 @@ export function createWorkspaceActivity(
   notify: (scope?: WorkspaceActivityScope) => void,
   options: WorkspaceActivityOptions,
 ) {
+  // Rises on every run state change, in any workspace.
+  let agentRunRevision = 0;
+
+  // The run state is read from the live slot only, never from stored runs.
+  function agentRunState(
+    workspace: Pick<ActivityWorkspace, "workspaceId">,
+    state: WorkspaceActivityState,
+  ): AgentRunStateEvent {
+    return {
+      workspaceId: workspace.workspaceId,
+      revision: agentRunRevision,
+      active: isAgentAtWork(state.entry?.agentRun ?? null),
+    };
+  }
+
+  function publishAgentRunState(workspaceId: string, active: boolean): void {
+    agentRunRevision += 1;
+    options.onAgentRunState?.({ workspaceId, revision: agentRunRevision, active });
+  }
+
+  // Every slot write goes through here, so each change pushes once. A write to
+  // a closed entry changes nothing the projection reads.
+  function assignAgentRun(
+    state: WorkspaceActivityState,
+    entry: WatchedWorkspace,
+    run: ActiveAgentRun | null,
+  ): void {
+    const was = isAgentAtWork(entry.agentRun);
+    entry.agentRun = run;
+    const active = isAgentAtWork(run);
+    if (state.entry === entry && active !== was) {
+      publishAgentRunState(entry.workspace.workspaceId, active);
+    }
+  }
+
+  // Empties the slot only while it still holds this run.
+  function releaseAgentRun(
+    state: WorkspaceActivityState,
+    entry: WatchedWorkspace,
+    agentRunId: string,
+  ): void {
+    if (entry.agentRun?.agentRunId === agentRunId) assignAgentRun(state, entry, null);
+  }
+
   function statusFor(
     workspace: ActivityWorkspace,
     state: WorkspaceActivityState,
@@ -483,6 +534,7 @@ export function createWorkspaceActivity(
       state.preservedStatus = null;
     }
     state.entry = null;
+    if (isAgentAtWork(entry.agentRun)) publishAgentRunState(workspaceId, false);
     const stopped = await Promise.allSettled([
       Promise.resolve().then(() => entry.handle.stop()).catch(async error => {
         entry.capture?.observationDrainFailed();
@@ -641,7 +693,7 @@ export function createWorkspaceActivity(
     const { workspaceId } = workspace;
     if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
     await entry.capture?.setActiveAgentRun(run);
-    entry.agentRun = run;
+    assignAgentRun(state, entry, run);
   }
 
   async function claimAgentRun(
@@ -662,12 +714,12 @@ export function createWorkspaceActivity(
       );
     }
     if (entry.agentRun !== null) return false;
-    entry.agentRun = run;
+    assignAgentRun(state, entry, run);
     try {
       await entry.capture?.setActiveAgentRun(run);
       return true;
     } catch (error) {
-      if (entry.agentRun?.agentRunId === run.agentRunId) entry.agentRun = null;
+      releaseAgentRun(state, entry, run.agentRunId);
       throw error;
     }
   }
@@ -687,7 +739,7 @@ export function createWorkspaceActivity(
     }
     if (entry.agentRun?.agentRunId !== agentRunId) return;
     await entry.capture?.setActiveAgentRun(null);
-    if (entry.agentRun?.agentRunId === agentRunId) entry.agentRun = null;
+    releaseAgentRun(state, entry, agentRunId);
   }
 
   function hasAgentRun(state: WorkspaceActivityState,
@@ -706,6 +758,12 @@ export function createWorkspaceActivity(
   // MCP during the run writes at the run's depth, whichever agent it is.
   function agentRunDepth(state: WorkspaceActivityState): number {
     return state.entry?.agentRun?.depth ?? 0;
+  }
+
+  // Whether a run dohc dispatched holds the slot. Its agent gives no name, so
+  // the CLI drops any name a write claims and the run stays one actor.
+  function dispatchedAgentRun(state: WorkspaceActivityState): boolean {
+    return state.entry?.agentRun?.dispatch !== undefined;
   }
 
   // The agent run holding the slot, as a local app's invocation is
@@ -785,7 +843,9 @@ export function createWorkspaceActivity(
     clearAgentRun,
     hasAgentRun,
     agentRunDepth,
+    dispatchedAgentRun,
     agentRun,
+    agentRunState,
     engineCaptureFor,
     workspaceRootPath,
     registerExpectedEngineEvents,

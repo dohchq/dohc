@@ -1,5 +1,6 @@
 import { prepareRecordBackend, type RecordRunDependencies, type RecordRunInput, type RunSource } from "./automationRecordBackend";
 import { AutomationRunWait } from "./automationRunWait";
+import { automationUsageInvocations } from "./automationUsage";
 import type { AutomationTimeSpent, JsonValue } from "@dohc/app-backend-runtime/automation";
 import {
   answersOf,
@@ -78,6 +79,8 @@ export interface StepReads {
 
 /** How a run's steps read and write one kind of Collection. */
 export interface StepBackend {
+  /** Whether this approved action can write. Unknown actions are not counted. */
+  isWriteAction?(effect: Extract<StoredStep["effects"][number], { kind: "dataset-action" }>): boolean;
   /** A write may have landed even if applying its effect failed before recording it. */
   needsDurability?(): boolean;
   madeDurable?(): void;
@@ -250,11 +253,17 @@ export async function runSteps(
   }
   run.finishedAtMs = dependencies.nowMs();
   await dependencies.store.save(run);
+  if (dependencies.onUsageSuccess && outcome.kind === "done") {
+    for (const invocation of automationUsageInvocations(run, effect => backend.isWriteAction?.(effect) === true)) {
+      // Measurement must not change a run's result.
+      try { dependencies.onUsageSuccess(invocation); } catch {}
+    }
+  }
   return outcome.kind === "done" ? outcome : outcome.outcome;
 }
 
 /** What running steps needs besides a backend. */
-type StepRunDependencies = Pick<CollectionAutomationRunDependencies, "makeDurable" | "evaluator" | "store" | "nowMs" | "chat" | "recipientVerdicts" | "readCode">;
+type StepRunDependencies = Pick<CollectionAutomationRunDependencies, "makeDurable" | "evaluator" | "store" | "nowMs" | "chat" | "recipientVerdicts" | "readCode" | "onUsageSuccess">;
 
 /** The text of the code file a run-file step runs, or why it cannot run. */
 export async function readCodeFile(

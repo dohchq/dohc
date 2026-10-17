@@ -63,6 +63,7 @@ enum OwnedRoute {
     Workspace,
     Version,
     Moment,
+    RelayRefused,
 }
 
 const OWNED_OP_ROUTES: &[(&str, OwnedRoute)] = &[
@@ -86,6 +87,9 @@ const OWNED_OP_ROUTES: &[(&str, OwnedRoute)] = &[
     ("workspace.init", OwnedRoute::Workspace),
     ("version.create", OwnedRoute::Version),
     ("moment.append", OwnedRoute::Moment),
+    // The relay's record of a coordinate it refused. It changes nothing and
+    // only takes its origin's sequence.
+    ("relay.refused", OwnedRoute::RelayRefused),
 ];
 
 #[cfg(test)]
@@ -155,7 +159,7 @@ pub(crate) fn apply_replication_envelope_in_batch(
     };
     if !matches!(
         route,
-        OwnedRoute::Ydoc | OwnedRoute::LiveAudit | OwnedRoute::Moment
+        OwnedRoute::Ydoc | OwnedRoute::LiveAudit | OwnedRoute::Moment | OwnedRoute::RelayRefused
     ) {
         // Other replicated routes can archive or replace Y.Doc lineages.
         cache.clear();
@@ -219,6 +223,12 @@ pub(crate) fn apply_replication_envelope_in_batch(
                 ..RoutedApply::default()
             },
         ),
+        OwnedRoute::RelayRefused => plain(crate::apply_envelope_with(
+            store,
+            envelope,
+            faults,
+            |_tx, _op| Ok(()),
+        )),
     };
     // A skipped moment never ran its mutation closure. Clear every other
     // outcome before a later envelope can observe an ABA-valid stale entry.
