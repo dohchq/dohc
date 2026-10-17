@@ -8,6 +8,7 @@ import { basenameOf } from "../path";
 import { parseDatasetPath } from "@dohc/security-contract/dataset";
 import type { WorkspaceUiState } from "../../ipc/bridgeContract";
 import type { SidebarSettings } from "../../settings/userSettings";
+import type { ObjectKind } from "../ui/KindGlyph";
 
 export const VIEW_IDS = [
   "explorer",
@@ -239,12 +240,16 @@ export function tabPath(tab: ParsedTab): string {
   }
 }
 type TabTitle = (tab: ParsedTab, label?: string) => string;
-type TabRules = { virtual: boolean; singleton: boolean; title: TabTitle; tooltip: TabTitle; explorerTitle: TabTitle };
+// The object a tab shows, for its glyph. Null for a file, whose glyph comes
+// from the listing: its kind and page icon.
+type TabObjectRule = (tab: ParsedTab) => ObjectKind | null;
+type TabRules = { virtual: boolean; singleton: boolean; title: TabTitle; tooltip: TabTitle; explorerTitle: TabTitle; glyph: TabObjectRule };
 const fileTitles = {
   title: (tab: ParsedTab) => basenameOf(tab.path),
   tooltip: (tab: ParsedTab) => tab.path,
   explorerTitle: (tab: ParsedTab) => basenameOf(tab.path),
 };
+const chatGlyph: TabObjectRule =(tab) => tab.kind === "chat" && tab.target.kind === "channel" ? "group" : "chat";
 const chatTitle: TabTitle = (tab, label) => {
   if (label !== undefined) return label;
   if (tab.kind !== "chat") return "Chat";
@@ -260,11 +265,13 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     virtual: false,
     singleton: false,
     ...fileTitles,
+    glyph: () => null,
   },
   removed: {
     virtual: false,
     singleton: false,
     ...fileTitles,
+    glyph: () => null,
   },
   graph: {
     virtual: true,
@@ -272,6 +279,7 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     title: () => "Graph",
     tooltip: () => "Workspace graph",
     explorerTitle: () => "Graph",
+    glyph: () => "graph",
   },
   history: {
     virtual: true,
@@ -279,6 +287,7 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     title: () => "History",
     tooltip: () => "Workspace history",
     explorerTitle: () => "History",
+    glyph: () => "history",
   },
   chat: {
     virtual: true,
@@ -286,12 +295,14 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     title: chatTitle,
     tooltip: chatTitle,
     explorerTitle: chatTitle,
+    glyph: chatGlyph,
   },
   site: {
     virtual: true,
     singleton: true,
     ...fileTitles,
     explorerTitle: tab => `App: ${tab.kind === "site" ? tab.siteRoot ?? "preview" : "preview"}`,
+    glyph: () => "app",
   },
   momentDiff: {
     virtual: true,
@@ -299,6 +310,7 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     title: diffTitle,
     tooltip: (_tab, label) => label ? `History diff: ${label}` : "History change",
     explorerTitle: diffTitle,
+    glyph: () => "change",
   },
   versionCompare: {
     virtual: true,
@@ -306,12 +318,14 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     title: () => "Compare with Main",
     tooltip: () => "Compare this Version with Main",
     explorerTitle: () => "Compare with Main",
+    glyph: () => "compare",
   },
   collection: {
     virtual: true,
     singleton: false,
     ...fileTitles,
     explorerTitle: tab => basenameOf(tab.kind === "collection" ? tab.collectionPath ?? "Collection" : "Collection"),
+    glyph: () => "collection",
   },
   transactionalCollection: {
     virtual: true,
@@ -319,6 +333,7 @@ export const TAB_KINDS: Record<ParsedTab["kind"], TabRules> = {
     title: collectionTitle,
     tooltip: (_tab, label) => label ? `Collection: ${label}` : "Collection",
     explorerTitle: collectionTitle,
+    glyph: () => "collection",
   },
 };
 export function singletonTabIdentity(tab: ParsedTab | null): string | null {
