@@ -2906,25 +2906,26 @@ mod tests {
         stream.flush()
     }
 
-    /// A Collections update is admitted under the capture gate while a pull
-    /// waits for its first page, which removes a relation's target that the
-    /// second page brings back. The page must not land between the update's
-    /// admission and its run, so the update never sees half the pull.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_admitted_collections_update_never_sees_half_a_pull() {
-        const WORKSPACE: &str = "owed-admitted-mid-pull";
+    /// A relay workspace that keeps its Collections itself and owes an
+    /// update. The source record relates to the target, and the Collections
+    /// hold that relation when `reconciled`. Page one of the relay's log
+    /// removes the target and fills a pass; page two writes it at a new path.
+    async fn half_pull_fixture(
+        workspace_id: &'static str,
+        reconciled: bool,
+    ) -> (PagedRelay, CursorFixture) {
         let ctx = RequestContext::unbounded();
         let markdown = record(SOURCE, Some(TARGET));
         let target = record(TARGET, None);
         let target_sha = dohc_engine_storage::hex_sha256(target.as_bytes());
         let relay = PagedRelay::start([(target_sha.clone(), target.clone())].into());
-        let f = CursorFixture::with_relay(WORKSPACE, true, relay.configuration()).await;
+        let f = CursorFixture::with_relay(workspace_id, true, relay.configuration()).await;
         f.prepare().await;
         f.service
             .sync_claim(
                 &ctx,
                 Some(f.handle.clone()),
-                json!({ "workspaceId": WORKSPACE }),
+                json!({ "workspaceId": workspace_id }),
             )
             .await
             .expect("claim");
@@ -2933,14 +2934,16 @@ mod tests {
         f.pulled("source", "tasks/source.md", &markdown).await;
         f.pulled("target", "tasks/target.md", &target).await;
         f.source_lineage(&markdown).await;
-        f.service.collections_changed(&ctx, &f.open).await;
-        assert_eq!(f.edges(), 1);
+        if reconciled {
+            f.service.collections_changed(&ctx, &f.open).await;
+        }
+        assert_eq!(f.edges(), i64::from(reconciled));
 
         let head = f
             .open
             .actor
             .versioned_text_read(
-                WORKSPACE.into(),
+                workspace_id.into(),
                 "main".into(),
                 "tasks/target.md".into(),
                 dohc_engine_runtime::CancellationToken::new(),
@@ -2952,7 +2955,7 @@ mod tests {
         // target at a new path.
         let pass = i64::try_from(dohc_engine_sync::MAX_PULL_OPS).expect("pass size");
         let mut ops = vec![PagedRelay::row(
-            WORKSPACE,
+            workspace_id,
             0,
             "moment.append",
             json!({
@@ -2976,10 +2979,10 @@ mod tests {
             }),
         )];
         ops.extend(
-            (1..pass).map(|seq| PagedRelay::row(WORKSPACE, seq, "workspace.init", json!({}))),
+            (1..pass).map(|seq| PagedRelay::row(workspace_id, seq, "workspace.init", json!({}))),
         );
         ops.push(PagedRelay::row(
-            WORKSPACE,
+            workspace_id,
             pass,
             "moment.append",
             json!({
@@ -2995,20 +2998,65 @@ mod tests {
         ));
         lock(&relay.ops).extend(ops);
         f.open.collections_owed.store(true, Ordering::SeqCst);
+        (relay, f)
+    }
 
-        let pull = || {
-            let (service, handle) = (Arc::clone(&f.service), f.handle.clone());
-            async move {
-                service
-                    .sync_pull(
-                        &RequestContext::unbounded(),
-                        Some(handle),
-                        json!({ "workspaceId": WORKSPACE }),
-                    )
-                    .await
-            }
+    /// A `sync.pull` that owns what it needs, so a test can poll or spawn it.
+    fn pull(
+        f: &CursorFixture,
+    ) -> impl std::future::Future<Output = Result<Value, WireError>> + Send + 'static {
+        let (service, handle, workspace_id) =
+            (Arc::clone(&f.service), f.handle.clone(), f.workspace_id);
+        async move {
+            service
+                .sync_pull(
+                    &RequestContext::unbounded(),
+                    Some(handle),
+                    json!({ "workspaceId": workspace_id }),
+                )
+                .await
+        }
+    }
+
+    /// Poll `future` once and report whether it finished.
+    async fn poll_once<F: std::future::Future + ?Sized>(mut future: std::pin::Pin<&mut F>) -> bool {
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(future.as_mut(), cx).is_ready())
+        })
+        .await
+    }
+
+    /// Commit page one, then pull and commit page two, whose terminal commit
+    /// pays the owed update with the relation intact.
+    async fn finish_half_pull(f: CursorFixture, page_one: Value) {
+        let ctx = RequestContext::unbounded();
+        let commit = |page: Value| {
+            let token = page["pendingCursor"]["token"]
+                .as_str()
+                .expect("pending cursor")
+                .to_owned();
+            let request = f.request(0, "sync.commitCursor", &token);
+            f.service
+                .sync_commit_cursor(&ctx, request.workspace, request.params)
         };
-        let page_one = tokio::spawn(pull());
+        commit(page_one).await.expect("commit page one");
+        let page_two = pull(&f).await.expect("page two lands");
+        assert_eq!(page_two["hasMore"], json!(false));
+        commit(page_two).await.expect("commit page two");
+        assert!(!f.owed());
+        assert_eq!(f.edges(), 1, "the source still relates to the target");
+        f.close().await;
+    }
+
+    /// A Collections update is admitted under the capture gate while a pull
+    /// waits for its first page, which removes a relation's target that the
+    /// second page brings back. The page must not land between the update's
+    /// admission and its run, so the update never sees half the pull.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_admitted_collections_update_never_sees_half_a_pull() {
+        let ctx = RequestContext::unbounded();
+        let (relay, f) = half_pull_fixture("owed-admitted-mid-pull", true).await;
+        let page_one = tokio::spawn(pull(&f));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while !relay.started.load(Ordering::SeqCst) {
                 tokio::task::yield_now().await;
@@ -3020,10 +3068,7 @@ mod tests {
         // waits until this test polls it again.
         let hold = f.service.hold_actor(&f.handle).await;
         let mut update = Box::pin(f.service.settle_owed_collections(&ctx, &f.open));
-        let ran = std::future::poll_fn(|cx| {
-            std::task::Poll::Ready(std::future::Future::poll(update.as_mut(), cx).is_ready())
-        })
-        .await;
+        let ran = poll_once(update.as_mut()).await;
         drop(hold);
         relay.release();
         let page_one = page_one.await.expect("join").expect("page one lands");
@@ -3034,23 +3079,93 @@ mod tests {
         drop(update);
         assert_eq!(f.edges(), 1, "the update did not see page one alone");
         assert!(f.owed(), "the update waits for the terminal page");
+        finish_half_pull(f, page_one).await;
+    }
 
-        let commit = |page: Value| {
-            let token = page["pendingCursor"]["token"]
-                .as_str()
-                .expect("pending cursor")
-                .to_owned();
-            let request = f.request(0, "sync.commitCursor", &token);
-            f.service
-                .sync_commit_cursor(&ctx, request.workspace, request.params)
-        };
-        commit(page_one).await.expect("commit page one");
-        let page_two = pull().await.expect("page two lands");
-        assert_eq!(page_two["hasMore"], json!(false));
-        commit(page_two).await.expect("commit page two");
-        assert!(!f.owed());
-        assert_eq!(f.edges(), 1, "the source still relates to the target");
-        f.close().await;
+    /// A Collections update is admitted under the capture gate before a pull
+    /// starts. The pull registers only once the update lets the gate go, so
+    /// the update reconciles the relation before page one removes its
+    /// target, and the page leaves that relation alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pull_waits_for_an_admitted_collections_update() {
+        let ctx = RequestContext::unbounded();
+        let (relay, f) = half_pull_fixture("owed-admitted-before-pull", false).await;
+        // The update takes the gate, and its first actor step waits.
+        let hold = f.service.hold_actor(&f.handle).await;
+        let mut update = Box::pin(f.service.settle_owed_collections(&ctx, &f.open));
+        assert!(!poll_once(update.as_mut()).await);
+        assert!(
+            f.open.capture_apply_gate.try_lock().is_err(),
+            "the update holds the gate"
+        );
+        let mut page_one = Box::pin(pull(&f));
+        assert!(!poll_once(page_one.as_mut()).await);
+        assert_eq!(
+            f.open.pulls_in_flight.load(Ordering::SeqCst),
+            0,
+            "the pull waits for the gate before it registers"
+        );
+        let page_one = tokio::spawn(page_one);
+        relay.release();
+        drop(hold);
+        update.await;
+        assert!(!f.owed(), "the update ran");
+        let page_one = page_one.await.expect("join").expect("page one lands");
+        assert_eq!(page_one["hasMore"], json!(true));
+        assert_eq!(f.edges(), 1, "the update reconciled before page one landed");
+        assert!(
+            f.open
+                .actor
+                .versioned_text_read(
+                    f.workspace_id.into(),
+                    "main".into(),
+                    "tasks/target.md".into(),
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await
+                .expect("read target")
+                .is_none(),
+            "page one's removal stands"
+        );
+        assert!(
+            std::fs::read_to_string(f.open.root.join("tasks/source.md"))
+                .expect("source")
+                .contains(&format!("related: {TARGET}")),
+            "no cleanup removed the relation"
+        );
+        finish_half_pull(f, page_one).await;
+    }
+
+    /// A Collections update finds no pull, then waits for the capture gate
+    /// behind a pull, which registers under the gate and lets it go. The
+    /// update's check under the gate sees the pull and leaves its work owed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_update_leaves_its_work_to_a_pull_that_registered_while_it_waited() {
+        let ctx = RequestContext::unbounded();
+        let (relay, f) = half_pull_fixture("owed-checked-before-pull", false).await;
+        // The gate serves its waiters in order: the pull, then the update.
+        let gate = Arc::clone(&f.open.capture_apply_gate).lock_owned().await;
+        let mut page_one = Box::pin(pull(&f));
+        assert!(!poll_once(page_one.as_mut()).await, "the pull waits");
+        let mut update = Box::pin(f.service.settle_owed_collections(&ctx, &f.open));
+        assert!(
+            !poll_once(update.as_mut()).await,
+            "the update finds no pull and waits"
+        );
+        let page_one = tokio::spawn(page_one);
+        drop(gate);
+        update.await;
+        assert_eq!(
+            f.open.pulls_in_flight.load(Ordering::SeqCst),
+            1,
+            "the pull registered and waits for its first page"
+        );
+        assert!(f.owed(), "the update leaves its work owed");
+        assert_eq!(f.edges(), 0, "and the Collections alone");
+        relay.release();
+        let page_one = page_one.await.expect("join").expect("page one lands");
+        assert_eq!(page_one["hasMore"], json!(true));
+        finish_half_pull(f, page_one).await;
     }
 
     /// A pulled page left its Collections update owed. A later write that

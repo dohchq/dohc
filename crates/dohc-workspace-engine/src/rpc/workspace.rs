@@ -104,7 +104,8 @@ pub(crate) struct OpenWorkspace {
     /// the Collections may hold half a pull. Owed work waits for that commit.
     pub(super) pull_between_pages: std::sync::atomic::AtomicBool,
     /// Pulls that may be placing a page, counted from under the capture gate
-    /// before their first relay step until they set `pull_between_pages`.
+    /// before their first relay step until they are between pages, finish,
+    /// or fail.
     pub(super) pulls_in_flight: std::sync::atomic::AtomicUsize,
 }
 
