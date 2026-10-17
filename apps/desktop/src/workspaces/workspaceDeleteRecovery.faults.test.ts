@@ -293,7 +293,7 @@ describe("delete recovery placement and receipts", () => {
       const result = await f.undo(id);
       expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt",
         reason: change === "source"
-          ? "dohc could not put folder/rowless.txt back. Its trash copy is gone."
+          ? "folder/rowless.txt may be incomplete. Its trash copy is gone."
           : `dohc could not put folder/rowless.txt back. It stays at .dohc/trash/${staged}/rowless.txt.`,
       }] });
       expect(existsSync(faults.copyTarget)).toBe(change === "source");
