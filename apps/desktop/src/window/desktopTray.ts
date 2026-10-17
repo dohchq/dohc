@@ -27,7 +27,6 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
     readonly isPackaged: boolean;
     getAppPath(): string;
     quit(): void;
-    readonly dock?: { setIcon(path: string): void };
   };
   process: Pick<NodeJS.Process, "platform"> & { resourcesPath?: string };
   moduleDirectory: string;
@@ -75,6 +74,13 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
   }
 
   function dispatchTrayIcon() {
+    // The macOS menu bar draws a monochrome template image and tints it for
+    // its own appearance; the app icon would draw as a dark blob there.
+    if (process.platform === "darwin") {
+      const template = nativeImage.createFromPath(join(desktopIconDirectory(), "trayTemplate.png"));
+      template.setTemplateImage(true);
+      return template;
+    }
     const resourcesPath = (
       process as NodeJS.Process & { resourcesPath?: string }
     ).resourcesPath;
@@ -86,7 +92,6 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
     if (icon.isEmpty()) {
       icon = nativeImage.createFromPath(join(app.getAppPath(), "build/icon.png"));
     }
-    if (process.platform === "darwin") icon.setTemplateImage(true);
     return icon;
   }
 
@@ -142,7 +147,6 @@ export function createDesktopTray<Image extends DesktopTrayImage, Menu>(dependen
         platform: process.platform,
         iconPath,
         windows: BrowserWindow.getAllWindows(),
-        setDockIcon: (path) => app.dock?.setIcon(path),
       });
     }
     if (dispatchTray) dispatchTray.setImage(dispatchTrayIcon());

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="-8.5 0 110 110" role="img" aria-label="dohc">
+  <title>dohc — macOS menu bar template</title>
+  <!-- Black on transparent: macOS tints a template image for the menu bar's
+       appearance. Rendered to trayTemplate.png and trayTemplate@2x.png. -->
+  <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
+    fill="none" stroke="#000" stroke-width="10" stroke-linejoin="round"/>
+  <circle cx="38" cy="58" r="10" fill="#000"/>
+</svg>

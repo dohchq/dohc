@@ -293,9 +293,10 @@ export function createMainWindow(options?: {
     window.setIgnoreMouseEvents(true);
   }
 
-  // BrowserWindow's `icon` option is ignored on macOS; set the Dock icon after
-  // construction there. Windows and Linux already received the initial icon.
-  if (process.platform === "darwin" && iconPath) app.dock?.setIcon(iconPath);
+  // BrowserWindow's `icon` option is ignored on macOS, where a package's Dock
+  // shows its icon.icns. Unpackaged Electron shows its own icon there, so
+  // development sets dohc's Mac icon instead.
+  if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(join(iconDirectory, "icon-mac.png"));
 
   if (placement.isMaximized) window.maximize();
   trackWindowState(window, role);

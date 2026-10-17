@@ -18,8 +18,9 @@ executableName: dohc
 directories:
   output: release
   # The static launcher/executable fallback is the dual-tone build/icon.png.
-  # Runtime window, taskbar, Dock, and tray surfaces switch between
-  # icon-light.png and icon-dark.png with the OS appearance.
+  # Runtime window, taskbar, and tray surfaces on Windows and Linux switch
+  # between icon-light.png and icon-dark.png with the OS appearance. macOS
+  # uses icon.icns, drawn on Apple's icon grid, and a menu bar template.
   buildResources: build
 files:
   - dist/**
@@ -106,9 +107,21 @@ electronFuses:
   # the packaged binary). Workspace bytes still flow through
   # dohc-file://, never raw file://.
   grantFileProtocolExtraPrivileges: true
+  # Flipping a fuse rewrites Electron Framework, which breaks its ad-hoc
+  # signature, and Apple silicon refuses to load a framework whose signature
+  # does not match. Re-sign ad hoc after the flip; a release identity signs
+  # over it.
+  resetAdHocDarwinSignature: true
 
 mac:
   category: public.app-category.productivity
+  # Rendered from build/icon-mac.svg by scripts/render-icon.mjs.
+  icon: build/icon.icns
+  extraResources:
+    - from: build/trayTemplate.png
+      to: trayTemplate.png
+    - from: build/trayTemplate@2x.png
+      to: trayTemplate@2x.png
   # zip is required alongside dmg for macOS auto-updates (electron-updater).
   target: [dmg, zip]
   hardenedRuntime: true
