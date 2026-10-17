@@ -34,17 +34,17 @@ const recordName = (id: string) => `delete-${createHash("sha256").update(id).dig
 // Undo waits outside the workspace queue; reads can inspect the staged record.
 const pendingDeletes = new Map<string, Promise<void>>();
 export function beginPendingDeleteRecovery(operationId: string): () => void {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  pendingDeletes.set(operationId, promise);
+  let resolve!: () => void;
+  pendingDeletes.set(operationId, new Promise<void>(done => { resolve = done; }));
   return () => { pendingDeletes.delete(operationId); resolve(); };
 }
 export async function waitForDeleteRecovery(operationId: string, signal?: AbortSignal): Promise<void> {
   const pending = pendingDeletes.get(operationId);
   if (!pending || signal?.aborted) return;
   if (!signal) { await pending; return; }
-  const { promise, resolve } = Promise.withResolvers<void>();
-  const retirement = addAbortListener(signal, () => resolve());
-  try { await Promise.race([pending, promise]); }
+  let retirement!: ReturnType<typeof addAbortListener>;
+  const retired = new Promise<void>(done => { retirement = addAbortListener(signal, () => done()); });
+  try { await Promise.race([pending, retired]); }
   finally { retirement[Symbol.dispose](); }
 }
 const systemTrash = process.platform === "win32" ? "Recycle Bin" : "Trash";
