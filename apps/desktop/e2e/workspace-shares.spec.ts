@@ -1476,13 +1476,7 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
       if ("status" in threads) throw new Error(threads.code);
       // Listing is a read in a received share. It must answer without
       // creating General or storing generic chat rows.
-      let channels: string;
-      try {
-        await api.listChatChannels({ workspaceId });
-        channels = "answered";
-      } catch (error) {
-        channels = error instanceof Error ? error.message : String(error);
-      }
+      const channels = await api.listChatChannels({ workspaceId });
       return {
         refusal,
         threadCount: threads.threads.length,
@@ -1492,7 +1486,7 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
     });
     expect(chat.refusal).toContain("read-only");
     expect(chat.threadCount).toBe(0);
-    expect(chat.channels).toBe("answered");
+    expect(chat.channels).toEqual({ channels: [], fileThreads: [] });
     await expect
       .poll(() => receivedShareGenericChatRows(chat.rootPath))
       .toEqual({ storedRows: 0, replicationRows: 0 });
