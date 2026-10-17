@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { bridge } from "../bridge";
@@ -310,6 +310,8 @@ describe("makeLinkMenuPlugin: paste-URL-over-selection", () => {
 });
 
 describe("makeLinkMenuPlugin: click", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it("opens the popover in edit mode when clicking a link", () => {
     const editor = makeEditor(
       '<p><a href="https://example.com/">hello</a> world</p>',
@@ -342,7 +344,11 @@ describe("makeLinkMenuPlugin: click", () => {
     editor.destroy();
   });
 
-  it("opens externally via the safe bridge on Cmd/Ctrl+click, without opening the popover", async () => {
+  it.each([
+    ["darwin", { metaKey: true, ctrlKey: false }],
+    ["win32", { metaKey: false, ctrlKey: true }],
+  ] as const)("opens externally via the safe bridge on a %s primary-modifier click, without opening the popover", async (platform, modifiers) => {
+    vi.stubGlobal("dohcDesktop", { platform });
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
@@ -361,8 +367,8 @@ describe("makeLinkMenuPlugin: click", () => {
     const pos = editor.view.posAtDOM(anchor, 0);
     const event = {
       target: anchor,
-      metaKey: true,
-      ctrlKey: false,
+      button: 0,
+      ...modifiers,
       preventDefault: vi.fn(),
     } as unknown as MouseEvent;
 

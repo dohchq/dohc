@@ -193,7 +193,7 @@ describe("the active row inside a multi-selection", () => {
     );
 
     await user.click(row("notes.md"));
-    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true, metaKey: true });
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true });
     expect(row("notes.md").getAttribute("aria-selected")).toBe("true");
     expect(row("apps/reading-list/index.html").getAttribute("aria-selected")).toBe("true");
 
@@ -203,5 +203,18 @@ describe("the active row inside a multi-selection", () => {
     expect(row("apps/reading-list/index.html").className).not.toContain("font-medium");
     expect(row("apps/reading-list/index.html").className).toContain("bg-selected");
     expect(row("notes.md").className).toContain("bg-selected");
+  });
+});
+
+describe("macOS file tree keys", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("adds a row to the selection with ⌘-click on macOS", () => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    render(<Fixture {...explorerProps({ expandedFolders: ["apps", "apps/reading-list"] })} />);
+    fireEvent.click(row("notes.md"));
+    fireEvent.click(row("apps/reading-list/index.html"), { metaKey: true });
+    expect(row("notes.md").getAttribute("aria-selected")).toBe("true");
+    expect(row("apps/reading-list/index.html").getAttribute("aria-selected")).toBe("true");
   });
 });

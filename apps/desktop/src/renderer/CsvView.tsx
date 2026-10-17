@@ -3,6 +3,7 @@ import { Code, Database, LoaderCircle, Plus, Table, Trash2 } from "lucide-react"
 import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from "react";
 import type { ImportToDatabaseResult } from "../ipc/bridgeContract";
+import { hasPrimaryModifier } from "../shortcuts/shortcutRegistry";
 import { bridge } from "./bridge";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import { ViewActions } from "./fileInspectorUi";
@@ -665,7 +666,7 @@ export function CsvView({
           value={draft.draft}
           onChange={(event) => draft.setDraft(event.target.value)}
           onKeyDown={(event) => {
-            if ((event.metaKey || event.ctrlKey) && event.key === "s") {
+            if (hasPrimaryModifier(event, window.dohcDesktop?.platform) && event.key === "s") {
               event.preventDefault();
               void draft.saveNow();
             }

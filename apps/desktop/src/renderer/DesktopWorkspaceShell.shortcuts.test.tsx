@@ -32,11 +32,11 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     expect(bindings).toHaveLength(1);
     for (const binding of bindings) {
       const event = keyEvent(binding, platform);
-      expect(matchShellShortcut(event)).toBe("history-restore-undo");
+      expect(matchShellShortcut(event, platform)).toBe("history-restore-undo");
       fireEvent(window, event);
       expect(event.defaultPrevented).toBe(false);
       for (const extra of [{ isComposing: true }, { repeat: true }]) {
-        expect(matchShellShortcut(keyEvent(binding, platform, extra))).toBeNull();
+        expect(matchShellShortcut(keyEvent(binding, platform, extra), platform)).toBeNull();
       }
     }
   });
@@ -251,6 +251,31 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     } finally {
       Reflect.set(accelerators, "0", original);
     }
+  });
+});
+
+describe("macOS Control-key text editing", () => {
+  it.each(["textarea", "contenteditable"] as const)("keeps Control chords in a %s instead of running shell commands", async (kind) => {
+    await ready("darwin");
+    const field = document.createElement(kind === "textarea" ? "textarea" : "div");
+    if (kind === "contenteditable") field.contentEditable = "true";
+    screen.getByTestId("workspace-shell").append(field);
+    field.focus();
+    const groups = () => document.querySelectorAll('[data-testid^="editor-group-"]:not([data-testid*="resize"])').length;
+    const groupsBefore = groups();
+    for (const key of ["n", "p", "k", "b", "w", ",", "\\"]) {
+      const event = new KeyboardEvent("keydown", { key, ctrlKey: true, bubbles: true, cancelable: true });
+      fireEvent(field, event);
+      expect(event.defaultPrevented, `Control+${key}`).toBe(false);
+    }
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.queryByTestId("command-palette")).toBeNull();
+    expect(screen.queryByTestId("quick-open")).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Settings" })).toBeNull();
+    expect(groups()).toBe(groupsBefore);
+    field.remove();
   });
 });
 

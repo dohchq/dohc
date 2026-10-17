@@ -1,4 +1,5 @@
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
+import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { useFocusSurface } from "../ui/focusReturn";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
@@ -1037,7 +1038,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       const rowList = rowsRef.current;
       const isFolder =
         rowList.find((row) => row.fullPath === path)?.isFolder ?? false;
-      if (event.ctrlKey || event.metaKey) {
+      if (hasPrimaryModifier(event, window.dohcDesktop?.platform)) {
         setSelection((current) => {
           const next = new Set(current);
           if (next.has(path)) next.delete(path);

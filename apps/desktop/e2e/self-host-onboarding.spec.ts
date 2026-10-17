@@ -1,4 +1,5 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { DOCUMENT_END } from "./helpers/keys";
 import { activityPin, settingsNavPin } from "../src/testPins";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -93,7 +94,7 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     await explorerRow(left.page, "welcome.md").click();
     await expect(left.page.getByTestId("markdown-editor")).toContainText("Created before connecting.");
     await left.page.getByTestId("markdown-editor").click();
-    await left.page.keyboard.press("ControlOrMeta+End");
+    await left.page.keyboard.press(DOCUMENT_END);
     await left.page.keyboard.type(" Edited through the connected desktop.");
     await expect(left.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
     await expect.poll(() => readFileIfPresent(join(first.rootPath, "welcome.md"))).toContain("Edited through the connected desktop.");

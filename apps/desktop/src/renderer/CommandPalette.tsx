@@ -79,7 +79,7 @@ export function CommandPalette(props: {
       onClose={props.onClose}
       panelProps={{
         onKeyDown: (event) => {
-          if (matchShellShortcut(event.nativeEvent) === (props.toggleShortcut ?? "command-palette")) {
+          if (matchShellShortcut(event.nativeEvent, window.dohcDesktop?.platform) === (props.toggleShortcut ?? "command-palette")) {
             event.preventDefault();
             props.onClose();
           }

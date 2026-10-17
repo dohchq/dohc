@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Editor } from "@tiptap/core";
 import { ChevronDown, ChevronUp, Replace, X } from "lucide-react";
+import { shortcutTitle } from "../../shortcuts/shortcutRegistry";
 import {
   buildReplaceActiveTransaction,
   buildReplaceAllTransaction,
@@ -55,6 +56,7 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
   };
 
   const readOnly = !editor.isEditable;
+  const platform = window.dohcDesktop?.platform;
   const total = state.matches.length;
   const position = state.activeIndex >= 0 ? state.activeIndex + 1 : 0;
 
@@ -85,7 +87,7 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
           type="button"
           className="dohc-find-replace__icon-btn"
           aria-label="previous match"
-          title="previous match (Shift+Enter)"
+          title={`previous match (${shortcutTitle("find-previous", platform)})`}
           disabled={total === 0}
           onClick={() => dispatch({ type: "prev" })}
         >
@@ -95,7 +97,7 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
           type="button"
           className="dohc-find-replace__icon-btn"
           aria-label="next match"
-          title="next match (Enter)"
+          title={`next match (${shortcutTitle("find-next", platform)})`}
           disabled={total === 0}
           onClick={() => dispatch({ type: "next" })}
         >
@@ -127,7 +129,7 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
           type="button"
           className="dohc-find-replace__icon-btn"
           aria-label="close find"
-          title="close (Esc)"
+          title={`close (${shortcutTitle("find-close", platform)})`}
           onClick={close}
         >
           <X size={13} aria-hidden />

@@ -20,6 +20,7 @@ let editor: Editor | null = null;
 afterEach(() => {
   editor?.destroy();
   editor = null;
+  vi.unstubAllGlobals();
 });
 
 // The caret starts inside the empty second paragraph, at 9.
@@ -118,6 +119,18 @@ describe("URL paste offer", () => {
     // With no offer, Mod+K stays the link menu's.
     editor.view.dispatch(editor.state.tr.setMeta(urlPasteOfferKey, { type: "dismiss" }));
     expect(key(editor, { key: "k", ctrlKey: true }).handled).toBe(false);
+  });
+
+  it.each([
+    ["⌘K reaches", { metaKey: true }, true],
+    ["⌃K, which edits the line, does not reach", { ctrlKey: true }, false],
+  ] as const)("on macOS, %s the row", (_name, modifier, reaches) => {
+    vi.stubGlobal("dohcDesktop", { platform: "darwin" });
+    const { editor } = setup();
+    paste(editor);
+    const { handled, focusRow } = key(editor, { key: "k", ...modifier });
+    expect(handled).toBe(reaches);
+    expect(focusRow).toHaveBeenCalledTimes(reaches ? 1 : 0);
   });
 
   it("makes a choice one transaction, mapped through later ones, that Undo takes back alone", () => {

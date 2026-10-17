@@ -1,4 +1,5 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { DOCUMENT_END } from "./helpers/keys";
 import { test, expect } from "@playwright/test";
 import { access, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -36,7 +37,7 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
       const editor = page.getByTestId("markdown-editor");
       await expect(editor).toBeVisible();
       await editor.click();
-      await page.keyboard.press("ControlOrMeta+End");
+      await page.keyboard.press(DOCUMENT_END);
       await page.keyboard.type(" WARMUP");
       await expect.poll(() => readFile(join(temp.rootPath, path), "utf8")).toContain("WARMUP");
       if (mode === "write-failure") {

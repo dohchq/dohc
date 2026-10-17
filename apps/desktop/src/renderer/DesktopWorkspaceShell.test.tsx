@@ -221,12 +221,12 @@ describe("global letter shortcut ownership", () => {
   });
 
   it.each([
-    ["Control", { ctrlKey: true, metaKey: false }],
-    ["Command", { ctrlKey: false, metaKey: true }],
+    ["Control", "linux", { ctrlKey: true, metaKey: false }],
+    ["Command", "darwin", { ctrlKey: false, metaKey: true }],
   ] as const)(
     "leaves unsupported %s+Alt letter chords unclaimed",
-    async (_name, modifier) => {
-      renderShell(makeBridge(Promise.resolve(STORED_STATE)));
+    async (_name, platform, modifier) => {
+      renderShell(makeBridge(Promise.resolve(STORED_STATE), platform));
       await screen.findByTestId("side-panel");
 
       for (const [key, shiftKey] of [

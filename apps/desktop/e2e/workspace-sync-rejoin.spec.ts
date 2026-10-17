@@ -1,4 +1,5 @@
 import { activityPin } from "../src/testPins";
+import { DOCUMENT_END } from "./helpers/keys";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -918,7 +919,7 @@ async function typeWhileEnablingSync(pattern: TypingPattern): Promise<void> {
     });
     await expect(editor).toHaveAttribute("contenteditable", "true");
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
     await page.keyboard.type("Before sync.");
     await expect.poll(readPlan, { timeout: 20_000 }).toContain("Before sync.");
@@ -1131,7 +1132,7 @@ test("typing continues after enabling sync claims the open document", async () =
     });
     await expect(editor).toHaveAttribute("contenteditable", "true");
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("Enter");
     await page.keyboard.type("Before sync.");
     await expect.poll(readPlan, { timeout: 20_000 }).toContain("Before sync.");
@@ -1181,7 +1182,7 @@ test("typing continues after enabling sync claims the open document", async () =
       timeout: 30_000,
     });
     await editor.click();
-    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(" After the handoff.");
     await expect.poll(readPlan, { timeout: 30_000 }).toContain("After the handoff.");
     await expect(page.getByTestId("markdown-save-state")).not.toHaveAttribute(

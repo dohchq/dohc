@@ -45,7 +45,7 @@ import {
   getDohcYDocBodyFragment,
   markdownToYDoc,
 } from "@dohc/ydoc-projection";
-import { SHORTCUTS } from "../../shortcuts/shortcutRegistry";
+import { SHORTCUTS, shortcutAccelerators, type ShortcutId } from "../../shortcuts/shortcutRegistry";
 import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
 import { measureParseWork } from "./markdownParseWork";
 import {
@@ -2204,8 +2204,9 @@ describe("MarkdownEditor focus", () => {
 });
 
 
-it.each(["Win32", "MacIntel"])("keeps the display catalogue and allowed shell conflicts aligned with the mounted %s editor keymaps", async (platform) => {
-  const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+it.each([["Win32", "win32"], ["MacIntel", "darwin"]] as const)("keeps the display catalogue and allowed shell conflicts aligned with the mounted %s editor keymaps", async (navigatorPlatform, platform) => {
+  const platformSpy = vi.spyOn(navigator, "platform", "get").mockReturnValue(navigatorPlatform);
+  vi.stubGlobal("dohcDesktop", { platform });
   try {
     render(createElement(MarkdownEditor, { value: "Text", onDirty: vi.fn(), workspaceId: "ws", path: "note.md", knownFiles: [] }));
     const surface = await screen.findByTestId("markdown-editor");
@@ -2222,12 +2223,17 @@ it.each(["Win32", "MacIntel"])("keeps the display catalogue and allowed shell co
       return [parts.includes("mod") ? "commandorcontrol" : "", parts.includes("ctrl") ? "ctrl" : "", parts.includes("meta") ? "meta" : "", parts.includes("shift") ? "shift" : "", parts.includes("alt") ? "alt" : "", parts.at(-1)!].filter(Boolean).join("+");
     };
     const mounted = [...new Set(keymaps.map(({ key }) => canonical(key)))].sort();
-    const listed = Object.values(SHORTCUTS).filter((row) => row.owner === "editor" && (!("platform" in row) || platform === "MacIntel"))
-      .flatMap((row) => row.accelerators.map((key) => key.toLowerCase())).sort();
+    const listed = (Object.keys(SHORTCUTS) as ShortcutId[]).filter((id) => {
+      const row = SHORTCUTS[id];
+      return row.owner === "editor" && (!("platform" in row) || row.platform === platform);
+    }).flatMap((id) => shortcutAccelerators(id, platform).map((key) => key.toLowerCase())).sort();
     expect(listed).toEqual(mounted);
-    if (platform === "MacIntel") {
-      expect(mounted).toEqual(expect.arrayContaining(["ctrl+a", "ctrl+e", "ctrl+h", "ctrl+d", "ctrl+alt+backspace"]));
+    if (platform === "darwin") {
+      expect(mounted).toEqual(expect.arrayContaining(["ctrl+a", "ctrl+e", "ctrl+h", "ctrl+d", "ctrl+alt+backspace", "commandorcontrol+alt+f"]));
       expect(mounted).not.toContain("commandorcontrol+d");
+      expect(mounted).not.toContain("commandorcontrol+h");
+    } else {
+      expect(mounted).toContain("commandorcontrol+h");
     }
     const conflicts = Object.entries(SHORTCUTS).filter(([, row]) => row.owner === "shell" || row.owner === "history-restore")
       .flatMap(([id, row]) => row.accelerators.filter((key) => ["commandorcontrol", "ctrl", "meta"].some((modifier) => mounted.includes(key.toLowerCase().replace("commandorcontrol", modifier)))).map((accelerator) => [id, accelerator]));

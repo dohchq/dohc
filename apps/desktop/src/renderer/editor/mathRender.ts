@@ -1,5 +1,6 @@
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { EditorView, NodeView } from "@tiptap/pm/view";
+import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 
 // Desktop-only KaTeX rendering for the `mathInline` / `mathBlock` atom nodes.
 //
@@ -176,7 +177,7 @@ export function makeMathNodeView(
         // and commits on Cmd/Ctrl+Enter.
         const commitKey =
           event.key === "Enter" &&
-          (!displayMode || event.metaKey || event.ctrlKey);
+          (!displayMode || hasPrimaryModifier(event, window.dohcDesktop?.platform));
         if (commitKey) {
           event.preventDefault();
           exitEditing(el.value);

@@ -1,6 +1,7 @@
 import type { Node as PMNode, ResolvedPos } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
+import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 
 // Escape hatches for container blocks that otherwise trap the caret.
 //
@@ -190,13 +191,12 @@ export function makeBlockExitPlugin(): Plugin {
           return handled;
         }
         if (event.altKey || event.shiftKey) return false;
-        const mod = event.metaKey || event.ctrlKey;
-        if (event.key === "Enter" && mod) {
+        if (event.key === "Enter" && hasPrimaryModifier(event, window.dohcDesktop?.platform)) {
           if (!exitToParagraphBelowTopBlock(view)) return false;
           event.preventDefault();
           return true;
         }
-        if (mod) return false;
+        if (event.metaKey || event.ctrlKey) return false;
         let handled = false;
         switch (event.key) {
           case "ArrowDown":

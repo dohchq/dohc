@@ -1,8 +1,9 @@
-// In-document find & replace — Cmd/Ctrl+F opens a find bar, Cmd/Ctrl+H opens
-// it with the replace row expanded. Search state (query, case sensitivity,
-// active-match index, the replace row's open/value) lives entirely in a
-// ProseMirror plugin, not React state: the plugin is the single source of
-// truth, `FindReplaceBar.tsx` just renders whatever it reads off
+// In-document find & replace — Cmd/Ctrl+F opens a find bar, and ⌥⌘F on macOS
+// or Ctrl+H elsewhere opens it with the replace row expanded. Search state
+// (query, case sensitivity, active-match index, the replace row's
+// open/value) lives entirely in a ProseMirror plugin, not React state: the
+// plugin is the single source of truth, `FindReplaceBar.tsx` just renders
+// whatever it reads off
 // `findReplaceKey.getState(editor.state)` and dispatches meta transactions
 // back in. That keeps MarkdownEditor.tsx's edit down to "register the
 // extension, render the bar" — no new state/refs needed there.
@@ -273,8 +274,8 @@ function openFindReplace(editor: Editor, replace: boolean) {
   editor.view.dispatch(tr)
 }
 
-/** The Tiptap extension: wires Cmd/Ctrl+F and Cmd/Ctrl+H, and registers
- *  the decoration plugin. A ready-made singleton (like `MARKDOWN_EXTENSION`
+/** The Tiptap extension: wires Find and Replace, and registers the
+ *  decoration plugin. A ready-made singleton (like `MARKDOWN_EXTENSION`
  *  next to it in MarkdownEditor.tsx) — stateless, safe to share across
  *  editor instances. */
 export const findReplaceExtension = Extension.create({
@@ -283,12 +284,15 @@ export const findReplaceExtension = Extension.create({
     return [makeFindReplacePlugin()]
   },
   addKeyboardShortcuts() {
+    // macOS keeps ⌘H for Hide. Its keymap matches ⌥⌘F by keyCode, because
+    // the key reports the Option character ƒ.
+    const replace = window.dohcDesktop?.platform === 'darwin' ? 'Mod-Alt-f' : 'Mod-h'
     return {
       'Mod-f': ({ editor }) => {
         openFindReplace(editor, false)
         return true
       },
-      'Mod-h': ({ editor }) => {
+      [replace]: ({ editor }) => {
         openFindReplace(editor, true)
         return true
       },
