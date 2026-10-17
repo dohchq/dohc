@@ -259,18 +259,61 @@ describe("delete recovery placement and receipts", () => {
       expect(await readFile(faults.copyTarget, "utf8")).toBe("not ");
     } finally { faults.copyOnly = false; faults.failCopy = ""; faults.openError = ""; }
   });
-  it("names an unfinished copy and its retry alongside the intact source", async () => {
+  it("gives a manual recovery path after an interrupted copy", async () => {
     const f = await fixture();
     const id = await deleted(f);
     faults.copyOnly = true; faults.failCopy = "write";
     try {
       expect(await f.undo(id)).toMatchObject({ remaining: [{ path: "folder/rowless.txt",
-        reason: expect.stringMatching(/folder\/rowless.txt is incomplete\. Undo again to finish it\. The deleted file stays at \.dohc\/trash\//),
+        reason: expect.stringMatching(/dohc could not finish restoring folder\/rowless.txt\. Check the old path, then restore it from History or \.dohc\/trash\//),
       }] });
       expect(await readFile(faults.copyTarget, "utf8")).toBe("not ");
       faults.failCopy = "";
       expect(await f.undo(id)).toMatchObject({ remaining: [] });
       expect(await readFile(faults.copyTarget, "utf8")).toBe("not retained");
+    } finally { faults.copyOnly = false; faults.failCopy = ""; }
+  });
+  it.each(["parent", "source", "parent link", "fresh open"])("gives actionable recovery advice when retry cannot finish (%s)", async change => {
+    const f = await fixture();
+    const id = await deleted(f);
+    const trash = join(f.root, ".dohc/trash");
+    const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
+    faults.copyOnly = true; faults.failCopy = "write";
+    try {
+      await f.undo(id);
+      faults.failCopy = "";
+      if (change === "source") await rm(join(trash, staged, "rowless.txt"));
+      else if (change === "fresh open") {
+        await rm(faults.copyTarget);
+        faults.failPlace = true;
+      } else {
+        await rm(join(f.root, "folder"), { recursive: true });
+        if (change === "parent link") await symlink(trash, join(f.root, "folder"), process.platform === "win32" ? "junction" : "dir");
+      }
+      const result = await f.undo(id);
+      expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt",
+        reason: `dohc could not finish restoring folder/rowless.txt. Check the old path, then restore it from History or .dohc/trash/${staged}/rowless.txt.`,
+      }] });
+      expect(existsSync(faults.copyTarget)).toBe(change === "source");
+      if (change !== "source") expect(await readFile(join(trash, staged, "rowless.txt"), "utf8")).toBe("not retained");
+    } finally { faults.copyOnly = false; faults.failCopy = ""; faults.failPlace = false; }
+  });
+  it("removes empty nested staging folders after a split retry without removing retained bytes", async () => {
+    const f = await fixture(false, []);
+    await mkdir(join(f.root, "folder/nested"));
+    await writeFile(join(f.root, "folder/nested/child.txt"), "nested");
+    const id = await deleted(f);
+    const trash = join(f.root, ".dohc/trash");
+    const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
+    faults.copyOnly = true; faults.failCopy = "write";
+    try {
+      expect(await f.undo(id)).toMatchObject({ remaining: [{ path: "folder/rowless.txt" }] });
+      expect(existsSync(join(trash, staged, "nested"))).toBe(false);
+      expect(await readFile(join(trash, staged, "rowless.txt"), "utf8")).toBe("not retained");
+      faults.failCopy = "";
+      expect(await f.undo(id)).toMatchObject({ remaining: [] });
+      expect(existsSync(join(trash, staged))).toBe(false);
+      expect(await readFile(join(f.root, "folder/nested/child.txt"), "utf8")).toBe("nested");
     } finally { faults.copyOnly = false; faults.failCopy = ""; }
   });
   it.each([0, 32])("reads fresh fallback bytes once while retaining ownership saves (%s package files)", async count => {
@@ -301,12 +344,12 @@ describe("delete recovery placement and receipts", () => {
       expect(await f.undo(id)).toMatchObject({ restored: ["folder/tracked.txt"], remaining: [{ path: "folder/rowless.txt" }] });
       const trash = join(f.root, ".dohc/trash");
       const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
-      expect.soft(existsSync(join(trash, staged, "tracked.txt"))).toBe(false);
+      expect(existsSync(join(trash, staged, "tracked.txt"))).toBe(false);
       await rm(join(f.root, "folder/tracked.txt"));
       faults.failCopy = "";
-      expect.soft(await f.undo(id)).toMatchObject({ restored: ["folder/tracked.txt", "folder/rowless.txt"], remaining: [] });
+      expect(await f.undo(id)).toMatchObject({ restored: ["folder/tracked.txt", "folder/rowless.txt"], remaining: [] });
       expect(existsSync(join(f.root, "folder/tracked.txt"))).toBe(false);
-      expect(existsSync(join(trash, staged, "rowless.txt"))).toBe(false);
+      expect(existsSync(join(trash, staged))).toBe(false);
       expect(await readFile(faults.copyTarget, "utf8")).toBe("not retained");
     } finally { faults.copyOnly = false; faults.sourceLimit = false; faults.failCopy = ""; }
   });
@@ -454,7 +497,7 @@ describe("delete recovery placement and receipts", () => {
       expect(result).toMatchObject({ ok: true, restored: ["folder/tracked.txt"], remaining: [{ path: "folder/rowless.txt" }] });
       const trash = join(f.root, ".dohc/trash");
       const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
-      expect.soft(existsSync(join(trash, staged, "tracked.txt"))).toBe(false);
+      expect(existsSync(join(trash, staged, "tracked.txt"))).toBe(false);
       expect(existsSync(join(trash, staged, "rowless.txt"))).toBe(true);
     } finally { faults.failPlace = false; }
   });

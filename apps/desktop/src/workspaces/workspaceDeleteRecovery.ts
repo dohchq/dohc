@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { chmod, link, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
@@ -182,7 +182,7 @@ async function copyExclusive(root: string, record: RecoveryRecord, path: string,
   try {
     const entry = await file.stat();
     if (pending && occupant) {
-      if (!occupant.isFile() || !entry.isFile() || pending.ino === 0
+      if (!entry.isFile() || pending.ino === 0
         || entry.dev !== pending.dev || entry.ino !== pending.ino || entry.birthtimeMs !== pending.birthtimeMs
         || size !== pending.size || entry.size > size
         || await fingerprint(file, entry.size) !== await fingerprint(source, entry.size)) {
@@ -305,9 +305,7 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
         ? `dohc could not recreate ${path}. Check the old path, then create the folder there.`
         : code(error) === "EEXIST"
         ? `${path} now occupies the old path. The deleted file stays at ${trashPath}.`
-        : record.copies?.some(copy => copy.path === path)
-        ? `${path} is incomplete. Undo again to finish it. The deleted file stays at ${trashPath}.`
-        : `dohc could not put ${path} back. It stays at ${trashPath}.` });
+        : `dohc could not finish restoring ${path}. Check the old path, then restore it from History or ${trashPath}.` });
     }
   };
   if (pendingPaths) {
@@ -320,7 +318,11 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
   else { record.result = result; delete record.progress; }
   await save(root, record);
   for (const path of result.restored.filter(path => !record.emptyFolders.includes(path) && !keepSource.has(path))) {
-    await sourcePath(root, record, path).then(source => rm(source, { recursive: true, force: true })).catch(() => undefined);
+    await sourcePath(root, record, path).then(async source => {
+      await rm(source, { recursive: true, force: true });
+      const staged = join(await trashDir(root), record.staged!);
+      for (let parent = dirname(source); isInside(staged, parent); parent = dirname(parent)) await rmdir(parent);
+    }).catch(() => undefined);
   }
   for (const [target, mode] of linkedModes) await chmod(target, mode).catch(() => undefined);
   return result;
