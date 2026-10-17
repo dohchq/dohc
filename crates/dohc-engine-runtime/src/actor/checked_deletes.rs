@@ -13,6 +13,7 @@ pub(super) enum ExportedDeleteRecovery {
     Settled,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn recover_exported_on_store(
     store: &mut EngineStore,
     root: &Path,
@@ -21,6 +22,7 @@ pub(super) fn recover_exported_on_store(
     moment_id: &str,
     now_ms: i64,
     faults: &dyn FaultInjector,
+    holds: Option<&dohc_engine_files::PlacementHolds>,
 ) -> Result<ExportedDeleteRecovery, RuntimeError> {
     // Ordinary unpublished recovery needs no extra writer commit. Exported
     // settlement rechecks this reference together with the job inside its write.
@@ -30,7 +32,7 @@ pub(super) fn recover_exported_on_store(
         return Ok(ExportedDeleteRecovery::NotExported);
     }
     match store.write_with(faults, |tx| {
-        recover_exported_in_tx(tx, root, workspace_id, job_id, moment_id, now_ms)
+        recover_exported_in_tx(tx, root, workspace_id, job_id, moment_id, now_ms, holds)
     })? {
         TxnOutcome::Committed(decision) => Ok(decision),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
@@ -46,6 +48,7 @@ fn recover_exported_in_tx(
     job_id: &str,
     moment_id: &str,
     now_ms: i64,
+    holds: Option<&dohc_engine_files::PlacementHolds>,
 ) -> Result<ExportedDeleteRecovery, RuntimeError> {
     let Some(job) = dohc_engine_storage::materialize::load_job(tx, job_id)? else {
         return Ok(ExportedDeleteRecovery::Settled);
@@ -79,6 +82,11 @@ fn recover_exported_in_tx(
         super::versioned::settle_checked_delete_in_tx(tx, workspace_id, moment_id, true, false)?;
         return Ok(ExportedDeleteRecovery::Settled);
     };
+    // Recovery uses the object's current path. A hold on its old path may
+    // belong to another object and must not prevent this job from settling.
+    if holds.is_some_and(|holds| holds.blocks(&path)) {
+        return Err(RuntimeError::CaptureFileHeld { path });
+    }
     if dohc_engine_files::workspace_recovery_unavailable(root) {
         return Err(dohc_engine_files::MaterializeError::RecoveryUnavailable.into());
     }

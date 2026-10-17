@@ -1029,12 +1029,6 @@ pub(super) fn replay_pending_materializations(
             .map_err(StorageError::corrupt_public)
     })?;
     for job_id in checked_jobs {
-        if !holds.is_empty()
-            && let Some(job) = store.load_materialization_job(&job_id)?
-            && holds.blocks(&job.target_path)
-        {
-            continue;
-        }
         let recorder: &dyn SelfWriteRecorder = scope.self_writes.unwrap_or(&());
         match super::versioned::publish_checked_delete_on_store(
             store,

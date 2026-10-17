@@ -1425,6 +1425,7 @@ pub(super) fn publish_checked_delete_on_store(
             moment_id,
             now_ms,
             faults,
+            holds,
         )? {
             ExportedDeleteRecovery::Settled => return Ok(()),
             ExportedDeleteRecovery::Publish => {
@@ -1438,6 +1439,11 @@ pub(super) fn publish_checked_delete_on_store(
     } else {
         false
     };
+    if recovery && holds.is_some_and(|holds| holds.blocks(&job.target_path)) {
+        return Err(RuntimeError::CaptureFileHeld {
+            path: job.target_path.clone(),
+        });
+    }
     if (recovery || request_retry)
         && job.status == JobStatus::Pending
         && dohc_engine_files::workspace_recovery_unavailable(root)
@@ -1597,7 +1603,8 @@ pub(super) fn publish_checked_delete_on_store(
                 job_id,
                 moment_id,
                 now_ms,
-                faults
+                faults,
+                holds
             )?,
             ExportedDeleteRecovery::Settled
         ) {
@@ -3513,6 +3520,15 @@ mod doc_cache_reset_tests {
 
     #[test]
     fn checked_delete_replay_keeps_a_held_intent_parked() {
+        assert_held_checked_delete_stays_parked(false);
+    }
+
+    #[test]
+    fn checked_delete_legacy_replay_keeps_a_held_intent_parked() {
+        assert_held_checked_delete_stays_parked(true);
+    }
+
+    fn assert_held_checked_delete_stays_parked(exported: bool) {
         let (root, mut store, input, expected) = checked_delete_fixture(false);
         crash_checked_delete(
             &root,
@@ -3521,6 +3537,10 @@ mod doc_cache_reset_tests {
             &expected,
             FaultPoint::StorageAfterCommitBeforeAck,
         );
+        if exported {
+            bootstrap_checked_delete(&mut store);
+            seed_legacy_checked_delete_export(&mut store);
+        }
         let outside = format!("{} held outside edit\n", "> ".repeat(121));
         std::fs::write(root.join("record.md"), &outside).unwrap();
         let hold = dohc_engine_storage::capture_file_holds::CaptureFileHold {
