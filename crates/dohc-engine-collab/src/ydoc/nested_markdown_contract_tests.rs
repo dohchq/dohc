@@ -850,3 +850,47 @@ fn nested_contract_r25_multiline_heading_reread_stabilizes() {
         assert_eq!(doc.project_richdoc().unwrap(), second);
     }
 }
+
+#[test]
+fn nested_contract_r26_boundaries_in_every_reading() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../../tools/rust-engine-program/nested-markdown-contract.json"
+    ))
+    .unwrap();
+    let mut failures = Vec::new();
+    for case in corpus["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| case["name"].as_str().unwrap().starts_with("r26-"))
+    {
+        for reading in [
+            MarkdownReading::Source,
+            MarkdownReading::Projection,
+            MarkdownReading::ProjectedSource,
+            MarkdownReading::Successor,
+        ] {
+            let result = std::panic::catch_unwind(|| {
+                let doc = Ydoc::wire();
+                let result = doc.rewrite_content_to_markdown_as(
+                    ContentKind::Richdoc,
+                    case["source"].as_str().unwrap(),
+                    reading,
+                );
+                if case["refuse"] == true {
+                    assert!(result.is_err());
+                    return;
+                }
+                result.unwrap();
+                assert_eq!(
+                    doc.project_richdoc().unwrap(),
+                    case["canonical"].as_str().unwrap()
+                );
+            });
+            if result.is_err() {
+                failures.push(format!("{}: {reading:?}", case["name"]));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}

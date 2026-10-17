@@ -3678,6 +3678,24 @@ fn trim_list_item_end(text: &str) -> &str {
     text.trim_end_matches(|character| character != '\t' && is_js_whitespace(character))
 }
 
+// Marked's list scan uses a narrower boundary than its block tokenizer.
+fn list_lazy_end(line: &str, max_indent: usize, html: bool) -> bool {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    if indent > max_indent {
+        return false;
+    }
+    let rest = &line[indent..];
+    rest.starts_with('#')
+        || rest.starts_with("```")
+        || rest.starts_with("~~~")
+        || thematic_break(rest)
+        || (html
+            && (rest.starts_with("<!--")
+                || rest.strip_prefix('<').is_some_and(|tag| {
+                    tag.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) && tag.contains('>')
+                })))
+}
+
 fn parse_list<'src>(
     lines: &[&'src str],
     start: usize,
@@ -3715,6 +3733,7 @@ fn parse_list<'src>(
     let mut checks = Vec::new();
     let mut at = start;
     let mut next_marker = Some(first);
+    let mut last_body_ends_bare_quote = false;
     if prefix_end > start + 1 {
         plain_items.pop();
         items.extend(plain_items.into_iter().map(|text| MdListItem {
@@ -3731,6 +3750,9 @@ fn parse_list<'src>(
         if marker.kind != first.kind {
             break;
         }
+        // The checkbox is content after the bullet marker, not part of its width.
+        let content_indent = marker.indent + marker.width;
+        let lazy_limit = 3.min(content_indent - 1);
         let after_marker = &lines[at][marker.indent..]
             .trim_start_matches(|character: char| character.is_ascii_digit())[1..];
         let mut previous_ends_lazy = after_marker
@@ -3738,14 +3760,9 @@ fn parse_list<'src>(
             .take_while(|byte| *byte == b' ')
             .count()
             >= 4
-            || matches!(
-                block_start(after_marker, false, false),
-                Some("heading" | "fence" | "rule")
-            );
+            || list_lazy_end(after_marker, lazy_limit, false);
         at += 1;
         let mut continued = Vec::new();
-        // The checkbox is content after the bullet marker, not part of its width.
-        let content_indent = marker.indent + marker.width;
         while let Some(line) = lines.get(at) {
             if let Some(next) =
                 list_marker(line, reading).filter(|next| next.indent < content_indent)
@@ -3828,18 +3845,25 @@ fn parse_list<'src>(
             let indent = line.bytes().take_while(|byte| *byte == b' ').count();
             if indent >= content_indent {
                 continued.push(&line[content_indent..]);
-            } else if !previous_ends_lazy && block_start(line, false, false).is_none() {
+            } else if !previous_ends_lazy
+                && !list_lazy_end(line, lazy_limit, true)
+                && block_start(line, false, false).is_none()
+            {
                 continued.push(line);
             } else {
                 break;
             }
             previous_ends_lazy = indent >= content_indent + 4
-                || matches!(
-                    block_start(continued.last().unwrap(), false, false),
-                    Some("heading" | "fence" | "rule")
-                );
+                || list_lazy_end(continued.last().unwrap(), lazy_limit, false);
             at += 1;
         }
+        last_body_ends_bare_quote = continued
+            .last()
+            .copied()
+            .unwrap_or(marker.text)
+            .trim_start_matches(' ')
+            .strip_prefix('>')
+            .is_some_and(|tail| tail.trim().is_empty());
         let item = if continued.is_empty() && !structural_item_start(marker.text) {
             MdListItem {
                 paragraph: marker.text.into(),
@@ -3888,8 +3912,10 @@ fn parse_list<'src>(
         if let Some(last) = items.last_mut() {
             if let Some(blocks) = &mut last.blocks {
                 let mut tail = blocks.last_mut();
-                while let Some(MdBlock::Quote(inner)) = tail {
-                    tail = inner.last_mut();
+                if !last_body_ends_bare_quote {
+                    while let Some(MdBlock::Quote(inner)) = tail {
+                        tail = inner.last_mut();
+                    }
                 }
                 if let Some(MdBlock::Paragraph(text)) = tail {
                     text.truncate(trim_list_item_end(text).len());

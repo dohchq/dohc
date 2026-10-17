@@ -306,11 +306,11 @@ function continuationIndent(text: string): { indent: number; lazy: boolean; fenc
   const indent = content - marker > 4 || !body
     ? marker + 1
     : content;
-  const fence = fenceOpener(body);
+  const fence = content - marker > 4 ? null : fenceOpener(body);
   return {
     indent,
     lazy: !!body && content - marker < 4 &&
-      !HEADING_RE.test(body) && !fence && !BREAK_RE.test(body),
+      !body.startsWith("#") && !fence && !BREAK_RE.test(body),
     fence,
   };
 }
@@ -394,8 +394,7 @@ export function blockForLine(body: string, line: number): LineBlock {
   let openKind: BlockKind = "other";
   let openMarker = "";
   let openIndent = 1;
-  let lazyAllowed = false;
-  let previousDeep = false;
+  let previousEndsLazy = false;
   let quoteOpen = false;
   let quoteCallout = false;
   let quoteFence: Fence | null = null;
@@ -545,7 +544,10 @@ export function blockForLine(body: string, line: number): LineBlock {
           (kind === "ordered" &&
             (quoteCallout || INTERRUPTING_ORDERED_RE.test(text))))) ||
       // Ordinary item paragraphs accept underindented lazy continuation.
-      (open && listOpen && (!lazyAllowed || previousDeep) && indent < openIndent);
+      (open && listOpen && indent < openIndent &&
+        (previousEndsLazy ||
+          (indent <= Math.min(3, openIndent - 1) &&
+            (/^ *#/.test(text) || /^ *<(?:[a-z].*>|!--)/i.test(text)))));
     // A heading opens a block wherever one can open — but indented into a
     // list item it is that item's own heading, which is what `resumes` says.
     const opens = (kind === "heading" || interrupts || !open) && !resumes;
@@ -566,6 +568,11 @@ export function blockForLine(body: string, line: number): LineBlock {
         kind === "quote" && CALLOUT_RE.test(text.replace(QUOTE_PREFIX_RE, ""));
       quoteFence = null;
     }
+    previousEndsLazy = listOpen &&
+      (text.includes("\t") ? leadingColumns(text.replace(/\t/g, "    ")) : indent) >= openIndent + 4 ||
+      (listOpen && indent >= openIndent &&
+        indent - openIndent <= Math.min(3, openIndent - 1) &&
+        /^ *#/.test(text.slice(openIndent)));
     // The item at the top level of this list sets the continuation column, so
     // a later sibling with a wider marker moves it. A nested item does not:
     // it sits inside the open item's content, and the outer item still governs
@@ -580,11 +587,9 @@ export function blockForLine(body: string, line: number): LineBlock {
     ) {
       const continuation = continuationIndent(text);
       openIndent = continuation.indent;
-      lazyAllowed = continuation.lazy;
+      previousEndsLazy = !continuation.lazy;
       opener ??= continuation.fence;
     }
-    previousDeep = listOpen &&
-      (text.includes("\t") ? leadingColumns(text.replace(/\t/g, "    ")) : indent) >= openIndent + 4;
     // An ATX heading and a thematic break are one line each. The next line
     // opens its own block, blank line or not — `# Plan\nBody` is two nodes.
     open = kind !== "heading" && kind !== "break";

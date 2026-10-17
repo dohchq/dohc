@@ -167,10 +167,16 @@ it.each(corpus.cases.filter(item => item.name.startsWith('r25-')))('keeps round 
   finally { doc.destroy() }
 })
 
-it.each(corpus.cases.filter(item => item.rereadCanonical))('pins the one-time multiline-heading reread for $name', item => {
+it.each(corpus.cases.filter(item => item.rereadCanonical))('pins the one-time canonical reread for $name', item => {
   for (const reading of ['source', 'projection'] as const) {
     const second = serializeRichdocBody(parseRichdocMarkdown(item.canonical!, reading))
     expect(second).toBe(item.rereadCanonical)
     expect(serializeRichdocBody(parseRichdocMarkdown(second, reading))).toBe(second)
   }
+})
+
+it.each(corpus.cases.filter(item => item.name.startsWith('r26-')))('keeps round 26 boundaries for $name in projected reading', item => {
+  const doc = markdownToYDoc(item.source, { reading: 'projection' })
+  try { expect(yDocToMarkdown(doc)).toBe(item.canonical) }
+  finally { doc.destroy() }
 })
