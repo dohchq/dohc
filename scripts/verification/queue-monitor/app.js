@@ -21,8 +21,8 @@ const machine = o => o === "environment" || o === "error";
 const prLink = branch => branch === "main (nightly)" ? "https://github.com/dohchq/dohc/commits/main" : `https://github.com/dohchq/dohc/pulls?q=is%3Apr+head%3A${encodeURIComponent(branch)}`;
 const runKey = run => `${run.id}/${run.attempt}`;
 
-// `offline` holds the state refresh's failure and when failures began. `action` is a pause or resume in flight,
-// and `actionError` says why the last one failed. A state request numbered `staleBefore` or lower began before a write.
+// `offline` holds the state refresh's failure and when failures began. `action` is a pause, resume, or lane switch
+// in flight, and `actionError` says why the last one failed. A state request numbered `staleBefore` or lower began before a write.
 const ui = { data: null, load: { 1: null, 7: null }, loadRange: 1, tab: "now", range: 1, filter: "all", search: "", shown: 25, pinned: new Map(), logMeta: new Map(), drawer: null,
   offline: null, action: null, actionError: null, asked: 0, staleBefore: 0 };
 
@@ -153,7 +153,9 @@ function pauseBanner(pause) {
   return `<div class="banner">Paused${esc(since + why)}: ${esc(busy)}.</div>`;
 }
 
-// Banners on every tab: a server the page cannot reach, a failed pause or resume, the pause, and the service's own trouble.
+const lanesText = n => `${n} lane${n === 1 ? "" : "s"}`;
+
+// Banners on every tab: a server the page cannot reach, a failed write, the pause, a lane still closing, and the service's own trouble.
 function renderBanners() {
   const data = ui.data, svc = data?.service;
   const banners = [];
@@ -162,6 +164,9 @@ function renderBanners() {
   if (ui.actionError) banners.push(`<div class="banner bad">${esc(ui.actionError)}</div>`);
   if (data) {
     banners.push(pauseBanner(data.pause));
+    const setting = data.laneSetting;
+    if (setting?.note) banners.push(`<div class="banner info">${esc(setting.note[0].toUpperCase() + setting.note.slice(1))}.</div>`);
+    if (setting?.error) banners.push(`<div class="banner bad">The lane setting cannot be read, so the service keeps ${esc(lanesText(svc?.lanes ?? 1))}. ${esc(setting.error)} Choose 2 or 3 lanes to replace it.</div>`);
     if (svc && !svc.alive) banners.push(`<div class="banner bad">The service has not checked in for ${esc(dur(data.now - Date.parse(svc.heartbeatAt)))}, so nothing new starts. Task Scheduler restarts it within five minutes. If it stays down, run <span class="mono">pnpm verify:queue restart</span> on the host.</div>`);
     if (svc?.health?.reason) banners.push(`<div class="banner">${esc(svc.health.reason)}</div>`);
   }
@@ -183,10 +188,37 @@ function renderPauseControl() {
   button.setAttribute("aria-label", `${label} the queue`);
 }
 
+/*
+ * The lane switch: 2 or 3 lanes, host-wide. Lowering the count stops nothing, so neither choice asks twice.
+ * A count set on the host outside the switch, 1 or 4, shows as its own mark beside the two choices.
+ */
+const switchLanes = [2, 3];
+function renderLaneSwitch() {
+  const group = $("#lanes-switch");
+  const setting = ui.data?.laneSetting;
+  group.hidden = !setting;
+  if (!setting) return;
+  const current = setting.lanes;
+  group.setAttribute("aria-label", `Lanes, now ${current ?? "unreadable"}`);
+  // Unavailable rather than disabled, as for Pause, so a keyboard keeps its focus while a write runs.
+  const unavailable = String(Boolean(ui.action || ui.offline));
+  const counts = [...new Set([...switchLanes, ...(current ? [current] : [])])].sort((a, b) => a - b);
+  patch($(".seg", group), counts.map(n => switchLanes.includes(n)
+    ? `<button type="button" data-lanes="${n}" data-focus-key="lanes:${n}" aria-pressed="${n === current}" aria-label="${lanesText(n)}">${n}</button>`
+    : `<span class="seg-set" aria-hidden="true" title="Set on the host">${n}</span>`).join(""));
+  for (const button of $$("button", group)) button.setAttribute("aria-disabled", unavailable);
+}
+
+function renderControls() {
+  renderPauseControl();
+  renderLaneSwitch();
+}
+
+const actionWords = { pause: () => "pause the queue", resume: () => "resume the queue", lanes: body => `switch to ${lanesText(body.lanes)}` };
 async function act(action, body) {
   ui.action = action;
   ui.actionError = null;
-  renderPauseControl();
+  renderControls();
   renderBanners();
   try {
     await postJson(`api/${action}`, body);
@@ -194,12 +226,18 @@ async function act(action, body) {
     ui.staleBefore = ui.asked;
     await refresh();
   } catch (error) {
-    ui.actionError = `Could not ${action} the queue: ${error.message.replace(/\.$/, "")}.`;
+    ui.actionError = `Could not ${actionWords[action](body)}: ${error.message.replace(/\.$/, "")}.`;
   } finally {
     ui.action = null;
-    renderPauseControl();
+    renderControls();
     renderBanners();
   }
+}
+
+function switchLanesTo(event) {
+  const button = event.target.closest("[data-lanes]");
+  if (!button || ui.action || ui.offline || button.getAttribute("aria-pressed") === "true") return;
+  act("lanes", { lanes: Number(button.dataset.lanes) });
 }
 
 function openPause() {
@@ -229,7 +267,7 @@ function renderStrip({ data, running, finished, starts }) {
   const meter = (label, value, fill, cls = "") => `<div class="meter"><span class="m-label">${label}</span><b>${value}</b><div class="m-bar"><i class="${cls}" style="width:${Math.max(0, Math.min(100, fill))}%"></i></div></div>`;
   const cpu = health.cpuBusyPercent, mem = health.freeMemGb, disk = health.diskFreeGb;
   patch($("#strip"), `
-    <div class="stat"><div class="label">Running</div><div class="value">${busy} of ${lanes}</div><div class="sub">${busy >= lanes ? "every lane busy" : `${lanes - busy} lane free`}${data.lanes?.holders.some(h => h.kind === "inline") ? ", with an inline gate" : ""}</div></div>
+    <div class="stat"><div class="label">Running</div><div class="value">${busy} of ${lanes}</div><div class="sub">${busy >= lanes ? "every lane busy" : `${lanesText(lanes - busy)} free`}${data.lanes?.holders.some(h => h.kind === "inline") ? ", with an inline gate" : ""}</div></div>
     <div class="stat"><div class="label">Waiting</div><div class="value${data.queued.length > 2 * lanes ? " warn" : ""}">${data.queued.length}</div><div class="sub">${data.queued.length ? `oldest waited ${esc(dur(data.now - oldest))}` : "nothing waiting"}</div></div>
     <div class="stat"><div class="label">Line clears</div><div class="value${clears && clears - data.now > 2 * HOUR ? " warn" : ""}">${clears ? (data.pause ? esc(dur(clears - data.now)) : `≈ ${esc(at(clears))}`) : "Now"}</div><div class="sub">${clears ? (data.pause ? "after resume" : `in ${esc(dur(clears - data.now))} if nothing new arrives`) : "no backlog"}</div></div>
     <div class="stat"><div class="label">Last 24 hours</div><div class="value">${day.length ? Math.round(passed / day.length * 100) : 0}% <span class="muted" style="font-size:14px">passed</span></div>
@@ -655,7 +693,7 @@ function renderNightly({ data, runs }) {
 
 function render() {
   renderBanners();
-  renderPauseControl();
+  renderControls();
   if (!ui.data) return;
   const d = derived();
   renderHeader(d);
@@ -681,7 +719,7 @@ async function refreshOnce() {
     ui.offline = { since: ui.offline?.since ?? Date.now(), unreachable: Boolean(error.offline), message: error.message };
     patch($("#service"), '<span class="dot bad"></span>Not connected');
     renderBanners();
-    renderPauseControl();
+    renderControls();
   }
 }
 
@@ -852,6 +890,7 @@ document.addEventListener("DOMContentLoaded", () => {
     refreshTerminals();
   });
   $("#pause").addEventListener("click", openPause);
+  $("#lanes-switch").addEventListener("click", switchLanesTo);
   $("#pause-confirm").addEventListener("click", confirmPause);
   $("#pause-cancel").addEventListener("click", () => $("#pause-dialog").close());
   $("#pause-reason").addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); confirmPause(); } });

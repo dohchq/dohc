@@ -17,7 +17,7 @@ import type { CloudSyncFailure } from "./relaySyncEngine";
 import { captureForWorkspace } from "./engineCaptureGate";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "./testTemp";
-import { RUNNER_SELF_TEST_AGENT_ID, type ActiveAgentRun } from "../agents/activeAgentRun";
+import type { ActiveAgentRun } from "../agents/activeAgentRun";
 import type { AgentRunStateEvent } from "../ipc/bridgeContract";
 
 // The shared-view pin drives the real gate, which never reaches the engine
@@ -420,13 +420,29 @@ describe("workspaceActivity agent run state", () => {
 
   it("shows a chat dispatch run and leaves the runner self-test out", async () => {
     const { activity, pushed } = await opened();
-    expect(await activity.claimAgentRun(id, run("dispatch-1", "dohc-chat-runner"))).toBe(true);
+    expect(await activity.claimAgentRun(id, { ...run("dispatch-1"), dispatch: "run" })).toBe(true);
     expect(activity.agentRunState(id).active).toBe(true);
     await activity.clearAgentRun(id, "dispatch-1");
-    expect(await activity.claimAgentRun(id, run("self-test", RUNNER_SELF_TEST_AGENT_ID))).toBe(true);
+    expect(await activity.claimAgentRun(id, { ...run("self-test"), dispatch: "self-test" })).toBe(true);
     expect(activity.agentRunState(id).active).toBe(false);
     await activity.clearAgentRun(id, "self-test");
     expect(pushed.map((event) => event.active)).toEqual([true, false]);
+    await activity.stopAll();
+  });
+
+  it("reads whether dohc dispatched the run from the slot", async () => {
+    const { activity } = await opened();
+    expect(activity.dispatchedAgentRun(id)).toBe(false);
+    await activity.claimAgentRun(id, run("cli-run"));
+    expect(activity.dispatchedAgentRun(id)).toBe(false);
+    await activity.clearAgentRun(id, "cli-run");
+    await activity.claimAgentRun(id, { ...run("dispatch-1"), dispatch: "run" });
+    expect(activity.dispatchedAgentRun(id)).toBe(true);
+    await activity.clearAgentRun(id, "dispatch-1");
+    await activity.claimAgentRun(id, { ...run("self-test"), dispatch: "self-test" });
+    expect(activity.dispatchedAgentRun(id)).toBe(true);
+    await activity.clearAgentRun(id, "self-test");
+    expect(activity.dispatchedAgentRun(id)).toBe(false);
     await activity.stopAll();
   });
 

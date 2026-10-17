@@ -2,6 +2,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MENU_COMMANDS, WORKBENCH_MENU_COMMANDS } from "../../ipc/channels";
+import type { ShareViewWriteScope } from "../../workspaces/shareWriteGate";
 import { CommandPalette } from "../CommandPalette";
 import { VIEW_IDENTITY } from "../workbench/viewIdentity";
 import { appViewId, VIEW_IDS } from "../workbench/workbenchState";
@@ -18,22 +19,27 @@ import {
 afterEach(cleanup);
 
 const context: CommandContext = {
-  isShareView: false,
-  shareViewWritable: false,
+  shareView: null,
   activeDocumentKind: null,
   pinnedApps: [],
 };
+const viewShare: ShareViewWriteScope = { access: "view", ended: false };
+const editShare: ShareViewWriteScope = { access: "edit", ended: false };
+// In palette order.
+const CREATE_COMMANDS: readonly CommandId[] = ["new-file", "new-drawing", "new-folder", "new-collection", "import-files"];
 
 describe("command availability", () => {
-  it.each([
-    [false, false, true],
-    [false, true, true],
-    [true, false, false],
-    [true, true, true],
-  ])("collection creation in share=%s writable=%s is %s", (isShareView, shareViewWritable, expected) => {
-    const current = { ...context, isShareView, shareViewWritable };
-    expect(isCommandAvailable("new-collection", current)).toBe(expected);
-    expect(paletteCommandRows(current).some((row) => row.id === "new-collection")).toBe(expected);
+  it.each<[string, ShareViewWriteScope | null, readonly CommandId[]]>([
+    ["an ordinary workspace", null, CREATE_COMMANDS],
+    ["an Edit share view", editShare, ["new-file", "new-drawing", "new-collection", "import-files"]],
+    ["a Comment share view", { access: "comment", ended: false }, []],
+    ["a View share view", viewShare, []],
+    ["an ended Edit share view", { access: "edit", ended: true }, []],
+    ["a share view whose grant cannot be read", { access: null, ended: false }, []],
+  ])("%s offers only the creates and imports its handlers take", (_name, shareView, expected) => {
+    const current = { ...context, shareView };
+    expect(CREATE_COMMANDS.filter((id) => isCommandAvailable(id, current))).toEqual(expected);
+    expect(paletteCommandRows(current).map((row) => row.id).filter((id) => CREATE_COMMANDS.includes(id))).toEqual(expected);
   });
 
   it.each([null, "code", "drawing", "markdown"])("source toggle with active kind %s", (activeDocumentKind) => {
@@ -42,12 +48,10 @@ describe("command availability", () => {
     expect(paletteCommandRows(current).some((row) => row.id === "toggle-markdown-source")).toBe(activeDocumentKind === "markdown");
   });
 
-  it.each([false, true])("Chats in share=%s", (isShareView) => {
-    for (const shareViewWritable of [false, true]) {
-      const current = { ...context, isShareView, shareViewWritable };
-      expect(isCommandAvailable("show-chats", current)).toBe(!isShareView);
-      expect(paletteCommandRows(current).some((row) => row.id === "show-chats")).toBe(!isShareView);
-    }
+  it.each([null, viewShare, editShare])("Chats with share view %j", (shareView) => {
+    const current = { ...context, shareView };
+    expect(isCommandAvailable("show-chats", current)).toBe(shareView === null);
+    expect(paletteCommandRows(current).some((row) => row.id === "show-chats")).toBe(shareView === null);
   });
 
   it("pinned app rows keep encoded ids, labels, order, and membership", () => {
@@ -55,8 +59,8 @@ describe("command availability", () => {
       { root: "apps/旅行 plan", label: "Travel" },
       { root: "second#app", label: "Second" },
     ];
-    for (const isShareView of [false, true]) {
-      const current = { ...context, isShareView, pinnedApps };
+    for (const shareView of [null, viewShare]) {
+      const current = { ...context, shareView, pinnedApps };
       const rows = paletteCommandRows(current);
       const cloudIndex = rows.findIndex((row) => row.id === "connect-cloud");
       expect(rows.slice(cloudIndex - 2, cloudIndex).map(({ id, label }) => ({ id, label }))).toEqual(
@@ -66,13 +70,6 @@ describe("command availability", () => {
     }
     expect(isCommandAvailable(pinnedAppCommandId(pinnedApps[0].root), context)).toBe(false);
     expect(paletteCommandRows(context).some((row) => row.availability === "pinnedApp")).toBe(false);
-  });
-
-  it("preserves unconditional write offers for later UI work", () => {
-    const readOnlyShare = { ...context, isShareView: true };
-    for (const id of ["new-file", "new-drawing", "new-folder", "import-files"] as const) {
-      expect(isCommandAvailable(id, readOnlyShare)).toBe(true);
-    }
   });
 });
 

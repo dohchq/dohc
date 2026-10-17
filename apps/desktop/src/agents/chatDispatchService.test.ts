@@ -48,6 +48,9 @@ import {
 } from "./awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "./liveAgentDispatchStore";
 import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
+import { deriveChatActorKey } from "../workspaces/chatWrites";
+import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
+import { UNNAMED_AGENT_ID } from "./activeAgentRun";
 
 const WORKSPACE_ID = "workspace-chat-dispatch";
 const CHAT_START_MS = Date.parse("2026-07-10T04:05:06.000Z");
@@ -1073,7 +1076,7 @@ describe("chatDispatchService", () => {
     expect(personRun.chainDepth).toBe(0);
     expect(fixture.attributions.at(-1)).toEqual({
       workspaceId: WORKSPACE_ID,
-      run: { agentId: "dohc-chat-runner", agentRunId: personRun.run.runId, depth: 0 },
+      run: { agentId: UNNAMED_AGENT_ID, agentRunId: personRun.run.runId, depth: 0, dispatch: "run" },
     });
     await linkAgentReply(fixture, asked.threadId, personRun.run.runId);
     fixture.spawnCalls[0]!.process.emitExit(0);
@@ -1100,10 +1103,34 @@ describe("chatDispatchService", () => {
     const wokenRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
     expect(wokenRun.run.triggerMessageId).toBe(wake.message.id);
     expect(fixture.attributions.at(-1)?.run).toEqual({
-      agentId: "dohc-chat-runner", agentRunId: wokenRun.run.runId, depth: 3,
+      agentId: UNNAMED_AGENT_ID, agentRunId: wokenRun.run.runId, depth: 3, dispatch: "run",
     });
     // The agent reads that an automation asked, not a person.
     expect(fixture.spawnCalls[1]!.process.stdinText).toContain("**Stamp the finish date** · automation ·");
+  });
+
+  it("records a run's file writes as the agent its replies are", async () => {
+    const fixture = await createFixture();
+    await createAgentThread(fixture, { body: "Plan the trip.", authorUserId: "user_local" });
+    await activate(fixture);
+    const run = fixture.attributions.at(-1)?.run;
+    if (!run) throw new Error("Expected the run's attribution.");
+    // History keys a file write by the run slot's agent. The runner replies
+    // with `dohc chat reply --as-agent`, which names no agent.
+    const issuer = createActorIssuer("https://cloud.test");
+    const fileWrite = deriveMomentActor(
+      { kind: "agent", agentId: run.agentId, agentRunId: run.agentRunId, onBehalfOf: "user-1" },
+      { source: "own-store", workspaceId: WORKSPACE_ID, identity: { installationId: "local-id", account: { issuer, userId: "user-1" } } },
+      "Nova",
+    );
+    const reply = deriveChatActorKey({
+      credentials: { serverUrl: "https://cloud.test", userId: "user-1" },
+      installationId: "local-id",
+      workspaceId: WORKSPACE_ID,
+      writer: { via: "cli", actor: "agent" },
+      displayName: "Nova",
+    });
+    expect(parseActorKey(reply!)).toEqual(fileWrite.key);
   });
 
   it("releases temporary tray-only run activity after the owned child exits", async () => {
@@ -2838,31 +2865,36 @@ describe("chatDispatchService", () => {
       ),
     );
 
+    const timeoutReported = Promise.withResolvers<void>();
+    vi.spyOn(fixture.errors, "push").mockImplementation((...errors) => {
+      const length = Array.prototype.push.apply(fixture.errors, errors);
+      if (errors.some(error => error instanceof Error && error.message === "sidecar unavailable during timeout persistence")) timeoutReported.resolve();
+      return length;
+    });
     await vi.advanceTimersByTimeAsync(60_000);
 
-    await vi.waitFor(
-      () => {
-        expect(fixture.failRunRequests).toBe(6);
-        expect(fixture.errors).toContainEqual(
-          expect.objectContaining({ message: "sidecar unavailable during timeout persistence" }),
-        );
-      },
-      { interval: 0 },
+    // Notice-file I/O precedes failRun. Join the notification before advancing recovery time.
+    await timeoutReported.promise;
+    expect(fixture.failRunRequests).toBe(6);
+    expect(fixture.errors).toContainEqual(
+      expect.objectContaining({ message: "sidecar unavailable during timeout persistence" }),
     );
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).not.toHaveProperty(
       "endedAtMs",
     );
 
     const updatesBeforeRetry = fixture.runUpdatedWorkspaces.length;
+    const retryReported = Promise.withResolvers<void>();
+    vi.spyOn(fixture.runUpdatedWorkspaces, "push").mockImplementation((...workspaces) => {
+      const length = Array.prototype.push.apply(fixture.runUpdatedWorkspaces, workspaces);
+      if (length === updatesBeforeRetry + 2) retryReported.resolve();
+      return length;
+    });
     await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
 
-    await vi.waitFor(
-      () => {
-        expect(fixture.failRunRequests).toBe(7);
-        expect(fixture.runUpdatedWorkspaces).toHaveLength(updatesBeforeRetry + 2);
-      },
-      { interval: 0 },
-    );
+    await retryReported.promise;
+    expect(fixture.failRunRequests).toBe(7);
+    expect(fixture.runUpdatedWorkspaces).toHaveLength(updatesBeforeRetry + 2);
     expect(await fixture.dispatch.getRunRecord(claim.run.runId)).toMatchObject({
       endedAtMs: fixture.now.value,
       exitCode: 124,
@@ -3034,6 +3066,7 @@ describe("chatDispatchService", () => {
       `dohc chat post ${agentChannel.id} --as-agent --title "dohc runner self-test" "${marker}"`,
     );
     expect(runId).toBe("run_self_test_self_test_id_1");
+    expect(fixture.attributions.at(-1)?.run).toEqual({ agentId: UNNAMED_AGENT_ID, agentRunId: runId, depth: 0, dispatch: "self-test" });
 
     expect(await fixture.chat.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: agentChannel.id })).toEqual([]);
     const started = await fixture.chat.startChannelThread({

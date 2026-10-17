@@ -190,6 +190,10 @@ export function createInMemoryWorkspaceActivity(
         ? service.hasAgentRun(authority.state, expectedRootPath)
         : false;
     },
+    dispatchedAgentRun: (workspaceId: string): boolean => {
+      const authority = authorities.get(workspaceId);
+      return authority ? service.dispatchedAgentRun(authority.state) : false;
+    },
     engineCaptureFor: (
       workspaceId: string,
       expectedRootPath?: string,

@@ -17,13 +17,13 @@ import type {
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import type { RunnerSettings } from "../settings/userSettings";
+import { UNNAMED_AGENT_ID, type AgentRunDispatch } from "./activeAgentRun";
 import {
   AGENT_DISPATCH_RPC_DEADLINE_MS,
   type AgentDispatchRequestOptions,
   type AwaitableAgentDispatchStore,
 } from "./awaitableAgentDispatchStore";
 import { buildRunnerThreadContext } from "./runnerThreadContext";
-import { RUNNER_SELF_TEST_AGENT_ID } from "./activeAgentRun";
 
 // How a run ended, as its notice says it.
 type RunOutcome =
@@ -146,7 +146,7 @@ interface ChatDispatchServiceOptions extends ChatRunnerProcessOptions {
   // at the run's chain depth, for the person main names.
   setRunAttribution(
     workspace: ChatDispatchWorkspace,
-    run: { agentId: string; agentRunId: string; depth: number } | null,
+    run: { agentId: string; agentRunId: string; depth: number; dispatch: AgentRunDispatch } | null,
   ): void | Promise<void>;
   runSlotOccupied?(workspace: ChatDispatchWorkspace): boolean;
   publishPresence?(input: ChatDispatchPresenceInput): Promise<void>;
@@ -748,9 +748,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     try {
       const identity = await options.identityFor(workspace);
       await options.setRunAttribution(workspace, {
-        agentId: "dohc-chat-runner",
+        agentId: UNNAMED_AGENT_ID,
         agentRunId: claim.run.runId,
         depth: claim.chainDepth,
+        dispatch: "run",
       });
       const markdown = await buildRunnerThreadContext({
         dispatchStore: dispatch,
@@ -1460,9 +1461,10 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           };
         }
         await options.setRunAttribution(workspace, {
-          agentId: RUNNER_SELF_TEST_AGENT_ID,
+          agentId: UNNAMED_AGENT_ID,
           agentRunId: runId,
           depth: 0,
+          dispatch: "self-test",
         });
         const child = spawnConfiguredRunner({
           rootPath: workspace.rootPath,

@@ -11,7 +11,7 @@ import type {
   WorkspaceEngineCapture,
   WorkspaceEngineCaptureFailure,
 } from "./workspaceEngineCapture";
-import { RUNNER_SELF_TEST_AGENT_ID, type ActiveAgentRun } from "../agents/activeAgentRun";
+import type { ActiveAgentRun } from "../agents/activeAgentRun";
 import type { WorkspaceObservationCallbacks, WorkspaceObservationHandle } from "./workspaceFileObservation";
 import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 
@@ -111,7 +111,7 @@ export interface WorkspaceActivityOptions {
 
 // A local agent run is any run holding the slot except the runner self-test.
 function isAgentAtWork(run: ActiveAgentRun | null): boolean {
-  return run !== null && run.agentId !== RUNNER_SELF_TEST_AGENT_ID;
+  return run !== null && run.dispatch !== "self-test";
 }
 
 // What the open-time gate decided: the recorder, and why there is none.
@@ -760,6 +760,12 @@ export function createWorkspaceActivity(
     return state.entry?.agentRun?.depth ?? 0;
   }
 
+  // Whether a run dohc dispatched holds the slot. Its agent gives no name, so
+  // the CLI drops any name a write claims and the run stays one actor.
+  function dispatchedAgentRun(state: WorkspaceActivityState): boolean {
+    return state.entry?.agentRun?.dispatch !== undefined;
+  }
+
   // The agent run holding the slot, as a local app's invocation is
   // attributed to it: its chain depth, or null with no run.
   function agentRun(state: WorkspaceActivityState): { depth: number } | null {
@@ -837,6 +843,7 @@ export function createWorkspaceActivity(
     clearAgentRun,
     hasAgentRun,
     agentRunDepth,
+    dispatchedAgentRun,
     agentRun,
     agentRunState,
     engineCaptureFor,
