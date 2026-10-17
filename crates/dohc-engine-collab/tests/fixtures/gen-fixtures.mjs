@@ -352,6 +352,7 @@ const RICHDOC_PROJECTION_CASES = [
     markdown: [
       "- first",
       "  - nested [link](notes/item)",
+      "",
       "    3. deep ordered",
       "    4. next deep",
       "  - nested sibling",

@@ -13,7 +13,7 @@ import { AskAgentButton, type AskAgent } from "../askAgent";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { EmptyState, IconButton, PrimaryButton, RetryRow } from "../ui/controls";
-import { AppGlyph } from "../ui/KindGlyph";
+import { ObjectGlyph } from "../ui/KindGlyph";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import type { AboutNotices } from "./About";
@@ -120,7 +120,7 @@ function AppRow(props: {
             active ? "bg-bg text-ink" : "bg-panel-2 text-muted"
           }`}
         >
-          <AppGlyph size={14} />
+          <ObjectGlyph kind="app" size={14} />
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[13px] font-medium text-ink">{app.title}</span>

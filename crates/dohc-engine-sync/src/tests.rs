@@ -1050,7 +1050,7 @@ mod chat;
 mod file_export_lane;
 mod hosted_replica;
 mod outbound_authors;
-mod owner_publication;
+pub(crate) mod owner_publication;
 mod recover;
 mod relay_pull;
 mod relay_pull_bench;
@@ -1176,6 +1176,97 @@ fn refused_malformed_proof_with_phantom_blobs_does_not_block_the_next_pull_opera
             list_refusal_notices(&store, "ws").unwrap().is_empty(),
             "redelivery must not recreate a dismissed refusal"
         );
+    }
+}
+
+#[cfg(test)]
+mod nested_contract_production_folds {
+    use super::*;
+    #[test]
+    fn refuses_outside_edits_before_journaling() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tools/rust-engine-program/nested-markdown-contract.json"
+        ))
+        .unwrap();
+        let sources = corpus["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| case["productionFoldRefuse"] == true)
+            .map(|case| case["source"].as_str().unwrap());
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.rewrite_content_to_markdown(
+            dohc_engine_collab::ContentKind::Richdoc,
+            "Other settled body",
+        )
+        .unwrap();
+        let seed = doc.encode_full_state();
+        for source in sources {
+            let (_scratch, _path, mut store) = open_store();
+            seed_replication_version(&mut store, "main", "main");
+            store.write_with(&NoFaults, |tx| { tx.execute_batch("INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES('ws','probe-origin','epoch','stream',1); INSERT INTO sync_relay_cursors(workspace_id,cursor,replication_epoch,stream_identity) VALUES('ws','0','epoch','stream');").map_err(SyncError::persist) }).unwrap();
+            let key = dohc_engine_collab::DocKey::new("ws", "main", "probe").unwrap();
+            VersionedTextStore::new(&mut store)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        object_id: "probe".into(),
+                        path: "notes/probe.md".into(),
+                        text: "Other settled body".into(),
+                        moment_id: "seed-settled".into(),
+                        metadata_origin: "ydoc".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1501,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            dohc_engine_collab::claim_base(
+                &mut store,
+                &key,
+                dohc_engine_collab::ContentKind::Richdoc,
+                &seed,
+                &NoFaults,
+                1500,
+            )
+            .unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE ydoc_docs SET last_settled_sha=?1 WHERE object_id='probe'",
+                        [dohc_engine_storage::hex_sha256(b"Other settled body")],
+                    )
+                    .map_err(SyncError::persist)
+                })
+                .unwrap();
+            let result = store.write_with(&NoFaults, |tx| {
+                crate::ydoc_apply::fold_resolution_into_ydoc_in_tx(
+                    tx,
+                    "ws",
+                    "main",
+                    "probe",
+                    "notes/probe.md",
+                    source,
+                    1600,
+                )
+            });
+            let loaded = dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap();
+            let canonical = loaded
+                .doc
+                .project(dohc_engine_collab::ContentKind::Richdoc)
+                .unwrap()
+                .content;
+            let journaled:i64=store.read_with(|conn|conn.query_row("SELECT COUNT(*) FROM replication_log WHERE op_kind='ydoc.update' AND imported=0",[],|row|row.get(0))).unwrap();
+            assert!(result.is_err(), "{source}");
+            assert_eq!(canonical, "Other settled body", "{source}");
+            assert_eq!(journaled, 0, "{source}");
+        }
     }
 }
 

@@ -305,7 +305,8 @@ export function Menu(props: {
     const letter = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
     // A field keeps Home, End and the typed letters; the arrows leave it.
     const next = arrow || (!inField && (letter || event.key === "Home" || event.key === "End"))
-      ? moveInMenu(event, current(), rowElements.current.slice(0, count).map((row) => row?.textContent ?? ""))
+      ? moveInMenu(event, current(), rows.map((row, index) =>
+        "label" in row && typeof row.label === "string" ? row.label : rowElements.current[index]?.textContent ?? ""))
       : null;
     if (next !== null) {
       if (!letter) event.preventDefault();

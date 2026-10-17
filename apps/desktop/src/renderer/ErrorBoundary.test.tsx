@@ -123,13 +123,16 @@ describe("AppErrorBoundary", () => {
 
 describe("installGlobalErrorReporters", () => {
   it("logs uncaught errors and unhandled rejections", () => {
-    installGlobalErrorReporters(window);
-    window.dispatchEvent(new ErrorEvent("error", { message: "loose error" }));
+    // Not window: a listener there outlives the test, and vitest reports an
+    // uncaught error only while no other listener handles it.
+    const target = new EventTarget();
+    installGlobalErrorReporters(target as unknown as Window);
+    target.dispatchEvent(new ErrorEvent("error", { message: "loose error" }));
     const rejection = new Event("unhandledrejection") as Event & {
       reason?: unknown;
     };
     rejection.reason = new Error("loose rejection");
-    window.dispatchEvent(rejection);
+    target.dispatchEvent(rejection);
     const logged = vi.mocked(console.error).mock.calls.map((call) => String(call[0]));
     expect(logged.some((entry) => entry.includes("uncaught renderer error"))).toBe(
       true,
