@@ -84,8 +84,8 @@ async function harness() {
     assertTrustedSender: (event: Event) => { if (!event.trusted) throw new Error("untrusted"); },
     withActiveWorkspace: (event, id, message, work) => withRendererWorkspaceOperation(event.sender, id, message, work),
   }, shareProposalOperations, directWrites.handlers);
-  const invoke = (channel: string, payload: unknown = { workspaceId: "workspace" }, trusted = true) =>
-    Promise.resolve().then(() => handlers.get(channel)!({ sender: "window", trusted }, payload));
+  const invoke = (channel: string, payload: unknown = { workspaceId: "workspace" }, trusted = true, sender = "window") =>
+    Promise.resolve().then(() => handlers.get(channel)!({ sender, trusted }, payload));
   const recipient = (access: "view" | "comment" | "edit" = "edit", ended = false) => {
     delete workspace.remote;
     workspace.shareView = {
@@ -96,6 +96,7 @@ async function harness() {
   };
   return { workspace, authorities, attachmentId, cache, warm, list, read, readOp, settle, listMine, withdraw,
     readText, queue, reconcile, submit, pushDirect, relayFor, handlers, invoke, recipient, reported, directWrites,
+    work: [warm, list, read, readOp, settle, listMine, withdraw, readText, queue, reconcile, submit, pushDirect, relayFor],
     retireRenderer: () => { rendererCurrent = false; } };
 }
 
@@ -105,42 +106,18 @@ describe("registered share proposal handlers", () => {
   it.each(Object.values(shareProposalOperations))("rejects an untrusted sender on $channel before parsing or work", async row => {
     const h = await harness();
     await expect(h.invoke(row.channel, null, false)).rejects.toThrow("untrusted");
-    expect(h.warm).not.toHaveBeenCalled();
-    expect(h.list).not.toHaveBeenCalled();
-    expect(h.read).not.toHaveBeenCalled();
-    expect(h.readOp).not.toHaveBeenCalled();
-    expect(h.settle).not.toHaveBeenCalled();
-    expect(h.listMine).not.toHaveBeenCalled();
-    expect(h.withdraw).not.toHaveBeenCalled();
-    expect(h.readText).not.toHaveBeenCalled();
-    expect(h.queue).not.toHaveBeenCalled();
-    expect(h.reconcile).not.toHaveBeenCalled();
-    expect(h.submit).not.toHaveBeenCalled();
-    expect(h.pushDirect).not.toHaveBeenCalled();
-    expect(h.relayFor).not.toHaveBeenCalled();
+    for (const fn of h.work) expect(fn).not.toHaveBeenCalled();
   });
 
   it.each(Object.values(shareProposalOperations))("rejects another open workspace on $channel before work", async row => {
     const h = await harness();
     const payload = row.payload.parse({
-      workspaceId: "other", proposalId: "proposal", opIndex: 0, decision: "accept",
+      workspaceId: "workspace", proposalId: "proposal", opIndex: 0, decision: "accept",
       channelId: "chan", recipientEmail: "peer@example.test", channelWireIds: [],
       shareId: "share", generation: 1,
     });
-    await expect(h.invoke(row.channel, payload)).rejects.toThrow(row.inactiveMessage);
-    expect(h.warm).not.toHaveBeenCalled();
-    expect(h.list).not.toHaveBeenCalled();
-    expect(h.read).not.toHaveBeenCalled();
-    expect(h.readOp).not.toHaveBeenCalled();
-    expect(h.settle).not.toHaveBeenCalled();
-    expect(h.listMine).not.toHaveBeenCalled();
-    expect(h.withdraw).not.toHaveBeenCalled();
-    expect(h.readText).not.toHaveBeenCalled();
-    expect(h.queue).not.toHaveBeenCalled();
-    expect(h.reconcile).not.toHaveBeenCalled();
-    expect(h.submit).not.toHaveBeenCalled();
-    expect(h.pushDirect).not.toHaveBeenCalled();
-    expect(h.relayFor).not.toHaveBeenCalled();
+    await expect(h.invoke(row.channel, payload, true, "other-window")).rejects.toThrow(row.inactiveMessage);
+    for (const fn of h.work) expect(fn).not.toHaveBeenCalled();
   });
 
   it("preserves registration order and trusts the sender before parsing or loading credentials", async () => {

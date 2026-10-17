@@ -239,8 +239,7 @@ export const CHANNELS = {
   pressAutomationButton: "desktop:press-automation-button",
   automationRunSettled: "desktop:automation-run-settled",
   automationRunWaiting: "desktop:automation-run-waiting",
-  // Share changes. The first three act on a workspace this
-  // machine owns; the last three act from inside an edit-level share view.
+  // Reports direct writes pushed from an edit-level share view.
   shareDirectWritesPushed: "desktop:share-direct-writes-pushed",
   openWorkspace: "desktop:open-workspace",
   listEngineMoments: "desktop:list-engine-moments",

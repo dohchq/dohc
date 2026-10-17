@@ -118,11 +118,12 @@ async function harness(workspaceId = "workspace") {
     assertTrustedSender: (event: Event) => { if (!event.trusted) throw new Error("untrusted"); },
     withActiveWorkspace: (event, id, message, work) => withRendererWorkspaceOperation(event.sender, id, message, work),
   }, sharedChannelOperations, helpers.handlers);
-  const invoke = async (channel: string, payload: unknown, trusted = true) =>
-    handlers.get(channel)!({ sender: "window", trusted }, payload);
+  const invoke = async (channel: string, payload: unknown, trusted = true, sender = "window") =>
+    handlers.get(channel)!({ sender, trusted }, payload);
   return {
     handlers, invoke, workspace, other, authorities, helpers, relayListing, warm, peek, cache, write, pull, notify, acknowledge,
     mount, unmount, push, claim, rotateAfterLookup, store, relayCalls, sharesChanged, reconcileReceivedShares,
+    work: [warm, relayListing, peek, write, pull, notify, acknowledge, mount, unmount, push, claim, sharesChanged, reconcileReceivedShares],
     rotateCredentials: () => { generation += 1; }, retireRenderer: () => { rendererCurrent = false; },
   };
 }
@@ -131,42 +132,18 @@ describe("registered shared-channel handlers", () => {
   it.each(Object.values(sharedChannelOperations))("rejects an untrusted sender on $channel before parsing or work", async row => {
     const h = await harness();
     await expect(h.invoke(row.channel, null, false)).rejects.toThrow("untrusted");
-    expect(h.warm).not.toHaveBeenCalled();
-    expect(h.relayListing).not.toHaveBeenCalled();
-    expect(h.peek).not.toHaveBeenCalled();
-    expect(h.write).not.toHaveBeenCalled();
-    expect(h.pull).not.toHaveBeenCalled();
-    expect(h.notify).not.toHaveBeenCalled();
-    expect(h.acknowledge).not.toHaveBeenCalled();
-    expect(h.mount).not.toHaveBeenCalled();
-    expect(h.unmount).not.toHaveBeenCalled();
-    expect(h.push).not.toHaveBeenCalled();
-    expect(h.claim).not.toHaveBeenCalled();
-    expect(h.sharesChanged).not.toHaveBeenCalled();
-    expect(h.reconcileReceivedShares).not.toHaveBeenCalled();
+    for (const fn of h.work) expect(fn).not.toHaveBeenCalled();
   });
 
   it.each(Object.values(sharedChannelOperations))("rejects another open workspace on $channel before work", async row => {
     const h = await harness();
     const payload = row.payload.parse({
-      workspaceId: "other", proposalId: "proposal", opIndex: 0, decision: "accept",
+      workspaceId: "workspace", proposalId: "proposal", opIndex: 0, decision: "accept",
       channelId: "chan", recipientEmail: "peer@example.test", channelWireIds: [],
       shareId: "share", generation: 1,
     });
-    await expect(h.invoke(row.channel, payload)).rejects.toThrow(row.inactiveMessage);
-    expect(h.warm).not.toHaveBeenCalled();
-    expect(h.relayListing).not.toHaveBeenCalled();
-    expect(h.peek).not.toHaveBeenCalled();
-    expect(h.write).not.toHaveBeenCalled();
-    expect(h.pull).not.toHaveBeenCalled();
-    expect(h.notify).not.toHaveBeenCalled();
-    expect(h.acknowledge).not.toHaveBeenCalled();
-    expect(h.mount).not.toHaveBeenCalled();
-    expect(h.unmount).not.toHaveBeenCalled();
-    expect(h.push).not.toHaveBeenCalled();
-    expect(h.claim).not.toHaveBeenCalled();
-    expect(h.sharesChanged).not.toHaveBeenCalled();
-    expect(h.reconcileReceivedShares).not.toHaveBeenCalled();
+    await expect(h.invoke(row.channel, payload, true, "other-window")).rejects.toThrow(row.inactiveMessage);
+    for (const fn of h.work) expect(fn).not.toHaveBeenCalled();
   });
 
   it("registers the original sequence and rejects untrusted requests before work", async () => {
@@ -514,9 +491,8 @@ describe("joined Group operation", () => {
     h.workspace.sharedChannels = rows.map(row => ({
       ...row, relayUrl: "http://relay.test", recipientUserId: "member-1",
     }));
-    return async (event: { trusted: boolean; activeWorkspaceId?: string }, payload: unknown) => {
-      if (event.activeWorkspaceId !== undefined && event.activeWorkspaceId !== "ws-1") h.retireRenderer();
-      return await h.invoke(sharedChannelOperations.listJoinedSharedChannels.channel, payload, event.trusted) as ListJoinedSharedChannelsResult;
+    return async (event: { trusted: boolean; sender?: string }, payload: unknown) => {
+      return await h.invoke(sharedChannelOperations.listJoinedSharedChannels.channel, payload, event.trusted, event.sender) as ListJoinedSharedChannelsResult;
     };
   }
 
@@ -566,7 +542,7 @@ describe("joined Group operation", () => {
 
     await expect(
       handler(
-        { trusted: true, activeWorkspaceId: "ws-2" },
+        { trusted: true, sender: "other-window" },
         { workspaceId: "ws-1", channelWireIds: ["wire-1"] },
       ),
     ).rejects.toThrow("changed workspaces");

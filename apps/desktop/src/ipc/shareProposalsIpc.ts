@@ -442,7 +442,7 @@ export function createShareProposalsIpc<
     );
   };
 
-  const submitShareChangesHandler: Handlers["submitShareChanges"] = async (input, { operation }) => {
+  const submitShareChangesHandler: Handlers["submitShareChanges"] = async (_input, { operation }) => {
     // Sending needs the edit level.
     return withShareProposalRecipientOperation(
       operation,
@@ -570,7 +570,7 @@ export function createShareProposalsIpc<
     operation.assertCurrent();
   };
 
-  const listMyShareChangesHandler: Handlers["listMyShareChanges"] = async (input, { operation }) => {
+  const listMyShareChangesHandler: Handlers["listMyShareChanges"] = async (_input, { operation }) => {
     // SEEING what was already sent needs membership only: a downgrade must
     // not hide the changes it can no longer add to.
     return withShareProposalRecipientOperation(
