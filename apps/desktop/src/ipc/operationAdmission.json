@@ -17,6 +17,7 @@
   "desktop:create-workspace-folder": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + withStaleSensitiveWorkspaceOperation" } },
   "desktop:move-workspace-path": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + withExclusiveWorkspaceOperation" } },
   "desktop:delete-workspace-path": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + deleteWorkspacePathByHand/withExclusiveWorkspaceOperation" } },
+  "desktop:undo-history-operation": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + undoWorkspaceHistoryOperation/withExclusiveWorkspaceOperation" } },
   "desktop:export-workspace-zip": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "exactRendererWorkspaceReferences.capture/withReference" } },
   "desktop:export-document-file": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "exactRendererWorkspaceReferences.capture/withReference" } },
   "desktop:import-workspace-files": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "exactRendererWorkspaceReferences.capture/withReference + withRendererWorkspaceOperation + withStaleSensitiveWorkspaceOperation" } },

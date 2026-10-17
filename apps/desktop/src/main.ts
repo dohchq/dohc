@@ -1,3 +1,4 @@
+import { createOperationHistory } from "./workspaces/workspaceHistoryOperations";
 import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
 import { mountRootFor } from "./workspaces/shareMounts";
 import { createHistoryCollectionRemote } from "./workspaces/historyCollectionRemote";
@@ -5232,6 +5233,7 @@ shareViewFiles = {
     ),
 };
 const workspaceFileMutations = createWorkspaceFileMutationOwner({
+  historyFor: workspace => createOperationHistory(work => withEngineAdapter(workspace, work)),
   assertTrustedSender,
   withRendererWorkspaceOperation: (event, workspaceId, work) =>
     withRendererWorkspaceOperation(

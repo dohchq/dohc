@@ -14,6 +14,7 @@ import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPubl
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "./account";
 
+import { DeleteRecovery, HistoryOperationId, HistoryOperationReadResult, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 
 export const CLI_PROTOCOL_VERSION = 5;
@@ -36,6 +37,9 @@ const argsBase = {
   cwd: z.string().min(1),
   actor: cliActorSchema,
 };
+
+const historyOperationArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, cursor: z.string().optional() }).strict();
+const historyUndoArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, agent: z.string().min(1).max(200).optional() }).strict();
 
 const groupsArgsSchema = z.object(argsBase).strict();
 const threadsArgsSchema = z
@@ -439,6 +443,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     args: collectionCreateRecordArgsSchema,
   }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileWrite"), args: fileWriteArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("historyOperation"), args: historyOperationArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("historyUndo"), args: historyUndoArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileMove"), args: fileMoveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileDelete"), args: fileDeleteArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
@@ -532,6 +538,8 @@ export const CLI_CAPABILITIES = {
   grep: ["chat.search"],
   export: ["chat.export"],
   moments: ["history.list"],
+  historyOperation: ["history.operation.read"],
+  historyUndo: ["history.operation.undo"],
   moment: ["history.read"],
   fileChats: ["file.chats.list"],
   chat: ["chat.read"],
@@ -806,6 +814,7 @@ const rawMomentFileSchema = z
   .strict();
 const rawMomentSummarySchema = z
   .object({
+    operationId: HistoryOperationId.optional(),
     id: z.string().min(1),
     recordedAtMs: z.number(),
     source: z.literal("workspace-engine"),
@@ -1312,7 +1321,7 @@ const replacedPathSchema = z.object({
 
 const fileMoveResultSchema = z.discriminatedUnion("ok", [
   z.object({
-    ok: z.literal(true), fromPath: z.string(), toPath: z.string(), withoutHistory: z.array(z.string()).optional(),
+    ok: z.literal(true), operationId: HistoryOperationId, fromPath: z.string(), toPath: z.string(), withoutHistory: z.array(z.string()).optional(),
     replaced: replacedPathSchema.optional(),
   }).strict(),
   z.object({
@@ -1328,7 +1337,7 @@ const fileMoveResultSchema = z.discriminatedUnion("ok", [
 // deleted.
 const fileDeleteResultSchema = z.discriminatedUnion("ok", [
   z.object({
-    ok: z.literal(true), path: z.string(), trashed: z.boolean(), trashPath: z.string().optional(),
+    ok: z.literal(true), ...DeleteRecovery.shape, path: z.string(), trashed: z.boolean(), trashPath: z.string().optional(),
     withoutHistory: z.array(z.string()).optional(),
   }).strict(),
   z.object({
@@ -1383,6 +1392,8 @@ export const cliResultSchemas = {
     z.object({ ok: z.literal(false), reason: z.string() }).strict(),
   ]),
   fileWrite: fileWriteResultSchema,
+  historyOperation: HistoryOperationReadResult,
+  historyUndo: HistoryOperationUndoResult,
   fileMove: fileMoveResultSchema,
   fileDelete: fileDeleteResultSchema,
   dataset: DatasetResult,

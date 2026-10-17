@@ -5,6 +5,7 @@ import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
 import { DatasetRequest, DatasetSchemaChange } from "./dataset";
+import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { AccessObjectRef } from "@dohc/workspace-contracts/access";
 
 interface ParsedCliBase {
@@ -70,6 +71,8 @@ type CliCommandBody =
     }
   | { verb: "export"; scope: ExportScope; outDir: string }
   | { verb: "moments"; path?: string; limit: number }
+  | { verb: "historyOperation"; operationId: string; cursor?: string }
+  | { verb: "historyUndo"; operationId: string }
   | { verb: "moment"; id: string; side: "before" | "after" }
   | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string }
   | { verb: "automationList"; collectionPath: string }
@@ -502,7 +505,26 @@ const CHAT_VERBS = {
   },
 } satisfies Record<string, CliVerbSpec>;
 
+const operationId = (value: string | undefined) => {
+  if (!HistoryOperationId.safeParse(value).success) fail("Use an operation id from history list: dohc-operation: followed by a UUID.");
+  return value!;
+};
 const HISTORY_VERBS = {
+  operation: {
+    capabilityId: "history.operation.read", summary: "List the paths changed by one operation.", operands: "<operation>",
+    flags: [{ name: "--cursor", value: "cursor", text: "Continue from the cursor on the previous operation page." }],
+    parse: input => {
+      const [id, ...extra] = input.operands; noExtraArgs(extra, "history operation");
+      return { verb: "historyOperation", operationId: operationId(id), cursor: lastValue(input, "--cursor") };
+    },
+  },
+  undo: {
+    capabilityId: "history.operation.undo", summary: "Undo a delete recorded in History.", operands: "<operation>",
+    parse: input => {
+      const [id, ...extra] = input.operands; noExtraArgs(extra, "history undo");
+      return { verb: "historyUndo", operationId: operationId(id) };
+    },
+  },
   list: {
     capabilityId: "history.list",
     summary: "List changes to files, newest first.",
@@ -1091,7 +1113,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     verbs: APP_VERBS,
   },
   history: {
-    summary: "Read the changes History records for files.",
+    summary: "Read History changes and undo deletes.",
     notes: ["Changes come from the active version of the workspace."],
     verbs: HISTORY_VERBS,
   },
@@ -1175,7 +1197,7 @@ export function parseCliArguments(
   const verb = lookup(command.verbs, verbName);
   if (!verb) fail(`unknown ${commandName} verb '${verbName}'; run dohc ${commandName} --help`);
   if (help) return { help: [commandName, verbName] };
-  const agent = commandName === "document" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
+  const agent = (commandName === "history" && verbName === "undo") || commandName === "document" || global.actorFlag || (commandName === "chat" && env.DOHC_CHAT_ACTOR === "agent");
   const body = verb.parse(readVerbInput(`${commandName} ${verbName}`, verb, tokens));
   return { actor: agent ? "agent" : "human", json: global.json, ...body };
 }

@@ -114,11 +114,11 @@ const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (r
   if (request.verb === "fileMove") {
     await mkdir(dirname(join(request.args.cwd, request.args.toPath)), { recursive: true });
     await rename(join(request.args.cwd, request.args.fromPath), join(request.args.cwd, request.args.toPath));
-    return { ok: true, fromPath: request.args.fromPath, toPath: request.args.toPath };
+    return { ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", fromPath: request.args.fromPath, toPath: request.args.toPath };
   }
   if (request.verb === "fileDelete") {
     await rm(join(request.args.cwd, request.args.path), { recursive: true });
-    return { ok: true, path: request.args.path, trashed: true };
+    return { ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, path: request.args.path, trashed: true };
   }
   if (request.verb === "moments") {
     return {

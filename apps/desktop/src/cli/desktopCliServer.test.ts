@@ -787,7 +787,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
     vi.mocked(f.dependencies.activity.agentRunDepth).mockReturnValue(4);
     await writeFile(join(f.root, "plain.txt"), "original");
     expect(await f.invoke("fileMove", { fromPath: "plain.txt", toPath: "moved.txt", ...(agent ? { agent } : {}) }))
-      .toEqual({ ok: true, fromPath: "plain.txt", toPath: "moved.txt" });
+      .toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "plain.txt", toPath: "moved.txt" });
     expect(await f.invoke("fileDelete", { path: "moved.txt", ...(agent ? { agent } : {}) })).toMatchObject({ ok: true, path: "moved.txt", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/trash\//) });
     const author = { kind: "agent", agentId: agent ?? "dohc-mcp", onBehalfOf: "person-local", depth: 4 };
     expect(vi.mocked(f.capture.changePathsAs).mock.calls.map(call => call[1])).toEqual([

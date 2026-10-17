@@ -1,3 +1,4 @@
+import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { creationPartialMessage } from "@dohc/cli/creation";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import { cliUsageInvocation, type CliUsageInvocation } from "../usage/cliUsage";
@@ -309,6 +310,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   collections?: CliCollectionsPort;
   documents?: CliDocumentsPort;
   writeFiles?(files: CliFileWrite[], origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileWrite"]>;
+  historyOperation?(input: { operationId: string; cursor?: string }): Promise<CliResultByVerb["historyOperation"]>;
+  historyUndo?(input: { operationId: string }, origin: LiveDocumentEditOrigin): Promise<CliResultByVerb["historyUndo"]>;
   movePath?(input: { fromPath: string; toPath: string; overwrite?: boolean }, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileMove"]>;
   deletePath?(path: string, origin: LiveDocumentEditOrigin, requestId: string): Promise<CliResultByVerb["fileDelete"]>;
   // Absent in a shared view, which keeps no copies of its own.
@@ -548,6 +551,7 @@ function rawMomentSummary(
 ) {
   return {
     id: moment.id,
+    ...(HistoryOperationId.safeParse(moment.metadata.correlationId).success ? { operationId: moment.metadata.correlationId } : {}),
     recordedAtMs: moment.recordedAtMs,
     source: "workspace-engine" as const,
     operation: moment.operation,
@@ -2089,6 +2093,7 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
       ? validateUserMaterializePath(path, { platform: process.platform })
       : validateUserReadPath(path, { platform: process.platform });
   return {
+    shared: isSharedWithMePath(relative(root, folder).split(sep).join("/")),
     rebase(path: string, mode: CliPathMode): string {
       const supplied = validate(path, mode);
       if (!supplied.ok) throw new CliCommandError(cliPathRejected(supplied.reason, path).reason);
@@ -2774,6 +2779,20 @@ async function dispatchWorkspace(
         if (result.written?.length) await notifyWrite(options, context);
         return result;
       } catch (error) { return pathFreeFailure(error, "dohc could not write the files."); }
+    }
+
+    case "historyOperation":
+    case "historyUndo": {
+      if (request.verb === "historyUndo" && request.args.actor !== "agent") return { ok: false, reason: `An Undo through the CLI socket is recorded as an agent's; send actor "agent".` };
+      const paths = await callerPaths(context, request.args.cwd);
+      if (paths.shared) return { ok: false, reason: "History operations require the owning workspace. Open it to continue." };
+      if (!context.historyOperation || !context.historyUndo) return { ok: false, reason: "The workspace engine is not running." };
+      try {
+        if (request.verb === "historyOperation") return await context.historyOperation(request.args);
+        const result = await context.historyUndo(request.args, documentEditOrigin(request.args.agent, context, options));
+        if (result.ok) await notifyWrite(options, context);
+        return result;
+      } catch (error) { return pathFreeFailure(error, `dohc could not ${request.verb === "historyUndo" ? "undo" : "read"} this operation.`); }
     }
 
     case "fileMove":

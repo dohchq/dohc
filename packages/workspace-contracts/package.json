@@ -27,6 +27,7 @@
     "./domain": "./src/domain.ts",
     "./domain-values": "./src/domainValues.ts",
     "./engine": "./src/engine.ts",
+    "./history-operation": "./src/historyOperation.ts",
     "./file-version": "./src/fileVersion.ts",
     "./kinds": "./src/kinds.ts",
     "./live-documents": "./src/liveDocuments.ts",

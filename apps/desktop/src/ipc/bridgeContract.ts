@@ -13,6 +13,7 @@ import { PublicationAgent } from "@dohc/cli/app-publication";
 import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "@dohc/cli/account";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
 import type { WorkspaceRefTarget } from "@dohc/workspace-contracts/workspace-ref";
+import { DeleteRecovery, HistoryOperationId, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
 import { DatasetHistoryPage } from "@dohc/cli/dataset";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
@@ -814,9 +815,9 @@ export type DeleteWorkspacePathPayload = z.infer<
 // a share view, whose delete removes the projection of a moment rather than a
 // file the workspace owns. There the change is what can be taken back: the
 // granter's copy is untouched until they accept it.
-export const DeleteWorkspacePathResult = z.object({
-  trashed: z.boolean(),
-});
+export const DeleteWorkspacePathResult = z.object({ trashed: z.boolean() }).extend(DeleteRecovery.partial().shape);
+export const UndoHistoryOperationPayload = z.object({ workspaceId: WORKSPACE_ID, operationId: HistoryOperationId }).strict();
+export { HistoryOperationUndoResult as UndoHistoryOperationResult };
 export type DeleteWorkspacePathResult = z.infer<typeof DeleteWorkspacePathResult>;
 
 // relativePath absent = export the whole workspace. The output path comes

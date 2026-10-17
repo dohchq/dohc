@@ -7,6 +7,7 @@ import {
   CreateWorkspaceFolderPayload,
   DeleteWorkspacePathPayload,
   DeleteWorkspacePathResult,
+  UndoHistoryOperationPayload,
   MoveWorkspacePathPayload,
   WriteWorkspaceAssetPayload,
   WriteWorkspaceTextPayload,
@@ -38,6 +39,8 @@ import {
 } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { LocalPersonAuthor } from "./desktopRecordEdits";
+import { undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
+import type { DeleteUndoResult } from "./workspaceDeleteRecovery";
 import { deleteWorkspacePathByHand } from "./workspaceFileMoves";
 import {
   createFile,
@@ -66,6 +69,7 @@ export interface WorkspaceFileMutationOwner<Event> {
     Event,
     DeleteWorkspacePathResult
   >;
+  undoHistoryOperation: WorkspaceFileMutationIpcHandler<Event, DeleteUndoResult>;
   writeText: WorkspaceFileMutationIpcHandler<Event, WriteWorkspaceTextResult>;
   writeAsset: WorkspaceFileMutationIpcHandler<Event>;
 }
@@ -117,6 +121,7 @@ export function createWorkspaceFileMutationOwner<
   IpcEvent,
   Workspace extends WorkspaceFileMutationWorkspace,
 >(dependencies: {
+  historyFor(workspace: Readonly<Workspace>): OperationHistory;
   assertTrustedSender(event: IpcEvent): void;
   withRendererWorkspaceOperation<Result>(
     event: IpcEvent,
@@ -386,6 +391,13 @@ export function createWorkspaceFileMutationOwner<
       );
     },
       );
+    },
+
+    undoHistoryOperation: async (event, payload) => {
+      const request = admitMutation(event, payload, UndoHistoryOperationPayload.parse);
+      const person = await dependencies.localPerson();
+      return runAdmittedMutation(event, request, ({ input, workspace, assertCurrent }) =>
+        undoWorkspaceHistoryOperation({ workspace, assertCurrent }, input, person, { history: dependencies.historyFor(workspace), agent: false }));
     },
 
     deletePath: async (event, payload) => {

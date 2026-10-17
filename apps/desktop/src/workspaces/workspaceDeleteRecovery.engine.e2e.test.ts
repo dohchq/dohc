@@ -7,7 +7,7 @@ import { createRealDaemonLifecycle, createRealDaemonWorkspaceSessions, REAL_DAEM
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
-import { deleteWorkspacePathByHand, undoWorkspaceDelete } from "./workspaceFileMoves";
+import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
 
 const copy = vi.hoisted(() => ({ inspect: undefined as undefined | ((temp: string) => Promise<void>) }));
 vi.mock("node:fs/promises", async original => {
@@ -46,14 +46,18 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
     expect(await capture.fileObjectIdForPath("folder/node_modules/pkg/index.js")).toBeNull();
     const history = await sessions.run(workspace, async binding =>
       new VersionedLiveAdapter(binding.client, binding.workspace, { workspaceId: workspace.workspaceId }));
-    const removed = await deleteWorkspacePathByHand(operation, "folder", person, {
-      capture, requestId: "delete-folder", markDeleted: vi.fn(), trashItem: async () => { throw new Error("OS trash refuses"); },
+    const owner = createWorkspaceFileMutationOwner({
+      historyFor: () => history, assertTrustedSender: () => undefined,
+      withRendererWorkspaceOperation: async (_event, _id, work) => work({ workspace: operation.workspace, authorityId: workspace.attachmentId, capture,
+        yDocSessions: { withDocumentUnowned: async (_id, _path, work) => work(), markDeletedUnderPath: () => undefined }, assertCurrent: operation.assertCurrent }),
+      shareViewFiles: { change: async () => { throw new Error("No shares"); } },
+      trashItem: async () => { throw new Error("OS trash refuses"); }, localPerson: async () => person, notifyRenderer: () => undefined, shareViewEdited: () => undefined, logError: () => undefined,
     });
+    const removed = await owner.deletePath({}, { workspaceId: workspace.workspaceId, relativePath: "folder" });
     expect(removed).toMatchObject({ trashed: false, undo: { available: true }, operationId: expect.any(String) });
     await expect(stat(join(rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
     const operationId = removed.operationId!;
-    const undo = (requestId: string) => undoWorkspaceDelete(operation, { operationId, requestId }, person,
-      { workspaceId: workspace.workspaceId, history });
+    const undo = () => owner.undoHistoryOperation({}, { workspaceId: workspace.workspaceId, operationId });
     let inspection: Promise<void> | undefined;
     let inspectedTarget: string | undefined;
     copy.inspect = target => {
@@ -67,12 +71,12 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
       })();
       return inspection;
     };
-    const first = await undo("undo-folder");
+    const first = await undo();
     expect(inspection).toBeDefined();
     await inspection;
     expect(first).toMatchObject({ ok: true, tracked: { momentCount: 1 }, restored: ["folder/node_modules"], remaining: [] });
     expect(relative(rootPath, inspectedTarget!).split("\\").join("/")).toBe("folder/node_modules/pkg/index.js");
-    await expect.poll(() => undo("refresh-folder"), { timeout: REAL_DAEMON_DEADLINE_MS })
+    await expect.poll(() => undo(), { timeout: REAL_DAEMON_DEADLINE_MS })
       .toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 1 } });
     await expect.poll(() => readFile(join(rootPath, "folder/tracked.txt"), "utf8"), { timeout: REAL_DAEMON_DEADLINE_MS }).toBe("tracked original\n");
     expect(await readFile(join(rootPath, "folder/node_modules/pkg/index.js"), "utf8")).toBe("rowless original\n");
@@ -82,7 +86,7 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
     expect(replay).toMatchObject({ deduped: true, momentCount: 1, compensationOperationId: expect.any(String) });
     expect(await history.undoHistoryOperation({ workspaceId: workspace.workspaceId, operationId,
       requestId: `delete-undo:${operationId}`, author: person })).toMatchObject({ deduped: true, compensationOperationId: replay.compensationOperationId });
-    expect(await undo("new-caller-id")).toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 1 }, restored: ["folder/node_modules"], remaining: [] });
+    expect(await undo()).toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 1 }, restored: ["folder/node_modules"], remaining: [] });
     expect((await waitForPathMoments(capture, "folder/tracked.txt", 3)).map(moment => moment.id)).toEqual(moments.map(moment => moment.id));
   } finally {
     copy.inspect = undefined;

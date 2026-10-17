@@ -988,6 +988,13 @@ export function withOrderedWorkspaceTargetPathInLease<T>(
   );
 }
 
+export function withSharedWorkspaceOperation<T>(
+  rootPath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return workspaceOperationScheduler.shared(rootPath, operation);
+}
+
 export function withExclusiveWorkspaceOperation<T>(
   rootPath: string,
   operation: (

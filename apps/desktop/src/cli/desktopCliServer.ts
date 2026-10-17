@@ -1,3 +1,4 @@
+import { createOperationHistory, readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
 import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
 import { prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "../workspaces/workspaceFileMoves";
 import { join, resolve } from "node:path";
@@ -216,8 +217,17 @@ export function createDesktopCliServer<State>(
       });
       return finish();
     };
+    const operationHistory = createOperationHistory(work => withEngineAdapter(workspace, work));
+    const withHistoryOperation = <T>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<T>) =>
+      withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+        operation.assertCurrent();
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+        return work(operation);
+      });
     return {
       workspaceId: workspace.workspaceId,
+      historyOperation: input => withHistoryOperation(operation => readWorkspaceHistoryOperation(operation, input, operationHistory)),
+      historyUndo: (input, origin) => withHistoryOperation(operation => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history: operationHistory, agent: true })),
       ...(dependencies.stopWorkspaceSync ? { stopSync: async author => {
         let saved: import("@dohc/cli/protocol").CliResultByVerb["stopSync"] | undefined;
         try {
@@ -338,9 +348,7 @@ export function createDesktopCliServer<State>(
       deletePath: async (path, origin, requestId) => {
         const result = await withPathChange(requestId, (operation, options) =>
           prepareDeleteWorkspacePathAs(operation, path, agentWriteAuthor(origin), options));
-        // PR 3 exposes recovery through the agent doors.
-        const { operationId: _operationId, undo: _undo, ...wireResult } = result;
-        return wireResult;
+        return result;
       },
       // Document reads and edits go through the desktop's live document
       // sessions, the ones its editor holds, so an agent's edit merges into

@@ -99,6 +99,7 @@ export function createRealShareMountHarness(input: {
     removeMount: (owner, target) => commands.filesLifecycle.removeMount(owner, target),
   });
   const mutations = createWorkspaceFileMutationOwner({
+    historyFor: () => ({ readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_event, workspaceId, work) => {
       if (workspaceId !== workspace.workspaceId) throw new Error("Wrong host workspace");

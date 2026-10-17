@@ -174,6 +174,20 @@ describe("executeCli", () => {
     );
   });
 
+  it.each([undefined, 1234])("waits up to 90 seconds for Undo, preserving an explicit timeout (%s)", async timeoutMs => {
+    const stateDir = await tempStateDir();
+    const transport = vi.fn(async () => ({
+      protocolVersion: CLI_PROTOCOL_VERSION, ok: true,
+      result: { ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [] },
+    }));
+    const result = await executeCli({
+      argv: ["history", "undo", "dohc-operation:11111111-1111-4111-8111-111111111111"],
+      env: {}, client: { stateDir, transport, platform: "linux", ...(timeoutMs === undefined ? {} : { timeoutMs }) },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(transport).toHaveBeenCalledWith(join(stateDir, "dohc-cli.sock"), expect.any(String), timeoutMs ?? 90_000);
+  });
+
   it("passes the ambient run id through every chat write request only", async () => {
     const requests: CliRequestWithoutToken[] = [];
     const request = async (value: CliRequestWithoutToken): Promise<unknown> => {
