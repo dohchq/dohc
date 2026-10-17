@@ -10,6 +10,7 @@ import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/m
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
 import { MCP_TOOL_LEVELS } from "./mcpAdvertisement";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
@@ -22,6 +23,7 @@ import {
 } from "@dohc/security-contract/share-selector";
 import {
   MCP_TOOL_CAPABILITIES,
+  readOperation, undoOperation,
   getShareCopyDetails,
   createDocument,
   createRecord,
@@ -152,6 +154,15 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     { description: "Report whether this workspace is local-only or cloud-synced.", inputSchema: {} },
     async () => text(await workspaceStatus(ctx)),
   );
+
+  register("dohc_read_operation", {
+    description: "List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.",
+    inputSchema: { operationId: HistoryOperationId, cursor: z.string().optional() },
+  }, async args => text(await readOperation(ctx, args)));
+  register("dohc_undo_operation", {
+    description: "Undo a delete by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry a pending copy. Other operations cannot be undone yet.",
+    inputSchema: { operationId: HistoryOperationId },
+  }, async args => text(await undoOperation(ctx, args, agentName())));
 
   // Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed with the
   // retired workspace-api file/sync routes. Cloud sync is now automatic per
@@ -328,7 +339,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_move_path",
     {
       description:
-        "Move or rename a visible workspace file or folder. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.",
+        "Move or rename a visible workspace file or folder. Returns its operationId for reading the operation. Move Undo is not available yet. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.",
       inputSchema: {
         fromPath: z.string().min(1).max(4096),
         toPath: z.string().min(1).max(4096),
@@ -343,7 +354,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_delete_path",
     {
       description:
-        "Delete a visible workspace file or folder. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
+        "Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
       inputSchema: {
         path: z.string().min(1).max(4096),
         summary: z.string().max(500).optional(),

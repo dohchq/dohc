@@ -5178,6 +5178,18 @@ shareViewFiles = {
     ),
 };
 const workspaceFileMutations = createWorkspaceFileMutationOwner({
+  historyFor: workspace => ({
+    readHistoryPage: async input => {
+      const result = await withEngineAdapter(workspace, adapter => adapter.readHistoryPage(input));
+      if (!result) throw new Error("The workspace engine is not running.");
+      return result;
+    },
+    undoHistoryOperation: async input => {
+      const result = await withEngineAdapter(workspace, adapter => adapter.undoHistoryOperation(input));
+      if (!result) throw new Error("The workspace engine is not running.");
+      return result;
+    },
+  }),
   assertTrustedSender,
   withRendererWorkspaceOperation: (event, workspaceId, work) =>
     withRendererWorkspaceOperation(

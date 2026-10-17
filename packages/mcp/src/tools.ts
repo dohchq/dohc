@@ -1,3 +1,4 @@
+import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
@@ -76,6 +77,8 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_create_document: ["document.create"],
   dohc_write_file: ["file.write"],
   dohc_create_directory: ["folder.create"],
+  dohc_read_operation: ["history.operation.read"],
+  dohc_undo_operation: ["history.operation.undo"],
   dohc_move_path: ["file.move"],
   dohc_delete_path: ["file.delete"],
   dohc_detect_apps: ["app.detect"],
@@ -1871,6 +1874,17 @@ async function requestCli<Verb extends CliVerb>(
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
+}
+
+export async function readOperation(ctx: ToolContext, args: { operationId: string; cursor?: string }) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace." };
+  if (!HistoryOperationId.safeParse(args.operationId).success) return { ok: false as const, reason: "Use an operation id from history list: dohc-operation: followed by a UUID." };
+  return requestCli(ctx, "historyOperation", args);
+}
+export async function undoOperation(ctx: ToolContext, args: { operationId: string }, agent?: string) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace." };
+  if (!HistoryOperationId.safeParse(args.operationId).success) return { ok: false as const, reason: "Use an operation id from history list: dohc-operation: followed by a UUID." };
+  return requestCli(ctx, "historyUndo", { operationId: args.operationId, ...(agent ? { agent } : {}) });
 }
 
 export async function getShareCopyDetails(ctx: ToolContext, input: unknown) {

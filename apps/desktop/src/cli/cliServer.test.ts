@@ -1,3 +1,5 @@
+import { undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
+import { readOperation, undoOperation } from "@dohc/mcp/tools";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
@@ -727,17 +729,47 @@ describe("CLI socket server", () => {
     expect(writeFiles).not.toHaveBeenCalled();
   });
 
+  it("refuses non-delete Undo through socket, CLI and MCP before any engine call", async () => {
+    const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+    const history = { readHistoryPage: vi.fn(), undoHistoryOperation: vi.fn() };
+    const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, assertCurrent: vi.fn() };
+    context.historyOperation = async () => ({ ok: true, operationId, members: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null });
+    context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
+    const args = { cwd: workspaceRoot, actor: "agent" as const, operationId };
+    const unsupported = { ok: false as const, reason: "Cannot undo this change yet. Only a delete can be undone." };
+    expect(await invoke("historyUndo", args)).toEqual(unsupported);
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: request => invoke(request.verb, request.args) };
+    expect(await undoOperation(ctx, { operationId })).toEqual(unsupported);
+    expect(await readOperation(ctx, { operationId })).toMatchObject({ ok: true, members: [{ operation: "rename" }] });
+    expect(await executeCli({ argv: ["history", "undo", operationId], cwd: workspaceRoot, request: request => invoke(request.verb, request.args) }))
+      .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: " + unsupported.reason + "\n" });
+    expect(history.readHistoryPage).not.toHaveBeenCalled(); expect(history.undoHistoryOperation).not.toHaveBeenCalled();
+    context.historyUndo = vi.fn(async () => unsupported);
+    expect(await invoke("historyUndo", { ...args, actor: "human" })).toMatchObject({ ok: false, reason: 'A file delete through the CLI socket is recorded as an agent\'s; send actor "agent".' });
+    expect(context.historyUndo).not.toHaveBeenCalled();
+    for (const verb of ["historyOperation", "historyUndo"] as const) {
+      expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { ...args, operationId: operationId.slice(15) } })).toMatchObject({ ok: false });
+      context.readOnly = true;
+      expect(await invoke(verb, args)).toMatchObject({ ok: false, reason: "This workspace is read-only. Change files in the owning workspace." });
+      context.readOnly = false; context.sharedView = true;
+      expect(await invoke(verb, args)).toMatchObject({ ok: false });
+      context.sharedView = false;
+      await mkdir(join(workspaceRoot, "shared-with-me"), { recursive: true });
+      expect(await invoke(verb, { ...args, cwd: join(workspaceRoot, "shared-with-me") })).toMatchObject({ ok: false });
+    }
+  });
+
   it("keeps MCP moves and deletes relative to a subfolder cwd under the agent's name", async () => {
     const cwd = join(workspaceRoot, "app");
     await mkdir(cwd);
-    const movePath = vi.fn<NonNullable<CliWorkspaceContext["movePath"]>>(async input => ({ ok: true, fromPath: input.fromPath, toPath: input.toPath }));
+    const movePath = vi.fn<NonNullable<CliWorkspaceContext["movePath"]>>(async input => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", fromPath: input.fromPath, toPath: input.toPath }));
     const deletePath = vi.fn<NonNullable<CliWorkspaceContext["deletePath"]>>(async path => ({
       ok: false, deleted: [`${path}/a.txt`], path: `${path}/b.txt`, reason: `History could not record the delete of ${path}/b.txt.`,
     }));
     context.movePath = movePath;
     context.deletePath = deletePath;
     const ctx: ToolContext = { root: cwd, home: stateDir, request: request => invoke(request.verb, request.args) };
-    expect(await moveWorkspacePath(ctx, { fromPath: "a.txt", toPath: "b.txt" }, "Client")).toEqual({ ok: true, fromPath: "a.txt", toPath: "b.txt" });
+    expect(await moveWorkspacePath(ctx, { fromPath: "a.txt", toPath: "b.txt" }, "Client")).toEqual({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", fromPath: "a.txt", toPath: "b.txt" });
     expect(await deleteWorkspacePath(ctx, { path: "notes" })).toEqual({
       ok: false, deleted: ["notes/a.txt"], path: "notes/b.txt", reason: "History could not record the delete of notes/b.txt.",
     });
@@ -755,7 +787,7 @@ describe("CLI socket server", () => {
   it("rebases whole path tokens and descendants without rewriting ordinary words", async () => {
     const cwd = join(workspaceRoot, "app");
     await mkdir(cwd);
-    context.deletePath = async path => ({ ok: true, path, trashed: true });
+    context.deletePath = async path => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, path, trashed: true });
     context.movePath = async () => ({ ok: false, path: "app/a",
       reason: "Cannot move app/a. app/apple and app/a.txt stay. app/a/child.txt stays too. It happened again. Choose app/a, then retry." });
     expect(await invoke("fileMove", { cwd, actor: "agent", requestId: "tokens", fromPath: "a", toPath: "b" })).toEqual({
@@ -765,8 +797,8 @@ describe("CLI socket server", () => {
 
   it.each(["fileMove", "fileDelete"] as const)("hides realpath host errors before %s dispatch", async verb => {
     context.rootPath = join(workspaceRoot, "missing-root");
-    context.movePath = async input => ({ ok: true, ...input });
-    context.deletePath = async path => ({ ok: true, path, trashed: true });
+    context.movePath = async input => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", ...input });
+    context.deletePath = async path => ({ ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, path, trashed: true });
     const args = { cwd: workspaceRoot, actor: "agent" as const, requestId: "realpath" };
     const result = verb === "fileMove" ? await invoke(verb, { ...args, fromPath: "a", toPath: "b" })
       : await invoke(verb, { ...args, path: "a" });

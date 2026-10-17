@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { deleteWorkspacePath, moveWorkspacePath, writeWorkspaceFile } from "../../../packages/mcp/src/tools";
+import { deleteWorkspacePath, moveWorkspacePath, undoOperation, writeWorkspaceFile } from "../../../packages/mcp/src/tools";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { waitForCliEndpoint } from "./helpers/dohcCli";
 import { cleanupDesktopWorkspace, createTempWorkspace, openHistoryView, openWorkspaceFromFirstRun, waitForWorkspaceFile } from "./helpers/workspace";
@@ -21,11 +21,15 @@ test("an MCP move and delete each show one History row under the agent", async (
       await waitForWorkspaceFile(page, workspace.workspaceId, path);
     }
 
-    expect(await moveWorkspacePath(ctx, { fromPath: "plans", toPath: "archive/plans" }, "Mover agent"))
-      .toEqual({ ok: true, fromPath: "plans", toPath: "archive/plans" });
+    const move = await moveWorkspacePath(ctx, { fromPath: "plans", toPath: "archive/plans" }, "Mover agent");
+    expect(move).toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:/), fromPath: "plans", toPath: "archive/plans" });
+    if (!move.ok) throw new Error(move.reason);
+    await expect(undoOperation(ctx, { operationId: move.operationId })).resolves.toEqual({ ok: false, reason: "Cannot undo this change yet. Only a delete can be undone." });
     expect(await readFile(join(temp.rootPath, "archive/plans/notes.txt"), "utf8")).toBe("plans/notes.txt body");
     await waitForWorkspaceFile(page, workspace.workspaceId, "archive/plans/notes.txt");
-    expect(await deleteWorkspacePath(ctx, { path: "old.txt" })).toEqual({ ok: true, path: "old.txt", trashed: true });
+    const removed = await deleteWorkspacePath(ctx, { path: "old.txt" });
+    expect(removed).toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true }, path: "old.txt", trashed: true });
+    if (!removed.ok) throw new Error(removed.reason);
     expect(existsSync(join(temp.rootPath, "old.txt"))).toBe(false);
     // A later write is recorded after capture has seen the move and the delete,
     // so any row the watcher would add is already in History.
@@ -45,6 +49,8 @@ test("an MCP move and delete each show one History row under the agent", async (
     for (const label of ["Local file edit", "Reconciled offline edits", "dohc-mcp"]) {
       await expect(rows.filter({ hasText: label })).toHaveCount(0);
     }
+    await expect(undoOperation(ctx, { operationId: removed.operationId })).resolves.toMatchObject({ ok: true, remaining: [] });
+    await expect.poll(() => readFile(join(temp.rootPath, "old.txt"), "utf8")).toBe("old.txt body");
     await moved.click();
     await expect(page.getByTestId("engine-diff-source")).toHaveText("Mover agent");
   } finally {

@@ -172,3 +172,7 @@ It contains a complete file manifest, current text, and the applied ordinary and
 The union of current share selectors limits collection. It grants no recipient access.
 The relay replaces the stored view atomically and removes text with no remaining references.
 Settlement cuts remain a separate concept. Recipient access and pinned History are separate changes.
+
+## History operation
+
+A History operation groups the file changes made by one admitted action under a main-minted `dohc-operation:` id. Reading it returns paths and change references. Delete Undo also uses its recovery record.

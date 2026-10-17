@@ -75,6 +75,7 @@ async function harness() {
     read: async () => { throw new Error("unexpected shared read"); },
   };
   const mutations = createWorkspaceFileMutationOwner<Event, Workspace>({
+    historyFor: () => ({ readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
     assertTrustedSender: trusted,
     withRendererWorkspaceOperation: (event, id, work) => withOperation(event.sender, id, "mutation retired", async (operation) => work({
       assertCurrent: () => operation.assertCurrent(),
@@ -260,7 +261,7 @@ describe("registered workspace file handlers", () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
       workspaceFileOperations.listWorkspaceFiles.channel, workspaceFileOperations.createWorkspaceFile.channel, workspaceFileOperations.createWorkspaceFolder.channel,
-      workspaceFileOperations.moveWorkspacePath.channel, workspaceFileOperations.deleteWorkspacePath.channel, workspaceFileOperations.exportWorkspaceZip.channel,
+      workspaceFileOperations.moveWorkspacePath.channel, workspaceFileOperations.deleteWorkspacePath.channel, workspaceFileOperations.undoHistoryOperation.channel, workspaceFileOperations.exportWorkspaceZip.channel,
       workspaceFileOperations.exportDocumentFile.channel, workspaceFileOperations.importWorkspaceFiles.channel, workspaceFileOperations.readWorkspaceText.channel,
       workspaceFileOperations.writeWorkspaceText.channel, workspaceFileOperations.writeWorkspaceAsset.channel, workspaceFileOperations.pickImageFiles.channel,
       workspaceFileOperations.openFileExternally.channel, CHANNELS.readWorkspaceGraph, CHANNELS.getBacklinks,

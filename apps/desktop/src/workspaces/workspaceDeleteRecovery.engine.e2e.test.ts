@@ -7,7 +7,7 @@ import { createRealDaemonLifecycle, createRealDaemonWorkspaceSessions, REAL_DAEM
 import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
-import { deleteWorkspacePathByHand, undoWorkspaceDelete } from "./workspaceFileMoves";
+import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
 
 const copy = vi.hoisted(() => ({ inspect: undefined as undefined | ((temp: string) => Promise<void>) }));
 vi.mock("node:fs/promises", async original => {
@@ -46,14 +46,18 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
     expect(await capture.fileObjectIdForPath("folder/node_modules/pkg/index.js")).toBeNull();
     const history = await sessions.run(workspace, async binding =>
       new VersionedLiveAdapter(binding.client, binding.workspace, { workspaceId: workspace.workspaceId }));
-    const removed = await deleteWorkspacePathByHand(operation, "folder", person, {
-      capture, requestId: "delete-folder", markDeleted: vi.fn(), trashItem: async () => { throw new Error("OS trash refuses"); },
+    const owner = createWorkspaceFileMutationOwner({
+      historyFor: () => history, assertTrustedSender: () => undefined,
+      withRendererWorkspaceOperation: async (_event, _id, work) => work({ workspace: operation.workspace, authorityId: workspace.attachmentId, capture,
+        yDocSessions: { withDocumentUnowned: async (_id, _path, work) => work(), markDeletedUnderPath: () => undefined }, assertCurrent: operation.assertCurrent }),
+      shareViewFiles: { change: async () => { throw new Error("No shares"); } },
+      trashItem: async () => { throw new Error("OS trash refuses"); }, localPerson: async () => person, notifyRenderer: () => undefined, shareViewEdited: () => undefined, logError: () => undefined,
     });
+    const removed = await owner.deletePath({}, { workspaceId: workspace.workspaceId, relativePath: "folder" });
     expect(removed).toMatchObject({ trashed: false, undo: { available: true }, operationId: expect.any(String) });
     await expect(stat(join(rootPath, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
     const operationId = removed.operationId!;
-    const undo = (requestId: string) => undoWorkspaceDelete(operation, { operationId, requestId }, person,
-      { workspaceId: workspace.workspaceId, history });
+    const undo = (_requestId: string) => owner.undoHistoryOperation({}, { workspaceId: workspace.workspaceId, operationId });
     let inspection: Promise<void> | undefined;
     let inspectedTarget: string | undefined;
     copy.inspect = target => {

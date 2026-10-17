@@ -153,7 +153,7 @@ function renderMoments(result: CliResultByVerb["moments"]): string {
     const agents = (change.authors ?? [])
       .map((author) => (author.kind === "agent" ? ` · agent ${author.agentId}` : ""))
       .join("");
-    return `${change.id} · ${dateTime(change.recordedAtMs)} · ${change.operation} · ${change.path}${agents}`;
+    return `${change.id} · ${dateTime(change.recordedAtMs)} · ${change.operation} · ${change.path}${agents}${change.operationId ? ` · operation ${change.operationId}` : ""}`;
   });
   if (result.hasMore) lines.push(`${result.totalAvailable - result.count} more; raise --limit to list them`);
   return lines.join("\n");
@@ -344,6 +344,19 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       });
     case "export":
       return renderExport(result as CliResultByVerb["export"]);
+    case "historyOperation": {
+      const operation = result as CliResultByVerb["historyOperation"];
+      if (!operation.ok) return operation.reason;
+      return [...operation.members.map(member => `${member.momentId} · ${member.operation} · ${member.beforePath ? `${member.beforePath} → ` : ""}${member.path}`),
+        ...(operation.withoutHistory ?? []).map(path => `${path} · without History`),
+        ...(operation.nextCursor ? [`More paths; use --cursor ${operation.nextCursor}`] : [])].join("\n");
+    }
+    case "historyUndo": {
+      const undo = result as CliResultByVerb["historyUndo"];
+      if (!undo.ok) return undo.reason;
+      return [`History: ${undo.tracked.state}`, ...undo.restored.map(path => `Restored ${path}`),
+        ...undo.remaining.map(item => `${item.path}: ${item.reason}${item.retry ? " Undo again to retry." : ""}`)].join("\n");
+    }
     case "moments":
       return renderMoments(result as CliResultByVerb["moments"]);
     case "moment":

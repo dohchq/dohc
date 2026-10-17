@@ -1,0 +1,26 @@
+import { expect, it, vi } from "vitest";
+import { executeCli } from "./index";
+import { parseCliArguments } from "./args";
+import { cliRequestSchema, CLI_PROTOCOL_VERSION } from "./protocol";
+const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+it("sends an agent Undo and prints each remaining path with its retry", async () => {
+  const request = vi.fn(async () => ({ ok: true, tracked: { state: "restoring", momentCount: 1 }, restored: [], remaining: [
+    { path: "a.txt", reason: "a.txt now occupies the old path.", retry: true },
+    { path: "b.txt", reason: "Its trash copy is gone.", retry: false },
+  ] }));
+  expect(parseCliArguments(["history", "undo", operationId], {})).toMatchObject({ actor: "agent", verb: "historyUndo" });
+  const result = await executeCli({ argv: ["history", "undo", operationId], cwd: process.cwd(), request });
+  expect(result.exitCode).toBe(1);
+  expect(result.stdout.split("\n")).toEqual(["History: restoring", "a.txt: a.txt now occupies the old path. Undo again to retry.", "b.txt: Its trash copy is gone.", ""]);
+  expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "historyUndo", args: expect.objectContaining({ actor: "agent", operationId }) }));
+});
+it("refuses unsupported Undo and rejects an id without its namespace before transport", async () => {
+  const request = vi.fn(async () => ({ ok: false, reason: "Cannot undo this change yet. Only a delete can be undone." }));
+  expect(await executeCli({ argv: ["history", "undo", operationId], request })).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: Cannot undo this change yet. Only a delete can be undone.\n" });
+  request.mockClear();
+  for (const verb of ["undo", "operation"]) {
+    expect((await executeCli({ argv: ["history", verb, operationId.slice(15)], request })).exitCode).toBe(1);
+    expect(cliRequestSchema.safeParse({ token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb: verb === "undo" ? "historyUndo" : "historyOperation", args: { cwd: process.cwd(), actor: "agent", operationId: operationId.slice(15) } }).success).toBe(false);
+  }
+  expect(request).not.toHaveBeenCalled();
+});

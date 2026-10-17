@@ -1,3 +1,4 @@
+import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type OperationHistory } from "../workspaces/workspaceHistoryOperations";
 import { writeWorkspaceFilesAs } from "../workspaces/workspaceFileWrites";
 import { prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "../workspaces/workspaceFileMoves";
 import { join, resolve } from "node:path";
@@ -215,8 +216,29 @@ export function createDesktopCliServer<State>(
       });
       return finish();
     };
+    const operationHistory: OperationHistory = {
+      readHistoryPage: async input => {
+        const result = await withEngineAdapter(workspace, adapter => adapter.readHistoryPage(input));
+        if (!result) throw new Error("The workspace engine is not running.");
+        return result;
+      },
+      undoHistoryOperation: async input => {
+        const result = await withEngineAdapter(workspace, adapter => adapter.undoHistoryOperation(input));
+        if (!result) throw new Error("The workspace engine is not running.");
+        return result;
+      },
+    };
+    const withHistoryOperation = <T>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<T>) =>
+      withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
+        operation.assertCurrent();
+        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+        if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Change files in the owning workspace.");
+        return work(operation);
+      });
     return {
       workspaceId: workspace.workspaceId,
+      historyOperation: input => withHistoryOperation(operation => readWorkspaceHistoryOperation(operation, input, operationHistory)),
+      historyUndo: (input, origin) => withHistoryOperation(operation => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history: operationHistory, agent: true })),
       ...(dependencies.shareCopy ? { shareCopy: (input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
           if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
@@ -245,6 +267,7 @@ export function createDesktopCliServer<State>(
       store,
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
       readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+      sharedView: Boolean(sharedViewOf(workspace.workspaceId)),
       fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
       daemonReads: {
         async queryChatMessagesGranular(input: { query: string; limit: number }) {
@@ -324,9 +347,7 @@ export function createDesktopCliServer<State>(
       deletePath: async (path, origin, requestId) => {
         const result = await withPathChange(requestId, (operation, options) =>
           prepareDeleteWorkspacePathAs(operation, path, agentWriteAuthor(origin), options));
-        // PR 3 exposes recovery through the agent doors.
-        const { operationId: _operationId, undo: _undo, ...wireResult } = result;
-        return wireResult;
+        return result;
       },
       // Document reads and edits go through the desktop's live document
       // sessions, the ones its editor holds, so an agent's edit merges into

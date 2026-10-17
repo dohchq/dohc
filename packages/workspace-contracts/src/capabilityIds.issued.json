@@ -171,5 +171,7 @@
   "file.external.open",
   "account.delete.preview",
   "account.delete",
-  "agent.run.state.read"
+  "agent.run.state.read",
+  "history.operation.read",
+  "history.operation.undo"
 ]

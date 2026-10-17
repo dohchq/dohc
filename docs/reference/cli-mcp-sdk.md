@@ -80,6 +80,27 @@ No arguments.
 
 Returns `{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl? }`. `scope` is `"local"` or `"cloud"`.
 
+### `dohc_read_operation`
+
+List the paths changed by one operation, up to 50 per page. Returns change references and paths without retained contents. Owner workspace only.
+
+Operation reads require the owning workspace. Shared profiles do not offer this read.
+
+- `operationId`: `string`. Required.
+- `cursor`: `string`
+
+Returns `{ ok: false, reason } | { ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, nextCursor }`.
+
+### `dohc_undo_operation`
+
+Undo a delete by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry a pending copy. Other operations cannot be undone yet.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `operationId`: `string`. Required.
+
+Returns `{ ok: false, reason } | { ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
+
 ### `dohc_list_changes`
 
 List workspace history, newest first: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId. Pass path, relative to the MCP server folder, to list only that file's changes across its renames.
@@ -89,7 +110,7 @@ List workspace history, newest first: workspace-engine moments (the recorder for
 - `includeFiles`: `boolean`
 - `path`: `string`
 
-Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+Returns `{ changes: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_kept_copies`
 
@@ -117,7 +138,7 @@ Read one history entry by id: a workspace-engine moment with its full before/aft
 
 - `id`: `string`. Required.
 
-Returns `{ ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } } | { ok: false, reason } | { ok: false, status: "untracked", reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
+Returns `{ ok: true, change: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } } | { ok: false, reason } | { ok: false, status: "untracked", reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_files`
 
@@ -212,7 +233,7 @@ Returns `{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the 
 
 ### `dohc_move_path`
 
-Move or rename a visible workspace file or folder. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.
+Move or rename a visible workspace file or folder. Returns its operationId for reading the operation. Move Undo is not available yet. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -221,18 +242,18 @@ Changes the workspace, so a shared view does not offer it.
 - `overwrite`: `boolean`
 - `summary`: `string`
 
-Returns `{ ok: true, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/trash.
+Returns `{ ok: true, operationId, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/trash.
 
 ### `dohc_delete_path`
 
-Delete a visible workspace file or folder. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.
+Delete a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `path`: `string`. Required.
 - `summary`: `string`
 
-Returns `{ ok: true, path, trashed, trashPath?, withoutHistory? }`. Uses the desktop `fileDelete` verb. `trashed` is true when the system trash took the entry; otherwise `trashPath` names its workspace trash entry. `withoutHistory` lists files deleted without History rows: oversized files or non-UTF-8 text that History cannot keep as binary. On failure: `{ ok: false, reason, deleted?, path?, withoutHistory? }`. `deleted` lists files History recorded as deleted before it refused `path`. `withoutHistory` names files already removed without History rows. The reason names their workspace trash location.
+Returns `{ ok: true, operationId, undo, path, trashed, trashPath?, withoutHistory? }`. Uses the desktop `fileDelete` verb. `trashed` is true when the system trash took the entry; otherwise `trashPath` names its workspace trash entry. `withoutHistory` lists files deleted without History rows: oversized files or non-UTF-8 text that History cannot keep as binary. On failure: `{ ok: false, reason, deleted?, path?, withoutHistory? }`. `deleted` lists files History recorded as deleted before it refused `path`. `withoutHistory` names files already removed without History rows. The reason names their workspace trash location.
 
 ### `dohc_detect_apps`
 
@@ -1387,6 +1408,28 @@ Read the changes History records for files.
 
 Changes come from the active version of the workspace.
 
+#### `dohc history operation`
+
+```sh
+dohc history operation <operation> [options]
+```
+
+List the paths changed by one operation.
+
+- `--cursor <cursor>`: Continue from the operation page returned by --json.
+
+With `--json`, prints `{ schemaVersion, ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, nextCursor }`.
+
+#### `dohc history undo`
+
+```sh
+dohc history undo <operation> [options]
+```
+
+Undo a delete recorded in History.
+
+With `--json`, prints `{ schemaVersion, ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
+
 #### `dohc history list`
 
 ```sh
@@ -1399,7 +1442,7 @@ With a path, list that file's own changes, across its renames. Each line starts 
 
 - `--limit <count>`: List at most this many changes. The default is 50, the most 500.
 
-With `--json`, prints `{ schemaVersion, changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
+With `--json`, prints `{ schemaVersion, changes: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
 
 #### `dohc history show`
 
@@ -1413,7 +1456,7 @@ Find the change's ID with history list. With --json, print both sides and the ch
 
 - `--before`: Print the text from before the change instead.
 
-With `--json`, prints `{ schemaVersion, ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } }`.
+With `--json`, prints `{ schemaVersion, ok: true, change: { operationId?, id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } }`.
 
 ### `dohc automation`
 

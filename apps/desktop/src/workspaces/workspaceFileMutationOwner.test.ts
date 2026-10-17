@@ -208,6 +208,7 @@ async function harness(options: {
   let account = "account-alice";
   const deletedBy: string[] = [];
   const owner = createWorkspaceFileMutationOwner({
+    historyFor: () => ({ readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
     assertTrustedSender,
     withRendererWorkspaceOperation,
     shareViewFiles: { change },
@@ -635,7 +636,7 @@ describe("WorkspaceFileMutationOwner", () => {
         workspaceId: test.workspace.workspaceId,
         relativePath: "moved.txt",
       }),
-    ).resolves.toEqual({ trashed: false });
+    ).resolves.toMatchObject({ trashed: false });
     await expect(
       test.owner.writeText(trustedEvent, {
         workspaceId: test.workspace.workspaceId,
@@ -1046,7 +1047,7 @@ describe("WorkspaceFileMutationOwner", () => {
         workspaceId: test.workspace.workspaceId,
         relativePath: "notes/delete.md",
       }),
-    ).resolves.toEqual({ trashed: true });
+    ).resolves.toMatchObject({ trashed: true });
 
     expect(test.ownsDocument).toHaveBeenCalledWith(
       attachmentB,
@@ -1212,7 +1213,7 @@ describe("WorkspaceFileMutationOwner", () => {
         workspaceId: test.workspace.workspaceId,
         relativePath: "notes",
       }),
-    ).resolves.toEqual({ trashed: false });
+    ).resolves.toMatchObject({ trashed: false });
 
     expect(trace).toEqual([
       "settle:notes",
@@ -1261,7 +1262,7 @@ describe("WorkspaceFileMutationOwner", () => {
     await expect(test.owner.deletePath(trustedEvent, {
       workspaceId: test.workspace.workspaceId,
       relativePath: "notes",
-    })).resolves.toEqual({ trashed: false });
+    })).resolves.toMatchObject({ trashed: false });
     await expect(access(join(test.rootPath, "notes"))).rejects.toThrow();
     const [entry] = await readdir(join(test.rootPath, ".dohc/trash"));
     expect(await readFile(join(test.rootPath, ".dohc/trash", entry!, "a.md"), "utf8")).toBe("text\n");
@@ -1298,7 +1299,7 @@ describe("WorkspaceFileMutationOwner", () => {
         workspaceId: test.workspace.workspaceId,
         relativePath: "alias/a.md",
       }),
-    ).resolves.toEqual({ trashed: true });
+    ).resolves.toMatchObject({ trashed: true });
 
     expect(trace).toEqual(["settle:notes/a.md", "marked", "finish:true"]);
     expect(test.markDeletedUnderPath).toHaveBeenCalledWith(
@@ -1628,4 +1629,15 @@ describe("WorkspaceFileMutationOwner", () => {
     expect(test.notifyRenderer).toHaveBeenCalledWith(test.workspace.workspaceId);
     expect(test.logError).not.toHaveBeenCalled();
   });
+});
+
+it("admits operation Undo through the mutation owner and refuses other operations without an engine call", async () => {
+  const h = await harness();
+  const payload = { workspaceId: h.workspace.workspaceId, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111" };
+  await expect(h.owner.undoHistoryOperation({ trusted: false }, payload)).rejects.toThrow();
+  await expect(h.owner.undoHistoryOperation(trustedEvent, { ...payload, workspaceId: "other" })).rejects.toThrow();
+  await expect(h.owner.undoHistoryOperation(trustedEvent, { ...payload, operationId: "11111111-1111-4111-8111-111111111111" })).rejects.toThrow();
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "Cannot undo this change yet. Only a delete can be undone." });
+  h.workspace.shareView = { access: "read-only" };
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "This workspace is read-only. Change files in the owning workspace." });
 });

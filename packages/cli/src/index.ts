@@ -77,6 +77,10 @@ function buildCliRequest(
     actor: command.actor,
   } as const;
   switch (command.verb) {
+    case "historyOperation":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId, ...(command.cursor ? { cursor: command.cursor } : {}) } };
+    case "historyUndo":
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: "agent", operationId: command.operationId } };
     case "shareCopy":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, shareId: command.shareId, grantId: command.grantId } };
     case "accountDeletePreview":
@@ -308,7 +312,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["historyOperation", "historyUndo", "accountDelete", "moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChats", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -357,7 +361,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
           momentSide: command.verb === "moment" ? command.side : "after",
         });
     return {
-      exitCode: ("kind" in result && result.kind === "partial") || ("disconnectError" in result && result.disconnectError !== null) ? 1 : 0,
+      exitCode: ("remaining" in result && result.remaining.length > 0) || ("kind" in result && result.kind === "partial") || ("disconnectError" in result && result.disconnectError !== null) ? 1 : 0,
       // Markdown prints byte for byte so redirection preserves it.
       stdout: (command.verb === "moment" || command.verb === "documentRead") && !command.json
         ? output

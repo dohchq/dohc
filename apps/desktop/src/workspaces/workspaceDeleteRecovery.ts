@@ -16,7 +16,8 @@ const UndoResult = z.object({
   ok: z.literal(true), tracked: z.object({ state: z.enum(["restoring", "restored"]), momentCount: z.number() }),
   restored: z.array(z.string()), remaining: z.array(z.object({ path: z.string(), reason: z.string() })),
 });
-export type DeleteUndoResult = { ok: false; reason: string } | z.infer<typeof UndoResult>;
+export type DeleteUndoResult = { ok: false; reason: string } | (Omit<z.infer<typeof UndoResult>, "remaining"> & { remaining: { path: string; reason: string; retry: boolean }[] });
+export type DeleteRecoveryFloor = (record: Readonly<RecoveryRecord>, staged?: string) => Promise<void>;
 const Record = z.object({
   operationId: z.string(), staged: z.string().optional(), base: z.string(), paths: z.array(z.string()),
   emptyFolders: z.array(z.string()), tracked: z.boolean(),
@@ -73,12 +74,17 @@ async function save(root: string, record: RecoveryRecord): Promise<void> {
     await rename(temp, path);
   } finally { await unlink(temp).catch(() => undefined); }
 }
-async function load(root: string, id: string): Promise<RecoveryRecord> {
-  const dir = await trashDir(root);
+export async function readDeleteRecovery(root: string, id: string): Promise<RecoveryRecord> {
+  const metadata = await resolveWorkspaceMetadataDir(root, { create: false });
+  if (!metadata) throw new Error(unavailable);
+  const dir = join(metadata, "trash");
+  const folder = await info(dir);
+  if (!folder) throw new Error(unavailable);
+  if (!folder.isDirectory() || folder.isSymbolicLink() || !isInside(await realpath(root), await realpath(dir))) throw new Error("Cannot undo the delete. The workspace trash must be a real folder inside this workspace.");
   const path = join(dir, recordName(id));
   const entry = await info(path);
   if (!entry) throw new Error(unavailable);
-  if (Date.now() - entry.mtimeMs > MAX_RECORD_AGE) { await unlink(path); throw new Error(unavailable); }
+  if (Date.now() - entry.mtimeMs > MAX_RECORD_AGE) throw new Error(unavailable);
   if (entry.isSymbolicLink()) throw new Error("Cannot undo the delete. Its recovery record is a link.");
   const record = Record.parse(JSON.parse(await readFile(path, "utf8")));
   if (record.operationId !== id || record.staged !== undefined && basename(record.staged) !== record.staged) throw new Error("Invalid delete recovery record.");
@@ -217,10 +223,14 @@ async function copyExclusive(root: string, record: RecoveryRecord, path: string,
     throw Object.assign(new Error("Copy target changed"), { code: "EEXIST" });
   }
 }
-export async function undoDeleteRecovery(root: string, input: { operationId: string; requestId: string }, author: MomentWriteAuthor,
+export async function undoDeleteRecovery(root: string, input: { operationId: string }, author: MomentWriteAuthor,
   history: Pick<HistoryOperationsStore, "undoHistoryOperation">, workspaceId: string,
-  assertCurrent: () => void, markChanged: () => void): Promise<DeleteUndoResult> {
-  const record = await load(root, input.operationId);
+  assertCurrent: () => void, markChanged: () => void, floor: DeleteRecoveryFloor): Promise<DeleteUndoResult> {
+  const record = await readDeleteRecovery(root, input.operationId);
+  await floor(record, record.staged ? join(root, ".dohc", "trash", record.staged) : undefined);
+  assertCurrent();
+  const expose = (result: z.infer<typeof UndoResult>): DeleteUndoResult => ({ ...result,
+    remaining: result.remaining.map(item => ({ ...item, retry: record.copies?.some(copy => copy.path === item.path) ?? false })) });
   const engineUndo = () => history.undoHistoryOperation({ workspaceId, operationId: input.operationId,
     requestId: `delete-undo:${input.operationId}`, author });
   if (record.result) {
@@ -230,7 +240,7 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
         if (current.materialized) { record.result.tracked.state = "restored"; await save(root, record); }
       } catch { /* A finished Undo keeps its saved result when refresh is unavailable. */ }
     }
-    return record.result;
+    return expose(record.result);
   }
   const resuming = record.engine !== undefined;
   if (!record.engine) {
@@ -339,5 +349,5 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
     }).catch(() => undefined);
   }
   for (const [target, mode] of linkedModes) await chmod(target, mode).catch(() => undefined);
-  return result;
+  return expose(result);
 }

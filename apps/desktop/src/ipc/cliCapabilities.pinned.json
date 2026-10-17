@@ -169,6 +169,12 @@
     ],
     "accountDelete": [
       "account.delete"
+    ],
+    "historyOperation": [
+      "history.operation.read"
+    ],
+    "historyUndo": [
+      "history.operation.undo"
     ]
   },
   "public": {
@@ -246,6 +252,8 @@
     "automation press": "automation.button.press",
     "share copy": "share.copy.read",
     "account deletePreview": "account.delete.preview",
-    "account delete": "account.delete"
+    "account delete": "account.delete",
+    "history operation": "history.operation.read",
+    "history undo": "history.operation.undo"
   }
 }
