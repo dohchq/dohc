@@ -103,6 +103,9 @@ pub(crate) struct OpenWorkspace {
     /// A pull applied a page and its terminal page has not committed, so
     /// the Collections may hold half a pull. Owed work waits for that commit.
     pub(super) pull_between_pages: std::sync::atomic::AtomicBool,
+    /// Pulls that may be placing a page, counted from under the capture gate
+    /// before their first relay step until they set `pull_between_pages`.
+    pub(super) pulls_in_flight: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,7 +161,15 @@ impl OpenWorkspace {
             cursors_issued: Default::default(),
             collections_owed: Default::default(),
             pull_between_pages: Default::default(),
+            pulls_in_flight: Default::default(),
         }
+    }
+
+    /// The Collections may hold half a pull, or a pull may place a page
+    /// before an update started now would run.
+    fn mid_pull(&self) -> bool {
+        self.pull_between_pages.load(Ordering::SeqCst)
+            || self.pulls_in_flight.load(Ordering::SeqCst) > 0
     }
 
     pub(super) fn request_collection_reconcile(&self) {
@@ -538,11 +549,11 @@ impl EngineService {
     /// update reconciles the whole workspace, so whichever step runs it
     /// repairs every change still owed. While a pull is between pages it
     /// stays owed: dangling-link cleanup would remove a relation whose target
-    /// a later page brings back.
+    /// a later page brings back. A pull counts itself under the gate before
+    /// it places a page, so the check under the gate admits no update that a
+    /// page could overtake.
     pub(super) async fn settle_owed_collections(&self, ctx: &RequestContext, open: &OpenWorkspace) {
-        if !open.collections_owed.load(Ordering::SeqCst)
-            || open.pull_between_pages.load(Ordering::SeqCst)
-        {
+        if !open.collections_owed.load(Ordering::SeqCst) || open.mid_pull() {
             return;
         }
         let Ok(apply) = tokio::time::timeout(
@@ -554,10 +565,8 @@ impl EngineService {
             return;
         };
         // Another step took the update under the gate after this one landed,
-        // or a pull reached a page meanwhile.
-        if open.pull_between_pages.load(Ordering::SeqCst)
-            || !open.collections_owed.swap(false, Ordering::SeqCst)
-        {
+        // or a pull started meanwhile.
+        if open.mid_pull() || !open.collections_owed.swap(false, Ordering::SeqCst) {
             return;
         }
         let cancellation = OperationCancellation::new(&after_landing(ctx));
@@ -1245,6 +1254,7 @@ impl EngineService {
                 cursors_issued: Default::default(),
                 collections_owed: Default::default(),
                 pull_between_pages: Default::default(),
+                pulls_in_flight: Default::default(),
             }),
         );
         open_guard.disarm();

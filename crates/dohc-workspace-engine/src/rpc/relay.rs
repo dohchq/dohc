@@ -614,6 +614,15 @@ fn sync_identifier_from_entropy(prefix: &str, mut entropy: [u8; 16]) -> String {
     )
 }
 
+/// A pull counted in `OpenWorkspace::pulls_in_flight`, uncounted on drop.
+struct PullInFlight<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for PullInFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl EngineService {
     fn relay_open(
         &self,
@@ -914,6 +923,21 @@ impl EngineService {
         let params: RelayWorkspaceParams = parse(params)?;
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        // A Collections update already admitted under the gate runs before
+        // this pull places a page, and none is admitted until the pull is
+        // between pages or done. The gate is not held across the relay's I/O.
+        let pulling = if self.reconciles_collections_itself(&open) {
+            let cancellation = OperationCancellation::new(ctx);
+            let _apply = tokio::select! {
+                biased;
+                () = cancellation.token.cancelled() => return Err(cancellation.interruption("sync.pull")),
+                guard = open.capture_apply_gate.lock() => guard,
+            };
+            open.pulls_in_flight.fetch_add(1, Ordering::SeqCst);
+            Some(PullInFlight(&open.pulls_in_flight))
+        } else {
+            None
+        };
         let outcome = self
             .relay_execute(
                 ctx,
@@ -957,6 +981,7 @@ impl EngineService {
         {
             open.pull_between_pages.store(true, Ordering::SeqCst);
         }
+        drop(pulling);
         // Post-commit: every applied envelope's record changes are durable,
         // even on a crash after apply (the cursor retries; the durable layer
         // dedupes, so a replay derives no second fact set).
@@ -2078,6 +2103,7 @@ mod tests {
         open: Arc<OpenWorkspace>,
         workspace_id: &'static str,
         reconcile_collections: bool,
+        relay: Value,
     }
 
     const SOURCE: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -2095,6 +2121,19 @@ mod tests {
 
     impl CursorFixture {
         async fn new(workspace_id: &'static str, reconcile_collections: bool) -> Self {
+            Self::with_relay(
+                workspace_id,
+                reconcile_collections,
+                json!({ "baseUrl": "https://relay.example", "bearerToken": "test-token" }),
+            )
+            .await
+        }
+
+        async fn with_relay(
+            workspace_id: &'static str,
+            reconcile_collections: bool,
+            relay: Value,
+        ) -> Self {
             let workspaces: &'static dohc_engine_runtime::WorkspaceSupervisor =
                 Box::leak(Box::new(dohc_engine_runtime::WorkspaceSupervisor::new()));
             Self::open_at(
@@ -2102,6 +2141,7 @@ mod tests {
                 workspaces,
                 workspace_id,
                 reconcile_collections,
+                relay,
             )
             .await
         }
@@ -2111,6 +2151,7 @@ mod tests {
             workspaces: &'static dohc_engine_runtime::WorkspaceSupervisor,
             workspace_id: &'static str,
             reconcile_collections: bool,
+            relay: Value,
         ) -> Self {
             let service = Arc::new(EngineService::with_supervisor(workspaces));
             let opened = service
@@ -2121,7 +2162,7 @@ mod tests {
                         "workspaceId": workspace_id,
                         "captureMode": "none",
                         "reconcileCollections": reconcile_collections,
-                        "relay": { "baseUrl": "https://relay.example", "bearerToken": "test-token" },
+                        "relay": relay,
                     }),
                 )
                 .await
@@ -2137,6 +2178,7 @@ mod tests {
                 open,
                 workspace_id,
                 reconcile_collections,
+                relay,
             }
         }
 
@@ -2149,11 +2191,19 @@ mod tests {
                 handle,
                 workspace_id,
                 reconcile_collections,
+                relay,
                 ..
             } = self;
             service.workspace_close(Some(handle)).await.expect("close");
             drop(service);
-            Self::open_at(scratch, workspaces, workspace_id, reconcile_collections).await
+            Self::open_at(
+                scratch,
+                workspaces,
+                workspace_id,
+                reconcile_collections,
+                relay,
+            )
+            .await
         }
 
         /// The main version, and the local sync identity a chat change gives
@@ -2691,6 +2741,315 @@ mod tests {
                 .contains(&format!("related: {TARGET}")),
             "the relation stays in the source file"
         );
+        f.close().await;
+    }
+
+    /// A loopback relay serving a workspace log. Its first log request sets
+    /// `started`, then waits for `release`.
+    struct PagedRelay {
+        base_url: String,
+        ops: Arc<std::sync::Mutex<Vec<Value>>>,
+        started: Arc<std::sync::atomic::AtomicBool>,
+        release: Option<std::sync::mpsc::Sender<()>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl PagedRelay {
+        fn start(blobs: std::collections::HashMap<String, String>) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind relay");
+            let base_url = format!("http://{}", listener.local_addr().expect("relay address"));
+            let ops = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (release, released) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn({
+                let (ops, started, stop) =
+                    (Arc::clone(&ops), Arc::clone(&started), Arc::clone(&stop));
+                move || {
+                    let mut released = Some(released);
+                    for stream in listener.incoming() {
+                        if stop.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let Ok(stream) = stream else { continue };
+                        let _ = serve_paged_relay(stream, &ops, &blobs, &started, &mut released);
+                    }
+                }
+            });
+            PagedRelay {
+                base_url,
+                ops,
+                started,
+                release: Some(release),
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn configuration(&self) -> Value {
+            json!({
+                "baseUrl": self.base_url,
+                "bearerToken": "test-token",
+                "allowInsecureLoopbackForTests": true,
+            })
+        }
+
+        fn release(&self) {
+            if let Some(release) = &self.release {
+                release.send(()).expect("the first page waits");
+            }
+        }
+
+        fn row(workspace_id: &str, origin_seq: i64, op_kind: &str, payload: Value) -> Value {
+            json!({
+                "relaySeq": origin_seq + 1,
+                "workspaceId": workspace_id,
+                "originId": "peer",
+                "originSeq": origin_seq,
+                "opKind": op_kind,
+                "payload": payload,
+                "recordedAtMs": 1_000 + origin_seq,
+            })
+        }
+    }
+
+    impl Drop for PagedRelay {
+        fn drop(&mut self) {
+            self.release.take();
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = std::net::TcpStream::connect(self.base_url.trim_start_matches("http://"));
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn serve_paged_relay(
+        mut stream: std::net::TcpStream,
+        ops: &std::sync::Mutex<Vec<Value>>,
+        blobs: &std::collections::HashMap<String, String>,
+        started: &std::sync::atomic::AtomicBool,
+        released: &mut Option<std::sync::mpsc::Receiver<()>>,
+    ) -> std::io::Result<()> {
+        use std::io::{BufRead, Read, Write};
+        let mut reader = std::io::BufReader::new(stream.try_clone()?);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let mut request_line = line.split_whitespace();
+        let method = request_line.next().unwrap_or_default().to_owned();
+        let target = request_line.next().unwrap_or_default().to_owned();
+        let mut length = 0;
+        loop {
+            line.clear();
+            reader.read_line(&mut line)?;
+            match line.trim_end().split_once(':') {
+                Some((name, value)) if name.eq_ignore_ascii_case("content-length") => {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        reader.read_exact(&mut vec![0; length])?;
+        let (path, query) = target.split_once('?').unwrap_or((&target, ""));
+        let parameter = |name: &str| {
+            query
+                .split('&')
+                .filter_map(|part| part.split_once('='))
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value.parse::<i64>().ok())
+        };
+        let since = parameter("since").unwrap_or(0);
+        let limit = parameter("limit")
+            .and_then(|limit| usize::try_from(limit).ok())
+            .unwrap_or(usize::MAX);
+        let body = if method == "POST" && path == "/sync/workspaces" {
+            Some(json!({ "ok": true }).to_string())
+        } else if path.ends_with("/blobs/have") {
+            Some(json!({ "missing": [] }).to_string())
+        } else if let Some((_, sha256)) = path.rsplit_once("/blobs/") {
+            blobs.get(sha256).cloned()
+        } else if method == "GET" && path.ends_with("/log") {
+            if since == 0
+                && let Some(released) = released.take()
+            {
+                started.store(true, Ordering::SeqCst);
+                let _ = released.recv();
+            }
+            let ops = lock(ops);
+            let after: Vec<&Value> = ops
+                .iter()
+                .filter(|row| row["relaySeq"].as_i64() > Some(since))
+                .collect();
+            let rows = &after[..after.len().min(limit)];
+            Some(
+                json!({
+                    "ops": rows,
+                    "nextCursor": rows.last().and_then(|row| row["relaySeq"].as_i64()).unwrap_or(since),
+                    "hasMore": after.len() > rows.len(),
+                })
+                .to_string(),
+            )
+        } else {
+            None
+        };
+        let (status, body) = match body {
+            Some(body) => ("200 OK", body),
+            None => ("404 Not Found", String::new()),
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )?;
+        stream.flush()
+    }
+
+    /// A Collections update is admitted under the capture gate while a pull
+    /// waits for its first page, which removes a relation's target that the
+    /// second page brings back. The page must not land between the update's
+    /// admission and its run, so the update never sees half the pull.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_admitted_collections_update_never_sees_half_a_pull() {
+        const WORKSPACE: &str = "owed-admitted-mid-pull";
+        let ctx = RequestContext::unbounded();
+        let markdown = record(SOURCE, Some(TARGET));
+        let target = record(TARGET, None);
+        let target_sha = dohc_engine_storage::hex_sha256(target.as_bytes());
+        let relay = PagedRelay::start([(target_sha.clone(), target.clone())].into());
+        let f = CursorFixture::with_relay(WORKSPACE, true, relay.configuration()).await;
+        f.prepare().await;
+        f.service
+            .sync_claim(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({ "workspaceId": WORKSPACE }),
+            )
+            .await
+            .expect("claim");
+        f.pulled("schema", "tasks/collection.yaml", RELATION_SCHEMA)
+            .await;
+        f.pulled("source", "tasks/source.md", &markdown).await;
+        f.pulled("target", "tasks/target.md", &target).await;
+        f.source_lineage(&markdown).await;
+        f.service.collections_changed(&ctx, &f.open).await;
+        assert_eq!(f.edges(), 1);
+
+        let head = f
+            .open
+            .actor
+            .versioned_text_read(
+                WORKSPACE.into(),
+                "main".into(),
+                "tasks/target.md".into(),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .expect("read target")
+            .expect("target head");
+        // Page one deletes the target and fills the pass; page two writes the
+        // target at a new path.
+        let pass = i64::try_from(dohc_engine_sync::MAX_PULL_OPS).expect("pass size");
+        let mut ops = vec![PagedRelay::row(
+            WORKSPACE,
+            0,
+            "moment.append",
+            json!({
+                "momentId": "peer-delete", "versionId": "main", "objectId": head.object_id,
+                "objectCreatedAtMs": 2, "path": head.path, "recordedAtMs": 20,
+                "operation": "delete",
+                "payloadBeforeBlobSha256": head.blob_sha256, "payloadBeforePath": head.path,
+                "payloadBeforeContentKind": "text", "payloadBeforeByteLength": head.text.len(),
+                "payloadAfterBlobSha256": head.blob_sha256, "payloadAfterPath": head.path,
+                "payloadAfterContentKind": "text", "payloadAfterByteLength": head.text.len(),
+                "metadata": { "origin": "sync", "summary": null, "correlationId": null },
+                "beforePresent": "present", "beforeObjectId": head.object_id,
+                "beforeVersionId": "main", "beforePath": head.path,
+                "beforeBlobSha256": head.blob_sha256, "beforeContentKind": "text",
+                "beforeByteLength": head.text.len(), "beforeUpdatedAtMs": head.updated_at_ms,
+                "beforeLatestMomentId": head.latest_moment_id,
+                "beforeMetadata": {
+                    "origin": head.metadata_origin, "summary": head.metadata_summary,
+                    "correlationId": head.metadata_correlation_id,
+                },
+            }),
+        )];
+        ops.extend(
+            (1..pass).map(|seq| PagedRelay::row(WORKSPACE, seq, "workspace.init", json!({}))),
+        );
+        ops.push(PagedRelay::row(
+            WORKSPACE,
+            pass,
+            "moment.append",
+            json!({
+                "momentId": "peer-moved", "versionId": "main", "objectId": "moved",
+                "objectCreatedAtMs": 21, "path": "tasks/moved.md", "recordedAtMs": 21,
+                "operation": "write",
+                "payloadBeforeBlobSha256": null, "payloadBeforePath": null,
+                "payloadAfterBlobSha256": target_sha, "payloadAfterPath": "tasks/moved.md",
+                "payloadAfterContentKind": "text", "payloadAfterByteLength": target.len(),
+                "metadata": { "origin": "sync" },
+                "beforePresent": "absent",
+            }),
+        ));
+        lock(&relay.ops).extend(ops);
+        f.open.collections_owed.store(true, Ordering::SeqCst);
+
+        let pull = || {
+            let (service, handle) = (Arc::clone(&f.service), f.handle.clone());
+            async move {
+                service
+                    .sync_pull(
+                        &RequestContext::unbounded(),
+                        Some(handle),
+                        json!({ "workspaceId": WORKSPACE }),
+                    )
+                    .await
+            }
+        };
+        let page_one = tokio::spawn(pull());
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !relay.started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the pull asks for its first page");
+        // The update is admitted and its first step answered; its next step
+        // waits until this test polls it again.
+        let hold = f.service.hold_actor(&f.handle).await;
+        let mut update = Box::pin(f.service.settle_owed_collections(&ctx, &f.open));
+        let ran = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(update.as_mut(), cx).is_ready())
+        })
+        .await;
+        drop(hold);
+        relay.release();
+        let page_one = page_one.await.expect("join").expect("page one lands");
+        assert_eq!(page_one["hasMore"], json!(true));
+        if !ran {
+            update.as_mut().await;
+        }
+        drop(update);
+        assert_eq!(f.edges(), 1, "the update did not see page one alone");
+        assert!(f.owed(), "the update waits for the terminal page");
+
+        let commit = |page: Value| {
+            let token = page["pendingCursor"]["token"]
+                .as_str()
+                .expect("pending cursor")
+                .to_owned();
+            let request = f.request(0, "sync.commitCursor", &token);
+            f.service
+                .sync_commit_cursor(&ctx, request.workspace, request.params)
+        };
+        commit(page_one).await.expect("commit page one");
+        let page_two = pull().await.expect("page two lands");
+        assert_eq!(page_two["hasMore"], json!(false));
+        commit(page_two).await.expect("commit page two");
+        assert!(!f.owed());
+        assert_eq!(f.edges(), 1, "the source still relates to the target");
         f.close().await;
     }
 
