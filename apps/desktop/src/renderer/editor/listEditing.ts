@@ -1,5 +1,6 @@
 import { commands, Extension, getNodeType } from "@tiptap/core";
 import { Fragment, Slice } from "@tiptap/pm/model";
+import { canJoin } from "@tiptap/pm/transform";
 import type { EditorProps } from "@tiptap/pm/view";
 import { parseRichdocMarkdown } from "@dohc/ydoc-projection";
 
@@ -16,9 +17,13 @@ export const ListConversions = Extension.create({
         const listType = getNodeType(listName, state.schema);
         const itemType = getNodeType(itemName, state.schema);
         const { selection } = state;
+        const range = selection.$from.blockRange(selection.$to);
         for (let depth = selection.$from.depth; depth > 0; depth--) {
           const list = selection.$from.node(depth);
           if (!listTypes.has(list.type.name)) continue;
+          const parent = selection.$from.node(depth - 1);
+          if (!range || range.depth - depth > 1
+            || !["listItem", "taskItem"].includes(parent.type.name)) break;
           const pos = selection.$from.before(depth);
           if (selection.to >= pos + list.nodeSize || list.type === listType
             || list.firstChild?.type === itemType) break;
@@ -30,7 +35,18 @@ export const ListConversions = Extension.create({
           if (dispatch) {
             tr.replaceWith(pos, pos + list.nodeSize, listType.create(attributes, items));
             tr.setSelection(selection.getBookmark().resolve(tr.doc));
-            if (keepMarks) tr.ensureMarks(state.storedMarks ?? selection.$from.marks());
+            // Each join maps the selection; find the boundary again afterward.
+            for (const direction of [-1, 1]) {
+              const $from = tr.selection.$from;
+              const boundary = direction < 0 ? $from.before(depth) : $from.after(depth);
+              const $boundary = tr.doc.resolve(boundary);
+              const before = $boundary.nodeBefore;
+              const after = $boundary.nodeAfter;
+              const normalize = (type: string | null | undefined) => !type || type === "1" ? null : type;
+              if (before?.type === listType && after?.type === listType
+                && normalize(before.attrs.type) === normalize(after.attrs.type)
+                && canJoin(tr.doc, boundary)) tr.join(boundary);
+            }
           }
           return true;
         }
@@ -44,9 +60,10 @@ type ClipboardParser = NonNullable<EditorProps["clipboardTextParser"]>;
 
 // ProseMirror accepts null to use its default parser, but its type omits null.
 export const parseMarkdownListClipboard =
-  ((text, _context, plainText, view) => {
-    if (plainText || !/^\s*(?:[-+*]|\d+[.)])\s/.test(text)) return null;
+  ((text, context, plainText, view) => {
+    if (plainText || !text.includes("\n") || context.parentOffset !== 0
+      || !/^\s*(?:[-+*]|\d+[.)])\s/.test(text)) return null;
     const doc = parseRichdocMarkdown(text);
-    if (!doc.content?.some(node => listTypes.has(node.type ?? ""))) return null;
-    return Slice.maxOpen(view.state.schema.nodeFromJSON(doc).content);
+    if (!doc.content?.length || !doc.content.every(node => listTypes.has(node.type ?? ""))) return null;
+    return new Slice(view.state.schema.nodeFromJSON(doc).content, 0, 0);
   }) as ClipboardParser;

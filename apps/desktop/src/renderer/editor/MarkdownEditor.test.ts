@@ -14,6 +14,7 @@ import * as Y from "yjs";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  commands,
   Editor,
   Extension,
   getSchema,
@@ -891,10 +892,10 @@ describe.each(["local", "collaboration"])("MarkdownEditor nested list interactio
     return { surface, editor };
   }
 
-  function caret(editor: Editor, text: string) {
+  function caret(editor: Editor, text: string, offset = 0) {
     let position = -1;
     editor.state.doc.descendants((node, pos) => {
-      if (node.isTextblock && node.textContent === text) position = pos + 1;
+      if (node.isTextblock && node.textContent === text) position = pos + 1 + offset;
     });
     expect(position).toBeGreaterThan(0);
     act(() => { editor.commands.setTextSelection(position); editor.view.focus(); });
@@ -962,7 +963,7 @@ describe.each(["local", "collaboration"])("MarkdownEditor nested list interactio
   ] as const)("turns a %s child into %s and keeps its descendants", async (from, kind) => {
     const child = from === "task" ? "- [x] child" : from === "ordered" ? "1. child" : "- child";
     const { surface, editor } = await mount(`- parent\n  ${child}\n${" ".repeat(from === "ordered" ? 5 : 4)}- grandchild`);
-    caret(editor, "child");
+    caret(editor, "child", 2);
     reversible(surface, editor, () => {
       runSlashCommand(editor, kind, {
         open: true, query: "", selected: 0, x: 0, y: 0,
@@ -974,7 +975,64 @@ describe.each(["local", "collaboration"])("MarkdownEditor nested list interactio
       expect(node?.textContent).toContain("child");
       expect(node?.querySelector("li li")?.textContent).toContain("grandchild");
       expect(editor.state.selection.$from.parent.textContent).toBe("child");
+      expect(editor.state.selection.$from.parentOffset).toBe(2);
       expect(editor.state.doc.firstChild?.type.name).toBe("bulletList");
+    });
+  });
+
+  it.each([
+    ["top-level cursor", "- a\n- child\n- c", "child", false],
+    ["top-level selection", "- a\n- child\n- c", "child", true],
+    ["nested quote", "- parent\n  - child\n\n    > quote", "quote", false],
+    ["nested callout", "- parent\n  - child\n\n    > [!NOTE]\n    > callout", "callout", false],
+  ] as const)("keeps Tiptap conversion scope for %s", async (_name, markdown, text, multi) => {
+    const { surface, editor } = await mount(markdown);
+    if (multi) caret(editor, "c", 1);
+    const end = editor.state.selection.to;
+    caret(editor, text, 2);
+    if (multi) act(() => { editor.commands.setTextSelection({ from: editor.state.selection.from, to: end }); });
+    const before = editor.getJSON();
+    const selection = { from: editor.state.selection.from, to: editor.state.selection.to };
+    editor.view.dispatch(closeHistory(editor.state.tr));
+    act(() => { editor.commands.command(commands.toggleList("taskList", "taskItem")); });
+    const expected = editor.getJSON();
+    const expectedSelection = editor.state.selection.toJSON();
+    fireEvent.keyDown(surface, { key: "z", ctrlKey: true });
+    expect(editor.getJSON()).toEqual(before);
+    act(() => { editor.commands.setTextSelection(selection); });
+    reversible(surface, editor, () => { editor.commands.toggleTaskList(); }, () => {
+      expect(editor.getJSON()).toEqual(expected);
+      expect(editor.state.selection.toJSON()).toEqual(expectedSelection);
+    });
+  });
+
+  it.each(["before", "after", "both"])("joins converted children with task neighbours %s", async (side) => {
+    const { surface, editor } = await mount(`- parent\n${side !== "after" ? "  - [ ] a\n" : ""}  - child${side !== "before" ? "\n  - [ ] c" : ""}`);
+    caret(editor, "child", 2);
+    reversible(surface, editor, () => { editor.commands.toggleTaskList(); }, () => {
+      const lists = surface.querySelectorAll('li > ul[data-type="taskList"]');
+      expect(lists).toHaveLength(1);
+      expect(lists[0]!.querySelectorAll(":scope > li")).toHaveLength(side === "both" ? 3 : 2);
+      expect(editor.state.selection.$from.parent.textContent).toBe("child");
+      expect(editor.state.selection.$from.parentOffset).toBe(2);
+    });
+  });
+
+  it.each([
+    ["See here", 4, "- 5 points"],
+    ["See here", 4, "- first\n  - second"],
+    ["", 0, "- 5 points"],
+    ["", 0, "- a\n\n# Heading\n\n| t |\n|---|"],
+  ] as const)("keeps literal paste in %s at %i: %s", async (text, offset, pasted) => {
+    const { surface, editor } = await mount(text);
+    caret(editor, text, offset);
+    reversible(surface, editor, () => {
+      fireEvent.paste(surface, { clipboardData: {
+        files: [], types: ["text/plain"], getData: (type: string) => type === "text/plain" ? pasted : "",
+      } });
+    }, () => {
+      expect(surface.querySelector("li, h1, table")).toBeNull();
+      expect(surface.textContent).toContain(pasted.split("\n")[0]);
     });
   });
 
