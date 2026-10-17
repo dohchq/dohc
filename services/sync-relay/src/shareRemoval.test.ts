@@ -86,7 +86,7 @@ it("returns an owner-only undo receipt and minimal removed-recipient facts over 
   expect(body.undo.expiresAtMs).toBe(3000 + SHARE_REMOVAL_UNDO_MS);
   const named = await h(request("reader", "/sync/shares/s"));
   expect(named.status).toBe(404);
-  expect(await named.json()).toMatchObject({code: "not_found"});
+  expect(await named.json()).toMatchObject({code: "share_access_removed", error: "The owner removed your access."});
   const listed = await (await h(request("reader", "/sync/shares"))).json();
   expect(listed).toMatchObject({received: [], removed: [{shareId: "s", grantId: "named", message: "The owner removed your access.", removedAtMs: 3000}]});
   expect(JSON.stringify(listed)).not.toContain("private");

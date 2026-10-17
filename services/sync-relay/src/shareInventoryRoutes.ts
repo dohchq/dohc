@@ -164,8 +164,7 @@ export function createShareInventoryRoutes(
     }
     if (route.route === "share" && request.method === "GET") {
       await claimPendingShares(actor.userId);
-      const initial = resolveReceivedShareAuthority({ storage, actorUserId: actor.userId, shareId: route.shareId });
-      if (!initial.ok) throw notFound();
+      const initial = requireShareAction(route.shareId, actor.userId, "read");
       const granterEmail = lookupUserEmail
         ? await lookupUserEmail(initial.share.granterUserId)
         : null;
@@ -175,7 +174,7 @@ export function createShareInventoryRoutes(
         actorUserId: actor.userId,
         shareId: route.shareId,
       });
-      if (!authorized.ok) throw notFound();
+      if (!authorized.ok) { requireShareAction(route.shareId, actor.userId, "read"); throw notFound(); }
       const summary = receivedShareSummary(
         { share: authorized.share, grant: authorized.grant },
         granterEmail,

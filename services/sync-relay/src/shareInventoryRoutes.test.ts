@@ -283,6 +283,27 @@ it("returns one source per recipient and source only on admitted detail, never i
   const stranger=await h(request("stranger","/sync/shares/one"));
   storage.revokeShareGrant({shareId:"one",grantId:"grant-one",revokedAtMs:2});
   const revoked=await h(request("recipient","/sync/shares/one"));
-  expect([revoked.status,await revoked.text()]).toEqual([stranger.status,await stranger.text()]);
+  expect(stranger.status).toBe(404);
+  expect(await stranger.json()).toMatchObject({code: "not_found"});
+  expect(revoked.status).toBe(404);
+  expect(await revoked.json()).toMatchObject({code: "share_access_removed"});
   expect((await h(request("recipient","/sync/"+details[0].receivedSource+"/log?since=0&limit=100"))).status).toBe(404);
+});
+
+it.each([false, true])("explains removal during detail lookup without source identities (keyless: %s)", async keyless => {
+  const storage = await testStorage(); claim(storage); seed(storage, "one");
+  const h = testHandler(storage, {
+    ...(keyless ? {linkKey: undefined} : {}),
+    lookupUserEmail: async () => {
+      storage.revokeShareGrant({shareId: "one", grantId: "grant-one", revokedAtMs: 2});
+      return "owner@dohc.test";
+    },
+  });
+  const response = await h(request("recipient", "/sync/shares/one"));
+  expect(response.status).toBe(404);
+  const body = await response.json();
+  expect(body).toMatchObject({code: "share_access_removed", error: "The owner removed your access."});
+  expect(body).not.toHaveProperty("workspaceId");
+  expect(body).not.toHaveProperty("receivedSource");
+  expect(JSON.stringify(body)).not.toMatch(/workspace-a|share-source:v1:|share-object:v1:/u);
 });
