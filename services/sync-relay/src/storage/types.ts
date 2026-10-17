@@ -615,6 +615,11 @@ export interface SyncRelayStorage {
   readServiceHostEnrollment(workspaceId: string, path: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string): {documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: string | null};
   currentServiceHostWorkspace(workspaceId: string): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
+  readServiceHostFeedScope(workspaceId: string): import("./serviceHostFeed").ServiceHostFeedScope | null;
+  listServiceHostDocumentRows(input: {workspaceId: string; objectId: string; afterRelaySeq: number; limit: number}): SyncRelayLogRow[];
+  /** Stores blob bytes the service host uploaded, with its proof of holding them. */
+  putServiceHostBlob(input: {workspaceId: string; sha256: string; content: Uint8Array; createdAtMs: number}): PutBlobResult;
+  serviceHostUploaded(workspaceId: string, sha256: string): boolean;
   scanServiceHostCandidateShares(after?: import("./serviceHostEnrollment").ServiceHostCandidateCursor, workspaceId?: string): import("./serviceHostEnrollment").ServiceHostCandidatePage;
   checkServiceHostDocuments(input: {workspaceId: string; ownerUserId: string; shareId: string; paths: readonly string[]}): void;
   setServiceHostEnrollmentEnabled(input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
@@ -641,6 +646,7 @@ export interface SyncRelayStorage {
   recordAutomationServerTaken(input: { workspaceId: string; generation: number }): void;
   recordAutomationServerProgress(input: { workspaceId: string; throughMs: number }): void;
   joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
+  replaceLostAutomationReplica(input: { workspaceId: string; incarnation: number; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   listAutomationWorkspaces(): import("./automationWorkspaces").AutomationWorkspace[];
   forgetAutomationWorkspace(input: { workspaceId: string; incarnation: number }): void;
@@ -782,6 +788,8 @@ export interface SyncRelayStorage {
   currentViewFilesAtFences(workspaceId: string, files: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"], previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"], omitted: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["omitted"]): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"];
   readReplicaCurrentViewText(workspaceId: string,sha: string): string | null;
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string): ReturnType<typeof import("./replicaReads").readReplicaStanding>;
+  listReplicaCurrentViewFiles(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaCurrentViewReads").ReplicaCurrentViewList;
+  readReplicaCurrentViewFile(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & {path: string}, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaCurrentViewReads").ReplicaCurrentViewRead;
   putBlob(input: {
     workspaceId: string;
     sha256: string;

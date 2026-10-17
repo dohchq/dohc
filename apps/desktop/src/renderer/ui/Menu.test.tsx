@@ -165,6 +165,18 @@ describe("Menu", () => {
     expect(document.activeElement).toBe(third);
   });
 
+  it("finds a row by its label's first letter, past a text icon before it", async () => {
+    const user = userEvent.setup();
+    render(<Harness items={[
+      { id: "budget", label: "budget.csv", onSelect: vi.fn() },
+      { id: "plan", label: "plan.md", icon: <span aria-hidden>🧭</span>, onSelect: vi.fn() },
+    ]} />);
+    screen.getByTestId("row-menu").focus();
+    await user.keyboard("{ArrowDown}");
+    await user.keyboard("p");
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "plan.md" }));
+  });
+
   it("picks with Enter and Space, closes, and returns focus to the trigger", async () => {
     const user = userEvent.setup();
     render(<Harness items={items} />);

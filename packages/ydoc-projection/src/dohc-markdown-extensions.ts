@@ -5,7 +5,7 @@ import { Extension, Mark, Node, markInputRule } from '@tiptap/core'
 import type { JSONContent, MarkdownRendererHelpers } from '@tiptap/core'
 import { getDefaults, Lexer, Tokenizer, type Tokens } from 'marked'
 import { preprocessTablePipes, renderTableToMarkdown, Table } from '@tiptap/extension-table'
-import { OrderedList, ORDERED_LIST_MARKER_PATTERN, TaskItem, TaskList } from '@tiptap/extension-list'
+import { ListItem, OrderedList, TaskItem, TaskList } from '@tiptap/extension-list'
 import { Paragraph } from '@tiptap/extension-paragraph'
 import { sanitizeImageSrc } from './image-src.js'
 
@@ -963,7 +963,10 @@ export const DohcTableRowHeight = Extension.create({
 // checkbox schema-invalid — the Y.Doc conversion then drops the whole task
 // list. `nested: true` widens it to `paragraph block*`. Every dohc
 // schema registers this extension so the editor and the conversions agree.
-export const DohcTaskItem = TaskItem.configure({ nested: true })
+export const DohcTaskItem = TaskItem.extend({
+  renderMarkdown: (node, helpers) => renderItemBlocks(node, helpers,
+    `- [${node.attrs?.checked ? 'x' : ' '}] `, 2),
+}).configure({ nested: true })
 
 // dohc owns the `code` token instead of StarterKit's CodeBlock, whose
 // parseMarkdown accepts a token only when its raw text starts at column 0 with
@@ -984,6 +987,86 @@ export const DohcCodeBlock = Extension.create({
     ),
 })
 
+// Standalone editor managers must also wait for later reference definitions.
+export const markdownListParseState = { references: true }
+
+function markdownLists(projected = false) {
+  const tokenizer = new Tokenizer()
+  tokenizer.lexer = new Lexer({ ...getDefaults(), tokenizer })
+  tokenizer.lexer.blockTokens = () => Object.assign([], { links: {} })
+  return Extension.create({
+  name: 'dohcMarkdownLists', priority: 1001, markdownTokenName: 'list',
+  markdownTokenizer: { name: 'list', level: 'block', start: () => -1, tokenize(src, _tokens, helpers) {
+    if (!' -+*0123456789'.includes(src[0]) || !/^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|\n|$)/u.test(src)) return undefined
+    // Ordinary tight items need only inline lexing. A following root paragraph
+    // cannot continue the list across a blank; indented bodies stay on Marked.
+    // Reference labels wait for later definitions through block lexing.
+    const flatTasks = /^([-+*]) \[[ xX]\] [A-Za-z][^\n\t]*(?:\n\1 \[[ xX]\] [A-Za-z][^\n\t]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
+    const flat = flatTasks ?? /^([-+*]) [A-Za-z][^\n\t]*(?:\n\1 [A-Za-z][^\n\t]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
+      ?? /^[0-9]{1,9}([.)]) [A-Za-z][^\n\t]*(?:\n[0-9]{1,9}\1 [A-Za-z][^\n\t]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
+    if (flat && (!markdownListParseState.references || !flat[0].includes('['))) {
+      const raw = flat[0]
+      const ordered = /^[0-9]/u.test(raw)
+      const lines = raw.split('\n')
+      return {
+        type: 'list', raw, ordered, start: ordered ? Number.parseInt(raw, 10) : '', loose: false,
+        items: lines.map((line, at) => {
+          const body = line.slice(flatTasks ? 6 : ordered ? line.indexOf(' ') + 1 : 2)
+          const text = at === lines.length - 1 ? body.trimEnd() : body
+          return {
+            type: 'list_item', raw: line + (at < lines.length - 1 ? '\n' : ''),
+            task: !!flatTasks, ...(flatTasks ? { checked: line[3].toLowerCase() === 'x' } : {}),
+            loose: false, text,
+            tokens: [{ type: 'paragraph', raw: text, text, tokens: /^[A-Za-z ]+$/u.test(text)
+              ? [{ type: 'text', raw: text, text }]
+              : helpers.inlineTokens(text) }],
+          }
+        }),
+      }
+    }
+    if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?![ \t]*(?:\n|$))[^\n\[]+(?:\n|$))+(?:\n|$)(?![ \t\n0-9*+-])/u.test(src)) return undefined
+    // Marked otherwise strips a checkbox from ordered item text as GFM tasks.
+    tokenizer.options.gfm = !/^ {0,3}[0-9]/u.test(src)
+    const list = tokenizer.list(src)
+    if (!list) return undefined
+    for (const item of list.items) {
+      const task = /^\[([ xX])\][ \t]*(?:\n|$)/u.exec(item.text)
+      if (!list.ordered && task) { item.task = true; item.checked = task[1].toLowerCase() === 'x'; item.text = item.text.slice(task[0].length) }
+      item.tokens = helpers.blockTokens(item.text) as Tokens.ListItem['tokens']
+    }
+    return list
+  } },
+  parseMarkdown: (token, helpers) => {
+    if (token.type !== 'list') return []
+    const lists: JSONContent[] = []
+    let separate = false
+    for (const item of token.items ?? []) {
+      const emptyTask = /^[ ]*[-+*] \[([ xX])\] *\n?$/u.exec(item.raw ?? '')
+      const task = item.task || !!emptyTask
+      const type = token.ordered ? 'orderedList' : task ? 'taskList' : 'bulletList'
+      let list = lists.at(-1)
+      if (list?.type !== type || (projected && separate)) {
+        list = { type, ...(token.ordered ? { attrs: { start: Number(projected ? /^[ ]*([0-9]+)/u.exec(item.raw ?? '')?.[1] ?? token.start ?? 1 : token.start ?? 1) } } : {}), content: [] }
+        lists.push(list)
+      }
+      separate = /\n[ \t]*\n$/u.test(item.raw ?? '')
+      const tokens = (emptyTask ? [] : item.tokens ?? []).map(block => block.type === 'text'
+        ? { ...block, type: 'paragraph' } : block)
+      const content = (helpers.parseBlockChildren ?? helpers.parseChildren)(tokens)
+      if (content[0]?.type !== 'paragraph' || (/^[ \t]*\n/u.test(item.text ?? '') && /^[ ]*(?:[-+*]|[0-9]{1,9}[.)])(?: \[([ xX])\])? *\n/u.test(item.raw ?? ''))) content.unshift({ type: 'paragraph' })
+      list.content!.push({
+        type: task ? 'taskItem' : 'listItem',
+        ...(task ? { attrs: { checked: emptyTask ? emptyTask[1].toLowerCase() === 'x' : !!item.checked } } : {}), content,
+      })
+    }
+    return lists
+  },
+})
+
+}
+const DohcMarkdownLists = markdownLists()
+export const DohcProjectedMarkdownLists = markdownLists(true)
+
 export const dohcMarkdownExtensions = [
   DohcImage,
   DohcEscapedPunctuation,
@@ -995,6 +1078,7 @@ export const dohcMarkdownExtensions = [
   DohcMathBlock,
   DohcTableRowHeight,
   DohcCodeBlock,
+  DohcMarkdownLists,
 ]
 
 // GFM forbids block nodes inside table cells but permits inline raw HTML, so a
@@ -1026,33 +1110,50 @@ function firstLine(source: string): string {
   return newline < 0 ? source : source.slice(0, newline)
 }
 
-const orderedListTokenizer = OrderedList.config.markdownTokenizer!
-const taskListTokenizer = TaskList.config.markdownTokenizer!
 const tableTokenizer = Table.config.markdownTokenizer!
-const orderedListStart = new RegExp(`^(\\s*)(${ORDERED_LIST_MARKER_PATTERN})([.)])\\s+(.*)$`)
 
-// Tiptap 3.29.2 splits the remaining document before rejecting unrelated
-// blocks. Check only the first line, then leave eligible blocks to Tiptap.
+// Use marked's CommonMark item-body lexer; Tiptap's ordered-list tokenizer
+// accepts letter markers and strips only two columns from child blocks.
 export const MarkdownOrderedList = OrderedList.extend({
   markdownTokenizer: {
-    ...orderedListTokenizer,
-    tokenize: (src, tokens, helpers) => {
-      if (!orderedListStart.test(firstLine(src))) return undefined
-      return orderedListTokenizer.tokenize(src, tokens, helpers)
-    },
+    name: 'orderedList', level: 'block', start: () => -1, tokenize: () => undefined,
   },
 })
+export const MarkdownListItem = ListItem.extend({
+  renderMarkdown: (node, helpers, context) => {
+    const start = Number(context.meta?.parentAttrs?.start ?? 1)
+    const prefix = context.parentType === 'orderedList'
+      ? `${Math.min(999_999_999, start + (context.index || 0))}. ` : '- '
+    return renderItemBlocks(node, helpers, prefix, prefix.length)
+  },
+})
+
+function renderItemBlocks(node: JSONContent, helpers: MarkdownRendererHelpers, prefix: string, indent: number): string {
+  const [first, ...children] = node.content ?? []
+  const firstText = helpers.renderChildren(first ? [first] : []).replace(/^[ \t]*$/u, '')
+  const emptyMarker = node.type === 'listItem' && firstText === ''
+  let output = prefix + firstText.replaceAll('\n', '\n' + ' '.repeat(indent))
+  children.forEach((child, index) => {
+    let content = (helpers.renderChild?.(child, index + 1) ?? helpers.renderChildren([child]))
+    if (index === 0 && emptyMarker) content = content.replace(/^\n/u, '')
+    const rendered = content.split('\n').map(line => ' '.repeat(indent) + line).join('\n')
+    const firstLine = content.split('\n', 1)[0]
+    const previous = index === 0 ? first : children[index - 1]
+    const interrupts = child.type === 'orderedList' ? /^1\. [ \t]*[^ \t]/u.test(firstLine)
+      : child.type !== 'bulletList' || firstLine.replace(/[ \t]+$/u, '') !== '-'
+    const separate = child.type === 'paragraph' || child.type === 'horizontalRule' || child.type === 'mathBlock'
+      || (['paragraph', 'mathBlock', 'table', 'blockquote', 'callout'].includes(previous?.type ?? '') && !interrupts)
+    const boundary = separate || (['blockquote', 'callout'].includes(previous?.type ?? '') && ['blockquote', 'callout'].includes(child.type ?? ''))
+      || (previous?.type === child.type && ['bulletList', 'orderedList', 'taskList'].includes(child.type ?? ''))
+    output += (boundary && !(index === 0 && emptyMarker) ? '\n\n' : '\n') + rendered
+  })
+  return output
+}
 export const MarkdownTaskList = TaskList.extend({
+  // DohcMarkdownLists groups items before Tiptap's task-only list splitter.
+  markdownTokenName: 'list',
   markdownTokenizer: {
-    ...taskListTokenizer,
-    tokenize: (src, tokens, helpers) => {
-      // parseIndentedBlocks also accepts leading blank lines.
-      const firstContent = src.search(/\S/)
-      if (firstContent < 0) return undefined
-      const line = firstLine(src.slice(firstContent))
-      if (!/^([-+*])\s+\[([ xX])\]\s+(.*)$/.test(line)) return undefined
-      return taskListTokenizer.tokenize(src, tokens, helpers)
-    },
+    name: 'taskList', level: 'block', start: () => -1, tokenize: () => undefined,
   },
 })
 

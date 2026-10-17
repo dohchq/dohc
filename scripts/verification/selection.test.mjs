@@ -59,7 +59,7 @@ test("a change to a file that the repository tests read selects all of them, and
   assert.equal(selectsRepositoryTests(["apps/desktop/src/main.ts", "scripts/check-brand.mjs"], workflow), true, "one tooling input selects them all");
 });
 
-test("canonical repository checks include every script contract except the Docker proof", () => {
+test("canonical repository checks include every script contract except the Docker proofs", () => {
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   // A tooling change runs test:repo instead of test:repo:tree, so test:repo must run every test the tree set runs.
   const tree = manifest.scripts["test:repo:tree"];
@@ -67,7 +67,7 @@ test("canonical repository checks include every script contract except the Docke
   for (const [path] of tree.matchAll(/[^\s]+\.test\.mjs/gu)) assert.ok(manifest.scripts["test:repo"].split(/\s+/u).includes(path), `test:repo omits ${path}`);
   const listed = new Set([...manifest.scripts["test:repo"].matchAll(/[^\s]+\.test\.mjs/gu),
     ...manifest.scripts["test:repo:source"].matchAll(/[^\s]+\.test\.mjs/gu)].map(([path]) => path));
-  const optIn = new Set(["scripts/self-host/recovery.docker.test.mjs"]);
+  const optIn = new Set(["scripts/self-host/recovery.docker.test.mjs", "scripts/self-host/drill.docker.test.mjs"]);
   const tracked = execFileSync("git", ["ls-files", "-z", "--", ":(glob)scripts/**/*.test.mjs", ":(glob)tools/**/*.test.mjs"],
     { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }).split("\0").filter(Boolean);
   assert.ok(tracked.includes("scripts/build-slot.test.mjs"));

@@ -19,6 +19,7 @@ import type {
   SyncStatusResult,
   UsageRecordResult,
   UsageRecordRow,
+  WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
@@ -44,7 +45,8 @@ import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
-import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
+import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
+import { MENU_FRAME, MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { SkeletonRows } from "../ui/SkeletonRows";
@@ -54,14 +56,14 @@ import { Titlebar } from "../Titlebar";
 import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AppRows } from "../workbench/AppsView";
-import { siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
+import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
 import { ThreadMessages } from "../workbench/ChatPosts";
 import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
 import { ComposerModeBar } from "../workbench/ChatsControls";
-import { MentionComposer } from "../workbench/MentionComposer";
+import { ComposerCatalogOptions, MentionComposer } from "../workbench/MentionComposer";
 import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddressed";
 import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
@@ -425,7 +427,94 @@ function KindRows(props: { label: string; selected: boolean }) {
   );
 }
 
-const RELAY_ERROR = "dohc could not reach the sync relay. Check your connection.";
+// Every object that is not a file, by the name its tab shows, each glyph in
+// a row the way a list draws it. A `Record` over the kinds, so a new kind is
+// a compile error here until the page shows it.
+const OBJECT_SAMPLES: Record<ObjectKind, string> = {
+  app: "trip-planner",
+  collection: "Registrations",
+  group: "trip",
+  chat: "Home",
+  compare: "Compare with Main",
+  change: "Diff: plan.md",
+  graph: "Graph",
+  history: "History",
+};
+const OBJECTS = Object.keys(OBJECT_SAMPLES) as ObjectKind[];
+// The kind and object name columns share one width, wider than the longest
+// name, so the rows beside each start at the same place on both lines.
+const KIND_NAMES = "m-0 w-36 list-none border border-transparent py-1 font-mono text-[11px] text-subtle";
+
+function ObjectRows(props: { label: string; selected: boolean }) {
+  return (
+    <ul aria-label={props.label} className="m-0 w-52 list-none rounded-lg border border-line bg-panel py-1">
+      {OBJECTS.map((kind) => (
+        <li key={kind} className="px-1">
+          <span
+            className={`flex h-7 items-center gap-1.5 rounded-md pl-7 pr-2 text-[13px] ${
+              props.selected ? "bg-selected text-ink" : "text-muted"
+            }`}
+          >
+            <ObjectGlyph kind={kind} size={15} className={props.selected ? "text-ink" : "text-subtle"} />
+            <span className="min-w-0 flex-1 truncate">{OBJECT_SAMPLES[kind]}</span>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// Tabs of every kind, as the listing describes their files: a database by
+// its header, whatever its name, and a page with an emoji.
+const STRIP_GROUP = chatTabPath({ kind: "channel", id: "trip" });
+const STRIP_COLLECTION = collectionTabPath("registrations");
+const STRIP_LONG = "notes/offsite-retrospective-and-next-quarter-planning.md";
+const STRIP_FILES: ReadonlyMap<string, WorkspaceFileEntry> = new Map(
+  [
+    { path: "trip/plan.md", kind: "file" as const },
+    { path: "budget.csv", kind: "file" as const },
+    { path: "map.excalidraw", kind: "file" as const },
+    { path: "ledger.db", kind: "database" as const },
+    { path: "launch.md", kind: "file" as const, icon: "🚀" },
+    { path: STRIP_LONG, kind: "file" as const },
+  ].map((entry) => [entry.path, entry]),
+);
+const STRIP_LABELS: ReadonlyMap<string, string> = new Map([[STRIP_GROUP, "trip"]]);
+
+// One group's strip over a strip of paper, its tab list at rest.
+function GlyphStrip(props: { groupId: string; groupNumber: number; tabs: string[]; active: string; dirty?: boolean }) {
+  return (
+    <>
+      <EditorTabs
+        groupId={props.groupId}
+        groupNumber={props.groupNumber}
+        tabs={props.tabs.map((path) => ({ path }))}
+        activeTab={props.active}
+        activeTabDirty={props.dirty ?? false}
+        tabLabels={STRIP_LABELS}
+        files={STRIP_FILES}
+        recoveryPaths={NO_RECOVERY}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />
+      <div className="h-4 bg-bg" />
+    </>
+  );
+}
+
+function GlyphStripBox(props: { tabs: string[]; active: string; dirty?: boolean }) {
+  return (
+    <div className="w-full overflow-hidden rounded-lg border border-line">
+      <GlyphStrip groupId="states" groupNumber={1} {...props} />
+    </div>
+  );
+}
+
+const RELAY_ERROR ="dohc could not reach the sync relay. Check your connection.";
 const FOLDER = "C:\\Users\\ice\\Research";
 
 function toast(tone: "danger" | "success") {
@@ -1486,7 +1575,7 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       <Section part="kind-glyph" title="Kind glyph">
         <Specimen label="kind">
-          <ul className="m-0 list-none border border-transparent py-1 font-mono text-[11px] text-subtle">
+          <ul className={KIND_NAMES}>
             {KINDS.map((kind) => (
               <li key={kind.displayKind} className="flex h-7 items-center">
                 {kind.displayKind} · {kind.name}
@@ -1499,6 +1588,21 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="selected">
           <KindRows label="Kinds, selected" selected />
+        </Specimen>
+        <Specimen label="object">
+          <ul className={KIND_NAMES}>
+            {OBJECTS.map((kind) => (
+              <li key={kind} className="flex h-7 items-center">
+                {kind}
+              </li>
+            ))}
+          </ul>
+        </Specimen>
+        <Specimen label="object, rest">
+          <ObjectRows label="Objects" selected={false} />
+        </Specimen>
+        <Specimen label="object, selected">
+          <ObjectRows label="Objects, selected" selected />
         </Specimen>
       </Section>
 
@@ -2426,7 +2530,98 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
       </Section>
+
+      {/* Last, so the parts above keep their places. Each strip holds a tab
+          list, so the part holds them at rest. */}
+      <Section part="tab-glyphs" title="Tab glyphs" menusAtRest>
+        <Specimen label="files: a document, active and unsaved; a CSV; a drawing; a database" className="w-full">
+          <GlyphStripBox tabs={["trip/plan.md", "budget.csv", "map.excalidraw", "ledger.db"]} active="trip/plan.md" dirty />
+        </Specimen>
+        <Specimen label="objects: a group, active; an app; a Collection; History" className="w-full">
+          <GlyphStripBox tabs={[STRIP_GROUP, siteTabPath("trip-planner"), STRIP_COLLECTION, HISTORY_TAB_PATH]} active={STRIP_GROUP} />
+        </Specimen>
+        <Specimen label="a page with an emoji, active; a long name, cut off" className="w-full">
+          <GlyphStripBox tabs={["launch.md", STRIP_LONG]} active="launch.md" />
+        </Specimen>
+        <Specimen label="split: the active group, then one whose active tab recedes" className="w-full">
+          <div className="flex w-full overflow-hidden rounded-lg border border-line">
+            <EditorGroupLayout
+              groups={[
+                { id: "first", size: 1, content: <GlyphStrip groupId="first" groupNumber={1} tabs={["trip/plan.md", "ledger.db"]} active="trip/plan.md" /> },
+                { id: "second", size: 1, content: <GlyphStrip groupId="second" groupNumber={2} tabs={[STRIP_GROUP, siteTabPath("trip-planner")]} active={STRIP_GROUP} /> },
+              ]}
+              activeGroupId="first"
+              onFocusGroup={noop}
+              onResizeGroups={noop}
+            />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* The catalog is a listbox the textarea controls, not a menu, so it
+          is drawn open here under its composer instead of being opened. */}
+      <Section part="composer-poll" title="Composer catalog and poll">
+        <Specimen label="/ in a new post: Poll active">
+          <ComposerCatalogSpecimen theme={theme} surface="post" />
+        </Specimen>
+        <Specimen label="/ in a group's chat">
+          <ComposerCatalogSpecimen theme={theme} surface="stream" />
+        </Specimen>
+        <Specimen label="a new post with a poll; the second choice repeats the first">
+          <div className="w-[560px]">
+            <MentionComposer testIdPrefix={`states-poll-post-${theme}`} composerId={`states-poll-post-${theme}`}
+              value={POLL_QUESTION} sending={false} surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA}
+              placeholder="What's happening in #general?" sendLabel="Start post" candidates={[]} fileCandidates={STATES_FILES}
+              onChange={noop} onSend={noop} poll={{ choices: ["Porto", "Porto ", "Lisbon"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="a narrow new post with a poll: Poll without its label">
+          <div className="w-[400px]">
+            <MentionComposer testIdPrefix={`states-poll-narrow-${theme}`} composerId={`states-poll-narrow-${theme}`}
+              value={POLL_QUESTION} sending={false} surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA}
+              placeholder="What's happening in #general?" sendLabel="Start post" candidates={[]} fileCandidates={STATES_FILES}
+              onChange={noop} onSend={noop} poll={{ choices: ["Lisbon", "Porto"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="a comment asking the agent, with a poll, replying to a message: the offer floats over the stack">
+          {/* A stream composer floats its offer above its top edge, into the
+              room the end of its conversation keeps, so it gets that room. */}
+          <div className="w-[400px] rounded-lg border border-line bg-panel pt-9">
+            <MentionComposer testIdPrefix={`states-poll-stream-${theme}`} composerId={`states-poll-stream-${theme}`}
+              value={`@agent ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
+              sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES} onChange={noop} onSend={noop}
+              agentOffer={agentOffer("runs")} onSetUpAgent={noop}
+              above={
+                <ComposerModeBar testId={`states-poll-stream-${theme}-replying-mode`} cancelTestId={`states-poll-stream-${theme}-replying-cancel`}
+                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+              }
+              poll={{ choices: ["Lisbon", "Porto", "Madeira"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+      </Section>
     </section>
+  );
+}
+
+const POLL_QUESTION = "Where should we hold the offsite?";
+const STATES_FILES = [{ path: "Plans/offsite.md", label: "offsite" }];
+
+function ComposerCatalogSpecimen(props: { theme: "light" | "dark"; surface: "post" | "stream" }) {
+  const id = `states-catalog-${props.surface}-${props.theme}`;
+  const composer = (
+    <MentionComposer testIdPrefix={id} composerId={id} value={`${POLL_QUESTION} /`} sending={false}
+      surface={props.surface} authorName="Ada" authorPresentation={SAMPLE_ADA}
+      placeholder="Message #general" sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES}
+      onChange={noop} onSend={noop} poll={null} onPollChange={noop} />
+  );
+  return (
+    <div className={`flex flex-col gap-1.5 pb-10 ${props.surface === "post" ? "w-[560px]" : "w-[400px]"}`}>
+      {props.surface === "post" ? composer : <div className="flex flex-col rounded-lg border border-line bg-panel">{composer}</div>}
+      <ul role="listbox" aria-label="Add to message" className={`${MENU_FRAME} w-64`}>
+        <ComposerCatalogOptions listboxId={`${id}-mentions`} testIdPrefix={id} rows={["poll", "mention", "file"]}
+          highlight={0} onPick={noop} onHover={() => noop} />
+      </ul>
+    </div>
   );
 }
 

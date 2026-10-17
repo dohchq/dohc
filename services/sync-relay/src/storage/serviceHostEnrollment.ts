@@ -9,6 +9,7 @@ import {parseWorkspaceId} from "../requestInputs";
 import {canonicalLiveSelector, currentLiveDocumentMoment} from "./liveDocumentAuthority";
 import {LIVE_RESTORE_OPERATIONS} from "./liveRestoreOperationSchema";
 import {assertWorkspaceQuota} from "./workspaces";
+import {forgetServiceHostUploads} from "./serviceHostUploads";
 import {badRequest, notFound, relayError} from "../errors";
 
 export const SERVICE_HOST_ENROLLMENTS = "sync_relay_service_host_enrollments";
@@ -290,6 +291,10 @@ export function listRetiredServiceHostEnrollments(storage: StorageContext, works
 export interface ServiceHostWorkspace {
   readonly workspaceId: string; readonly ownerUserId: string; readonly replicationEpoch: string; readonly streamIdentity: string;
 }
+// Enabled enrollments that match the workspace's current owner and identity.
+const CURRENT = `FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
+  WHERE e.workspace_id=? AND e.enabled=1 AND e.retired=0 AND e.owner_user_id=w.owner_user_id
+    AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity`;
 /**
  * The workspace identity while at least one of its enrollments is enabled and
  * current, else null. One SQL snapshot; safe both on the request path and
@@ -297,14 +302,18 @@ export interface ServiceHostWorkspace {
  */
 export function currentServiceHostWorkspace(storage: StorageContext, workspaceId: string): ServiceHostWorkspace | null {
   storage.captureStanding();
-  const value = storage.db.prepare(`SELECT e.workspace_id,e.owner_user_id,e.replication_epoch,e.stream_identity
-    FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
-    WHERE e.workspace_id=? AND e.enabled=1 AND e.retired=0 AND e.owner_user_id=w.owner_user_id
-      AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity
-    LIMIT 1`).get(parseWorkspaceId(workspaceId));
+  const value = storage.db.prepare(`SELECT e.workspace_id,e.owner_user_id,e.replication_epoch,e.stream_identity ${CURRENT} LIMIT 1`)
+    .get(parseWorkspaceId(workspaceId));
   return value ? Object.freeze({workspaceId: parseWorkspaceId(value.workspace_id), ownerUserId: parseLiveUpdateIdentifier(value.owner_user_id, "owner_user_id"),
     replicationEpoch: parseLiveUpdateIdentifier(value.replication_epoch, "replication_epoch"),
     streamIdentity: parseLiveUpdateIdentifier(value.stream_identity, "stream_identity")}) : null;
+}
+/** The enrollments `currentServiceHostWorkspace` counts, in one SQL snapshot. */
+export function currentServiceHostEnrollments(storage: StorageContext, workspaceId: string): readonly ServiceHostEnrollment[] {
+  storage.captureStanding();
+  const values = storage.db.prepare(`SELECT e.* ${CURRENT} ORDER BY e.path LIMIT ?`).all(parseWorkspaceId(workspaceId), SERVICE_HOST_MAX_DOCUMENTS + 1);
+  if (values.length > SERVICE_HOST_MAX_DOCUMENTS) throw new Error("Service host enrollment capacity is damaged.");
+  return values.map(row);
 }
 export class ServiceHostRetirementConflict extends Error {
   constructor(readonly restoreFenceGeneration: number) {super("The document's restore generation changed.");}
@@ -345,6 +354,8 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
     const retired = !enabled && (current.retired || ownerStop === "retire");
     storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET owner_stop=?,enabled=?,retired=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
       .run(ownerStop, Number(enabled), Number(retired), Math.max(nowMs, current.updatedAtMs), workspaceId, current.objectId);
+    // Stop retires at once, so the release that clears upload proof never sees this row.
+    if (!currentServiceHostWorkspace(storage, workspaceId)) forgetServiceHostUploads(storage, workspaceId);
     return {...read(storage, workspaceId, current.path)!, ...(acceptedCursor === undefined ? {} : {acceptedCursor})};
   });
 }
@@ -381,6 +392,7 @@ export function releaseServiceHostEnrollment(storage: StorageContext, input: {wo
     if (!uncovered && !(current.enabled && current.ownerStop)) return null;
     storage.db.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET enabled=0,retired=?,updated_at_ms=? WHERE workspace_id=? AND object_id=?`)
       .run(Number(uncovered || current.ownerStop === "retire"), Math.max(nowMs, current.updatedAtMs), current.workspaceId, current.objectId);
+    if (!currentServiceHostWorkspace(storage, current.workspaceId)) forgetServiceHostUploads(storage, current.workspaceId);
     return read(storage, current.workspaceId, current.path);
   });
 }

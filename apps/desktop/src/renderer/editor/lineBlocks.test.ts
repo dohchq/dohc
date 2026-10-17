@@ -181,9 +181,9 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- one\n1) matched\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("1) one\n- matched\n\nAfter", 2).index).toBe(1);
     expect(blockForLine("1. one\n- matched\n\nAfter", 2).index).toBe(1);
-    // Ordered delimiters are not part of the list's identity.
-    expect(blockForLine("1) a\n1. b", 2).index).toBe(0);
-    expect(blockForLine("1. a\n1) b", 2).index).toBe(0);
+    // A changed delimiter starts a separate ordered list.
+    expect(blockForLine("1) a\n1. b", 2).index).toBe(1);
+    expect(blockForLine("1. a\n1) b", 2).index).toBe(1);
     // Indented, it is a nested list and stays in the item.
     expect(blockForLine("- one\n  1. matched\n\nAfter", 2).index).toBe(0);
   });
@@ -489,9 +489,9 @@ describe("blockForLine — the index", () => {
 
   it("ends an open list at a quote, but not at a table or display math", () => {
     expect(blockForLine("- item\n> matched\n\nAfter", 2).index).toBe(1);
-    // An ordered-list item keeps the quote as nested content.
-    expect(blockForLine("1. item\n> matched\n\nAfter", 2).index).toBe(0);
-    expect(blockForLine("1) item\n> matched\n\nAfter", 2).index).toBe(0);
+    // A quote must be indented into either kind of list item.
+    expect(blockForLine("1. item\n> matched\n\nAfter", 2).index).toBe(1);
+    expect(blockForLine("1) item\n> matched\n\nAfter", 2).index).toBe(1);
     // A table and display math interrupt a paragraph only.
     expect(blockForLine("- item\n$$x$$\n\nAfter", 2).index).toBe(0);
     expect(blockForLine("- item\n| A |\n| --- |\n| r |\n\nAfter", 2).index).toBe(0);
@@ -500,19 +500,17 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- item\n  > matched\n\nAfter", 2).index).toBe(0);
   });
 
-  it("takes any indent for an ordered item", () => {
-    // Measured, not derived: either delimiter keeps a one-column continuation.
-    expect(blockForLine("1. item\n\n para\n\nAfter", 3).index).toBe(0);
+  it("requires the ordered item's content column after a blank", () => {
+    expect(blockForLine("1. item\n\n para\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("1. item\n\npara\n\nAfter", 3).index).toBe(1);
-    expect(blockForLine("10. item\n\n   para\n\nAfter", 3).index).toBe(0);
-    expect(blockForLine("1) item\n\n  para\n\nAfter", 3).index).toBe(0);
+    expect(blockForLine("10. item\n\n   para\n\nAfter", 3).index).toBe(1);
+    expect(blockForLine("1) item\n\n  para\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("1) item\n\n   para\n\nAfter", 3).index).toBe(0);
   });
 
-  it("splits a CHECKLIST at a blank line, where a bullet list joins", () => {
-    // A checklist is a taskList, a different node with the opposite rule.
-    expect(blockForLine("- [ ] a\n\n- [ ] b\n\nAfter", 3).index).toBe(1);
-    expect(blockForLine("- [ ] a\n\n- [ ] b\n\n- [ ] c\n\nAfter", 5).index).toBe(2);
+  it("keeps a loose checklist together across blank lines", () => {
+    expect(blockForLine("- [ ] a\n\n- [ ] b\n\nAfter", 3).index).toBe(0);
+    expect(blockForLine("- [ ] a\n\n- [ ] b\n\n- [ ] c\n\nAfter", 5).index).toBe(0);
     // A bullet list still joins across one.
     expect(blockForLine("- a\n\n- b\n\nAfter", 3).index).toBe(0);
     // With no blank line the checklist is one node, mixed states and all.
@@ -533,7 +531,7 @@ describe("blockForLine — the index", () => {
   it("reads a checkbox only where the tokenizer does", () => {
     // Both cases, and the bullet markers. An ordered item is never a task.
     for (const item of ["- [x]", "- [X]", "* [ ]", "+ [ ]"]) {
-      expect(blockForLine(`${item} a\n\n${item} b\n\nAfter`, 3).index).toBe(1);
+      expect(blockForLine(`${item} a\n\n${item} b\n\nAfter`, 3).index).toBe(0);
     }
     expect(blockForLine("1. [ ] a\n\n2. [ ] b\n\nAfter", 3).index).toBe(0);
     // The box needs a space or the line end after it, and only `x`/`X` in it.
@@ -553,8 +551,7 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- one\n* two", 2).index).toBe(1);
     expect(blockForLine("- one\n+ two", 2).index).toBe(1);
     expect(blockForLine("- a\n\n* b\n\n- c\n\nAfter", 5).index).toBe(2);
-    // An ordered list's delimiter does not change its identity.
-    expect(blockForLine("1. a\n\n2) b\n\nAfter", 3).index).toBe(0);
+    expect(blockForLine("1. a\n\n2) b\n\nAfter", 3).index).toBe(1);
     // The same marker still resumes, and an indented one is a nested list.
     expect(blockForLine("- one\n\n- two\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("1. a\n\n2. b\n\nAfter", 3).index).toBe(0);
@@ -1163,7 +1160,7 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "ordered delimiters share one list",
+      name: "ordered delimiters start separate lists",
       body: "1. a\n\n2) b\n\nAfter",
       lands: [
         [1, "a"],
@@ -1171,6 +1168,39 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
         [5, "After"],
       ],
     },
+    ...[
+      ["1. item\n  lazy\n\nAfter", 2, 4],
+      ["10. item\n   lazy\n\nAfter", 2, 4],
+      ["- item\n lazy\n\nAfter", 2, 4],
+    ].map(([body, lazy, after]) => ({
+      name: `an underindented lazy line stays in its item: ${body}`,
+      body: body as string,
+      lands: [[lazy as number, "lazy"], [after as number, "After"]] as [number, string][],
+    })),
+    { name: "a lazy line leaves a deep or empty item: - a\n      b\n lazy\n\nAfter", body: "- a\n      b\n lazy\n\nAfter", lands: [[3, "lazy"], [5, "After"]] as [number, string][] },
+    { name: "a lazy line leaves a deep or empty item: - a\n  - b\n      c\n lazy\n\nAfter", body: "- a\n  - b\n      c\n lazy\n\nAfter", lands: [[4, "lazy"], [6, "After"]] as [number, string][] },
+    { name: "a lazy line leaves a deep or empty item: - a\n      b\nlazy\n\nAfter", body: "- a\n      b\nlazy\n\nAfter", lands: [[3, "lazy"], [5, "After"]] as [number, string][] },
+    { name: "a lazy line leaves a deep or empty item: -\nlazy\n\nAfter", body: "-\nlazy\n\nAfter", lands: [[2, "lazy"], [4, "After"]] as [number, string][] },
+    { name: "a lazy line leaves a deep or empty item: -     a\nlazy\n\nAfter", body: "-     a\nlazy\n\nAfter", lands: [[2, "lazy"], [4, "After"]] as [number, string][] },
+    { name: "a lazy line leaves a deep or empty item: - a\n  \tb\n lazy\n\nAfter", body: "- a\n  \tb\n lazy\n\nAfter", lands: [[3, "lazy"], [5, "After"]] as [number, string][] },
+    { name: "r25-deep-marker-bullet", body: "-    a\nlazy\n\nAfter", lands: [[2,"lazy"],[4,"After"]] as [number, string][] },
+    { name: "r25-deep-marker-ordered", body: "1.    a\nlazy\n\nAfter", lands: [[2,"lazy"],[4,"After"]] as [number, string][] },
+    { name: "r25-heading-marker", body: "- # h\nlazy\n\nAfter", lands: [[2,"lazy"],[4,"After"]] as [number, string][] },
+    { name: "r25-heading-continuation", body: "- a\n  # h\nlazy\n\nAfter", lands: [[3,"lazy"],[5,"After"]] as [number, string][] },
+    { name: "r25-fence-marker", body: "- ```\n  x\n  ```\nlazy\n\nAfter", lands: [[4,"lazy"],[6,"After"]] as [number, string][] },
+    { name: "r25-fence-continuation", body: "- a\n  ```\n  x\n  ```\nlazy\n\nAfter", lands: [[5,"lazy"],[7,"After"]] as [number, string][] },
+    { name: "r25-rule-marker", body: "- ---\nlazy\n\nAfter", lands: [[2,"lazy"],[4,"After"]] as [number, string][] },
+    { name: "r25-rule-continuation", body: "- a\n  - - -\nlazy\n\nAfter", lands: [[3,"lazy"],[5,"After"]] as [number, string][] },
+    { name: "r26-hashtag-prose-resumes", body: "- #tag\n  plain\nlazy\n\nAfter", lands: [[3, "lazy"], [5, "After"]] as [number, string][] },
+    { name: "r26-hashtag-next", body: "- a\n#tag\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-hashtag-marker", body: "- #tag\nlazy\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-hashtag-continuation", body: "- a\n  #tag\nlazy\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-hashtag-number", body: "- #1 priority\nnext\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-html-next", body: "- a\n<!-- note -->\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-deep-heading", body: "- a\n    # h\nlazy\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-deep-fence", body: "- a\n    ```\n    x\n    ```\nlazy\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-deep-ordered-heading", body: "1. a\n      # h\nlazy\n\nAfter", lands: [] as [number,string][] },
+    { name: "r26-five-space-marker-fence", body: "-     ```\nnext\n\n# H", lands: [] as [number,string][] },
     {
       name: "three lists, two marker changes",
       body: "- a\n\n* b\n\n- c\n\nAfter",
@@ -1358,10 +1388,18 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "a `)`-ordered item accepts any indented continuation",
+      name: "an underindented continuation leaves a `)`-ordered item",
       body: "1) item\n\n  para\n\nAfter",
       lands: [
         [1, "item"],
+        [3, "para"],
+        [5, "After"],
+      ],
+    },
+    {
+      name: "five padding columns leave one marker space in an ordered item",
+      body: "1.     item\n\n   para\n\nAfter",
+      lands: [
         [3, "para"],
         [5, "After"],
       ],
@@ -1393,7 +1431,7 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "an ordered delimiter change stays in one list",
+      name: "an ordered delimiter change starts a new list",
       body: "1) a\n1. b",
       lands: [
         [1, "a"],
@@ -1603,7 +1641,7 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "an ordered list absorbs the quote under it",
+      name: "an unindented quote ends an ordered list",
       body: "1. item\n> matched\n\nAfter",
       lands: [
         [2, "matched"],
@@ -1718,7 +1756,7 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ],
     },
     {
-      name: "a blank line splits a checklist",
+      name: "a blank line keeps a loose checklist together",
       body: "- [ ] a\n\n- [ ] b\n\nAfter",
       lands: [
         [1, "a"],
