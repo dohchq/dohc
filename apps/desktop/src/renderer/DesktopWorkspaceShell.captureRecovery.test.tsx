@@ -3,10 +3,10 @@ import "./DesktopWorkspaceShell.testSupport";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { CaptureRecoveryStatusResult, EngineMomentRecord, ListEngineMomentsResult, ReadEngineMomentResult } from "../ipc/bridgeContract";
+import type { CaptureRecoveryStatusResult, EngineMomentRecord, ListHistoryPayload, ReadEngineMomentResult } from "../ipc/bridgeContract";
 import type { OwnerRestoreRequest } from "../ipc/ownerRestoreContract";
 import { deferred, type Deferred } from "../testing/deferred";
-import { historyCursor, historyPageFields } from "../testing/historyPageFixture";
+import { timelinePage } from "../testing/historyPageFixture";
 import { CAPTURE_RECOVERY_TITLE, captureRecoveryMessage } from "./shell/useCaptureRecoveryNotices";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { DesktopWorkspaceShell, OTHER_WORKSPACE, WORKSPACE, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
@@ -18,9 +18,8 @@ const RECOVERY = {
 const RECOVERY_MOMENT: EngineMomentRecord = {
   id: RECOVERY.momentId, versionId: "main", path: PATH, recordedAtMs: 100, operation: "write", origin: "capture-recovery", momentOrder: 2,
 };
-const page = (moments: EngineMomentRecord[]): ListEngineMomentsResult => ({
-  moments, nextCursor: null, latestMomentOrder: 2, activeVersionId: "main", ...historyPageFields,
-});
+const page = (workspaceId: string, moments: EngineMomentRecord[]) =>
+  timelinePage(moments.map((moment) => ({ kind: "file", moment })), { workspaceId });
 // What main sends when History Restore refuses a file whose live binding is
 // active, as on a replicated lineage: the engine's refusal in the capture
 // layer's words.
@@ -36,7 +35,7 @@ function recoveryBridge() {
   bridge.clearCaptureRecovery.mockImplementation(async ({ momentId }) => {
     listed = listed.filter((recovery) => recovery.momentId !== momentId);
   });
-  bridge.listEngineMoments = vi.fn(async () => page([RECOVERY_MOMENT]));
+  bridge.listHistory = vi.fn(async ({ workspaceId }: ListHistoryPayload) => page(workspaceId, [RECOVERY_MOMENT]));
   bridge.readEngineMoment = vi.fn(async () => ({
     moment: { ...RECOVERY_MOMENT, beforeText: "Typing kept here.\n", afterText: "Written outside dohc.\n" },
   }));

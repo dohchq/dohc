@@ -19,23 +19,23 @@ async fn open(
     scratch: &ScratchDir,
     received: bool,
 ) -> WorkspaceHandle {
-    let response = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": if received { "received" } else { "owned" },
-                    "captureMode": "none",
-                    "projectCollections": received,
-                }),
-            ),
-        )
-        .await
-        .expect("open handle");
+    let response = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": if received { "received" } else { "owned" },
+                "captureMode": "none",
+                "projectCollections": received,
+            }),
+        ),
+    )
+    .await
+    .expect("open handle");
     serde_json::from_value(response.result["workspace"].clone()).unwrap()
 }
 

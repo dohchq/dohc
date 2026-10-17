@@ -118,6 +118,14 @@ const REQUIRED_TABLES: &[&str] = &[
     "path_aliases",
     "snapshots",
     "fork_base_snapshots",
+    "links",
+    "link_sources",
+    "link_occurrence_keys",
+    "link_target_keys",
+    "link_pending",
+    "link_aliases",
+    "link_index_state",
+    "link_gc",
     "moments",
     "scene_asset_delete_authorities",
     "scene_asset_delete_authority_items",
@@ -240,6 +248,7 @@ enum Disposition {
 pub(crate) struct OpenedEngineDb {
     pub conn: Connection,
     pub freshly_created: bool,
+    pub checkpoints: Option<crate::checkpoint::Checkpoints>,
 }
 
 /// `work`, when given, counts the SQLite work of the open as it runs.
@@ -257,7 +266,7 @@ pub(crate) fn open_engine_db_with_root_token(
     root_token: Option<&str>,
     work: Option<Arc<AtomicU64>>,
 ) -> Result<OpenedEngineDb, StorageError> {
-    open_engine_db_with_store_role(path, now_ms, root_token, work, false)
+    open_engine_db_configured(path, now_ms, root_token, work, false, false)
 }
 
 pub(crate) fn store_is_passive(conn: &Connection) -> Result<bool, StorageError> {
@@ -297,6 +306,26 @@ pub(crate) fn open_engine_db_with_store_role(
     work: Option<Arc<AtomicU64>>,
     passive: bool,
 ) -> Result<OpenedEngineDb, StorageError> {
+    open_engine_db_configured(path, now_ms, root_token, work, false, passive)
+}
+
+pub(crate) fn open_engine_db_for_actor(
+    path: &Path,
+    now_ms: i64,
+    root_token: Option<&str>,
+    work: Option<Arc<AtomicU64>>,
+) -> Result<OpenedEngineDb, StorageError> {
+    open_engine_db_configured(path, now_ms, root_token, work, true, false)
+}
+
+fn open_engine_db_configured(
+    path: &Path,
+    now_ms: i64,
+    root_token: Option<&str>,
+    work: Option<Arc<AtomicU64>>,
+    background_checkpoints: bool,
+    passive: bool,
+) -> Result<OpenedEngineDb, StorageError> {
     // Step 1: "is this file empty?" is our question, not the VFS's.
     reject_undersized_database(path)?;
 
@@ -314,6 +343,10 @@ pub(crate) fn open_engine_db_with_store_role(
 
     // Step 2: session-scoped pragmas only — these do not touch the file.
     apply_session_pragmas(&conn)?;
+    if background_checkpoints {
+        conn.pragma_update(None, "wal_autocheckpoint", 0)
+            .map_err(StorageError::persist)?;
+    }
 
     // Step 3: classify from read-only queries. A rejected store returns here
     // before any persistent pragma runs, so the file is left byte-unchanged.
@@ -331,11 +364,19 @@ pub(crate) fn open_engine_db_with_store_role(
         }
     }
 
-    // Step 4: the store is ours — closing may checkpoint again, and the
-    // file-mutating pragmas are now safe.
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, false)
-        .map_err(StorageError::corrupt)?;
+    // Step 4: the store is ours. Actor connections leave close checkpoints
+    // to the background connection, including failed startup and worker exits.
+    conn.set_db_config(
+        DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        background_checkpoints,
+    )
+    .map_err(StorageError::corrupt)?;
     apply_persistent_pragmas(&conn)?;
+    let checkpoints = if background_checkpoints && !passive {
+        Some(crate::checkpoint::Checkpoints::start(path)?)
+    } else {
+        None
+    };
 
     // Production uses `NoFaults`, so a `Crashed` outcome is unreachable here
     // (the migration fault points are exercised by `migration.rs`'s tests).
@@ -347,15 +388,17 @@ pub(crate) fn open_engine_db_with_store_role(
     }
     let no_faults = NoFaults;
     // Migrations must not originate operations or queue work for passive stores.
-    match run_migrations(
+    // Fresh passive stores migrate as owner before the role switch below. They
+    // contain no versions; migrations must not seed versions or local work there.
+    let newly_applied = match run_migrations(
         &mut conn,
         BASELINE_MIGRATIONS,
         &ctx,
         &no_faults as &dyn FaultInjector,
     )? {
-        MigrationOutcome::Applied { .. } => {}
+        MigrationOutcome::Applied { newly_applied } => newly_applied,
         MigrationOutcome::Crashed => return Err(StorageError::MigrationFailed { source: None }),
-    }
+    };
 
     if passive {
         if disposition == Disposition::Fresh {
@@ -371,8 +414,18 @@ pub(crate) fn open_engine_db_with_store_role(
     validate_v2(&conn)?;
     integrity_check(&conn)?;
     stop_counting(&conn)?;
+    crate::search_generation::install(&conn).map_err(StorageError::corrupt)?;
+    if let Some(checkpoints) = &checkpoints {
+        if disposition == Disposition::Fresh {
+            checkpoints.checkpoint_fresh_schema(&conn);
+        } else if newly_applied > 0 {
+            checkpoints.checkpoint_migration_tail_if_small(&conn);
+        }
+        checkpoints.request();
+    }
     Ok(OpenedEngineDb {
         conn,
+        checkpoints,
         freshly_created: disposition == Disposition::Fresh,
     })
 }
@@ -396,9 +449,11 @@ pub(crate) fn open_engine_db_read_only(
     validate_v2(&conn)?;
     integrity_check(&conn)?;
     stop_counting(&conn)?;
+    crate::search_generation::install(&conn).map_err(StorageError::corrupt)?;
     Ok(OpenedEngineDb {
         conn,
         freshly_created: false,
+        checkpoints: None,
     })
 }
 
@@ -593,6 +648,22 @@ fn integrity_check(conn: &Connection) -> Result<(), StorageError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn passive_role_overrides_background_checkpoint_opt_in() {
+        let scratch =
+            dohc_test_scratch::ScratchDir::new_named("passive-checkpoint-opt-in").unwrap();
+        let path = scratch.path().join("engine.db");
+        for now_ms in [1, 2] {
+            let opened =
+                super::open_engine_db_configured(&path, now_ms, None, None, true, true).unwrap();
+            assert!(super::store_is_passive(&opened.conn).unwrap());
+            assert!(
+                opened.checkpoints.is_none(),
+                "passive role must override checkpoint opt-in"
+            );
+        }
+    }
+
     use super::REQUIRED_TABLES;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 async fn open(scratch: &ScratchDir) -> (InProcessTransport<EngineService>, WorkspaceHandle) {
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport.call(RequestContext::unbounded(), request(1, "workspace.open", None,
+    let opened = call_with_busy_retry(&transport, RequestContext::unbounded(), request(1, "workspace.open", None,
         json!({"workspaceId":"authors", "rootDir":scratch.path().to_string_lossy(), "captureMode":"none"})))
         .await.unwrap();
     let handle = serde_json::from_value(opened.result["workspace"].clone()).unwrap();

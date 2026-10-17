@@ -797,26 +797,41 @@ async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&source_db, 2).expect("open actor").actor;
     for index in 0..SECRET_ROWS {
-        actor
-            .write_secret_file(
-                SecretWrite {
-                    workspace_id: workspace_id.to_owned(),
-                    version_id: "main".to_owned(),
-                    path: format!("secrets/{index:04}-{}.env", "p".repeat(460)),
-                    text: format!("TOKEN={index}"),
-                    moment_id: capped_identifier(&format!("secret-{index}-"), 'm'),
-                    metadata_origin: "api".to_owned(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    now_ms: 10 + index as i64,
-                    disk_intent: SecretDiskIntent::AlreadyOnDisk,
-                },
-                secret_key(),
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-            )
-            .await
-            .expect("write source secret");
+        let input = || SecretWrite {
+            workspace_id: workspace_id.to_owned(),
+            version_id: "main".to_owned(),
+            path: format!("secrets/{index:04}-{}.env", "p".repeat(460)),
+            text: format!("TOKEN={index}"),
+            moment_id: capped_identifier(&format!("secret-{index}-"), 'm'),
+            metadata_origin: "api".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 10 + index as i64,
+            disk_intent: SecretDiskIntent::AlreadyOnDisk,
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                match actor
+                    .write_secret_file(
+                        input(),
+                        secret_key(),
+                        Arc::new(NoFaults),
+                        CancellationToken::new(),
+                    )
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(dohc_engine_runtime::RuntimeError::Domain(
+                        dohc_engine_domain::DomainError::Storage(StorageError::FileLocked),
+                    )) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("write source secret: {error:?}"),
+                }
+            }
+        })
+        .await
+        .expect("backfill must admit the source secret");
     }
     let measured_rows = local_ops(&source_db)
         .into_iter()

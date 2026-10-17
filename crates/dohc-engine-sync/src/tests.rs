@@ -1067,6 +1067,7 @@ mod version;
 mod ydoc_base;
 mod ydoc_cache;
 mod ydoc_drain;
+mod ydoc_live_echo;
 mod ydoc_projection_authors;
 mod ydoc_restore;
 

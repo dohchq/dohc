@@ -36,21 +36,20 @@ impl Harness {
     }
 
     async fn open(&self, root: &str, workspace_id: &str) -> Result<WorkspaceHandle, WireError> {
-        self.transport
-            .call(
-                RequestContext::unbounded(),
-                request(
-                    self.next_id(),
-                    "workspace.open",
-                    None,
-                    json!({ "rootDir": root, "workspaceId": workspace_id }),
-                ),
-            )
-            .await
-            .map(|response| {
-                serde_json::from_value(response.result["workspace"].clone())
-                    .expect("workspace handle")
-            })
+        call_with_busy_retry(
+            &self.transport,
+            RequestContext::unbounded(),
+            request(
+                self.next_id(),
+                "workspace.open",
+                None,
+                json!({ "rootDir": root, "workspaceId": workspace_id }),
+            ),
+        )
+        .await
+        .map(|response| {
+            serde_json::from_value(response.result["workspace"].clone()).expect("workspace handle")
+        })
     }
 
     async fn close(&self, handle: WorkspaceHandle) -> Result<Value, WireError> {

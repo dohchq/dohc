@@ -11,9 +11,7 @@ use dohc_engine_collab::{
 use dohc_engine_files::MAX_CAPTURE_TEXT_BYTES;
 use dohc_engine_protocol::{
     error::ErrorCode,
-    transport::{
-        EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
-    },
+    transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
@@ -30,7 +28,7 @@ async fn call_ydoc_with_blob(
     method: &str,
     params: Value,
 ) -> (Value, Vec<u8>) {
-    let output = ProtocolEngineService::call(
+    let output = service_call_with_busy_retry(
         service,
         RequestContext::unbounded().with_capability("blobs"),
         request(id, method, Some(handle.clone()), params),
@@ -70,22 +68,22 @@ async fn open_workspace_with_capture_mode(
     id: u64,
     capture_mode: Option<&str>,
 ) -> WorkspaceHandle {
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_id,
-                    "captureMode": capture_mode,
-                }),
-            ),
-        )
-        .await
-        .expect("workspace open");
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            id,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id,
+                "captureMode": capture_mode,
+            }),
+        ),
+    )
+    .await
+    .expect("workspace open");
     let handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
     if capture_mode == Some("none") {
@@ -95,13 +93,13 @@ async fn open_workspace_with_capture_mode(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut status_id = id.saturating_add(1_000_000);
     loop {
-        let status = transport
-            .call(
-                RequestContext::unbounded(),
-                request(status_id, "watcher.status", Some(handle.clone()), json!({})),
-            )
-            .await
-            .expect("watcher.status");
+        let status = call_with_busy_retry(
+            transport,
+            RequestContext::unbounded(),
+            request(status_id, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
         status_id += 1;
         if status.result["phase"] == json!("ready") {
             return handle;
@@ -3438,6 +3436,37 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
+    async fn call_after_backfill(
+        transport: &InProcessTransport<EngineService>,
+        workspace: &WorkspaceHandle,
+        id: u64,
+        method: &str,
+        params: Value,
+    ) -> Value {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                match transport
+                    .call(
+                        RequestContext::unbounded(),
+                        request(id, method, Some(workspace.clone()), params.clone()),
+                    )
+                    .await
+                {
+                    Ok(response) => break response.result,
+                    Err(error)
+                        if error.code == ErrorCode::Overloaded
+                            && error.message == "engine-store-busy" =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("{method} failed: {error:?}"),
+                }
+            }
+        })
+        .await
+        .expect("capture backfill must admit the request")
+    }
+
     // AUDIT-SILENTSAVE round 5. This is the race that made
     // `a_settle_past_the_inband_cap…` fail under `cargo test --workspace`
     // while passing in isolation — the capture pass only gets scheduled
@@ -3478,7 +3507,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         json!({ "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
     )
     .await;
-    let settled = call(
+    let settled = call_after_backfill(
         &transport,
         &handle,
         4,
@@ -3563,7 +3592,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
 
     // And the close — which settles by default — succeeds instead of failing
     // ConflictStaleTarget against a head capture moved underneath it.
-    call(
+    call_after_backfill(
         &transport,
         &handle,
         7,

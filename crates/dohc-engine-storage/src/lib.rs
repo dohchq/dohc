@@ -29,18 +29,25 @@
 pub mod backup;
 pub mod blob;
 pub mod capture_file_holds;
+#[cfg(feature = "fault-injection")]
+pub mod capture_phase;
 pub mod diagnostics;
 mod durability;
 pub mod error;
 pub mod faults;
 pub mod limits;
+pub mod links;
 pub mod materialize;
 pub mod remote_changes;
 pub mod replica;
 pub mod store;
 
+mod checkpoint;
 pub(crate) mod migration;
 pub(crate) mod schema;
+mod search_generation;
+
+pub use search_generation::search_generation;
 
 pub use backup::{
     BackupManifest, BackupOutcome, BackupRecord, FreeSpaceProbe, RealFreeSpace,

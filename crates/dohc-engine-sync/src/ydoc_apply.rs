@@ -4317,8 +4317,8 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         )
         .map_err(SyncError::corrupt)
     })?;
+    let live_lease = !payload.is_base_state && leases.is_live(&key);
     let cheap_probe_allowed = !payload.is_base_state
-        && !leases.is_live(&key)
         && dohc_engine_collab::read_marker(store, &key)
             .map_err(map_collab_hard_error)?
             .is_some_and(|marker| {
@@ -4330,6 +4330,22 @@ pub(crate) fn apply_ydoc_envelope_in_batch(
         && cheap_probe_allowed
         && crate::apply::is_acknowledged_envelope(store, envelope)?
     {
+        // Live admission checks blob integrity before its transactional skip.
+        // Keep that check while avoiding full-document replay of a durable echo.
+        if live_lease {
+            let bytes: Option<Vec<u8>> = store.read_with(|conn| {
+                conn.query_row(
+                    "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+                    [&payload.update_blob_sha256],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)
+            })?;
+            if bytes.is_none_or(|bytes| hex_sha256(&bytes) != payload.update_blob_sha256) {
+                return Err(SyncError::BlobInvalid);
+            }
+        }
         let probe = crate::apply::apply_envelope_with_mutation_outcome::<()>(
             store,
             envelope,

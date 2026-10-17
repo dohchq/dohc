@@ -33,21 +33,21 @@ async fn open_workspace(
     scratch: &ScratchDir,
     id: u64,
 ) -> WorkspaceHandle {
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("workspace open");
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            id,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("workspace open");
     serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
 }
 
@@ -2418,4 +2418,479 @@ async fn a_quarantined_path_keeps_capture_flush_unsettled() {
         )
         .await
         .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn successful_first_capture_releases_hold_and_drains_exact_backlink_pairs() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    for n in 0..8 {
+        write_file(
+            scratch.path(),
+            &format!("note-{n}.md"),
+            format!("[[note-{}]]", (n + 1) % 8).as_bytes(),
+        );
+    }
+    let service = Arc::new(EngineService::new());
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_initial_settled_event(&mut events).await;
+    let observer =
+        EngineStore::open_read_only(&scratch.path().join(".dohc/engine/engine.db")).unwrap();
+    tokio::time::timeout(WAIT, async {
+        let mut poll = tokio::time::interval(Duration::from_millis(10));
+        while observer.table_row_count("link_pending").unwrap() != 0
+            || observer.table_row_count("link_sources").unwrap() != 8
+        {
+            poll.tick().await;
+        }
+    })
+    .await
+    .unwrap();
+    let actual:Vec<(String,String)>=observer.read_with(|c| {
+        c.prepare("SELECT source.path,target.path FROM link_sources ts JOIN link_target_keys t USING(workspace_id,version_id,object_id,index_key) JOIN link_occurrence_keys k ON k.workspace_id=t.workspace_id AND k.version_id=t.version_id AND k.key_kind=t.key_kind AND k.key=t.key JOIN link_sources ss ON ss.workspace_id=k.workspace_id AND ss.version_id=k.version_id AND ss.object_id=k.object_id AND ss.index_key=k.index_key JOIN snapshots source ON source.workspace_id=ss.workspace_id AND source.version_id=ss.version_id AND source.object_id=ss.object_id JOIN snapshots target ON target.workspace_id=ts.workspace_id AND target.version_id=ts.version_id AND target.object_id=ts.object_id WHERE t.key_kind='stem' ORDER BY source.path,target.path")?
+            .query_map([],|row|Ok((row.get(0)?,row.get(1)?)))?.collect::<rusqlite::Result<_>>()
+    }).unwrap();
+    let expected = (0..8)
+        .map(|n| (format!("note-{n}.md"), format!("note-{}.md", (n + 1) % 8)))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    drop(observer);
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(100, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn large_first_capture_retries_checkpoint_backpressure_without_losing_files() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    let body = |n| format!("{n}:{}", "x".repeat(5 * 1024 * 1024 - 2));
+    for n in 0..8 {
+        write_file(scratch.path(), &format!("large-{n}.md"), body(n).as_bytes());
+    }
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 100).await;
+    let mut observer =
+        EngineStore::open_read_only(&scratch.path().join(".dohc/engine/engine.db")).unwrap();
+    assert_eq!(observer.table_row_count("snapshots").unwrap(), 8);
+    for n in 0..8 {
+        let snapshot = dohc_engine_domain::VersionedTextStore::new(&mut observer)
+            .read_text_inband(
+                WORKSPACE_ID,
+                "main",
+                &format!("large-{n}.md"),
+                6 * 1024 * 1024,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(
+            snapshot.text.as_deref() == Some(body(n).as_str()),
+            "wrong body for file {n}"
+        );
+    }
+    drop(observer);
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(300, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn five_thousand_file_capture_has_no_link_writes_at_initial_settled() {
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    for n in 0..5_000 {
+        write_file(scratch.path(), &format!("note-{n:04}.md"), b"[[target]]");
+    }
+    let probe = CaptureApplyProbe::default();
+    probe.pause_at_initial_settled();
+    let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+        probe.clone(),
+    ));
+    let mut events = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            if events.recv().await.unwrap().name == CAPTURE_INITIAL_SETTLED_EVENT {
+                break;
+            }
+        }
+        probe.wait_at_initial_settled().await;
+    })
+    .await
+    .unwrap();
+    // The driver's real hold is still owned at the event edge; the probe only
+    // pauses its release, so the observation cannot race the deferred drain.
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let actor = dohc_engine_runtime::WorkspaceSupervisor::global()
+        .open(&db, 1)
+        .unwrap()
+        .actor;
+    let observer = EngineStore::open_read_only(&db).unwrap();
+    assert_eq!(observer.table_row_count("snapshots").unwrap(), 5_000);
+    let phase: String = observer
+        .read_with(|c| {
+            c.query_row(
+        "SELECT seed_phase FROM link_index_state WHERE workspace_id=?1 AND version_id='main'",
+        [WORKSPACE_ID], |r| r.get(0))
+        })
+        .unwrap();
+    assert_eq!(
+        phase, "deferred",
+        "seed started before the initial fence closed"
+    );
+    assert_eq!(observer.table_row_count("link_pending").unwrap(), 0);
+    assert_eq!(observer.table_row_count("link_aliases").unwrap(), 0);
+    assert_eq!(
+        actor
+            .capture_phase_totals_for_harness()
+            .await
+            .unwrap()
+            .count("link_pending_row_writes"),
+        0
+    );
+    probe.release_initial_settled();
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let mut poll = tokio::time::interval(Duration::from_millis(10));
+        loop {
+            let ready: bool = observer.read_with(|c| c.query_row(
+                "SELECT seed_phase='ready' FROM link_index_state WHERE workspace_id=?1 AND version_id='main'",
+                [WORKSPACE_ID], |r| r.get(0))).unwrap();
+            if ready { break; }
+            poll.tick().await;
+        }
+    }).await.unwrap();
+    assert_eq!(observer.table_row_count("link_aliases").unwrap(), 5_000);
+    assert_eq!(observer.table_row_count("link_sources").unwrap(), 5_000);
+    assert_eq!(observer.table_row_count("link_pending").unwrap(), 0);
+    drop(observer);
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(100, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "manual quiet-host 5000-file initial capture measurement"]
+async fn measure_five_thousand_file_initial_capture() {
+    measure_initial_capture(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "manual matched-profile 5000-file capture comparison"]
+async fn measure_five_thousand_file_capture_only() {
+    measure_initial_capture(false).await;
+}
+
+async fn measure_initial_capture(measure_typing: bool) {
+    for n in 0..3 {
+        let scratch = ScratchDir::new().unwrap();
+        write_root_binding(scratch.path(), TOKEN).unwrap();
+        for i in 0..5_000 {
+            write_file(
+                scratch.path(),
+                &format!("note-{i:04}.md"),
+                format!("# Note {i}\n[[note-{:04}]]\n", (i + 1) % 5_000).as_bytes(),
+            );
+        }
+        let service = Arc::new(EngineService::new());
+        let mut events = service.events().subscribe();
+        let transport = InProcessTransport::new(Arc::clone(&service));
+        let began = std::time::Instant::now();
+        let handle = open_workspace(&transport, &scratch, 1).await;
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                if events.recv().await.unwrap().name == CAPTURE_INITIAL_SETTLED_EVENT {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let elapsed = began.elapsed();
+        let db = scratch.path().join(".dohc/engine/engine.db");
+        let actor = dohc_engine_runtime::WorkspaceSupervisor::global()
+            .open(&db, 1)
+            .unwrap()
+            .actor;
+        let commits = actor.commit_count_for_harness().await.unwrap();
+        let observer = EngineStore::open_read_only(&db).unwrap();
+        let snapshots = observer.table_row_count("snapshots").unwrap();
+        eprintln!(
+            "DRIVER_CAPTURE run={n} files={snapshots} capture_ms={} commits={commits}",
+            elapsed.as_millis()
+        );
+        assert_eq!(snapshots, 5_000);
+        if measure_typing && n == 0 {
+            use base64::Engine as _;
+            use dohc_engine_protocol::transport::EngineService as Service;
+            let opened = Service::call(
+                service.as_ref(),
+                RequestContext::unbounded().with_capability("blobs"),
+                request(
+                    200,
+                    "ydoc.open",
+                    Some(handle.clone()),
+                    json!({"versionId":"main","path":"note-0000.md","contentKind":"plaintext"}),
+                ),
+            )
+            .await
+            .unwrap();
+            let session = opened.response.result["sessionId"].clone();
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.apply(&opened.blob_egress.unwrap().bytes).unwrap();
+            let mut samples = Vec::new();
+            for draining in [true, false] {
+                let pending = observer.table_row_count("link_pending").unwrap();
+                let certified = actor.link_drain_metrics().certified_sources;
+                let seeding = observer.read_with(|c| c.query_row("SELECT EXISTS(SELECT 1 FROM link_index_state WHERE seed_phase<>'ready')", [], |r| r.get::<_,bool>(0))).unwrap();
+                assert_eq!(pending > 0 || seeding, draining);
+                let mut timings = Vec::new();
+                for i in 0..200 {
+                    let update = doc.plaintext_insert(0, "x");
+                    let start = std::time::Instant::now();
+                    transport.call(RequestContext::unbounded(),request(300+i,"ydoc.recordUpdate",Some(handle.clone()),json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)}))).await.unwrap();
+                    timings.push(start.elapsed().as_micros());
+                }
+                if draining {
+                    assert!(
+                        actor.link_drain_metrics().certified_sources > certified,
+                        "typing did not overlap drain progress"
+                    );
+                }
+                timings.sort();
+                eprintln!(
+                    "DRAIN_TYPING draining={draining} pending_before={pending} certified_during={} p95_us={} max_us={}",
+                    actor.link_drain_metrics().certified_sources - certified,
+                    timings[189],
+                    timings[199]
+                );
+                samples.push(timings);
+                let deadline = std::time::Instant::now() + Duration::from_secs(120);
+                let mut poll = tokio::time::interval(Duration::from_millis(10));
+                while observer.table_row_count("link_pending").unwrap() != 0 || observer.read_with(|c| c.query_row("SELECT EXISTS(SELECT 1 FROM link_index_state WHERE seed_phase<>'ready')", [], |r| r.get::<_,bool>(0))).unwrap() {
+                    assert!(std::time::Instant::now() < deadline, "drain deadline");
+                    poll.tick().await;
+                }
+            }
+            eprintln!(
+                "DRAIN_FINISHED commits={} metrics={:?}",
+                actor.commit_count_for_harness().await.unwrap(),
+                actor.link_drain_metrics()
+            );
+            let backlinks:i64=observer.read_with(|c|c.query_row("SELECT count(*) FROM (SELECT target.object_id FROM link_sources target JOIN link_target_keys t USING(workspace_id,version_id,object_id,index_key) JOIN link_occurrence_keys k ON k.workspace_id=t.workspace_id AND k.version_id=t.version_id AND k.key_kind=t.key_kind AND k.key=t.key JOIN link_sources source ON source.workspace_id=k.workspace_id AND source.version_id=k.version_id AND source.object_id=k.object_id AND source.index_key=k.index_key WHERE t.key_kind='stem' GROUP BY target.object_id HAVING count(*)=1)",[],|r|r.get(0))).unwrap();
+            assert_eq!(backlinks, 5_000);
+            assert!(
+                samples[0][189] <= samples[1][189] + 5_000,
+                "typing p95 exceeds the drain slice"
+            );
+            assert!(
+                samples[0][199] < 50_000,
+                "drain caused a long typing request"
+            );
+            transport
+                .call(
+                    RequestContext::unbounded(),
+                    request(
+                        900,
+                        "ydoc.close",
+                        Some(handle.clone()),
+                        json!({"sessionId":session}),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let mut drain_poll = tokio::time::interval(Duration::from_millis(10));
+        while observer.table_row_count("link_pending").unwrap() != 0
+            || observer
+                .read_with(|c| {
+                    c.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM link_index_state WHERE seed_phase<>'ready')",
+                        [],
+                        |r| r.get::<_, bool>(0),
+                    )
+                })
+                .unwrap()
+        {
+            assert!(std::time::Instant::now() < deadline);
+            drain_poll.tick().await;
+        }
+        assert_eq!(observer.table_row_count("link_sources").unwrap(), 5_000);
+        drop(observer);
+        transport
+            .call(
+                RequestContext::unbounded(),
+                request(100, "workspace.close", Some(handle), json!({})),
+            )
+            .await
+            .unwrap();
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_and_edited_document_settle_retry_a_huge_first_capture_transaction() {
+    use base64::Engine as _;
+    use dohc_engine_protocol::transport::EngineService as Service;
+
+    let scratch = ScratchDir::new().unwrap();
+    write_root_binding(scratch.path(), TOKEN).unwrap();
+    for n in 0..EARLY_IMPORT_MIN_ADDED_FILES {
+        write_file(scratch.path(), &format!("seed-{n:04}.md"), b"captured");
+    }
+    let probe = CaptureApplyProbe::default();
+    probe.pause_next_apply();
+    let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+        probe.clone(),
+    ));
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let handle = tokio::time::timeout(WAIT, open_workspace(&transport, &scratch, 1))
+        .await
+        .unwrap();
+    tokio::time::timeout(WAIT, probe.wait_until_paused())
+        .await
+        .unwrap();
+    let opened = Service::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            2,
+            "ydoc.open",
+            Some(handle.clone()),
+            json!({"versionId":"main","path":"draft.md","contentKind":"plaintext"}),
+        ),
+    )
+    .await
+    .unwrap();
+    let session = opened.response.result["sessionId"].clone();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&opened.blob_egress.unwrap().bytes).unwrap();
+    let update = doc.plaintext_insert(0, "edit survives capture backfill");
+    call(&transport, &handle, 3, "ydoc.recordUpdate", json!({"sessionId":session,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update)})).await;
+
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let observer = rusqlite::Connection::open(&db).unwrap();
+    // Enlarge one real capture transaction deterministically, without a load run.
+    // The snapshot trigger's payload commits atomically with the captured file.
+    observer
+        .execute_batch(
+            "CREATE TABLE capture_checkpoint_payload(body BLOB);
+        CREATE TRIGGER huge_capture AFTER INSERT ON snapshots WHEN NEW.path='seed-0000.md'
+        BEGIN INSERT INTO capture_checkpoint_payload VALUES(zeroblob(28*1024*1024)); END;",
+        )
+        .unwrap();
+    observer
+        .execute_batch("BEGIN; SELECT count(*) FROM snapshots;")
+        .unwrap();
+    probe.release();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let probe_connection = rusqlite::Connection::open(&db).unwrap();
+            let log: i64 = probe_connection
+                .query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| r.get(1))
+                .unwrap();
+            drop(probe_connection);
+            if log > 6000 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("one capture transaction must exceed 6000 frames");
+    let busy = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({"sessionId":session}),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(busy.message, "engine-store-busy");
+    let opening = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "ydoc.open",
+                Some(handle.clone()),
+                json!({"versionId":"main","path":"seed-0999.md","contentKind":"plaintext"}),
+            ),
+        )
+        .await;
+    match opening {
+        Ok(response) => assert_eq!(response.result["head"], json!("present")),
+        Err(error) => assert!(
+            error.message == "engine-store-busy"
+                || error.message == "Workspace is still updating. Try again.",
+            "{error:?}"
+        ),
+    }
+
+    observer.execute_batch("ROLLBACK").unwrap();
+    drop(observer);
+
+    // Both renderer-style callers retain the same request after a refusal.
+    for (method, params) in [
+        ("ydoc.settle", json!({"sessionId":session})),
+        (
+            "ydoc.open",
+            json!({"versionId":"main","path":"seed-0999.md","contentKind":"plaintext"}),
+        ),
+    ] {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                match transport
+                    .call(
+                        RequestContext::unbounded(),
+                        request(6, method, Some(handle.clone()), params.clone()),
+                    )
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(error) => {
+                        assert!(
+                            error.message == "engine-store-busy"
+                                || error.message == "Workspace is still updating. Try again.",
+                            "{error:?}"
+                        );
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+    wait_until_capture_ready(&transport, &handle, 100).await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("draft.md")).unwrap(),
+        "edit survives capture backfill"
+    );
+    wait_for_text(
+        &transport,
+        &handle,
+        "draft.md",
+        Some("edit survives capture backfill"),
+    )
+    .await;
+    call(&transport, &handle, 101, "workspace.close", json!({})).await;
 }
