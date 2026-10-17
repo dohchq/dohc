@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { deleteWorkspacePath, moveWorkspacePath, undoOperation, writeWorkspaceFile } from "../../../packages/mcp/src/tools";
+import { deleteWorkspacePath, listChanges, readChange, moveWorkspacePath, undoOperation, writeWorkspaceFile } from "../../../packages/mcp/src/tools";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { waitForCliEndpoint } from "./helpers/dohcCli";
 import { cleanupDesktopWorkspace, createTempWorkspace, openHistoryView, openWorkspaceFromFirstRun, waitForWorkspaceFile } from "./helpers/workspace";
@@ -49,8 +49,14 @@ test("an MCP move and delete each show one History row under the agent", async (
     for (const label of ["Local file edit", "Reconciled offline edits", "dohc-mcp"]) {
       await expect(rows.filter({ hasText: label })).toHaveCount(0);
     }
-    await expect(undoOperation(ctx, { operationId: removed.operationId })).resolves.toMatchObject({ ok: true, remaining: [] });
+    await expect(undoOperation(ctx, { operationId: removed.operationId })).resolves.toEqual({ ok: true, tracked: { state: expect.stringMatching(/^restor(?:ing|ed)$/u), momentCount: 1 }, restored: [], remaining: [] });
     await expect.poll(() => readFile(join(temp.rootPath, "old.txt"), "utf8")).toBe("old.txt body");
+    const changes = await listChanges(ctx);
+    expect(changes).toHaveProperty("changes");
+    if (!("changes" in changes)) throw new Error("History list failed after Undo");
+    for (const change of changes.changes) {
+      expect(await readChange(ctx, { id: change.id })).toMatchObject({ ok: true, change: { id: change.id } });
+    }
     await moved.click();
     await expect(page.getByTestId("engine-diff-source")).toHaveText("Mover agent");
   } finally {

@@ -80,7 +80,7 @@ function buildCliRequest(
     case "historyOperation":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId, ...(command.cursor ? { cursor: command.cursor } : {}) } };
     case "historyUndo":
-      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: "agent", operationId: command.operationId } };
+      return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId } };
     case "shareCopy":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, shareId: command.shareId, grantId: command.grantId } };
     case "accountDeletePreview":

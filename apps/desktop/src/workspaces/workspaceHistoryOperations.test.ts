@@ -78,11 +78,12 @@ it("checks beforePath on later History pages before Undo", async () => {
   expect(await f.undo(id, true)).toMatchObject({ ok: false });
   expect(f.history.readHistoryPage).toHaveBeenCalledTimes(2); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
-it("refuses moves, unknown ids and invalid ids before any engine call or record creation", async () => {
+it("refuses moves, unknown ids and invalid ids without an engine Undo or record creation", async () => {
   const f = await fixture();
+  f.history.readHistoryPage.mockResolvedValue({ moments: [], nextCursor: null } as never);
   expect(await f.undo(otherId)).toEqual({ ok: false, reason: unsupported });
   expect(await f.undo("11111111-1111-4111-8111-111111111111")).toMatchObject({ ok: false });
-  expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  expect(f.history.readHistoryPage).toHaveBeenCalledOnce(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   expect(await readdir(join(f.rootPath, ".dohc"))).toEqual([]);
 });
 it("reads a move's references without contents and scopes its cursor", async () => {
@@ -96,7 +97,7 @@ it("reads a move's references without contents and scopes its cursor", async () 
 });
 it.each(["readOnly", "shareView"] as const)("refuses both operations in %s workspaces before engine calls", async kind => {
   const f = await fixture(); if (kind === "readOnly") f.operation.workspace.readOnly = true; else f.operation.workspace.shareView = {};
-  expect(await f.undo(otherId)).toMatchObject({ ok: false, reason: "This workspace is read-only. Change files in the owning workspace." });
+  expect(await f.undo(otherId)).toMatchObject({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
   expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId }, f.history)).toMatchObject({ ok: false });
   expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
@@ -106,3 +107,82 @@ it("passes a different author's lost-reply refusal through unchanged", async () 
   expect(await f.undo(id, true)).toEqual({ ok: false, reason: "The idempotency key belongs to another author." });
   expect(f.history.undoHistoryOperation).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "owner", author: agent, requestId: `delete-undo:${id}` }));
 });
+
+it.each(["/x", "/", "C:x", "C:/", "//host/share", "//host/share/x", "\\\\host\\share\\x"])("refuses hostile recovery paths before walking (%s)", async hostile => {
+  const f = await fixture(); const id = await f.remove();
+  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  const original = JSON.parse(await readFile(sidecar, "utf8"));
+  for (const patch of [{ base: hostile }, { paths: [hostile] }, { emptyFolders: [hostile] },
+    { copies: [{ path: hostile, dev: 0, ino: 0, birthtimeMs: 0, size: 0 }] },
+    { result: { ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [hostile], remaining: [] } }]) {
+    const body = JSON.stringify({ ...original, ...patch });
+    await writeFile(sidecar, body);
+    expect(await f.undo(id, true)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery paths are invalid." });
+    expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery paths are invalid." });
+    expect(await readFile(sidecar, "utf8")).toBe(body);
+  }
+  expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+});
+it.each(["{", "null", "{}"])("never exposes corrupt sidecar parser errors (%s)", async body => {
+  const f = await fixture(); const id = await f.remove();
+  const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
+  await writeFile(sidecar, body);
+  const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash." };
+  expect(await f.undo(id, true)).toEqual(refusal);
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toEqual(refusal);
+  expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+});
+it.each(["!", Buffer.from("null").toString("base64url"), Buffer.from("{}").toString("base64url")])("refuses malformed cursors without parser text (%s)", async cursor => {
+  const f = await fixture();
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId, cursor }, f.history)).toEqual({
+    ok: false, reason: "Cannot read this operation page. Use the cursor from the previous page.",
+  });
+  expect(f.history.readHistoryPage).not.toHaveBeenCalled();
+});
+it("lets the engine reject a cursor from an inactive version", async () => {
+  const f = await fixture();
+  const cursor = { workspaceId: "owner", operationId: otherId, objectId: null, versionId: "inactive" };
+  f.history.readHistoryPage.mockImplementation(async input => {
+    expect(input).not.toHaveProperty("versionId");
+    expect(input.cursor).toEqual(cursor);
+    throw new Error("This History cursor belongs to another version.");
+  });
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId, cursor: Buffer.from(JSON.stringify(cursor)).toString("base64url") }, f.history))
+    .toEqual({ ok: false, reason: "This History cursor belongs to another version." });
+});
+it.each([SyntaxError, TypeError])("does not expose %s messages from History decoding", async ErrorType => {
+  const f = await fixture(); f.history.readHistoryPage.mockRejectedValue(new ErrorType("raw parser detail"));
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: otherId }, f.history)).toEqual({
+    ok: false, reason: "dohc could not read this operation. Check the workspace, then try again.",
+  });
+});
+it("reports missing recovery for a delete and unsupported for another operation", async () => {
+  const f = await fixture();
+  expect(await f.undo(otherId)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
+  f.history.readHistoryPage.mockResolvedValue({ moments: [{ operation: "rename", path: "folder/a.txt", beforePath: "folder/b.txt" }], nextCursor: null } as never);
+  expect(await f.undo(otherId)).toEqual({ ok: false, reason: unsupported });
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+});
+it.runIf(process.env.DOHC_OPERATION_TIMING === "1")("times agent reads and Undo for a deleted folder of 5,000 files", async () => {
+  const reads: number[] = [], undos: number[] = [];
+  for (let run = 0; run < 3; run++) {
+    const f = await fixture();
+    for (let start = 0; start < 4998; start += 100) {
+      await Promise.all(Array.from({ length: Math.min(100, 4998 - start) }, (_, i) => writeFile(join(f.rootPath, "folder/assets/file-" + (start + i) + ".txt"), "bytes")));
+    }
+    const id = await f.remove();
+    console.log("TIMING_RUN " + run + " deleted 5000 files");
+    let start = performance.now();
+    expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toMatchObject({ ok: true });
+    reads.push(performance.now() - start);
+    console.log("TIMING_READ_MS " + reads.at(-1));
+    start = performance.now();
+    expect(await f.undo(id, true)).toMatchObject({ ok: true, remaining: [] });
+    undos.push(performance.now() - start);
+    console.log("TIMING_UNDO_MS " + undos.at(-1));
+  }
+  const stats = (values: number[]) => { const sorted = [...values].sort((a, b) => a - b); return { runs: values, p50: sorted[1], p95: sorted[2] }; };
+  const timings = { read: stats(reads), undo: stats(undos) };
+  if (process.env.DOHC_OPERATION_TIMING_OUTPUT) await writeFile(process.env.DOHC_OPERATION_TIMING_OUTPUT, JSON.stringify(timings, null, 2));
+  console.log("OPERATION_TIMING_MS " + JSON.stringify(timings));
+}, 900_000);

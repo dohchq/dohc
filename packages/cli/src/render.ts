@@ -355,7 +355,7 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       const undo = result as CliResultByVerb["historyUndo"];
       if (!undo.ok) return undo.reason;
       return [`History: ${undo.tracked.state}`, ...undo.restored.map(path => `Restored ${path}`),
-        ...undo.remaining.map(item => `${item.path}: ${item.reason}${item.retry ? " Undo again to retry." : ""}`)].join("\n");
+        ...undo.remaining.map(item => `${item.reason}${item.retry && !item.reason.includes("Undo again to retry") ? " Undo again to retry." : ""}`)].join("\n");
     }
     case "moments":
       return renderMoments(result as CliResultByVerb["moments"]);

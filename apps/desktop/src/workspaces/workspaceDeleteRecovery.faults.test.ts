@@ -1,3 +1,4 @@
+import { undoWorkspaceHistoryOperation } from "./workspaceHistoryOperations";
 import { chmod, mkdir, readFile, readdir, readlink, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { existsSync } from "node:fs";
@@ -8,7 +9,7 @@ import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { executeCli } from "@dohc/cli";
 import { undoOperation } from "@dohc/mcp/tools";
 import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
-import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, undoWorkspaceHistoryOperation, type PathChangeOptions } from "./workspaceFileMoves";
+import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
 
 const faults = vi.hoisted(() => ({ openError: "", opened: [] as string[], reads: [] as string[], recordSaves: 0, failRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false, beforePublish: undefined as undefined | ((target: string) => Promise<void>), copyTemps: [] as string[], copyTarget: "", sourceLimit: false, failRemove: false, beforeResume: undefined as undefined | (() => Promise<void>), modeCalls: [] as string[] }));
 vi.mock("node:fs/promises", async original => {
@@ -99,11 +100,11 @@ async function fixture(systemAccepts = false, tracked = ["folder/tracked.txt"]) 
     if (!systemAccepts) throw new Error("OS refuses");
     await rm(path, { recursive: true });
   } };
-  const history = { readHistoryPage: vi.fn(async () => ({ moments: [], protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => ({ operationId: "unused", versionId: "main", momentCount: 1,
+  const history = { readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => ({ operationId: "unused", versionId: "main", momentCount: 1,
     compensationOperationId: "undo", deduped: false, materialized: false })) };
   const remove = (hand = false) => hand ? deleteWorkspacePathByHand(operation, "folder", person, options)
     : prepareDeleteWorkspacePathAs(operation, "folder", person, options).then(finish => finish());
-  const undo = (id: string, requestId = "first") => undoWorkspaceHistoryOperation(operation, { operationId: id }, person, { agent: false, history });
+  const undo = (id: string) => undoWorkspaceHistoryOperation(operation, { operationId: id }, person, { agent: false, history });
   return { root, write, remove, undo, operation, recordDelete, history, options };
 }
 async function deleted(f: Awaited<ReturnType<typeof fixture>>) {
@@ -156,7 +157,7 @@ describe("delete recovery failures", () => {
     const id = await deleted(f);
     f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("old tracked path occupied"));
     expect(await f.undo(id)).toEqual({ ok: false, reason: "old tracked path occupied" });
-    expect(await f.undo(id, "second")).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
+    expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
     const calls = f.history.undoHistoryOperation.mock.calls as unknown as [{ requestId: string }][];
     expect(calls.map(([input]) => input.requestId)).toEqual([`delete-undo:${id}`, `delete-undo:${id}`]);
   });
@@ -167,7 +168,7 @@ describe("delete recovery failures", () => {
       operationId: id, versionId: "main", momentCount: 1, compensationOperationId: "undo", deduped: false, materialized: false,
     }; });
     expect(await f.undo(id)).toMatchObject({ ok: false });
-    expect(await f.undo(id, "second")).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
+    expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
   });
   it.each([false, true])("a failed recovery save does not fail a completed delete (hand=%s)", async hand => {
     const f = await fixture();
@@ -395,7 +396,7 @@ describe("delete recovery placement and receipts", () => {
       expect((await stat(faults.copyTarget)).mode & 0o222).toBe(0);
     } finally { faults.sourceLimit = false; faults.failRemove = false; faults.readOnly = false; }
   });
-  it.each([["write", "same"], ["write", "fresh"], ["flush", "same"], ["close", "same"], ["readonly", "same"], ["readonly-write", "same"]])("retries an interrupted owned copy (%s, %s request id)", async (failure, request) => {
+  it.each(["write", "flush", "close", "readonly", "readonly-write"])("retries an interrupted owned copy (%s)", async failure => {
     const f = await fixture();
     if (failure === "readonly-write") await chmod(faults.copyTarget, 0o444);
     const id = await deleted(f);
@@ -409,7 +410,7 @@ describe("delete recovery placement and receipts", () => {
       expect(record.copies.find((copy: { path: string }) => copy.path === "folder/rowless.txt")).toMatchObject({ ino: (await stat(faults.copyTarget)).ino, size: 12 });
       faults.failCopy = ""; faults.failFlush = false;
       if (failure === "readonly" || failure === "readonly-write") { await chmod(faults.copyTarget, 0o444); faults.readOnly = true; }
-      expect(await f.undo(id, request === "same" ? "first" : "next")).toMatchObject({ restored: ["folder/rowless.txt"], remaining: [] });
+      expect(await f.undo(id)).toMatchObject({ restored: ["folder/rowless.txt"], remaining: [] });
       expect(await readFile(faults.copyTarget, "utf8")).toBe("not retained");
     } finally { faults.copyOnly = false; faults.failCopy = ""; faults.failFlush = false; faults.failRemove = false; faults.readOnly = false; }
   });
@@ -469,7 +470,7 @@ describe("delete recovery placement and receipts", () => {
       const trash = join(f.root, ".dohc/trash");
       const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
       expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt",
-        reason: `folder/rowless.txt now occupies the old path. The deleted file stays at .dohc/trash/${staged}/rowless.txt.` }] });
+        reason: `folder/rowless.txt now occupies the old path. Move it first. The deleted file stays at .dohc/trash/${staged}/rowless.txt.` }] });
       expect(await readFile(join(trash, staged, "rowless.txt"), "utf8")).toBe("not retained");
     } finally { faults.copyOnly = false; faults.beforePublish = undefined; }
   });
@@ -553,7 +554,7 @@ describe("delete recovery placement and receipts", () => {
     const id = await deleted(f);
     const first = await f.undo(id);
     f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("engine down or author mismatch"));
-    expect(await f.undo(id, "next")).toEqual(first);
+    expect(await f.undo(id)).toEqual(first);
   });
   it("restores a relative directory link from its original location", async () => {
     const f = await fixture();
@@ -574,7 +575,7 @@ describe("delete recovery placement and receipts", () => {
     expect(await f.undo(id)).toMatchObject({ tracked: { state: "restoring", momentCount: 1 } });
     f.history.undoHistoryOperation.mockResolvedValueOnce({ operationId: id, versionId: "main", momentCount: 1,
       compensationOperationId: "undo", deduped: true, materialized: true });
-    expect(await f.undo(id, "next")).toMatchObject({ tracked: { state: "restored", momentCount: 1 } });
+    expect(await f.undo(id)).toMatchObject({ tracked: { state: "restored", momentCount: 1 } });
   });
   it.each([false, true])("names a missing staged source before engine commit (whole folder=%s)", async whole => {
     const f = await fixture();
@@ -593,7 +594,7 @@ describe("delete recovery placement and receipts", () => {
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     await vi.waitFor(() => expect(faults.visited).toContain(join(trash, record)));
     await utimes(join(trash, record), new Date(0), new Date(0));
-    expect(await f.undo(id)).toMatchObject({ ok: false, reason: "Cannot undo this change yet. Only a delete can be undone." });
+    expect(await f.undo(id)).toMatchObject({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
     await f.write("folder/tracked.txt", "new");
     await f.write("folder/rowless.txt", "new");
     await f.remove();

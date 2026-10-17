@@ -1,5 +1,7 @@
-import { undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
-import { readOperation, undoOperation } from "@dohc/mcp/tools";
+import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
+import { listChanges, readChange, readOperation, undoOperation } from "@dohc/mcp/tools";
+import { deleteWorkspacePathByHand } from "../workspaces/workspaceFileMoves";
+import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
@@ -729,11 +731,65 @@ describe("CLI socket server", () => {
     expect(writeFiles).not.toHaveBeenCalled();
   });
 
-  it("refuses non-delete Undo through socket, CLI and MCP before any engine call", async () => {
-    const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
-    const history = { readHistoryPage: vi.fn(), undoHistoryOperation: vi.fn() };
+
+  it("lists and reads changes at CLI and MCP after an Undo adds compensation moments", async () => {
     const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, assertCurrent: vi.fn() };
-    context.historyOperation = async () => ({ ok: true, operationId, members: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null });
+    await mkdir(join(workspaceRoot, ".dohc"), { recursive: true });
+    await mkdir(join(workspaceRoot, "folder"));
+    await writeFile(join(workspaceRoot, "folder/tracked.txt"), "original");
+    const fixture = momentFixtures(WORKSPACE_ID, "tracked", SERVER_NOW_MS);
+    fixture.summary.path = fixture.detail.path = "folder/tracked.txt";
+    let changes = [fixture.summary];
+    let details = [fixture.detail];
+    const history = {
+      readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: fixture.summary.id, operation: "delete", path: "folder/tracked.txt" }], nextCursor: null }) as never),
+      undoHistoryOperation: vi.fn(async (input: { operationId: string }) => {
+        const compensation = momentFixtures(WORKSPACE_ID, "undo", SERVER_NOW_MS + 1);
+        compensation.summary.path = compensation.detail.path = "folder/tracked.txt";
+        compensation.summary.metadata.correlationId = compensation.detail.metadata.correlationId = "dohc-operation:undo:hash";
+        const malformed = momentFixtures(WORKSPACE_ID, "malformed", SERVER_NOW_MS - 1);
+        malformed.summary.metadata.correlationId = malformed.detail.metadata.correlationId = "dohc-operation:bad";
+        changes = [compensation.summary, ...changes, malformed.summary];
+        details = [compensation.detail, ...details, malformed.detail];
+        await mkdir(join(workspaceRoot, "folder"), { recursive: true });
+        await writeFile(join(workspaceRoot, "folder/tracked.txt"), "original");
+        return { operationId: input.operationId, versionId: "main", momentCount: 1, compensationOperationId: "dohc-operation:undo:hash", materialized: true, deduped: false };
+      }),
+    };
+    const removed = await deleteWorkspacePathByHand(operation, "folder", { kind: "human", humanId: "local:owner" }, {
+      capture: { changePathsAs: async (_paths, _author, work) => work({
+        policy: await readWorkspaceEnginePolicy(workspaceRoot), recordDisk: async () => ["folder/tracked.txt"], delete: async () => fixture.summary.id,
+      } as never) }, requestId: "delete-for-list", trashItem: async () => { throw new Error("OS refused"); }, markDeleted: vi.fn(),
+    });
+    fixture.summary.metadata.correlationId = fixture.detail.metadata.correlationId = removed.operationId!;
+    context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
+    context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
+    context.listMoments = async () => changes;
+    context.readMoment = async id => details.find(moment => moment.id === id) ?? null;
+    const request = (request: import("@dohc/cli/protocol").CliRequestWithoutToken) => invoke(request.verb, request.args);
+    expect(await executeCli({ argv: ["history", "undo", removed.operationId!], cwd: workspaceRoot, request })).toMatchObject({ exitCode: 0 });
+    const listed = await executeCli({ argv: ["history", "list", "--json"], cwd: workspaceRoot, request });
+    expect(listed.exitCode).toBe(0);
+    const rows = JSON.parse(listed.stdout).changes;
+    expect(rows).toHaveLength(3);
+    expect(rows.find((row: { id: string }) => row.id === fixture.summary.id).operationId).toBe(removed.operationId);
+    for (const id of ["moment_undo", "moment_malformed"]) expect(rows.find((row: { id: string }) => row.id === id)).not.toHaveProperty("operationId");
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request };
+    expect(await listChanges(ctx)).toMatchObject({ changes: rows, count: 3 });
+    for (const row of rows) {
+      expect(await executeCli({ argv: ["history", "show", row.id, "--json"], cwd: workspaceRoot, request })).toMatchObject({ exitCode: 0 });
+      const detail = await readChange(ctx, { id: row.id });
+      expect(detail).toMatchObject({ ok: true, change: { id: row.id } });
+      if (row.id !== fixture.summary.id && "change" in detail) expect(detail.change).not.toHaveProperty("operationId");
+    }
+    expect(history.undoHistoryOperation).toHaveBeenCalledOnce();
+  });
+
+  it("refuses non-delete Undo through socket, CLI and MCP without an engine Undo", async () => {
+    const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+    const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
+    const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot, get readOnly() { return context.readOnly; }, shareView: undefined as unknown }, assertCurrent: vi.fn() };
+    context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
     const args = { cwd: workspaceRoot, actor: "agent" as const, operationId };
     const unsupported = { ok: false as const, reason: "Cannot undo this change yet. Only a delete can be undone." };
@@ -743,20 +799,34 @@ describe("CLI socket server", () => {
     expect(await readOperation(ctx, { operationId })).toMatchObject({ ok: true, members: [{ operation: "rename" }] });
     expect(await executeCli({ argv: ["history", "undo", operationId], cwd: workspaceRoot, request: request => invoke(request.verb, request.args) }))
       .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: " + unsupported.reason + "\n" });
-    expect(history.readHistoryPage).not.toHaveBeenCalled(); expect(history.undoHistoryOperation).not.toHaveBeenCalled();
-    context.historyUndo = vi.fn(async () => unsupported);
-    expect(await invoke("historyUndo", { ...args, actor: "human" })).toMatchObject({ ok: false, reason: 'A file delete through the CLI socket is recorded as an agent\'s; send actor "agent".' });
+    expect(history.undoHistoryOperation).not.toHaveBeenCalled();
+    context.historyUndo = vi.fn(context.historyUndo);
+    expect(await invoke("historyUndo", { ...args, actor: "human" })).toMatchObject({ ok: false, reason: 'An Undo through the CLI socket is recorded as an agent\'s; send actor "agent".' });
     expect(context.historyUndo).not.toHaveBeenCalled();
     for (const verb of ["historyOperation", "historyUndo"] as const) {
       expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { ...args, operationId: operationId.slice(15) } })).toMatchObject({ ok: false });
       context.readOnly = true;
-      expect(await invoke(verb, args)).toMatchObject({ ok: false, reason: "This workspace is read-only. Change files in the owning workspace." });
-      context.readOnly = false; context.sharedView = true;
+      expect(await invoke(verb, args)).toMatchObject({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
+      context.readOnly = false; operation.workspace.shareView = {};
       expect(await invoke(verb, args)).toMatchObject({ ok: false });
-      context.sharedView = false;
+      operation.workspace.shareView = undefined;
       await mkdir(join(workspaceRoot, "shared-with-me"), { recursive: true });
       expect(await invoke(verb, { ...args, cwd: join(workspaceRoot, "shared-with-me") })).toMatchObject({ ok: false });
     }
+  });
+
+  it("returns missing-delete recovery words through the socket, CLI and MCP", async () => {
+    const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+    const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, assertCurrent: vi.fn() };
+    const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
+    context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
+    context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
+    const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." };
+    expect(await invoke("historyUndo", { cwd: workspaceRoot, actor: "agent", operationId })).toEqual(refusal);
+    const request = (request: import("@dohc/cli/protocol").CliRequestWithoutToken) => invoke(request.verb, request.args);
+    expect(await undoOperation({ root: workspaceRoot, home: stateDir, request }, { operationId })).toEqual(refusal);
+    expect(await executeCli({ argv: ["history", "undo", operationId], cwd: workspaceRoot, request })).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: " + refusal.reason + "\n" });
+    expect(history.undoHistoryOperation).not.toHaveBeenCalled();
   });
 
   it("keeps MCP moves and deletes relative to a subfolder cwd under the agent's name", async () => {

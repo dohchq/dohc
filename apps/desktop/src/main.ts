@@ -1,3 +1,4 @@
+import { createOperationHistory } from "./workspaces/workspaceHistoryOperations";
 import { createHistoryCollectionRemote } from "./workspaces/historyCollectionRemote";
 import { forgetWorkspacePresentation } from "./workspaces/actorPresentation";
 import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
@@ -5178,18 +5179,7 @@ shareViewFiles = {
     ),
 };
 const workspaceFileMutations = createWorkspaceFileMutationOwner({
-  historyFor: workspace => ({
-    readHistoryPage: async input => {
-      const result = await withEngineAdapter(workspace, adapter => adapter.readHistoryPage(input));
-      if (!result) throw new Error("The workspace engine is not running.");
-      return result;
-    },
-    undoHistoryOperation: async input => {
-      const result = await withEngineAdapter(workspace, adapter => adapter.undoHistoryOperation(input));
-      if (!result) throw new Error("The workspace engine is not running.");
-      return result;
-    },
-  }),
+  historyFor: workspace => createOperationHistory(work => withEngineAdapter(workspace, work)),
   assertTrustedSender,
   withRendererWorkspaceOperation: (event, workspaceId, work) =>
     withRendererWorkspaceOperation(

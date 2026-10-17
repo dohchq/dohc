@@ -5,13 +5,13 @@ import { cliRequestSchema, CLI_PROTOCOL_VERSION } from "./protocol";
 const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
 it("sends an agent Undo and prints each remaining path with its retry", async () => {
   const request = vi.fn(async () => ({ ok: true, tracked: { state: "restoring", momentCount: 1 }, restored: [], remaining: [
-    { path: "a.txt", reason: "a.txt now occupies the old path.", retry: true },
-    { path: "b.txt", reason: "Its trash copy is gone.", retry: false },
+    { path: "a.txt", reason: "a.txt now occupies the old path. Move it first.", retry: true },
+    { path: "b.txt", reason: "b.txt may be incomplete. Undo again to retry, or restore it from the trash.", retry: true },
   ] }));
   expect(parseCliArguments(["history", "undo", operationId], {})).toMatchObject({ actor: "agent", verb: "historyUndo" });
   const result = await executeCli({ argv: ["history", "undo", operationId], cwd: process.cwd(), request });
   expect(result.exitCode).toBe(1);
-  expect(result.stdout.split("\n")).toEqual(["History: restoring", "a.txt: a.txt now occupies the old path. Undo again to retry.", "b.txt: Its trash copy is gone.", ""]);
+  expect(result.stdout.split("\n")).toEqual(["History: restoring", "a.txt now occupies the old path. Move it first. Undo again to retry.", "b.txt may be incomplete. Undo again to retry, or restore it from the trash.", ""]);
   expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "historyUndo", args: expect.objectContaining({ actor: "agent", operationId }) }));
 });
 it("refuses unsupported Undo and rejects an id without its namespace before transport", async () => {

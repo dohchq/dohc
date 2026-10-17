@@ -1877,12 +1877,12 @@ async function requestCli<Verb extends CliVerb>(
 }
 
 export async function readOperation(ctx: ToolContext, args: { operationId: string; cursor?: string }) {
-  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace." };
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };
   if (!HistoryOperationId.safeParse(args.operationId).success) return { ok: false as const, reason: "Use an operation id from history list: dohc-operation: followed by a UUID." };
   return requestCli(ctx, "historyOperation", args);
 }
 export async function undoOperation(ctx: ToolContext, args: { operationId: string }, agent?: string) {
-  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace." };
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };
   if (!HistoryOperationId.safeParse(args.operationId).success) return { ok: false as const, reason: "Use an operation id from history list: dohc-operation: followed by a UUID." };
   return requestCli(ctx, "historyUndo", { operationId: args.operationId, ...(agent ? { agent } : {}) });
 }

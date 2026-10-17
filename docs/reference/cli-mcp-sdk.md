@@ -1404,7 +1404,7 @@ Returns `{ action: "undo", items: { acceptanceId, status, momentId? }[], nextCur
 
 ### `dohc history`
 
-Read the changes History records for files.
+Read History changes and undo deletes.
 
 Changes come from the active version of the workspace.
 
@@ -1416,7 +1416,7 @@ dohc history operation <operation> [options]
 
 List the paths changed by one operation.
 
-- `--cursor <cursor>`: Continue from the operation page returned by --json.
+- `--cursor <cursor>`: Continue from the cursor on the previous operation page.
 
 With `--json`, prints `{ schemaVersion, ok: true, operationId, members: { momentId, operation, path, beforePath? }[], withoutHistory?, nextCursor }`.
 

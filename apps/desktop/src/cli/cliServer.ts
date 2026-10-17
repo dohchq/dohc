@@ -1,3 +1,4 @@
+import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
 import { creationPartialMessage } from "@dohc/cli/creation";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import { cliUsageInvocation, type CliUsageInvocation } from "../usage/cliUsage";
@@ -276,7 +277,6 @@ function historyPolicyUnreadable(refusal: HistoryPolicyRefusal) {
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
-  sharedView?: boolean;
   shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   access?: {
     object(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").ObjectAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
@@ -550,7 +550,7 @@ function rawMomentSummary(
 ) {
   return {
     id: moment.id,
-    ...(moment.metadata.correlationId?.startsWith("dohc-operation:") ? { operationId: moment.metadata.correlationId } : {}),
+    ...(HistoryOperationId.safeParse(moment.metadata.correlationId).success ? { operationId: moment.metadata.correlationId } : {}),
     recordedAtMs: moment.recordedAtMs,
     source: "workspace-engine" as const,
     operation: moment.operation,
@@ -2777,17 +2777,16 @@ async function dispatchWorkspace(
 
     case "historyOperation":
     case "historyUndo": {
-      if (context.sharedView || context.readOnly) return { ok: false, reason: "This workspace is read-only. Change files in the owning workspace." };
-      if (request.verb === "historyUndo" && request.args.actor !== "agent") return { ok: false, reason: `A file delete through the CLI socket is recorded as an agent's; send actor "agent".` };
+      if (request.verb === "historyUndo" && request.args.actor !== "agent") return { ok: false, reason: `An Undo through the CLI socket is recorded as an agent's; send actor "agent".` };
       const paths = await callerPaths(context, request.args.cwd);
-      if (paths.shared) return { ok: false, reason: "This action requires the owning workspace." };
+      if (paths.shared) return { ok: false, reason: "History operations require the owning workspace. Open it to continue." };
       if (!context.historyOperation || !context.historyUndo) return { ok: false, reason: "The workspace engine is not running." };
       try {
         if (request.verb === "historyOperation") return await context.historyOperation(request.args);
         const result = await context.historyUndo(request.args, documentEditOrigin(request.args.agent, context, options));
         if (result.ok) await notifyWrite(options, context);
         return result;
-      } catch (error) { return pathFreeFailure(error, "dohc could not read or undo this operation."); }
+      } catch (error) { return pathFreeFailure(error, `dohc could not ${request.verb === "historyUndo" ? "undo" : "read"} this operation.`); }
     }
 
     case "fileMove":
@@ -3452,7 +3451,7 @@ async function workspaceContextForRequest(
   const collectionWriteRequest =
     request.verb === "collectionSetFields" ||
     request.verb === "collectionCreateRecord";
-  const fileRequest = request.verb === "fileWrite" || request.verb === "fileMove" || request.verb === "fileDelete" || request.verb === "historyUndo";
+  const fileRequest = request.verb === "fileWrite" || request.verb === "fileMove" || request.verb === "fileDelete";
   const documentWriteRequest =
     request.verb === "documentEdit" || request.verb === "documentCreate" || fileRequest;
   const writeRequest =
@@ -3464,7 +3463,6 @@ async function workspaceContextForRequest(
     request.verb === "react" ||
     request.verb === "export" ||
     (request.verb === "show" && !request.args.peek);
-  if (workspace.readOnly && (request.verb === "historyOperation" || request.verb === "historyUndo")) throw new CliCommandError("This workspace is read-only. Change files in the owning workspace.");
   if (workspace.readOnly && writeRequest) {
     throw new CliCommandError(
       fileRequest

@@ -1,3 +1,4 @@
+import { undoWorkspaceHistoryOperation } from "./workspaceHistoryOperations";
 import { mkdir, readFile, rename, readdir, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { existsSync } from "node:fs";
@@ -5,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { HistoryUndoResult } from "@dohc/workspace-contracts/engine";
 import { createTestScratch } from "./testTemp";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
-import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, undoWorkspaceHistoryOperation, type PathChangeOptions } from "./workspaceFileMoves";
+import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
 
 const faults = vi.hoisted(() => ({ beforeLink: undefined as undefined | ((to: string) => Promise<void>), failRecord: false }));
 vi.mock("node:fs/promises", async original => {
@@ -42,7 +43,7 @@ async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) 
   let placement: Promise<void> | undefined;
   let interrupted = false;
   let refuse: string | undefined;
-  const history = { readHistoryPage: vi.fn(async () => ({ moments: [], protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async (input: { operationId: string; requestId: string }) => {
+  const history = { readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async (input: { operationId: string; requestId: string }) => {
     if (refuse) throw new Error(refuse);
     if (!committed) placement = placementGate.then(async () => { for (const path of tracked) await write(path, "tracked"); });
     committed ??= { operationId: input.operationId, versionId: "main", momentCount: tracked.length,
@@ -52,7 +53,7 @@ async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) 
   }) };
   const remove = async (hand = false) => hand ? deleteWorkspacePathByHand(operation, "folder", person, options)
     : (await prepareDeleteWorkspacePathAs(operation, "folder", person, options))();
-  const undo = (id: string, requestId = "undo-request") => undoWorkspaceHistoryOperation(operation, { operationId: id }, person, { agent: false, history });
+  const undo = (id: string) => undoWorkspaceHistoryOperation(operation, { operationId: id }, person, { agent: false, history });
   return { root, write, remove, undo, history, groups, operation, recordDisk,
     interrupt: () => { interrupted = true; }, refuse: (message: string) => { refuse = message; },
     placeTracked: async () => { expect(placement).toBeDefined(); releasePlacement(); await placement; },
@@ -81,7 +82,7 @@ describe("delete recovery", () => {
     const where = process.platform === "win32" ? "in the Recycle Bin" : "in the Trash";
     expect(result).toMatchObject({ undo: { available: false, paths: ["folder/rowless.txt"],
       reason: `Cannot undo the delete. folder/rowless.txt is ${where}. Restore it there.` } });
-    expect(await f.undo(result.operationId!)).toMatchObject({ ok: false, reason: "Cannot undo this change yet. Only a delete can be undone." });
+    expect(await f.undo(result.operationId!)).toMatchObject({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
   it("offers Undo for tracked-only files even after OS trash accepts", async () => {
@@ -205,7 +206,7 @@ describe("recovery durability and path authority", () => {
     const f = await fixture();
     const id = recovery(await f.remove());
     f.operation.workspace.readOnly = true;
-    expect(await f.undo(id)).toEqual({ ok: false, reason: "This workspace is read-only. Change files in the owning workspace." });
+    expect(await f.undo(id)).toEqual({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
 });

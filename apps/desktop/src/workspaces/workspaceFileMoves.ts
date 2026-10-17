@@ -636,5 +636,3 @@ export async function deleteWorkspacePathByHand(
   }
   return { trashed: outcome.trashed, ...("recovery" in outcome ? outcome.recovery : {}) };
 }
-
-export { undoWorkspaceHistoryOperation } from "./workspaceHistoryOperations";

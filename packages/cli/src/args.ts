@@ -511,7 +511,7 @@ const operationId = (value: string | undefined) => {
 const HISTORY_VERBS = {
   operation: {
     capabilityId: "history.operation.read", summary: "List the paths changed by one operation.", operands: "<operation>",
-    flags: [{ name: "--cursor", value: "cursor", text: "Continue from the operation page returned by --json." }],
+    flags: [{ name: "--cursor", value: "cursor", text: "Continue from the cursor on the previous operation page." }],
     parse: input => {
       const [id, ...extra] = input.operands; noExtraArgs(extra, "history operation");
       return { verb: "historyOperation", operationId: operationId(id), cursor: lastValue(input, "--cursor") };
@@ -1089,7 +1089,7 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
     verbs: APP_VERBS,
   },
   history: {
-    summary: "Read the changes History records for files.",
+    summary: "Read History changes and undo deletes.",
     notes: ["Changes come from the active version of the workspace."],
     verbs: HISTORY_VERBS,
   },
