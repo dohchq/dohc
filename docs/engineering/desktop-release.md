@@ -50,7 +50,7 @@ Run the Windows and macOS runners in a signed-in desktop session for the package
 The Linux runner also needs `xvfb-run` for the fuse smoke.
 The macOS runner boots the x64 package under Rosetta. Install it once with `softwareupdate --install-rosetta --agree-to-license`.
 After packaging, that check verifies the actual executable's fuse values and starts it with an isolated profile.
-Local packages outside `apps/desktop/release/linux-unpacked` need `DOHC_SMOKE_PACKAGE_DIRECTORY` set to their unpacked directory.
+The smoke looks for `apps/desktop/release/linux-unpacked` on Linux, and on a Mac for `apps/desktop/release/mac-arm64/dohc.app` (Apple silicon) or `apps/desktop/release/mac/dohc.app` (Intel). Point `DOHC_SMOKE_PACKAGE_DIRECTORY` at any other unpacked directory or app bundle.
 The package and publish jobs receive the environment's secrets.
 Register only runners that the release owner controls.
 On a shared Windows runner, set `DOHC_BUILD_SLOT_ROOT=C:\w\_locks` in the runner's `.env` file.

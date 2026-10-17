@@ -128,6 +128,8 @@ mac:
 win:
   target: [nsis]
 linux:
+  # Without its own icon, the Linux target falls back to mac.icon.
+  icon: build/icon.png
   target: [AppImage]
   category: Office
   # Use package.json desktopName for the launcher filename and StartupWMClass;

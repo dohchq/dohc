@@ -587,10 +587,25 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   const windowsSmoke = releaseStep(jobs.build, "--binary apps/desktop/release/win-unpacked/dohc.exe");
   assert.equal(windowsSmoke.if, "runner.os == 'Windows'");
   assert.match(windowsSmoke.run, /--package-commit '\$\{\{ github\.sha \}\}'/);
+  const macSmoke = jobs.build.steps.find(step => step.if === "runner.os == 'macOS'" && step.run === "pnpm smoke:fuses:desktop");
+  assert.ok(macSmoke, "the macOS package's signature, fuses and boot are checked");
+  const macDirectory = macSmoke.env.DOHC_SMOKE_PACKAGE_DIRECTORY
+    .match(/^\$\{\{ github\.workspace \}\}\/apps\/desktop\/release\/(\$\{\{ .+ \}\})\/dohc\.app$/u)?.[1];
+  assert.ok(macDirectory, "the macOS smoke boots a bundle electron-builder wrote under apps/desktop/release");
+  for (const [arch, directory] of [["arm64", "mac-arm64"], ["x64", "mac"]]) {
+    assert.equal(Function("matrix", `return (${macDirectory.slice(3, -2)});`)({ arch }), directory, `the ${arch} smoke boots its own bundle`);
+  }
   const upload = releaseStep(jobs.build, "actions/upload-artifact@");
   const order = step => jobs.build.steps.indexOf(step);
   assert.ok(order(packageDesktop) < order(fuseSmoke), "the Linux fuse smoke boots the package electron-builder wrote");
-  for (const smoke of [fuseSmoke, windowsSmoke]) assert.ok(order(smoke) < order(upload), "the packaged smoke runs before the upload");
+  assert.ok(order(packageDesktop) < order(macSmoke), "the macOS smoke boots the package electron-builder wrote");
+  for (const smoke of [fuseSmoke, windowsSmoke, macSmoke]) assert.ok(order(smoke) < order(upload), "the packaged smoke runs before the upload");
+  // Package smoke fails a required-signing Mac run that would skip notarization.
+  const packageSmoke = releaseStep(jobs.build, "smoke:package:desktop");
+  for (const name of ["APPLE_ID", "APPLE_APP_SPECIFIC_PASSWORD", "APPLE_TEAM_ID"]) {
+    assert.ok(packageDesktop.env[name], `packaging notarizes with ${name}`);
+    assert.equal(packageSmoke.env[name], packageDesktop.env[name], `Package smoke sees the ${name} that packaging uses`);
+  }
 
   const secretExpressions = workflowValues(releaseWorkflow).filter(value => typeof value === "string" && value.includes("secrets."));
   assert.ok(secretExpressions.length > 0, "the workflow still declares release secrets");

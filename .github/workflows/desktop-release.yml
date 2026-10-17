@@ -306,6 +306,9 @@ jobs:
           DOHC_REQUIRE_SIGNING: ${{ steps.signing.outputs.require }}
           CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.MACOS_CSC_LINK || '' }}
           WIN_CSC_LINK: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.WIN_CSC_LINK || '' }}
+          APPLE_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.APPLE_TEAM_ID || '' }}
         run: pnpm smoke:package:desktop
 
       - name: Package desktop
