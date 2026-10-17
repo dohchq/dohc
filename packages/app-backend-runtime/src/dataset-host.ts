@@ -21,10 +21,10 @@ import { createDatasetReplicaHost } from "./replica-host.js";
 import { datasetHistoryLineage, historyStatement, readDatasetHistory, readDatasetHistoryRevision } from "./dataset-history.js";
 import { initializeDatasetAttempts, reviewDatasetAttempts, reconcileDatasetAttempt, cancelDatasetAttempt, assertDatasetAttemptsCommitted, assertDatasetAttemptNotCancelled } from "./dataset-attempts.js";
 import { createDatasetAutomationClaims, DATASET_AUTOMATION_CHAIN_DEPTH, type DatasetActor, type DatasetPressed, type DatasetPressInput } from "./dataset-automation-claims.js";
-
-export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
 export { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
+
+export type DatasetAccess = { kind: "data" } | { kind: "app"; appId: string };
 /** Resolve only immutable revisions already approved at this host; callers cannot supply compatibility. */
 export function resolveCompatibleDatasetRevision(db: JournalDb, key: DatasetScope, reference: { revision: number; revisionSha256: string }, current?: DatasetRevision): DatasetRevision {
   const row = current ? undefined : db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
