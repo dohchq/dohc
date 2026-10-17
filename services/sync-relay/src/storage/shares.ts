@@ -30,8 +30,8 @@ import {
   rowToShareRow,
   rowToShareWithGrantRow,
 } from "./rows";
-import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import { LINK_SESSION_RENEWAL_GRACE_MS } from "../linkSecurity";
+import { linkAccessLevels, parseStoredAnyShareSelectorJson } from "../shareFilter";
 import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, RECEIVED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
 
 function dependentGrantIdsMatch(
@@ -259,8 +259,10 @@ export function retuneShareGrant(storage: StorageContext, input: {
     return storage.tx(() => {
       input.guard();
       const grant = storage.getShareGrant(input.grantId);
-      const from = grant ? shareAccessRank(grant.access) : -1;
-      const to = shareAccessRank(input.access);
+      const share = grant && storage.getShare(grant.shareId);
+      const levels = linkAccessLevels(share ? parseStoredAnyShareSelectorJson(share.selectorJson) : null);
+      const from = grant ? levels.indexOf(grant.access) : -1;
+      const to = levels.indexOf(input.access);
       if (
         !grant ||
         grant.shareId !== input.shareId ||
@@ -324,8 +326,7 @@ export function retuneShareGrant(storage: StorageContext, input: {
       } else {
         nextShareDiscussionRevision(storage, grant.shareId);
         for (const dependent of dependents) {
-          const dependentRank = shareAccessRank(dependent.access);
-          if (dependentRank > to) {
+          if (levels.indexOf(dependent.access) > to) {
             storage.db
               .prepare(
                 `UPDATE sync_relay_share_grants

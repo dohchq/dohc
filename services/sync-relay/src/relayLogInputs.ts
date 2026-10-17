@@ -13,6 +13,10 @@ export const COLLECTION_FILE_ORIGIN_PREFIX = "relay:collection-file:";
 
 export const SHARE_MEMBER_ORIGIN_PREFIX = "relay:share-member:";
 
+// Only the service host's own feed accepts writes from these origins, so they
+// never collide with an owner device's coordinates.
+export const SERVICE_HOST_ORIGIN_PREFIX = "service-host:";
+
 export function namedShareOrigin(shareId: string, userId: string, originId: string): string {
   return `${SHARE_MEMBER_ORIGIN_PREFIX}${sha256Hex(JSON.stringify([shareId, userId, originId]))}`;
 }
@@ -22,8 +26,9 @@ export function namedShareOrigin(shareId: string, userId: string, originId: stri
 // alone mints human, public, named, and link attribution.
 const CLIENT_MOMENT_AUTHOR_KINDS: ReadonlySet<unknown> = new Set(["agent", "automation"]);
 
-export function assertClientLogProvenance(originId: string, rawOps: unknown[], deferMomentRefusal = false): void {
-  assertUnreservedLogOrigin(originId);
+export function assertClientLogProvenance(originId: string, rawOps: unknown[],
+  {deferMomentRefusal = false, serviceHost = false}: {deferMomentRefusal?: boolean; serviceHost?: boolean} = {}): void {
+  assertUnreservedLogOrigin(originId, serviceHost);
   for (const raw of rawOps) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const op = raw as Record<string, unknown>;
@@ -34,7 +39,10 @@ export function assertClientLogProvenance(originId: string, rawOps: unknown[], d
   }
 }
 
-function assertUnreservedLogOrigin(originId: string): void {
+function assertUnreservedLogOrigin(originId: string, serviceHost: boolean): void {
+  if (originId.startsWith(SERVICE_HOST_ORIGIN_PREFIX) !== serviceHost) {
+    throw badRequest(serviceHost ? "originId must use the service host prefix" : "originId is reserved for service host writes");
+  }
   if (originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for named share writes");
   }
@@ -79,6 +87,50 @@ export function parseLogOp(value: unknown): SyncRelayLogInput {
 
 export type LogAuthorNameLookup = (userId: string) => Promise<string | null> | string | null;
 
+async function authenticatedDisplayName(actorUserId: string, lookupUserDisplayName?: LogAuthorNameLookup, fallback = actorUserId): Promise<string> {
+  const name = (await lookupUserDisplayName?.(actorUserId))?.trim() || fallback;
+  try {
+    parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName: name}]);
+    return name;
+  } catch {
+    return fallback;
+  }
+}
+
+export async function parseNamedShareLogOps(
+  values: unknown[],
+  actorUserId: string,
+  lookupUserDisplayName?: LogAuthorNameLookup,
+): Promise<SyncRelayLogInput[]> {
+  let lookup: Promise<string | null> | undefined;
+  // A failed lookup leaves the post unnamed rather than refusing it.
+  const accountName = () => lookup ??= Promise.resolve().then(() => lookupUserDisplayName?.(actorUserId) ?? null).catch(() => null);
+  const ops = await parseAuthenticatedLogOps(values, actorUserId, accountName);
+  const chatOps = ops.filter(op => op.opKind === "chat.message.append" || op.opKind === "chat.reaction.set");
+  if (chatOps.length === 0) return ops;
+  // Chat names a person without an account name "Unnamed", as the relay's other chat and discussion routes do.
+  const name = await authenticatedDisplayName(actorUserId, accountName, "Unnamed");
+  const humanName = name.length <= 200 && name.isWellFormed() ? name : "Unnamed";
+  const snapshot = parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName}]);
+  for (const op of chatOps) {
+    op.admittedAuthorSnapshot = snapshot;
+    if (op.opKind === "chat.reaction.set") continue;
+    const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
+    if (payload.authorKind !== "human" && payload.authorKind !== "agent" && payload.authorKind !== "automation") {
+      throw badRequest("invalid author kind");
+    }
+    if (payload.authorKind !== "human") {
+      const name = payload.authorDisplayName;
+      if (typeof name !== "string" || !name.isWellFormed() || !name.trim() || name.trim().length > 200) {
+        throw badRequest("invalid display name");
+      }
+      payload.authorDisplayName = name.trim();
+      op.payloadJson = stableJsonStringify(payload);
+    }
+  }
+  return ops;
+}
+
 function ordinaryAuthorContext(payload: unknown): LiveAuthorContext | undefined {
   const fields = payload as Record<string, unknown>;
   if (!Object.hasOwn(fields, "authorContext")) return undefined;
@@ -101,10 +153,7 @@ export async function parseAuthenticatedLogOps(
     ? ordinaryAuthorContext((values[index] as Record<string, unknown>).payload)
     : undefined);
   if (!contexts.some(context => context?.kind === "account" && context.accountId === actorUserId)) return ops;
-  const name = (await lookupUserDisplayName?.(actorUserId))?.trim() || actorUserId;
-  let humanName = name;
-  try { parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName}]); }
-  catch { humanName = actorUserId; }
+  const humanName = await authenticatedDisplayName(actorUserId, lookupUserDisplayName);
   for (const [index, context] of contexts.entries()) {
     if (context?.kind !== "account" || context.accountId !== actorUserId) continue;
     ops[index]!.admittedAuthorSnapshot = parseLiveAuthorSnapshot([
@@ -169,8 +218,8 @@ const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
 };
 
 // Verifies chat authorship before parseLogOp freezes the exact payload bytes.
-// The relay never mutates replicated payloads because the author reads its own
-// operations back and compares those bytes with its local replication log.
+// The ordinary workspace route preserves payload bytes for replica comparison.
+// Named share writes separately admit the account's chat display name.
 export function assertChatAuthorship(
   rawOps: unknown[],
   actorUserId: string,
