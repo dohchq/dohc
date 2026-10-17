@@ -3,7 +3,7 @@ import { atomicReplaceFile } from "../atomicReplaceFile";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
-import type { ActiveAgentRun } from "./activeAgentRun";
+import { UNNAMED_AGENT_ID, type ActiveAgentRun } from "./activeAgentRun";
 
 // Local agent runs. An agent run is a LOCAL concept: a small record in
 // .dohc/agent-runs.json (id, startedAt, agentId, status). While a run is
@@ -63,7 +63,6 @@ export interface AgentIntegrationOptions {
 }
 
 const RUNS_FILE = "agent-runs.json";
-const DEFAULT_AGENT_ID = "dohc-mcp";
 
 function isAgentRunRecord(value: unknown): value is AgentRunRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -127,7 +126,7 @@ async function writeRuns(rootPath: string, runs: AgentRunRecord[]): Promise<void
 export function createAgentIntegration(options: AgentIntegrationOptions) {
   const now = options.now ?? (() => Date.now());
   const createId = options.createId ?? (() => randomUUID());
-  const agentId = options.agentId ?? DEFAULT_AGENT_ID;
+  const agentId = options.agentId ?? UNNAMED_AGENT_ID;
 
   function serialize<T>(
     state: AgentIntegrationState,

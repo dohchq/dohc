@@ -52,8 +52,9 @@ export async function runBounded(tasks, execute, concurrency = 2) {
 }
 
 // `stop` is the caller's cancellation scope: its stop interrupts these commands, and their first confirmed failure stops it.
+// `repositoryTests` is the repository lane's script: every repository test, or "test:repo:tree" for the ones that read the source tree.
 // `full` runs each desktop unit test file in a worker of its own, so a test that passes only after another file in a shared worker fails.
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null, full = false, stop } = {}) {
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, beforeDesktopScripts, runProofs, changed = null, repositoryTests = "test:repo", full = false, stop } = {}) {
   if (runProofs !== undefined && typeof runProofs !== "function") throw new Error("runProofs must be a function.");
   mkdirSync(output, { recursive: true });
   const report = { version: 1, concurrency: 2, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
@@ -196,7 +197,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     if (!prepared) {
       await command("runtime-build", ["--filter", "@dohc/app-backend-runtime", "build"]);
     }
-    const repositoryChecks = command("repository", ["run", "test:repo"], { rerun: repoRoot });
+    const repositoryChecks = command("repository", ["run", repositoryTests], { rerun: repoRoot });
     const plan = planPackages().catch(fail);
     const databasePending = new Set();
     const packages = plan.then(async tasks => {
