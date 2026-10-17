@@ -3553,7 +3553,7 @@ export function DesktopWorkspaceShell(props: {
 
   const showWorkbenchMenu = useCallback(
     async (
-      context: "tab" | "editor" | "status",
+      context: "tab" | "status",
       path?: string,
       groupId?: string,
     ) => {
@@ -5356,13 +5356,7 @@ export function DesktopWorkspaceShell(props: {
                         : {})}
                     />
                   )}>
-                    <div
-                      className="flex min-h-0 flex-1 flex-col"
-                      onContextMenu={(event) => {
-                        event.preventDefault();
-                        void showWorkbenchMenu("editor", tabPath ?? undefined, editorGroup.id);
-                      }}
-                    >
+                    <div className="flex min-h-0 flex-1 flex-col">
             {/* The editor island: a document/tab view that throws (hostile
                 markdown tripping the WYSIWYG parse, a failed editor chunk, a
                 view bug) contains to this pane — tabs, explorer, and rail

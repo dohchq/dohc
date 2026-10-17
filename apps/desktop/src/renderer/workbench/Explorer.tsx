@@ -1477,6 +1477,8 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             else if (event.key === "Enter") finishEdit(true, true);
           }}
           onBlur={() => { renameFocus.current = null; finishEdit(true); }}
+          // The name field takes the text menu, not the tree's menu.
+          onContextMenu={(event) => event.stopPropagation()}
           // The name keeps the row's exact type (13px sans, square) — F2
           // must not morph the label into a web-input pill — and the strong
           // border IS the focus affordance (the input is focused while open;

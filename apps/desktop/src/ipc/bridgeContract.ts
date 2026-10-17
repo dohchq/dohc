@@ -899,7 +899,7 @@ export type ShowExplorerMenuResult = z.infer<typeof ShowExplorerMenuResult>;
 export const ShowWorkbenchMenuPayload = z.object({
   workspaceId: WORKSPACE_ID,
   // A pinned app's menu names the app's folder as its path.
-  context: z.enum(["tab", "editor", "status", "pinned-app"]),
+  context: z.enum(["tab", "status", "pinned-app"]),
   path: PATH_STRING.optional(),
   groupId: z.string().min(1).max(MAX_EDITOR_GROUP_ID_CHARS).optional(),
   canCloseEditorGroup: z.boolean().optional(),

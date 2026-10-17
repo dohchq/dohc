@@ -93,6 +93,7 @@ async function harness() {
   });
   const applyZoomLevelToWindows = vi.fn((value: number) => { effects.push({ kind: "zoom", value, persisted: persisted() }); });
   const applyThemeMode = vi.fn((value: ThemeMode) => { effects.push({ kind: "theme", value, persisted: persisted() }); });
+  const setSpellCheckerEnabled = vi.fn<(enabled: boolean) => void>();
   const broadcastUserSettings = vi.fn();
   const notifyRenderer = vi.fn();
   const refreshDispatchTray = vi.fn<() => Promise<unknown>>(async () => undefined);
@@ -102,7 +103,7 @@ async function harness() {
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const capability = createSettingsIpc<Sender, Event, Operation>({
     stateDir: () => stateDirectory, setCachedPreferredName,
-    applyZoomLevelToWindows, applyThemeMode, refreshDispatchTray, openDispatchWorkspaces,
+    applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
     broadcastUserSettings, notifyRenderer, openPath,
     knownWorkspaceIds: () => [...entries.keys()],
@@ -121,7 +122,7 @@ async function harness() {
   });
   return {
     handlers, effects, entries, authorities, sessions, first, second, open,
-    zoom: capability.stepWindowZoom, setCachedPreferredName, applyZoomLevelToWindows, applyThemeMode,
+    zoom: capability.stepWindowZoom, setCachedPreferredName, applyZoomLevelToWindows, applyThemeMode, setSpellCheckerEnabled,
     refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings, notifyRenderer,
     openPath, reload: capability.reloadUserSettings,
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
@@ -351,6 +352,17 @@ describe("registered settings IPC", () => {
     expect(h.preferredName()).toBe("Ada");
     expect(h.refreshDispatchTray).toHaveBeenCalledOnce();
     await expect(h.invoke(settingsOperations.getUserSettings.channel)).resolves.toEqual(applied);
+  });
+
+  it("turns spellcheck on and off with the setting, from Settings or a hand edit", async () => {
+    const h = await harness();
+    const path = join(h.stateDirectory(), userSettingsStore.USER_SETTINGS_FILE);
+    const off = { ...DEFAULT_USER_SETTINGS, editor: { ...DEFAULT_USER_SETTINGS.editor, spellcheck: false } };
+    await h.invoke(settingsOperations.setUserSettings.channel, { settings: off, base: DEFAULT_USER_SETTINGS });
+    expect(h.setSpellCheckerEnabled).toHaveBeenLastCalledWith(false);
+    await writeFile(path, JSON.stringify({ editor: { spellcheck: true } }));
+    await h.reload();
+    expect(h.setSpellCheckerEnabled).toHaveBeenLastCalledWith(true);
   });
 
   it("steps zoom from the file as it is now and puts a hand edit it merged into effect", async () => {
