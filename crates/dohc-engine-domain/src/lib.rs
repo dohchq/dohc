@@ -199,3 +199,12 @@ pub use dohc_engine_storage::{EngineStore, FaultInjector, NoFaults, StorageError
 /// Re-exported so replication appliers bind to the same values the local
 /// seal/open and secret write paths use instead of restating them.
 pub use dohc_engine_crypto::aead::{MAX_SECRET_FILE_BYTES, SECRET_IV_BYTES, SECRET_TAG_BYTES};
+
+pub(crate) fn received_object_token(id: &str) -> bool {
+    id.strip_prefix("share-object:v1:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}

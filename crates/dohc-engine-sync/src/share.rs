@@ -346,14 +346,7 @@ pub(crate) fn selected_path_within_grant(path: &str, granted: &ShareGrant) -> bo
 /// kind that carries its own file: a served `chat.thread.create` names the
 /// granted PATH.
 ///
-/// It is a path and never an object id because the served `moment.append`
-/// deliberately drops the granter's `objectId`
-/// (`services/sync-relay/src/shareFilter.ts`), so this store minted its own
-/// and a granter object id would name nothing here. `linkedObjectId` and
-/// `linkedPathHint` are therefore shapes a share never carries, and a relay
-/// offering one is offering something this boundary must not place — which is
-/// a malformed payload, not a scope decision, because no grant admits it and
-/// widening the share changes nothing.
+/// Token links carry a serve-time path hint checked against the pinned grant.
 fn enforce_share_view_thread_create(
     boundary: &ShareBoundary,
     op: &ReplicationEnvelope,
@@ -365,18 +358,25 @@ fn enforce_share_view_thread_create(
         .granted
         .as_ref()
         .ok_or(SyncError::ShareBoundaryViolation)?;
-    if op.payload.get("linkedObjectId").is_some() || op.payload.get("linkedPathHint").is_some() {
+    let token = op.payload.get("linkedObjectId").and_then(Value::as_str);
+    if (token.is_some() && !token.is_some_and(super::relay::received_object_token))
+        || (token.is_none() && op.payload.get("linkedPathHint").is_some())
+    {
         return Err(SyncError::InvalidInput {
             reason: "share-view chat.thread.create must carry linkedPath, never a linked object id or path hint",
         });
     }
-    let path =
-        op.payload
-            .get("linkedPath")
-            .and_then(Value::as_str)
-            .ok_or(SyncError::InvalidInput {
-                reason: "share-view chat.thread.create must carry a linkedPath string",
-            })?;
+    let path = op
+        .payload
+        .get(if token.is_some() {
+            "linkedPathHint"
+        } else {
+            "linkedPath"
+        })
+        .and_then(Value::as_str)
+        .ok_or(SyncError::InvalidInput {
+            reason: "share-view chat.thread.create must carry a linkedPath string",
+        })?;
     if !selected_path_within_grant(path, granted) {
         return Err(SyncError::ShareBoundaryViolation);
     }

@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette, type Command } from "./CommandPalette";
+import { SHORTCUTS } from "../shortcuts/shortcutRegistry";
 
 beforeEach(() => {
   // jsdom doesn't implement scrollIntoView; the palette nudges the selected
@@ -28,6 +29,31 @@ function selectedLabel(): string | null {
 }
 
 describe("CommandPalette keyboard selection", () => {
+  it.each(["win32", "darwin"].flatMap((platform) =>
+    ["input", "result row", "panel"].flatMap((focus) =>
+      SHORTCUTS["command-palette"].accelerators.map((binding) => ({ platform, focus, binding })),
+    ),
+  ))("handles $binding on $platform with focus on the $focus", ({ platform, focus, binding }) => {
+    const { ran, onClose } = setup();
+    const target = focus === "input"
+      ? screen.getByRole("textbox", { name: "Command" })
+      : focus === "result row"
+        ? screen.getByRole("button", { name: "alpha" })
+        : screen.getByTestId("command-palette").closest<HTMLElement>('[data-focus-surface="dialog"]')!;
+    target.focus();
+    expect(document.activeElement).toBe(target);
+    const parts = binding.split("+");
+    const event = new KeyboardEvent("keydown", {
+      key: parts.at(-1)!, shiftKey: parts.includes("Shift"),
+      ctrlKey: platform === "win32", metaKey: platform === "darwin",
+      bubbles: true, cancelable: true,
+    });
+    fireEvent(target, event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(ran).toEqual([]);
+  });
+
   it("Arrow keys move the selection (wrapping) and Enter runs it", async () => {
     const { ran, onClose } = setup();
     expect(selectedLabel()).toBe("alpha");
@@ -50,5 +76,13 @@ describe("CommandPalette keyboard selection", () => {
     expect(selectedLabel()).toBe("gamma");
     await userEvent.keyboard("{Enter}");
     expect(ran).toEqual(["gamma"]);
+  });
+
+  it("Escape from the input closes it once, through the overlay", async () => {
+    const { ran, onClose } = setup();
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "Command" }));
+    await userEvent.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(ran).toEqual([]);
   });
 });

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { afterEach, expect, it, vi } from "vitest";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
-import { createLocalAppLaunchHost, type LocalAppLaunchHost } from "./localAppLaunch";
+import { createLocalAppLaunchHost, LocalAppUnavailableError, type LocalAppLaunchHost } from "./localAppLaunch";
 
 const publicationId = "a".repeat(64);
 const hosts: LocalAppLaunchHost[] = [];
@@ -90,6 +90,25 @@ it("requires exact origin, host, handoff, and proof and strips caller authority"
   expect(f.backend.request).not.toHaveBeenCalled();
   expect((await f.post("/backend", invoke, headers)).status).toBe(200);
   expect(f.backend.request).toHaveBeenCalledWith(publicationId, "invoke", { authorityRevision: 1, operation: "register", idempotencyKey: "attempt-1", input: { count: 1 } }, expect.any(AbortSignal));
+});
+
+it("carries exact Collection list and create requests and answers an unavailable engine with 503", async () => {
+  const f = await fixture(), opened = await f.open(), headers = { "x-dohc-app-proof": opened.proof };
+  const list = { id: "list", op: "collection.list", limit: 10, afterPath: "trip/responses/a.md" };
+  const create = { id: "create", op: "collection.create", idempotencyKey: "response-1", fields: { destination: "Tokyo" } };
+  expect((await f.post("/backend", list, headers)).status).toBe(200);
+  expect(f.backend.request).toHaveBeenLastCalledWith(publicationId, "list", { authorityRevision: 1, limit: 10, afterPath: list.afterPath }, expect.any(AbortSignal));
+  expect((await f.post("/backend", create, headers)).status).toBe(200);
+  expect(f.backend.request).toHaveBeenLastCalledWith(publicationId, "create", { authorityRevision: 1, idempotencyKey: "response-1", fields: { destination: "Tokyo" } }, expect.any(AbortSignal));
+  for (const body of [{ ...list, limit: 0 }, { ...list, authorityRevision: 9 }, { ...create, path: "elsewhere.md" }, { ...create, authorityRevision: 9 }])
+    expect((await f.post("/backend", body, headers)).status).toBe(400);
+  expect((await f.post("/backend", { ...create, idempotencyKey: "bad key" }, headers)).status).toBe(404);
+  expect((await f.post("/backend", { ...create, fields: { note: "x".repeat(17_000) } }, headers)).status).toBe(413);
+  expect(f.backend.request).toHaveBeenCalledTimes(2);
+  f.backend.request.mockRejectedValueOnce(new LocalAppUnavailableError("The workspace engine did not answer."));
+  expect((await f.post("/backend", list, headers)).status).toBe(503);
+  f.backend.request.mockRejectedValueOnce(new Error("This app is not approved for document Collection access."));
+  expect((await f.post("/backend", list, headers)).status).toBe(404);
 });
 
 it("binds upload and authorized file operations to the same approved app", async () => {

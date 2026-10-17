@@ -904,7 +904,7 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
   listLocal: { summary: "List an app's publications on this computer." },
   prepareLocal: {
     summary: "Prepare an app to open on this computer.",
-    notes: ["Review the source and the dataset operations it asks for, then approve."],
+    notes: ["Review the source and the Collection access it asks for, then approve."],
   },
   launchLocal: {
     summary: "Get a local URL for an approved app.",
@@ -939,10 +939,15 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
   withdraw: {
     summary: "Stop a shared publication.",
     take: publicationFromList,
+    notes: [
+      "For an app approved on this computer, take publicationId and authorityRevision from listLocal.",
+      "withdrawalUnconfirmed means access ended, but responses the app sent earlier are not yet confirmed saved or refused. Withdraw again with the returned authorityRevision to confirm.",
+    ],
   },
   revokeCollection: {
     summary: "Remove a shared publication's Collection access.",
     take: publicationFromList,
+    notes: ["For an app approved on this computer, this ends its approval, as withdraw does."],
   },
   reviewReactivation: {
     summary: "Prepare a stopped publication to publish again.",

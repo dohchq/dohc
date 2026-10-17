@@ -9,6 +9,7 @@ import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervis
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import type { ApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import type { LocalAppStore, LocalAppRow, LocalAppPrepared, LocalAppStorage } from "./localAppStore";
+import type { LocalAppAction } from "./localAppLaunch";
 import type { LocalDatasetAgent, LocalDatasetUpload } from "./localDatasetHost";
 import { parseDatasetAttemptRequest, type DatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 
@@ -74,13 +75,13 @@ export function createLocalDatasetApps(options: {
       const publicationId = hash(JSON.stringify(["dohc-local-dataset-app-v1", options.workspaceId, candidate]));
       const { operations: _, name: _name, ...binding } = verified;
       return options.store.activate({ kind: "dataset", resourceId: verified.datasetId, publicationId, prepared, agent }, signal,
-        (existing, commit) => options.bind(verified.datasetId, publicationId, binding, () => {
+        (existing, _displaced, commit) => options.bind(verified.datasetId, publicationId, binding, () => {
           if (existing && existing.publicationId !== publicationId) options.bind(existing.resourceId, existing.publicationId, null, () => {});
           commit();
         }));
     },
+    /** The store has checked the root's authority. The Dataset itself may no longer be approved. */
     withdrawBinding(value: LocalAppRow, commit: () => void) {
-      current(value.publicationId, value.authorityRevision);
       options.bind(value.resourceId, value.publicationId, null, commit);
     },
     describe(value: LocalAppRow) {
@@ -88,9 +89,10 @@ export function createLocalDatasetApps(options: {
       if (declared?.kind !== "dataset") throw new Error("Invalid app approval.");
       let active = false; try { current(value.publicationId, value.authorityRevision); active = true; } catch {}
       return { publicationId: value.publicationId, authorityRevision: value.authorityRevision, appRoot: value.appRoot,
-        sourceRevision: value.candidate.sourceRevision, datasetCapability: declared, active };
+        sourceRevision: value.candidate.sourceRevision, datasetCapability: declared, approved: options.store.held(value), active };
     },
-    request(publicationId: string, action: "invoke" | "upload" | "attempt", raw: unknown, signal?: AbortSignal): Promise<unknown> {
+    request(publicationId: string, action: LocalAppAction, raw: unknown, signal?: AbortSignal): Promise<unknown> {
+      if (action === "list" || action === "create") throw new Error("This app is not approved for document Collection access.");
       if (action === "attempt") {
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid pending submission request.");
         const { authorityRevision, operation: operationName, ...request } = raw as Record<string, unknown>;

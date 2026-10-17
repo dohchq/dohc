@@ -1,3 +1,5 @@
+import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
+import { mountRootFor } from "./workspaces/shareMounts";
 import { createHistoryCollectionRemote } from "./workspaces/historyCollectionRemote";
 import { forgetWorkspacePresentation } from "./workspaces/actorPresentation";
 import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
@@ -48,7 +50,8 @@ import { detectAgentTools } from "./agents/agentToolDetection";
 import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { registerOwnerAppPublicationIpc, createOwnerAppPublicationHandler } from "./ipc/ownerAppPublicationIpc";
 import { createLocalOwnerAppPublicationHandler } from "./ipc/localOwnerAppPublication";
-import { createLocalDatasetHost, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { createLocalDatasetHost, localDatasetStoreExists, reconcileExistingLocalCollectionApps, type LocalDatasetAgent, type LocalDatasetHost } from "./workspaces/localDatasetHost";
+import { localCollectionEngine } from "./workspaces/localCollectionEngine";
 import { createInstalledDatasetCompiler } from "./workspaces/installedDatasetCompiler";
 import { createDatasetAuthorityRouter, createRemoteDatasetData, createRemoteDatasetTransferTarget, resolveRemoteDatasetRevision } from "./workspaces/remoteDataset";
 import { createNamedDatasetData } from "./workspaces/namedDataset";
@@ -2919,7 +2922,18 @@ async function withEngineAdapter<T>(
   );
 }
 
-const resolveEngineFiles = createEngineFileResolver(withEngineAdapter);
+const resolveEngineFiles = createEngineFileResolver(withEngineAdapter, createReceivedFileReferenceScopes<EngineWorkspace>({
+  findWorkspace,
+  currentAttachment: workspaceId => workspaceAuthorities.currentBinding(workspaceId).attachmentId,
+  isCurrentAttachment: (workspaceId, attachment) => workspaceAuthorities.isCurrentAttachment(workspaceId, attachment),
+  warmCredentials: warmCredentialCache,
+  credentials: () => cachedCredentials,
+  credentialGeneration: () => credentialCacheGeneration,
+  mountWorkspace: (workspace, mount) => receivedShareEngine.workspaceFor({
+    engineWorkspaceId: mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
+    rootPath: mountRootFor(workspace.rootPath, mount.label),
+  }),
+}));
 
 // The human author every renderer-sent chat message is attributed to. Main
 // derives it — the renderer never supplies identity. At alpha the desktop's
@@ -3566,8 +3580,16 @@ async function openWorkspaceActivityForOperation(
     automationHosts.open(canonicalWorkspace.workspaceId);
     void operation.state.collectionAutomations.open();
     operation.state.relayedPresses.start();
+    reconcileLocalCollectionApps(canonicalWorkspace);
   }
   return result;
+}
+
+// Responses a local Collection app admitted before a quit, crash, or engine
+// restart settle once the engine is back. Only an existing store opens.
+function reconcileLocalCollectionApps(workspace: { workspaceId: string; rootPath: string }): void {
+  void reconcileExistingLocalCollectionApps(workspace.rootPath, () => localDatasetHostFor(workspace, new AbortController().signal))
+    .catch(error => console.warn("[desktop] local Collection app reconciliation:", error));
 }
 
 function openWorkspaceActivityWith(
@@ -4463,7 +4485,7 @@ function createCollectionAutomationsFor(
       return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
         if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
         // A workspace that never approved a dataset has no dataset store to open.
-        if (!(await lstat(join(rootPath, ".dohc", "datasets", "state.sqlite")).then(() => true, () => false))) return null;
+        if (!(await localDatasetStoreExists(rootPath))) return null;
         const host = await localDatasetHostFor(operation.workspace, operation.signal);
         return await work(host.automations);
       });
@@ -4543,6 +4565,21 @@ const localDatasetHostFor = async (workspace: { workspaceId: string; rootPath: s
           if (failed) automations?.failuresChanged();
         },
         onDatasetsChanged: () => collectionAutomationsOf(workspace.workspaceId)?.datasetsChanged(),
+        collectionEngine: () => {
+          const capture = activity.engineCaptureFor(workspace.workspaceId, workspace.rootPath);
+          if (!capture) throw new Error("The workspace engine is unavailable.");
+          return localCollectionEngine({ workspaceId: workspace.workspaceId, rootPath: workspace.rootPath, capture,
+            withAdapter: async work => {
+              const result = await withEngineAdapter({ ...workspace, attachmentId: attachment.attachmentId }, async adapter => ({ value: await work(adapter) }));
+              if (result === null) throw new Error("The workspace engine is unavailable.");
+              return result.value;
+            } });
+        },
+        collectionAuthor: async () => {
+          const run = withWorkspaceAttachment(attachment, lease => workspaceActivity.agentRun(lease.state.activity));
+          if (run === undefined) throw new Error("The Collection workspace attachment changed.");
+          return run ? { kind: "agent", agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId, ...(run.depth > 0 ? { depth: run.depth } : {}) } : await localPerson();
+        },
       });
       slot.pending = pending;
       activeDatasetHosts.add(pending);
@@ -4869,6 +4906,7 @@ const desktopEngine = createDesktopEngine({
   onWorkspaceOpened: workspaceId => {
     const workspace = findWorkspace(workspaceId);
     if (workspace) void withWorkspaceAttachment({workspaceId}, lease => recoverOutageTyping(canonicalWorkspaceFor(lease)));
+    if (workspace && activity.engineCaptureFor(workspaceId)) reconcileLocalCollectionApps(workspace);
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
     });
@@ -4955,6 +4993,7 @@ function createShareMountCommandsFor(
       await updateWorkspaceShareMounts(workspaceId, update);
     },
     loadCredentials: () => loadAndCacheCurrentCredentials(),
+    currentCredentialGeneration: () => credentialCacheGeneration,
     fetchInfo: (relay, shareId) => fetchShareViewInfo({ relay, shareId }),
     listDirectory: (absolutePath) => readdir(absolutePath).catch(() => []),
     withWorkspaceOperation: (workspaceRoot, run) =>

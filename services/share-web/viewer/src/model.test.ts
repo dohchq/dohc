@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  accumulatorFromCurrentFiles,
   filesFromAccumulator,
   filesFromLog,
   foldLogOps,
@@ -67,6 +68,17 @@ function deleteOp(relaySeq: number, beforeBlobSha256: string): RelayOp {
     recordedAtMs: relaySeq,
   };
 }
+
+it("preserves received tokens in current, snapshots and renamed log files, without real-id fallback", () => {
+  const objectId = "share-object:v1:" + "a".repeat(64);
+  const file: SharedFile = { path: PATH, objectId, blobSha256: ORIGINAL_SHA, contentKind: "text" };
+  expect(filesFromAccumulator(accumulatorFromCurrentFiles([file])!)).toEqual([file]);
+  const rename = writeOp(2, ORIGINAL_SHA, ORIGINAL_SHA);
+  Object.assign(rename.payload as Record<string, unknown>, { operation: "rename", objectId, payloadAfterPath: "renamed.txt" });
+  expect(filesFromLog([snapshotOp(file), rename])).toEqual([{ ...file, path: "renamed.txt" }]);
+  const raw = { ...file, objectId: "real-source-object" };
+  expect(filesFromAccumulator(accumulatorFromCurrentFiles([raw])!)[0]).not.toHaveProperty("objectId");
+});
 
 describe("filesFromLog", () => {
   it("ignores a later divergent append instead of letting relay arrival order win", () => {

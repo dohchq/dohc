@@ -98,6 +98,9 @@ describe("stop one workspace's sync", () => {
       expect(h.runStates.map(event => event.active)).toEqual([true]);
       expect(h.service.dispatchedAgentRun(h.state)).toBe(true);
       expect(h.service.agentRunDepth(h.state)).toBe(2);
+      const collectionRun = h.service.agentRun(h.state);
+      expect(collectionRun).toEqual(run);
+      expect(collectionRun).not.toBe(run);
       expect(h.captureRuns[1]).toHaveBeenCalledExactlyOnceWith(run);
       h.write();
       expect(h.capturedWrites).toEqual([run]);
@@ -105,6 +108,7 @@ describe("stop one workspace's sync", () => {
       await h.service.clearAgentRun(h.state, run.agentRunId);
       expect(h.service.agentRunState(h.workspace, h.state).active).toBe(false);
       expect(h.service.dispatchedAgentRun(h.state)).toBe(false);
+      expect(h.service.agentRun(h.state)).toBeNull();
     } finally {
       await h.service.close(h.workspace, h.state);
     }

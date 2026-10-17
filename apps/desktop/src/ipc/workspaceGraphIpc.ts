@@ -1,4 +1,5 @@
-import { workspaceFileRef, type EngineFileReferenceTarget, type EngineFileResolver } from "../workspaces/resolveEngineFiles";
+import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
+import { type EngineFileReferenceTarget, type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { CHANNELS } from "./channels";
 import {
   GetBacklinksPayload,
@@ -15,6 +16,7 @@ import type { EngineWorkspace } from "@dohc/workspace-engine-client/daemon";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceGraphIndex } from "../workspaces/workspaceGraph";
 import type { WorkspaceFileListingCache } from "../workspaces/workspaceFileListingCache";
+import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { workspaceHasReceivedShareState } from "../workspaces/shareViewFilesTarget";
 import { addChatMentionsToWorkspaceGraph } from "../workspaces/chatMentionGraphOverlay";
 import {
@@ -110,10 +112,10 @@ export function registerWorkspaceGraphIpcHandlers<
           ownedWorkspaceGraphSource(workspace),
         );
         if (!input.includeChatMentions) return WorkspaceGraphResult.parse(graph);
-        const { workspace: engineWorkspace } = await requireEngineCapture(
+        const engineWorkspace = shareViewIsPresent(workspace.shareView) ? workspace : (await requireEngineCapture(
           workspace.workspaceId,
           "Chat mentions",
-        );
+        )).workspace;
         const rowsUncovered = await syncWorkspaceSharedChannels(
           engineWorkspace.workspaceId,
         );
@@ -140,7 +142,7 @@ export function registerWorkspaceGraphIpcHandlers<
         );
         const threadAttachments = await Promise.all(threads.map(thread => store.listThreadAttachments(engineWorkspace.workspaceId, thread.id)));
         const mentionTargets = threadAttachments.flat().flatMap<EngineFileReferenceTarget>(attachment => attachment.objectId
-          ? [workspaceFileRef(engineWorkspace.workspaceId, attachment.objectId)]
+          ? workspaceFileRefs(workspace, attachment.objectId)
           : attachment.pathHint ? [{ path: attachment.pathHint }] : []);
         const targets = [...new Map(mentionTargets.map(target => [JSON.stringify(target), target])).values()];
         const resolvedFiles = await resolveEngineFiles(engineWorkspace, targets);
