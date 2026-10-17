@@ -193,12 +193,6 @@ export const CHANNELS = {
   resumeRelayShareDiscussion: "desktop:resume-relay-share-discussion",
   promoteRelayShareGrant: "desktop:promote-relay-share-grant",
   revokeRelayShareGrant: "desktop:revoke-relay-share-grant",
-  shareChatChannel: "desktop:share-chat-channel",
-  listChatChannelShares: "desktop:list-chat-channel-shares",
-  listJoinedSharedChannels: "desktop:list-joined-shared-channels",
-  joinSharedChannel: "desktop:join-shared-channel",
-  leaveSharedChannel: "desktop:leave-shared-channel",
-  dismissShareSkips: "desktop:dismiss-share-skips",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",
   // The crash report changed; the renderer reads it again.
@@ -245,17 +239,8 @@ export const CHANNELS = {
   pressAutomationButton: "desktop:press-automation-button",
   automationRunSettled: "desktop:automation-run-settled",
   automationRunWaiting: "desktop:automation-run-waiting",
-  // Share changes. The first three act on a workspace this
-  // machine owns; the last three act from inside an edit-level share view.
-  listShareProposals: "desktop:list-share-proposals",
-  readShareProposalChanges: "desktop:read-share-proposal-changes",
-  readShareProposalFileContent: "desktop:read-share-proposal-file-content",
-  settleShareProposal: "desktop:settle-share-proposal",
-  submitShareChanges: "desktop:submit-share-changes",
-  pushShareDirectWrites: "desktop:push-share-direct-writes",
+  // Reports direct writes pushed from an edit-level share view.
   shareDirectWritesPushed: "desktop:share-direct-writes-pushed",
-  listMyShareChanges: "desktop:list-my-share-changes",
-  withdrawShareChanges: "desktop:withdraw-share-changes",
   openWorkspace: "desktop:open-workspace",
   listEngineMoments: "desktop:list-engine-moments",
   readEngineMoment: "desktop:read-engine-moment",

@@ -114,7 +114,7 @@ import {
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
 import type { chatOperations } from "./chatOperations";
 import type { settingsOperations } from "./settingsOperations";
-import type { shareHandoffOperations, shareMountOperations } from "./shareOperations";
+import type { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations } from "./shareOperations";
 import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
@@ -6962,6 +6962,8 @@ export interface DohcDesktopBridge
     OperationBridge<typeof chatOperations>,
     OperationBridge<typeof shareHandoffOperations>,
     OperationBridge<typeof shareMountOperations>,
+    OperationBridge<typeof shareProposalOperations>,
+    OperationBridge<typeof sharedChannelOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof serverAccountOperations>,
@@ -7153,16 +7155,6 @@ export interface DohcDesktopBridge
   revokeRelayShareGrant(
     payload: RevokeRelayShareGrantPayload,
   ): Promise<RevokeRelayShareGrantResult>;
-  shareChatChannel(payload: ShareChatChannelPayload): Promise<ShareChatChannelResult>;
-  listChatChannelShares(
-    payload: ListChatChannelSharesPayload,
-  ): Promise<ListChatChannelSharesResult>;
-  listJoinedSharedChannels(
-    payload: ListJoinedSharedChannelsPayload,
-  ): Promise<ListJoinedSharedChannelsResult>;
-  joinSharedChannel(payload: JoinSharedChannelPayload): Promise<JoinSharedChannelResult>;
-  leaveSharedChannel(payload: LeaveSharedChannelPayload): Promise<void>;
-  dismissShareSkips(payload: DismissShareSkipsPayload): Promise<void>;
   // Collection automations, for the ⚡ panel.
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
   switchCollectionAutomation(payload: SwitchCollectionAutomationPayload): Promise<SwitchCollectionAutomationResult>;
@@ -7192,35 +7184,7 @@ export interface DohcDesktopBridge
   listAutomationButtons(payload: ListAutomationButtonsPayload): Promise<ListAutomationButtonsResult>;
   listRecordButtons(payload: ListRecordButtonsPayload): Promise<ListRecordButtonsResult>;
   pressAutomationButton(payload: PressAutomationButtonPayload): Promise<PressAutomationButtonResult>;
-  // Share changes: the granter reviews and settles.
-  listShareProposals(
-    payload: ListShareProposalsPayload,
-  ): Promise<ListShareProposalsResult>;
-  readShareProposalChanges(
-    payload: ReadShareProposalChangesPayload,
-  ): Promise<ReadShareProposalChangesResult>;
-  readShareProposalFileContent(
-    payload: ReadShareProposalFileContentPayload,
-  ): Promise<ReadShareProposalFileContentResult>;
-  settleShareProposal(
-    payload: SettleShareProposalPayload,
-  ): Promise<SettleShareProposalResult>;
-  // Share changes: the recipient sends, tracks, and takes back.
-  submitShareChanges(
-    payload: SubmitShareChangesPayload,
-  ): Promise<SubmitShareChangesResult>;
-  // Writes the share view's changes to a Collection's own files straight
-  // into the owner's workspace. Every other change waits for Send changes.
-  pushShareDirectWrites(
-    payload: PushShareDirectWritesPayload,
-  ): Promise<void>;
   onShareDirectWritesPushed(listener: (event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void, workspaceId: string): () => void;
-  listMyShareChanges(
-    payload: ListMyShareChangesPayload,
-  ): Promise<ListMyShareChangesResult>;
-  withdrawShareChanges(
-    payload: WithdrawShareChangesPayload,
-  ): Promise<WithdrawShareChangesResult>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
   // Engine history + linked Chats. Gated in main on the workspace's engine
   // capture.

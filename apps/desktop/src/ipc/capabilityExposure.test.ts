@@ -118,6 +118,34 @@ describe("main inventories", () => {
       expect(row).not.toHaveProperty("handlerCheck");
     }
   });
+  it("records the 14 proposal and Group operations with their existing admission", () => {
+    const messages = {
+      "desktop:list-share-proposals": "Share changes stopped because this window changed workspaces.",
+      "desktop:read-share-proposal-changes": "Share changes stopped because this window changed workspaces.",
+      "desktop:read-share-proposal-file-content": "Share changes stopped because this window changed workspaces.",
+      "desktop:settle-share-proposal": "Share changes stopped because this window changed workspaces.",
+      "desktop:submit-share-changes": "Share changes stopped because this window changed workspaces.",
+      "desktop:push-share-direct-writes": "Share changes stopped because this window changed workspaces.",
+      "desktop:list-my-share-changes": "Share changes stopped because this window changed workspaces.",
+      "desktop:withdraw-share-changes": "Share changes stopped because this window changed workspaces.",
+      "desktop:share-chat-channel": "Sharing stopped because this window changed workspaces.",
+      "desktop:list-joined-shared-channels": "Sharing stopped because this window changed workspaces.",
+      "desktop:list-chat-channel-shares": "Sharing stopped because this window changed workspaces.",
+      "desktop:join-shared-channel": "Joining stopped because this window changed workspaces.",
+      "desktop:leave-shared-channel": "Leaving stopped because this window changed workspaces.",
+      "desktop:dismiss-share-skips": "Share warning update stopped because this window changed workspaces.",
+    };
+    const channels = Object.keys(messages);
+    const shareRows = rows.filter(row => channels.includes(row.channel));
+    expect(shareRows.map(row => row.channel).sort()).toEqual(channels.sort());
+    for (const row of shareRows) {
+      expect(row, row.channel).toMatchObject({
+        guard: "active-workspace", scope: "workspace",
+        inactiveMessage: messages[row.channel as keyof typeof messages],
+      });
+      expect(row).not.toHaveProperty("handlerCheck");
+    }
+  });
   it("preserves socket verbs, public verbs, and all public help", () => {
     expect(socketVerbs).toEqual(mainCli.socketVerbs);
     expect(Object.keys(CLI_COMMANDS)).toEqual(mainCli.publicGroups);

@@ -121,5 +121,19 @@
   "desktop:mount-share": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:refresh-share-mounts": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:unmount-share": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:open-shared-view": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null }
+  "desktop:open-shared-view": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:list-share-proposals": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:read-share-proposal-changes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:read-share-proposal-file-content": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:settle-share-proposal": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:submit-share-changes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:push-share-direct-writes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-my-share-changes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:withdraw-share-changes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:share-chat-channel": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-joined-shared-channels": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:list-chat-channel-shares": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:join-shared-channel": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:leave-shared-channel": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:dismiss-share-skips": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }
