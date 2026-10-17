@@ -78,6 +78,19 @@ describe("the workspaces this server keeps a replica of", () => {
     expect(storage.joinAutomationWorkspace({ workspaceId: "unknown", nowMs: 1 })).toBeNull();
   });
 
+  it("replaces a lost replica only once the server began running automations in its incarnation", async () => {
+    const { storage, raw } = await relay();
+    const first = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 10 })!;
+    acceptedPress(raw, "taken-here", "server");
+    expect(storage.replaceLostAutomationReplica({ workspaceId: WORKSPACE, incarnation: 1, nowMs: 20 }), "nothing ran in it").toEqual(first);
+    storage.beginAutomationServerCopy({ workspaceId: WORKSPACE, incarnation: 1 });
+    const second = storage.replaceLostAutomationReplica({ workspaceId: WORKSPACE, incarnation: 1, nowMs: 30 })!;
+    expect(second).toMatchObject({ incarnation: 2, startedAtMs: 30 });
+    expect(second.credentialNonce).not.toBe(first.credentialNonce);
+    expect(pressState(raw, "taken-here")).toEqual({ state: "settled", outcome: "ended" });
+    expect(storage.replaceLostAutomationReplica({ workspaceId: WORKSPACE, incarnation: 1, nowMs: 40 }), "already replaced").toEqual(second);
+  });
+
   it("leaves a day after no condition needs it, and rejoins as it was", async () => {
     const { storage } = await relay();
     const joined = storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 })!;
@@ -1145,6 +1158,35 @@ describe("the automation replicas", () => {
     await running.settled();
     expect(spawn).toHaveBeenCalledTimes(2);
     expect(running.replica(WORKSPACE)).toMatchObject({ incarnation: 2, workspace: "handle-1" });
+  });
+
+  it("starts a new incarnation that ends the presses the server took when the copy it began lost its folder", async () => {
+    const { storage, raw } = await relay();
+    fakeEngine();
+    const clock = { ms: 1 };
+    const { replicas: first, root } = await replicas(storage, () => [WORKSPACE], clock);
+    storage.beginAutomationServerCopy({ workspaceId: WORKSPACE, incarnation: 1 });
+    acceptedPress(raw, "taken-here", "server");
+    await first.close();
+
+    clock.ms = 2;
+    const kept = await start(storage, { root, wanted: () => [WORKSPACE], nowMs: () => clock.ms });
+    await kept.settled();
+    expect(kept.replica(WORKSPACE), "a restart that kept its host data").toMatchObject({ incarnation: 1, startedAtMs: 1 });
+    expect(pressState(raw, "taken-here")).toEqual({ state: "accepted", outcome: null });
+    await kept.close();
+
+    // The server restarts with empty host data and the same relay.
+    clock.ms = 3;
+    const { replicas: emptied } = await replicas(storage, () => [WORKSPACE], clock);
+    expect(emptied.replica(WORKSPACE)).toMatchObject({ incarnation: 2, startedAtMs: 3 });
+    expect(pressState(raw, "taken-here")).toEqual({ state: "settled", outcome: "ended" });
+    await emptied.close();
+
+    // Nothing ran in incarnation 2, so losing its folder too starts no third.
+    clock.ms = 4;
+    const { replicas: again } = await replicas(storage, () => [WORKSPACE], clock);
+    expect(again.replica(WORKSPACE)).toMatchObject({ incarnation: 2, startedAtMs: 3 });
   });
 
   it("closes a replica that never opened fully, and tries again later", async () => {
