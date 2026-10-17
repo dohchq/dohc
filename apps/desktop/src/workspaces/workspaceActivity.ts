@@ -54,9 +54,6 @@ interface WatchedWorkspace {
   recoveryUnavailable: boolean;
   keptFiles: readonly (readonly [string, string])[];
   heldFiles: NonNullable<SyncStatusResult["heldFiles"]>;
-  // The agent run whose writes this workspace's settled batches attribute to
-  // right now; null when the local user is editing. AgentIntegration sets it.
-  agentRun: ActiveAgentRun | null;
 }
 
 /**
@@ -69,6 +66,8 @@ interface WatchedWorkspace {
  */
 export class WorkspaceActivityState {
   entry: WatchedWorkspace | null = null;
+  // The run outlives capture when stopping sync restarts local activity.
+  agentRun: { workspace: ActivityWorkspace; run: ActiveAgentRun } | null = null;
   preservedStatus: SyncStatusResult | null = null;
   liveSessionsGeneration = 0;
 }
@@ -184,7 +183,7 @@ export function createWorkspaceActivity(
     return {
       workspaceId: workspace.workspaceId,
       revision: agentRunRevision,
-      active: isAgentAtWork(state.entry?.agentRun ?? null),
+      active: isAgentAtWork(state.agentRun?.run ?? null),
     };
   }
 
@@ -193,28 +192,27 @@ export function createWorkspaceActivity(
     options.onAgentRunState?.({ workspaceId, revision: agentRunRevision, active });
   }
 
-  // Every slot write goes through here, so each change pushes once. A write to
-  // a closed entry changes nothing the projection reads.
+  // Every slot write goes through here, so each change pushes once.
   function assignAgentRun(
     state: WorkspaceActivityState,
-    entry: WatchedWorkspace,
+    workspace: ActivityWorkspace,
     run: ActiveAgentRun | null,
   ): void {
-    const was = isAgentAtWork(entry.agentRun);
-    entry.agentRun = run;
+    const was = isAgentAtWork(state.agentRun?.run ?? null);
+    state.agentRun = run ? { workspace, run } : null;
     const active = isAgentAtWork(run);
-    if (state.entry === entry && active !== was) {
-      publishAgentRunState(entry.workspace.workspaceId, active);
+    if (active !== was) {
+      publishAgentRunState(workspace.workspaceId, active);
     }
   }
 
   // Empties the slot only while it still holds this run.
   function releaseAgentRun(
     state: WorkspaceActivityState,
-    entry: WatchedWorkspace,
+    workspace: ActivityWorkspace,
     agentRunId: string,
   ): void {
-    if (entry.agentRun?.agentRunId === agentRunId) assignAgentRun(state, entry, null);
+    if (state.agentRun?.run.agentRunId === agentRunId) assignAgentRun(state, workspace, null);
   }
 
   function statusFor(
@@ -336,7 +334,8 @@ export function createWorkspaceActivity(
     state: WorkspaceActivityState,
   ): Promise<SyncStatusResult> {
     const current = state.entry;
-    if (current && current.workspace.rootPath !== workspace.rootPath) {
+    const rootPath = current?.workspace.rootPath ?? state.agentRun?.workspace.rootPath;
+    if (rootPath !== undefined && rootPath !== workspace.rootPath) {
       throw new Error(
         "Workspace activity was replaced by another physical root.",
       );
@@ -358,7 +357,6 @@ export function createWorkspaceActivity(
         recoveryUnavailable: false,
         keptFiles: [],
         heldFiles: [],
-        agentRun: null,
       };
       state.entry = entry;
       // Resolve the engine capture before the watcher starts, so the mode is
@@ -395,6 +393,9 @@ export function createWorkspaceActivity(
           }
           entry.capture = decision.capture;
           entry.historyShareView = decision.shareView;
+          if (state.agentRun) {
+            await entry.capture?.setActiveAgentRun(state.agentRun.run);
+          }
         } catch (error) {
           console.error(
             `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,
@@ -539,13 +540,19 @@ export function createWorkspaceActivity(
   async function close(
     workspace: ActivityWorkspace,
     state: WorkspaceActivityState,
-    closeOptions: { preserveStatus?: boolean; notify?: boolean;
+    closeOptions: { preserveStatus?: boolean; preserveAgentRun?: boolean; notify?: boolean;
       expectedRootPath?: string;
     } = {},
   ): Promise<boolean> {
     const { workspaceId } = workspace;
     const entry = state.entry;
-    if (!entry) return false;
+    if (!entry) {
+      if (!closeOptions.preserveAgentRun && state.agentRun &&
+        (closeOptions.expectedRootPath === undefined || state.agentRun.workspace.rootPath === closeOptions.expectedRootPath)) {
+        assignAgentRun(state, workspace, null);
+      }
+      return false;
+    }
     if (
       closeOptions.expectedRootPath !== undefined &&
       entry.workspace.rootPath !== closeOptions.expectedRootPath
@@ -558,7 +565,7 @@ export function createWorkspaceActivity(
       state.preservedStatus = null;
     }
     state.entry = null;
-    if (isAgentAtWork(entry.agentRun)) publishAgentRunState(workspaceId, false);
+    if (!closeOptions.preserveAgentRun) assignAgentRun(state, workspace, null);
     const stopped = await Promise.allSettled([
       Promise.resolve().then(() => entry.handle.stop()).catch(async error => {
         entry.capture?.observationDrainFailed();
@@ -717,7 +724,7 @@ export function createWorkspaceActivity(
     const { workspaceId } = workspace;
     if (!entry) throw new Error(`Workspace is not open: ${workspaceId}`);
     await entry.capture?.setActiveAgentRun(run);
-    assignAgentRun(state, entry, run);
+    if (state.entry === entry) assignAgentRun(state, workspace, run);
   }
 
   async function claimAgentRun(
@@ -737,13 +744,13 @@ export function createWorkspaceActivity(
         "Workspace activity was replaced by another physical root.",
       );
     }
-    if (entry.agentRun !== null) return false;
-    assignAgentRun(state, entry, run);
+    if (state.agentRun !== null) return false;
+    assignAgentRun(state, workspace, run);
     try {
       await entry.capture?.setActiveAgentRun(run);
       return true;
     } catch (error) {
-      releaseAgentRun(state, entry, run.agentRunId);
+      releaseAgentRun(state, workspace, run.agentRunId);
       throw error;
     }
   }
@@ -753,27 +760,27 @@ export function createWorkspaceActivity(
     agentRunId: string,
     expectedRootPath?: string,
   ): Promise<void> {
-    const entry = state.entry;
-    if (!entry) return;
+    const slot = state.agentRun;
+    if (!slot) return;
     if (
       expectedRootPath !== undefined &&
-      entry.workspace.rootPath !== expectedRootPath
+      slot.workspace.rootPath !== expectedRootPath
     ) {
       return;
     }
-    if (entry.agentRun?.agentRunId !== agentRunId) return;
-    await entry.capture?.setActiveAgentRun(null);
-    releaseAgentRun(state, entry, agentRunId);
+    if (slot.run.agentRunId !== agentRunId) return;
+    await state.entry?.capture?.setActiveAgentRun(null);
+    if (state.agentRun === slot) releaseAgentRun(state, slot.workspace, agentRunId);
   }
 
   function hasAgentRun(state: WorkspaceActivityState,
     expectedRootPath?: string,
   ): boolean {
-    const entry = state.entry;
+    const slot = state.agentRun;
     return (
-      entry !== null &&
+      slot !== null &&
       (expectedRootPath === undefined ||
-        entry.workspace.rootPath === expectedRootPath) && entry.agentRun !== null
+        slot.workspace.rootPath === expectedRootPath)
     );
   }
 
@@ -781,19 +788,19 @@ export function createWorkspaceActivity(
   // the run's depth, or 0 with no run. An agent writing through the CLI or
   // MCP during the run writes at the run's depth, whichever agent it is.
   function agentRunDepth(state: WorkspaceActivityState): number {
-    return state.entry?.agentRun?.depth ?? 0;
+    return state.agentRun?.run.depth ?? 0;
   }
 
   // Whether a run dohc dispatched holds the slot. Its agent gives no name, so
   // the CLI drops any name a write claims and the run stays one actor.
   function dispatchedAgentRun(state: WorkspaceActivityState): boolean {
-    return state.entry?.agentRun?.dispatch !== undefined;
+    return state.agentRun?.run.dispatch !== undefined;
   }
 
   // The agent run holding the slot, as a local app's invocation is
   // attributed to it: its chain depth, or null with no run.
   function agentRun(state: WorkspaceActivityState): { depth: number } | null {
-    const run = state.entry?.agentRun;
+    const run = state.agentRun?.run;
     return run ? { depth: run.depth } : null;
   }
 
@@ -840,6 +847,7 @@ export function createWorkspaceActivity(
   // the last engine record is durably written too.
   async function stop(state: WorkspaceActivityState): Promise<void> {
     if (state.entry) await close(state.entry.workspace, state, { notify: false });
+    else if (state.agentRun) assignAgentRun(state, state.agentRun.workspace, null);
   }
 
   return {

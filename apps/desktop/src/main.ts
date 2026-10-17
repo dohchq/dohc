@@ -2462,7 +2462,7 @@ const activity = {
     ),
   close: (
     workspaceId: string,
-    options?: { preserveStatus?: boolean; notify?: boolean; expectedRootPath?: string },
+    options?: { preserveStatus?: boolean; preserveAgentRun?: boolean; notify?: boolean; expectedRootPath?: string },
   ) => {
     if (!findWorkspace(workspaceId)) return Promise.resolve(false);
     return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
@@ -5820,7 +5820,7 @@ const stopWorkspaceSync = createWorkspaceSyncStop({
   prepare: workspace => activity.prepareSyncPause(workspace),
   resume: workspace => activity.enableCloud(workspace),
   pauseRemote: pauseWorkspaceRemote,
-  closeActivity: workspaceId => activity.close(workspaceId, { notify: false }),
+  closeActivity: workspaceId => activity.close(workspaceId, { notify: false, preserveAgentRun: true }),
   closeRelay: workspace => closeRelayTransportWorkspace(workspace),
   openActivity: workspace => activity.open(workspace),
   status: workspaceId => activity.getStatus(workspaceId),

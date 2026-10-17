@@ -9,6 +9,9 @@ import { idleObservation } from "./workspaceActivity.testSupport";
 import { createTestScratch } from "./testTemp";
 import { deferred } from "../testing/deferred";
 import { assertSyncEnrollmentCredentials } from "./chatRelayIdentity";
+import type { AgentRunStateEvent } from "../ipc/bridgeContract";
+import type { ActiveAgentRun } from "../agents/activeAgentRun";
+import type { WorkspaceObservationCallbacks } from "./workspaceFileObservation";
 
 const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
 const credentials: CloudCredentials = { ...remote, userId: remote.ownerUserId, token: "token", email: "owner@test", relayUrl: "https://relay.test" };
@@ -27,8 +30,16 @@ async function fixture(synced = true) {
   const engineStop = vi.fn(async () => { steps.push("engine-stop"); });
   const engineStart = vi.fn(async () => { steps.push("engine-start"); });
   const watcherStop = vi.fn(async () => { steps.push("watcher-stop"); });
+  const runStates: AgentRunStateEvent[] = [];
+  const captureRuns: ReturnType<typeof vi.fn<(run: ActiveAgentRun | null) => Promise<void>>>[] = [];
+  const capturedWrites: (ActiveAgentRun | null)[] = [];
+  let observation!: WorkspaceObservationCallbacks;
   const service = createWorkspaceActivity(vi.fn(), {
-    observationFor: () => ({ ...idleObservation(workspace, {} as never), stop: watcherStop }),
+    onAgentRunState: event => runStates.push(event),
+    observationFor: (_workspace, callbacks) => {
+      observation = callbacks;
+      return { ...idleObservation(workspace, callbacks), stop: watcherStop };
+    },
     cloudStateFor: () => {
       const entry = store.find(workspace.workspaceId)!;
       return { enabled: !!entry.remote, connected: !!entry.remote,
@@ -37,11 +48,18 @@ async function fixture(synced = true) {
     engineFor: () => store.find(workspace.workspaceId)?.remote ? ({
       start: engineStart, stop: engineStop, queueSync: vi.fn(), snapshot: () => ({}),
     } as never) : null,
-    captureFor: () => ({ shareView: false, capture: {
-      start: () => {}, stop: async () => { steps.push("capture-stop"); },
-      settleAndCloseLiveSessionsForSyncPause: settle,
-      settleAndCloseAllLiveSessions: settle,
-    } as never }),
+    captureFor: () => {
+      let activeRun: ActiveAgentRun | null = null;
+      const setActiveAgentRun = vi.fn(async (run: ActiveAgentRun | null) => { activeRun = run; });
+      captureRuns.push(setActiveAgentRun);
+      return { shareView: false, capture: {
+        setActiveAgentRun,
+        observeFileEvents: () => { capturedWrites.push(activeRun); },
+        start: () => {}, stop: async () => { steps.push("capture-stop"); },
+        settleAndCloseLiveSessionsForSyncPause: settle,
+        settleAndCloseAllLiveSessions: settle,
+      } as never };
+    },
   });
   const state = new WorkspaceActivityState();
   await service.open(workspace, state);
@@ -56,7 +74,7 @@ async function fixture(synced = true) {
     pauseStatus: pause => workspaceSyncPauseStatus(pause, "local-person"),
     withOwnerHostPaused: async work => { steps.push("host-pause"); try { return await work(); } finally { steps.push("host-resume"); } },
     prepare: () => service.prepareSyncPause(workspace, state), resume: () => service.enableCloud(workspace, state), pauseRemote,
-    closeActivity: () => service.close(workspace, state, { notify: false }), closeRelay,
+    closeActivity: () => service.close(workspace, state, { notify: false, preserveAgentRun: true }), closeRelay,
     openActivity: () => service.open(workspace, state), status: () => service.getStatus(workspace, state),
     notify: () => { steps.push("notify"); },
   });
@@ -65,10 +83,55 @@ async function fixture(synced = true) {
     assertCurrent() { if (!current) throw new Error("workspace changed"); },
   });
   return { workspace, store, registryPath, steps, settle, engineStart, engineStop, watcherStop, closeRelay,
-    pauseRemote, resumeAdmission, service, state, stop, operation, cleanupFailed, person, retire: () => { current = false; } };
+    pauseRemote, resumeAdmission, service, state, stop, operation, cleanupFailed, person, runStates, captureRuns, capturedWrites,
+    write: () => observation.facts([{ path: "note.md", kind: "changed" }]), retire: () => { current = false; } };
 }
 
 describe("stop one workspace's sync", () => {
+  it("keeps a dispatched run active and claiming writes across the capture restart", async () => {
+    const h = await fixture();
+    const run = { agentId: "dohc-mcp", onBehalfOf: "local-person", agentRunId: "run", depth: 2, dispatch: "run" as const };
+    await h.service.claimAgentRun(h.workspace, h.state, run);
+    try {
+      await h.stop(h.operation());
+      expect(h.service.agentRunState(h.workspace, h.state).active).toBe(true);
+      expect(h.runStates.map(event => event.active)).toEqual([true]);
+      expect(h.service.dispatchedAgentRun(h.state)).toBe(true);
+      expect(h.service.agentRunDepth(h.state)).toBe(2);
+      expect(h.captureRuns[1]).toHaveBeenCalledExactlyOnceWith(run);
+      h.write();
+      expect(h.capturedWrites).toEqual([run]);
+      expect(await h.service.claimAgentRun(h.workspace, h.state, { ...run, agentId: "other", agentRunId: "other" })).toBe(false);
+      await h.service.clearAgentRun(h.state, run.agentRunId);
+      expect(h.service.agentRunState(h.workspace, h.state).active).toBe(false);
+      expect(h.service.dispatchedAgentRun(h.state)).toBe(false);
+    } finally {
+      await h.service.close(h.workspace, h.state);
+    }
+  });
+
+  it("does not revive a run that ends while sync is stopping", async () => {
+    const h = await fixture();
+    const run = { agentId: "dohc-mcp", onBehalfOf: "local-person", agentRunId: "run", depth: 2, dispatch: "run" as const };
+    await h.service.claimAgentRun(h.workspace, h.state, run);
+    h.closeRelay.mockImplementationOnce(async () => {
+      expect(h.service.agentRunState(h.workspace, h.state).active).toBe(true);
+      expect(h.service.dispatchedAgentRun(h.state)).toBe(true);
+      await h.service.clearAgentRun(h.state, run.agentRunId, h.workspace.rootPath);
+    });
+    try {
+      await h.stop(h.operation());
+      expect(h.service.agentRunState(h.workspace, h.state).active).toBe(false);
+      expect(h.service.dispatchedAgentRun(h.state)).toBe(false);
+      expect(h.runStates.map(event => event.active)).toEqual([true, false]);
+      expect(h.captureRuns[1]).not.toHaveBeenCalled();
+      h.write();
+      expect(h.capturedWrites).toEqual([null]);
+    } finally {
+      await h.service.close(h.workspace, h.state);
+    }
+  });
+
   it("leaves a never-synced workspace open without requiring an account", async () => {
     const h = await fixture(false);
     const operation = h.operation();
