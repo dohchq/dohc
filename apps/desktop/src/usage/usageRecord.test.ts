@@ -79,7 +79,7 @@ describe("usage record bridge", () => {
     });
     // The other doors this build does not count stay marked, never a plain zero.
     expect(read.rows.find(row => row.capabilityId === "chat.post")!.doors).toMatchObject({
-      renderer: { counted: false }, cli: { counted: true }, mcp: { counted: true }, automation: { counted: false },
+      renderer: { counted: false }, cli: { counted: true }, mcp: { counted: true }, automation: { counted: true },
     });
     expect(record).not.toHaveBeenCalled();
     expect(Object.keys(counted)).toEqual(["version", "crash", "notice"]);

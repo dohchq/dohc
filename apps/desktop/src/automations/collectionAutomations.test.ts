@@ -58,6 +58,9 @@ import {
   type ChatNeeds,
 } from "@dohc/automation-executor/automation-chat";
 
+import { createUsageStore } from "../usage/usageStore";
+import { DESKTOP_USAGE_COVERAGE } from "../usage/cliUsage";
+
 type RecordChange = Exclude<AutomationClaim["change"], { kind: "message" }>;
 
 // The executor against an in-memory engine and record store: claims, record
@@ -7156,4 +7159,35 @@ it.each(["before barrier", "before receipts"])("replays shared Undo batches afte
   expect(applied).toBe(201); expect(batches).toEqual([100, 100, 1]);
   expect(events).toEqual(["barrier", "receipts", "barrier", "receipts", "barrier", "receipts"]);
   expect((await w.baseStore.runsOf(TASKS, claim.claimId)).runs[0]?.undoWrites).toHaveLength(201);
+});
+
+it("automation usage follows the local record off switch without stopping the run", async () => {
+  const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
+  const store = createUsageStore({ stateDir: () => join(w.root, "local-state"), appVersion: "0.1.0", coverage: DESKTOP_USAGE_COVERAGE });
+  await store.load();
+  const observed: Array<{ capabilityId: string; door: string }> = [];
+  const executor = w.makeExecutor({ onUsageSuccess: pair => { observed.push(pair); store.recordSuccess(pair); } });
+  try {
+    await store.setEnabled(false);
+    await executor.open();
+    const first = w.claim(TASKS, w.addRecord("Tasks", "Off", { Count: 0 }));
+    executor.notifyClaimed();
+    await w.settledClaim(first);
+    expect(first.state).toBe("done");
+    expect(observed).toEqual([
+      { capabilityId: "collection.record.edit", door: "automation" },
+      { capabilityId: "collection.record.create", door: "automation" },
+    ]);
+    expect((await store.read()).counts).toEqual([]);
+    await store.setEnabled(true);
+    const next = w.claim(TASKS, w.addRecord("Tasks", "On", { Count: 0 }));
+    executor.notifyClaimed();
+    await w.settledClaim(next);
+    expect(next.state).toBe("done");
+    expect((await store.read()).counts.map(({ capabilityId, door, count }) => ({ capabilityId, door, count })))
+      .toEqual(expect.arrayContaining([
+        { capabilityId: "collection.record.edit", door: "automation", count: 1 },
+        { capabilityId: "collection.record.create", door: "automation", count: 1 },
+      ]));
+  } finally { await executor.dispose(); await store.close(); }
 });
