@@ -87,27 +87,31 @@ const holds = [
   { objectId: "c", reason: "hosted-conflict-parent-withheld", conflictId: "conflict" },
   { objectId: "d", reason: "hosted-backfill-work-waiting" },
   { objectId: "e", reason: "hosted-scope-path-mismatch", scopePath: "docs/e.md", headPath: null },
+  { objectId: "f", reason: "hosted-live-edit-unadmitted" },
 ];
 const hosted = { fetched: 2, applied: 1, refused: 1, skipped: 0, conflictsOpened: 0, hasMore: true,
-  pendingCursor: { kind: "hosted", token: "opaque-issued-token" }, changedPaths: [change], refusals: [refusal], sharingDeclined: [], held: holds };
+  pendingCursor: { kind: "hosted", token: "opaque-issued-token" }, changedPaths: [change], refusals: [refusal], sharingDeclined: [], held: holds,
+  departed: ["gone"] };
 
 describe("hosted native sync contract", () => {
-  it("keeps the issued hosted cursor, every hold with its fields, and a pass that adopted a scope", () => {
+  it("keeps the issued hosted cursor, every hold with its fields, departed documents, and a pass that adopted a scope", () => {
     expect(decodeHostedSyncResult("sync.pullHosted", { ...hosted, ignored: true })).toEqual(hosted);
     expect(decodeHostedSyncResult("sync.pullHosted", { ...hosted, pendingCursor: null, held: [] }).pendingCursor).toBeNull();
   });
 
-  it("keeps a commit that stands beside the retirement error after it", () => {
+  it("keeps a commit that stands beside the retirement error after it, and unread departed documents", () => {
     const retirement = { code: "INTERNAL", message: "hosted file unexpected: docs/a.md", retry: "no" };
-    expect(decodeHostedSyncResult("sync.commitCursor", { committed: true, hasMore: false, retirement, sharingDeclined: [] }))
-      .toEqual({ committed: true, hasMore: false, retirement, sharingDeclined: [] });
-    expect(decodeHostedSyncResult("sync.commitCursor", { committed: false, hasMore: true, retirement: null, sharingDeclined: [] }).committed).toBe(false);
+    const commit = { committed: true, hasMore: false, retirement, departed: ["gone"], sharingDeclined: [] };
+    expect(decodeHostedSyncResult("sync.commitCursor", commit)).toEqual(commit);
+    expect(decodeHostedSyncResult("sync.commitCursor", { ...commit, retirement: null, departed: null }).departed).toBeNull();
+    expect(decodeHostedSyncResult("sync.commitCursor", { ...commit, committed: false, retirement: null }).committed).toBe(false);
   });
 
   it.each([
     { pendingCursor: { kind: "relay", token: "opaque-issued-token" } }, { pendingCursor: undefined }, { held: undefined },
     { held: [{ objectId: "a", reason: "hosted-backfill-path-held" }] }, { held: [{ objectId: "a", reason: "unknown" }] },
     { held: [{ ...holds[3], headPath: "" }] }, { status: "complete", nextCursor: 1, held: null },
+    { departed: undefined }, { departed: null }, { departed: [""] },
   ])("rejects an unusable hosted pass: %j", patch => {
     expect(() => decodeHostedSyncResult("sync.pullHosted", { ...hosted, ...patch })).toThrow("hosted sync.pullHosted result");
   });
@@ -115,6 +119,8 @@ describe("hosted native sync contract", () => {
   it("rejects an ordinary pull and an ordinary commit as hosted results", () => {
     expect(() => decodeHostedSyncResult("sync.pullHosted", pull)).toThrow(ProtocolShapeError);
     expect(() => decodeHostedSyncResult("sync.commitCursor", { committed: true, sharingDeclined: [] })).toThrow(ProtocolShapeError);
+    expect(() => decodeHostedSyncResult("sync.commitCursor", { committed: true, hasMore: false, retirement: null, sharingDeclined: [] }))
+      .toThrow(ProtocolShapeError);
     expect(() => decodeHostedSyncResult("sync.createHostedReplica", { hosted: false })).toThrow(ProtocolShapeError);
   });
 });

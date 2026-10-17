@@ -1004,6 +1004,10 @@ impl ApplicationOwner {
         self.current.push(registration.clone());
         Ok(ApplicationHandle { registration })
     }
+    /// Retire every registration, on a reconnect or a close. A hosted replica
+    /// retires them in memory only, as [`release`](Self::release) does: a
+    /// document held meanwhile cannot register again, and its binding must
+    /// stay available for the accepted work it journaled to push.
     pub fn invalidate(&mut self, store: &mut EngineStore) -> Result<(), ApplicationError> {
         for current in &self.current {
             current
@@ -1011,8 +1015,18 @@ impl ApplicationOwner {
                 .map_err(|_| ApplicationError::Interrupted)?
                 .live = false;
         }
-        for current in &self.current {
-            invalidate_registration(store, current)?;
+        let hosted: bool = store.read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM hosted_replicas WHERE workspace_id=?1)",
+                [&self.workspace_id],
+                |row| row.get(0),
+            )
+            .map_err(read_sql)
+        })?;
+        if !hosted {
+            for current in &self.current {
+                invalidate_registration(store, current)?;
+            }
         }
         self.current.clear();
         Ok(())
@@ -1067,11 +1081,12 @@ pub enum UnloadPending {
 }
 
 /// The settlement clause reads only the binding's current lineage: a restore
-/// replaces the lineage, and the replaced one never settles again.
+/// replaces the lineage, and the replaced one never settles again. `?3` counts
+/// deferred updates.
 const UNLOAD_PENDING: &str = "SELECT
     EXISTS(SELECT 1 FROM live_restore_fences
         WHERE workspace_id=?1 AND object_id=?2 AND resume_receipt_json IS NULL),
-    EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2)
+    (?3 AND EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND object_id=?2))
         OR EXISTS(SELECT 1 FROM owner_ydoc_outboxes
             WHERE workspace_id=?1 AND object_id=?2 AND pending_bytes>0 AND state<>'quarantined'),
     EXISTS(SELECT 1 FROM live_device_update_applications a
@@ -1096,10 +1111,33 @@ pub fn unload_pending(
     workspace_id: &str,
     object_id: &str,
 ) -> Result<Option<UnloadPending>, ApplicationError> {
+    pending(conn, workspace_id, object_id, true)
+}
+
+/// [`unload_pending`] for parking a hosted document that left the scope.
+/// Only work the host accepted counts. A deferred update is a pulled row
+/// waiting for rows the feed no longer serves; parking keeps it, and the
+/// document's return applies it.
+pub fn park_pending(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Option<UnloadPending>, ApplicationError> {
+    pending(conn, workspace_id, object_id, false)
+}
+
+fn pending(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+    deferred: bool,
+) -> Result<Option<UnloadPending>, ApplicationError> {
     let (restore, delivery, settlement): (bool, bool, bool) = conn
-        .query_row(UNLOAD_PENDING, params![workspace_id, object_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
+        .query_row(
+            UNLOAD_PENDING,
+            params![workspace_id, object_id, deferred],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
         .map_err(read_sql)?;
     Ok(if restore {
         Some(UnloadPending::Restore)
@@ -1145,14 +1183,16 @@ fn require_workspace(tx: &Connection, registration: &Registration) -> Result<(),
     require_binding_workspace(tx, &registration.workspace_id, &registration.binding)
 }
 
-/// A hosted replica refuses a document its current scope holds but not ready.
-/// One that left the scope registers, so its accepted work can settle and drain.
+/// A hosted replica refuses a document its current scope holds but not ready,
+/// and a parked one. One that left the scope and has not parked registers,
+/// so its accepted work can settle and drain.
 fn require_hosted_ready(tx: &Connection, key: &DocKey) -> Result<(), ApplicationError> {
     let unready: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM hosted_documents d JOIN hosted_replicas h
-                ON h.workspace_id=d.workspace_id AND h.scope_generation=d.scope_generation
-             WHERE d.workspace_id=?1 AND d.object_id=?2 AND d.state<>'ready')",
+                ON h.workspace_id=d.workspace_id
+             WHERE d.workspace_id=?1 AND d.object_id=?2 AND (d.state='parked'
+                OR (d.scope_generation=h.scope_generation AND d.state<>'ready')))",
             params![key.workspace_id, key.object_id],
             |row| row.get(0),
         )

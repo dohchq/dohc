@@ -8,7 +8,7 @@ use dohc_engine_collab::{
     },
 };
 
-pub(super) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
+pub(crate) fn fixture() -> (ScratchDir, EngineStore, ObservedOwnerBinding, Vec<u8>) {
     let (dir, _, mut store) = open_store();
     seed_identity(&mut store);
     VersionedTextStore::new(&mut store)

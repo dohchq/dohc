@@ -1,5 +1,11 @@
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
-import { shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
+import { isRecord } from "@dohc/workspace-core/records";
+import {
+  readableShareLevel,
+  shareViewGranterEmail,
+  shareViewIdentityIsIntact,
+  shareViewIsPresent,
+} from "./shareViewMarker";
 
 // The LOCAL-WRITE gate for a share view, as one rule in one place.
 //
@@ -20,7 +26,8 @@ import { shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
 // rule: a hand-copied re-implementation in a test proves only that the copy
 // behaves.
 export interface ShareViewWriteScope {
-  // The level the PINNED grant names, or null when the grant cannot be read.
+  // The level the PINNED grant names, or null when the grant cannot be read
+  // or the marker lost its identity.
   access: ShareAccess | null;
   // The granter ended this share.
   ended: boolean;
@@ -44,6 +51,54 @@ export const SHARE_VIEW_EMPTY_FOLDER_REFUSAL =
 export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
   if (scope.ended) return false;
   return scope.access === "edit";
+}
+
+/**
+ * Which create and import actions a workspace offers, given the share view it
+ * is, or null for an ordinary workspace. The Explorer menu and the command
+ * rows both ask this, so neither offers an action its handler refuses.
+ */
+export function workspaceCreateOffers(shareView: ShareViewWriteScope | null): {
+  write: boolean;
+  folder: boolean;
+  collection: boolean;
+} {
+  // Create, rename, delete and import: everywhere in an ordinary workspace,
+  // and in a share view only at the level `shareViewTakesLocalWrites` names.
+  const write = shareView === null || shareViewTakesLocalWrites(shareView);
+  return {
+    write,
+    // Nowhere in a share view, at any level: the engine has no folder object,
+    // so an empty folder is nothing the recipient could send.
+    // `ShareViewFiles` therefore exposes no empty-folder operation.
+    folder: shareView === null,
+    // A document Collection is a folder with a schema file. A share view that
+    // takes writes can make one: the schema file is the Collection's first
+    // file, and the folder comes with it (ADR 0013).
+    collection: write,
+  };
+}
+
+/**
+ * The share view a registry marker describes, or null for an ordinary
+ * workspace. `main`'s `sharedViewOf` is one line over this.
+ *
+ * PRESENCE decides whether it is a share view. The level comes only from an
+ * intact marker: one that lost its share id or recipient is damaged, names no
+ * level, and so offers and admits no write.
+ */
+export function shareViewWriteScopeOf(
+  shareView: unknown,
+): (ShareViewWriteScope & { granterEmail: string | null }) | null {
+  if (!shareViewIsPresent(shareView)) return null;
+  const marker = isRecord(shareView) ? shareView : {};
+  return {
+    granterEmail: shareViewGranterEmail(marker),
+    access: shareViewIdentityIsIntact(marker)
+      ? readableShareLevel(marker.grantedSelector)
+      : null,
+    ended: marker.ended === true,
+  };
 }
 
 /**

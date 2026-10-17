@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { composeArgs, describeWriters, readValidSettings, storageWriters } from "../../tools/self-host/config.mjs";
 import { archiveDeployment } from "./archive.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -41,9 +42,8 @@ export function parseRecoveryArguments(args) {
   return options;
 }
 
-export async function recoveryComposeArgs(options) {
-  const { composeArgs, readSettings } = await import("../../tools/self-host/config.mjs");
-  return composeArgs(options.envFile, readSettings(options.envFile),
+export function recoveryComposeArgs(options) {
+  return composeArgs(options.envFile, readValidSettings(options.envFile),
     ...options.composeFiles.flatMap(path => ["-f", path]), ...(options.project ? ["--project-name", options.project] : []));
 }
 
@@ -59,33 +59,25 @@ export async function runRecovery(options, run = docker, log = console.log, comp
     }
     await mkdir(parent, { recursive: true, mode: 0o700 });
   } else if (!(await stat(options.directory)).isDirectory()) throw new Error("The backup directory does not exist.");
-  const compose = composePrefix ?? await recoveryComposeArgs(options);
+  const compose = composePrefix ?? recoveryComposeArgs(options);
   const config = JSON.parse(run([...compose, "config", "--format", "json"]));
   const relay = config.services?.["sync-relay"];
   if (relay?.environment?.DOHC_RELAY_DEPLOYMENT_CONFIG !== "/continuity/deployment.json") {
     throw new Error("This command requires the supported self-host deployment layout.");
   }
-  const volumeNames = new Set(Object.values(config.volumes ?? {}).map(volume => volume.name));
-  if (volumeNames.size) run(["volume", "inspect", ...volumeNames]);
+  // Every deployment volume must exist; a missing one fails here before anything stops.
+  const volumeNames = Object.values(config.volumes ?? {}).map(volume => volume.name);
+  const writers = storageWriters(config, volumeNames.length ? JSON.parse(run(["volume", "inspect", ...volumeNames])) : [], run);
   const current = run([...compose, "ps", "--services", "--filter", "status=running"]).trim().split(/\r?\n/).filter(Boolean);
-  const runningIds = run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean);
-  if (runningIds.length) {
-    const containers = JSON.parse(run(["inspect", ...runningIds]));
-    for (const container of containers) {
-      if ((container.Mounts ?? []).some(mount => mount.Type === "volume" && volumeNames.has(mount.Name)) &&
-          container.Config?.Labels?.["com.docker.compose.project"] !== config.name) {
-        throw new Error("Another running project uses a deployment volume. Stop it before recovery.");
-      }
-    }
+  const foreign = writers().filter(({ container }) => container.Config?.Labels?.["com.docker.compose.project"] !== config.name);
+  if (foreign.length) {
+    throw new Error(`Running containers outside ${config.name} can write its storage. Stop them before recovery: ${describeWriters(foreign)}.`);
   }
   log(`Stopping ${config.name} for ${options.action}.`);
   run([...compose, "stop"]);
-  const remaining = run(["ps", "--quiet"]).trim().split(/\r?\n/).filter(Boolean);
+  const remaining = writers();
   if (remaining.length) {
-    const containers = JSON.parse(run(["inspect", ...remaining]));
-    if (containers.some(container => (container.Mounts ?? []).some(mount => mount.Type === "volume" && volumeNames.has(mount.Name)))) {
-      throw new Error("A running container still uses a deployment volume. Services remain stopped; stop that writer before recovery.");
-    }
+    throw new Error(`Running containers can still write this deployment's storage. Services remain stopped; stop them before recovery: ${describeWriters(remaining)}.`);
   }
   const entrypoint = "/app/services/sync-relay/dist/relay-deployment.js";
   try {

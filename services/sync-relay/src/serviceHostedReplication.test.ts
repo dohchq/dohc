@@ -10,9 +10,9 @@ let issued = 0;
 const pass = (patch: Partial<HostedSyncMethodResultMap["sync.pullHosted"]> = {}) => ({fetched: 1, applied: 1, refused: 0, skipped: 0,
   conflictsOpened: 0, hasMore: false, pendingCursor: {kind: "hosted" as const, token: `issued-${++issued}`},
   changedPaths: [{versionId: "main", path: "docs/a.md", operation: "write" as const, contentKind: "text" as const}],
-  refusals: [], sharingDeclined: [], held: [], ...patch});
+  refusals: [], sharingDeclined: [], held: [], departed: [], ...patch});
 const commit = (patch: Partial<HostedSyncMethodResultMap["sync.commitCursor"]> = {}) =>
-  ({committed: true, hasMore: false, retirement: null, sharingDeclined: [], ...patch});
+  ({committed: true, hasMore: false, retirement: null, departed: [], sharingDeclined: [], ...patch});
 const diverged = () => new EngineRequestError(1, {code: "INVALID_PARAMS", message: "relay-origin-diverged", retry: "no"});
 
 function fixture(config = attachment()) {
@@ -92,6 +92,22 @@ it("tells the caller of a commit that stands before the retirement after it fail
   await expect(f.driver.pull(undefined, heard)).rejects.toThrow("Hosted retirement failed: hosted file unexpected: docs/a.md");
   expect(heard).toHaveBeenCalledWith(expect.objectContaining({committed: true}));
   expect(await f.driver.pull()).toMatchObject({hasMore: false});
+});
+
+it("keeps each departed document the engine still holds until a reply that read them drops it", async () => {
+  const f = fixture();
+  expect(f.driver.departed).toBeNull();
+  const passes = [pass({pendingCursor: null, departed: ["doc-b"]}), pass({departed: ["doc-b"]}), pass({departed: ["doc-b"]}), pass()];
+  const failed = {code: "INTERNAL", message: "hosted file unexpected: docs/b.md", retry: "no"};
+  // The rows retired but the file did not go; then the departed list went unread; then the file went.
+  const commits = [commit({hasMore: true, retirement: failed, departed: ["doc-b"]}), commit({hasMore: true, departed: null}), commit()];
+  f.answers["sync.pullHosted"] = () => passes.shift();
+  f.answers["sync.commitCursor"] = () => commits.shift();
+  const seen: Array<string[] | null> = [];
+  const record = () => seen.push(f.driver.departed && [...f.driver.departed]);
+  await expect(f.driver.pull(undefined, record)).rejects.toThrow("Hosted retirement failed");
+  await f.driver.pull(undefined, record);
+  expect(seen).toEqual([["doc-b"], ["doc-b"], ["doc-b"], []]);
 });
 
 it("leaves a pass uncommitted when a reply is lost, and the next pull carries on", async () => {
