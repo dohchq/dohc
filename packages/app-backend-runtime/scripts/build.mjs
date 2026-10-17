@@ -44,6 +44,8 @@ try {
         "recovery-install": fileURLToPath(new URL("../src/recovery-install.ts", import.meta.url)),
         "replica-host": fileURLToPath(new URL("../src/replica-host.ts", import.meta.url)),
         replica: fileURLToPath(new URL("../src/replica.ts", import.meta.url)),
+        "dataset-history": fileURLToPath(new URL("../src/dataset-history.ts", import.meta.url)),
+        "dataset-error": fileURLToPath(new URL("../src/dataset-error.ts", import.meta.url)),
         "dataset-host": fileURLToPath(new URL("../src/dataset-host.ts", import.meta.url)),
         "dataset-compiler": fileURLToPath(new URL("../src/dataset-compiler.ts", import.meta.url)),
         "dataset-attempts": fileURLToPath(new URL("../src/dataset-attempts.ts", import.meta.url)),
@@ -63,7 +65,8 @@ try {
       platform: "node",
       format: "esm",
       target: "node24",
-      external: ["quickjs-emscripten", "@dohc/app-backend-runtime/child", "@dohc/app-backend-runtime/persistent-child", "@dohc/app-backend-runtime/automation-worker"],
+      // Keep one error constructor across independently bundled runtime entries.
+      external: ["@dohc/app-backend-runtime/dataset-error", "quickjs-emscripten", "@dohc/app-backend-runtime/child", "@dohc/app-backend-runtime/persistent-child", "@dohc/app-backend-runtime/automation-worker"],
     });
     if (cache) {
       if (source !== cache.artifactSourceFingerprint("runtime", root)) throw new Error("Runtime inputs changed during the build. Build again.");

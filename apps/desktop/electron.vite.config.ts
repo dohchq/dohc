@@ -54,6 +54,7 @@ export const mainBuildEntries = {
   "document-projection-worker":
     "src/workspaces/documentProjectionThread.ts",
   "workspace-files-worker": "src/workspaces/workspaceFilesThread.ts",
+  "collection-history-worker": "src/workspaces/localDatasetHistoryThread.ts",
 };
 
 function effectFree(surface: "preload" | "renderer"): Plugin {
