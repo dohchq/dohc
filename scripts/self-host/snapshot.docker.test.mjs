@@ -126,6 +126,10 @@ test("online snapshots of a relay under constant writes, verified offline with o
     // check-backup's own check: integrity, the deployment marker against continuity, and the manifest checksum.
     // Like recovery.mjs, it runs on the stopped deployment with its relay and continuity volumes.
     docker(["stop", writer]);
+    // A relay that stops cleanly closes its database, which folds the WAL in and removes it. The killed writer can't,
+    // and maintenance refuses a leftover WAL as unsettled continuity. SQLite touches the WAL only on its first read.
+    node(["-e", `const db = new (require("node:sqlite").DatabaseSync)("/data/sync-relay.sqlite"); db.prepare("SELECT count(*) FROM sqlite_master").get(); db.close();`],
+      { mounts: [mount("relay", "/data")] });
     for (const index of [0, 1, 2]) {
       node(["/proof/relay-deployment.js", "check-backup", "--config", "/continuity/deployment.json", "--directory", `/backup/verified-${index}`],
         { mounts: [mount("relay", "/data"), mount("continuity", "/continuity"), mount("out", "/backup", true), proof] });

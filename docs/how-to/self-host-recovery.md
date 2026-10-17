@@ -217,7 +217,7 @@ Then set `DOHC_SNAPSHOT_KEY` in the new `.env.self-host` to the key you kept.
 An hourly snapshot does not include authentication, live-host data, configuration or continuity.
 Server accounts are stored in Postgres and need a separate backup.
 With an [external database](#accounts-in-an-external-database), your provider's backups hold them.
-Repair with `restore` still requires the snapshot stamp to equal current continuity.
+Repair with `restore` still requires the snapshot stamp and nonce to equal current continuity.
 An hourly snapshot usually falls behind within minutes, so it rarely qualifies.
 Restoring a lost server from an off-site snapshot is not supported yet.
 You can salvage files from a verified snapshot.
