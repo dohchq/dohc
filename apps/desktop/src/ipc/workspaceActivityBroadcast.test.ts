@@ -1,10 +1,32 @@
 import { describe, expect, it, vi } from "vitest";
-import { broadcastWorkspaceActivity, coalesceWorkspaceActivity } from "./workspaceActivityBroadcast";
+import { broadcastWorkspaceActivity, coalesceWorkspaceActivity, sendToWorkspaceWindows } from "./workspaceActivityBroadcast";
 import { CHANNELS } from "./channels";
 
 function fakeWindow(id: number) {
   return { webContents: { id, send: vi.fn() } };
 }
+
+describe("sendToWorkspaceWindows", () => {
+  it("sends only to live windows whose session shows the event's workspace", () => {
+    const window = (workspaceId: string | undefined, destroyed = false) =>
+      ({ webContents: { workspaceId, isDestroyed: () => destroyed, send: vi.fn() } });
+    const showing = window("ws-a");
+    const destroyed = window("ws-a", true);
+    const other = window("ws-b");
+    const noSession = window(undefined);
+    const event = { workspaceId: "ws-a", revision: 3, active: true };
+    sendToWorkspaceWindows({
+      windows: [showing, destroyed, other, noSession],
+      workspaceIdOf: (webContents) => webContents.workspaceId,
+      channel: CHANNELS.agentRunState,
+      event,
+    });
+    expect(showing.webContents.send).toHaveBeenCalledExactlyOnceWith(CHANNELS.agentRunState, event);
+    expect(destroyed.webContents.send).not.toHaveBeenCalled();
+    expect(other.webContents.send).not.toHaveBeenCalled();
+    expect(noSession.webContents.send).not.toHaveBeenCalled();
+  });
+});
 
 describe("broadcastWorkspaceActivity", () => {
   it.each([true, false])("preserves a summary change beside file activity (summary first: %s)", async summaryFirst => {
