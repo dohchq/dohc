@@ -2176,7 +2176,7 @@ it.each(["quit", "renderer retirement"] as const)("%s releases a refused settle 
     } finally { recovered.destroy(); await reopened.close(); }
   } finally { editor.destroy(); }
 });
-it("keeps a quit lease reserved without repeating a failed eviction during quit", async () => {
+it("retries only eviction after a transient quit release failure", async () => {
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
   const editor = mirrorEditor(session);
   typeIntoBody(editor, "Typing that must survive a failed eviction.");
@@ -2199,10 +2199,10 @@ it("keeps a quit lease reserved without repeating a failed eviction during quit"
     expect(daemon.leases.size).toBe(1);
     blockEvict = false;
     const closes = methodCount(YDOC_METHOD.close);
-    await expect(capture.settleAndCloseAllLiveSessions()).rejects.toThrow();
+    await expect(capture.settleAndCloseAllLiveSessions()).resolves.toBeUndefined();
     expect(methodCount(YDOC_METHOD.close)).toBe(closes);
-    expect(methodCount(YDOC_METHOD.evict)).toBe(1);
-    expect(daemon.leases.size).toBe(1);
+    expect(methodCount(YDOC_METHOD.evict)).toBe(2);
+    expect(daemon.leases.size).toBe(0);
     expect(await readFile(join(root, PATH), "utf8")).toBe("Outside bytes.");
   } finally { editor.destroy(); }
 });
@@ -2445,6 +2445,116 @@ it("quit eviction waits for the active typing checkpoint writer and its queued r
   } finally {
     acknowledge.resolve(); finishWrite.resolve(); finishRetirement.resolve();
     await closing;
+    editor.destroy();
+  }
+});
+
+it("a later quit caller journals missing typing after transient resend refusals", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
+  const editor = mirrorEditor(session);
+  const recorded = ydoc.recordedUpdates.length;
+  busyRecordAttempts = 100;
+  typeIntoBody(editor, "Only main holds this typing until quit retries.");
+  await session.applyDecidedLocalUpdate(() => null);
+  expect(ydoc.recordedUpdates).toHaveLength(recorded);
+  capture.beginShutdown();
+  sessions.beginShutdown();
+  try {
+    await expect(session.close({ shuttingDown: true })).rejects.toThrow("engine-store-busy");
+    expect(ydoc.recordedUpdates).toHaveLength(recorded);
+    expect(methodCount(YDOC_METHOD.evict)).toBe(0);
+    expect(daemon.leases.size).toBe(1);
+    busyRecordAttempts = 0;
+    const closes = methodCount(YDOC_METHOD.close);
+    const settles = methodCount(YDOC_METHOD.settle);
+    await expect(capture.settleAndCloseAllLiveSessions()).resolves.toBeUndefined();
+    expect(methodCount(YDOC_METHOD.close)).toBe(closes);
+    expect(methodCount(YDOC_METHOD.settle)).toBe(settles);
+    expect(methodCount(YDOC_METHOD.evict)).toBe(1);
+    expect(daemon.leases.size).toBe(0);
+    const reopened = await openEngineYdocProviderSession({ transport: ydoc, workspace: WORKSPACE_ID,
+      versionId: "main", path: PATH, contentKind: "richdoc", onRemoteUpdate() {} });
+    expect(documentMarkdown(reopened.initialUpdate)).toContain("Only main holds this typing until quit retries.");
+    await reopened.close();
+  } finally { busyRecordAttempts = 0; editor.destroy(); }
+});
+
+it("an interactive sweep makes its own close attempt after a renderer refusal", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
+  closeRefusal = wireRefusal("ydoc-unsettled-close");
+  await expect(session.close({ settle: false, settleOnRefusal: false })).rejects.toThrow();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  beforeClose = async () => {
+    entered.resolve();
+    await release.promise;
+    beforeClose = async () => { closeRefusal = null; };
+  };
+  const rendererClose = session.close({ settle: false, settleOnRefusal: false });
+  const rendererRefused = expect(rendererClose).rejects.toThrow("ydoc-unsettled-close");
+  await entered.promise;
+  const sweep = capture.settleAndCloseAllLiveSessions();
+  const swept = expect(sweep).resolves.toBeUndefined();
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    release.resolve();
+    await rendererRefused;
+    await swept;
+    expect(daemon.leases.size).toBe(0);
+  } finally { release.resolve(); await Promise.allSettled([rendererClose, sweep]); }
+});
+
+it("successful eviction stays closed when checkpoint retirement fails", async () => {
+  await capture.stop();
+  const writing = Promise.withResolvers<void>();
+  const finishWrite = Promise.withResolvers<void>();
+  let notifyDeath!: (error: unknown) => void;
+  let failRetirement = true;
+  const retire = vi.fn(async () => { if (failRetirement) throw new Error("checkpoint disk failure"); });
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions,
+    openRustYDocProviderSession: async options => {
+      notifyDeath = options.onSessionError!;
+      return { ...await openEngineYdocProviderSession(options), objectId: "checkpoint-object", versionId: "main" };
+    },
+    writeTypingCheckpoint: async () => { writing.resolve(); await finishWrite.promise; },
+    retireTypingCheckpoint: retire,
+    onError: context => captureErrors.push(context),
+  });
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
+  const editor = mirrorEditor(session);
+  const recording = Promise.withResolvers<void>();
+  const acknowledge = Promise.withResolvers<void>();
+  beforeRecordUpdate = async () => { recording.resolve(); await acknowledge.promise; };
+  typeIntoBody(editor, "Typing durable before checkpoint retirement fails.");
+  await recording.promise;
+  notifyDeath(transportLost());
+  await writing.promise;
+  acknowledge.resolve();
+  await session.settleNow();
+  const leasesBeforeClose = daemon.leases.size;
+  closeRefusal = wireRefusal("ydoc-unsettled-close");
+  capture.beginShutdown();
+  sessions.beginShutdown();
+  const closing = session.close({ shuttingDown: true });
+  const closed = expect(closing).resolves.toBeUndefined();
+  try {
+    await expect.poll(() => methodCount(YDOC_METHOD.evict)).toBe(1);
+    finishWrite.resolve();
+    await closed;
+    expect(daemon.leases.size).toBe(leasesBeforeClose - 1);
+    expect(() => session.applyLocalUpdate(new Uint8Array())).toThrow("closed");
+    expect(captureErrors).toContain("Typing checkpoint");
+    expect(captureErrors).not.toContain(`ydoc evict of ${PATH}`);
+    await expect(capture.settleAndCloseAllLiveSessions()).resolves.toBeUndefined();
+    const attempts = retire.mock.calls.length;
+    failRetirement = false;
+    await flushTypingCheckpoints(WORKSPACE_ID);
+    expect(retire.mock.calls.length).toBeGreaterThan(attempts);
+  } finally {
+    acknowledge.resolve(); finishWrite.resolve(); failRetirement = false;
+    await closing.catch(() => undefined);
+    await flushTypingCheckpoints(WORKSPACE_ID);
     editor.destroy();
   }
 });

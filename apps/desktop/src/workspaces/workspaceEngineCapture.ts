@@ -2301,8 +2301,10 @@ export function createWorkspaceEngineCapture(
       if (checkpointTimer !== null) { clearTimeout(checkpointTimer); checkpointTimer = null; }
       if(checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) {const error=new DrawingCheckpointUnavailable(); options.onTypingCheckpointFailure?.(input.path,error); return Promise.reject(error);}
       const snapshot = checkpointSnapshot();
-      if (!snapshot) return checkpointWriter.wait();
-      return checkpointWriter.flush(checkpointTypingIsDurable() ? null : snapshot);
+      const flushing = snapshot || (lastCheckpoint && checkpointTypingIsDurable())
+        ? checkpointWriter.flush(checkpointTypingIsDurable() ? null : snapshot)
+        : checkpointWriter.wait();
+      return flushing.then(() => { if (closed) unregisterCheckpoint(); });
     };
     const checkpointUnresolved = (): void => {
       if (!options.writeTypingCheckpoint) return;
@@ -3387,9 +3389,17 @@ export function createWorkspaceEngineCapture(
             await releaseObligation.evict();
             releaseObligation = null;
           }
-          await flushCheckpoint();
+          let checkpointFlushed = false;
+          try {
+            await flushCheckpoint();
+            checkpointFlushed = true;
+          } catch (error) {
+            // The lease is released. Keep checkpoint recovery registered for
+            // the final flush without reporting a failed eviction.
+            onError("Typing checkpoint", error);
+          }
           closed = true;
-          unregisterCheckpoint();
+          if (checkpointFlushed) unregisterCheckpoint();
           await checkpointWriter.idle();
           recordedDoc.destroy();
           current = null;
@@ -5102,9 +5112,10 @@ export function createWorkspaceEngineCapture(
         let dischargedByEvict = false;
         let closeInFlight: Promise<void> | null = null;
         let quitClose: Promise<void> | null = null;
+        let quitEvictionFailure: { closeError: unknown; evictError: unknown } | null = null;
         const closeEntry = (opts?: WorkspaceEngineYDocCloseOptions): Promise<void> => {
           if (shuttingDown && quitClose) return quitClose;
-          const closing = closeInFlight ?? attemptCloseEntry(opts);
+          const closing = shuttingDown && closeInFlight ? closeInFlight : attemptCloseEntry(opts);
           closeInFlight = closing;
           if (shuttingDown) quitClose = closing;
           const completed = (): void => {
@@ -5112,7 +5123,14 @@ export function createWorkspaceEngineCapture(
             if (shuttingDown) quitClose ??= closing;
             if (closeInFlight === closing) closeInFlight = null;
           };
-          void closing.then(completed, completed);
+          void closing.then(completed, () => {
+            completed();
+            // Later quit callers may retry the handover, never the close.
+            if (shuttingDown && quitClose === closing && quitEvictionFailure &&
+                isTransientEngineCause(quitEvictionFailure.evictError)) {
+              quitClose = null;
+            }
+          });
           return closing;
         };
         const attemptCloseEntry = async (
@@ -5140,6 +5158,7 @@ export function createWorkspaceEngineCapture(
               ? { ...opts, settle: false, settleOnRefusal: false }
               : opts;
           try {
+            if (shuttingDown && quitEvictionFailure) throw quitEvictionFailure.closeError;
             await session.close(effective);
           } catch (error) {
             if (error instanceof YdocReleasedWithSettleFailureError) {
@@ -5228,6 +5247,7 @@ export function createWorkspaceEngineCapture(
                 ((liveEntry.orphaned || writeCancelled) && isYdocUnsettledCloseRefusal(error))) {
               try {
                 await session.evict();
+                quitEvictionFailure = null;
                 dischargedByEvict = true;
                 if (liveYDocSessions.get(input.path) === liveEntry) {
                   liveYDocSessions.delete(input.path);
@@ -5237,6 +5257,7 @@ export function createWorkspaceEngineCapture(
                 // Keep the close refusal as the caller's error, and report the
                 // failed release separately. The guard below remains reserved.
                 onError(`ydoc evict of ${input.path}`, evictError);
+                if (shuttingDown) quitEvictionFailure = { closeError: error, evictError };
               }
             }
             // The reservation may still be held and the on-disk state is
@@ -5245,7 +5266,7 @@ export function createWorkspaceEngineCapture(
             // teardown).
             if (liveYDocSessions.get(input.path) === liveEntry) {
               liveEntry.status = "failing-close";
-              scheduleTransientCloseRetry(error, opts);
+              scheduleTransientCloseRetry(quitEvictionFailure?.evictError ?? error, opts);
             }
             throw error;
           }
