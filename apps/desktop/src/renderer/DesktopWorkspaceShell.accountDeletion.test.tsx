@@ -10,6 +10,14 @@ import { DesktopRoot } from "./DesktopRoot";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { makeBridge, OTHER_WORKSPACE, renderShell, WORKSPACE } from "./DesktopWorkspaceShell.testHarness";
 
+// Settings mounts without its lazy boundary. Each open suspends on a fresh
+// lazy(), and React holds the revealed content 300 ms of real time past its
+// fallback, for every Settings open in every test. LazyDesktopSettings.test.tsx
+// covers the boundary.
+vi.mock("./settings/LazyDesktopSettings", async () => ({
+  LazyDesktopSettings: (await import("./settings/SettingsDialog")).SettingsDialog,
+}));
+
 type SessionEvent = { sessionKey: string | null; phase: "changing" | "ready" };
 type DeleteResult = ServerAccountDeleteResult;
 
@@ -155,7 +163,7 @@ describe("deleting the server account from Settings", () => {
     await screen.findByTestId("server-account-delete-scope");
     const reads = vi.mocked(bridge.cloudStatus).mock.calls.length;
 
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(within(screen.getByTestId("server-account-delete")).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByTestId("server-account-delete")).toBeNull();
     await waitFor(() => expect(bridge.cloudStatus).toHaveBeenCalledTimes(reads + 1));
     expect(screen.getByTestId("settings-row-account")).toBeTruthy();

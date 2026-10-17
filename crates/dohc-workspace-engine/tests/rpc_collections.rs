@@ -320,7 +320,7 @@ async fn call_ydoc_with_blob(
     method: &str,
     params: Value,
 ) -> (Value, Vec<u8>) {
-    let output = ProtocolEngineService::call(
+    let output = service_call_with_busy_retry(
         service,
         RequestContext::unbounded().with_capability("blobs"),
         request(id, method, Some(handle.clone()), params),

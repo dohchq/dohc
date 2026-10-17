@@ -421,26 +421,26 @@ async fn open_workspace(
     workspace_id: &str,
 ) -> WorkspaceHandle {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_id,
-                    "relay": {
-                        "baseUrl": relay.base_url,
-                        "bearerToken": BEARER,
-                        "allowInsecureLoopbackForTests": true,
-                    },
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            id,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id,
+                "relay": {
+                    "baseUrl": relay.base_url,
+                    "bearerToken": BEARER,
+                    "allowInsecureLoopbackForTests": true,
+                },
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
 }
 
@@ -452,14 +452,14 @@ async fn call(
     params: Value,
 ) -> Value {
     *id += 1;
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(*id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
-        .result
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(*id, method, Some(handle.clone()), params),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
+    .result
 }
 
 async fn close(
@@ -838,28 +838,28 @@ async fn open_uncaptured_workspace_options(
     reconcile_collections: bool,
 ) -> WorkspaceHandle {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_id,
-                    "captureMode": "none",
-                    "reconcileCollections": reconcile_collections,
-                    "relay": {
-                        "baseUrl": relay.base_url,
-                        "bearerToken": BEARER,
-                        "allowInsecureLoopbackForTests": true,
-                    },
-                }),
-            ),
-        )
-        .await
-        .expect("open workspace");
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": workspace_id,
+                "captureMode": "none",
+                "reconcileCollections": reconcile_collections,
+                "relay": {
+                    "baseUrl": relay.base_url,
+                    "bearerToken": BEARER,
+                    "allowInsecureLoopbackForTests": true,
+                },
+            }),
+        ),
+    )
+    .await
+    .expect("open workspace");
     serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
 }
 

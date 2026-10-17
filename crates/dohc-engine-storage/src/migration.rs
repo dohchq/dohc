@@ -3306,6 +3306,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_HOSTED_PARKED_DOCUMENTS_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 59,
+        id: "v2-persisted-links",
+        sql: include_str!("links.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A hosted document that left the scope parks instead of losing its state.
@@ -4312,6 +4318,10 @@ mod tests {
             (
                 "v2-hosted-parked-documents",
                 "d6090f08905899107200c732a3c4301d726213b87489861b1af664515bcf5b44",
+            ),
+            (
+                "v2-persisted-links",
+                "605a6d01c45ddce5f97465428a20e9f5b2d3185f3e9da2c550a1072521062f44",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -7030,6 +7040,137 @@ mod tests {
         }];
         let err = run_migrations(&mut conn, tampered, &ctx, &NoFaults).unwrap_err();
         assert_eq!(err.code(), "migration-failed");
+    }
+
+    #[test]
+    fn persisted_links_upgrade_seeds_existing_heads_and_survives_cascades() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-persisted-links");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 59);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws','main','main','Main',1); INSERT INTO file_objects VALUES('ws','a',1); INSERT INTO blobs VALUES('hash',5,'[[b]]'); INSERT INTO path_aliases VALUES('ws','main','a.md','a'); INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES('ws','main','a','a.md','hash',1,'m','test');").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let pending: i64 = conn
+            .query_row("SELECT COUNT(*) FROM link_pending", [], |r| r.get(0))
+            .expect("persisted queue must exist");
+        assert_eq!(pending, 0);
+        assert_eq!(
+            conn.query_row(
+                "SELECT wr FROM pragma_table_list WHERE name='link_index_state'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT seed_phase FROM link_index_state", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "deferred"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM link_aliases", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        conn.execute("DELETE FROM file_objects WHERE object_id='a'", [])
+            .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM link_pending", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn seed_phase_guard_uses_one_primary_key_lookup() {
+        let conn = Connection::open_in_memory().unwrap();
+        let definition = include_str!("links.sql")
+            .split("CREATE TABLE link_index_state ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE guard_before {}; CREATE TABLE guard_after {};",
+            definition.replace(", WITHOUT ROWID", ""),
+            definition,
+        ))
+        .unwrap();
+        for table in ["guard_before", "guard_after"] {
+            conn.execute(&format!("INSERT INTO {table}(workspace_id,version_id,parser_generation) VALUES('ws','main',1)"), []).unwrap();
+        }
+        let query = |table| {
+            format!("SELECT seed_phase FROM {table} WHERE workspace_id=?1 AND version_id=?2")
+        };
+        let plan: String = conn
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN {}", query("guard_after")),
+                ["ws", "main"],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("USING PRIMARY KEY"), "{plan}");
+        let mut before = conn.prepare(&query("guard_before")).unwrap();
+        let mut after = conn.prepare(&query("guard_after")).unwrap();
+        let mut before_ns = Vec::new();
+        let mut after_ns = Vec::new();
+        let mut phase = crate::capture_phase::Phase::new("trigger_guard_comparison", None, 0, true);
+        // Same prepared lookup as the trigger, including SQL dispatch. Alternate
+        // the two layouts; these timings are diagnostic, never a gate limit.
+        for trial in 0..6 {
+            for is_after in if trial % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let statement = if is_after { &mut after } else { &mut before };
+                let label = if is_after {
+                    "guard_without_rowid"
+                } else {
+                    "guard_rowid"
+                };
+                let measure = crate::capture_phase::Measure::new(label);
+                let started = std::time::Instant::now();
+                for _ in 0..15_000 {
+                    let value: String = statement.query_row(["ws", "main"], |r| r.get(0)).unwrap();
+                    assert_eq!(value, "deferred");
+                }
+                let elapsed = (started.elapsed().as_nanos() / 15_000) as u64;
+                drop(measure);
+                crate::capture_phase::count(label, 15_000);
+                if is_after {
+                    after_ns.push(elapsed);
+                } else {
+                    before_ns.push(elapsed);
+                }
+            }
+        }
+        before_ns.sort();
+        after_ns.sort();
+        phase.field("before_rowid_ns_per_lookup", before_ns[3]);
+        phase.field("after_without_rowid_ns_per_lookup", after_ns[3]);
+        phase.field("lookups_per_trial", 15_000_u64);
+        phase.finish("measured");
+        eprintln!(
+            "TRIGGER_GUARD before_ns={} after_ns={} lookups_per_trial=15000 trials=6; SQL dispatch included",
+            before_ns[3], after_ns[3]
+        );
     }
 
     fn tempdir() -> dohc_test_scratch::ScratchDir {

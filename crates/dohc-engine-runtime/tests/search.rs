@@ -917,6 +917,92 @@ fn inclusive_result_anchor_keeps_the_candidate_after_an_exhausted_row() {
 }
 
 #[test]
+fn background_links_writes_do_not_restart_search_pages() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path();
+    let db = engine_db_path(&scratch).expect("database path");
+    let mut store = open(&db, 1);
+    write_file(
+        &mut store,
+        "cursor-links",
+        "notes/cursor.md",
+        "needle first\nneedle second",
+        10,
+    );
+    ensure_index(&mut store, root, 20);
+    let first = store
+        .read_with(|conn| {
+            search_workspace_page(conn, root, WS, V, "needle", Some(1), 30, None, None)
+        })
+        .expect("first page");
+    assert_eq!(first.results.len(), 1);
+    let after = first.continuation.expect("second matching line");
+    let changed = store
+        .write_with(&NO_FAULTS, |tx| {
+            // A raw-store fixture has not run the actor's deferred seed yet.
+            tx.execute("INSERT OR IGNORE INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots", [])
+                .map_err(dohc_engine_runtime::search::SearchError::from)?;
+            tx.execute(
+                "UPDATE link_pending SET retry_after_ms = retry_after_ms + 1",
+                [],
+            )
+            .map_err(dohc_engine_runtime::search::SearchError::from)
+        })
+        .expect("links parser retry bookkeeping");
+    assert!(matches!(changed, TxnOutcome::Committed(count) if count > 0));
+    let second = store
+        .read_with(|conn| {
+            search_workspace_page(
+                conn,
+                root,
+                WS,
+                V,
+                "needle",
+                Some(1),
+                30,
+                Some(first.generation),
+                Some(after),
+            )
+        })
+        .expect("second page after background links write");
+    assert_eq!(second.disposition, SearchPageDisposition::Results);
+    assert_eq!(second.generation, first.generation);
+    assert_eq!(second.results.len(), 1);
+    assert_eq!(second.results[0].result.line, 2);
+
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            upsert_file_search_index(
+                tx,
+                root,
+                WS,
+                V,
+                "cursor-links",
+                "notes/cursor.md",
+                "needle changed",
+            )
+        })
+        .expect("search-only index write");
+    let stale = store
+        .read_with(|conn| {
+            search_workspace_page(
+                conn,
+                root,
+                WS,
+                V,
+                "needle",
+                Some(1),
+                30,
+                Some(first.generation),
+                Some(after),
+            )
+        })
+        .expect("old cursor after search index update");
+    assert_eq!(stale.disposition, SearchPageDisposition::Restart);
+    assert_ne!(stale.generation, first.generation);
+}
+
+#[test]
 fn file_and_chat_line_continuations_preserve_dense_and_sparse_results() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path();

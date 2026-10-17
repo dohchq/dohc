@@ -30,6 +30,7 @@ import type { DatasetDefinition, DatasetDescription, DatasetOperationKind } from
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   isInvalidInputRefusal,
+  isEngineStoreBusyRefusal,
   type AutomationClaim,
   type AutomationClaimSummary,
   type SharedChangeAuthor,
@@ -4854,7 +4855,8 @@ export class CollectionAutomations {
         }
       }
     } catch (error) {
-      this.options.onError("drain Collection automation claims", error);
+      if (isEngineStoreBusyRefusal(error)) this.scheduleBusyRetry();
+      else this.options.onError("drain Collection automation claims", error);
     } finally {
       for (const held of release) this.owed.set(held.claim.claimId, { held, action: { kind: "release" } });
       if (!stop.aborted) await this.payOwed(true);
@@ -4895,7 +4897,8 @@ export class CollectionAutomations {
           this.owed.delete(id);
           this.waitingFor.delete(id);
         } else {
-          this.options.onError(`${action.kind} automation claim "${id}"`, error);
+          if (isEngineStoreBusyRefusal(error)) this.scheduleBusyRetry();
+          else this.options.onError(`${action.kind} automation claim "${id}"`, error);
         }
         continue;
       }
@@ -5311,11 +5314,10 @@ export class CollectionAutomations {
       }, { once: true });
     });
     try {
-      const run = Promise.resolve().then(() => runClaim(controller.signal)).catch((error: unknown): CollectionAutomationRunOutcome => ({
-        kind: "failed",
-        error: errorText(error),
-        timedOut: controller.signal.aborted,
-      }));
+      const run = Promise.resolve().then(() => runClaim(controller.signal)).catch((error: unknown): CollectionAutomationRunOutcome =>
+        isEngineStoreBusyRefusal(error)
+          ? { kind: "wait", reason: "busy" }
+          : { kind: "failed", error: errorText(error), timedOut: controller.signal.aborted });
       // The hold ends only when the run's writes have really stopped, even
       // after the deadline's grace, or a close, gave up waiting for them.
       started = true;

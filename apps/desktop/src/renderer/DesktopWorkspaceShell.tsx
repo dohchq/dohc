@@ -118,7 +118,7 @@ import { CopyButton } from "./ui/CopyButton";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
-import { useHistoryPage } from "./shell/useHistoryPage";
+import { readNewestMomentOrder, useHistoryPage } from "./shell/useHistoryPage";
 import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
 import {
   fileOpenStartMark,
@@ -205,6 +205,7 @@ import type { SentNotices } from "./shell/useSentNotices";
 import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
+  type HistoryCollections,
 } from "./workbench/EngineHistory";
 import { HistoryHiddenState } from "./workbench/HistoryPolicyStates";
 import {
@@ -1664,7 +1665,7 @@ export function DesktopWorkspaceShell(props: {
     supersede: supersedeHistoryPage,
     loadMore: loadMoreEngineHistory,
     observeVersion: observeEngineVersion,
-  } = useHistoryPage(engineHistoryToken, workspaceId, markHistoryReady);
+  } = useHistoryPage(engineHistoryToken, workspaceId, markHistoryReady, !!shareView);
   // The sync and try snapshots ride the refresh response but are not the
   // timeline: no pagination competes for them, so they apply as soon as they
   // arrive. Each is its own lane with its own watermark, because a local
@@ -1752,6 +1753,12 @@ export function DesktopWorkspaceShell(props: {
   const agentActive = useAgentRunActive(workspaceId, workspaceIsReady, (error, retry) =>
     reportLaneFailure("dohc could not refresh agent runs.", error, retry),
   );
+  // The engine's newest file moment, whatever the History page holds: 50
+  // newer Collection changes, or a moment that arrived with an old date,
+  // can keep a changed file off the first page.
+  const [latestMomentOrder, latestMomentLane] = useSnapshotLane(engineHistoryToken, -1);
+  // The refresh whose read of that moment may still retry.
+  const latestMomentRequest = useRef(0);
   // "Try it in a version" (PR 0N-2): the workspace's live try session —
   // running banner or the run's review card. Refreshed with history (the
   // manager pings the same workspace-activity channel on every transition).
@@ -1806,10 +1813,10 @@ export function DesktopWorkspaceShell(props: {
     if (captureDecidedRef.current !== workspaceId) return;
     // The engine fetch runs only when main's status agrees a recorder exists:
     // after a failed capture build the renderer's own read still
-    // says engine-on, and every listEngineMoments call would error.
+    // says engine-on, and every History read would error.
     const token = ++engineHistoryToken.current;
     if (historyReadable(syncStatusLane.latest())) {
-      // Three reads ride one refresh, and they answer three different
+      // Four reads ride one refresh, and they answer four different
       // questions. One batch made every answer hostage to the worst of them:
       // a try-state failure discarded a history page the engine had already
       // served, and the timeline then said it could not load. An
@@ -1826,7 +1833,7 @@ export function DesktopWorkspaceShell(props: {
       // Each is handed whole to the lane rule, which judges both ways it can
       // settle.
       const pageRead = refreshHistoryPage(token);
-      // Asking again IS this refresh: it re-reads all three, so the lane that
+      // Asking again IS this refresh: it re-reads all four, so the lane that
       // failed is read again. Same control the History surface offers for its
       // own read, and the same one the caller runs on any activity.
       const askAgain = () => {
@@ -1834,6 +1841,17 @@ export function DesktopWorkspaceShell(props: {
           reportShellError("Could not refresh history.", error),
         );
       };
+      // Whether an open file changed, read apart from the page, which can
+      // succeed while this fails. A shared view re-reads no open file.
+      latestMomentRequest.current = token;
+      if (!shareView) latestMomentLane.settle(
+        token,
+        readNewestMomentOrder(workspaceId, () =>
+          latestMomentRequest.current === token && !workspaceAdmission.superseded),
+        (order) => order ?? latestMomentLane.latest(),
+        (error) =>
+          reportLaneFailure("dohc could not check whether open files changed.", error, askAgain),
+      );
       syncStatusLane.settle(
         token,
         bridge().getSyncStatus({ workspaceId }),
@@ -1876,6 +1894,7 @@ export function DesktopWorkspaceShell(props: {
     );
     await statusRead.then(() => markHistoryReady(), () => undefined);
   }, [
+    latestMomentLane,
     !!shareView,
     markHistoryReady,
     refreshHistoryPage,
@@ -1884,6 +1903,7 @@ export function DesktopWorkspaceShell(props: {
     supersedeHistoryPage,
     syncStatusLane,
     tryStateLane,
+    workspaceAdmission,
     workspaceId,
   ]);
 
@@ -2488,6 +2508,16 @@ export function DesktopWorkspaceShell(props: {
   const selectedChatsNav = focusedTabPath && (parseTab(focusedTabPath)?.kind === "chat")
     ? chatEditors.get(focusedTabPath).nav : undefined;
   const dataCollections = useMemo(() => datasets.flatMap(dataset => dataset.tables.map(table => ({ datasetId: dataset.datasetId, datasetPath: dataset.datasetPath, tableId: table.tableId, name: table.name, archived: dataset.archived }))), [datasets]);
+  // The Collections History can name, with their operations' labels, each
+  // opening on its first table.
+  const historyCollections = useMemo<HistoryCollections>(() => new Map(datasets.map(dataset => {
+    const path = dataset.datasetPath, table = dataset.tables[0];
+    return [dataset.datasetId, {
+      name: dataset.name,
+      operationLabels: new Map(dataset.operations.map(operation => [operation.name, operation.label])),
+      ...(path !== null && table ? { open: () => openDataCollection(path, table.tableId) } : {}),
+    }];
+  })), [datasets, openDataCollection]);
   const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
   ]), [knownTabLabels, chatEditors.titles, dataCollections]);
@@ -4363,7 +4393,7 @@ export function DesktopWorkspaceShell(props: {
     // history had no changes, whenever a read was in flight or had failed.
     engineHistory ? (
       <EngineHistoryView
-        moments={engineHistory.moments}
+        entries={engineHistory.entries}
         hasMore={engineHistory.nextCursor != null}
         loadingMore={engineHistoryLoadingMore}
         onLoadMore={() =>
@@ -4372,6 +4402,14 @@ export function DesktopWorkspaceShell(props: {
           )
         }
         onOpenMoment={openMomentDiffTab}
+        unavailableSources={engineHistory.unavailableSources}
+        omittedSources={engineHistory.omittedSources}
+        collections={historyCollections}
+        onRetry={() =>
+          void refreshHistory().catch((error) =>
+            reportShellError("Could not refresh history.", error),
+          )
+        }
       />
     ) : engineHistoryReadState === "failed" && engineHistoryPolicyError ? (
       <HistoryHiddenState
@@ -4442,12 +4480,12 @@ export function DesktopWorkspaceShell(props: {
   const historyRefreshFloor = useRef(0);
   historyRefreshFloor.current = Math.max(
     historyRefreshFloor.current,
-    engineHistory ? engineHistory.latestMomentOrder + 1 : 0,
+    latestMomentOrder + 1,
   );
   const historyRefreshCounter = shareView ? 0 : historyRefreshFloor.current;
   const graphKey = shareView
     ? graphRefreshKey
-    : `${graphRefreshKey}\0${engineHistory?.latestMomentOrder ?? -1}`;
+    : `${graphRefreshKey}\0${latestMomentOrder}`;
 
   const explorerView = (
     <>

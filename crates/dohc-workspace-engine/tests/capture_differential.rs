@@ -18,7 +18,7 @@ mod common;
 use base64::Engine as _;
 use common::*;
 use dohc_engine_protocol::{
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    transport::{InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, hex_sha256};
@@ -81,21 +81,21 @@ async fn open_workspace(
     root: &Path,
     id: u64,
 ) -> WorkspaceHandle {
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": root.to_string_lossy(),
-                    "workspaceId": WORKSPACE_ID,
-                }),
-            ),
-        )
-        .await
-        .expect("workspace open");
+    let opened = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(
+            id,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": root.to_string_lossy(),
+                "workspaceId": WORKSPACE_ID,
+            }),
+        ),
+    )
+    .await
+    .expect("workspace open");
     serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
 }
 
@@ -104,13 +104,13 @@ async fn close_workspace(
     handle: WorkspaceHandle,
     id: u64,
 ) {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, "workspace.close", Some(handle), json!({})),
-        )
-        .await
-        .expect("workspace close");
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(id, "workspace.close", Some(handle), json!({})),
+    )
+    .await
+    .expect("workspace close");
 }
 
 async fn flush(
@@ -118,13 +118,13 @@ async fn flush(
     handle: &WorkspaceHandle,
     id: u64,
 ) -> bool {
-    let response = transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, "capture.flush", Some(handle.clone()), json!({})),
-        )
-        .await
-        .expect("capture.flush");
+    let response = call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(id, "capture.flush", Some(handle.clone()), json!({})),
+    )
+    .await
+    .expect("capture.flush");
     response.result["settled"] == json!(true)
 }
 

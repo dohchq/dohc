@@ -50,9 +50,9 @@ describe("EngineHistoryView automation rows", () => {
   it("shows the automation's name and Collection after the ⚡, and describes the row by them", () => {
     render(
       <EngineHistoryView
-        moments={[
+        entries={[
           moment({ id: "m-auto", origin: "api", path: "Tasks/new.md", automationAuthor: { name: "Stamp the finish date", collection: "Tasks" } }),
-        ]}
+        ].map((entry) => ({ kind: "file" as const, moment: entry }))}
         hasMore={false}
         loadingMore={false}
         onLoadMore={() => {}}
@@ -72,7 +72,7 @@ describe("EngineHistoryView protected rows", () => {
   it("renders a lock on protected moments and none on ordinary ones", () => {
     render(
       <EngineHistoryView
-        moments={[
+        entries={[
           moment({
             id: "m-secret",
             path: ".env",
@@ -81,7 +81,7 @@ describe("EngineHistoryView protected rows", () => {
             momentOrder: 2,
           }),
           moment({ id: "m-plain", momentOrder: 1 }),
-        ]}
+        ].map((entry) => ({ kind: "file" as const, moment: entry }))}
         hasMore={false}
         loadingMore={false}
         onLoadMore={() => {}}
