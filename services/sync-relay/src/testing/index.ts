@@ -565,7 +565,7 @@ export function seedLinkGrant(
     grantId: string;
     shareId: string;
     secretHash: string;
-    access?: "view" | "comment" | "edit";
+    access?: "view" | "comment" | "edit" | "read-only" | "read-write";
     createdAtMs?: number;
     credentialId?: string;
   },

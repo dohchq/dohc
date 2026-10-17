@@ -59,7 +59,7 @@ pub use conflict_resolve_v1::{
     prepare_local_conflict_resolve_v1_in_tx,
 };
 pub use cursor::{
-    CursorKind, RelayCursor, ShareCursor, SharedPeerPosition, commit_relay_cursor,
+    CursorCommit, CursorKind, RelayCursor, ShareCursor, SharedPeerPosition, commit_relay_cursor,
     commit_share_cursor, read_pushed_seq, read_relay_cursor, read_share_cursor,
     read_shared_peer_position,
 };
@@ -110,14 +110,14 @@ pub use relay::{
     HostedPullResponse, HostedPushRefusal, HostedScope, HostedScopeDocument,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BASE_REPAIR_LOOKUPS,
-    MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, PushWorkspaceProgress, RecoverResponse, RelaySyncClient, RelayTransport,
-    SettlementPublicationRefusal, ShareBlobRequest, ShareBlobUploadRequest,
-    ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
-    ShareProposalChange, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,
-    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewChangedPath,
-    ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest, ShareViewResponse,
-    SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
+    MAX_BLOB_DOWNLOAD_BATCH, MAX_BLOB_UPLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
+    PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse,
+    RelaySyncClient, RelayTransport, SettlementPublicationRefusal, ShareBlobRequest,
+    ShareBlobUploadRequest, ShareCollectionWriteRequest, ShareCollectionWriteResponse,
+    ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitOutcome,
+    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareReplicationEnvelope,
+    ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest,
+    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, collision_key, hosted_feed_only,
     no_hosted_feed, read_direct_write_status, read_record_creation_statuses,
 };

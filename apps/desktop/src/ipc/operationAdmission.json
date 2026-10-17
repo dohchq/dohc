@@ -1,4 +1,17 @@
 {
+  "desktop:get-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:reload-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:set-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:set-app-pinned": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:reset-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:get-user-settings-file-path": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:open-user-settings-file": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:open-workspace-settings-file": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },
+  "desktop:get-workspace-settings": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:set-workspace-settings": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:reset-workspace-settings": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:get-workspace-ui-state": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:set-workspace-ui-state": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:list-workspace-files": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:create-workspace-file": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + withStaleSensitiveWorkspaceOperation" } },
   "desktop:create-workspace-folder": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "workspaceFileMutationOwner.runAdmittedMutation + withStaleSensitiveWorkspaceOperation" } },
@@ -77,5 +90,8 @@
   "desktop:typing-recovery": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:get-folder-app": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:get-system-reduced-motion": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
-  "desktop:list-history": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:list-history": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:preview-server-account-deletion": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:delete-server-account": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:retry-server-account-disconnect": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null }
 }

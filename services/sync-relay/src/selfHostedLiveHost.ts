@@ -19,6 +19,23 @@ import {startServiceLiveHost, type ServiceHostedSet} from "./serviceLiveHost";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {discoverServiceHostDocuments} from "./serviceHostEnrollmentRoutes";
 
+type WorkspaceIdentity = {workspaceId: string; replicationEpoch: string | null; streamIdentity: string | null};
+// A workspace identity's hosted replica. The label keeps a store of any other kind from opening as one.
+const hostedStoreName = (namespace: string, row: WorkspaceIdentity) => createHash("sha256")
+  .update(JSON.stringify(["hosted-v1", namespace, row.workspaceId, row.replicationEpoch, row.streamIdentity])).digest("hex");
+// The marker beside a store whose hosted replica diverged from the relay.
+const divergedMarker = (root: string, name: string) => join(root, `${name}.diverged`);
+
+/** Removes each workspace identity's hosted store, with any parked documents in it, and its divergence marker. */
+export async function deleteSelfHostedWorkspaceRoots(root: string, namespace: string, workspaces: readonly WorkspaceIdentity[]): Promise<void> {
+  for (const row of workspaces) {
+    const name = hostedStoreName(namespace, row);
+    // The marker goes last, so a store that is only partly removed stays detached.
+    await rm(join(root, name), {recursive: true, force: true});
+    await rm(divergedMarker(root, name), {force: true});
+  }
+}
+
 type Host = Awaited<ReturnType<typeof startServiceLiveHost>>;
 // Background reconciliation must not keep an otherwise idle Node process alive.
 const pause = (ms: number) => Effect.promise(signal => delay(ms, undefined, {signal, ref: false}));
@@ -84,14 +101,12 @@ export async function startSelfHostedLiveHost(options: {
   };
   const selectionSignature = ({targets, departing}: ReturnType<typeof select>) => JSON.stringify([targets, departing].map(rows =>
     rows.map(({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}) => ({workspaceId, objectId, path, shareId, ownerUserId, replicationEpoch, streamIdentity}))));
-  // A workspace identity's hosted replica. The label keeps a store of any other kind from opening as one.
-  // A store keeps its parked documents' activations, so nothing here deletes one.
-  const storeName = (row: Pick<ServiceHostEnrollment, "workspaceId" | "replicationEpoch" | "streamIdentity">) => createHash("sha256")
-    .update(JSON.stringify(["hosted-v1", history.namespace, row.workspaceId, row.replicationEpoch, row.streamIdentity])).digest("hex");
+  // A store keeps its parked documents' activations, so only account deletion removes one.
+  const storeName = (row: WorkspaceIdentity) => hostedStoreName(history.namespace, row);
   // The stores, by name, whose hosted replica diverged from the relay. Each
   // stays detached, untouched, and releases nothing. A marker beside the store
   // keeps it so after a restart, before any pull could find the divergence again.
-  const marker = (name: string) => join(root, `${name}.diverged`);
+  const marker = (name: string) => divergedMarker(root, name);
   const recovery = (name: string) => `Recovery is not automatic yet. The store and every edit in it are kept. Keep ${marker(name)}: without it the next relay start attaches the store again, and edits made before it detaches again stay only in the store.`;
   const diverged = new Set((await readdir(root)).flatMap(name => /^([0-9a-f]{64})\.diverged$/.exec(name)?.[1] ?? []));
   for (const name of diverged) options.onError?.(new Error(`The live editing copy in store ${join(root, name)} diverged from the relay earlier. It stays detached. ${recovery(name)}`));
@@ -244,6 +259,14 @@ export async function startSelfHostedLiveHost(options: {
       }
     }
   }
+  // Reconciliations and account deletions take turns, so no reconciliation
+  // writes a store or a marker while a deletion removes it.
+  let turn: Promise<void> = Promise.resolve();
+  const exclusive = (work: () => Promise<void>) => {
+    const run = turn.then(work);
+    turn = run.catch(() => {});
+    return run;
+  };
   const finished = Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {
     yield* Effect.acquireRelease(Effect.succeed(changes), Queue.shutdown);
     yield* Effect.acquireRelease(
@@ -261,11 +284,28 @@ export async function startSelfHostedLiveHost(options: {
       yield* Queue.clear(changes);
       // File operations and daemon starts may ignore cancellation. Drain them
       // before finalization, so a late start cannot escape its owner's close.
-      yield* Effect.uninterruptible(Effect.promise(reconcile));
+      yield* Effect.uninterruptible(Effect.promise(() => exclusive(reconcile)));
     }
   })), {signal});
   return {
     current: () => current,
+    /**
+     * Removes the hosted stores of a deleted account's workspaces, diverged
+     * or drained ones included, with their markers. The running daemon first
+     * detaches each workspace without settling it. The account fence keeps
+     * them out of every later selection, so nothing attaches them again.
+     */
+    async deleteWorkspaces(workspaces: readonly WorkspaceIdentity[]) {
+      await exclusive(async () => {
+        // The daemon's membership changes under the last update, so the next reconciliation updates again.
+        signature = "";
+        try {
+          await current?.deleteWorkspaces([...new Set(workspaces.map(row => row.workspaceId))]);
+          for (const row of workspaces) {diverged.delete(storeName(row)); unmarked.delete(storeName(row));}
+          await deleteSelfHostedWorkspaceRoots(root, history.namespace, workspaces);
+        } finally {schedule();}
+      });
+    },
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
     /** Why the running daemon cannot continue the document until its owner tries again, if it cannot. */
     blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document);},

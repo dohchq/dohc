@@ -9,7 +9,7 @@ import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
 import { startTiming, timed } from "./timing.mjs";
 import { testWorkspace } from "./js-tests.mjs";
-import { affectedPackages, packageReferences, readWorkspacePackages, selectedGates } from "./selection.mjs";
+import { affectedPackages, packageReferences, readWorkspacePackages, selectedGates, selectsRepositoryTests } from "./selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 import { acquireExclusiveSlot, acquireVerificationSlot, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { processIdentity, ticketEvidence } from "./ticket-evidence.mjs";
@@ -136,7 +136,8 @@ export async function postgres(output, command = run, measure = (_name, action) 
   const stop = async () => {
     // Also protect cleanup when the successfully started database is stopped later.
     unlisten(); listen();
-    try { return await measure("postgres-stop", () => command("docker", ["rm", "--force", id ?? name], { log: join(output, "postgres-stop.log"), timeoutMs: 30_000 })); }
+    // --volumes also removes the anonymous data volume the image declares, about 49 MB a run.
+    try { return await measure("postgres-stop", () => command("docker", ["rm", "--force", "--volumes", id ?? name], { log: join(output, "postgres-stop.log"), timeoutMs: 30_000 })); }
     finally { unlisten(); }
   };
   listen();
@@ -188,6 +189,10 @@ export async function verify(args) {
   const keepGoing = full || args.includes("--keep-going");
   const detach = args.includes("--detach");
   const inline = args.includes("--inline");
+  // Names who a queued run belongs to when T3 does not know its thread.
+  const ownerIndex = args.indexOf("--owner");
+  const ownerName = ownerIndex < 0 ? null : args[ownerIndex + 1];
+  if (ownerIndex >= 0 && (mode !== "pr" || !ownerName?.trim() || ownerName.startsWith("--"))) throw new Error("Use --owner <name> with a PR run.");
   // The queue service runs this verifier in its lane with a grant; it must not queue again.
   const { grant, output: grantOutput } = takeGrant();
   const reuseIndex = args.indexOf("--reuse-rust");
@@ -207,15 +212,19 @@ export async function verify(args) {
     if (full) Object.assign(requiredGates, { rust: true, js: true });
     if (job) requiredGates[job] = true;
     const gates = Object.fromEntries(Object.entries(requiredGates).map(([name, needed]) => [name, needed && (!job || name === job)]));
-    return { baseCommit, files, workflow, requiredGates, gates };
+    // The JavaScript gate runs every repository test when the change reaches a file they read, when the run keeps going,
+    // and when no changed file narrows it, as for packages. Otherwise it runs only the tests that read the source tree.
+    const repositoryTests = !gates.js ? undefined
+      : keepGoing || !files.length || selectsRepositoryTests(files, workflow) ? "test:repo" : "test:repo:tree";
+    return { baseCommit, files, workflow, requiredGates, gates, repositoryTests };
   }
   if (mode === "plan") {
-    const {baseCommit, files, gates} = selection();
+    const {baseCommit, files, gates, repositoryTests} = selection();
     // Package tests run for the affected packages only; --full and changes outside packages run every package.
     const workspace = gates.js && !full ? readWorkspacePackages(repoRoot) : null;
     const packages = workspace && affectedPackages(files, workspace, packageReferences(repoRoot, workspace));
-    // The JavaScript gate runs the affected packages' tests and every repository check, then these proofs.
-    const javascript = gates.js ? {needs: ["postgres", "engine", "desktop"], packages: packages ?? "all", proofs: ["self-host-native", "accounts", ...desktopProofTags().required]} : null;
+    // The JavaScript gate runs the affected packages' tests and the selected repository tests, then these proofs.
+    const javascript = gates.js ? {needs: ["postgres", "engine", "desktop"], packages: packages ?? "all", repositoryTests, proofs: ["self-host-native", "accounts", ...desktopProofTags().required]} : null;
     console.log(JSON.stringify({base, baseCommit, files, gates, javascript}, null, 2));
     return;
   }
@@ -289,11 +298,11 @@ export async function verify(args) {
   try {
     if (mode === "pr") process.env.CARGO_INCREMENTAL = "0";
     desktopEnvironment = {...process.env, DOHC_TEST_ENGINE_BINARY: stagedEnginePath};
-    const {workflow, gates} = await measure("selection", () => {
+    const {workflow, gates, repositoryTests} = await measure("selection", () => {
       treeState = createTreeReader();
       const selected = selection();
       Object.assign(report, {baseCommit: selected.baseCommit, files: selected.files, requiredGates: selected.requiredGates, gates: selected.gates,
-        commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== ""});
+        repositoryTests: selected.repositoryTests, commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== ""});
       // A detached HEAD names no branch. symbolic-ref would fail there, and git() retries a failure.
       try { const ref = git(["rev-parse", "--symbolic-full-name", "HEAD"]); branch = ref.startsWith("refs/") ? ref : null; } catch { /* No branch. */ }
       recordTree("start");
@@ -336,7 +345,7 @@ export async function verify(args) {
         checkoutOwner.release();
         const outcome = await measure("queue", () => verifyThroughQueue({ root: queue, detach, checkpoint: () => cancellation.checkpoint(), submission: {
           head: report.commit, base: report.baseCommit, baseRef: base, scope: report.scope, full,
-          gates, branch, checkout: repoRoot, requester: { pid: process.pid } } }));
+          gates, branch, checkout: repoRoot, ownerName, requester: { pid: process.pid } } }));
         report.queue = outcome;
         try {
           const receipt = JSON.parse(readLog(outcome.result ?? "") || "{}");
@@ -350,6 +359,7 @@ export async function verify(args) {
         report.verdict = "PASS";
         return report;
       }
+      if (inline && hostQueue) console.log("[verification] This inline gate runs outside the queue's turns between owners. pnpm verify:pr without --inline takes a fair turn.");
       // Identify this process before publishing a ticket; no lookup may delay admission.
       const tickets = !grant && resolveBuildBudget() ? ticketEvidence({output, checkout: repoRoot, commit: report.commit,
         producer: await measure("producer-identity", () => processIdentity()), persist: save}) : null;
@@ -491,7 +501,7 @@ export async function verify(args) {
         // escalation before database cleanup, without a competing parent timer.
         try {
           await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
-            () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, changed: full ? null : report.files,
+            () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, changed: full ? null : report.files, repositoryTests, full,
               beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled), stop: cancellation,
               runProofs: checkpoint => integrationProofs(env, checkpoint) }));
         } finally {
@@ -577,6 +587,7 @@ export async function verify(args) {
       const rerun = report.verdict === "FAIL" ? [...new Set(failed.map(rerunCommand).filter(Boolean))] : [];
       if (rerun.length) report.rerun = rerun;
       save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
+      if (report.repositoryTests === "test:repo:tree") console.log("[verification] repository tests: tree set only (no tooling change). --full runs every repository test.");
       if (report.stopped?.notRun.length) console.log(`[verification] Stopped after ${report.stopped.after} failed. These steps did not finish, so coverage is partial (--keep-going runs them):\n${report.stopped.notRun.map(name => `  ${name}`).join("\n")}`);
       if (report.slowest.length) console.log(`[verification] slowest tests:\n${report.slowest.slice(0, 5).map(row => `  ${row.seconds}s ${row.step}: ${row.test}`).join("\n")}`);
       if (flaky.length) console.log(`[verification] ${flaky.length} flaky test(s) passed only on retry. Each one is a defect to fix:\n${flaky.map(row => `  ${row.step}: ${row.test}${row.passedAlone ? " (failed both tries, passed alone)" : ""}`).join("\n")}`);

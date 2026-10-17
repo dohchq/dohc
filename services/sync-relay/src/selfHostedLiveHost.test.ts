@@ -4,8 +4,9 @@ import {createHash} from "node:crypto";
 import {basename, join} from "node:path";
 import {tmpdir} from "node:os";
 import {afterEach, expect, it, vi} from "vitest";
-import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
+import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHostedLiveHost";
 import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
+import {fenceAccount, initializeAccountDeletion} from "./storage/accountDeletion";
 import type {ServiceHostedSet} from "./serviceLiveHost";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
@@ -16,12 +17,15 @@ import {serviceHostDocumentEnabled} from "./storage/serviceHostEnrollment";
 import type {StorageContext} from "./storage/context";
 
 // While `error` is set, opening a divergence marker fails, as on a full disk.
-// `synced` counts the flushes of marker files.
-const markerFailure = vi.hoisted(() => ({error: undefined as Error | undefined, synced: 0}));
+// While `hold` is set, opening one waits for its release. `synced` counts the flushes of marker files.
+const markerFailure = vi.hoisted(() => ({error: undefined as Error | undefined, synced: 0,
+  hold: undefined as {entered(): void; release: Promise<void>} | undefined}));
 vi.mock("node:fs/promises", async importOriginal => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {...actual, open: async (...args: Parameters<typeof actual.open>) => {
     if (!String(args[0]).endsWith(".diverged")) return actual.open(...args);
+    const hold = markerFailure.hold;
+    if (hold) {markerFailure.hold = undefined; hold.entered(); await hold.release;}
     if (markerFailure.error) throw markerFailure.error;
     const handle = await actual.open(...args), sync = handle.sync.bind(handle);
     return Object.assign(handle, {sync: async () => {await sync(); markerFailure.synced++;}});
@@ -29,7 +33,7 @@ vi.mock("node:fs/promises", async importOriginal => {
 });
 
 const cleanup: Array<() => Promise<void>> = [];
-afterEach(async () => {Object.assign(markerFailure, {error: undefined, synced: 0}); vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
+afterEach(async () => {Object.assign(markerFailure, {error: undefined, synced: 0, hold: undefined}); vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
 type Configuration = {workspaces: unknown[]; activation: {targets: unknown[]}; hostId: string; instanceId: string};
 type Hosted = ServiceHostedSet["documents"][number];
 type Workspace = ServiceHostedSet["workspaces"][number];
@@ -107,6 +111,13 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
       attached.delete(workspaceId); events.push(`detach ${workspaceId}`);
       return true;
     });
+    // Detaches at once, settling nothing. The supervisor removes the stores.
+    const deleteWorkspaces = vi.fn(async (workspaceIds: readonly string[]) => {
+      for (const workspaceId of workspaceIds) {
+        events.push(`delete ${workspaceId} store=${existsSync(join(data, storeName(workspaceId)))}`);
+        attached.delete(workspaceId); diverged.delete(workspaceId); held = held.filter(row => row.workspaceId !== workspaceId);
+      }
+    });
     // A failed detach leaves the diverged workspace attached.
     running = {holds, attached, diverge(workspaceId, detached) {
       diverged.set(workspaceId, attached.get(workspaceId)!);
@@ -114,7 +125,7 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     }};
     // Its replica had its chance to retire the document once it is attached and no longer hosts it.
     const pulledAfterDeparture = (document: Document) => attached.has(document.workspaceId) && !holds(document);
-    return {invalidated: controller.signal, close, update, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, onEvent: () => () => undefined,
+    return {invalidated: controller.signal, close, update, deleteWorkspaces, retains, pulledAfterDeparture, drained, detachDrained, isDocumentReady, onEvent: () => () => undefined,
       blocked: (document: Document) => holds(document) ? blocked.get(document.objectId) : undefined,
       unblock: (document: Document) => holds(document) && blocked.delete(document.objectId),
       diverged: () => [...diverged].map(([workspaceId, root]) => ({workspaceId, root}))} as never;
@@ -156,7 +167,12 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
       VALUES (?,?,'user','editor',NULL,'edit',1,'active',1,NULL,NULL)`).run(options.grantId ?? `${shareId}-edit`, shareId);
   };
   const enrollment = (path = binding.currentPath) => f.storage.readServiceHostEnrollment(scope.workspaceId, path);
-  return {...f, host, history, data, starts, startHost, input, add, share, moment, waitStarted, waitUpdate, waitPasses, onError, frameChanges, updates, pending, attachedAfter, enrollment, events,
+  // Fences the owner's account for deletion, as the deletion route does first, and returns what it deletes.
+  const fence = (ownerUserId = "owner-1") => {
+    initializeAccountDeletion(f.storage as StorageContext, "fence-key");
+    return fenceAccount(f.storage as StorageContext, "fence-key", ownerUserId, `${ownerUserId}@dohc.test`).manifest!;
+  };
+  return {...f, host, history, data, starts, startHost, input, add, share, moment, waitStarted, waitUpdate, waitPasses, onError, frameChanges, updates, pending, attachedAfter, enrollment, events, fence,
     refusal, peak: () => peak, failNextUpdate(error: Error) {failUpdate = error;},
     /** Refuses every update that wants the path. */
     refuseAttach(path: string | undefined) {refusedPath = path;},
@@ -928,4 +944,121 @@ it("reaches stopped documents past a page of ones that stay and keeps every stor
   expect(Math.max(...f.updates.map(update => update.workspaces.length))).toBeLessThanOrEqual(64);
   expect(await readFile(join(f.data, last, "marker"), "utf8")).toBe(last);
   expect(existsSync(join(f.data, storeName(workspaces[0]!)))).toBe(true);
+});
+
+// Proves: with no session host running, deleting an account removes each of
+// its workspace identities' hosted stores, with their parked live state, and
+// a diverged store's marker, idempotently. Every other store stays.
+it("removes a deleted account's hosted stores and markers while no session host runs, idempotently", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-deleted-live-root-"));
+  cleanup.push(() => rm(root, {recursive: true, force: true}));
+  const current = {workspaceId: "deleted-workspace", replicationEpoch: "epoch", streamIdentity: "stream"};
+  const earlier = {...current, replicationEpoch: "epoch-0", streamIdentity: "stream-0"};
+  for (const row of [current, earlier]) {
+    const store = join(root, storeName(row.workspaceId, row.replicationEpoch, row.streamIdentity));
+    await mkdir(store); await writeFile(join(store, "replica.sqlite"), "parked live state");
+  }
+  await writeFile(join(root, `${storeName(current.workspaceId)}.diverged`), JSON.stringify({workspaceId: current.workspaceId}));
+  const kept = [storeName("workspace-2"), `${storeName("workspace-2")}.diverged`, "automations"];
+  await mkdir(join(root, kept[0]!)); await writeFile(join(root, kept[1]!), "{}"); await mkdir(join(root, kept[2]!));
+  await deleteSelfHostedWorkspaceRoots(root, namespace, [current, earlier]);
+  await deleteSelfHostedWorkspaceRoots(root, namespace, [current, earlier]);
+  expect((await readdir(root)).sort()).toEqual(kept.sort());
+});
+
+// Proves: once its owner's account is fenced for deletion, no hosted set names
+// the account's documents, hosted or departing, so no pass settles them
+// against a feed the fence refuses. Its workspace detaches without draining,
+// and another owner's document stays hosted.
+it("keeps a deleted account's hosted and departing documents out of the hosted set", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  const workspaceId = "workspace-2", ownerUserId = "owner-2", shareId = "share-2", path = "docs/other.md";
+  f.storage.claimWorkspace({workspaceId, ownerUserId, createdAtMs: 1});
+  f.storage.claimWorkspaceIdentity({workspaceId, replicationEpoch: "epoch-2", streamIdentity: "stream-2"});
+  f.share(shareId, ["docs"], {workspaceId, ownerUserId});
+  f.moment(path, "second-owner-object", workspaceId);
+  f.storage.enrollServiceHostDocument({...f.input, workspaceId, ownerUserId, shareId, path});
+  f.add();
+  await f.waitUpdate(["docs/a.md", "docs/b.md", path]);
+  // A paused sibling its replica has not let go yet.
+  f.pending.add("object-b");
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, path: "docs/b.md", enabled: false});
+  await vi.waitFor(() => expect(f.updates.at(-1)!.departing.map(row => row.path)).toEqual(["docs/b.md"]), {timeout: 10_000});
+  const before = f.updates.length;
+  f.fence();
+  await vi.waitFor(() => expect(f.updates.at(-1)!.workspaces.map(row => row.workspaceId)).toEqual([workspaceId]), {timeout: 10_000});
+  await f.waitPasses();
+  const named = (update: ServiceHostedSet) => [...update.workspaces, ...update.documents, ...update.departing].filter(row => row.workspaceId === scope.workspaceId);
+  expect(f.updates.length).toBeGreaterThan(before);
+  expect(f.updates.slice(before).flatMap(named)).toEqual([]);
+  expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual([path]);
+  expect(f.attachedAfter.at(-1)).toEqual([workspaceId]);
+  expect(f.events.filter(event => event.startsWith("detach"))).toEqual([]);
+  expect(f.onError).not.toHaveBeenCalled();
+});
+
+// Proves: deleting an account removes, on a running host, every hosted store
+// of its workspaces with the live state parked there, an earlier identity's
+// drained store, and a diverged store's marker. The daemon detaches each
+// workspace while its store is still there. Nothing writes them again, and
+// another owner's store stays.
+it("removes a deleted account's hosted stores, parked state and markers on a running host", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  const sibling = "workspace-3", path = "docs/other.md";
+  f.storage.claimWorkspace({workspaceId: sibling, ownerUserId: "owner-1", createdAtMs: 1});
+  f.storage.claimWorkspaceIdentity({workspaceId: sibling, replicationEpoch: "epoch", streamIdentity: "stream"});
+  f.share("share-3", ["docs"], {workspaceId: sibling});
+  f.moment(path, "sibling-object", sibling);
+  f.storage.enrollServiceHostDocument({...f.input, workspaceId: sibling, shareId: "share-3", path});
+  await vi.waitFor(() => expect(f.attachedAfter.at(-1)).toEqual([scope.workspaceId, sibling]), {timeout: 10_000});
+  const store = join(f.data, storeName(scope.workspaceId)), marker = `${store}.diverged`, siblingStore = join(f.data, storeName(sibling));
+  const earlier = join(f.data, storeName(scope.workspaceId, "epoch-0", "stream-0")), other = join(f.data, storeName("workspace-2"));
+  await writeFile(join(store, "replica.sqlite"), "parked live state");
+  for (const directory of [earlier, other]) {await mkdir(directory); await writeFile(join(directory, "replica.sqlite"), "drained");}
+  f.diverge();
+  await vi.waitFor(() => {f.host.reconcile(); expect(existsSync(marker)).toBe(true);}, {timeout: 10_000});
+  f.onError.mockClear();
+  const manifest = f.fence();
+  await f.host.deleteWorkspaces([...manifest.workspaces, {workspaceId: scope.workspaceId, replicationEpoch: "epoch-0", streamIdentity: "stream-0"}]);
+  expect(f.events.filter(event => event.startsWith("delete")).sort()).toEqual([`delete ${scope.workspaceId} store=true`, `delete ${sibling} store=true`]);
+  for (const removed of [store, marker, siblingStore, earlier]) expect(existsSync(removed)).toBe(false);
+  expect(f.host.diverged(f.enrollment()!)).toBe(false);
+  await f.waitPasses();
+  expect((await readdir(f.data))).toEqual([basename(other)]);
+  expect(f.updates.at(-1)!.workspaces).toEqual([]);
+  expect(f.onError).not.toHaveBeenCalled();
+});
+
+// Proves: a divergence marker still waiting to be written is not written once
+// its store was deleted with its account.
+it("drops a deleted store's divergence marker that could not be written yet", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  const store = join(f.data, storeName(scope.workspaceId));
+  markerFailure.error = new Error("no space left on device");
+  f.diverge();
+  await vi.waitFor(() => {f.host.reconcile(); expect(f.onError).toHaveBeenCalledWith(expect.objectContaining({cause: markerFailure.error}));}, {timeout: 10_000});
+  await f.host.deleteWorkspaces(f.fence().workspaces);
+  markerFailure.error = undefined;
+  await f.waitPasses();
+  expect(markerFailure.synced).toBe(0);
+  expect(existsSync(store)).toBe(false); expect(existsSync(`${store}.diverged`)).toBe(false);
+});
+
+// Proves: a deletion waits for the reconciliation writing a divergence marker,
+// so that marker is not written after the deletion removed the store.
+it("waits for a divergence marker being written before deleting its store", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  const store = join(f.data, storeName(scope.workspaceId)), entered = deferred(), release = deferred();
+  markerFailure.hold = {entered: entered.resolve, release: release.promise};
+  f.diverge(); f.host.reconcile();
+  await entered.promise;
+  const deleting = f.host.deleteWorkspaces(f.fence().workspaces);
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    expect(f.events.filter(event => event.startsWith("delete"))).toEqual([]);
+  } finally {release.resolve();}
+  await deleting;
+  await f.waitPasses();
+  expect(markerFailure.synced).toBe(1);
+  expect(existsSync(store)).toBe(false); expect(existsSync(`${store}.diverged`)).toBe(false);
 });

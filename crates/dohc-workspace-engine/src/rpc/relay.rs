@@ -439,7 +439,9 @@ pub(super) fn sharing_declined_json(
 fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError> {
     Ok(match outcome {
         RelayOperationOutcome::Sync(outcome) => sync_outcome_json(outcome),
-        RelayOperationOutcome::CursorCommitted { sharing_declined } => json!({
+        RelayOperationOutcome::CursorCommitted {
+            sharing_declined, ..
+        } => json!({
             "committed": true,
             "sharingDeclined": sharing_declined_json(sharing_declined),
         }),
@@ -1141,7 +1143,10 @@ impl EngineService {
         }
         // A cursor commit can be what makes enrollment ready, as a push can.
         let (_, declined) = self.originate_live_sessions(ctx, &open).await?;
-        if let RelayOperationOutcome::CursorCommitted { sharing_declined } = &mut outcome {
+        if let RelayOperationOutcome::CursorCommitted {
+            sharing_declined, ..
+        } = &mut outcome
+        {
             sharing_declined.extend(declined);
             if reconcile_collections && !share_view {
                 self.collections_changed(ctx, &open).await?;
