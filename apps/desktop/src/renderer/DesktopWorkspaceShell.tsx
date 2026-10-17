@@ -2578,6 +2578,7 @@ export function DesktopWorkspaceShell(props: {
   const tabLabels = useMemo(() => new Map([...knownTabLabels, ...chatEditors.titles,
     ...dataCollections.flatMap(table => table.datasetPath === null ? [] : [[transactionalCollectionTabPath(table.datasetPath, table.tableId), table.name] as const]),
   ]), [knownTabLabels, chatEditors.titles, dataCollections]);
+  const fileEntries = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
   // The chat list lives in the left side panel's Chats view.
   const openChatsNavigator = useCallback(() => {
     mutateWb((state) => showView(state, "chats"));
@@ -3865,12 +3866,16 @@ export function DesktopWorkspaceShell(props: {
   // routes through it (onMenuCommand below) — one definition per action.
   const commandContext = useMemo<CommandContext>(
     () => ({
-      isShareView,
-      shareViewWritable,
+      // A damaged marker's grant cannot be read, so it names no level.
+      // These are the renderer's latest access facts, so until the registry the
+      // Explorer menu reads catches up, the two menus can differ either way.
+      shareView: isShareView
+        ? { access: shareViewDamaged ? null : shareAccess ?? null, ended: shareViewEnded }
+        : null,
       activeDocumentKind: activeDocumentPath ? fileKindForPath(activeDocumentPath).displayKind : null,
       pinnedApps,
     }),
-    [isShareView, shareViewWritable, activeDocumentPath, pinnedApps],
+    [isShareView, shareViewDamaged, shareAccess, shareViewEnded, activeDocumentPath, pinnedApps],
   );
   const commandHandlers = useMemo<CommandHandlers>(
     () => ({
@@ -5364,6 +5369,7 @@ export function DesktopWorkspaceShell(props: {
                       activeTab={tabPath}
                       activeTabDirty={!!tabPath && dirtyPaths.has(tabPath)}
                       tabLabels={tabLabels}
+                      files={fileEntries}
                       recoveryPaths={recoveryPaths}
                       groupNumber={groupIndex + 1}
                       onActivate={activateEditorTab}

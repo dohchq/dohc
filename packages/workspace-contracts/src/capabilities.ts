@@ -30,6 +30,19 @@ function capability(description: string, exposure: {
 }
 
 export const CAPABILITIES = {
+  "settings.user.read": capability("Read this computer's user settings.", {ipc: ["getUserSettings"]}),
+  "settings.user.reload": capability("Reload and apply this computer's user settings file.", {ipc: ["reloadUserSettings"]}),
+  "settings.user.write": capability("Save changes to this computer's user settings.", {ipc: ["setUserSettings"]}),
+  "app.pin.set": capability("Pin or unpin an app in this computer's sidebar.", {ipc: ["setAppPinned"]}),
+  "settings.user.reset": capability("Reset this computer's user settings.", {ipc: ["resetUserSettings"]}),
+  "settings.user.path.read": capability("Read the path of this computer's user settings file.", {ipc: ["getUserSettingsFilePath"]}),
+  "settings.user.file.open": capability("Open this computer's user settings file in the system editor.", {ipc: ["openUserSettingsFile"]}),
+  "settings.workspace.file.open": capability("Open the admitted workspace's settings file in the system editor.", {ipc: ["openWorkspaceSettingsFile"]}),
+  "settings.workspace.read": capability("Read the admitted workspace's settings.", {ipc: ["getWorkspaceSettings"]}),
+  "settings.workspace.write": capability("Save a patch to the admitted workspace's settings.", {ipc: ["setWorkspaceSettings"]}),
+  "settings.workspace.reset": capability("Reset the admitted workspace's settings.", {ipc: ["resetWorkspaceSettings"]}),
+  "workspace.ui.read": capability("Read saved workbench state for the admitted workspace.", {ipc: ["getWorkspaceUiState"]}),
+  "workspace.ui.write": capability("Save workbench state for the admitted workspace.", {ipc: ["setWorkspaceUiState"]}),
   "file.create": capability("Create a workspace file, optionally refusing an existing path.", {ipc: ["createWorkspaceFile"]}),
   "file.zip.export": capability("Export workspace files to a user-selected zip archive.", {ipc: ["exportWorkspaceZip"]}),
   "document.file.export": capability("Export supplied document content to a user-selected file.", {ipc: ["exportDocumentFile"]}),

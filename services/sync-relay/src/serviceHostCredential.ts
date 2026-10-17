@@ -27,15 +27,21 @@ export function serviceHostReplicationRoute(input: {workspaceId: string; method:
     /^\d+$/.test(suffix[2]!) && Number.isSafeInteger(Number(suffix[2])) && input.method === "GET";
 }
 
+/** The same replication routes, under `/sync/:workspaceId/hosted/`: the service host's scoped feed. */
+export function serviceHostFeedRoute(input: {workspaceId: string; method: string; pathname: string}): boolean {
+  const parts = input.pathname.split("/");
+  return parts[3] === "hosted" && serviceHostReplicationRoute({...input, pathname: [...parts.slice(0, 3), ...parts.slice(4)].join("/")});
+}
+
 /**
- * A service token grants ordinary replication only, never account or share
- * administration, and only while an enabled enrollment matches the
+ * A service token grants replication and the scoped feed only, never account
+ * or share administration, and only while an enabled enrollment matches the
  * workspace's current owner and identity.
  */
 export function authorizeServiceHostReplication(storage: SyncRelayStorage, input: ServiceHostCredentialKey & {
   workspaceId: string; bearer: string; method: string; pathname: string;
 }): string | null {
-  if (!/^dohc-service-v1\.[A-Za-z0-9_-]{43}$/.test(input.bearer) || !serviceHostReplicationRoute(input)) return null;
+  if (!/^dohc-service-v1\.[A-Za-z0-9_-]{43}$/.test(input.bearer) || !(serviceHostReplicationRoute(input) || serviceHostFeedRoute(input))) return null;
   const workspace = storage.currentServiceHostWorkspace(input.workspaceId);
   if (!workspace) return null;
   const supplied = Buffer.from(input.bearer), expected = Buffer.from(deriveServiceHostBearer(workspace, input));

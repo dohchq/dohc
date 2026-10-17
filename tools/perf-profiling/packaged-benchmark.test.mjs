@@ -1,3 +1,4 @@
+import './document-size.test.mjs';
 import './go-to-index-fixture.test.mjs';
 import './go-to-packaged-fixture.test.mjs';
 import test from 'node:test';

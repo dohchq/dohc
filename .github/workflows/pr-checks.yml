@@ -186,6 +186,15 @@ jobs:
               # storage migrations.
               - 'crates/yrs-interop/scripts/**'
               - 'crates/dohc-engine-storage/src/migration.rs'
+              # go-to-index-benchmark.test.mjs bundles the Go to ranker and
+              # the three files it imports, under their packages' tsconfigs.
+              - 'apps/desktop/src/renderer/workbench/quick-open-rank.ts'
+              - 'apps/desktop/src/renderer/path.ts'
+              - 'packages/security-contract/src/visibilityPolicy.ts'
+              - 'packages/workspace-contracts/src/kinds.ts'
+              - 'apps/desktop/tsconfig.json'
+              - 'packages/security-contract/tsconfig.json'
+              - 'packages/workspace-contracts/tsconfig.json'
 
   javascript:
     name: typecheck + tests

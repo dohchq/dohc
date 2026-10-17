@@ -237,6 +237,12 @@ export function readError(error: unknown): ReadError {
   if (name === "ReservedWorkspaceIdError") {
     return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
   }
+  if (name === "DaemonRefusalError" && code === "INVALID_PARAMS" && [
+    "Each choice is one line of at most 200 characters.",
+    "Each choice appears once.",
+  ].includes(message)) {
+    return { words: message, mapped: false, cause: text };
+  }
   const plain = name === "Error" && code === undefined;
   const entry = ERROR_WORDS[name];
   const lead = message.split(": ")[0];

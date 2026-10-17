@@ -2,9 +2,10 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-const fixture = vi.hoisted(() => ({ spawn: vi.fn(), query: vi.fn(), end: vi.fn(), close: vi.fn() }));
+const fixture = vi.hoisted(() => ({ spawn: vi.fn(), query: vi.fn(), release: vi.fn(), migrate: vi.fn(), end: vi.fn(), close: vi.fn() }));
 vi.mock("node:child_process", () => ({ spawn: fixture.spawn }));
-vi.mock("pg", () => ({ Pool: class { query = fixture.query; end = fixture.end; } }));
+vi.mock("pg", () => ({ Pool: class { connect = async () => ({ query: fixture.query, release: fixture.release }); end = fixture.end; } }));
+vi.mock("../../../scripts/lib/apply-migrations.mjs", () => ({ applyMigrations: fixture.migrate }));
 vi.mock("../e2e/smtpCapture", () => ({ startSmtpCapture: async () => ({ port: 2525, close: fixture.close }) }));
 import { startAccountServer } from "../e2e/harness";
 
@@ -23,6 +24,22 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async () => Response.json({ ok: true })));
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.resetAllMocks(); });
+
+it("applies every migration on the client that holds the migration lock", async () => {
+  const steps: string[] = [];
+  fixture.query.mockImplementation(async (sql: string) => { steps.push(sql); });
+  fixture.migrate.mockImplementation(async (client: { query: unknown }) => { steps.push(client.query === fixture.query ? "migrate on that client" : "migrate elsewhere"); });
+  fixture.release.mockImplementation(() => { steps.push("release"); });
+  const server = await startAccountServer({ port: 12345 });
+  expect(steps).toEqual([
+    "select pg_advisory_lock(hashtext('dohc_migrations'))",
+    "migrate on that client",
+    "select pg_advisory_unlock(hashtext('dohc_migrations'))",
+    "release",
+  ]);
+  expect(fixture.spawn).toHaveBeenCalledOnce();
+  await server.close();
+});
 
 it("waits through slow readiness beyond the former 20 second deadline", async () => {
   vi.useFakeTimers();
