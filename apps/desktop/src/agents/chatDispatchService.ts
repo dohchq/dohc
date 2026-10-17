@@ -366,7 +366,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     try {
       await options.publishPresence?.(input);
     } catch {
-      // Presence is cosmetic. The dispatch ledger and failure notes carry truth.
+      // Presence is cosmetic. The dispatch ledger and run records carry truth.
     }
   }
 
@@ -436,8 +436,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       run.runId,
       durableDispatchRequest,
     );
-    if (current?.failureNotePosted) return;
-    await dispatch.markFailureNotePosted(run.runId, durableDispatchRequest);
+    if (current?.failureHandled) return;
+    await dispatch.markFailureHandled(run.runId, durableDispatchRequest);
   }
 
   async function clearLiveAttribution(live: LiveRun): Promise<void> {
@@ -608,7 +608,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         let outcome: RunOutcome;
         if (saved !== "exited") {
           outcome = saved;
-        } else if (run.failureNotePosted) {
+        } else if (run.failureHandled) {
           // The no-reply check already handled this run.
           outcome = "no-reply";
         } else if (runMessageLinkPending(workspace, runId)) {
@@ -1088,7 +1088,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         claim.run.runId,
         durableDispatchRequest,
       );
-      if (linked.length === 0 && !claim.run.failureNotePosted) {
+      if (linked.length === 0 && !claim.run.failureHandled) {
         await markRunFailureHandled(workspace, claim.run).catch(reportError);
       }
       await oweRunNotice(workspace, claim.run.runId);
@@ -1124,15 +1124,15 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         durableDispatchRequest,
       );
       if (linked.length > 0) {
-        if (!recovery.run.failureNotePosted) {
-          await dispatch.markFailureNotePosted(
+        if (!recovery.run.failureHandled) {
+          await dispatch.markFailureHandled(
             recovery.run.runId,
             durableDispatchRequest,
           );
         }
         continue;
       }
-      if (!recovery.run.failureNotePosted) {
+      if (!recovery.run.failureHandled) {
         await markRunFailureHandled(workspace, recovery.run).catch(reportError);
       }
       if (recovery.attemptCount < 2) {
@@ -1328,7 +1328,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       } catch (error) {
         reportError(error);
         // Mark the stopped run handled so app-quit recovery never retries it.
-        await dispatch.markFailureNotePosted(
+        await dispatch.markFailureHandled(
           live.claim.run.runId,
           durableDispatchRequest,
         );

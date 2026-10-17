@@ -1144,7 +1144,7 @@ impl ActorHandle {
         .await
     }
 
-    pub async fn chat_dispatch_mark_failure_note_posted(
+    pub async fn chat_dispatch_mark_failure_handled(
         &self,
         workspace_id: String,
         run_id: String,
@@ -1155,7 +1155,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 chats
-                    .mark_failure_note_posted(&workspace_id, &run_id, &NoFaults)
+                    .mark_failure_handled(&workspace_id, &run_id, &NoFaults)
                     .map_err(RuntimeError::from)
             }
         })

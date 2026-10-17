@@ -3312,6 +3312,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("links.sql"),
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 60,
+        id: "v2-agent-run-failure-handled",
+        sql: "ALTER TABLE agent_run_records RENAME COLUMN failure_note_posted TO failure_handled;",
+        sets_user_version: None,
+    },
 ];
 
 /// A hosted document that left the scope parks instead of losing its state.
@@ -4323,6 +4329,10 @@ mod tests {
                 "v2-persisted-links",
                 "605a6d01c45ddce5f97465428a20e9f5b2d3185f3e9da2c550a1072521062f44",
             ),
+            (
+                "v2-agent-run-failure-handled",
+                "56e87a5adcc33c2af1f301c3c25c91fe7c6b1c738f34e35ccd629080d89bcc50",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
@@ -4333,6 +4343,77 @@ mod tests {
                 "the {id} migration changed after it shipped"
             );
         }
+    }
+
+    #[test]
+    fn agent_run_failure_handled_upgrade_preserves_values() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-agent-run-failure-handled");
+        assert_eq!(BASELINE_MIGRATIONS[before - 1].ordinal, 59);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 60);
+        {
+            let mut conn = open_bare(&path);
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults)
+                .expect("previous store version");
+            conn.execute_batch(
+                "INSERT INTO agent_run_records
+                 (workspace_id,run_id,thread_id,trigger_message_id,command,started_at_ms,failure_note_posted)
+                 VALUES ('ws','unhandled','thread','trigger-1','agent',10,0),
+                        ('ws','handled','thread','trigger-2','agent',20,1);",
+            )
+            .expect("previous run values");
+        }
+
+        let mut conn = open_bare(&path);
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("upgrade"),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let runs = conn
+            .prepare("SELECT run_id, failure_handled FROM agent_run_records ORDER BY started_at_ms")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            runs,
+            vec![
+                ("unhandled".to_owned(), false),
+                ("handled".to_owned(), true)
+            ]
+        );
+        let old_columns: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('agent_run_records') WHERE name='failure_note_posted'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_columns, 0);
+        conn.execute_batch(
+            "INSERT INTO agent_run_records
+             (workspace_id,run_id,thread_id,trigger_message_id,command,started_at_ms)
+             VALUES ('ws','new','thread','trigger-3','agent',30);",
+        )
+        .expect("default remains available");
+        assert!(
+            !conn
+                .query_row(
+                    "SELECT failure_handled FROM agent_run_records WHERE run_id='new'",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("reopen"),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
     }
 
     #[test]

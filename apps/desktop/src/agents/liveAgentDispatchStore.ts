@@ -276,14 +276,14 @@ export function createLiveAgentDispatchStore(
         ),
       );
     },
-    markFailureNotePosted: async (
+    markFailureHandled: async (
       runId,
       requestOptions?: AgentDispatchRequestOptions,
     ) =>
       (await invoke(
         async (adapter) =>
           await adapter.request(
-            CHATS_METHOD.dispatchMarkFailureNotePosted,
+            CHATS_METHOD.dispatchMarkFailureHandled,
             { runId },
             requestOptions,
           ),

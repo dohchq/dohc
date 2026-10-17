@@ -1324,7 +1324,7 @@ export interface AgentRunRecord {
   exitCode?: number;
   failureReason?: string;
   logPath?: string;
-  failureNotePosted: boolean;
+  failureHandled: boolean;
 }
 
 export interface AgentDispatchClaim {
@@ -1367,7 +1367,7 @@ export interface AgentDispatchStore {
   failRun(input: { runId: string; exitCode?: number; reason: string }): AgentRunRecord;
   listPending(workspaceId: WorkspaceId): AgentDispatchRecord[];
   openRuns(workspaceId: WorkspaceId): AgentDispatchClaim[];
-  markFailureNotePosted(runId: string): AgentRunRecord;
+  markFailureHandled(runId: string): AgentRunRecord;
   recentDispatchCount(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;

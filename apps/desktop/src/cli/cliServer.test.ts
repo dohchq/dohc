@@ -3558,7 +3558,7 @@ describe("CLI socket server", () => {
     if (!next) throw new Error("Expected next run");
     await dispatchStore.completeRun({ runId: next.run.runId, exitCode: 0 });
     expect((await show()).dispatch.lastRun).toEqual({ state: "completed", failureReason: null, exitCode: 0 });
-    await dispatchStore.markFailureNotePosted(next.run.runId);
+    await dispatchStore.markFailureHandled(next.run.runId);
     const noReply = { paused: null, lastRun: { state: "failed", failureReason: "no-reply", exitCode: 0 } };
     expect(await show()).toMatchObject({ dispatch: noReply, messages: before.messages });
     expect(await chat()).toMatchObject({ ok: true, dispatch: noReply });

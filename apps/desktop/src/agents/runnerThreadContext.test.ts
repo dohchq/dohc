@@ -135,7 +135,7 @@ describe("buildRunnerThreadContext", () => {
     const claim = await dispatchStore.store.claimNextPending(WORKSPACE_ID);
     if (!claim) throw new Error("Expected run");
     await dispatchStore.store.completeRun({ runId: claim.run.runId, exitCode: 0 });
-    await dispatchStore.store.markFailureNotePosted(claim.run.runId);
+    await dispatchStore.store.markFailureHandled(claim.run.runId);
     cliShowFixture.dispatch.lastRun = { state: "failed", failureReason: "no-reply", exitCode: 0 };
     await expect(buildRunnerThreadContext({
       dispatchStore: dispatchStore.store, store, workspaceId: WORKSPACE_ID, threadId: "th_1",

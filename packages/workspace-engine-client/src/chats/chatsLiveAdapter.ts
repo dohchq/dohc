@@ -959,8 +959,8 @@ export class ChatsLiveAdapter {
     );
   }
 
-  async markFailureNotePosted(runId: string): Promise<ChatRun> {
-    return this.request(CHATS_METHOD.dispatchMarkFailureNotePosted, { runId });
+  async markFailureHandled(runId: string): Promise<ChatRun> {
+    return this.request(CHATS_METHOD.dispatchMarkFailureHandled, { runId });
   }
 
   async recentDispatchCount(input: {

@@ -199,7 +199,7 @@ struct RunWire<'a> {
     trigger_message_id: &'a str,
     command: &'a str,
     started_at_ms: i64,
-    failure_note_posted: bool,
+    failure_handled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     ended_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,7 +219,7 @@ impl<'a> From<&'a AgentRunRecord> for RunWire<'a> {
             trigger_message_id: &run.trigger_message_id,
             command: &run.command,
             started_at_ms: run.started_at_ms,
-            failure_note_posted: run.failure_note_posted,
+            failure_handled: run.failure_handled,
             ended_at_ms: run.ended_at_ms,
             exit_code: run.exit_code,
             failure_reason: run.failure_reason.as_deref(),
@@ -730,7 +730,7 @@ impl EngineService {
         Ok(pause_json(&pause))
     }
 
-    pub(crate) async fn chats_dispatch_mark_failure_note_posted(
+    pub(crate) async fn chats_dispatch_mark_failure_handled(
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
@@ -741,8 +741,8 @@ impl EngineService {
         let cancellation = OperationCancellation::new(ctx);
         let run = Self::read_under_ctx(
             &cancellation,
-            "chats.dispatch.markFailureNotePosted",
-            open.actor.chat_dispatch_mark_failure_note_posted(
+            "chats.dispatch.markFailureHandled",
+            open.actor.chat_dispatch_mark_failure_handled(
                 open.workspace_id.clone(),
                 params.run_id,
                 cancellation.token(),
@@ -886,7 +886,7 @@ mod tests {
             exit_code: None,
             failure_reason: None,
             log_path: None,
-            failure_note_posted: false,
+            failure_handled: false,
         }
     }
 
@@ -926,7 +926,7 @@ mod tests {
                     "triggerMessageId": "message",
                     "command": "",
                     "startedAtMs": 10,
-                    "failureNotePosted": false,
+                    "failureHandled": false,
                 },
                 "chainDepth": 2,
             })
