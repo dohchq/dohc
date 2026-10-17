@@ -62,6 +62,7 @@ import type {
   WorkspaceFileMutationYDocPort,
 } from "./workspaceFileMutationOwner";
 import {
+  YDocSessionClosedError,
   isYDocPathNotInVersionError,
   isYDocRemovalInProgressError,
   isYDocSessionUnreleasedError,
@@ -921,15 +922,22 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           authorityId: owned.workspace.attachmentId, path: owned.path,
           source: arrivalSource(sender, input.sessionId), requestId: input.requestId, update: input.update,
         }, this.#localPersonId);
-        owned.provider.applyLocalUpdate(
-          input.update,
-          () => noteLocalEdit(owned.saveSeq, input.seq),
-          // Shared-view admission keeps its current contract until A2.
-          this.#isSharedView(owned.workspace)
-            ? { idempotencyKey: input.requestId, attribution: { actorKind: "human", onBehalfOf: person } }
-            : { idempotencyKey: input.requestId, actorOriginId: person,
-                attribution: { actorKind: "human", onBehalfOf: person, depth: 0 } },
-        );
+        try {
+          owned.provider.applyLocalUpdate(
+            input.update,
+            () => noteLocalEdit(owned.saveSeq, input.seq),
+            // Shared-view admission keeps its current contract until A2.
+            this.#isSharedView(owned.workspace)
+              ? { idempotencyKey: input.requestId, attribution: { actorKind: "human", onBehalfOf: person } }
+              : { idempotencyKey: input.requestId, actorOriginId: person,
+                  attribution: { actorKind: "human", onBehalfOf: person, depth: 0 } },
+          );
+        } catch (error) {
+          if (error instanceof YDocSessionClosedError) {
+            return { accepted: false, reason: "session-unavailable" };
+          }
+          throw error;
+        }
         return { accepted: true };
       },
     );

@@ -48,6 +48,9 @@ import { deleteWorkspacePathByHand } from "./workspaceFileMoves";
 import { EngineYDocSessionOwner } from "./engineYDocSessionOwner";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
+import { WILL_QUIT_BUDGET_MS } from "../shutdownBudgets";
+import { bindEngineYDoc, EngineYDocDeliveryRefusedError, type EngineYDocTransport } from "../renderer/collab/engineYDocProvider";
+import { flushTypingCheckpoints } from "./outageTypingRecovery";
 
 const WORKSPACE_ID = "engine-ydoc-session-test";
 const ATTACHMENT_ID = Symbol("test-workspace-attachment");
@@ -2173,7 +2176,7 @@ it.each(["quit", "renderer retirement"] as const)("%s releases a refused settle 
     } finally { recovered.destroy(); await reopened.close(); }
   } finally { editor.destroy(); }
 });
-it("keeps a quit lease reserved when durable eviction fails, then retries its release", async () => {
+it("keeps a quit lease reserved without repeating a failed eviction during quit", async () => {
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
   const editor = mirrorEditor(session);
   typeIntoBody(editor, "Typing that must survive a failed eviction.");
@@ -2195,8 +2198,11 @@ it("keeps a quit lease reserved when durable eviction fails, then retries its re
     expect(methodCount(YDOC_METHOD.evict)).toBe(1);
     expect(daemon.leases.size).toBe(1);
     blockEvict = false;
-    await expect(capture.settleAndCloseAllLiveSessions()).resolves.toBeUndefined();
-    expect(daemon.leases.size).toBe(0);
+    const closes = methodCount(YDOC_METHOD.close);
+    await expect(capture.settleAndCloseAllLiveSessions()).rejects.toThrow();
+    expect(methodCount(YDOC_METHOD.close)).toBe(closes);
+    expect(methodCount(YDOC_METHOD.evict)).toBe(1);
+    expect(daemon.leases.size).toBe(1);
     expect(await readFile(join(root, PATH), "utf8")).toBe("Outside bytes.");
   } finally { editor.destroy(); }
 });
@@ -2273,7 +2279,7 @@ it.each(["workspace close", "version switch", "stopped capture"] as const)(
   },
 );
 
-it("quit finishes within the injected budget without retrying refused closes at authority retirement", async () => {
+it("quit removes repeated refused closes and leaves the remaining shutdown budget", async () => {
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
   const editor = mirrorEditor(session);
   typeIntoBody(editor, "Typing before the deadline.");
@@ -2284,6 +2290,11 @@ it("quit finishes within the injected budget without retrying refused closes at 
   await owner.open({ sender: { id: 1 }, generation: 1, sessionId: "quit", workspaceId: WORKSPACE_ID,
     authorityId: ATTACHMENT_ID, path: PATH, openSession: async () => ({ session, value: null }) });
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  // Gate 140 observed about 400 ms for two closes. Model each close as
+  // 1/30 of the 6 s shutdown budget (200 ms), leaving 28/30 (5.6 s)
+  // for other cleanup. This checks repeated calls, not gate 140 causality.
+  const closeLatencyMs = WILL_QUIT_BUDGET_MS / 30;
+  const remainingBudgetMs = WILL_QUIT_BUDGET_MS - 2 * closeLatencyMs;
   const start = Date.now();
   const trace: string[] = [];
   let step = "owner.shutdown";
@@ -2292,7 +2303,7 @@ it("quit finishes within the injected budget without retrying refused closes at 
     beforeClose = delayClose;
     trace.push((Date.now() - start) + "ms " + step + ": ydoc.close");
     rpcStarted.resolve();
-    await new Promise(resolve => setTimeout(resolve, 10));
+    await new Promise(resolve => setTimeout(resolve, closeLatencyMs));
   };
   capture.beginShutdown();
   sessions.beginShutdown();
@@ -2311,7 +2322,7 @@ it("quit finishes within the injected budget without retrying refused closes at 
   let timer: ReturnType<typeof setTimeout>;
   const result = Promise.race([
     teardown.then(() => "complete"),
-    new Promise<string>(resolve => { timer = setTimeout(() => resolve("deadline at " + step), 50); }),
+    new Promise<string>(resolve => { timer = setTimeout(() => resolve("deadline at " + step), WILL_QUIT_BUDGET_MS); }),
   ]);
   let outcome: string | undefined;
   void result.then(value => { outcome = value; });
@@ -2320,16 +2331,120 @@ it("quit finishes within the injected budget without retrying refused closes at 
       await Promise.race([rpcStarted.promise, result]);
       if (outcome !== undefined) break;
       rpcStarted = Promise.withResolvers<void>();
-      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(closeLatencyMs);
     }
     expect(outcome, trace.join("\n")).toBe("complete");
     expect(methodCount(YDOC_METHOD.close)).toBe(2);
+    expect(WILL_QUIT_BUDGET_MS - (Date.now() - start)).toBe(remainingBudgetMs);
     expect(daemon.leases.size).toBe(0);
   } finally {
     clearTimeout(timer!);
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(WILL_QUIT_BUDGET_MS);
     await teardown;
     vi.useRealTimers();
+    editor.destroy();
+  }
+});
+
+it.each(["closed", "evicted"] as const)("preserves a renderer draft once after its capture session is %s", async mode => {
+  const sender = { id: 1, isDestroyed: () => false, send() {}, once() { return this; } };
+  const workspace = { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID };
+  let provider!: Awaited<ReturnType<typeof capture.openYDocSession>>;
+  const ipc = createEngineYDocSessionIpc({
+    localPersonId: () => "person-local",
+    sessionFor: () => ({ workspaceId: WORKSPACE_ID, generation: 1, isCurrent: () => true }),
+    acquireWorkspace: () => ({ workspace, assertCurrent() {}, release() {} }),
+    captureFor: () => ({ openYDocSession: async input => provider = await capture.openYDocSession(input) }),
+    ensureCaptureFor: async () => undefined, isSharedView: () => false,
+    resolveDocumentPath: async (_workspace, path) => path, onError() {},
+  });
+  const apply = vi.fn(async (update: Uint8Array, seq: number, lineageGeneration: number, requestId: string) => {
+    const result = ipc.applyUpdate(sender, { sessionId: "late-editor", update, seq, lineageGeneration, requestId });
+    if (!result.accepted) throw new EngineYDocDeliveryRefusedError(result.reason);
+  });
+  let seq = 0;
+  const transport: EngineYDocTransport = {
+    open: () => ipc.open(sender, { workspaceId: WORKSPACE_ID, sessionId: "late-editor", path: PATH }),
+    stageLocalUpdate: () => ++seq, applyLocalUpdate: apply,
+    onRemoteUpdate: () => () => undefined, onLineageReplacement: () => () => undefined,
+    acknowledgeLineageReplacement: async () => [], close: async () => undefined,
+  };
+  const recover = vi.fn();
+  const binding = await bindEngineYDoc(transport, undefined, { onDeliveryFailure: recover });
+  if (mode === "evicted") {
+    closeRefusal = wireRefusal("ydoc-unsettled-close");
+    capture.beginShutdown();
+  }
+  // The IPC owner remains open while capture independently retires its provider.
+  await provider.close();
+  expect(methodCount(YDOC_METHOD.evict)).toBe(mode === "evicted" ? 1 : 0);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    typeIntoBody(binding.doc!, "Keep this late typing as a draft.");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(recover).toHaveBeenCalledOnce();
+    expect(documentMarkdown(recover.mock.calls[0]![0])).toContain("Keep this late typing as a draft.");
+    expect(apply).toHaveBeenCalledOnce();
+  } finally {
+    const destroying = binding.destroy();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await destroying;
+    vi.useRealTimers();
+    await ipc.shutdown();
+  }
+});
+
+it("quit eviction waits for the active typing checkpoint writer and its queued retirement", async () => {
+  await capture.stop();
+  const writing = Promise.withResolvers<void>();
+  const finishWrite = Promise.withResolvers<void>();
+  const retiring = Promise.withResolvers<void>();
+  const finishRetirement = Promise.withResolvers<void>();
+  let notifyDeath!: (error: unknown) => void;
+  const writeCheckpoint = vi.fn(async () => { writing.resolve(); await finishWrite.promise; });
+  capture = createWorkspaceEngineCapture({
+    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions,
+    openRustYDocProviderSession: async options => {
+      notifyDeath = options.onSessionError!;
+      return { ...await openEngineYdocProviderSession(options), objectId: "checkpoint-object", versionId: "main" };
+    },
+    writeTypingCheckpoint: writeCheckpoint,
+    retireTypingCheckpoint: async () => { retiring.resolve(); await finishRetirement.promise; },
+    onError: context => captureErrors.push(context),
+  });
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
+  const editor = mirrorEditor(session);
+  const recording = Promise.withResolvers<void>();
+  const acknowledge = Promise.withResolvers<void>();
+  beforeRecordUpdate = async () => { recording.resolve(); await acknowledge.promise; };
+  typeIntoBody(editor, "Checkpoint typing acknowledged before quit.");
+  await recording.promise;
+  notifyDeath(transportLost());
+  await writing.promise;
+  acknowledge.resolve();
+  await session.settleNow();
+  const acknowledged = ydoc.recordedUpdates.length;
+  expect(acknowledged).toBeGreaterThan(0);
+  closeRefusal = wireRefusal("ydoc-unsettled-close");
+  capture.beginShutdown();
+  sessions.beginShutdown();
+  let completed = false;
+  const closing = session.close({ shuttingDown: true }).then(() => { completed = true; });
+  try {
+    await expect.poll(() => methodCount(YDOC_METHOD.evict)).toBe(1);
+    // The event-loop turn drains the close continuations while disk stays gated.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(completed).toBe(false);
+    finishWrite.resolve();
+    await retiring.promise;
+    expect(completed).toBe(false);
+    finishRetirement.resolve();
+    await closing;
+    expect(ydoc.recordedUpdates).toHaveLength(acknowledged);
+    await flushTypingCheckpoints(WORKSPACE_ID);
+  } finally {
+    acknowledge.resolve(); finishWrite.resolve(); finishRetirement.resolve();
+    await closing;
     editor.destroy();
   }
 });

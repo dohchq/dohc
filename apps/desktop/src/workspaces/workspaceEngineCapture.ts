@@ -1240,6 +1240,13 @@ export class YDocOpenRacedError extends Error {
   }
 }
 
+export class YDocSessionClosedError extends Error {
+  constructor(path: string, cause?: unknown) {
+    super(`Y.Doc session for ${path} is closed.`, cause === undefined ? {} : { cause });
+    this.name = "YDocSessionClosedError";
+  }
+}
+
 // The open refused, and its session was not released. The daemon reinserts a
 // refused close's entry with its lease held (ydoc_close_inner), so it may
 // still own this document — which makes every refusal that describes the disk
@@ -3033,10 +3040,7 @@ export function createWorkspaceEngineCapture(
       );
 
     const closedError = (cause?: unknown): Error =>
-      new Error(
-        `Y.Doc session for ${input.path} is closed.`,
-        cause === undefined ? {} : { cause },
-      );
+      new YDocSessionClosedError(input.path, cause);
 
     const executeWithReconnect = async <T>(
       operation: (session: EngineYdocProviderSession) => Promise<T>,
@@ -3383,8 +3387,10 @@ export function createWorkspaceEngineCapture(
             await releaseObligation.evict();
             releaseObligation = null;
           }
+          await flushCheckpoint();
           closed = true;
           unregisterCheckpoint();
+          await checkpointWriter.idle();
           recordedDoc.destroy();
           current = null;
           clearDeadYDocSession(deadSessionToken);
@@ -5091,12 +5097,25 @@ export function createWorkspaceEngineCapture(
             });
           }, delay);
         };
-        // The close was refused and an evict discharged it instead. Only the
-        // absent-head refusals below read it, and what it tells them is that
-        // the lineage holds content: the daemon refuses a prune-close for no
-        // other reason.
+        // The close was refused and eviction released the lease. The absent-head
+        // checks below must not treat that release as a successful settlement.
         let dischargedByEvict = false;
-        const closeEntry = async (
+        let closeInFlight: Promise<void> | null = null;
+        let quitClose: Promise<void> | null = null;
+        const closeEntry = (opts?: WorkspaceEngineYDocCloseOptions): Promise<void> => {
+          if (shuttingDown && quitClose) return quitClose;
+          const closing = closeInFlight ?? attemptCloseEntry(opts);
+          closeInFlight = closing;
+          if (shuttingDown) quitClose = closing;
+          const completed = (): void => {
+            // Also retain a renderer close that quit overtook while it waited.
+            if (shuttingDown) quitClose ??= closing;
+            if (closeInFlight === closing) closeInFlight = null;
+          };
+          void closing.then(completed, completed);
+          return closing;
+        };
+        const attemptCloseEntry = async (
           opts?: WorkspaceEngineYDocCloseOptions,
         ): Promise<void> => {
           await observationResync;
@@ -5202,8 +5221,8 @@ export function createWorkspaceEngineCapture(
               throw error;
             }
             // A quit cannot wait for another settle attempt. Orphans and
-            // cancelled writes also cannot settle. Eviction hands over pending
-            // text and keeps the durable lineage before releasing the lease.
+            // cancelled writes also cannot settle. Eviction journals pending
+            // text or preserves a recovered draft before releasing the lease.
             // Interactive close/switch failures keep their guard for retry.
             if (shuttingDown ||
                 ((liveEntry.orphaned || writeCancelled) && isYdocUnsettledCloseRefusal(error))) {
