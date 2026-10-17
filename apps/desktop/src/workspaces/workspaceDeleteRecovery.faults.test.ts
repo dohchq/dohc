@@ -7,7 +7,7 @@ import { createTestScratch } from "./testTemp";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, undoWorkspaceDelete, type PathChangeOptions } from "./workspaceFileMoves";
 
-const faults = vi.hoisted(() => ({ failRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false, beforePublish: undefined as undefined | ((target: string) => Promise<void>), copyTemps: [] as string[], copyTarget: "", sourceLimit: false, failRemove: false, beforeResume: undefined as undefined | (() => Promise<void>), modeCalls: [] as string[] }));
+const faults = vi.hoisted(() => ({ openError: "", opened: [] as string[], reads: [] as string[], recordSaves: 0, failRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false, beforePublish: undefined as undefined | ((target: string) => Promise<void>), copyTemps: [] as string[], copyTarget: "", sourceLimit: false, failRemove: false, beforeResume: undefined as undefined | (() => Promise<void>), modeCalls: [] as string[] }));
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
   return { ...actual,
@@ -28,12 +28,16 @@ vi.mock("node:fs/promises", async original => {
     },
     link: async (from: string, to: string) => {
       if (faults.failPlace && to.endsWith("rowless.txt")) throw new Error("placement refused");
-      if (faults.sourceLimit && !faults.copyTemps.includes(String(from))) throw Object.assign(new Error("link count limit"), { code: "EMLINK" });
+      if (faults.sourceLimit && String(to) === faults.copyTarget && !faults.copyTemps.includes(String(from))) throw Object.assign(new Error("link count limit"), { code: "EMLINK" });
       if (faults.copyOnly) throw Object.assign(new Error("cross-volume link"), { code: "EXDEV" });
       if (faults.copyTemps.includes(String(from))) await faults.beforePublish?.(to);
       return actual.link(from, to);
     },
     open: async (...args: Parameters<typeof actual.open>) => {
+      if (String(args[0]) === faults.copyTarget && (args[1] === "r+" || args[1] === "r")) {
+        faults.opened.push(String(args[1]));
+        if (faults.openError) throw Object.assign(new Error("directory link"), { code: faults.openError });
+      }
       const copying = args[1] === "wx" && !basename(String(args[0])).startsWith("delete-");
       if (copying) await faults.beforePublish?.(String(args[0]));
       if (faults.failPlace && String(args[0]).includes("rowless.txt")) throw new Error("placement refused");
@@ -46,7 +50,7 @@ vi.mock("node:fs/promises", async original => {
         faults.copyTemps.push(String(args[0]));
         const write = file.writeFile.bind(file), close = file.close.bind(file), changeMode = file.chmod.bind(file);
         file.writeFile = async (...input) => {
-          if (faults.failCopy === "write") { await write("not "); throw new Error("disk full"); }
+          if (faults.failCopy === "write" && String(args[0]) === faults.copyTarget) { await write("not "); throw new Error("disk full"); }
           await write(...input);
           faults.exposed = existsSync(faults.copyTarget);
         };
@@ -63,9 +67,17 @@ vi.mock("node:fs/promises", async original => {
       };
       return file;
     }, rename: async (from: string, to: string) => {
+    if (to.endsWith(".json")) faults.recordSaves++;
     if (faults.failRecord && to.endsWith(".json")) { faults.failRecord = false; throw new Error("recovery save refused"); }
     if (faults.copyTemps.includes(String(from))) await faults.beforePublish?.(to);
     return actual.rename(from, to);
+  } };
+});
+vi.mock("node:fs", async original => {
+  const actual = await original<typeof import("node:fs")>();
+  return { ...actual, createReadStream: (...args: Parameters<typeof actual.createReadStream>) => {
+    faults.reads.push(String(args[0]));
+    return actual.createReadStream(...args);
   } };
 });
 const person = { kind: "human", humanId: "local:test" } as const;
@@ -215,6 +227,89 @@ describe("delete recovery failures", () => {
 
 
 describe("delete recovery placement and receipts", () => {
+  it.each(["EISDIR", "EPERM", "EACCES"])("rejects a replay link before opening it (%s)", async openError => {
+    const f = await fixture();
+    const id = await deleted(f);
+    faults.copyOnly = true; faults.failCopy = "write";
+    try {
+      await f.undo(id);
+      faults.failCopy = "";
+      await rm(faults.copyTarget);
+      const destination = join(f.root, ".dohc/trash");
+      await symlink(destination, faults.copyTarget, process.platform === "win32" ? "junction" : "dir");
+      faults.openError = openError; faults.opened = [];
+      expect(await f.undo(id)).toMatchObject({ restored: [], remaining: [{
+        path: "folder/rowless.txt", reason: expect.stringContaining("now occupies"),
+      }] });
+      expect(faults.opened).toEqual([]);
+      expect(await readlink(faults.copyTarget)).toContain("trash");
+    } finally { faults.copyOnly = false; faults.failCopy = ""; faults.openError = ""; }
+  });
+  it("classifies an EISDIR open race as an occupant on every host", async () => {
+    const f = await fixture();
+    const id = await deleted(f);
+    faults.copyOnly = true; faults.failCopy = "write";
+    try {
+      await f.undo(id);
+      faults.failCopy = ""; faults.openError = "EISDIR"; faults.opened = [];
+      expect(await f.undo(id)).toMatchObject({ remaining: [{
+        path: "folder/rowless.txt", reason: expect.stringContaining("now occupies"),
+      }] });
+      expect(faults.opened).toEqual(["r+"]);
+      expect(await readFile(faults.copyTarget, "utf8")).toBe("not ");
+    } finally { faults.copyOnly = false; faults.failCopy = ""; faults.openError = ""; }
+  });
+  it("names an unfinished copy and its retry alongside the intact source", async () => {
+    const f = await fixture();
+    const id = await deleted(f);
+    faults.copyOnly = true; faults.failCopy = "write";
+    try {
+      expect(await f.undo(id)).toMatchObject({ remaining: [{ path: "folder/rowless.txt",
+        reason: expect.stringMatching(/folder\/rowless.txt is incomplete\. Undo again to finish it\. The deleted file stays at \.dohc\/trash\//),
+      }] });
+      expect(await readFile(faults.copyTarget, "utf8")).toBe("not ");
+      faults.failCopy = "";
+      expect(await f.undo(id)).toMatchObject({ remaining: [] });
+      expect(await readFile(faults.copyTarget, "utf8")).toBe("not retained");
+    } finally { faults.copyOnly = false; faults.failCopy = ""; }
+  });
+  it.each([0, 32])("reads fresh fallback bytes once while retaining ownership saves (%s package files)", async count => {
+    const f = await fixture();
+    await mkdir(join(f.root, "folder/node_modules/pkg"), { recursive: true });
+    for (let index = 0; index < count; index++) {
+      await writeFile(join(f.root, `folder/node_modules/pkg/${index}.js`), "x".repeat(64 * 1024));
+    }
+    const removed = await f.remove(true);
+    expect(removed.undo).toEqual({ available: true });
+    const id = removed.operationId!;
+    faults.copyOnly = true; faults.reads = []; faults.recordSaves = 0;
+    try {
+      expect(await f.undo(id)).toMatchObject({ remaining: [] });
+      expect(faults.reads).toHaveLength(count + 1);
+      expect(faults.reads[0]).toContain("trash");
+      expect(faults.recordSaves).toBe(count + 3); // Engine receipt, ownership per file, completed result.
+      expect(await readFile(faults.copyTarget, "utf8")).toBe("not retained");
+    } finally { faults.copyOnly = false; }
+  });
+  it.each([false, true])("releases completed sources and retries only pending paths (copy siblings=%s)", async copySiblings => {
+    const f = await fixture(false, []);
+    const id = await deleted(f);
+    faults.copyOnly = copySiblings; faults.failCopy = "write";
+    // Only the failing path needs the fallback in the hard-link sibling case.
+    faults.sourceLimit = !copySiblings;
+    try {
+      expect(await f.undo(id)).toMatchObject({ restored: ["folder/tracked.txt"], remaining: [{ path: "folder/rowless.txt" }] });
+      const trash = join(f.root, ".dohc/trash");
+      const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
+      expect.soft(existsSync(join(trash, staged, "tracked.txt"))).toBe(false);
+      await rm(join(f.root, "folder/tracked.txt"));
+      faults.failCopy = "";
+      expect.soft(await f.undo(id)).toMatchObject({ restored: ["folder/tracked.txt", "folder/rowless.txt"], remaining: [] });
+      expect(existsSync(join(f.root, "folder/tracked.txt"))).toBe(false);
+      expect(existsSync(join(trash, staged, "rowless.txt"))).toBe(false);
+      expect(await readFile(faults.copyTarget, "utf8")).toBe("not retained");
+    } finally { faults.copyOnly = false; faults.sourceLimit = false; faults.failCopy = ""; }
+  });
   it.runIf(process.platform === "win32")("does not chmod writable hard-linked files again", async () => {
     const f = await fixture();
     const id = await deleted(f);
@@ -359,7 +454,7 @@ describe("delete recovery placement and receipts", () => {
       expect(result).toMatchObject({ ok: true, restored: ["folder/tracked.txt"], remaining: [{ path: "folder/rowless.txt" }] });
       const trash = join(f.root, ".dohc/trash");
       const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
-      expect(existsSync(join(trash, staged, "tracked.txt"))).toBe(false);
+      expect.soft(existsSync(join(trash, staged, "tracked.txt"))).toBe(false);
       expect(existsSync(join(trash, staged, "rowless.txt"))).toBe(true);
     } finally { faults.failPlace = false; }
   });
