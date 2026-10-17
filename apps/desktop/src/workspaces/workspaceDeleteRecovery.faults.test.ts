@@ -259,13 +259,13 @@ describe("delete recovery placement and receipts", () => {
       expect(await readFile(faults.copyTarget, "utf8")).toBe("not ");
     } finally { faults.copyOnly = false; faults.failCopy = ""; faults.openError = ""; }
   });
-  it("gives a manual recovery path after an interrupted copy", async () => {
+  it("offers another Undo and a trash path after an interrupted copy", async () => {
     const f = await fixture();
     const id = await deleted(f);
     faults.copyOnly = true; faults.failCopy = "write";
     try {
       expect(await f.undo(id)).toMatchObject({ remaining: [{ path: "folder/rowless.txt",
-        reason: expect.stringMatching(/dohc could not finish restoring folder\/rowless.txt\. Check the old path, then restore it from History or \.dohc\/trash\//),
+        reason: expect.stringMatching(/folder\/rowless.txt may be incomplete\. Undo again to retry, or restore it from \.dohc\/trash\//),
       }] });
       expect(await readFile(faults.copyTarget, "utf8")).toBe("not ");
       faults.failCopy = "";
@@ -292,11 +292,27 @@ describe("delete recovery placement and receipts", () => {
       }
       const result = await f.undo(id);
       expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt",
-        reason: `dohc could not finish restoring folder/rowless.txt. Check the old path, then restore it from History or .dohc/trash/${staged}/rowless.txt.`,
+        reason: change === "source"
+          ? "dohc could not put folder/rowless.txt back. Its trash copy is gone."
+          : `dohc could not put folder/rowless.txt back. It stays at .dohc/trash/${staged}/rowless.txt.`,
       }] });
       expect(existsSync(faults.copyTarget)).toBe(change === "source");
       if (change !== "source") expect(await readFile(join(trash, staged, "rowless.txt"), "utf8")).toBe("not retained");
     } finally { faults.copyOnly = false; faults.failCopy = ""; faults.failPlace = false; }
+  });
+  it.each([false, true])("cleans up staged empty folders without removing new contents (occupied=%s)", async occupied => {
+    const f = await fixture();
+    await mkdir(join(f.root, "folder/empty"));
+    const id = await deleted(f);
+    const trash = join(f.root, ".dohc/trash");
+    const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
+    const source = join(trash, staged, "empty");
+    if (occupied) await writeFile(join(source, "keep.txt"), "new contents");
+    expect(await f.undo(id)).toMatchObject({ restored: ["folder/rowless.txt", "folder/empty"], remaining: [] });
+    expect((await stat(join(f.root, "folder/empty"))).isDirectory()).toBe(true);
+    expect(existsSync(source)).toBe(occupied);
+    if (occupied) expect(await readFile(join(source, "keep.txt"), "utf8")).toBe("new contents");
+    expect(await readFile(join(trash, staged, "tracked.txt"), "utf8")).toBe("tracked");
   });
   it("removes empty nested staging folders after a split retry without removing retained bytes", async () => {
     const f = await fixture(false, []);

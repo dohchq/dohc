@@ -259,10 +259,12 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
   const place = async (path: string, empty = false): Promise<void> => {
     assertCurrent();
     const trashPath = `.dohc/trash/${record.staged}${path.slice(record.base.length)}`;
+    let retryable = false;
     try {
       const target = await checkedTarget(root, path, record.base);
       const source = empty ? undefined : await sourcePath(root, record, path);
       const entry = source === undefined ? undefined : await lstat(source);
+      retryable = true;
       if (empty || entry?.isDirectory()) {
         await mkdir(dirname(target), { recursive: true });
         if (!(empty || resuming) || !(await info(target))?.isDirectory()) await mkdir(target);
@@ -301,11 +303,18 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
       markChanged();
     } catch (error) {
       // An interrupted copy stays journaled and keeps its source until a later Undo succeeds.
+      const sourceMissing = !empty && await sourcePath(root, record, path)
+        .then(async source => !await info(source)).catch(error => code(error) === "ENOENT");
       result.remaining.push({ path, reason: empty
         ? `dohc could not recreate ${path}. Check the old path, then create the folder there.`
         : code(error) === "EEXIST"
         ? `${path} now occupies the old path. The deleted file stays at ${trashPath}.`
-        : `dohc could not finish restoring ${path}. Check the old path, then restore it from History or ${trashPath}.` });
+        : sourceMissing
+        ? `dohc could not put ${path} back. Its trash copy is gone.`
+        : retryable && record.copies?.some(copy => copy.path === path)
+          && await info(join(root, path)).then(entry => entry?.isFile()).catch(() => false)
+        ? `${path} may be incomplete. Undo again to retry, or restore it from ${trashPath}.`
+        : `dohc could not put ${path} back. It stays at ${trashPath}.` });
     }
   };
   if (pendingPaths) {
@@ -317,11 +326,13 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
   if (record.copies?.length) record.progress = result;
   else { record.result = result; delete record.progress; }
   await save(root, record);
-  for (const path of result.restored.filter(path => !record.emptyFolders.includes(path) && !keepSource.has(path))) {
+  const staged = record.staged
+    ? await trashDir(root).then(dir => join(dir, record.staged!)).catch(() => undefined) : undefined;
+  for (const path of result.restored.filter(path => staged && !keepSource.has(path))) {
     await sourcePath(root, record, path).then(async source => {
-      await rm(source, { recursive: true, force: true });
-      const staged = join(await trashDir(root), record.staged!);
-      for (let parent = dirname(source); isInside(staged, parent); parent = dirname(parent)) await rmdir(parent);
+      if (record.emptyFolders.includes(path)) await rmdir(source);
+      else await rm(source, { recursive: true, force: true });
+      for (let parent = dirname(source); isInside(staged!, parent); parent = dirname(parent)) await rmdir(parent);
     }).catch(() => undefined);
   }
   for (const [target, mode] of linkedModes) await chmod(target, mode).catch(() => undefined);
