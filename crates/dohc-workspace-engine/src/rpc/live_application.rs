@@ -1034,6 +1034,88 @@ impl EngineService {
         })
     }
 
+    /// Run a hosted pull or commit, then drop the registrations and editor
+    /// sessions of each document it left unready, whose native registrations
+    /// the writer released in the same step. Durable work stays. One task
+    /// runs both, so a caller that stops waiting cannot keep them open. The
+    /// close waits on `session_ops`, so a registration in flight is dropped
+    /// here or refused natively. Only the relay observes cancellation, before
+    /// a step runs or while it waits on the network, so a step that landed is
+    /// answered after its close and never reported as failed.
+    pub(super) async fn hosted_execute(
+        &self,
+        ctx: &RequestContext,
+        open: &Arc<OpenWorkspace>,
+        configuration: dohc_engine_runtime::RelayConfiguration,
+        operation: dohc_engine_runtime::RelayOperation,
+        label: &str,
+    ) -> Result<dohc_engine_runtime::RelayOperationOutcome, WireError> {
+        use dohc_engine_runtime::RelayOperationOutcome as Outcome;
+        let cancellation = super::request::OperationCancellation::new(ctx);
+        let handles: Vec<WorkspaceHandle> = lock(&self.handles)
+            .iter()
+            .filter(|(_, candidate)| Arc::ptr_eq(candidate, open))
+            .map(|(handle, _)| handle.clone())
+            .collect();
+        let registry = Arc::clone(&self.live_applications);
+        let sessions = Arc::clone(&self.sessions);
+        let leases = self.leases.scoped(&open.root);
+        let token = cancellation.token();
+        let open = Arc::clone(open);
+        let task = tokio::spawn(async move {
+            let outcome = open
+                .actor
+                .relay(configuration, operation, leases, token, None)
+                .await?;
+            let unready: &[String] = match &outcome {
+                Outcome::HostedPass { unready, .. }
+                | Outcome::HostedCursorCommitted {
+                    unready: Ok(unready),
+                    ..
+                } => unready,
+                _ => &[],
+            };
+            if !unready.is_empty() {
+                let _serial = Arc::clone(&open.session_ops).lock_owned().await;
+                lock(&registry).registrations.retain(|_, registration| {
+                    if Arc::ptr_eq(&registration.host.open, &open)
+                        && unready.contains(&registration.object_id)
+                    {
+                        let _fence = lock(&registration.host.output_fence);
+                        registration.retired.cancel();
+                        false
+                    } else {
+                        true
+                    }
+                });
+                lock(&sessions).retain(|_, session| {
+                    !handles.contains(&session.workspace)
+                        || !unready.contains(&session.key.object_id)
+                });
+            }
+            Ok::<_, dohc_engine_runtime::RuntimeError>(outcome)
+        });
+        task.await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "hosted-sync-interrupted"))?
+            .map_err(|error| match error {
+                dohc_engine_runtime::RuntimeError::Cancelled => cancellation.interruption(label),
+                error => map_runtime(error),
+            })
+    }
+
+    /// Hold the workspace's session lock, as an editor or registration step
+    /// in flight holds it.
+    #[cfg(feature = "harness")]
+    #[doc(hidden)]
+    pub async fn session_ops_for_harness(
+        &self,
+        handle: &WorkspaceHandle,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, WireError> {
+        Ok(Arc::clone(&self.open(Some(handle))?.session_ops)
+            .lock_owned()
+            .await)
+    }
+
     pub(crate) fn live_application_registration(
         &self,
         connection: &ConnectionHandle,

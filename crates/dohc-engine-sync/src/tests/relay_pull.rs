@@ -3046,6 +3046,40 @@ fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
 }
 
 #[test]
+fn an_owner_records_a_relay_refusal_as_a_silent_no_op_that_takes_its_coordinate() {
+    let (_scratch, _path, mut engine) = open_store();
+    let origin = "service-host:host";
+    let refused = envelope(
+        origin,
+        0,
+        "relay.refused",
+        json!({"opKind": "moment.append", "payloadSha256": "a".repeat(64), "reason": "outside-hosted-documents"}),
+    );
+    let later = envelope(origin, 1, "workspace.init", json!({}));
+    for op in [&refused, &later] {
+        let outcome = apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome.primary, ApplyDisposition::Applied(_)) && outcome.refusals.is_empty(),
+            "{} applies: {outcome:?}",
+            op.op_kind
+        );
+    }
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", origin).unwrap(),
+        1
+    );
+    assert!(list_refusal_notices(&engine, "ws").unwrap().is_empty());
+    assert_eq!(engine.table_row_count("moments").unwrap(), 0);
+}
+
+#[test]
 fn relay_pull_rejects_a_tampered_own_ydoc_echo() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);

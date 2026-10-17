@@ -1,3 +1,4 @@
+import {createLiveBufferBudget, LiveConnectionLimitError} from "./liveConnection";
 import { describe, expect, it, vi } from "vitest";
 import vectors from "../vectors/live-frame-vectors.json";
 import { parseHostEpoch } from "./hostControl.js";
@@ -38,8 +39,8 @@ function consume(sender: Session, receiver: Session, frame: LiveFrame) {
   const received = deliver(sender, receiver, frame);
   received.value.transfer?.release(); received.release();
 }
-function pair(serverLimits = limits, hostEpoch = 1) {
-  const client = createLiveFrameSession("client", limits), server = createLiveFrameSession("server", serverLimits);
+function pair(serverLimits = limits, hostEpoch = 1, reserveBytes?: (size: number) => () => void) {
+  const client = createLiveFrameSession("client", limits), server = createLiveFrameSession("server", serverLimits, reserveBytes);
   consume(server, client, { kind: "welcome", hostEpoch: parseHostEpoch(hostEpoch), receivePolicy: serverLimits.receive });
   consume(client, server, { kind: "hello", receivePolicy: limits.receive });
   return { client, server };
@@ -508,13 +509,24 @@ describe("live frame route ownership", () => {
       else expect(() => client.receive(encodeLiveFrame({ kind: "result", result: "retry", deliveryId: "other", updateDigest: digest, reason: "application-pending" }, 586))).toThrow();
     }
   });
-  it("terminal retry leaves held frames charged until transport release", () => {
-    const { client, server } = makeLive(); consume(client, server, begin("submit-update", 2));
-    consume(client, server, { kind: "chunk", transferId: 2, offset: 0, bytes: new Uint8Array([0, 0]) });
-    const sent = server.send({ kind: "result", result: "retry", deliveryId: "d", updateDigest: digest, reason: "application-pending" });
-    expect(server.usage().closed).toBe(true); expect(server.usage().outgoing.controlBytes).toBe(sent.value.length);
-    const received = client.receive(sent.value); expect(client.usage().closed).toBe(true);
-    sent.release(); received.release(); expect(server.usage().outgoing.controlBytes).toBe(0); expect(client.usage().incoming.controlBytes).toBe(0);
+  it.each(["retry", "refused"] as const)("releases held RESULT frames and closes only a terminal %s", result => {
+    const {client, server} = makeLive(); consume(client, server, begin("submit-update", 2));
+    consume(client, server, {kind: "chunk", transferId: 2, offset: 0, bytes: new Uint8Array([0, 0])});
+    const sent = server.send(result === "retry"
+      ? {kind: "result", result, deliveryId: "d", updateDigest: digest, reason: "application-pending"}
+      : {kind: "result", result, deliveryId: "d", updateDigest: digest, reason: "authority-refused"});
+    expect(server.usage().closed).toBe(result === "refused");
+    expect(server.usage().outgoing.controlBytes).toBe(sent.value.length);
+    const received = client.receive(sent.value); expect(client.usage().closed).toBe(result === "refused");
+    sent.release(); received.release();
+    expect(server.usage().outgoing.controlBytes).toBe(0); expect(client.usage().incoming.controlBytes).toBe(0);
+    if (result === "retry") {
+      grant(server, client, 773, 6);
+      consume(client, server, begin("submit-update", 3));
+      consume(client, server, {kind: "chunk", transferId: 3, offset: 0, bytes: new Uint8Array([0, 0])});
+      expect(server.usage()).toMatchObject({closed: false, live: true});
+    }
+    client.close(); server.close();
   });
   it("bounds control queues and snapshots policies and retained metadata", () => {
     const mutable = { ...limits, receive: { ...limits.receive } }; const client = createLiveFrameSession("client", mutable);
@@ -526,4 +538,35 @@ describe("live frame route ownership", () => {
     hello.release(); credits.forEach(credit => credit.release()); client.close();
     expect(client.usage().outgoing.controlFrames).toBe(0);
   });
+});
+
+it("charges shared frame leases and assemblies until their actual release", () => {
+  const budget = createLiveBufferBudget(8192);
+  const {client, server} = pair(limits, 1, budget.reserve);
+  const lease = server.send({kind: "credit", grantedBytes: 586, grantedFrames: 2});
+  expect(budget.usage()).toBe(lease.value.length);
+  client.receive(lease.value).release(); lease.release(); expect(budget.usage()).toBe(0);
+  consume(client, server, begin("client-vector", 1, 2048));
+  expect(budget.usage()).toBe(2048);
+  server.close(); expect(budget.usage()).toBe(0); client.close();
+});
+it("refuses a shared assembly before allocating it", () => {
+  const budget = createLiveBufferBudget(8192), {client, server} = pair(limits, 1, budget.reserve);
+  grant(server, client); const release = budget.reserve(8000);
+  expect(() => deliver(client, server, begin("client-vector", 1, 2048))).toThrowError(LiveConnectionLimitError);
+  release(); expect(budget.usage()).toBe(0); client.close(); server.close();
+});
+
+it("keeps admission-unavailable retry live and accepts the next correlated attempt", () => {
+  const {client, server} = makeLive();
+  consume(client, server, begin("submit-update", 2));
+  consume(client, server, {kind: "chunk", transferId: 2, offset: 0, bytes: new Uint8Array([0, 0])});
+  consume(server, client, {kind: "result", result: "retry", deliveryId: "d", updateDigest: digest, reason: "admission-unavailable"});
+  expect(server.usage()).toMatchObject({closed: false, live: true}); expect(client.usage()).toMatchObject({closed: false, live: true});
+  grant(server, client, 773, 6);
+  consume(client, server, begin("submit-update", 3));
+  consume(client, server, {kind: "chunk", transferId: 3, offset: 0, bytes: new Uint8Array([0, 0])});
+  consume(server, client, {kind: "result", result: "success", ack: {deliveryId: "d", updateDigest: digest,
+    journalCursor: 19, acceptingHostEpoch: parseHostEpoch(1), localYDocSequence: 3, applicationReplayed: false}});
+  expect(server.usage().closed).toBe(false); expect(client.usage().closed).toBe(false); client.close(); server.close();
 });

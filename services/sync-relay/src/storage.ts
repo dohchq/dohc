@@ -393,8 +393,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string) {
     return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
   }
-  currentServiceHostWorkspace(workspaceId: string) {
-    const row = serviceHostEnrollmentStorage.currentServiceHostWorkspace(this, workspaceId);
+  currentServiceHostWorkspace(workspaceId: string, includeUndrained = false) {
+    const row = serviceHostEnrollmentStorage.currentServiceHostWorkspace(this, workspaceId, includeUndrained);
     return row && !accountIsFenced(this, row.ownerUserId) ? row : null;
   }
   readServiceHostFeedScope(workspaceId: string) {
@@ -480,8 +480,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveDocumentAuthorityStorage.registerLiveDocumentBaseline(this, input);
   }
 
-  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult {
-    return liveUpdateJournalStorage.readLiveUpdateJournalCut(this, input);
+  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }, reserveBytes?: (size: number) => void): LiveUpdateJournalCutResult {
+    return liveUpdateJournalStorage.readLiveUpdateJournalCut(this, input, reserveBytes);
   }
 
   commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput, activation?: ServiceActivationAccess): RelayLiveUpdateJournalResult {
@@ -918,6 +918,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     originId: string;
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
+    admit?: (ops: SyncRelayLogInput[]) => void;
   }): AppendLogBatchResult {
     return logStorage.appendLogBatch(this, input);
   }

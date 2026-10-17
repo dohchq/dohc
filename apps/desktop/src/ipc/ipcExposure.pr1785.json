@@ -1,6 +1,0 @@
-{
-  "sourceCommit": "a04aa8caa3c9bac6ab4a68917832e8314bc86342",
-  "reason": "Main notifies the requesting window when its workspace's cached History names change. This outbound event adds no renderer request or capability.",
-  "nameAdditions": ["desktop:history-names-changed"],
-  "channelKeyAdditions": ["historyNamesChanged"]
-}

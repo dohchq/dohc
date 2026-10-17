@@ -686,10 +686,23 @@ export function subtractJournalRanges(candidate: readonly LiveUpdateStructRange[
 }
 
 
-export function readLiveUpdateJournalCut(storage: StorageContext, input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult {
+export function readLiveUpdateJournalCut(storage: StorageContext, input: { document: LiveDocumentKey }, reserveBytes?: (size: number) => void): LiveUpdateJournalCutResult {
     const outer = baselineRecord(input, ["document"]), document = journalDocument(outer.document);
     let current: (() => boolean) | undefined;
     const result = storage.readTx(() => {
+      if (reserveBytes) {
+        const history = storage.db.prepare(`SELECT COALESCE(SUM(length(baseline_bytes)),0) AS bytes
+          FROM sync_relay_live_documents WHERE workspace_id=? AND main_version_id=? AND object_id=?`)
+          .get(document.workspaceId, document.mainVersionId, document.objectId)!;
+        const checkpoint = storage.db.prepare(`SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE}
+          WHERE ${JOURNAL_DOCUMENT_WHERE} AND validation_checkpoint_bytes IS NOT NULL ORDER BY journal_cursor DESC LIMIT 1`)
+          .get(...documentParams(document));
+        const journal = storage.db.prepare(`SELECT COALESCE(SUM(length(update_bytes)+COALESCE(length(validation_checkpoint_bytes),0)),0) AS bytes
+          FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE} AND journal_cursor>=?`)
+          .get(...documentParams(document), checkpoint?.journal_cursor ?? 0)!;
+        // SQLite rows, decoded cut, public token, validation clone, and checkpoint output can coexist.
+        reserveBytes(5 * (Number(history.bytes) + Number(journal.bytes)));
+      }
       const read = liveJournalCut(storage, document);
       if (read.kind === "cut") current = captureSqliteReadRevisionMatches(storage.db);
       return read;
