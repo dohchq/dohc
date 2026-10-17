@@ -26,6 +26,17 @@ export type DeleteRecoveryPlan = { operationId: string; record?: RecoveryRecord;
 const code = (error: unknown) => error && typeof error === "object" && "code" in error ? error.code : undefined;
 const info = async (path: string) => lstat(path).catch(error => { if (code(error) === "ENOENT") return null; throw error; });
 const recordName = (id: string) => `delete-${createHash("sha256").update(id).digest("hex")}.json`;
+const copyPrefix = (id: string) => `.dohc-undo-${createHash("sha256").update(id).digest("hex")}.`;
+const copyTempName = /^\.dohc-undo-[a-f0-9]{64}\.[a-f0-9-]{36}\.tmp$/u;
+async function cleanCopies(dir: string, id: string): Promise<void> {
+  const prefix = copyPrefix(id);
+  for (const name of await readdir(dir).catch(() => [])) {
+    if (!name.startsWith(prefix) || !copyTempName.test(name)) continue;
+    const path = join(dir, name);
+    try { if ((await lstat(path)).isFile()) await rm(path, { force: true }); }
+    catch { /* A leftover copy cannot prevent Undo. */ }
+  }
+}
 const MAX_RECORD_AGE = 30 * 24 * 60 * 60 * 1_000;
 const unavailable = "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash.";
 
@@ -38,7 +49,7 @@ async function trashDir(root: string): Promise<string> {
   }
   return dir;
 }
-// Only metadata expires. Existing fallback trash contents keep their lifetime.
+// Only metadata and temporary copies expire. Existing fallback trash contents keep their lifetime.
 const pruned = new Set<string>();
 function schedulePrune(root: string): void {
   if (pruned.has(root)) return;
@@ -48,10 +59,13 @@ function schedulePrune(root: string): void {
 async function prune(root: string): Promise<void> {
   const dir = await trashDir(root);
   for (const name of await readdir(dir)) {
-    if (!/^delete-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name)) continue;
+    if (!/^delete-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name) && !copyTempName.test(name)) continue;
     try {
       const path = join(dir, name), entry = await lstat(path);
-      if (entry.isFile() && Date.now() - entry.mtimeMs > MAX_RECORD_AGE) await unlink(path);
+      if (entry.isFile() && Date.now() - entry.mtimeMs > MAX_RECORD_AGE) {
+        if (copyTempName.test(name)) await rm(path, { force: true });
+        else await unlink(path);
+      }
     } catch { /* Cleanup cannot affect another delete or its Undo. */ }
   }
 }
@@ -157,6 +171,7 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
   history: Pick<HistoryOperationsStore, "undoHistoryOperation">, workspaceId: string,
   assertCurrent: () => void, markChanged: () => void): Promise<DeleteUndoResult> {
   const record = await load(root, input.operationId);
+  await cleanCopies(await trashDir(root), input.operationId);
   const engineUndo = () => history.undoHistoryOperation({ workspaceId, operationId: input.operationId,
     requestId: `delete-undo:${input.operationId}`, author });
   if (record.result) {
@@ -220,7 +235,7 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
             if (process.platform === "win32") linkedModes.set(target, entry!.mode & 0o7777);
           } catch (error) {
             if (code(error) === "EEXIST") throw error;
-            const temp = `${target}.${randomUUID()}.tmp`;
+            const temp = join(await trashDir(root), `${copyPrefix(input.operationId)}${randomUUID()}.tmp`);
             try {
               const file = await open(temp, "wx", entry!.mode);
               try {
@@ -229,8 +244,9 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
                 await file.sync();
               } finally { await file.close(); }
               await checkedTarget(root, path, record.base);
-              if (await info(target)) throw Object.assign(new Error("Target exists"), { code: "EEXIST" });
-              await rename(temp, target);
+              // Publish the finished private copy without replacing an occupant.
+              await link(temp, target);
+              if (process.platform === "win32") linkedModes.set(target, entry!.mode & 0o7777);
             } finally { await rm(temp, { force: true }).catch(() => undefined); }
           }
         }

@@ -1,45 +1,50 @@
 import { chmod, mkdir, readFile, readdir, readlink, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { existsSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { createTestScratch } from "./testTemp";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, undoWorkspaceDelete, type PathChangeOptions } from "./workspaceFileMoves";
 
-const faults = vi.hoisted(() => ({ failRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false }));
+const faults = vi.hoisted(() => ({ failRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false, beforePublish: undefined as undefined | ((target: string) => Promise<void>), copyTemps: [] as string[], copyTarget: "", noPublish: false }));
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
   return { ...actual,
     rm: async (...args: Parameters<typeof actual.rm>) => {
       // Node can clear a Windows read-only flag before unlinking the staged hard link.
-      if (process.platform === "win32" && faults.readOnly && !faults.copyOnly) {
+      if (process.platform === "win32" && faults.readOnly && (!faults.copyOnly || faults.copyTemps.includes(String(args[0])))) {
         await actual.chmod(String(args[0]), 0o666).catch(() => undefined);
       }
       return actual.rm(...args);
     },
-    lstat: async (path: string) => { faults.visited.push(String(path)); return actual.lstat(path); },
+    lstat: async (path: string) => { const entry = await actual.lstat(path); faults.visited.push(String(path)); return entry; },
     unlink: async (path: string) => {
       if (String(path) === faults.blockedPrune) { faults.pruneAttempts++; throw Object.assign(new Error("record held open"), { code: "EPERM" }); }
       return actual.unlink(path);
     },
     link: async (from: string, to: string) => {
       if (faults.failPlace && to.endsWith("rowless.txt")) throw new Error("placement refused");
-      if (faults.copyOnly) throw Object.assign(new Error("no links"), { code: "EXDEV" });
+      if (faults.copyTemps.includes(String(from))) {
+        await faults.beforePublish?.(to);
+        if (faults.noPublish) throw Object.assign(new Error("no hard links"), { code: "ENOTSUP" });
+      } else if (faults.copyOnly) throw Object.assign(new Error("no links"), { code: "EXDEV" });
       return actual.link(from, to);
     },
     open: async (...args: Parameters<typeof actual.open>) => {
-      const copying = String(args[0]).includes("rowless.txt") && args[1] === "wx";
+      const copying = args[1] === "wx" && !basename(String(args[0])).startsWith("delete-");
       if (faults.failPlace && String(args[0]).includes("rowless.txt")) throw new Error("placement refused");
       if (faults.readOnly && String(args[0]).endsWith("rowless.txt") && args[1] === "r+") {
         throw Object.assign(new Error("read-only file"), { code: "EPERM" });
       }
       const file = await actual.open(...args);
       if (copying) {
+        faults.copyTemps.push(String(args[0]));
         const write = file.writeFile.bind(file), close = file.close.bind(file), changeMode = file.chmod.bind(file);
         file.writeFile = async (...input) => {
           if (faults.failCopy === "write") { await write("partial"); throw new Error("disk full"); }
           await write(...input);
-          faults.exposed = existsSync(String(args[0]).replace(/\.[a-f0-9-]{36}\.tmp$/u, ""));
+          faults.exposed = existsSync(faults.copyTarget);
         };
         file.chmod = async mode => { faults.copyModes.push(Number(mode)); return changeMode(mode); };
         file.close = async () => { await close(); if (faults.failCopy === "close") throw new Error("close failed"); };
@@ -55,12 +60,14 @@ vi.mock("node:fs/promises", async original => {
       return file;
     }, rename: async (from: string, to: string) => {
     if (faults.failRecord && to.endsWith(".json")) { faults.failRecord = false; throw new Error("recovery save refused"); }
+    if (faults.copyTemps.includes(String(from))) await faults.beforePublish?.(to);
     return actual.rename(from, to);
   } };
 });
 const person = { kind: "human", humanId: "local:test" } as const;
 async function fixture(systemAccepts = false, tracked = ["folder/tracked.txt"]) {
   const root = await createTestScratch("delete-recovery-faults-");
+  faults.copyTarget = join(root, "folder/rowless.txt");
   await mkdir(join(root, ".dohc"));
   const write = async (path: string, body: string) => { await mkdir(join(root, "folder"), { recursive: true }); await writeFile(join(root, path), body); };
   await write("folder/tracked.txt", "tracked");
@@ -179,16 +186,22 @@ describe("delete recovery failures", () => {
     await mkdir(trash);
     const record = `delete-${"b".repeat(64)}.json`;
     const temp = `${record}.00000000-0000-4000-8000-000000000000.tmp`;
+    const copy = `.dohc-undo-${"c".repeat(64)}.00000000-0000-4000-8000-000000000000.tmp`;
+    const fresh = `.dohc-undo-${"d".repeat(64)}.00000000-0000-4000-8000-000000000000.tmp`;
     await writeFile(join(trash, record), "invalid old record");
     await writeFile(join(trash, temp), "crash");
+    await writeFile(join(trash, copy), "partial copy");
+    await writeFile(join(trash, fresh), "active copy");
     await writeFile(join(trash, "fallback.txt"), "fallback bytes");
-    for (const name of [record, temp]) await utimes(join(trash, name), new Date(0), new Date(0));
+    for (const name of [record, temp, copy]) await utimes(join(trash, name), new Date(0), new Date(0));
     await deleted(f);
     await vi.waitFor(async () => {
       expect(await readdir(trash)).not.toContain(record);
       expect(await readdir(trash)).not.toContain(temp);
+      expect(await readdir(trash)).not.toContain(copy);
     });
     expect(await readFile(join(trash, "fallback.txt"), "utf8")).toBe("fallback bytes");
+    expect(await readFile(join(trash, fresh), "utf8")).toBe("active copy");
   });
   it("restores through a noncanonical workspace root", async () => {
     const f = await fixture();
@@ -204,6 +217,61 @@ describe("delete recovery failures", () => {
 
 
 describe("delete recovery placement and receipts", () => {
+  it("keeps copy temps outside the capture path floor", async () => {
+    const f = await fixture();
+    const id = await deleted(f);
+    faults.copyOnly = true; faults.copyTemps = [];
+    try {
+      expect(await f.undo(id)).toMatchObject({ restored: ["folder/rowless.txt"], remaining: [] });
+      expect(faults.copyTemps).toHaveLength(1);
+      const temp = relative(f.root, faults.copyTemps[0]!).split("\\").join("/");
+      expect(classifyEngineFilePath(temp)).toEqual({ kind: "ignored" });
+      expect(dirname(temp).split("\\").join("/")).toBe(".dohc/trash");
+    } finally { faults.copyOnly = false; }
+  });
+  it("keeps a racing occupant and names the retained trash source when publishing a copy", async () => {
+    const f = await fixture();
+    const id = await deleted(f);
+    faults.copyOnly = true;
+    faults.beforePublish = target => writeFile(target, "raced occupant");
+    try {
+      const result = await f.undo(id);
+      expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("raced occupant");
+      const trash = join(f.root, ".dohc/trash");
+      const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
+      expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt",
+        reason: `folder/rowless.txt now occupies the old path. The deleted file stays at .dohc/trash/${staged}/rowless.txt.` }] });
+      expect(await readFile(join(trash, staged, "rowless.txt"), "utf8")).toBe("not retained");
+    } finally { faults.copyOnly = false; faults.beforePublish = undefined; }
+  });
+  it("removes crashed copy temps on replay without removing another operation's temp", async () => {
+    const f = await fixture();
+    const id = await deleted(f);
+    faults.copyOnly = true; faults.copyTemps = [];
+    try {
+      expect(await f.undo(id)).toMatchObject({ remaining: [] });
+      const temp = faults.copyTemps[0]!;
+      await writeFile(temp, "partial crash copy");
+      const unrelated = join(dirname(temp), ".dohc-undo-" + "f".repeat(64) + ".00000000-0000-4000-8000-000000000000.tmp");
+      await writeFile(unrelated, "another operation");
+      expect(await f.undo(id, "replay")).toMatchObject({ remaining: [] });
+      expect(existsSync(temp)).toBe(false);
+      expect(await readFile(unrelated, "utf8")).toBe("another operation");
+      expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("not retained");
+    } finally { faults.copyOnly = false; }
+  });
+  it("keeps the source when the filesystem cannot publish a copy without replacing", async () => {
+    const f = await fixture();
+    const id = await deleted(f);
+    faults.copyOnly = true; faults.noPublish = true;
+    try {
+      expect(await f.undo(id)).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt", reason: expect.stringContaining("stays at .dohc/trash/") }] });
+      expect(existsSync(join(f.root, "folder/rowless.txt"))).toBe(false);
+      const trash = join(f.root, ".dohc/trash");
+      const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
+      expect(await readFile(join(trash, staged, "rowless.txt"), "utf8")).toBe("not retained");
+    } finally { faults.copyOnly = false; faults.noPublish = false; }
+  });
   it.each(["", "write", "flush", "close"])("publishes only complete flushed copies and keeps failed copies private (failure=%s)", async failure => {
     const f = await fixture();
     if (failure === "flush") await chmod(join(f.root, "folder/rowless.txt"), 0o444);
@@ -313,6 +381,7 @@ describe("delete recovery placement and receipts", () => {
     const trash = join(f.root, ".dohc/trash");
     const record = (await readdir(trash)).find(name => name.endsWith(".json"))!;
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
+    await vi.waitFor(() => expect(faults.visited).toContain(join(trash, record)));
     await utimes(join(trash, record), new Date(0), new Date(0));
     expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining("missing or expired") });
     await f.write("folder/tracked.txt", "new");

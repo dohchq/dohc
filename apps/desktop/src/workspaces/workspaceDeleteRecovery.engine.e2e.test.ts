@@ -1,5 +1,5 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join, relative } from "node:path";
 import { expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
@@ -9,6 +9,24 @@ import { waitForPathMoments } from "./waitForPathMoments";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { deleteWorkspacePathByHand, undoWorkspaceDelete } from "./workspaceFileMoves";
 
+const copy = vi.hoisted(() => ({ inspect: undefined as undefined | ((temp: string) => Promise<void>) }));
+vi.mock("node:fs/promises", async original => {
+  const actual = await original<typeof import("node:fs/promises")>();
+  return { ...actual,
+    link: async (from: string, to: string) => {
+      if (basename(from) === "index.js") throw Object.assign(new Error("copy required"), { code: "EXDEV" });
+      return actual.link(from, to);
+    },
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const file = await actual.open(...args);
+      if (args[1] === "wx" && !basename(String(args[0])).startsWith("delete-")) {
+        const sync = file.sync.bind(file);
+        file.sync = async () => { await sync(); await copy.inspect?.(String(args[0])); };
+      }
+      return file;
+    },
+  };
+});
 const engine = requireEngineBinaryOrSkip();
 const person = { kind: "human", humanId: "local:delete-recovery" } as const;
 
@@ -39,7 +57,20 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
     const operationId = removed.operationId!;
     const undo = (requestId: string) => undoWorkspaceDelete(operation, { operationId, requestId }, person,
       { workspaceId: workspace.workspaceId, history });
+    let inspection: Promise<void> | undefined;
+    copy.inspect = temp => {
+      inspection = (async () => {
+        await writeFile(join(rootPath, "copy-barrier.txt"), "capture reached this copy");
+        await capture.flush();
+        await waitForPathMoments(capture, "copy-barrier.txt", 1);
+        expect(await readFile(temp, "utf8")).toBe("rowless original\n");
+        expect(await capture.fileObjectIdForPath(relative(rootPath, temp).split("\\").join("/"))).toBeNull();
+      })();
+      return inspection;
+    };
     const first = await undo("undo-folder");
+    expect(inspection).toBeDefined();
+    await inspection;
     expect(first).toMatchObject({ ok: true, tracked: { momentCount: 1 }, restored: ["folder/node_modules"], remaining: [] });
     await expect.poll(() => undo("refresh-folder"), { timeout: REAL_DAEMON_DEADLINE_MS })
       .toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 1 } });
@@ -54,6 +85,7 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
     expect(await undo("new-caller-id")).toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 1 }, restored: ["folder/node_modules"], remaining: [] });
     expect((await waitForPathMoments(capture, "folder/tracked.txt", 3)).map(moment => moment.id)).toEqual(moments.map(moment => moment.id));
   } finally {
+    copy.inspect = undefined;
     await capture.stop();
     await sessions.closeAll();
     await lifecycle.stop();
