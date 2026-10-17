@@ -14,6 +14,7 @@ import { afterEach, expect, vi } from "vitest";
 import * as Y from "yjs";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type {
+  AgentRunStateEvent,
   AgentRunStatusResult,
   CaptureRecoveryStatusResult,
   ReadCrashReportResult,
@@ -315,6 +316,7 @@ function makeBaseBridge(
   const directAnswerDelivery: ShareDirectWriteAnswerDelivery = { claim: async () => true, acknowledge: async () => true, release: async () => true };
   const directWritesPushedCallbacks = new Set<(event: ShareDirectWritesPushedEvent, delivery: ShareDirectWriteAnswerDelivery) => void>();
   const crashReportCallbacks = new Set<() => void>();
+  const agentRunStateCallbacks = new Set<(event: AgentRunStateEvent) => void>();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommand) => void) | null = null;
   return {
@@ -392,8 +394,8 @@ function makeBaseBridge(
         outcome: "moved",
       }),
     ),
-    // Typed to the contract, not to this idle default: a freshness test drives
-    // a real running agent through it.
+    // Typed to the contract, not to this idle default: the Settings toggle
+    // tests drive a real running agent through it.
     getAgentRunStatus: vi.fn(
       async (): Promise<AgentRunStatusResult> => ({
         activeRun: null,
@@ -449,6 +451,19 @@ function makeBaseBridge(
     setTitlebarTheme: vi.fn(async () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
     onChatDispatchNotices: vi.fn(() => () => {}),
+    // This computer's agent is idle until a test pushes a run.
+    readAgentRunState: vi.fn(
+      async ({ workspaceId }: { workspaceId: string }): Promise<AgentRunStateEvent> => ({ workspaceId, revision: 0, active: false }),
+    ),
+    onAgentRunState: vi.fn((listener: (event: AgentRunStateEvent) => void) => {
+      agentRunStateCallbacks.add(listener);
+      return () => {
+        agentRunStateCallbacks.delete(listener);
+      };
+    }),
+    emitAgentRunState: (event: AgentRunStateEvent) => {
+      for (const callback of [...agentRunStateCallbacks]) callback(event);
+    },
     registerChatDispatchNotices: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, revision: 0, notices: [] })),
     dismissChatDispatchNotice: vi.fn(async () => {}),
     stepWindowZoom: vi.fn(async (payload: { step: "in" | "out" | "reset" }) => ({

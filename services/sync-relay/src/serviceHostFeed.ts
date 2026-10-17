@@ -5,13 +5,16 @@ import { badRequest, notFound, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
 import { assertSha256, parseCursor, parseLimit, readJsonObject } from "./requestInputs";
 import { MAX_RAW_ROWS_PER_LINK_PAGE, scanFilteredLog } from "./shareReadQueries";
-import type { SyncRelayLogRow, SyncRelayStorage } from "./storage";
+import type { SyncRelayLogInput, SyncRelayLogRow, SyncRelayStorage } from "./storage";
 import { referencedBlobShas } from "./storage/blobReferences";
+import { logBlobsMissing } from "./storage/errors";
+import { readRefusal, refuseOp } from "./storage/relayAdmission";
 import type { ServiceHostFeedScope } from "./storage/serviceHostFeed";
 import { MAX_BLOB_BYTES } from "./wireLimits";
 import {
   createWorkspaceReplicationRoutes,
   enforceWorkspaceIdentity,
+  type HostedAdmission,
   logCoordinateAnswer,
   parseOptionalWorkspaceIdentityQuery,
   servedLogOp,
@@ -79,29 +82,55 @@ export function hostedRowDecision(
 }
 
 /**
- * Whether the host may append an op. It may write only the content of a
- * document it hosts, where that document is enrolled: never move, delete or
- * replace it, and never touch another file. A revoked share leaves its
- * enrolled documents writable, so edits the relay already accepted can settle.
+ * The document an op writes, when the host may append it. It may write only
+ * the content of a document it hosts, at its enrolled path: never move, delete
+ * or replace it, and never touch another file. A revoked share or a move
+ * leaves the enabled enrolled document writable, so edits the host accepted
+ * can settle.
  */
-export function hostedWriteAllowed(scope: ServiceHostFeedScope, opKind: string, payload: unknown): boolean {
+function hostedWriter(scope: ServiceHostFeedScope, opKind: string, payload: unknown): string | null {
   const record = asRecord(payload);
-  if (!record) return false;
+  if (!record) return null;
   const claim = claimedDocument(opKind, record);
   const objectId = hostedObject(scope, claim, scope.hosted);
-  if (objectId === null) return false;
-  if (opKind === "live.audit.application") return true;
+  if (objectId === null) return null;
+  if (opKind === "live.audit.application") return objectId;
   const path = scope.hosted.get(objectId)!;
-  if (claim!.path !== path) return false;
-  if (opKind === "ydoc.update") return record.contentKind === "richdoc";
-  if (opKind !== "moment.append") return true;
+  if (claim!.path !== path) return null;
+  if (opKind === "ydoc.update") return record.contentKind === "richdoc" ? objectId : null;
+  if (opKind !== "moment.append") return objectId;
   return record.operation === "write" && record.payloadAfterPath === path &&
     [record.payloadBeforePath, record.beforePath].every(value => absent(value) || value === path) &&
-    (absent(record.beforeObjectId) || record.beforeObjectId === objectId);
+    (absent(record.beforeObjectId) || record.beforeObjectId === objectId) ? objectId : null;
+}
+
+export function hostedWriteAllowed(scope: ServiceHostFeedScope, opKind: string, payload: unknown): boolean {
+  return hostedWriter(scope, opKind, payload) !== null;
+}
+
+/** Why the relay refused one of the host's ops. */
+export type HostedRefusalReason = "outside-hosted-documents";
+
+/**
+ * The decision for one new coordinate. An op may name only blobs the host
+ * can fetch now or ones it uploaded, so a write never turns a digest it read
+ * into bytes it may fetch. Any other blob fails the request as missing,
+ * whether or not the relay holds it: `blobs/have` reports it missing too, so
+ * the host uploads it and retries. A document out of the share settles that way.
+ */
+function hostedPublication(scope: ServiceHostFeedScope, known: BlobReach, op: SyncRelayLogInput): "accepted" | "departed" | HostedRefusalReason {
+  const objectId = hostedWriter(scope, op.opKind, JSON.parse(op.payloadJson));
+  if (objectId === null) return "outside-hosted-documents";
+  const blobs = referencedBlobShas(op.opKind, op.payloadJson, { workspaceId: scope.workspaceId, recordedAtMs: op.recordedAtMs });
+  const unknown = blobs.filter(sha256 => !known(sha256));
+  if (unknown.length) throw logBlobsMissing(unknown);
+  return scope.departed.has(objectId) ? "departed" : "accepted";
 }
 
 type DocumentReach = { through: number; blobs: Set<string> };
 type WorkspaceReach = { documents: Map<string, DocumentReach>; usedAtMs: number };
+/** Whether the host may fetch, or name in a write, a blob. */
+type BlobReach = (sha256: string) => boolean;
 
 /**
  * The blobs the host may fetch or name: those the accepted rows of its current
@@ -138,8 +167,7 @@ function createBlobReach(storage: Pick<SyncRelayStorage, "listServiceHostDocumen
       if (rows.length < REACH_PAGE_ROWS) return document.blobs;
     }
   };
-  /** Whether the host may fetch, or name in a write, each blob under this scope. */
-  return (scope: ServiceHostFeedScope): ((sha256: string) => boolean) => {
+  return (scope: ServiceHostFeedScope): BlobReach => {
     const entry = workspaceReach(scope.workspaceId);
     // A document that left the scope takes its blobs along.
     for (const objectId of entry.documents.keys()) if (!scope.shared.has(objectId)) entry.documents.delete(objectId);
@@ -201,29 +229,46 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
     }
 
     if (head === "log" && route.length === 1 && request.method === "POST") {
-      const body = await readJsonObject(request);
-      const ops = Array.isArray(body.ops) ? body.ops : [];
-      // Checked again under the append's writer, where the scope cannot move.
-      // An op may name only blobs the host could already fetch or has uploaded,
-      // so a write never turns a digest it read into bytes it may fetch. An
-      // unknown blob is refused like any other op, whether or not the relay holds it.
-      const admitted = () => {
-        guard();
-        const scope = currentScope(workspaceId);
-        const known = blobReach(scope);
-        for (const op of ops) {
-          const row = asRecord(op);
-          if (!row || typeof row.opKind !== "string" || !hostedWriteAllowed(scope, row.opKind, row.payload) ||
-            !referencedBlobShas(row.opKind, JSON.stringify(row.payload), { workspaceId, recordedAtMs: Number(row.recordedAtMs) }).every(known)) {
-            throw relayError("share_op_rejected", "an op is outside the hosted documents");
+      // Each coordinate gets its own decision. A refused op still takes its
+      // coordinate, as a relay-written refusal, so the host's later ops land.
+      // What the scope already rules out is refused, and a blob out of reach
+      // fails the request, before preparation, which must never probe a blob
+      // the host may not name; the rest is decided again under the append's
+      // writer, where the scope cannot move.
+      const received = new WeakMap<SyncRelayLogInput, string>();
+      const refuse = (op: SyncRelayLogInput, reason: HostedRefusalReason) =>
+        refuseOp(op, { opKind: op.opKind, payloadSha256: received.get(op)!, reason });
+      const admission: HostedAdmission = {
+        screen(originId, ops) {
+          const scope = currentScope(workspaceId), known = blobReach(scope);
+          const held = storage.maxOriginSeq(workspaceId, originId);
+          for (const op of ops) {
+            received.set(op, sha256Hex(op.payloadJson));
+            if (op.originSeq > held) {
+              const decision = hostedPublication(scope, known, op);
+              if (decision !== "accepted" && decision !== "departed") refuse(op, decision);
+              continue;
+            }
+            // A retried refusal gets its original decision; anything else at a held coordinate is compared on append.
+            const stored = storage.fetchLogCoordinate({ workspaceId, originId, originSeq: op.originSeq });
+            const refusal = stored && readRefusal(stored);
+            if (refusal && refusal.opKind === op.opKind && refusal.payloadSha256 === received.get(op) && stored.recordedAtMs === op.recordedAtMs) {
+              refuseOp(op, refusal);
+            }
           }
-        }
+        },
+        admit(ops) {
+          const scope = currentScope(workspaceId), known = blobReach(scope);
+          for (const op of ops) {
+            if (op.relayAdmission === "refused") continue;
+            const decision = hostedPublication(scope, known, op);
+            if (decision === "departed") op.relayAdmission = "departed";
+            else if (decision !== "accepted") refuse(op, decision);
+          }
+        },
       };
-      admitted();
-      const headers = new Headers(request.headers);
-      headers.delete("content-length");
-      const forwarded = new Request(request.url, { method: "POST", headers, body: JSON.stringify(body), signal: request.signal });
-      return await replication.respondToWorkspaceReplication(forwarded, { route: "log", workspaceId, serviceHost: true }, input.actor, admitted);
+      return await replication.respondToWorkspaceReplication(request, { route: "log", workspaceId, serviceHost: admission }, input.actor,
+        () => { guard(); currentScope(workspaceId); });
     }
 
     if (head === "log" && route.length === 3 && request.method === "GET") {
@@ -236,6 +281,8 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
     }
 
     if (head === "blobs" && second === "have" && route.length === 2 && request.method === "POST") {
+      let scope = currentScope(workspaceId);
+      if (!scope.hosted.size) throw notFound();
       const body = await readJsonObject(request);
       if (!Array.isArray(body.sha256s)) throw badRequest("sha256s must be an array");
       if (body.sha256s.length > MAX_BLOB_HAVE) throw badRequest("too many sha256s");
@@ -245,7 +292,9 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
         return value;
       });
       guard();
-      const stored = new Set(sha256s.filter(blobReach(currentScope(workspaceId))));
+      scope = currentScope(workspaceId);
+      if (!scope.hosted.size) throw notFound();
+      const stored = new Set(sha256s.filter(blobReach(scope)));
       for (const sha256 of storage.missingBlobs(workspaceId, [...stored])) stored.delete(sha256);
       return jsonResponse({ ok: true, missing: sha256s.filter(sha256 => !stored.has(sha256)) });
     }
@@ -259,10 +308,15 @@ export function createServiceHostFeed(storage: SyncRelayStorage) {
 
     if (head === "blobs" && second && second !== "have" && route.length === 2 && request.method === "PUT") {
       assertSha256(second);
+      guard();
+      let scope = currentScope(workspaceId);
+      if (!scope.hosted.size) throw notFound();
       const bytes = await readBytes(request, MAX_BLOB_BYTES);
       if (sha256Hex(bytes) !== second) throw badRequest("blob content does not match sha256 path");
       guard();
-      const known = blobReach(currentScope(workspaceId))(second);
+      scope = currentScope(workspaceId);
+      if (!scope.hosted.size) throw notFound();
+      const known = blobReach(scope)(second);
       const put = storage.putServiceHostBlob({ workspaceId, sha256: second, content: bytes, createdAtMs: Date.now() });
       // Whether the owner already held these bytes is theirs to know, unless the host could already fetch them.
       return jsonResponse({ ok: true, workspaceId, sha256: second, byteLength: put.byteLength, alreadyHad: put.alreadyHad && known });

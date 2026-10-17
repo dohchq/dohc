@@ -1,3 +1,4 @@
+import {LIVE_CONNECTION_LIMIT_CLOSE_CODE, LiveConnectionLimitError, type LiveConnectionLimitCode} from "@dohc/live-session-contract/live-connection";
 import { isDeepStrictEqual } from "node:util";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import type { IncomingMessage } from "node:http";
@@ -11,9 +12,9 @@ import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-
 import type { SyncRelayStorage } from "./storage.js";
 import type { createLiveTickets } from "./liveTickets.js";
 import { liveBrowserActor, type LiveBrowserContext } from "./liveBrowserContext.js";
-import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
+import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity.js";
-import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost, type NamedFrameHostBounds, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
+import { captureNamedLiveFrameHost, captureOwnerLiveFrameHost, type NamedFrameValidationBudget, type NamedFrameHostBounds, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
 import { createNamedLiveFrameSession, type NamedFrameHostSession } from "./namedLiveFrameSession.js";
 import type { createLiveMembershipRegistry, LiveMembershipSession } from "./liveMembership.js";
 import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
@@ -26,6 +27,8 @@ import { liveEditors } from "./liveEditors.js";
 
 export interface NamedLiveRouteLimits {
   readonly maxConnections: number;
+  readonly maxConnectionsPerWorkspace: number;
+  readonly reservedOwnerConnections: number;
   readonly maxConnectionsPerSession: number;
   readonly maxConnectionsPerPrincipal: number;
   readonly maxConnectionsPerGrant: number;
@@ -33,6 +36,7 @@ export interface NamedLiveRouteLimits {
   readonly maxRequestBytes: number;
   readonly maxResponseBytes: number;
   readonly maxPendingBytes: number;
+  readonly maxBufferedBytes: number;
   readonly maxFragments: number;
   readonly maxBufferedChunks: number;
   readonly upgradeTimeoutMs: number;
@@ -40,12 +44,14 @@ export interface NamedLiveRouteLimits {
   readonly drainTimeoutMs: number;
 }
 export function parseNamedLiveRouteLimits(value: unknown): NamedLiveRouteLimits {
-  const names = ["maxConnections", "maxConnectionsPerSession", "maxConnectionsPerPrincipal", "maxConnectionsPerGrant",
-    "maxPendingRequests", "maxRequestBytes", "maxResponseBytes", "maxPendingBytes", "maxFragments", "maxBufferedChunks",
+  const names = ["maxConnections", "maxConnectionsPerWorkspace", "reservedOwnerConnections", "maxConnectionsPerSession", "maxConnectionsPerPrincipal", "maxConnectionsPerGrant",
+    "maxPendingRequests", "maxRequestBytes", "maxResponseBytes", "maxBufferedBytes", "maxPendingBytes", "maxFragments", "maxBufferedChunks",
     "upgradeTimeoutMs", "idleTimeoutMs", "drainTimeoutMs"];
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== names.sort().join()) throw new TypeError("Invalid named route limits.");
   const limits = { ...value } as NamedLiveRouteLimits;
-  if (Object.values(limits).some(number => !Number.isSafeInteger(number) || number < 1 || number > 2_147_483_647)) throw new TypeError("Invalid named route limits.");
+  if (Object.values(limits).some(number => !Number.isSafeInteger(number) || number < 0 || number > 2_147_483_647)) throw new TypeError("Invalid named route limits.");
+  if (Object.entries(limits).some(([key, value]) => key !== "reservedOwnerConnections" && value < 1) ||
+    limits.reservedOwnerConnections >= Math.min(limits.maxConnections, limits.maxConnectionsPerWorkspace)) throw new TypeError("Invalid named route limits.");
   return limits;
 }
 
@@ -58,7 +64,7 @@ interface LiveRouteOptions {
   frames: LiveFrameSessionPolicy;
   bounds: NamedFrameHostBounds;
   captureNative(binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost>;
-  validate: OwnerOutboxAdmission["validate"];
+  validate: CapacityLiveAdmissionValidator;
   lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
   admission?: ReturnType<typeof createLiveConnectionAdmission>;
 }
@@ -99,6 +105,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     closeTimeout: limits.drainTimeoutMs, handleProtocols: () => "dohc-live-v1" };
   const server = new WebSocketServer(wsOptions);
   const connections = new Set<() => void>(), admission = options.admission ?? createLiveConnectionAdmission();
+  const buffers = admission.buffers(limits.maxBufferedBytes), validationBuffers = admission.validationBuffers(limits.maxBufferedBytes);
   const connectionScopes = new Map<() => void, {userId?: string; workspaceId: string}>();
   const shutdown = new AbortController();
   const storage = options.storage, editors = liveEditors(storage);
@@ -199,19 +206,36 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
       refuseDeviceControl(socket, limits.drainTimeoutMs); return;
     }
     const releaseConnection = admission.reserve([["connections", limits.maxConnections]]);
-    if (!releaseConnection) {refuseDeviceControl(socket, limits.drainTimeoutMs); return;}
+    const releaseRefusal = !releaseConnection ? admission.reserve([["upgrade-refusals", limits.maxPendingRequests]]) : undefined;
+    if (!releaseConnection && !releaseRefusal) {refuseDeviceControl(socket, limits.drainTimeoutMs); return;}
     socket.pause();
     const lifetime = new AbortController(), signal = AbortSignal.any([lifetime.signal, storage.unavailable, shutdown.signal]);
     let ws: WebSocket | undefined, host: NamedFrameHostSession | undefined, session: ReturnType<typeof createNamedLiveFrameSession> | undefined;
     let membership: LiveMembershipSession | undefined;
+    let reserveBytes: (size: number) => () => void = buffers.reserve;
+    let validationBudget: NamedFrameValidationBudget | undefined;
+    let closingForLimit = false;
     let done = false, opening = true, releaseAuthority: (() => void) | undefined, releaseEditor: (() => void) | undefined;
     let timer = setTimeout(stop, limits.upgradeTimeoutMs);
     async function release() {
       if (opening || !done) return;
       await session?.settled();
+      if (closingForLimit && ws && ws.readyState !== WebSocket.CLOSED) await new Promise<void>(resolve => ws!.once("close", resolve));
       connectionScopes.delete(stop);
       if (!connections.delete(stop)) return;
-      releaseEditor?.(); releaseAuthority?.(); releaseConnection!();
+      releaseEditor?.(); releaseAuthority?.(); releaseConnection?.(); releaseRefusal?.();
+    }
+    function refuseLimit(code: LiveConnectionLimitCode) {
+      if (done || socket.destroyed) return;
+      if (!ws) server.handleUpgrade(request, socket, Buffer.alloc(0), accepted => { ws = accepted; accepted.on("error", stop); });
+      if (ws) {
+        closingForLimit = true;
+        ws.close(LIVE_CONNECTION_LIMIT_CLOSE_CODE, code);
+        socket.resume();
+        const deadline = setTimeout(() => ws?.terminate(), limits.drainTimeoutMs); deadline.unref();
+        ws.once("close", () => clearTimeout(deadline));
+      }
+      stop();
     }
     function stop() {
       if (done) return;
@@ -221,7 +245,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
       membership?.invalidated.removeEventListener("abort", stop);
       membership?.close();
       session?.close(); host?.close();
-      if (ws) ws.terminate(); else refuseDeviceControl(socket, limits.drainTimeoutMs);
+      if (ws) { if (!closingForLimit) ws.terminate(); } else refuseDeviceControl(socket, limits.drainTimeoutMs);
       void release();
     }
     const touch = () => { if (done) return; clearTimeout(timer); timer = setTimeout(stop, limits.idleTimeoutMs); timer.unref(); };
@@ -230,10 +254,27 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
     try {
       const check = storage.captureStanding();
       const authenticated = new Request(new URL(request.url!, `https://${headers.get("host")}`), { headers: credentials(headers), signal });
-      function reserve(reservations: [string, number][]) {
-        const release = admission.reserve(reservations);
+      function reserve(reservations: [string, number, LiveConnectionLimitCode][], principal: string, workspaceId: string, shareId?: string) {
+        if (!releaseConnection) throw new LiveConnectionLimitError("live_total_limit");
+        const release = admission.reserve([
+          [JSON.stringify(["workspace", workspaceId]), limits.maxConnectionsPerWorkspace, "live_workspace_limit"],
+          ...(kind === "owner" ? [] : [
+            ["non-owner", limits.maxConnections - limits.reservedOwnerConnections, "live_total_limit"],
+            [JSON.stringify(["non-owner-workspace", workspaceId]), limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections, "live_workspace_limit"],
+          ] as [string, number, LiveConnectionLimitCode][]),
+          ...reservations,
+        ]);
         if (!release) throw new Error("Live connection limit reached.");
         releaseAuthority = release;
+        const scopes: [string, number][] = [[principal, Math.max(1, Math.floor(limits.maxBufferedBytes *
+          Math.min(1, limits.maxConnectionsPerPrincipal / limits.maxConnections)))]];
+        if (kind !== "owner") scopes.push([JSON.stringify(["workspace", workspaceId]), Math.max(1, Math.floor(limits.maxBufferedBytes *
+          Math.min(1, (limits.maxConnectionsPerWorkspace - limits.reservedOwnerConnections) / limits.maxConnections)))]);
+        if (shareId) scopes.push([JSON.stringify(["share", workspaceId, shareId]), Math.max(1, Math.floor(limits.maxBufferedBytes *
+          Math.min(1, limits.maxConnectionsPerGrant / limits.maxConnections)))]);
+        reserveBytes = size => buffers.reserve(size, scopes);
+        validationBudget = {reserve: () => admission.reserve([[JSON.stringify(["validation", principal]), 1]]),
+          maxBytes: limits.maxBufferedBytes, reserveBytes: validationBuffers.reserve};
       }
       if (options.kind === "owner") {
         const {document, shareId} = ownerTarget!;
@@ -243,10 +284,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: actor.userId, shareId}});
         if (current.kind !== "current") throw new Error();
         reserve([
-          [JSON.stringify(["owner-document", actor.userId, document.workspaceId, document.objectId]), limits.maxConnectionsPerSession],
-          [JSON.stringify(["owner", actor.userId]), limits.maxConnectionsPerPrincipal],
-          [JSON.stringify(["owner-share", document.workspaceId, shareId]), limits.maxConnectionsPerGrant],
-        ]);
+          [JSON.stringify(["owner-document", actor.userId, document.workspaceId, document.objectId]), limits.maxConnectionsPerSession, "live_session_limit"],
+          [JSON.stringify(["principal", "named", actor.userId]), limits.maxConnectionsPerPrincipal, "live_person_limit"],
+          [JSON.stringify(["owner-share", document.workspaceId, shareId]), limits.maxConnectionsPerGrant, "live_grant_limit"],
+        ], JSON.stringify(["principal", "named", actor.userId]), document.workspaceId);
         // Counted before capture, so the host cannot unload the document while this connection opens.
         releaseEditor = editors.acquire(document);
         const native = await captureNative(current.binding, signal); signal.throwIfAborted(); check();
@@ -254,28 +295,28 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         const refreshed = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: actor.userId, shareId}});
         if (!isDeepStrictEqual(refreshed, current)) throw new Error("Owner binding changed during capture.");
         const trustedAccount = await accountSnapshot(actor.userId); signal.throwIfAborted(); check();
-        host = captureOwnerLiveFrameHost({authenticatedUserId: actor.userId, trustedAccount, shareId, storage, native, bounds, validate});
+        host = captureOwnerLiveFrameHost({authenticatedUserId: actor.userId, trustedAccount, shareId, storage, native, bounds, validate, reserveBytes, validationBudget});
       } else {
         const context = await options.sessions.resolve(authenticated, discriminator); signal.throwIfAborted(); check();
         if (!context || context.kind !== kind) { stop(); return; }
         connectionScopes.set(stop, {workspaceId: context.workspaceId, ...(context.kind === "named" ? {userId: context.userId} : {})});
         const principalKey = context.kind === "named" ? context.userId : context.profileTokenHash;
-        const reservations: [string, number][] = [
-          [JSON.stringify(["session", context.kind, principalKey, context.workspaceId, context.grantId, discriminator]), limits.maxConnectionsPerSession],
+        const reservations: [string, number, LiveConnectionLimitCode][] = [
+          [JSON.stringify(["session", context.kind, principalKey, context.workspaceId, context.grantId, discriminator]), limits.maxConnectionsPerSession, "live_session_limit"],
           [JSON.stringify(context.kind === "named" ? ["principal", "named", context.userId] :
-            ["principal", "link", context.workspaceId, context.grantId, principalKey]), limits.maxConnectionsPerPrincipal],
-          [JSON.stringify(["grant", context.workspaceId, context.grantId]), limits.maxConnectionsPerGrant],
+            ["principal", "link", context.workspaceId, context.grantId, principalKey]), limits.maxConnectionsPerPrincipal, "live_person_limit"],
+          [JSON.stringify(["grant", context.workspaceId, context.grantId]), limits.maxConnectionsPerGrant, "live_grant_limit"],
         ];
-        reserve(reservations);
         const ticket = await options.tickets.redeem(token, context, signal); signal.throwIfAborted(); check();
         if (!ticket || ticket.audience !== origin || ticket.authority.principalKind !== context.kind ||
           (context.kind === "named" && ticket.authority.principalId !== context.userId) ||
           ticket.authority.grantId !== context.grantId || ticket.binding.workspaceId !== context.workspaceId) { stop(); return; }
+        reserve(reservations, reservations[1]![0], context.workspaceId, context.shareId);
         releaseEditor = editors.acquire(ticket.binding);
         const native = await captureNative(ticket.binding, signal); signal.throwIfAborted(); check();
         const trustedAccount = context.kind === "named" ? await accountSnapshot(context.userId) : undefined;
         signal.throwIfAborted(); check();
-        host = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(context), ...(trustedAccount ? {trustedAccount} : {}), storage, native, bounds, validate });
+        host = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(context), ...(trustedAccount ? {trustedAccount} : {}), storage, native, bounds, validate, reserveBytes, validationBudget });
         host.assertCurrent();
         membership = options.membership?.join({ ticket, invalidated: host.invalidated, assertCurrent: host.assertCurrent.bind(host) });
       }
@@ -291,16 +332,24 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         accepted.on("ping", bytes => {
           if (done || controlFrames >= frames.maxControlFrames || bytes.length > frames.maxControlBytes - controlBytes ||
             accepted.bufferedAmount > limits.maxPendingBytes - bytes.length) { stop(); return; }
+          let releaseBytes: () => void;
+          try { releaseBytes = reserveBytes(bytes.length); } catch { refuseLimit("live_buffer_limit"); return; }
           controlBytes += bytes.length; controlFrames++;
-          accepted.pong(bytes, undefined, error => { controlBytes -= bytes.length; controlFrames--; if (error) stop(); });
+          try { accepted.pong(bytes, undefined, error => { releaseBytes(); controlBytes -= bytes.length; controlFrames--; if (error) stop(); }); }
+          catch { releaseBytes(); stop(); }
         });
-        session = createNamedLiveFrameSession({ host: host!, frames, membership, transport: {
+        session = createNamedLiveFrameSession({ host: host!, frames, membership, reserveBytes,
+          failed(error) { if (error instanceof LiveConnectionLimitError) refuseLimit(error.code); }, transport: {
           send(bytes) {
             if (done || accepted.readyState !== WebSocket.OPEN || accepted.bufferedAmount > limits.maxPendingBytes - bytes.length) return Promise.reject(new Error("Named transport unavailable."));
             host!.assertCurrent();
-            return new Promise<void>((resolve, reject) => accepted.send(bytes, { binary: true, compress: false }, error => {
-              if (error) reject(error); else { touch(); resolve(); }
-              }));
+            let releaseBytes: () => void;
+            try { releaseBytes = reserveBytes(bytes.length); } catch (error) { return Promise.reject(error); }
+            return new Promise<void>((resolve, reject) => {
+              try { accepted.send(bytes, { binary: true, compress: false }, error => {
+                releaseBytes(); if (error) reject(error); else { touch(); resolve(); }
+              }); } catch (error) { releaseBytes(); reject(error); }
+            });
           }, close: stop,
         } });
         accepted.on("message", (bytes, binary) => {
@@ -310,7 +359,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         touch(); socket.resume();
       });
       if (!ws) stop();
-    } catch { stop(); }
+    } catch (error) { if (error instanceof LiveConnectionLimitError) refuseLimit(error.code); else stop(); }
     finally { opening = false; void release(); }
   }
   return { handle, handleUpgrade,

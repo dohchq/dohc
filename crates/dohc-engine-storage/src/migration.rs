@@ -2569,6 +2569,39 @@ CREATE INDEX materialization_displacements_state
     ON materialization_displacements(state, job_id);
 ";
 
+const V2_RETAINED_DISPLACEMENTS_DDL: &str = r#"
+CREATE TABLE materialization_retained (
+    displacement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    source_path TEXT NOT NULL UNIQUE,
+    device TEXT NOT NULL,
+    inode TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    size INTEGER NOT NULL CHECK (size >= 0),
+    mtime TEXT NOT NULL,
+    ctime TEXT NOT NULL,
+    changed_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE INDEX materialization_retained_due ON materialization_retained(changed_at_ms);
+CREATE INDEX materialization_retained_job ON materialization_retained(job_id);
+CREATE TABLE materialization_displacement_reads (
+    workspace_id TEXT NOT NULL,
+    displacement_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    bytes BLOB NOT NULL,
+    observed_at_ms INTEGER NOT NULL,
+    PRIMARY KEY(workspace_id, displacement_id, sha256)
+) STRICT;
+CREATE TABLE materialization_staging_locations (
+    job_id TEXT PRIMARY KEY,
+    directory TEXT NOT NULL
+) STRICT;
+"#;
+
 /// Run history keeps an automation's settled claims 30 days from when they
 /// last settled, and its newest failure. An expired claim that still keeps a
 /// trigger from running twice stays, marked `expired` and out of run
@@ -3242,6 +3275,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
+        ordinal: 54,
+        id: "v2-retained-materialization-displacements",
+        sql: V2_RETAINED_DISPLACEMENTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
         ordinal: 55,
         id: "v2-history-operation-correlation",
         sql: "CREATE INDEX idx_moments_operation_correlation ON moments(workspace_id, metadata_correlation_id);",
@@ -3253,7 +3292,96 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_HOSTED_REPLICA_DDL,
         sets_user_version: None,
     },
+    // A file retired before this names no document. It keeps its row, so
+    // its path stays held and the file still goes; its document is unknown.
+    Migration {
+        ordinal: 57,
+        id: "v2-hosted-retired-file-object",
+        sql: "ALTER TABLE hosted_retired_files ADD COLUMN object_id TEXT CHECK (length(object_id) > 0);",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 58,
+        id: "v2-hosted-parked-documents",
+        sql: V2_HOSTED_PARKED_DOCUMENTS_DDL,
+        sets_user_version: None,
+    },
 ];
+
+/// A hosted document that left the scope parks instead of losing its state.
+/// Its heads and path aliases move to the parked tables, whose blob keys keep
+/// their bytes, so its paths come free while its history, Y.Doc and
+/// activation stay for its return. A returning document whose history holds
+/// a live edit the host never admitted is held. `unmaterialized_seq` is the
+/// relay position of the newest row of a document a pass applied before any
+/// committed pass wrote its files, so a document that leaves the scope first
+/// can still finish them before it parks.
+const V2_HOSTED_PARKED_DOCUMENTS_DDL: &str = "\
+CREATE TABLE hosted_documents_next (
+    workspace_id TEXT NOT NULL REFERENCES hosted_replicas(workspace_id) ON DELETE CASCADE,
+    object_id TEXT NOT NULL,
+    path TEXT NOT NULL CHECK (length(path) > 0),
+    state TEXT NOT NULL CHECK (state IN ('backfilling','held','ready','parked')),
+    held_reason TEXT CHECK (held_reason IN
+      ('hosted-backfill-path-held','hosted-backfill-work-waiting','hosted-scope-path-mismatch',
+       'hosted-conflict-parent-withheld','hosted-live-edit-unadmitted')),
+    held_path TEXT CHECK (length(held_path) > 0),
+    held_by TEXT CHECK (length(held_by) > 0),
+    held_conflict_id TEXT CHECK (length(held_conflict_id) > 0),
+    backfill_cursor INTEGER NOT NULL DEFAULT 0 CHECK (backfill_cursor >= 0),
+    scope_generation INTEGER NOT NULL CHECK (scope_generation >= 0),
+    unmaterialized_seq INTEGER CHECK (unmaterialized_seq > 0),
+    PRIMARY KEY (workspace_id, object_id),
+    CHECK ((state = 'held') = (held_reason IS NOT NULL)),
+    CHECK ((held_by IS NOT NULL) = (held_reason IS 'hosted-backfill-path-held')),
+    CHECK ((held_conflict_id IS NOT NULL) = (held_reason IS 'hosted-conflict-parent-withheld')),
+    CHECK (held_reason IS NOT 'hosted-backfill-path-held' OR held_path IS NOT NULL),
+    CHECK (held_reason NOT IN ('hosted-backfill-work-waiting','hosted-conflict-parent-withheld',
+      'hosted-live-edit-unadmitted') OR held_path IS NULL),
+    CHECK (state <> 'parked' OR unmaterialized_seq IS NULL)
+) STRICT;
+INSERT INTO hosted_documents_next (workspace_id,object_id,path,state,held_reason,held_path,
+    held_by,held_conflict_id,backfill_cursor,scope_generation)
+  SELECT workspace_id,object_id,path,state,held_reason,held_path,held_by,held_conflict_id,
+    backfill_cursor,scope_generation FROM hosted_documents;
+DROP TABLE hosted_documents;
+ALTER TABLE hosted_documents_next RENAME TO hosted_documents;
+CREATE TABLE hosted_parked_snapshots (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    blob_sha256 TEXT REFERENCES blobs(sha256),
+    updated_at_ms INTEGER NOT NULL,
+    latest_moment_id TEXT NOT NULL,
+    metadata_origin TEXT NOT NULL,
+    content_kind TEXT NOT NULL CHECK (content_kind IN ('text', 'binary')),
+    binary_sha256 TEXT REFERENCES binary_blobs(sha256),
+    metadata_summary TEXT,
+    metadata_correlation_id TEXT,
+    CHECK (
+        (content_kind = 'text'   AND blob_sha256   IS NOT NULL AND binary_sha256 IS NULL)
+     OR (content_kind = 'binary' AND binary_sha256 IS NOT NULL AND blob_sha256   IS NULL)
+    ),
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES hosted_documents(workspace_id, object_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX hosted_parked_snapshots_by_document ON hosted_parked_snapshots(workspace_id, object_id);
+CREATE TABLE hosted_parked_path_aliases (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, path, object_id),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES hosted_documents(workspace_id, object_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX hosted_parked_path_aliases_by_document
+  ON hosted_parked_path_aliases(workspace_id, object_id, version_id, path);
+";
 
 const V2_REPLICA_FRONTIERS_DDL: &str = "\
 CREATE TABLE replica_frontiers (
@@ -3773,6 +3901,103 @@ fn apply_transactional(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn p0_passive_upgrade_adds_empty_retention_without_originating_work() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-retained-materialization-displacements");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 54);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute("UPDATE engine_ownership SET store_role='passive'", [])
+            .unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        assert!(crate::schema::store_is_passive(&conn).unwrap());
+        for table in [
+            "materialization_retained",
+            "materialization_staging_locations",
+            "materialization_displacement_reads",
+            "materialization_jobs",
+            "replication_log",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+    }
+
+    #[test]
+    fn p0_upgrade_adds_retention_without_changing_jobs() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-retained-materialization-displacements");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 54);
+        let without_retention: Vec<_> = BASELINE_MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|migration| migration.ordinal != 54)
+            .collect();
+        run_migrations(&mut conn, &without_retention, &ctx, &NoFaults).unwrap();
+        let sha = crate::blob::put_binary_blob(&conn, b"before").unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        crate::materialize::enqueue_job(
+            &tx,
+            &crate::MaterializationJobSpec {
+                job_id: "pending".into(),
+                workspace_id: "ws".into(),
+                target_path: "notes.md".into(),
+                content_sha256: sha,
+                preimage: crate::Preimage::Absent,
+                target_generation: 1,
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let jobs:i64=conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE job_id='pending' AND status='pending'",[],|r|r.get(0)).unwrap();
+        assert_eq!(jobs, 1);
+        for ordinal in [54, 55, 56] {
+            let applied: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM engine_migrations WHERE ordinal=?1 AND completed_at IS NOT NULL",
+                    [ordinal],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(applied, 1, "migration {ordinal} applied once");
+        }
+        let history_index: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='idx_moments_operation_correlation')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(history_index, "migration 55's index survives migration 54");
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+        for table in [
+            "materialization_retained",
+            "materialization_displacement_reads",
+            "materialization_staging_locations",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+    }
+
     #[cfg(feature = "fault-injection")]
     use crate::faults::FaultAction;
     use crate::faults::NoFaults;
@@ -4069,12 +4294,24 @@ mod tests {
                 "fd9a692216dd5b73e9c3f08bee04b16dbcd313084e370a3592db4c8bc59d9adb",
             ),
             (
+                "v2-retained-materialization-displacements",
+                "a3acee99edade72fc8fda127206bcf641f876ad08fb4b39ce96c50afc372a2b3",
+            ),
+            (
                 "v2-history-operation-correlation",
                 "c0f4d24b926a03be07f0999f3aab707da566b2de18654243031f0cb1b80a4819",
             ),
             (
                 "v2-hosted-replica",
                 "332fbe3728b51bdb26a1cc9cc0d8d1da4decd311aa991687be899f4def7c7468",
+            ),
+            (
+                "v2-hosted-retired-file-object",
+                "7eb78041929d56613f64fd29f5f68200564dd7c08421ce869e96f4a36cb5c675",
+            ),
+            (
+                "v2-hosted-parked-documents",
+                "d6090f08905899107200c732a3c4301d726213b87489861b1af664515bcf5b44",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -4247,6 +4484,169 @@ mod tests {
             .unwrap();
         assert_eq!(replicas, 0, "an existing replica stays ordinary");
         hosted(&upgraded);
+    }
+
+    /// A file retired before files named their document keeps its row, so
+    /// its path stays held until the file goes.
+    #[test]
+    fn hosted_retired_file_object_upgrade_keeps_files_retired_before_it() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-hosted-retired-file-object");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 57);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+             VALUES ('hosted','service-host:a','epoch','stream',1); \
+             INSERT INTO hosted_replicas (workspace_id,created_at_ms) VALUES ('hosted',1); \
+             INSERT INTO hosted_retired_files (workspace_id,path,sha256) \
+             VALUES ('hosted','locked.md',printf('%064d',0));",
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        conn.execute(
+            "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+             VALUES ('hosted','gone.md','gone',printf('%064d',1))",
+            [],
+        )
+        .unwrap();
+        let files: Vec<(String, Option<String>)> = conn
+            .prepare("SELECT path,object_id FROM hosted_retired_files ORDER BY path")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            files,
+            [
+                ("gone.md".to_owned(), Some("gone".to_owned())),
+                ("locked.md".to_owned(), None),
+            ]
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                 VALUES ('hosted','empty.md','',printf('%064d',2))",
+                [],
+            )
+            .is_err()
+        );
+    }
+
+    /// Every hosted document keeps its state across the upgrade. After it, a
+    /// document can park, and one can be held for a live edit the host never
+    /// admitted, which names no path.
+    #[test]
+    fn hosted_parked_documents_upgrade_keeps_every_document() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-hosted-parked-documents");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 58);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch(
+            "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+             VALUES ('hosted','service-host:a','epoch','stream',1); \
+             INSERT INTO hosted_replicas (workspace_id,scope_generation,created_at_ms) VALUES ('hosted',2,1); \
+             INSERT INTO hosted_documents (workspace_id,object_id,path,state,held_reason,held_path, \
+               held_by,backfill_cursor,scope_generation) \
+             VALUES ('hosted','held','a.md','held','hosted-backfill-path-held','a.md','ready',4,2), \
+                    ('hosted','ready','b.md','ready',NULL,NULL,NULL,7,1);",
+        )
+        .unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        type Row = (String, String, Option<String>, Option<String>, i64, i64);
+        let rows: Vec<Row> = conn
+            .prepare(
+                "SELECT object_id,state,held_reason,held_by,backfill_cursor,scope_generation \
+                 FROM hosted_documents ORDER BY object_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (
+                    "held".to_owned(),
+                    "held".to_owned(),
+                    Some("hosted-backfill-path-held".to_owned()),
+                    Some("ready".to_owned()),
+                    4,
+                    2
+                ),
+                ("ready".to_owned(), "ready".to_owned(), None, None, 7, 1),
+            ]
+        );
+        // A document's parked rows are found without scanning every parked row.
+        for (table, index) in [
+            (
+                "hosted_parked_snapshots",
+                "hosted_parked_snapshots_by_document",
+            ),
+            (
+                "hosted_parked_path_aliases",
+                "hosted_parked_path_aliases_by_document",
+            ),
+        ] {
+            let plan: String = conn
+                .query_row(
+                    &format!(
+                        "EXPLAIN QUERY PLAN SELECT version_id,path FROM {table} \
+                         WHERE workspace_id='hosted' AND object_id='held'"
+                    ),
+                    [],
+                    |row| row.get(3),
+                )
+                .unwrap();
+            assert!(plan.contains(index), "{table}: {plan}");
+        }
+        for valid in [
+            "UPDATE hosted_documents SET state='parked',held_reason=NULL,held_path=NULL,held_by=NULL \
+             WHERE object_id='held'",
+            "UPDATE hosted_documents SET state='held',held_reason='hosted-live-edit-unadmitted' \
+             WHERE object_id='ready'",
+            "UPDATE hosted_documents SET unmaterialized_seq=9 WHERE object_id='ready'",
+        ] {
+            conn.execute(valid, []).unwrap();
+        }
+        for invalid in [
+            "UPDATE hosted_documents SET held_path='b.md' WHERE object_id='ready'",
+            "UPDATE hosted_documents SET state='parked' WHERE object_id='ready'",
+            "UPDATE hosted_documents SET state='retired' WHERE object_id='held'",
+            "UPDATE hosted_documents SET unmaterialized_seq=0 WHERE object_id='ready'",
+            "UPDATE hosted_documents SET unmaterialized_seq=9 WHERE object_id='held'",
+        ] {
+            assert!(conn.execute(invalid, []).is_err(), "{invalid}");
+        }
+        conn.execute("DELETE FROM hosted_replicas", []).unwrap();
+        let documents: i64 = conn
+            .query_row("SELECT COUNT(*) FROM hosted_documents", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(documents, 0, "documents leave with their replica");
     }
 
     #[test]

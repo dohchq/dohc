@@ -3,7 +3,7 @@ import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/acc
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
   ActorPresentation,
@@ -62,7 +62,7 @@ import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
 import { ThreadMessages } from "../workbench/ChatPosts";
-import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
+import { ChatComposer, ChatMessageList, type ChatReactionControls } from "../workbench/chatMessages";
 import { ComposerModeBar } from "../workbench/ChatsControls";
 import { ComposerCatalogOptions, MentionComposer } from "../workbench/MentionComposer";
 import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddressed";
@@ -126,9 +126,14 @@ const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-su
 // menus from EDITOR_MENU_BOX's margin and their boxes' heights.
 const SHADOW_ROOM = "p-10";
 
+// The parts the page renders, when it renders only some.
+const ShownParts = createContext<ReadonlySet<string> | undefined>(undefined);
+
 // A part whose subject is not a menu but which holds one, such as a header
 // with its document menu, is captured with its menus closed (`menusAtRest`).
 function Section(props: { part: string; title: string; children: ReactNode; menusAtRest?: boolean }) {
+  const shown = useContext(ShownParts);
+  if (shown && !shown.has(props.part)) return null;
   return (
     <section data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined} className="flex flex-col gap-3">
       <SectionLabel as="h3" className="m-0">
@@ -644,8 +649,11 @@ const aboutMoment = (moment: Partial<EngineMomentRecord> & { id: string; recorde
   ...moment,
 });
 const ABOUT_MOMENTS: EngineMomentRecord[] = [
-  aboutMoment({ id: "about-agent", recordedAtMs: new Date(2026, 6, 8, 9, 30).getTime(), momentOrder: 9, agentAuthorName: "Nova", summary: "Tightened the launch list" }),
-  aboutMoment({ id: "about-person", recordedAtMs: new Date(2026, 6, 8, 8, 55).getTime(), momentOrder: 8, namedAuthor: { userId: "sam", label: "Sam Rivera" } }),
+  aboutMoment({ id: "about-agent", recordedAtMs: new Date(2026, 6, 8, 9, 30).getTime(), momentOrder: 9, agentAuthorName: "Nova", summary: "Tightened the launch list",
+    authors: [{ kind: "agent", agentId: "nova", agentRunId: "run-nova", onBehalfOf: "ice" }],
+    authorPresentations: [{ group: "states-nova", hue: null, self: false }] }),
+  aboutMoment({ id: "about-person", recordedAtMs: new Date(2026, 6, 8, 8, 55).getTime(), momentOrder: 8, namedAuthor: { userId: "sam", label: "Sam Rivera" },
+    authors: [{ kind: "named", userId: "sam", grantId: "grant-sam", grantGeneration: 1 }], authorPresentations: [SAMPLE_SAM] }),
   aboutMoment({ id: "about-local", recordedAtMs: new Date(2026, 6, 7, 17, 20).getTime(), momentOrder: 6, origin: "local-file" }),
 ];
 const aboutGrant = (grant: Partial<AccessShareRow> & { grantId: string }): AccessShareRow => ({
@@ -834,6 +842,27 @@ function AgentOfferComposer(props: {
 // The About rail at the drawing's 290px, on the chrome.
 function AboutPanelSpecimen(props: { children: ReactNode }) {
   return <div className="flex w-[290px] flex-col rounded-lg border border-line bg-panel pb-2">{props.children}</div>;
+}
+
+// A run in a file's chats, the narrowest conversation. From an earlier year,
+// so its day divider reads the same whenever the page is drawn.
+const CHAT_RUN_AT = new Date(2025, 6, 8, 12, 43).getTime();
+const CHAT_RUN: ChatMessageRecord[] = [
+  { id: "run-1", threadId: "about-chat", ...SAM, body: "The second section reads well.", createdAtMs: CHAT_RUN_AT },
+  { id: "run-2", threadId: "about-chat", ...SAM, body: "Can we cut the last paragraph?", createdAtMs: CHAT_RUN_AT + 2 * 60_000 },
+];
+
+// Its second message hovered, so "12:45" shows in the avatar's column.
+function ChatRunSpecimen() {
+  return (
+    <div data-force-state="hover" data-force-target='[data-message-id="run-2"] > .group'>
+      <AboutPanelSpecimen>
+        <div className="flex h-[180px] flex-col">
+          <ChatMessageList testIdPrefix="states-chat" messages={CHAT_RUN} loading={false} emptyLabel="No messages yet." />
+        </div>
+      </AboutPanelSpecimen>
+    </div>
+  );
 }
 
 const accessSetup = (reason: AccessReason): AccessSetup => ({ reason, openSyncSettings: noop, connect: noop });
@@ -1412,6 +1441,17 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       <Section part="color-control" title="Color control">
         <ColorControl label="Accent" value="#6b7230" onChange={noop} />
+      </Section>
+
+      <Section part="native-controls" title="Native controls">
+        <Specimen label="checkboxes and radios in the theme's colors, checked ones in the accent (Explorer's archived toggle)">
+          <div className="flex flex-col">
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" defaultChecked={false} />Archived collections</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" defaultChecked />Archived collections</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="radio" name={`native-radio-${theme}`} defaultChecked={false} />Off</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="radio" name={`native-radio-${theme}`} defaultChecked />On</label>
+          </div>
+        </Specimen>
       </Section>
 
       <Section part="list-rows" title="List rows">
@@ -2663,6 +2703,13 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
       </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="chat-messages" title="Chat messages">
+        <Specimen label="a file's chats in About: a run, its second message hovered at 12:45 PM">
+          <ChatRunSpecimen />
+        </Specimen>
+      </Section>
     </section>
   );
 }
@@ -2912,7 +2959,8 @@ const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedS
   { label: "server disconnected", syncStatus: { ...SYNCED_STATUS, state: "cloud-disconnected" }, failedSaves: 0 },
 ];
 
-export function StatesPage() {
+// `parts` renders only those parts, so a test renders only what it checks.
+export function StatesPage(props: { parts?: ReadonlySet<string> }) {
   // The light pane has no rule of its own: it reads the document's light
   // tokens. The document is held light while the page is open and given back
   // its theme on close.
@@ -2935,8 +2983,10 @@ export function StatesPage() {
         </SecondaryButton>
       </header>
       <div className="grid grid-cols-2">
-        <Pane theme="light" />
-        <Pane theme="dark" />
+        <ShownParts.Provider value={props.parts}>
+          <Pane theme="light" />
+          <Pane theme="dark" />
+        </ShownParts.Provider>
       </div>
     </div>
   );

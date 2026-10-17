@@ -4418,3 +4418,343 @@ fn damaged_local_audit_chunk_propagates_storage_failure_and_can_retry() {
     .unwrap();
     assert!(matches!(result.primary, ApplyDisposition::Skipped));
 }
+
+/// Parking, end to end on a session host's hosted replica: a live document
+/// backfills, captures its activation, leaves the scope and parks only once
+/// the activation is adopted. It returns, its rows skip as redelivered, its
+/// Y.Doc holds exactly the state it parked with, and it resumes the same
+/// activation.
+#[test]
+fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
+    use dohc_engine_collab::live_update_application::{
+        OwnerAdoptionCut, adopt_owner_committed, capture_imported_owner_activation,
+        resume_imported_owner_activation,
+    };
+    use dohc_engine_storage::TxnOutcome;
+    use std::collections::BTreeMap;
+    const HOST: &str = "service-host:host";
+    let mut source = fixture(true);
+    bootstrap_committed::<Box<dyn std::error::Error>>(
+        &mut source.store,
+        &mut WriterDocCache::new(),
+        &source.handle,
+        source.input.clone(),
+        source.bytes.clone(),
+        &NoFaults,
+        |tx, _, namespace, binding| {
+            crate::journal_moment_append_in_tx(tx, "ws", "bootstrap-moment")?;
+            journal_live_base_in_tx(tx, namespace, binding, 100)?;
+            Ok(())
+        },
+    )
+    .unwrap();
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&source.bytes).unwrap();
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "An ordinary edit.")
+        .unwrap();
+    let edit = doc.encode_full_state();
+    source
+        .store
+        .write_with(&NoFaults, |tx| {
+            let digest = put_binary_blob(tx, &edit)?;
+            journal_local_op_in_tx(
+                tx,
+                "ws",
+                "ydoc.update",
+                &crate::ydoc_update_payload(
+                    &key,
+                    "note.md",
+                    ContentKind::Richdoc,
+                    &digest,
+                    &source.binding.lineage_claim_id,
+                    Some("owner-origin"),
+                    None,
+                    false,
+                ),
+                200,
+            )?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let mut ops = operations(&source.store);
+    for op in &mut ops {
+        op.relay_seq = Some(op.origin_seq + 1);
+    }
+    let end = ops.last().unwrap().origin_seq + 1;
+
+    let (_scratch, _path, mut store) = open_store();
+    crate::create_hosted_replica(&mut store, "ws", HOST, "epoch", "stream", 250, &NoFaults)
+        .unwrap();
+    let (binary, text) = source
+        .store
+        .read_with(|conn| {
+            let binary: Vec<Vec<u8>> = conn
+                .prepare("SELECT bytes FROM binary_blobs")?
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            let text: Vec<(String, i64, String)> = conn
+                .prepare("SELECT sha256,byte_length,text FROM blobs")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<_, _>>()?;
+            Ok::<_, rusqlite::Error>((binary, text))
+        })
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            for bytes in &binary {
+                put_binary_blob(tx, bytes)?;
+            }
+            for (digest, length, body) in &text {
+                tx.execute(
+                    "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![digest, length, body],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let scope = |store: &mut EngineStore, token: &str, documents: &[(&str, &str)]| {
+        let documents = documents
+            .iter()
+            .map(|(id, path)| ((*id).to_owned(), (*path).to_owned()))
+            .collect::<BTreeMap<_, _>>();
+        crate::hosted::adopt_scope(store, "ws", token, &documents, &NoFaults).unwrap();
+    };
+    let backfill = |store: &mut EngineStore, ops: &[ReplicationEnvelope]| {
+        ops.iter()
+            .map(|op| {
+                crate::apply_replication_envelope(
+                    store,
+                    &mut WriterDocCache::new(),
+                    op,
+                    &NoFaults,
+                    &NoLiveLeases,
+                )
+                .unwrap()
+                .primary
+            })
+            .collect::<Vec<_>>()
+    };
+    let complete = |store: &mut EngineStore, cursor: i64| {
+        let replica = crate::read_hosted_replica(store, "ws").unwrap().unwrap();
+        let read = crate::HostedRead {
+            cursor,
+            stopped: None,
+            complete: true,
+            heads_written: true,
+        };
+        let committed = crate::commit_hosted_cursor(
+            store,
+            "ws",
+            &crate::HostedCursor {
+                scope_generation: replica.scope_generation,
+                cursor_commits: replica.cursor_commits,
+                main_cursor: None,
+                reads: BTreeMap::from([("object".to_owned(), read)]),
+                settlement_report_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(
+            committed,
+            TxnOutcome::Committed(crate::HostedCommit {
+                committed: true,
+                has_more: false
+            })
+        );
+        crate::read_hosted_replica(store, "ws")
+            .unwrap()
+            .unwrap()
+            .documents["object"]
+            .status
+            == crate::HostedDocumentStatus::Ready
+    };
+    let ydoc_state = |store: &EngineStore| {
+        let loaded = dohc_engine_collab::load_persisted(store, &key)
+            .unwrap()
+            .unwrap();
+        hex_sha256(&loaded.doc.encode_full_state())
+    };
+
+    scope(&mut store, "scope-1", &[("object", "note.md")]);
+    assert!(
+        backfill(&mut store, &ops)
+            .iter()
+            .all(|applied| matches!(applied, ApplyDisposition::Applied(_)))
+    );
+    assert!(complete(&mut store, end));
+    let activation = capture_imported_owner_activation(
+        &mut store, "relay", &key, "note.md", 1_000_000, &NoFaults,
+    )
+    .unwrap();
+
+    // Its activation has no adoption yet, so it cannot park.
+    scope(&mut store, "scope-2", &[]);
+    assert!(!crate::hosted_document_parkable(&store, "ws", "object").unwrap());
+    let mut owner = ApplicationOwner::new("ws".into()).unwrap();
+    let handle = owner
+        .register(
+            &mut store,
+            "relay".into(),
+            ApplicationHostCoordinate {
+                host_id: "service-host".into(),
+                host_epoch: 1,
+                instance_id: "self-host-service".into(),
+                connection_id: "connection".into(),
+            },
+            source.binding.clone(),
+        )
+        .unwrap();
+    adopt_owner_committed(
+        &mut store,
+        &handle,
+        OwnerAdoptionCut {
+            relay_database_namespace: "relay".into(),
+            adoption_id: activation.activation_id.clone(),
+            source_moment_id: activation.source.source_moment_id.clone(),
+            source_digest: activation.source.source_digest.clone(),
+            source_byte_length: activation.source.source_byte_length,
+            baseline_moment_relay_sequence: ops
+                .iter()
+                .find(|op| op.payload["momentId"] == "bootstrap-moment")
+                .unwrap()
+                .origin_seq
+                + 1,
+            baseline_registered_at_ms: 100,
+            baseline_bytes: source.bytes.clone(),
+            expected_local_sequence: activation.source.native_head_sequence,
+            events: vec![],
+            terminal_receipt: None,
+            outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
+                max_pending_bytes: 1_000_000,
+                max_pending_age_ms: 100_000,
+            },
+        },
+        1_000_000,
+        10,
+        260,
+        &NoFaults,
+        |tx, namespace, binding, _| {
+            journal_live_base_in_tx(tx, namespace, binding, 260)
+                .map(|_| ())
+                .map_err(|e| {
+                    dohc_engine_collab::live_update_application::ApplicationError::Storage(
+                        dohc_engine_storage::StorageError::persist_public(e),
+                    )
+                })
+        },
+    )
+    .unwrap();
+    drop(owner);
+    // The relay acknowledged what the host wrote and its seed was delivered.
+    let host_ops = crate::list_replication_ops(&store, "ws", HOST, -1, 500).unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+                 VALUES ('ws',?1,?2)",
+                params![HOST, host_ops.last().unwrap().origin_seq],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "UPDATE owner_ydoc_outboxes SET pending_bytes=0,oldest_entry_at_ms=NULL",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    assert!(crate::hosted_document_parkable(&store, "ws", "object").unwrap());
+    let parked = (
+        ydoc_state(&store),
+        count(&store, "ydoc_updates"),
+        count(&store, "replication_log"),
+    );
+    assert_eq!(
+        crate::park_hosted_document(&mut store, "ws", "object", "main", &NoFaults).unwrap(),
+        TxnOutcome::Committed(true)
+    );
+    for file in crate::retired_hosted_files(&store, "ws").unwrap() {
+        crate::forget_retired_hosted_file(&mut store, "ws", &file.path, &NoFaults).unwrap();
+    }
+    assert_eq!(count(&store, "snapshots"), 0);
+    let coordinate = ApplicationHostCoordinate {
+        host_id: "service-host".into(),
+        host_epoch: 2,
+        instance_id: "self-host-service".into(),
+        connection_id: "connection".into(),
+    };
+    assert!(
+        ApplicationOwner::new("ws".into())
+            .unwrap()
+            .register(
+                &mut store,
+                "relay".into(),
+                coordinate,
+                source.binding.clone()
+            )
+            .is_err(),
+        "a parked document registers nothing"
+    );
+    assert!(matches!(
+        resume_imported_owner_activation(
+            &mut store,
+            "relay",
+            &key,
+            "note.md",
+            &activation.activation_id,
+            1_000_000
+        ),
+        Err(dohc_engine_collab::live_update_application::ApplicationError::Conflict)
+    ));
+
+    // It returns: its head comes back, every row it applied skips, the host's
+    // own rows too, and it is ready with the state it parked with.
+    scope(&mut store, "scope-3", &[("object", "note.md")]);
+    crate::hosted::unpark_returned(&mut store, "ws", &NoFaults).unwrap();
+    let heads = store
+        .read_with(|conn| crate::hosted::head_writes(conn, "ws", "object"))
+        .unwrap();
+    assert_eq!(
+        heads
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>(),
+        ["note.md"]
+    );
+    let mut redelivered = ops.clone();
+    redelivered.extend(host_ops.into_iter().enumerate().map(|(index, mut op)| {
+        op.relay_seq = Some(end + 1 + index as i64);
+        op
+    }));
+    assert!(
+        backfill(&mut store, &redelivered)
+            .iter()
+            .all(|skipped| matches!(skipped, ApplyDisposition::Skipped))
+    );
+    assert!(complete(&mut store, end + redelivered.len() as i64));
+    assert_eq!(
+        (
+            ydoc_state(&store),
+            count(&store, "ydoc_updates"),
+            count(&store, "replication_log"),
+        ),
+        parked,
+        "nothing applied twice"
+    );
+    let resumed = resume_imported_owner_activation(
+        &mut store,
+        "relay",
+        &key,
+        "note.md",
+        &activation.activation_id,
+        1_000_000,
+    )
+    .unwrap();
+    assert_eq!(resumed.activation_id, activation.activation_id);
+    assert_eq!(resumed.source, activation.source);
+    assert_eq!(resumed.full_state, activation.full_state);
+}

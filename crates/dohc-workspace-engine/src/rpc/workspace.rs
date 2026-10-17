@@ -12,6 +12,7 @@ use crate::rpc::error::map_runtime;
 use crate::rpc::error::workspace_unavailable;
 use crate::rpc::relay::RelayOpenParams;
 use crate::rpc::request::OperationCancellation;
+use crate::rpc::request::after_landing;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::request::validated_author;
@@ -41,6 +42,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub(super) const MAX_OPEN_HANDLES: usize = 64;
+
+/// How long a landed step waits for the capture gate before it leaves its
+/// Collections update to the next text write, push, or terminal page's commit.
+const OWED_COLLECTIONS_GATE_WAIT: Duration = Duration::from_secs(2);
 
 /// A `capture.hold`: the apply gate it holds, and when it ends unless the
 /// holder renews it first.
@@ -87,6 +92,21 @@ pub(crate) struct OpenWorkspace {
     /// Version fences retain this gate through their destructive continuation,
     /// without stalling editor traffic in unrelated open workspaces.
     pub(super) session_ops: Arc<tokio::sync::Mutex<()>>,
+    /// How many pending cursors of each kind this handle has issued, counted
+    /// under the pending-cursor lock. A commit that did not land restores its
+    /// token only if no newer cursor of its kind was issued since.
+    pub(super) cursors_issued: [std::sync::atomic::AtomicU64; 3],
+    /// A landed step changed what this workspace's Collections hold and the
+    /// update has not run yet. The next text write, push, or terminal page's
+    /// commit runs it.
+    pub(super) collections_owed: std::sync::atomic::AtomicBool,
+    /// A pull applied a page and its terminal page has not committed, so
+    /// the Collections may hold half a pull. Owed work waits for that commit.
+    pub(super) pull_between_pages: std::sync::atomic::AtomicBool,
+    /// Pulls that may be placing a page, counted from under the capture gate
+    /// before their first relay step until they are between pages, finish,
+    /// or fail.
+    pub(super) pulls_in_flight: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,7 +159,18 @@ impl OpenWorkspace {
             capture_apply_gate: Arc::clone(&self.capture_apply_gate),
             capture_holds: Arc::clone(&self.capture_holds),
             session_ops: Arc::clone(&self.session_ops),
+            cursors_issued: Default::default(),
+            collections_owed: Default::default(),
+            pull_between_pages: Default::default(),
+            pulls_in_flight: Default::default(),
         }
+    }
+
+    /// The Collections may hold half a pull, or a pull may place a page
+    /// before an update started now would run.
+    fn mid_pull(&self) -> bool {
+        self.pull_between_pages.load(Ordering::SeqCst)
+            || self.pulls_in_flight.load(Ordering::SeqCst) > 0
     }
 
     pub(super) fn request_collection_reconcile(&self) {
@@ -490,27 +521,73 @@ impl EngineService {
         open.reconciles_collections && open.is_local_owner()
     }
 
-    /// A change that can move the workspace's Collections committed. A
-    /// workspace with capture asks its driver, whose next pass reconciles
-    /// after it applies what it scanned. One that keeps its Collections itself
+    /// A change that can move the workspace's Collections landed. A workspace
+    /// with capture asks its driver, whose next pass reconciles after it
+    /// applies what it scanned. One that keeps its Collections itself
     /// reconciles now, under the gate a capture pass holds, and wakes the
     /// executors for committed claims. Workspaces that reconcile here have no
-    /// capture driver. A held lease fails the request so the caller retries.
-    pub(super) async fn collections_changed(
-        &self,
-        ctx: &RequestContext,
-        open: &OpenWorkspace,
-    ) -> Result<(), WireError> {
-        if !self.reconciles_collections_itself(open) {
+    /// capture driver. The request answers with what landed either way.
+    pub(super) async fn collections_changed(&self, ctx: &RequestContext, open: &OpenWorkspace) {
+        self.collections_landed(open);
+        self.settle_owed_collections(ctx, open).await;
+    }
+
+    /// A landed step changed what the Collections hold. A workspace that
+    /// keeps them itself owes the update until it runs; one with capture asks
+    /// its driver.
+    pub(super) fn collections_landed(&self, open: &OpenWorkspace) {
+        if self.reconciles_collections_itself(open) {
+            open.collections_owed.store(true, Ordering::SeqCst);
+        } else {
             open.request_collection_reconcile();
-            return Ok(());
         }
-        let cancellation = OperationCancellation::new(ctx);
-        let _apply = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => return Err(cancellation.interruption("collection reconcile")),
-            guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+    }
+
+    /// Run an owed Collections update after a landed step, which answers with
+    /// what landed either way. A renewed `capture.hold` can keep the gate
+    /// forever, so the wait for it is bounded. An update that cannot run now
+    /// stays owed to the next text write, push, or terminal page's commit. The
+    /// update reconciles the whole workspace, so whichever step runs it
+    /// repairs every change still owed. While a pull is between pages it
+    /// stays owed: dangling-link cleanup would remove a relation whose target
+    /// a later page brings back. A pull counts itself under the gate before
+    /// it places a page, so the check under the gate admits no update that a
+    /// page could overtake.
+    pub(super) async fn settle_owed_collections(&self, ctx: &RequestContext, open: &OpenWorkspace) {
+        if !open.collections_owed.load(Ordering::SeqCst) || open.mid_pull() {
+            return;
+        }
+        let Ok(apply) = tokio::time::timeout(
+            OWED_COLLECTIONS_GATE_WAIT,
+            Arc::clone(&open.capture_apply_gate).lock_owned(),
+        )
+        .await
+        else {
+            return;
         };
+        // Another step took the update under the gate after this one landed,
+        // or a pull started meanwhile.
+        if open.mid_pull() || !open.collections_owed.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let cancellation = OperationCancellation::new(&after_landing(ctx));
+        if let Err(error) = self
+            .reconcile_collections_under(apply, open, &cancellation)
+            .await
+        {
+            open.collections_owed.store(true, Ordering::SeqCst);
+            eprintln!("engine: Collections update deferred: {error:?}");
+        }
+    }
+
+    /// Reconcile a workspace that keeps its Collections itself, holding the
+    /// capture gate `_apply`.
+    pub(super) async fn reconcile_collections_under(
+        &self,
+        _apply: tokio::sync::OwnedMutexGuard<()>,
+        open: &OpenWorkspace,
+        cancellation: &OperationCancellation,
+    ) -> Result<(), WireError> {
         let version_id = match open
             .actor
             .active_version_id(open.workspace_id.clone())
@@ -1175,6 +1252,10 @@ impl EngineService {
                 capture_apply_gate,
                 capture_holds: CaptureHolds::default(),
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
+                cursors_issued: Default::default(),
+                collections_owed: Default::default(),
+                pull_between_pages: Default::default(),
+                pulls_in_flight: Default::default(),
             }),
         );
         open_guard.disarm();
@@ -1283,6 +1364,57 @@ impl EngineService {
             .get(handle)
             .cloned()
             .ok_or_else(workspace_unavailable)
+    }
+}
+
+#[cfg(test)]
+impl EngineService {
+    /// Occupy a workspace's actor until the returned sender drops, so a test
+    /// can stop a request before its actor work runs. The held write rolls back.
+    pub(crate) async fn hold_actor(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> std::sync::mpsc::Sender<()> {
+        use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
+        struct Hold {
+            held: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl FaultInjector for Hold {
+            fn poll(&self, point: FaultPoint) -> FaultAction {
+                if point != FaultPoint::StorageBeforePersist {
+                    return FaultAction::Continue;
+                }
+                if let Some(held) = lock(&self.held).take() {
+                    let _ = held.send(());
+                    let _ = lock(&self.release).recv();
+                }
+                FaultAction::Crash
+            }
+        }
+        let (held, entered) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let hold = Arc::new(Hold {
+            held: std::sync::Mutex::new(Some(held)),
+            release: std::sync::Mutex::new(released),
+        });
+        let actor = self
+            .open(Some(workspace))
+            .expect("open workspace")
+            .actor
+            .clone();
+        tokio::spawn(async move {
+            let _ = actor
+                .ensure_main_version(
+                    "actor-hold".into(),
+                    0,
+                    hold,
+                    dohc_engine_runtime::CancellationToken::new(),
+                )
+                .await;
+        });
+        entered.await.expect("the actor is held");
+        release
     }
 }
 
@@ -2462,7 +2594,7 @@ mod tests {
             )
             .await
             .unwrap();
-        service.collections_changed(&ctx, &open).await.unwrap();
+        service.collections_changed(&ctx, &open).await;
         // A pull deletes the target while automation retains the source's session lease.
         let observer = rusqlite::Connection::open(&open.db_path).unwrap();
         let count = || {
@@ -2499,24 +2631,19 @@ mod tests {
             )
             .await
             .unwrap();
-        let result = service.collections_changed(&ctx, &open).await;
+        service.collections_changed(&ctx, &open).await;
         assert_eq!(count(), 1, "the held source keeps its stale relation");
-        let error =
-            result.expect_err("a replica must leave the pull retryable until cleanup completes");
-        assert_eq!(error.code, ErrorCode::Overloaded);
-        assert_eq!(
-            error.retry,
-            dohc_engine_protocol::error::Retryability::AfterBackoff
+        assert!(
+            open.collections_owed.load(Ordering::SeqCst),
+            "a replica owes the cleanup until it completes"
         );
         drop(lease);
-        service
-            .collections_changed(&ctx, &open)
-            .await
-            .expect("retry after release");
+        service.settle_owed_collections(&ctx, &open).await;
+        assert!(!open.collections_owed.load(Ordering::SeqCst));
         assert_eq!(
             count(),
             0,
-            "the retry cleans the relation without another relay change"
+            "the next step cleans the relation without another relay change"
         );
         assert!(
             !std::fs::read_to_string(scratch.path().join("tasks/source.md"))
@@ -2580,7 +2707,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_move_cancellation_and_deadline_return_while_actor_query_is_queued() {
+    async fn a_stopped_check_move_answers_once_its_queued_actor_query_runs() {
         use dohc_engine_protocol::transport::EngineService as _;
         for deadline in [false, true] {
             let scratch = ScratchDir::new().unwrap();
@@ -2648,30 +2775,25 @@ mod tests {
             } else {
                 cancel.cancel();
             }
-            let result = tokio::time::timeout(Duration::from_millis(250), checking.as_mut()).await;
-            let actor_still_held = !held.is_finished();
+            tokio::task::yield_now().await;
+            std::future::poll_fn(|cx| {
+                assert!(
+                    std::future::Future::poll(checking.as_mut(), cx).is_pending(),
+                    "a queued actor query is awaited, not answered for"
+                );
+                std::task::Poll::Ready(())
+            })
+            .await;
             if deadline {
                 tokio::time::resume();
             }
             gate.release();
             held.await.unwrap().unwrap();
-            drop(checking);
+            let checked = tokio::time::timeout(Duration::from_secs(5), checking)
+                .await
+                .expect("checkMove answers once its query runs");
+            assert!(checked.is_ok(), "{checked:?}");
             service.workspace_close(Some(handle)).await.unwrap();
-            assert!(
-                actor_still_held,
-                "the actor query cannot finish before cancellation"
-            );
-            assert_eq!(
-                result
-                    .expect("cancelled checkMove returns before actor release")
-                    .unwrap_err()
-                    .code,
-                if deadline {
-                    ErrorCode::DeadlineExceeded
-                } else {
-                    ErrorCode::Cancelled
-                }
-            );
         }
     }
 
@@ -3522,6 +3644,7 @@ mod tests {
                 materialization_paths: Vec::new(),
                 materialized: false,
                 reconcile_collections: false,
+                issue: 1,
                 cursor: IssuedCursor::Relay(dohc_engine_sync::RelayCursor {
                     bootstrap_complete: true,
                     cursor: 7,

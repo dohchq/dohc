@@ -582,7 +582,7 @@ impl EngineService {
 
         if open.capture_enabled {
             let mut flush = self
-                .capture_flush_once(ctx, &open, "history.page capture flush")
+                .capture_flush_once(ctx, &open, "history.page capture flush", None)
                 .await?;
             for _ in 0..HISTORY_PAGE_FLUSH_RETRIES {
                 if flush.settled {
@@ -597,7 +597,7 @@ impl EngineService {
                     () = tokio::time::sleep(HISTORY_PAGE_FLUSH_RETRY_DELAY) => {}
                 }
                 flush = self
-                    .capture_flush_once(ctx, &open, "history.page capture flush")
+                    .capture_flush_once(ctx, &open, "history.page capture flush", None)
                     .await?;
             }
             if !flush.settled {

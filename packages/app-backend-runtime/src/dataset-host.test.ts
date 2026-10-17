@@ -1,3 +1,4 @@
+import { readDatasetHistoryHeads } from "./dataset-history.js";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import * as datasetOperations from "@dohc/security-contract/dataset-operations";
 import type { JsonValue } from "./protocol.js";
@@ -988,31 +989,32 @@ it("pins owner-local agent approvals to initial and migrated rule history", asyn
   expect(f.host.historyRevision("owner",{...scope,revisionSha256:revision.revisionSha256})).toMatchObject({approvalAgent:agent});
 });
 
-it("reads all local history heads in one owner-authorized metadata transaction", async () => {
+it("reads local metadata heads inside the caller snapshot", async () => {
   const f = await fixture(); await f.activate();
   await f.invoke("owner", id(6), { value: "private" });
   const prepared = vi.spyOn(f.db, "prepare"), exec = vi.spyOn(f.db, "exec");
-  const heads = f.host.historyHeads("owner", { workspaceId: scope.workspaceId, limit: 1 });
+  f.db.exec("BEGIN");
+  const heads = readDatasetHistoryHeads(f.db, { workspaceId: scope.workspaceId, limit: 1 });
+  f.db.exec("COMMIT");
   expect(heads).toMatchObject([{ datasetId: scope.datasetId, name: "Orders", headRevision: 1, lineage: expect.stringMatching(/^[a-f0-9]{64}$/), entries: [{ revision: 1 }] }]);
-  expect(exec.mock.calls).toEqual([["BEGIN IMMEDIATE"], ["COMMIT"]]);
+  expect(exec.mock.calls).toEqual([["BEGIN"], ["COMMIT"]]);
   expect(prepared.mock.calls.every(([sql]) => !String(sql).includes("e.result_json"))).toBe(true);
   const page = f.host.history("owner", { ...scope, metadataOnly: true });
   expect(page).toMatchObject({ name: "Orders", lineage: heads[0]!.lineage, archived: false, olderRecordedAtMs: expect.any(Number) });
   expect(page.entries[0]!.undo).toBeUndefined();
   for (const caller of ["helper", "friend"] as const) {
-    expect(() => f.host.historyHeads(caller, { workspaceId: scope.workspaceId })).toThrow("You do not have access");
     expect(() => f.host.history(caller, { ...scope, metadataOnly: true })).toThrow("You do not have access");
   }
   f.host.archiveDataset("owner", scope);
-  expect(f.host.historyHeads("owner", { workspaceId: scope.workspaceId })).toEqual([]);
+  expect(readDatasetHistoryHeads(f.db, { workspaceId: scope.workspaceId })).toEqual([]);
   expect(f.host.history("owner", { ...scope, metadataOnly: true }).archived).toBe(true);
 });
 
 it("reuses history statements and targets the requested catalog row", async () => {
   const f = await fixture(); await f.activate(); await f.invoke("owner", id(6), { value: "private" });
   const input = { workspaceId: scope.workspaceId, positions: [{ datasetId: scope.datasetId, beforeRevision: 2 }], limit: 1 };
-  f.host.historyHeads("owner", input);
+  readDatasetHistoryHeads(f.db, input);
   const prepared = vi.spyOn(f.db, "prepare");
-  f.host.historyHeads("owner", input);
+  readDatasetHistoryHeads(f.db, input);
   expect(prepared.mock.calls.filter(([sql]) => String(sql).includes("WITH changes") || String(sql).includes("SELECT c.dataset_id") || String(sql).includes("checkpoint_digest AS digest"))).toEqual([]);
 });
