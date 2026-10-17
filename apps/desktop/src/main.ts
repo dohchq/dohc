@@ -339,6 +339,7 @@ import {
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
 import { createChatWrites } from "./workspaces/chatWrites";
+import { localPersonOwnsWorkspace } from "./workspaces/localPersonOwns";
 import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
 import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
@@ -748,15 +749,12 @@ async function pressingPerson(): Promise<string> {
   return localUserId();
 }
 
-// Whether this computer's person owns the workspace: a workspace that does
-// not sync is its computer's person's, and a synced one is its owner
+// Whether this computer's person owns the workspace: a workspace that never
+// synced is its computer's person's, and a synced one is its owner
 // account's. A shared view is never this person's.
 async function localPersonOwns(workspaceId: string): Promise<boolean> {
   await warmCredentialCache();
-  const entry = findWorkspace(workspaceId);
-  if (!entry || shareViewIsPresent(entry.shareView)) return false;
-  const remote = entry.remote ?? entry.pausedRemote;
-  return !remote || workspaceRemoteMatchesCredentials(remote, cachedCredentials);
+  return localPersonOwnsWorkspace(findWorkspace(workspaceId), cachedCredentials);
 }
 
 // A Collection automation step started or stopped waiting for a current
