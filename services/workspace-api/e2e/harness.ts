@@ -1,13 +1,25 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
+import { applyMigrations } from "../../../scripts/lib/apply-migrations.mjs";
 import { startSmtpCapture } from "./smtpCapture";
 
 export const ACCOUNT_TEST_SECRET = "disposable-account-browser-acceptance-secret-0123456789";
+
+// The relay and the account server read every migration's tables, such as account
+// deletion's jobs. Parallel account servers share a database, so all migrations
+// run under one session lock, on the client that holds it.
+async function migrate(pool: Pool): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("select pg_advisory_lock(hashtext('dohc_migrations'))");
+    try { await applyMigrations(client); }
+    finally { await client.query("select pg_advisory_unlock(hashtext('dohc_migrations'))"); }
+  } finally { client.release(); }
+}
 
 export async function startAccountServer(options: { relayUrl?: string; shareUrl?: string; port?: number; publicOrigin?: string; signal?: AbortSignal } = {}) {
   const connectionString = process.env.POSTGRES_URL;
@@ -17,7 +29,7 @@ export async function startAccountServer(options: { relayUrl?: string; shareUrl?
   // Under the full JS gate a 2 s connect bound timed out against a healthy
   // database; a refused connection still fails at once.
   const pool = new Pool({ connectionString, connectionTimeoutMillis: 30_000 });
-  await pool.query(await readFile(new URL("../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql", import.meta.url), "utf8"));
+  await migrate(pool);
   const port = options.port ?? await availablePort();
   const listenOrigin = `http://127.0.0.1:${port}`;
   const origin = options.publicOrigin ?? listenOrigin;

@@ -2692,9 +2692,29 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
             )?;
             recovered_sibling = true;
         }
-        let mut update = doc
-            .rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text)
-            .map_err(map_fold_edit_error)?;
+        let mut update =
+            match doc.rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text) {
+                Err(CollabError::MarkdownNotRepresentable)
+                    if pristine_empty && empty_seed_never_replicated_in_tx(tx, key)? =>
+                {
+                    retire_complete_ydoc_lineage_in_tx(tx, complete)?;
+                    return Ok(LineageFold::NoContent);
+                }
+                // Peers already hold the settled body, so an outside edit that
+                // keeps it, such as a frontmatter change, may fold its nested
+                // items. Parse refusals and quote overflow still apply; the
+                // settled-rule exception below then keeps the exact bytes.
+                Err(CollabError::MarkdownNotRepresentable)
+                    if marker.content_kind == ContentKind::Richdoc
+                        && last_settled_text_in_tx(tx, key)?.is_some_and(|settled| {
+                            markdown_body(&settled) == markdown_body(chosen_text)
+                        }) =>
+                {
+                    doc.rewrite_settled_body_for_fold(chosen_text)
+                        .map_err(map_fold_edit_error)?
+                }
+                result => result.map_err(map_fold_edit_error)?,
+            };
         // Check the delta before projection, which has a separate byte cap.
         if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(SyncError::BlobTooLarge {
@@ -2724,17 +2744,7 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
             let mut projection = canonical;
             if marker.content_kind == ContentKind::Richdoc
                 && let Some(source) = doc.settled_markdown_source(&projection.content, || {
-                    tx.query_row(
-                        "SELECT b.text FROM ydoc_docs d JOIN blobs b \
-                         ON b.sha256=COALESCE(d.last_settled_sha, \
-                           CASE WHEN d.settle_seq=0 THEN d.seed_source_sha256 END) \
-                         WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
-                        params![key.workspace_id, key.version_id, key.object_id],
-                        |row| row.get::<_, Option<String>>(0),
-                    )
-                    .optional()
-                    .map(Option::flatten)
-                    .map_err(SyncError::corrupt)
+                    last_settled_text_in_tx(tx, key)
                 })?
             {
                 projection.content = source;
@@ -5579,6 +5589,29 @@ fn refuse_ydoc_with_reason(
     })
 }
 
+/// The lineage's last settled text, or its seed source before any settle.
+fn last_settled_text_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<String>, SyncError> {
+    tx.query_row(
+        "SELECT b.text FROM ydoc_docs d JOIN blobs b \
+         ON b.sha256=COALESCE(d.last_settled_sha, \
+           CASE WHEN d.settle_seq=0 THEN d.seed_source_sha256 END) \
+         WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+    .map_err(SyncError::corrupt)
+}
+
+fn markdown_body(markdown: &str) -> &str {
+    dohc_engine_domain::collections::markdown_frontmatter_json_with_body(markdown)
+        .map_or(markdown, |(_, body)| body)
+}
+
 fn map_fold_edit_error(error: CollabError) -> SyncError {
     match error {
         CollabError::UpdateTooLarge { actual, max } => SyncError::BlobTooLarge {
@@ -5591,9 +5624,11 @@ fn map_fold_edit_error(error: CollabError) -> SyncError {
             limit_bytes: max,
             observed_bytes: actual,
         },
-        CollabError::MarkdownQuoteDepthExceeded => SyncError::InvalidInput {
-            reason: "ydoc-resolution-not-representable",
-        },
+        CollabError::MarkdownQuoteDepthExceeded | CollabError::MarkdownNotRepresentable => {
+            SyncError::InvalidInput {
+                reason: "ydoc-resolution-not-representable",
+            }
+        }
         CollabError::MarkdownRewriteUnsupported { .. } => SyncError::InvalidInput {
             reason: "the content kind does not support Markdown conflict resolution",
         },
