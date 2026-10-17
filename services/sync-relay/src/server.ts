@@ -58,6 +58,7 @@ import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
 import { accountDisplayName, createDiscussionRoutes } from "./discussionRoutes";
 import {shareSenderLabel as formatShareSender} from "@dohc/security-contract/share-labels";
 import { createShareReadQueries } from "./shareReadQueries";
+import { createLinkChatRoutes } from "./linkChatRoutes";
 import { createLinkReadRoutes } from "./linkReadRoutes";
 import { createShareSummaries } from "./shareSummaries";
 import { createShareGrantRoutes } from "./shareGrantRoutes";
@@ -676,6 +677,17 @@ export function createSyncRelayHandler({
     publicEditRelease,
   );
 
+  const respondToLinkChat = createLinkChatRoutes({
+    storage,
+    requireLinkRead,
+    requireFreshLinkRead,
+    linkJsonResponse,
+    readLimiters: { capability: linkReadRateLimiter, grant: linkGrantReadRateLimiter },
+    followLimiters: { capability: linkLogReadRateLimiter, grant: linkGrantLogReadRateLimiter },
+    activity: discussionActivity,
+    reads: { chatResolverFor },
+  });
+
   const respondToLinkRead = createLinkReadRoutes(
     storage,
     nowMs,
@@ -738,6 +750,9 @@ export function createSyncRelayHandler({
       }
       if (route.route === "link-discussion-activity") {
         return await respondToLinkDiscussionActivity(request);
+      }
+      if (route.route === "link-chat-channels" || route.route === "link-chat-messages") {
+        return await respondToLinkChat(request, route);
       }
       if (route.route === "link-collection-writes") {
         if (!respondToLinkCollectionWrites) throw notFound();

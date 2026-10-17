@@ -153,13 +153,14 @@ pub(crate) fn apply_replication_envelope_in_batch(
             |_tx, _op| Err(SyncError::UnsupportedOperation),
         ));
     };
-    if !matches!(route, OwnedRoute::Ydoc | OwnedRoute::LiveAudit) {
-        // Other replicated routes can archive or replace Y.Doc lineages. Clear
-        // before their transactions so a later envelope in this pull cannot
-        // observe an ABA-valid stale entry after a committed crash.
+    if !matches!(
+        route,
+        OwnedRoute::Ydoc | OwnedRoute::LiveAudit | OwnedRoute::Moment
+    ) {
+        // Other replicated routes can archive or replace Y.Doc lineages.
         cache.clear();
     }
-    match route {
+    let result = match route {
         OwnedRoute::Chat => map_applied(
             crate::apply_chat_envelope(store, envelope, faults),
             |automation_claims| RoutedApply {
@@ -218,7 +219,21 @@ pub(crate) fn apply_replication_envelope_in_batch(
                 ..RoutedApply::default()
             },
         ),
+    };
+    // A skipped moment never ran its mutation closure. Clear every other
+    // outcome before a later envelope can observe an ABA-valid stale entry.
+    if matches!(route, OwnedRoute::Moment)
+        && !matches!(
+            &result,
+            Ok(ApplyOutcome {
+                primary: crate::ApplyDisposition::Skipped,
+                ..
+            })
+        )
+    {
+        cache.clear();
     }
+    result
 }
 
 fn plain(

@@ -19,13 +19,13 @@
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
-import { buildQueueStatus, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
+import { buildQueueStatus, heldVerificationSlots, maxVerificationLanes, readVerificationLanes, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { git } from "./process.mjs";
 
 export const protocol = 1;
@@ -71,17 +71,25 @@ export async function withFileRetry(action, attempts = 8) {
   }
 }
 
-/** Write JSON so readers see the old or the new bytes, never a mix, and so it survives a crash. */
-export async function writeJson(path, value) {
+/** Write a file so readers see the old or the new bytes, never a mix, and so it survives a crash. */
+export async function writeText(path, text) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID().slice(0, 8)}.tmp`;
   const fd = openSync(temporary, "w");
   try {
-    writeSync(fd, JSON.stringify(value, null, 2) + "\n");
+    writeSync(fd, text);
     fsyncSync(fd);
   } finally { closeSync(fd); }
   try { await withFileRetry(() => renameSync(temporary, path)); }
   catch (error) { rmSync(temporary, { force: true }); throw error; }
+}
+
+export const writeJson = (path, value) => writeText(path, JSON.stringify(value, null, 2) + "\n");
+
+/** Add an event to the queue's history. Losing a line must not stop the queue. */
+export function recordHistory(root, event) {
+  try { appendFileSync(queuePaths(root).history, JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n"); }
+  catch { /* History informs estimates and records moves and lane changes. A request keeps its last move in its status. */ }
 }
 
 /** A JSON file, or null when it does not exist or is torn. Torn files are rewritten by their one writer. */
@@ -403,10 +411,43 @@ export const pauseHold = root => () => {
 // The service holds a lane under this purpose for each of its runs. Every other holder is an inline gate.
 export const queueLanePurpose = "PR verification (queue)";
 
-/** Inline gates holding one of the host's verification lanes, in either lane whatever the lane setting. */
+/** The root that holds the verification slots and the lane setting: an isolated trial root, else the build slot root. */
+export const verificationSlotRoot = (env = process.env) => env.DOHC_VERIFICATION_SLOT_ROOT ?? resolveBuildBudget(env)?.root ?? null;
+
+/** Inline gates holding one of the host's verification lanes, in any lane whatever the lane setting. */
 export function inlineRuns(env = process.env) {
-  const root = env.DOHC_VERIFICATION_SLOT_ROOT ?? resolveBuildBudget(env)?.root;
-  return root ? buildQueueStatus({ root, slots: 2, kind: "verification-slot" }).owners.filter(owner => owner.purpose !== queueLanePurpose).length : 0;
+  const root = verificationSlotRoot(env);
+  return root ? buildQueueStatus({ root, slots: maxVerificationLanes, kind: "verification-slot" }).owners.filter(owner => owner.purpose !== queueLanePurpose).length : 0;
+}
+
+/**
+ * The lane setting in the slot root, `{ lanes, error, closing }`, or null without a slot root. `lanes` is
+ * null when the setting cannot be read, and `error` says why. `closing` lists the held lanes above the
+ * setting: each finishes its current gate and takes no more.
+ */
+export function laneSetting(slotRoot) {
+  if (!slotRoot) return null;
+  try {
+    const lanes = readVerificationLanes(slotRoot);
+    return { lanes, error: null, closing: heldVerificationSlots(slotRoot).filter(slot => slot > lanes) };
+  } catch (error) { return { lanes: null, error: error.message, closing: [] }; }
+}
+
+/** The closing lanes in the words status and the dashboard use, or null when none is closing. */
+export const closingNote = closing => !closing?.length ? null : closing.length === 1 ? `lane ${closing[0]} closes after its current gate`
+  : `lanes ${closing.slice(0, -1).join(", ")} and ${closing.at(-1)} close after their current gates`;
+
+/**
+ * Set the host's lane count, which every verifier and the queue service read. Lowering it stops nothing: a lane
+ * above the new count finishes its current gate and takes no more. A change goes to the queue's history with
+ * who made it. Returns the count it replaced, null when that one could not be read, and whether it changed.
+ */
+export async function setLanes({ root, slotRoot, lanes, by }) {
+  const { lanes: previous } = laneSetting(slotRoot);
+  if (previous === lanes) return { previous, changed: false };
+  await writeText(join(slotRoot, "verification-lanes"), `${lanes}\n`);
+  recordHistory(root, { event: "lanes", lanes, previous, by });
+  return { previous, changed: true };
 }
 
 /**
@@ -659,7 +700,10 @@ function printStatus(root) {
   if (pause) console.log(pause);
   if (record?.health?.reason) console.log(`health: ${record.health.reason}`);
   if (record?.health?.diskFreeGb != null) console.log(`free disk: ${record.health.diskFreeGb.toFixed(1)} GB`);
-  if (record) console.log(`host: ${lanes} lane(s), ${record.health?.cpuBusyPercent ?? "unknown"}% CPU, ${record.health?.freeMemGb ?? "unknown"} GB free memory`);
+  // The setting, which the service reads each tick, and any lane above it still finishing a gate.
+  const setting = laneSetting(verificationSlotRoot());
+  console.log(`lanes: ${setting?.error ? `${lanes}, the service's last count. ${setting.error}` : [setting?.lanes ?? lanes, closingNote(setting?.closing)].filter(Boolean).join(", ")}`);
+  if (record) console.log(`host: ${record.health?.cpuBusyPercent ?? "unknown"}% CPU, ${record.health?.freeMemGb ?? "unknown"} GB free memory`);
   const live = runOrder(requests);
   for (const [index, entry] of live.entries()) {
     const place = index + 1;

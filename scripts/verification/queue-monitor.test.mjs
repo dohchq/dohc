@@ -6,12 +6,13 @@ import { spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { connect } from "node:net";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadSampler, monitorState, runDetails, runLog, slotLog, startMonitor, threadDirectory, waitingIntervals } from "./queue-monitor.mjs";
-import { listRequests, nextRequest, pauseQueue, position, queuePaths, readJson, readPause, resumeQueue, writeJson } from "./queue.mjs";
+import { laneSetting, listRequests, nextRequest, pauseQueue, position, queueLanePurpose, queuePaths, readJson, readPause, resumeQueue, writeJson } from "./queue.mjs";
+import { verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
 const iso = minutesAgo => new Date(now - minutesAgo * 60_000).toISOString();
@@ -304,8 +305,16 @@ test("status, positions, and the dashboard show the line in the order the servic
   assert.match(rows.find(row => row.startsWith(c7)), /  b7  owner: cat$/u, "status shows the owner beside each request");
 });
 
+/** A throwaway verification slot root, so no test reads or changes the host's lanes. */
+function slotRoot(t) {
+  const root = mkdtempSync(join(tmpdir(), "dohc-monitor-slots-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
 async function monitor(t, root, options = {}) {
-  const server = startMonitor({ root, port: 0, ...options });
+  const slots = "slotRoot" in options ? options.slotRoot : slotRoot(t);
+  const server = startMonitor({ root, port: 0, ...options, slotRoot: slots });
   t.after(() => server.close());
   if (!server.listening) await once(server, "listening");
   const { port } = server.address();
@@ -314,7 +323,7 @@ async function monitor(t, root, options = {}) {
     get(port, path, { host, method, chunked, body: typeof body === "string" || body === undefined ? body : JSON.stringify(body),
       headers: { ...(origin === null ? {} : { origin }), ...(type === null ? {} : { "content-type": type }), ...headers } });
   const state = async () => JSON.parse((await get(port, "/api/state")).body);
-  return { port, write, state };
+  return { port, write, state, slots };
 }
 
 test("the page pauses and resumes the queue with a JSON POST from its own origin, and the pause keeps a one-line reason and names the dashboard", async t => {
@@ -340,27 +349,29 @@ test("the page pauses and resumes the queue with a JSON POST from its own origin
   assert.equal(JSON.parse(defaultPort.body).changed, true, "a Host that names the scheme's default port matches an Origin that leaves it out");
 });
 
+// Writes the server refuses before reading what they ask for: [name, body, options, status].
+const refusals = [
+  ["another site's origin", {}, { origin: "http://attacker.example" }, 403],
+  ["another origin on this host", {}, { origin: "http://127.0.0.1:3000" }, 403],
+  ["no origin", {}, { origin: null }, 403],
+  ["an opaque origin", {}, { origin: "null" }, 403],
+  ["a form's content type", "reason=x", { type: "application/x-www-form-urlencoded" }, 415],
+  ["plain text", "{}", { type: "text/plain" }, 415],
+  ["no content type", "{}", { type: null }, 415],
+  ["a GET", undefined, { method: "GET" }, 405],
+  ["a PUT", {}, { method: "PUT" }, 405],
+  ["a body over the limit", { reason: "x".repeat(5000) }, {}, 413],
+  ["a body over the limit sent without a length", { reason: "x".repeat(5000) }, { chunked: true }, 413],
+  ["a body that is not an object", "[]", {}, 400],
+  ["a body that is not JSON", "{", {}, 400],
+  ["a reason that is not text", { reason: { text: "x" } }, {}, 400],
+  ["a name rebound to this host", {}, { host: "attacker.example", origin: "http://attacker.example" }, 403],
+  ["a request through Funnel", {}, { host: "pc.example.ts.net", origin: "https://pc.example.ts.net", headers: { "tailscale-funnel-request": "?1" } }, 403],
+];
+
 test("a write is refused with a status, and changes nothing, unless it is a small JSON POST from the page's own origin on an allowed host", async t => {
   const root = await queueRoot(t);
   const { write } = await monitor(t, root);
-  const refusals = [
-    ["another site's origin", {}, { origin: "http://attacker.example" }, 403],
-    ["another origin on this host", {}, { origin: "http://127.0.0.1:3000" }, 403],
-    ["no origin", {}, { origin: null }, 403],
-    ["an opaque origin", {}, { origin: "null" }, 403],
-    ["a form's content type", "reason=x", { type: "application/x-www-form-urlencoded" }, 415],
-    ["plain text", "{}", { type: "text/plain" }, 415],
-    ["no content type", "{}", { type: null }, 415],
-    ["a GET", undefined, { method: "GET" }, 405],
-    ["a PUT", {}, { method: "PUT" }, 405],
-    ["a body over the limit", { reason: "x".repeat(5000) }, {}, 413],
-    ["a body over the limit sent without a length", { reason: "x".repeat(5000) }, { chunked: true }, 413],
-    ["a body that is not an object", "[]", {}, 400],
-    ["a body that is not JSON", "{", {}, 400],
-    ["a reason that is not text", { reason: { text: "x" } }, {}, 400],
-    ["a name rebound to this host", {}, { host: "attacker.example", origin: "http://attacker.example" }, 403],
-    ["a request through Funnel", {}, { host: "pc.example.ts.net", origin: "https://pc.example.ts.net", headers: { "tailscale-funnel-request": "?1" } }, 403],
-  ];
   for (const [name, body, options, status] of refusals) {
     const answer = await write("/api/pause", body, options);
     assert.equal(answer.status, status, name);
@@ -377,6 +388,90 @@ test("a write is refused with a status, and changes nothing, unless it is a smal
   const preflight = await write("/api/pause", undefined, { method: "OPTIONS", origin: "http://attacker.example", type: null });
   assert.equal(preflight.status, 405);
   assert.deepEqual(Object.keys(preflight.headers).filter(name => name.startsWith("access-control-")), [], "no answer grants another origin");
+});
+
+// The queue fixture's history has a torn line, which every reader skips.
+const laneEvents = root => readFileSync(queuePaths(root).history, "utf8").trim().split("\n").flatMap(line => {
+  try { const event = JSON.parse(line); return event.event === "lanes" ? [event] : []; } catch { return []; }
+});
+const holdSlot = (slots, n, owner) => {
+  mkdirSync(join(slots, `verification-slot-${n}`));
+  writeFileSync(join(slots, `verification-slot-${n}`, "owner.json"), JSON.stringify({ pid: process.pid, start: new Date().toISOString(), ...owner }));
+};
+
+test("the page switches the host between 2 and 3 lanes with a JSON POST from its own origin, records who did, and the next poll shows it", async t => {
+  const root = await queueRoot(t);
+  const logged = [];
+  const { port, write, state, slots } = await monitor(t, root, { log: line => logged.push(line) });
+  const setting = () => readFileSync(join(slots, "verification-lanes"), "utf8");
+  // A count set on the host outside the switch shows as it is.
+  writeFileSync(join(slots, "verification-lanes"), "4\n");
+  assert.deepEqual((await state()).laneSetting, { lanes: 4, error: null, closing: [], note: null });
+  const three = await write("/api/lanes", { lanes: 3 }, { type: "application/json; charset=utf-8" });
+  assert.deepEqual([three.status, JSON.parse(three.body)], [200, { changed: true, lanes: 3 }]);
+  assert.equal(setting(), "3\n");
+  assert.deepEqual(readdirSync(slots), ["verification-lanes"], "the write leaves no temporary file");
+  assert.equal(verificationLanes({ DOHC_BUILD_SLOT_ROOT: slots }), 3, "every verifier and the service read the new count");
+  assert.equal((await state()).laneSetting.lanes, 3, "the next poll shows the new setting, not a snapshot from before it");
+  const by = { name: "dashboard", host: `127.0.0.1:${port}` };
+  assert.deepEqual(laneEvents(root).map(({ at: _at, ...event }) => event), [{ event: "lanes", lanes: 3, previous: 4, by }], "the history records who set it");
+  assert.deepEqual(logged, [`the dashboard at 127.0.0.1:${port} set the verification lanes to 3, from 4`]);
+  assert.deepEqual(JSON.parse((await write("/api/lanes", { lanes: 3 })).body), { changed: false, lanes: 3 }, "choosing the current count changes nothing");
+  assert.equal(laneEvents(root).length, 1);
+  const tailnet = { host: "pc.example.ts.net:443", origin: "https://pc.example.ts.net" };
+  assert.deepEqual(JSON.parse((await write("/api/lanes", { lanes: 2 }, tailnet)).body), { changed: true, lanes: 2 }, "the page on the tailnet name switches back");
+  assert.equal(setting(), "2\n");
+  // A setting the host cannot read is shown with why, and a switch replaces it.
+  writeFileSync(join(slots, "verification-lanes"), "two");
+  assert.deepEqual(laneSetting(slots), { lanes: null, error: `${join(slots, "verification-lanes")} must contain a lane count from 1 to 4.`, closing: [] });
+  assert.equal((await write("/api/lanes", { lanes: 3 })).status, 200);
+  assert.equal(setting(), "3\n");
+  assert.match(logged.at(-1), /set the verification lanes to 3, from a setting that could not be read$/u);
+});
+
+test("a lane switch is refused with a status, and changes nothing, unless it is a small JSON POST from the page's own origin that names 2 or 3 lanes", async t => {
+  const root = await queueRoot(t);
+  const { write, slots } = await monitor(t, root);
+  writeFileSync(join(slots, "verification-lanes"), "2\n");
+  // Each refused write asks for 3 lanes, so only its refusal keeps the setting at 2.
+  const asking = body => body && typeof body === "object" ? { lanes: 3, ...body } : body;
+  const counts = [["one lane", { lanes: 1 }], ["four lanes", { lanes: 4 }], ["a count as text", { lanes: "3" }], ["a fraction", { lanes: 2.5 }], ["no count", {}]]
+    .map(([name, body]) => [name, body, {}, 400]);
+  for (const [name, body, options, status] of [...refusals.map(([name, body, options, status]) => [name, asking(body), options, status]), ...counts]) {
+    const answer = await write("/api/lanes", body, options);
+    assert.equal(answer.status, status, name);
+    assert.equal(answer.headers.connection, options.method === "GET" ? "keep-alive" : "close", `${name} closes its connection unless it is a GET`);
+    assert.equal(readFileSync(join(slots, "verification-lanes"), "utf8"), "2\n", `${name} must not change the lanes`);
+  }
+  assert.equal((await write("/api/lanes", undefined, { method: "GET" })).headers.allow, "POST");
+  assert.deepEqual(laneEvents(root), []);
+  // A host without a slot root has no lane setting to show or change.
+  const bare = await monitor(t, root, { slotRoot: null });
+  assert.equal((await bare.state()).laneSetting, null);
+  assert.equal((await bare.write("/api/lanes", { lanes: 3 })).status, 409);
+});
+
+test("switching to 2 while lane 3 runs a gate stops nothing, and the dashboard and status say lane 3 closes after its current gate", async t => {
+  const root = await queueRoot(t);
+  const { write, state, slots } = await monitor(t, root);
+  writeFileSync(join(slots, "verification-lanes"), "3\n");
+  holdSlot(slots, 3, { purpose: queueLanePurpose, phase: "request 000000003-cccccc" });
+  assert.equal((await write("/api/lanes", { lanes: 2 })).status, 200);
+  assert.ok(existsSync(join(slots, "verification-slot-3")), "lane 3 keeps its gate");
+  const { laneSetting: closing, lanes } = await state();
+  assert.deepEqual(closing, { lanes: 2, error: null, closing: [3], note: "lane 3 closes after its current gate" });
+  assert.deepEqual([lanes.slots, lanes.holders.map(holder => [holder.slot, holder.requestId])], [3, [[3, "000000003-cccccc"]]], "the page still draws lane 3 and its gate");
+  const { DOHC_VERIFICATION_SLOT_ROOT: _trial, ...env } = process.env;
+  const status = () => {
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL("./queue.mjs", import.meta.url)), "status"], { env: { ...env, DOHC_VERIFICATION_QUEUE_ROOT: root, DOHC_BUILD_SLOT_ROOT: slots }, encoding: "utf8", windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  assert.match(status(), /^lanes: 2, lane 3 closes after its current gate$/mu);
+  // Once lane 3's gate ends, no lane is closing.
+  rmSync(join(slots, "verification-slot-3"), { recursive: true });
+  assert.deepEqual(monitorState(root, { now, lanes: () => laneSetting(slots) }).laneSetting, { lanes: 2, error: null, closing: [], note: null });
+  assert.match(status(), /^lanes: 2$/mu);
 });
 
 test("a write whose body is too large or too slow is refused, and its connection closes", async t => {
