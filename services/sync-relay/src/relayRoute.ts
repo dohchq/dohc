@@ -6,6 +6,7 @@ import type {LinkAppCollectionRoute} from "./appCollectionRoutes";
 import type {OwnerAppPublicationRoute} from "./ownerAppPublicationRoutes";
 import type {OwnerAppResponseRoute} from "./ownerAppResponseRoutes";
 import type {OwnerRestoreRoute} from "./ownerRestoreRoutes";
+import type {LinkChatRoute} from "./linkChatRoutes";
 import type {LinkReadRoute} from "./linkReadRoutes";
 import type {NoticeRoute} from "./noticeRoutes";
 import {isAutomationHostPath, parseAutomationHostAction, type AutomationHostRoute} from "./automationHostRoutes";
@@ -40,6 +41,7 @@ type SyncRelayRoute =
   | LinkReadRoute
   | { route: "link-discussion" }
   | { route: "link-discussion-activity" }
+  | LinkChatRoute
   | { route: "link-collection-writes" }
   | { route: "workspaces" }
   | NoticeRoute
@@ -106,6 +108,10 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     parts[3] === "activity"
   ) {
     return { route: "link-discussion-activity" };
+  }
+  if (parts.length === 4 && parts[0] === "sync" && parts[1] === "link" && parts[2] === "chat") {
+    if (parts[3] === "channels") return { route: "link-chat-channels" };
+    if (parts[3] === "messages") return { route: "link-chat-messages" };
   }
   if (
     parts.length === 4 &&
