@@ -509,6 +509,37 @@ describe("EditorTabs strip scrolling", () => {
 
     expect(screen.queryByTestId("tabs-overflow-menu")).toBeNull();
   });
+
+  it("marks the overflow menu's active row apart from the current tab's row", async () => {
+    const user = userEvent.setup();
+    renderTabs("b.md");
+    await user.click(screen.getByTestId("tabs-overflow"));
+    const active = screen.getByRole("menuitem", { name: "a.md" });
+    const current = screen.getByRole("menuitem", { name: "b.md" });
+    expect(document.activeElement).toBe(active);
+    // The current row keeps its fill; focus adds the outline only to the
+    // active one.
+    expect(current.classList).toContain("bg-selected");
+    expect(current.classList).not.toContain("outline-accent");
+    expect(active.classList).toContain("focus:outline-accent");
+  });
+
+  it("keeps the overflow menu clear of the window's right edge", async () => {
+    const user = userEvent.setup();
+    renderTabs("a.md");
+    const trigger = screen.getByTestId("tabs-overflow");
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(
+      { top: 40, bottom: 68, left: 992, right: 1020, width: 28, height: 28, x: 992, y: 40, toJSON: () => ({}) },
+    );
+    vi.stubGlobal("innerWidth", 1024);
+    try {
+      await user.click(trigger);
+      expect(screen.getByTestId("tabs-overflow-menu").style.left).toBe(`${1024 - 12 - 240}px`);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
 });
 
 describe("EditorTabs pointer drag", () => {
