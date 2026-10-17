@@ -2984,8 +2984,12 @@ export function DesktopWorkspaceShell(props: {
       void closeTabsAfterFlush([{ groupId: group.id, tab }]);
     } else if (current.editorGroups.length > 1) {
       mutateWb((state) => closeEditorGroup(state, group.id));
+    } else if (group.tabs.length === 0 && bridge().platform === "darwin") {
+      // With nothing left to close, macOS closes the window.
+      void bridge().closeThisWindow().catch((error) =>
+        reportShellError("Could not close this window.", error));
     }
-  }, [closeTabsAfterFlush, mutateWb]);
+  }, [closeTabsAfterFlush, mutateWb, reportShellError]);
 
   const closeAllTabs = useCallback(() => {
     void closeTabsAfterFlush(

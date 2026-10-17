@@ -7,7 +7,7 @@ import { settingsOperations } from "./settingsOperations";
 import { registerOperations } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import { WorkspaceUiState } from "./bridgeContract";
-import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../settings/userSettings";
+import { DEFAULT_USER_SETTINGS, type DesktopUserSettings, type ThemeMode } from "../settings/userSettings";
 import * as userSettingsStore from "../settings/userSettingsStore";
 import * as workspaceSettingsFile from "../workspaces/workspaceSettingsFile";
 import * as uiStateStore from "../workspaces/workspaceUiState";
@@ -92,6 +92,7 @@ async function harness() {
     effects.push({ kind: "name", value, persisted: persisted() });
   });
   const applyZoomLevelToWindows = vi.fn((value: number) => { effects.push({ kind: "zoom", value, persisted: persisted() }); });
+  const applyThemeMode = vi.fn((value: ThemeMode) => { effects.push({ kind: "theme", value, persisted: persisted() }); });
   const broadcastUserSettings = vi.fn();
   const notifyRenderer = vi.fn();
   const refreshDispatchTray = vi.fn<() => Promise<unknown>>(async () => undefined);
@@ -101,7 +102,7 @@ async function harness() {
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const capability = createSettingsIpc<Sender, Event, Operation>({
     stateDir: () => stateDirectory, setCachedPreferredName,
-    applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
+    applyZoomLevelToWindows, applyThemeMode, refreshDispatchTray, openDispatchWorkspaces,
     chatDispatchService: { scanWorkspace }, withRendererWorkspaceOperation,
     broadcastUserSettings, notifyRenderer, openPath,
     knownWorkspaceIds: () => [...entries.keys()],
@@ -120,7 +121,7 @@ async function harness() {
   });
   return {
     handlers, effects, entries, authorities, sessions, first, second, open,
-    zoom: capability.stepWindowZoom, setCachedPreferredName, applyZoomLevelToWindows,
+    zoom: capability.stepWindowZoom, setCachedPreferredName, applyZoomLevelToWindows, applyThemeMode,
     refreshDispatchTray, openDispatchWorkspaces, scanWorkspace, broadcastUserSettings, notifyRenderer,
     openPath, reload: capability.reloadUserSettings,
     preferredName: () => preferredName, stateDirectory: () => stateDirectory,
@@ -189,11 +190,12 @@ describe("registered settings IPC", () => {
     expect(h.broadcastUserSettings).toHaveBeenLastCalledWith({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
     expect(h.preferredName()).toBeUndefined();
     expect(h.effects.map(({ kind, value }) => ({ kind, value }))).toEqual([
-      { kind: "name", value: "Sam" }, { kind: "zoom", value: 2 },
-      { kind: "name", value: undefined }, { kind: "zoom", value: 0 },
+      { kind: "name", value: "Sam" }, { kind: "zoom", value: 2 }, { kind: "theme", value: "system" },
+      { kind: "name", value: undefined }, { kind: "zoom", value: 0 }, { kind: "theme", value: "system" },
     ]);
     for (const effect of h.effects) {
-      expect(effect.value).toEqual(effect.kind === "name" ? effect.persisted.profile.preferredName : effect.persisted.appearance.zoomLevel);
+      expect(effect.value).toEqual(effect.kind === "name" ? effect.persisted.profile.preferredName
+        : effect.kind === "zoom" ? effect.persisted.appearance.zoomLevel : effect.persisted.appearance.themeMode);
     }
     expect(h.refreshDispatchTray).toHaveBeenCalledTimes(2);
     expect(h.openDispatchWorkspaces).not.toHaveBeenCalled();
@@ -206,8 +208,8 @@ describe("registered settings IPC", () => {
     const writes = vi.spyOn(userSettingsStore, "writeUserSettingsFile").mockImplementationOnce(async (dir, settings, base) => {
       reached.resolve(); await release.promise; return realWrite(dir, settings, base);
     });
-    const firstSettings = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "First" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 1 } };
-    const nextSettings = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Next" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: -2 } };
+    const firstSettings = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "First" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 1, themeMode: "dark" as const } };
+    const nextSettings = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Next" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: -2, themeMode: "light" as const } };
     const first = h.invoke(settingsOperations.setUserSettings.channel, { settings: firstSettings, base: DEFAULT_USER_SETTINGS });
     const pending = [first];
     try {
@@ -231,6 +233,7 @@ describe("registered settings IPC", () => {
       // Every change puts the whole file into effect, the zoom step included.
       expect(h.setCachedPreferredName.mock.calls).toEqual([["First", undefined], ["Next", undefined], ["Next", undefined], [undefined, undefined]]);
       expect(h.applyZoomLevelToWindows.mock.calls).toEqual([[1], [-2], [-1], [0]]);
+      expect(h.applyThemeMode.mock.calls).toEqual([["dark"], ["light"], ["light"], ["system"]]);
       await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
     } finally {
       release.resolve();
@@ -315,7 +318,7 @@ describe("registered settings IPC", () => {
     const settings = { ...DEFAULT_USER_SETTINGS, profile: { agentName: "Nova" }, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
     await expect(h.invoke(settingsOperations.setUserSettings.channel, { settings, base: DEFAULT_USER_SETTINGS })).rejects.toBe(error);
     await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings, source: "stored" });
-    expect(h.effects).toHaveLength(2);
+    expect(h.effects).toHaveLength(3);
     expect(h.scanWorkspace).not.toHaveBeenCalled();
   });
 

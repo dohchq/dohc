@@ -1,5 +1,5 @@
 import type { App, BrowserWindow, Dialog, Menu, WebContents } from "electron";
-import type { DesktopUserSettingsResult, WorkspaceSummary } from "../ipc/bridgeContract";
+import type { DesktopUserSettingsResult, MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import { createWorkspaceWindowRegistry } from "../quitGuard";
 import { buildMenuTemplate } from "./applicationMenu";
@@ -14,7 +14,11 @@ import type { readCachedUserSettingsFile as readSettings } from "../settings/use
 import type { RendererWorkspaceSessionOwner } from "./rendererWorkspaceSessionOwner";
 
 interface DesktopWindowsDependencies {
-  app: Pick<App, "isReady" | "isPackaged" | "getVersion" | "clearRecentDocuments" | "addRecentDocument" | "setUserTasks">;
+  app: Pick<
+    App,
+    "isReady" | "isPackaged" | "getVersion" | "clearRecentDocuments" | "addRecentDocument" | "setUserTasks"
+    | "setAboutPanelOptions"
+  >;
   BrowserWindow: Pick<typeof BrowserWindow, "getAllWindows">;
   Menu: Pick<typeof Menu, "setApplicationMenu" | "buildFromTemplate">;
   dialog: Pick<Dialog, "showErrorBox" | "showMessageBox">;
@@ -230,10 +234,32 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     }
   }
 
+  // macOS keeps dohc running with no window open. A menu command then opens
+  // one and runs there once its renderer loads; the preload holds it until
+  // the window's workspace shell listens.
+  function sendMenuCommand(window: BrowserWindow | undefined, command: MenuCommand): void {
+    const target = targetWindow(window);
+    if (target) {
+      target.webContents.send(CHANNELS.menuCommand, command);
+      return;
+    }
+    const created = createWorkspaceWindow();
+    focusShareHandoffWindowWhenReady(created);
+    void whenRendererLoaded(created).then(
+      () => created.webContents.send(CHANNELS.menuCommand, command),
+      () => undefined,
+    );
+  }
+
   function refreshApplicationMenu(): void {
     if (!app.isReady()) return;
     const canInstallUpdate = currentUpdateState().canInstall === true;
     applicationMenuCanInstallUpdate = canInstallUpdate;
+    // Without these, an unpackaged About panel names Electron, and a packaged
+    // one adds the bundle's build number after the version.
+    if (process.platform === "darwin") {
+      app.setAboutPanelOptions({ applicationName: "dohc", applicationVersion: app.getVersion(), version: "" });
+    }
     Menu.setApplicationMenu(
       Menu.buildFromTemplate(
         buildMenuTemplate({
@@ -241,9 +267,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
           platform: process.platform,
           recentWorkspaces: nativeWorkspaceSummaries(),
           canInstallUpdate,
-          sendCommand: (window, command) => {
-            targetWindow(window)?.webContents.send(CHANNELS.menuCommand, command);
-          },
+          sendCommand: sendMenuCommand,
           stepZoom: (step) => {
             void dependencies.stepWindowZoom(step).catch((error) => {
               console.error("[desktop] window zoom:", error);

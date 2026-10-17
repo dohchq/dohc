@@ -13,6 +13,7 @@ import { applyLookSettings, differsOnlyInLook } from "./theme";
 import { WorkspaceManager } from "./WorkspaceManager";
 import { DevPanel } from "./DevPanel";
 import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
+import { workspaceName } from "./Titlebar";
 import { ChevronRight } from "lucide-react";
 import { readError } from "../ipc/errorWords";
 import { errorDetails } from "./shell/copyDetails";
@@ -220,6 +221,27 @@ export function DesktopRoot() {
       setWorkspace(next);
     });
   }, []);
+
+  // The window list, Mission Control, and the Dock tell windows apart by
+  // their workspace.
+  const shownWorkspace = isManagerWindow ? null : workspace;
+  useEffect(() => {
+    document.title = shownWorkspace ? workspaceName(shownWorkspace) : "dohc";
+  }, [shownWorkspace]);
+
+  // The workspace shell answers menu commands. Without it, such as in the
+  // manager or before the first workspace, nothing has a tab to close, so
+  // Close tab closes the window on macOS. Before the registry loads, a
+  // command waits in the preload for the shell.
+  const showsShell = loaded && !loadError && !statesPageOpen && shownWorkspace !== null;
+  useEffect(() => {
+    if (!loaded || showsShell) return;
+    return bridge().onMenuCommand((command) => {
+      if (command === "close-tab" && bridge().platform === "darwin") {
+        void bridge().closeThisWindow().catch(() => undefined);
+      }
+    });
+  }, [loaded, showsShell]);
 
   // Signal first paint when real content is about to mount (not while the
   // registry IPC is still pending and the root renders null).

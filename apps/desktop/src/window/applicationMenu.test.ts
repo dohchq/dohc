@@ -231,19 +231,74 @@ describe("application menu template", () => {
     expect(roles(false)).not.toContain("toggleDevTools");
   });
 
-  it("darwin: appMenu role leads (macOS turns the first entry into the app menu) and windowMenu precedes Help", () => {
-    const { template } = build(false, "darwin");
-    expect(template[0]).toEqual({ role: "appMenu" });
-    expect(template.map((entry) => entry.label)).toEqual([
-      undefined, // appMenu — macOS supplies the app name
+  it("darwin: the app menu leads and holds About, updates, Settings, and the system's items", () => {
+    const { template } = build(false, "darwin", true);
+    expect(template.map((entry) => entry.label ?? entry.role)).toEqual([
+      "appMenu", // macOS titles it with the app name
       "File",
-      "Edit",
+      "editMenu",
       "View",
-      "Go",
-      undefined, // windowMenu
+      "windowMenu",
       "Help",
     ]);
-    expect(template.at(-2)).toEqual({ role: "windowMenu" });
+    const appMenu = template[0]!;
+    expect(appMenu.role).toBe("appMenu");
+    expect((appMenu.submenu as MenuItemConstructorOptions[]).map((entry) => entry.role ?? entry.label ?? entry.type)).toEqual([
+      "about",
+      "Check for updates",
+      "Update and restart",
+      "separator",
+      "Settings…",
+      "separator",
+      "services",
+      "separator",
+      "hide",
+      "hideOthers",
+      "unhide",
+      "separator",
+      "quit",
+    ]);
+    const settings = (appMenu.submenu as MenuItemConstructorOptions[]).find((entry) => entry.label === "Settings…");
+    expect(settings?.accelerator).toBe("CommandOrControl+,");
+  });
+
+  it("darwin: one About, the native panel, and no Go menu", () => {
+    const { template, sendCommand } = build(false, "darwin");
+    const all = (entries: MenuItemConstructorOptions[]): MenuItemConstructorOptions[] =>
+      entries.flatMap((entry) => [entry, ...(Array.isArray(entry.submenu) ? all(entry.submenu) : [])]);
+    const abouts = all(template).filter((entry) => entry.role === "about" || entry.label === "About dohc");
+    expect(abouts).toEqual([{ role: "about", label: "About dohc" }]);
+    expect(template.some((entry) => entry.label === "Go")).toBe(false);
+    const settings = all(template).filter((entry) => entry.label?.startsWith("Settings"));
+    expect(settings).toHaveLength(1);
+    const fakeWindow = { id: 9 };
+    (settings[0]?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "settings");
+  });
+
+  it("darwin: the standard Edit menu, Full Screen in View, and the palette in Help beside the menu search", () => {
+    const { template, sendCommand } = build(false, "darwin");
+    expect(template.find((entry) => entry.role === "editMenu")).toEqual({ role: "editMenu" });
+    const view = items(template, "View");
+    expect(view.at(-1)).toEqual({ role: "togglefullscreen" });
+    const help = template.at(-1)!;
+    expect(help).toMatchObject({ label: "Help", role: "help" });
+    const helpItems = help.submenu as MenuItemConstructorOptions[];
+    // View registers the palette's keys; a second copy would register them again.
+    expect(helpItems).toEqual([{ label: "Command palette", enabled: true, click: expect.any(Function) }]);
+    const fakeWindow = { id: 10 };
+    (helpItems[0]?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "command-palette");
+  });
+
+  it.each(["win32", "linux"] as const)("%s keeps Edit, Go, and Help as they were, without macOS items", (platform) => {
+    const { template } = build(false, platform);
+    expect(template.map((entry) => entry.label)).toEqual(["File", "Edit", "View", "Go", "Help"]);
+    expect(template.at(-1)?.role).toBe("help");
+    expect(items(template, "Help").map((entry) => entry.label ?? entry.type)).toEqual([
+      "Check for updates", "Update and restart", "separator", "About dohc",
+    ]);
+    expect(items(template, "View").some((entry) => entry.role === "togglefullscreen")).toBe(false);
   });
 
   it("About is a Help click-through, not a command", () => {

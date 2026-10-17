@@ -42,6 +42,7 @@ export interface ProtocolClientRegistrar {
 }
 
 export interface ProtocolRuntime {
+  platform: NodeJS.Platform;
   defaultApp?: boolean;
   execPath: string;
   argv: string[];
@@ -135,6 +136,9 @@ export function registerShareHandoffProtocol(
     return false;
   }
   if (runtime.defaultApp) {
+    // macOS registers a scheme to an app bundle and ignores the executable
+    // and arguments, so a development run would claim dohc:// for Electron.
+    if (runtime.platform === "darwin") return false;
     const appEntry = runtime.argv[1];
     if (!appEntry) return false;
     return registrar.setAsDefaultProtocolClient(

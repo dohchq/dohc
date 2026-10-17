@@ -61,12 +61,16 @@ describe("shortcut menu contract", () => {
         expect(item.label).toBe("About dohc");
         continue;
       }
-      expect(item.accelerator, id).toBe(shortcutAccelerators(id as StaticCommandId)[0]);
+      // macOS's Help menu repeats the palette without the keys View registers.
+      const helpCopy = platform === "darwin" && id === "command-palette" && item.accelerator === undefined;
+      expect(item.accelerator, id).toBe(helpCopy ? undefined : shortcutAccelerators(id as StaticCommandId)[0]);
       labels[id] = item.label!;
     }
+    // macOS's app menu marks Settings with the ellipsis of a command that opens a window.
+    const settingsLabel = platform === "darwin" ? "Settings…" : "Settings";
     const rowLabels = Object.fromEntries([...MENU_COMMANDS, ...Object.values(zoomIds)].map((id) => [
       id,
-      id === "command-palette" ? "Command palette" : COMMAND_ROWS[id].label.replace(/^View: /, ""),
+      id === "command-palette" ? "Command palette" : id === "settings" ? settingsLabel : COMMAND_ROWS[id].label.replace(/^View: /, ""),
     ]));
     expect(labels).toEqual(rowLabels);
     expect(labels).toEqual({
@@ -76,7 +80,7 @@ describe("shortcut menu contract", () => {
       "command-palette": "Command palette", "quick-open": "Go to", "new-editor-group-right": "New editor group right",
       "toggle-sidebar": "Toggle sidebar", "toggle-about": "Toggle About", "show-chats": "Chats",
       "toggle-theme": "Toggle light/dark theme", "zoom-reset": "Reset zoom", "zoom-in": "Zoom in", "zoom-out": "Zoom out",
-      "settings": "Settings", "check-updates": "Check for updates", "install-update": "Update and restart",
+      "settings": settingsLabel, "check-updates": "Check for updates", "install-update": "Update and restart",
     });
   });
 

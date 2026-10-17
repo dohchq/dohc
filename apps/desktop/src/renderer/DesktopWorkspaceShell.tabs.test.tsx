@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "./DesktopWorkspaceShell.testSupport";
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { editorTabTestId } from "../testPins";
 import type { ExplorerProps } from "./workbench/Explorer";
@@ -159,5 +159,20 @@ describe("shell tab surfaces", () => {
     const pane = within(screen.getByTestId("editor-group-primary"));
     expect(pane.getByText("Select a file, or create one")).toBeTruthy();
     expect(pane.queryByTestId("file-inspector")).toBeNull();
+  });
+
+  it.each(["darwin", "win32"] as const)("closes the last tab, then on macOS the window (%s)", async (platform) => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["b.md"])), platform);
+    renderShell(bridge);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    const pane = within(screen.getByTestId("editor-group-primary"));
+    expect(pane.getByTestId(editorTabTestId("b.md"))).toBeTruthy();
+
+    act(() => bridge.emitMenuCommand("close-tab"));
+    await waitFor(() => expect(pane.queryByTestId(editorTabTestId("b.md"))).toBeNull());
+    expect(bridge.closeThisWindow).not.toHaveBeenCalled();
+
+    act(() => bridge.emitMenuCommand("close-tab"));
+    expect(bridge.closeThisWindow).toHaveBeenCalledTimes(platform === "darwin" ? 1 : 0);
   });
 });

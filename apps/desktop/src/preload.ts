@@ -105,6 +105,17 @@ async function invokeParsed<Schema extends z.ZodType>(
   return schema.parse(await ipcRenderer.invoke(channel, ...args));
 }
 
+// A menu command that arrives before anything listens, as when the command
+// opened this window, waits for the first listener.
+const menuCommandListeners = new Set<(command: MenuCommand) => void>();
+const heldMenuCommands: MenuCommand[] = [];
+ipcRenderer.on(CHANNELS.menuCommand, (_event, raw: unknown) => {
+  const parsed = MenuCommand.safeParse(raw);
+  if (!parsed.success) return;
+  if (menuCommandListeners.size === 0) heldMenuCommands.push(parsed.data);
+  for (const listener of [...menuCommandListeners]) listener(parsed.data);
+});
+
 // The entire bridge surface. Narrow on purpose: the renderer gets named,
 // typed operations — never raw ipcRenderer, never Node. Typed as
 // DohcDesktopBridge so it cannot drift from the contract (a missing or
@@ -483,7 +494,11 @@ const bridge: DohcDesktopBridge = {
     return () =>
       ipcRenderer.removeListener(CHANNELS.cloudSessionChanged, handler);
   },
-  onMenuCommand: (listener) => onEvent(CHANNELS.menuCommand, MenuCommand, listener),
+  onMenuCommand: (listener) => {
+    menuCommandListeners.add(listener);
+    for (const command of heldMenuCommands.splice(0)) listener(command);
+    return () => { menuCommandListeners.delete(listener); };
+  },
   onWorkspaceActivated: (listener) =>
     onEvent(CHANNELS.workspaceActivated, WorkspaceSummary, listener),
   onWorkspacePathOpenFailed: (listener) =>

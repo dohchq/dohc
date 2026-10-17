@@ -71,6 +71,7 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
     app: {
       isReady: () => ready, isPackaged: false, getVersion: () => "1.2.3",
       clearRecentDocuments: vi.fn(), addRecentDocument: vi.fn(), setUserTasks: vi.fn(() => true),
+      setAboutPanelOptions: vi.fn(),
     },
     BrowserWindow: { getAllWindows: () => all.map((item) => item.native) },
     Menu: {
@@ -751,5 +752,37 @@ describe("desktop native menus", () => {
     expect(f.dependencies.dialog.showMessageBox).toHaveBeenCalledWith({
       title: "About dohc", message: "dohc", detail: "Version 1.2.3\nYour workspace is a folder.",
     });
+    expect(f.dependencies.app.setAboutPanelOptions).not.toHaveBeenCalled();
+  });
+
+  it("names dohc and its version in the macOS About panel", () => {
+    const f = fixture("darwin"); f.windows.refreshApplicationMenu();
+    expect(f.dependencies.app.setAboutPanelOptions).toHaveBeenCalledWith({
+      applicationName: "dohc", applicationVersion: "1.2.3", version: "",
+    });
+  });
+
+  it("opens a window for a menu command when none is open, and sends it once the renderer loads", async () => {
+    const f = fixture("darwin"); f.windows.refreshApplicationMenu();
+    const appMenu = submenu(f.templates.at(-1)![0]!);
+    click(appMenu.find((entry) => entry.label === "Settings…")!);
+    expect(f.dependencies.createMainWindow).toHaveBeenCalledOnce();
+    const created = f.all[0]!;
+    expect(f.windows.workspaceWindows.allLive()).toEqual([created.native]);
+    expect(created.webContents.send).not.toHaveBeenCalled();
+    created.emit("ready-to-show");
+    expect(created.show).toHaveBeenCalledOnce(); expect(created.focus).toHaveBeenCalledOnce();
+    created.finishLoad();
+    await vi.waitFor(() => expect(created.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings"));
+
+  });
+
+  it("drops a window-less menu command when its new window closes before it loads", () => {
+    const f = fixture("darwin"); f.windows.refreshApplicationMenu();
+    click(item(f, "File", "New file"));
+    const closing = f.all[0]!;
+    closing.destroy();
+    closing.finishLoad();
+    expect(closing.webContents.send).not.toHaveBeenCalled();
   });
 });
