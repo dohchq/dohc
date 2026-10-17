@@ -697,6 +697,12 @@ const unready = () => new EngineRequestError(1, {code: "CONFLICT", message: "hos
 const diverged = () => new EngineRequestError(1, {code: "CONFLICT", message: "live-application-conflict", retry: "no"} as never);
 // A first capture of a document with no Y.Doc lineage.
 const withoutLineage = () => new EngineRequestError(1, {code: "CONFLICT", message: "live-document-without-lineage", retry: "no"} as never);
+// Appends a relay row naming the document, as another device's push does.
+const appendDocumentRow = (raw: InstanceType<typeof DatabaseSync>, opKind: "moment.append" | "ydoc.update", objectId: string) => {
+  raw.prepare(`INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms)
+    SELECT 'workspace','device',COUNT(*)+1,?,?,0 FROM sync_relay_log WHERE origin_id='device'`).run(opKind, JSON.stringify({versionId: "main", objectId,
+    path: "docs/a.md", contentKind: "richdoc", isBaseState: true, lineageClaimId: "d".repeat(64), updateBlobSha256: "d".repeat(64)}));
+};
 
 // Proves: after a restart, restore steps that send no registration never load
 // the native session, so an open sync conflict cannot block them.
@@ -1320,6 +1326,8 @@ it("captures a document held for an unadmitted live edit once, then not again un
   o.replies.pass = {held: [{objectId: o.sibling.objectId, reason: "hosted-live-edit-unadmitted"}]};
   await vi.waitFor(() => expect(captures()).toBe(before + 1));
   const pushed = pushes();
+  // A Y.Doc update for it does not lift a refusal.
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
   await o.nextPull(); await o.nextPull();
   expect(pushes()).toBeGreaterThan(pushed);
   expect(captures()).toBe(before + 1);
@@ -1404,6 +1412,65 @@ it.each([
   await vi.waitFor(() => expect(o.host.blocked(plain)).toBe(block));
   const retried = visits();
   await vi.waitFor(() => expect(visits()).toBeGreaterThan(retried + 2));
+  expect(captures()).toBe(2);
+});
+
+// Proves: a document whose capture found no Y.Doc lineage captures once more,
+// with no Resume, only once the relay holds a Y.Doc update for it newer than
+// any that capture saw. A moment, or another document's update, does not lift
+// it. It then activates and stops reporting the block.
+it("activates a document without lineage once a Y.Doc update for it reaches the relay", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(withoutLineage());
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.blocked(o.sibling)).toBe("without-lineage"));
+  o.refuseCapture(undefined);
+  appendDocumentRow(o.raw, "moment.append", o.sibling.objectId);
+  appendDocumentRow(o.raw, "ydoc.update", o.other.objectId);
+  await o.nextPull(); await o.nextPull();
+  expect(captures()).toBe(1);
+  expect(o.host.blocked(o.sibling)).toBe("without-lineage");
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  expect(captures()).toBe(2);
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  await expect(o.host.drain(o.document)).resolves.toMatchObject({kind: "done"});
+});
+
+// Proves: a document still without lineage after the update that lifted its
+// block blocks again, at that update, so it captures once per new update. One
+// whose retry meets another conflict is no longer blocked and waits.
+it("blocks a document again when the update that lifted it carried no lineage", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(withoutLineage());
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(captures()).toBe(1));
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  await vi.waitFor(() => expect(captures()).toBe(2));
+  await o.nextPull(); await o.nextPull();
+  expect(captures()).toBe(2);
+  expect(o.host.blocked(o.sibling)).toBe("without-lineage");
+  o.refuseCapture(unready());
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  await vi.waitFor(() => expect(captures()).toBeGreaterThan(4));
+  expect(o.host.blocked(o.sibling)).toBeUndefined();
+});
+
+// Proves: an update that reached the relay while the capture's pull ran may
+// have missed that pull, so it lifts the block that capture left.
+it("captures a document without lineage once more for an update that arrived during its pull", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace], captures = () => o.client().captureOwnerActivation.mock.calls.length;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.refuseCapture(withoutLineage());
+  const pulling = o.park("sync.pullHosted");
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await pulling.entered.promise;
+  appendDocumentRow(o.raw, "ydoc.update", o.sibling.objectId);
+  pulling.release.resolve();
+  await vi.waitFor(() => expect(captures()).toBe(2));
+  await o.nextPull(); await o.nextPull();
   expect(captures()).toBe(2);
 });
 
