@@ -140,6 +140,7 @@ import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
 import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
 import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
+import { ListConversions, parseMarkdownListClipboard } from "./listEditing";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 
@@ -319,6 +320,7 @@ const TABLE_EXTENSION = DohcMarkdownTable.configure({
   allowTableNodeSelection: true,
 });
 const STATIC_EDITOR_EXTENSIONS = [
+  ListConversions,
   MarkdownListItem,
   MarkdownOrderedList,
   MarkdownTaskList,
@@ -844,6 +846,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           }
         },
         editorProps: {
+          clipboardTextParser: parseMarkdownListClipboard,
           attributes: {
             class: "dohc-notion-editor",
             "data-testid": "markdown-editor",
