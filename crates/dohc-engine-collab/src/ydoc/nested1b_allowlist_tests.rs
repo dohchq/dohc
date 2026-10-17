@@ -39,6 +39,25 @@ fn nested1b_disagreeing_readings_hold() {
 }
 
 #[test]
+fn nested1b_multiline_setext_and_any_reading_item_blocks_hold() {
+    let sources = [
+        "- a\n  b\n  ===\n  - c\n",
+        "- a\n  -",
+        "```\nx\n````\n- a\n  - b\n```\n",
+    ];
+    assert_eq!(sources.map(outside_markdown_is_allowlisted), [false; 3]);
+    for source in sources {
+        assert!(successor(source).is_err(), "{source:?}");
+        assert!(
+            Ydoc::wire()
+                .seed_collection_relation_markdown(source)
+                .is_err(),
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
 fn nested1b_desktop_block_starts_hold() {
     for source in [
         "- step\n\n  $$\n  x^2\n  $$\n  - sub\n",
@@ -127,8 +146,11 @@ fn nested1b_flat_unsupported_marker_keeps_builder_refusal() {
         .is_err());
 }
 
-fn held_sources() -> [&'static str; 18] {
+fn held_sources() -> Vec<&'static str> {
     [
+        "- a\n  b\n  ===\n  - c\n",
+        "- a\n  -",
+        "```\nx\n````\n- a\n  - b\n```\n",
         "- a\n\n- b\n  - c",
         "- p\n  - a\n\n  - b",
         "* parent\n  * a\n\n  * b\n",
@@ -147,7 +169,7 @@ fn held_sources() -> [&'static str; 18] {
         "- parent\n  - child\n\n<!-- dohc:table row-heights=1:40 -->\n| h |\n| --- |\n| [link](https://example.com) |",
         "- [link](https://example.com) and `code`\n  - child",
         "- ~~strike~~ &amp; \\*literal\\*\n  - child",
-    ]
+    ].into_iter().chain(inline_tag_sources()).collect()
 }
 
 fn generated_sources() -> Vec<String> {
@@ -242,6 +264,36 @@ fn generated_sources() -> Vec<String> {
         ]
         .map(str::to_owned),
     );
+    for (first, next) in [
+        ("-", "*"),
+        ("*", "+"),
+        ("+", "-"),
+        ("1.", "2)"),
+        ("1)", "2."),
+        ("- [ ]", "- [x]"),
+        ("- [x]", "- [X]"),
+        ("- [X]", "- [ ]"),
+        ("-", "- [x]"),
+        ("- [x]", "-"),
+    ] {
+        for level in 0..4 {
+            let mut source = String::new();
+            for depth in 0..4 {
+                source.push_str(&format!(
+                    "{}- parent\n{}  more\n",
+                    " ".repeat(depth * 4),
+                    " ".repeat(depth * 4)
+                ));
+            }
+            source.push_str(&format!(
+                "{}{first} sibling\n{}{next} changed",
+                " ".repeat(level * 4),
+                " ".repeat(level * 4)
+            ));
+            sources.push(source);
+        }
+    }
+    sources.push("- p\n  more\n  - c".to_owned());
     sources
 }
 
@@ -343,6 +395,11 @@ fn nested1b_positive_grammar_and_strict_admission_remains_off() {
                 .unwrap();
             assert_eq!(witness(&doc), witness(&replay), "{source:?}");
             assert_eq!(
+                replay.canonical_content()["body"],
+                fixture["body"],
+                "{source:?}"
+            );
+            assert_eq!(
                 doc.project_richdoc().unwrap(),
                 fixture["canonical"].as_str().unwrap(),
                 "{source:?}"
@@ -372,6 +429,7 @@ fn nested1b_changed_nested_fold_still_refuses() {
 #[test]
 fn nested1b_non_allowlisted_shapes() {
     for source in [
+        "- a\n  b\n  ===\n  - c\n",
         "- a\n  ---",
         "- a\n  ===",
         "- a\n\n  # heading",
@@ -397,15 +455,26 @@ fn nested1b_non_allowlisted_shapes() {
     }
 }
 
-#[test]
-fn nested1b_inline_tags_are_not_html_blocks() {
-    for source in [
+fn inline_tag_sources() -> [&'static str; 4] {
+    [
         "- parent\n\n  <div:foo>\n  - child",
         "- parent\n\n  <span>inline</span>\n  - child",
         "- parent\n\n  <prelude>inline</prelude>\n  - child",
         "- parent\n\n  <_foo>\n  - child",
-    ] {
-        assert!(outside_markdown_is_allowlisted(source), "{source:?}");
+    ]
+}
+
+#[test]
+fn nested1b_unproved_inline_tags_hold() {
+    for source in inline_tag_sources() {
+        assert!(!outside_markdown_is_allowlisted(source), "{source:?}");
+        assert!(successor(source).is_err(), "{source:?}");
+        assert!(
+            Ydoc::wire()
+                .seed_collection_relation_markdown(source)
+                .is_err(),
+            "{source:?}"
+        );
     }
 }
 

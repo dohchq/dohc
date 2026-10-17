@@ -2890,6 +2890,7 @@ fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
             .find_map(|prefix| text.strip_prefix(prefix))
             .unwrap_or(text);
         !text.contains('[')
+            && !text.contains('<')
             && !text.split('&').skip(1).any(|part| {
                 part.split_once(';')
                     .is_some_and(|(name, _)| decoded_reference(name).is_some())
@@ -3066,6 +3067,7 @@ fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
                 }
                 fence = Some(column);
             } else if html_block(text.trim_start_matches(' '))
+                || block_start(text, false, false) == Some("setext")
                 || matches!(
                     block_start(text, true, true),
                     Some("code" | "fence" | "heading" | "quote" | "rule" | "math")
@@ -3080,20 +3082,25 @@ fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
     let (_, _, body) = split_markdown_frontmatter(markdown);
     let body = body.replace("\r\n", "\n");
     let normalized = normalize_list_tabs(&body, MarkdownReading::Source);
-    let (blocks, refused) = parse_markdown_blocks_checked(&normalized, MarkdownReading::Source);
-    if !refused_fold_item_bodies(&blocks) {
-        return (!quote_fold_overflows(&blocks, 0)).then_some(false);
-    }
-    if refused || markdown.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES || !tree(&blocks, false)
-    {
-        return None;
-    }
+    let (blocks, mut refused) = parse_markdown_blocks_checked(&normalized, MarkdownReading::Source);
+    let mut item_blocks = refused_fold_item_bodies(&blocks);
+    let mut readings_agree = true;
     for reading in [MarkdownReading::Projection, MarkdownReading::Successor] {
         let normalized = normalize_list_tabs(&body, reading);
-        let (other, refused) = parse_markdown_blocks_checked(&normalized, reading);
-        if refused || other != blocks {
-            return None;
-        }
+        let (other, other_refused) = parse_markdown_blocks_checked(&normalized, reading);
+        item_blocks |= refused_fold_item_bodies(&other);
+        refused |= other_refused;
+        readings_agree &= other == blocks;
+    }
+    if !item_blocks {
+        return (!quote_fold_overflows(&blocks, 0)).then_some(false);
+    }
+    if refused
+        || !readings_agree
+        || markdown.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
+        || !tree(&blocks, false)
+    {
+        return None;
     }
     let lines: Vec<_> = body.lines().collect();
     let mut at = 0;
