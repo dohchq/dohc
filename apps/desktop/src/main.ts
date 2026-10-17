@@ -155,6 +155,7 @@ import {
   noticeOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
+  agentRunStateOperations,
   type ScheduleHostResult,
   type NoticeRef,
   type NoticeRow,
@@ -409,6 +410,7 @@ import {
 import {
   broadcastWorkspaceActivity,
   coalesceWorkspaceActivity,
+  sendToWorkspaceWindows as sendToWorkspaceWindowsOf,
   workspaceActivityPayload,
   type WorkspaceActivityScope,
 } from "./ipc/workspaceActivityBroadcast";
@@ -2352,6 +2354,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       }
     }
   },
+  onAgentRunState: (event) => sendToWorkspaceWindows(CHANNELS.agentRunState, event),
   cloudStateFor: (workspaceId) => {
     const remote = findWorkspace(workspaceId)?.remote;
     return {
@@ -2610,7 +2613,7 @@ const activity = {
     ),
   dispatchedAgentRun: (workspaceId: string) =>
     withWorkspaceActivityState(workspaceId, (lease) =>
-      lease.state.dispatchAgentRunId !== null,
+      workspaceActivity.dispatchedAgentRun(lease.state.activity),
     ),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
@@ -2647,6 +2650,7 @@ const activity = {
 const agentIntegration = createAgentIntegration({
   workspaceIds: () => workspaceAuthorities.workspaceIds(),
   localPersonId: localUserId,
+  installId: localInstallationId,
   acquire: (workspaceId) => {
     const lease = requireWorkspaceAuthority(workspaceId);
     const workspace = canonicalWorkspaceFor(lease);
@@ -3383,12 +3387,18 @@ function rememberPendingCliRunMessageLink(
   lease.release();
 }
 
+// Sends a workspace's event only to windows showing that workspace.
+function sendToWorkspaceWindows(channel: string, event: { workspaceId: string }): void {
+  sendToWorkspaceWindowsOf({
+    windows: BrowserWindow.getAllWindows(),
+    workspaceIdOf: (webContents) => rendererWorkspaceSessions.current(webContents)?.workspaceId,
+    channel,
+    event,
+  });
+}
+
 const chatDispatchNotices = createChatDispatchNotices((event) => {
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (window.webContents.isDestroyed()) continue;
-    if (rendererWorkspaceSessions.current(window.webContents)?.workspaceId !== event.workspaceId) continue;
-    window.webContents.send(CHANNELS.chatDispatchNotices, event);
-  }
+  sendToWorkspaceWindows(CHANNELS.chatDispatchNotices, event);
 });
 
 const chatDispatchService = createChatDispatchService({
@@ -4364,6 +4374,7 @@ function createCollectionAutomationsFor(
       if (!workspaceAuthorities.isCurrentAttachment(workspaceId, attachmentId)) throw new Error("This workspace was closed.");
     }),
     onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
+    onUsageSuccess: invocation => { usageStore?.recordSuccess(invocation); },
     reportFailure: (report) => sendFailureNotices({
       notices: noticeStore(),
       computer: { installId: localInstallationId(), label: computerLabel(hostname()) },
@@ -5896,8 +5907,9 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
+    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, readSyncHistory, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
+    localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
     historyCollections: async operation => {
       const { workspace } = operation;
       const local = await localDatasetHostFor(workspace, operation.signal);
@@ -5924,7 +5936,7 @@ function registerIpcHandlers(): void {
         }),
       };
     },
-    recordHistoryPersonName: (workspaceId, userId, sender) => {
+    recordHistoryPersonName:(workspaceId, userId, sender) => {
       const workspace = findWorkspace(workspaceId);
       if (!recordHistoryPersonIsNamed(userId, workspace?.remote?.ownerUserId ?? localUserId())) return null;
       return historyLabelsFor(sender).person(workspaceId, userId);
@@ -6869,6 +6881,11 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, chatDispatchNoticeOperations, {
     registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),
     dismissChatDispatchNotice: (input) => chatDispatchNotices.dismiss(input.workspaceId, input.id),
+  });
+
+  registerOperations(operationBoundary, agentRunStateOperations, {
+    readAgentRunState: (_input, { operation }) =>
+      workspaceActivity.agentRunState(operation.workspace, operation.state.activity),
   });
 
   registerOperations(operationBoundary, noticeOperations, {

@@ -10,13 +10,16 @@
 //!   that, submission fails immediately with a typed `OVERLOADED` error
 //!   (`afterBackoff`) instead of buffering unboundedly.
 //! - **Deadlines**: every request gets `default_deadline` unless it asks for
-//!   less; requests never exceed `max_deadline`. Expiry produces
-//!   `DEADLINE_EXCEEDED` — including while still queued for an execution
-//!   slot: a hung in-flight handler never pins an expired or cancelled
-//!   queued request.
-//! - **Cooperative cancellation**: `cancel(id)` resolves queued or in-flight
-//!   requests to `CANCELLED`; handlers observe `ctx.cancel` at their own
-//!   pace, and the supervisor stops awaiting them once cancellation wins.
+//!   less; requests never exceed `max_deadline`. A request still queued for
+//!   an execution slot when it expires answers `DEADLINE_EXCEEDED`: a hung
+//!   in-flight handler never pins an expired or cancelled queued request.
+//! - **Cooperative cancellation**: `cancel(id)` resolves a queued request to
+//!   `CANCELLED`. A started handler may already have landed work, so the
+//!   supervisor never drops it: cancellation or expiry signals `ctx.cancel`,
+//!   frees its execution slot, and answers with whatever the handler returns.
+//!   A handler answers `CANCELLED` only when nothing it started has landed;
+//!   after expiry that answer becomes `DEADLINE_EXCEEDED`. The request keeps
+//!   its admission until the handler finishes.
 //!
 //! Execution slots are granted in approximate submission order (tokio's
 //! semaphore queues waiters fairly); strict FIFO is not a protocol
@@ -38,7 +41,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::time::Instant;
 
 /// Tuning knobs for a supervisor instance.
@@ -242,7 +245,7 @@ async fn acquire_and_run<S: EngineService>(
     input: Option<S::Input>,
     progress: ProgressSink,
 ) -> RequestOutcome {
-    let _permit = tokio::select! {
+    let permit = tokio::select! {
         biased;
         () = cancel.cancelled() => {
             return Err(WireError::new(ErrorCode::Cancelled, "cancelled while queued"));
@@ -263,6 +266,7 @@ async fn acquire_and_run<S: EngineService>(
         request,
         cancel,
         deadline,
+        permit,
         capabilities,
         max_frame_bytes,
         connection,
@@ -278,6 +282,7 @@ async fn run_job<S: EngineService>(
     request: &Request,
     cancel: &CancelSignal,
     deadline: Instant,
+    permit: OwnedSemaphorePermit,
     capabilities: Arc<[String]>,
     max_frame_bytes: u32,
     connection: Option<ConnectionHandle>,
@@ -298,14 +303,22 @@ async fn run_job<S: EngineService>(
         connection,
         progress,
     };
-    tokio::select! {
-        () = cancel.cancelled() => Err(WireError::new(ErrorCode::Cancelled, "request cancelled")),
-        () = tokio::time::sleep_until(deadline) => {
-            // Tell the handler to stop; its output can no longer be observed.
-            cancel.cancel();
-            Err(WireError::new(ErrorCode::DeadlineExceeded, "request deadline elapsed"))
-        }
-        outcome = service.call_with_input(ctx, request.clone(), input) => outcome,
+    let handler = service.call_with_input(ctx, request.clone(), input);
+    tokio::pin!(handler);
+    let expired = tokio::select! {
+        biased;
+        outcome = &mut handler => return outcome,
+        () = cancel.cancelled() => false,
+        () = tokio::time::sleep_until(deadline) => true,
+    };
+    cancel.cancel();
+    drop(permit);
+    match handler.await {
+        Err(error) if expired && error.code == ErrorCode::Cancelled => Err(WireError::new(
+            ErrorCode::DeadlineExceeded,
+            "request deadline elapsed",
+        )),
+        outcome => outcome,
     }
 }
 
@@ -671,17 +684,20 @@ mod tests {
         assert_eq!(error.code, ErrorCode::InvalidParams);
     }
 
-    /// Service that sleeps far past any deadline without cooperating.
+    /// Service that sleeps far past any deadline until told to stop, then
+    /// answers that it was cancelled.
     struct Sleeper;
 
     impl EngineService for Sleeper {
         type Input = ();
-        async fn call(&self, _ctx: RequestContext, request: Request) -> RequestOutcome {
-            tokio::time::sleep(Duration::from_secs(3600)).await;
-            Ok(ServiceResponse::response(Response {
-                id: request.id,
-                result: Value::Null,
-            }))
+        async fn call(&self, ctx: RequestContext, request: Request) -> RequestOutcome {
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(3600)) => Ok(ServiceResponse::response(Response {
+                    id: request.id,
+                    result: Value::Null,
+                })),
+                () = ctx.cancel.cancelled() => Err(WireError::new(ErrorCode::Cancelled, "handler observed cancellation")),
+            }
         }
     }
 
@@ -693,14 +709,122 @@ mod tests {
         let receiver = supervisor.try_submit(slow).expect("accepted");
         let outcome = receiver.await.expect("responded");
         let error = outcome.expect_err("must time out");
-        assert_eq!(error.code, ErrorCode::DeadlineExceeded);
+        assert_eq!(
+            error.code,
+            ErrorCode::DeadlineExceeded,
+            "a handler's cooperative cancel after expiry answers DEADLINE_EXCEEDED"
+        );
+    }
+
+    /// Request 1 lands its work and waits for `release` without observing
+    /// cancellation, as a handler past its durable step does. Every other
+    /// request answers at once.
+    struct Landing {
+        entered: Notify,
+        release: Notify,
+        signalled: std::sync::atomic::AtomicBool,
+    }
+
+    impl Landing {
+        fn new() -> Self {
+            Landing {
+                entered: Notify::new(),
+                release: Notify::new(),
+                signalled: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl EngineService for Landing {
+        type Input = ();
+        async fn call(&self, ctx: RequestContext, request: Request) -> RequestOutcome {
+            if request.id == 1 {
+                self.entered.notify_one();
+                self.release.notified().await;
+                self.signalled
+                    .store(ctx.cancel.is_cancelled(), Ordering::SeqCst);
+            }
+            Ok(ServiceResponse::response(Response {
+                id: request.id,
+                result: json!("landed"),
+            }))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_handler_answers_with_the_work_it_landed() {
+        let service = Arc::new(Landing::new());
+        let supervisor = Supervisor::new(config(1, 1), service.clone());
+        let mut receiver = supervisor.try_submit(request(1)).expect("accepted");
+        service.entered.notified().await;
+        assert!(supervisor.cancel(1));
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "a started handler is awaited, not answered for"
+        );
+        service.release.notify_one();
+        let response = receiver.await.expect("responded").expect("landed outcome");
+        assert_eq!(response.response.result, json!("landed"));
+        assert!(
+            service.signalled.load(Ordering::SeqCst),
+            "the handler was told to stop"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_handler_answers_with_the_work_it_landed() {
+        let service = Arc::new(Landing::new());
+        let supervisor = Supervisor::new(config(1, 1), service.clone());
+        let mut landing = request(1);
+        landing.deadline_ms = Some(50);
+        let mut receiver = supervisor.try_submit(landing).expect("accepted");
+        service.entered.notified().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        service.release.notify_one();
+        let response = receiver.await.expect("responded").expect("landed outcome");
+        assert_eq!(response.response.result, json!("landed"));
+        assert!(service.signalled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_handler_frees_its_slot_but_keeps_its_admission() {
+        let service = Arc::new(Landing::new());
+        // One execution slot, two admitted requests.
+        let supervisor = Supervisor::new(config(1, 1), service.clone());
+        let landing = supervisor.try_submit(request(1)).expect("accepted");
+        service.entered.notified().await;
+        assert!(supervisor.cancel(1));
+        let next = supervisor.try_submit(request(2)).expect("accepted");
+        tokio::time::timeout(Duration::from_secs(1), next)
+            .await
+            .expect("the cancelled handler released its execution slot")
+            .expect("responded")
+            .expect("ran");
+        let _queued = supervisor.try_submit(request(3)).expect("accepted");
+        assert_eq!(
+            supervisor
+                .try_submit(request(4))
+                .expect_err("the cancelled handler still counts")
+                .code,
+            ErrorCode::Overloaded
+        );
+        service.release.notify_one();
+        assert!(landing.await.expect("responded").is_ok());
     }
 
     #[tokio::test(start_paused = true)]
     async fn queued_request_deadline_resolves_behind_hung_handler() {
-        // One slot, occupied by a non-cooperating handler with a long
-        // deadline; a queued request with a short deadline must still
-        // resolve on time.
+        // One slot, occupied by a handler with a long deadline; a queued
+        // request with a short deadline must still resolve on time.
         let supervisor = Supervisor::new(config(1, 4), Arc::new(Sleeper));
         let mut hog = request(1);
         hog.deadline_ms = Some(5_000);

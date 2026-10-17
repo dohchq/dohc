@@ -1076,7 +1076,7 @@ describe("chatDispatchService", () => {
     expect(personRun.chainDepth).toBe(0);
     expect(fixture.attributions.at(-1)).toEqual({
       workspaceId: WORKSPACE_ID,
-      run: { agentId: UNNAMED_AGENT_ID, agentRunId: personRun.run.runId, depth: 0 },
+      run: { agentId: UNNAMED_AGENT_ID, agentRunId: personRun.run.runId, depth: 0, dispatch: "run" },
     });
     await linkAgentReply(fixture, asked.threadId, personRun.run.runId);
     fixture.spawnCalls[0]!.process.emitExit(0);
@@ -1103,7 +1103,7 @@ describe("chatDispatchService", () => {
     const wokenRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
     expect(wokenRun.run.triggerMessageId).toBe(wake.message.id);
     expect(fixture.attributions.at(-1)?.run).toEqual({
-      agentId: UNNAMED_AGENT_ID, agentRunId: wokenRun.run.runId, depth: 3,
+      agentId: UNNAMED_AGENT_ID, agentRunId: wokenRun.run.runId, depth: 3, dispatch: "run",
     });
     // The agent reads that an automation asked, not a person.
     expect(fixture.spawnCalls[1]!.process.stdinText).toContain("**Stamp the finish date** · automation ·");
@@ -3066,7 +3066,7 @@ describe("chatDispatchService", () => {
       `dohc chat post ${agentChannel.id} --as-agent --title "dohc runner self-test" "${marker}"`,
     );
     expect(runId).toBe("run_self_test_self_test_id_1");
-    expect(fixture.attributions.at(-1)?.run).toEqual({ agentId: UNNAMED_AGENT_ID, agentRunId: runId, depth: 0 });
+    expect(fixture.attributions.at(-1)?.run).toEqual({ agentId: UNNAMED_AGENT_ID, agentRunId: runId, depth: 0, dispatch: "self-test" });
 
     expect(await fixture.chat.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: agentChannel.id })).toEqual([]);
     const started = await fixture.chat.startChannelThread({

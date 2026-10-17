@@ -31,7 +31,7 @@ automations:
     save: async (state: StoredRun) => { log.push(`save:${state.outcome?.state ?? "open"}:${state.durableEffects}`); saves.push(structuredClone(state)); },
     appendEffect: async () => { log.push("appendEffect"); },
   } as unknown as AutomationRunStore;
-  const dependencies: Pick<CollectionAutomationRunDependencies, "makeDurable" | "store" | "nowMs" | "evaluator" | "chat" | "recipientVerdicts" | "readCode"> = {
+  const dependencies: Pick<CollectionAutomationRunDependencies, "makeDurable" | "store" | "nowMs" | "evaluator" | "chat" | "recipientVerdicts" | "readCode" | "onUsageSuccess"> = {
     store, nowMs: () => 2,
     makeDurable: async () => { log.push("makeDurable"); if (barrierFails) throw Error("unavailable"); },
     evaluator: { evaluate: async () => { throw Error("saved steps must not evaluate"); }, runCode: async () => { throw Error("saved steps must not evaluate"); } },
@@ -302,5 +302,40 @@ describe("engine durability before run outcomes", () => {
     f.backend.apply = async () => ({ outcome: { kind: "failed", error: "partial", timedOut: false } });
     await f.execute();
     expect(f.log).toEqual(["makeDurable", "save:failed:0"]);
+  });
+});
+
+describe("automation usage completion", () => {
+  it.each(["dataset-edit", "dataset-create"] as const)("counts a successful %s as the corresponding Collection action", async kind => {
+    const f = fixture();
+    const calls: Array<{ capabilityId: string; door: string }> = [];
+    f.dependencies.onUsageSuccess = pair => { calls.push(pair); };
+    const rules = { datasetId: "dataset", revision: 1, revisionSha256: "hash" };
+    f.run.steps = [{ ordinal: 0, effects: Array.from({ length: 2 }, () => kind === "dataset-edit"
+      ? { kind, rules, operationId: "edit", tableId: "table", target: { recordId: "record", version: 1 },
+        fields: [{ fieldId: "A", field: "A", before: 0, after: 1 }] }
+      : { kind, rules, operationId: "create", tableId: "table", values: [{ fieldId: "A", field: "A", value: 1 }], deletes: [] }) }];
+    f.backend.apply = async () => kind === "dataset-edit"
+      ? [{ kind, rules, operationId: "edit", tableId: "table", recordId: "record", expectedVersion: 1, version: 2,
+        fields: [{ fieldId: "A", field: "A", before: 0, after: 1 }] }]
+      : [{ kind: "dataset-created", rules, operationId: "create", tableId: "table", recordId: "record", version: 1, deletes: [] }];
+    expect(await f.execute()).toEqual({ kind: "done" });
+    expect(calls).toEqual([{ capabilityId: kind === "dataset-edit" ? "collection.record.edit" : "collection.record.create", door: "automation" }]);
+  });
+
+  it("waits for durability and saved completion, and preserves success if the observer throws", async () => {
+    const f = fixture();
+    const calls: Array<{ capabilityId: string; door: string }> = [];
+    f.dependencies.onUsageSuccess = pair => {
+      expect(f.saves.at(-1)?.outcome).toEqual({ state: "done" });
+      calls.push(pair);
+      throw Error("record unavailable");
+    };
+    f.failBarrier(true);
+    expect(await f.execute()).toEqual({ kind: "wait", reason: "engine" });
+    expect(calls).toEqual([]);
+    f.failBarrier(false);
+    expect(await f.execute()).toEqual({ kind: "done" });
+    expect(calls).toEqual([{ capabilityId: "collection.record.edit", door: "automation" }]);
   });
 });

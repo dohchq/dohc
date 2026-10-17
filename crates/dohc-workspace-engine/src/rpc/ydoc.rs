@@ -10,6 +10,8 @@ use crate::rpc::error::map_runtime;
 use crate::rpc::error::workspace_unavailable;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
 use crate::rpc::request::OperationCancellation;
+use crate::rpc::request::after_landing;
+use crate::rpc::request::landed_wait_until;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::workspace::OpenWorkspace;
@@ -514,11 +516,10 @@ impl EngineService {
         Ok((Some(draft), Some(reservation)))
     }
 
-    /// Keep scene-open exclusion owned by the detached completion. The
-    /// protocol supervisor can stop waiting on cancellation or deadline, but
-    /// a queued actor command still runs after its reply receiver is dropped.
+    /// Keep scene-open exclusion owned by the detached completion: a queued
+    /// actor command still runs after its caller is dropped. The request
+    /// waits for it, since materialization ignores cancellation once queued.
     async fn complete_scene_seed_materialization(
-        cancellation: &OperationCancellation,
         materialization: impl std::future::Future<
             Output = Result<YdocSeedMaterialization, RuntimeError>,
         > + Send
@@ -533,21 +534,18 @@ impl EngineService {
         ),
         WireError,
     > {
-        let completion = tokio::spawn(async move {
+        let (materialization, serial, lease) = tokio::spawn(async move {
             let materialization = materialization.await;
             (materialization, serial, lease)
-        });
-        tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                Err(cancellation.interruption("ydoc.open (scene asset materialization)"))
-            }
-            completed = completion => {
-                let (materialization, serial, lease) = completed
-                    .map_err(|_| WireError::new(ErrorCode::Internal, "ydoc scene asset materialization task failed"))?;
-                Ok((materialization.map_err(map_runtime)?, serial, lease))
-            }
-        }
+        })
+        .await
+        .map_err(|_| {
+            WireError::new(
+                ErrorCode::Internal,
+                "ydoc scene asset materialization task failed",
+            )
+        })?;
+        Ok((materialization.map_err(map_runtime)?, serial, lease))
     }
 
     pub(super) async fn owner_ydoc_stop(
@@ -1054,6 +1052,13 @@ impl EngineService {
         for facts in &state.record_facts {
             emit_record_events(&self.events, &open.workspace_id, facts);
         }
+        // The read committed the document's pulled edits, so the open runs to
+        // its answer, its blob included. If the blob cannot have its egress
+        // budget by the deadline, the open answers OVERLOADED without a
+        // session, and the next open shows the edits.
+        let budget_until = landed_wait_until(ctx);
+        let ctx = after_landing(ctx);
+        let cancellation = OperationCancellation::new(&ctx);
         let (serial, lease) = if state.seed_materialization_jobs.is_empty() {
             (serial, lease)
         } else {
@@ -1074,13 +1079,8 @@ impl EngineService {
                     )
                     .await
             };
-            let (materialization, serial, lease) = Self::complete_scene_seed_materialization(
-                &cancellation,
-                materialization,
-                serial,
-                lease,
-            )
-            .await?;
+            let (materialization, serial, lease) =
+                Self::complete_scene_seed_materialization(materialization, serial, lease).await?;
             if !materialization.materialized {
                 return Err(scene_seed_materialization_error(materialization));
             }
@@ -1111,11 +1111,10 @@ impl EngineService {
         let initial_update = state.initial_update;
         let byte_permit = self
             .blob_egress_budget
-            .reserve(
+            .reserve_landed(
                 i64::try_from(initial_update.len())
                     .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?,
-                &cancellation,
-                "ydoc.open",
+                budget_until,
             )
             .await?;
         let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
@@ -1902,14 +1901,17 @@ impl EngineService {
                 .map_err(|error| map_runtime(RuntimeError::Collab(error)))?;
             session.owner_draft = owner_draft.clone();
         }
+        // The resync committed the document's pulled edits, so it runs to its
+        // answer, its blob included. If the blob cannot have its egress budget
+        // by the deadline, the resync answers OVERLOADED and keeps the
+        // session: the edits are stored, so the next resync delivers them.
         let initial_update = state.initial_update;
         let byte_permit = self
             .blob_egress_budget
-            .reserve(
+            .reserve_landed(
                 i64::try_from(initial_update.len())
                     .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?,
-                &cancellation,
-                "ydoc.resync",
+                landed_wait_until(ctx),
             )
             .await?;
         let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
@@ -1939,8 +1941,8 @@ impl EngineService {
                 stream_id: request_id,
                 sha256: initial_update_sha256,
                 bytes: initial_update,
-                cancel: ctx.cancel.clone(),
-                deadline: ctx.deadline,
+                cancel: dohc_engine_protocol::cancel::CancelSignal::new(),
+                deadline: None,
                 byte_permit: Some(byte_permit),
             },
         ))
@@ -2064,7 +2066,6 @@ mod tests {
     }
     use crate::EngineService;
     use crate::rpc::error::map_owner_outbox;
-    use crate::rpc::request::OperationCancellation;
     use dohc_engine_collab::DocKey;
     use dohc_engine_collab::LeaseRegistry;
     use dohc_engine_collab::OwnerOutboxError;
@@ -2960,12 +2961,8 @@ mod tests {
             .expect("workspace close");
     }
 
-    async fn assert_scene_seed_interruption_retains_exclusion(
-        ctx: RequestContext,
-        expected_code: ErrorCode,
-    ) {
-        let signal = ctx.cancel.clone();
-        let cancellation = OperationCancellation::new(&ctx);
+    #[tokio::test]
+    async fn scene_seed_materialization_keeps_exclusion_when_its_caller_leaves() {
         let session_ops = Arc::new(tokio::sync::Mutex::new(()));
         let serial = Arc::clone(&session_ops).lock_owned().await;
         let leases = LeaseRegistry::new();
@@ -2974,36 +2971,22 @@ mod tests {
         let lease = leases.acquire(&key).expect("initial lease");
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let waiting = tokio::spawn(async move {
-            EngineService::complete_scene_seed_materialization(
-                &cancellation,
-                async move {
-                    let _ = started_tx.send(());
-                    release_rx.await.expect("release materialization");
-                    Ok(YdocSeedMaterialization {
-                        materialized: true,
-                        incomplete_jobs: 0,
-                        invalid_jobs: 0,
-                    })
-                },
-                serial,
-                lease,
-            )
-            .await
-        });
+        let waiting = tokio::spawn(EngineService::complete_scene_seed_materialization(
+            async move {
+                let _ = started_tx.send(());
+                release_rx.await.expect("release materialization");
+                Ok(YdocSeedMaterialization {
+                    materialized: true,
+                    incomplete_jobs: 0,
+                    invalid_jobs: 0,
+                })
+            },
+            serial,
+            lease,
+        ));
         started_rx.await.expect("materialization started");
-        if expected_code == ErrorCode::Cancelled {
-            signal.cancel();
-        }
-        let result = tokio::time::timeout(Duration::from_secs(5), waiting)
-            .await
-            .expect("interrupted wait completed")
-            .expect("completion task");
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("an interrupted wait must not return materialization"),
-        };
-        assert_eq!(error.code, expected_code);
+        waiting.abort();
+        assert!(waiting.await.expect_err("caller left").is_cancelled());
         assert!(
             session_ops.try_lock().is_err(),
             "the session serial must stay held until actor completion"
@@ -3026,20 +3009,463 @@ mod tests {
         .expect("completion released serial and lease");
     }
 
+    /// The open is stopped at its egress reservation, after the scene's assets
+    /// landed, so it answers with the session it opened.
     #[tokio::test]
-    async fn scene_seed_cancellation_keeps_exclusion_until_actor_completion() {
-        assert_scene_seed_interruption_retains_exclusion(
-            RequestContext::unbounded(),
-            ErrorCode::Cancelled,
+    async fn a_scene_open_cancelled_after_its_assets_land_answers_with_its_session() {
+        use dohc_engine_protocol::supervisor::{Supervisor, SupervisorConfig};
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let ctx = RequestContext::unbounded();
+        let opened = service
+            .workspace_open(
+                &ctx,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "scene-open-cancel",
+                    "captureMode": "none"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        service
+            .versions_ensure_main(
+                &ctx,
+                Some(handle.clone()),
+                json!({ "workspaceId": "scene-open-cancel" }),
+            )
+            .await
+            .expect("ensure main");
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let scene = json!({
+            "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
+            "elements": [{
+                "id": "image-element", "type": "image", "version": 1, "versionNonce": 1,
+                "isDeleted": false, "index": "a0", "fileId": "image-file"
+            }],
+            "appState": {},
+            "files": { "image-file": {
+                "id": "image-file", "mimeType": "image/png",
+                "dataURL": format!("data:image/png;base64,{png}"), "created": 12
+            }}
+        });
+        service
+            .versioned_text_write(
+                &ctx,
+                dohc_engine_protocol::wire::Request {
+                    id: 1,
+                    method: "versionedText.write".into(),
+                    workspace: Some(handle.clone()),
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    progress: false,
+                    params: json!({
+                        "versionId": "main", "path": "drawings/a.excalidraw",
+                        "text": scene.to_string(), "origin": "api"
+                    }),
+                },
+            )
+            .await
+            .expect("write the scene");
+        let budget = super::super::reads::BLOB_EGRESS_BYTE_BUDGET;
+        let held = service
+            .blob_egress_budget
+            .reserve(
+                i64::try_from(budget).expect("budget"),
+                &OperationCancellation::new(&ctx),
+                "test",
+            )
+            .await
+            .expect("hold the whole egress budget");
+        let requests = Supervisor::new(SupervisorConfig::default(), Arc::clone(&service));
+        let answer = requests
+            .try_submit_with(
+                dohc_engine_protocol::wire::Request {
+                    id: 2,
+                    method: "ydoc.open".into(),
+                    workspace: Some(handle.clone()),
+                    deadline_ms: Some(60_000),
+                    idempotency_key: None,
+                    progress: false,
+                    params: json!({
+                        "versionId": "main", "path": "drawings/a.excalidraw",
+                        "contentKind": "scene", "seedFromArtifact": true
+                    }),
+                },
+                Arc::from(["blobs".to_owned()]),
+                dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes,
+                |_| {},
+            )
+            .expect("admitted");
+        let assets = scratch.path().join("assets").join("excalidraw");
+        let waiting = std::time::Instant::now();
+        while std::fs::read_dir(&assets).map_or(true, |mut entries| entries.next().is_none()) {
+            assert!(
+                waiting.elapsed() < Duration::from_secs(10),
+                "the scene's assets never landed"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(requests.cancel(2));
+        // Let the cancellation reach the open's token before the budget frees.
+        tokio::task::yield_now().await;
+        drop(held);
+        let opened = answer
+            .await
+            .expect("answered")
+            .expect("an open whose assets landed answers with its session");
+        assert_eq!(opened.response.result["contentKind"], json!("scene"));
+        let egress = opened.blob_egress.as_ref().expect("the session's blob");
+        assert!(
+            !egress.cancel.is_cancelled(),
+            "the blob is sent without the request's cancellation"
+        );
+        assert_eq!(egress.deadline, None, "or its deadline");
+        let session = opened.response.result["sessionId"].clone();
+        drop(opened);
+        service
+            .ydoc_evict(&ctx, Some(handle.clone()), json!({ "sessionId": session }))
+            .await
+            .expect("evict the session");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+    }
+
+    const PARKED_PATH: &str = "notes/live.md";
+
+    /// A plain-text document with a pulled edit, " parked", waiting behind
+    /// an open editor. With `editor`, that editor's session is open here;
+    /// without, it was open in a daemon that stopped.
+    struct ParkedEdit {
+        _scratch: ScratchDir,
+        service: Arc<EngineService>,
+        handle: WorkspaceHandle,
+        db_path: std::path::PathBuf,
+        session: Option<String>,
+    }
+
+    impl ParkedEdit {
+        async fn new(workspace_id: &'static str, editor: bool) -> Self {
+            use dohc_engine_sync::{AlwaysLive, NoLiveLeases, ReplicationEnvelope};
+            let scratch = ScratchDir::new().expect("scratch");
+            let supervisor: &'static WorkspaceSupervisor =
+                Box::leak(Box::new(WorkspaceSupervisor::new()));
+            let service = Arc::new(EngineService::with_supervisor(supervisor));
+            let ctx = RequestContext::unbounded();
+            let opened = service
+                .workspace_open(
+                    &ctx,
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": workspace_id,
+                        "captureMode": "none"
+                    }),
+                )
+                .await
+                .expect("workspace open");
+            let handle: WorkspaceHandle =
+                serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+            service
+                .versions_ensure_main(
+                    &ctx,
+                    Some(handle.clone()),
+                    json!({ "workspaceId": workspace_id }),
+                )
+                .await
+                .expect("ensure main");
+            let open = service.open(Some(&handle)).expect("open");
+            open.actor
+                .versioned_text_write(
+                    dohc_engine_domain::WriteText {
+                        workspace_id: workspace_id.into(),
+                        version_id: "main".into(),
+                        object_id: "live".into(),
+                        path: PARKED_PATH.into(),
+                        text: "before".into(),
+                        moment_id: "before".into(),
+                        metadata_origin: "sync".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("the document's head");
+            std::fs::create_dir_all(scratch.path().join("notes")).expect("folder");
+            std::fs::write(scratch.path().join(PARKED_PATH), "before").expect("the file");
+            let envelope = |origin_seq: i64, update: &str, base: &str| ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
+                workspace_id: workspace_id.to_owned(),
+                origin_id: "peer".to_owned(),
+                origin_seq,
+                relay_seq: Some(origin_seq),
+                op_kind: "ydoc.update".to_owned(),
+                payload: json!({
+                    "versionId": "main",
+                    "objectId": "live",
+                    "path": PARKED_PATH,
+                    "contentKind": "plaintext",
+                    "updateBlobSha256": update,
+                    "lineageClaimId": base,
+                    "isBaseState": update == base
+                }),
+                recorded_at_ms: 100 + origin_seq,
+            };
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.plaintext_insert(0, "before");
+            let mut store =
+                dohc_engine_storage::EngineStore::open(&open.db_path, 100).expect("store");
+            let base = store
+                .put_binary_blob(&doc.encode_full_state())
+                .expect("base blob");
+            dohc_engine_sync::apply_ydoc_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &envelope(0, &base, &base),
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .expect("the replicated base");
+            drop(store);
+            let session = if editor {
+                let (opened, _) = service
+                    .ydoc_open(
+                        &ctx,
+                        Some(handle.clone()),
+                        json!({ "versionId": "main", "path": PARKED_PATH, "contentKind": "plaintext" }),
+                        1,
+                    )
+                    .await
+                    .expect("the editor's session");
+                Some(opened["sessionId"].as_str().expect("session").to_owned())
+            } else {
+                None
+            };
+            let mut store =
+                dohc_engine_storage::EngineStore::open(&open.db_path, 100).expect("store");
+            let update = store
+                .put_binary_blob(&doc.plaintext_insert(6, " parked"))
+                .expect("update blob");
+            dohc_engine_sync::apply_ydoc_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &envelope(1, &update, &base),
+                &NoFaults,
+                &AlwaysLive,
+            )
+            .expect("park the pulled edit");
+            drop(store);
+            let parked = ParkedEdit {
+                _scratch: scratch,
+                service,
+                handle,
+                db_path: open.db_path.clone(),
+                session,
+            };
+            assert_eq!(parked.parked(), 1, "the pulled edit starts parked");
+            parked
+        }
+
+        fn parked(&self) -> i64 {
+            rusqlite::Connection::open_with_flags(
+                &self.db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("engine db")
+            .query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count parked updates")
+        }
+
+        async fn open_document(
+            &self,
+            ctx: &RequestContext,
+        ) -> Result<(Value, BlobEgress), WireError> {
+            self.service
+                .ydoc_open(
+                    ctx,
+                    Some(self.handle.clone()),
+                    json!({ "versionId": "main", "path": PARKED_PATH, "contentKind": "plaintext" }),
+                    3,
+                )
+                .await
+        }
+
+        /// Hold the whole egress budget, then start the editor's resync, or
+        /// an open without an editor, and return once it committed the
+        /// pulled edit.
+        async fn run_past_the_edit(
+            &self,
+            ctx: RequestContext,
+        ) -> (
+            tokio::task::JoinHandle<Result<(Value, BlobEgress), WireError>>,
+            tokio::sync::OwnedSemaphorePermit,
+        ) {
+            let held = self
+                .service
+                .blob_egress_budget
+                .reserve(
+                    i64::try_from(super::super::reads::BLOB_EGRESS_BYTE_BUDGET).expect("budget"),
+                    &OperationCancellation::new(&RequestContext::unbounded()),
+                    "test",
+                )
+                .await
+                .expect("hold the whole egress budget");
+            let service = Arc::clone(&self.service);
+            let handle = Some(self.handle.clone());
+            let session = self.session.clone();
+            let task = tokio::spawn(async move {
+                match session {
+                    Some(session) => {
+                        service
+                            .ydoc_resync(&ctx, handle, json!({ "sessionId": session }), 2)
+                            .await
+                    }
+                    None => {
+                        service
+                            .ydoc_open(
+                                &ctx,
+                                handle,
+                                json!({ "versionId": "main", "path": PARKED_PATH, "contentKind": "plaintext" }),
+                                2,
+                            )
+                            .await
+                    }
+                }
+            });
+            let waiting = std::time::Instant::now();
+            while self.parked() != 0 {
+                assert!(
+                    waiting.elapsed() < Duration::from_secs(10),
+                    "the pulled edit never committed"
+                );
+                tokio::task::yield_now().await;
+            }
+            (task, held)
+        }
+
+        async fn close(self) {
+            self.service
+                .workspace_close(Some(self.handle))
+                .await
+                .expect("workspace close");
+        }
+    }
+
+    fn shows_the_pulled_edit(egress: &BlobEgress) {
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&egress.bytes).expect("the document's state");
+        assert_eq!(doc.plaintext_string(), "before parked");
+    }
+
+    /// An open or resync is cancelled after it committed the document's
+    /// pulled edit, while its blob waits for egress budget. It answers with
+    /// the document, edit included, and its blob ignores the cancellation.
+    async fn cancelled_after_the_pulled_edit_commits(editor: bool) {
+        let parked = ParkedEdit::new(
+            if editor {
+                "resync-pulled-cancel"
+            } else {
+                "open-pulled-cancel"
+            },
+            editor,
         )
         .await;
+        let ctx = RequestContext {
+            deadline: Some(Instant::now() + Duration::from_secs(60)),
+            ..RequestContext::unbounded()
+        };
+        let cancel = ctx.cancel.clone();
+        let (task, held) = parked.run_past_the_edit(ctx).await;
+        cancel.cancel();
+        // Let the cancellation reach the request's token before the budget frees.
+        tokio::task::yield_now().await;
+        drop(held);
+        let (_, egress) = task
+            .await
+            .expect("task")
+            .expect("a request that committed the edit answers with it");
+        assert!(
+            !egress.cancel.is_cancelled(),
+            "the blob ignores the cancellation"
+        );
+        assert_eq!(egress.deadline, None, "and the deadline");
+        shows_the_pulled_edit(&egress);
+        parked.close().await;
     }
 
     #[tokio::test]
-    async fn scene_seed_deadline_keeps_exclusion_until_actor_completion() {
-        let mut ctx = RequestContext::unbounded();
-        ctx.deadline = Some(std::time::Instant::now() + Duration::from_millis(100));
-        assert_scene_seed_interruption_retains_exclusion(ctx, ErrorCode::DeadlineExceeded).await;
+    async fn an_open_cancelled_after_its_pulled_edit_commits_answers_with_it() {
+        cancelled_after_the_pulled_edit_commits(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_resync_cancelled_after_its_pulled_edit_commits_answers_with_it() {
+        cancelled_after_the_pulled_edit_commits(true).await;
+    }
+
+    /// An open or resync committed the document's pulled edit, and its blob
+    /// cannot have egress budget in time. Both answer OVERLOADED. The open
+    /// keeps no session, so the next open shows the edit; the resync keeps its
+    /// session, so the editor's next resync shows it.
+    async fn full_budget_after_the_pulled_edit_commits(editor: bool) {
+        let parked = ParkedEdit::new(
+            if editor {
+                "resync-pulled-overloaded"
+            } else {
+                "open-pulled-overloaded"
+            },
+            editor,
+        )
+        .await;
+        let (task, held) = parked.run_past_the_edit(RequestContext::unbounded()).await;
+        let refused = task
+            .await
+            .expect("task")
+            .expect_err("the blob has no budget");
+        drop(held);
+        assert_eq!(refused.code, ErrorCode::Overloaded);
+        assert_eq!(refused.message, "blob-egress-capacity");
+        let (_, egress) = match &parked.session {
+            Some(session) => parked
+                .service
+                .ydoc_resync(
+                    &RequestContext::unbounded(),
+                    Some(parked.handle.clone()),
+                    json!({ "sessionId": session }),
+                    3,
+                )
+                .await
+                .expect("the editor's session survives and resyncs"),
+            None => parked
+                .open_document(&RequestContext::unbounded())
+                .await
+                .expect("the document opens again"),
+        };
+        shows_the_pulled_edit(&egress);
+        parked.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_open_without_egress_budget_answers_overloaded_and_reopens_with_the_edit() {
+        full_budget_after_the_pulled_edit_commits(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_resync_without_egress_budget_keeps_its_session() {
+        full_budget_after_the_pulled_edit_commits(true).await;
     }
 
     #[test]

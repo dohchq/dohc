@@ -241,12 +241,15 @@ pub(crate) fn write_pushed_seq(
         origin_id,
         pushed_seq,
         &[],
+        &[],
         faults,
         leases,
         now_ms,
     )
 }
 
+/// Advance an origin's push cursor together with the refusals the relay
+/// returned for the batch it acknowledged, so a crash keeps both or neither.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_pushed_seq_with_refusals(
     store: &mut EngineStore,
@@ -254,6 +257,7 @@ pub(crate) fn write_pushed_seq_with_refusals(
     origin_id: &str,
     pushed_seq: i64,
     refusals: &[crate::SettlementPublicationRefusal],
+    hosted_refusals: &[crate::HostedPushRefusal],
     faults: &dyn FaultInjector,
     leases: &dyn crate::LeaseProbe,
     now_ms: i64,
@@ -267,6 +271,7 @@ pub(crate) fn write_pushed_seq_with_refusals(
     store
         .write_with(faults, |tx| {
             crate::settlement_publication::push_refusals_in_tx(tx,workspace_id,refusals)?;
+            crate::hosted::record_push_refusals_in_tx(tx, workspace_id, hosted_refusals)?;
             let was_enrolled =
                 crate::workspace_replicates_with_relay_in_tx(tx, workspace_id)?;
             tx.execute(

@@ -278,6 +278,7 @@ impl RelayTransport for FakeRelay {
         let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
             settlement_refusals,
+            hosted_refusals: Vec::new(),
             accepted,
             inserted: accepted,
             skipped: 0,
@@ -590,6 +591,7 @@ impl RelayTransport for PagedRelay {
         }
         Ok(PushResponse {
             settlement_refusals: Vec::new(),
+            hosted_refusals: Vec::new(),
             accepted,
             inserted,
             skipped: accepted - inserted,
@@ -867,6 +869,7 @@ impl RelayTransport for PagedShareRelay {
             .push(req);
         Ok(PushResponse {
             settlement_refusals: Vec::new(),
+            hosted_refusals: Vec::new(),
             accepted,
             inserted: accepted,
             skipped: 0,
@@ -1064,6 +1067,7 @@ mod version;
 mod ydoc_base;
 mod ydoc_cache;
 mod ydoc_drain;
+mod ydoc_live_echo;
 mod ydoc_projection_authors;
 mod ydoc_restore;
 
