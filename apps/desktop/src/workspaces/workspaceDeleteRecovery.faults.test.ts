@@ -1,3 +1,4 @@
+import { readDeleteRecovery, undoDeleteRecovery } from "./workspaceDeleteRecovery";
 import { undoWorkspaceHistoryOperation } from "./workspaceHistoryOperations";
 import { chmod, mkdir, readFile, readdir, readlink, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -11,7 +12,7 @@ import { undoOperation } from "@dohc/mcp/tools";
 import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
 import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
 
-const faults = vi.hoisted(() => ({ openError: "", opened: [] as string[], reads: [] as string[], recordSaves: 0, failRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false, beforePublish: undefined as undefined | ((target: string) => Promise<void>), copyTemps: [] as string[], copyTarget: "", sourceLimit: false, failRemove: false, beforeResume: undefined as undefined | (() => Promise<void>), modeCalls: [] as string[] }));
+const faults = vi.hoisted(() => ({ removeAfterStat: "", openError: "", opened: [] as string[], reads: [] as string[], recordSaves: 0, failRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false, beforePublish: undefined as undefined | ((target: string) => Promise<void>), copyTemps: [] as string[], copyTarget: "", sourceLimit: false, failRemove: false, beforeResume: undefined as undefined | (() => Promise<void>), modeCalls: [] as string[] }));
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
   return { ...actual,
@@ -25,7 +26,7 @@ vi.mock("node:fs/promises", async original => {
       }
       return actual.rm(...args);
     },
-    lstat: async (path: string) => { const entry = await actual.lstat(path); faults.visited.push(String(path)); return entry; },
+    lstat: async (path: string) => { const entry = await actual.lstat(path); if (String(path) === faults.removeAfterStat) await actual.rm(path); faults.visited.push(String(path)); return entry; },
     unlink: async (path: string) => {
       if (String(path) === faults.blockedPrune) { faults.pruneAttempts++; throw Object.assign(new Error("record held open"), { code: "EPERM" }); }
       return actual.unlink(path);
@@ -114,6 +115,22 @@ async function deleted(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe("delete recovery failures", () => {
+  it("reports a missing trash copy when a folder occupies an interrupted copy's path", async () => {
+    const f = await fixture(); const id = await deleted(f);
+    faults.copyOnly = true; faults.failCopy = "write";
+    try {
+      expect(await f.undo(id)).toMatchObject({ remaining: [{ retry: true }] });
+      faults.failCopy = "";
+      await rm(faults.copyTarget); await mkdir(faults.copyTarget);
+      const record = (await readDeleteRecovery(f.root, id))!;
+      faults.removeAfterStat = join(f.root, ".dohc/trash", record.staged!, "rowless.txt");
+      const result = await undoDeleteRecovery(f.root, record, person, f.history, "test", () => undefined, () => undefined);
+      expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt", retry: false,
+        reason: "folder/rowless.txt now occupies the old path. Its trash copy is gone." }] });
+      expect(await f.undo(id)).toEqual(result);
+      expect((await stat(faults.copyTarget)).isDirectory()).toBe(true);
+    } finally { faults.copyOnly = false; faults.failCopy = ""; faults.removeAfterStat = ""; }
+  });
   it.each([false, true])("restores a read-only rowless file without reopening it for writing (copy=%s)", async copyOnly => {
     const f = await fixture();
     await chmod(join(f.root, "folder/rowless.txt"), 0o444);

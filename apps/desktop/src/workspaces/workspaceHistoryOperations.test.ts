@@ -1,5 +1,5 @@
 import * as filesystem from "node:fs/promises";
-import { mkdir, readFile, readdir, rename, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, rm, readFile, readdir, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
@@ -137,13 +137,17 @@ it.each(["/x", "/", ...(process.platform === "win32" ? ["C:x"] : []), "C:/", "//
   }
   expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
-it.each(["{", "null", "{}"])("never exposes corrupt sidecar parser errors (%s)", async body => {
+it.each(["{", "null", "{}", "directory", "wrong id", "invalid staged"])("never exposes corrupt sidecar parser errors (%s)", async body => {
   const f = await fixture(); const id = await f.remove();
   const sidecar = join(f.rootPath, ".dohc/trash", (await readdir(join(f.rootPath, ".dohc/trash"))).find(name => name.endsWith(".json"))!);
-  await writeFile(sidecar, body);
+  if (body === "directory") { await rm(sidecar); await mkdir(sidecar); }
+  else if (body === "wrong id" || body === "invalid staged") {
+    const record = JSON.parse(await readFile(sidecar, "utf8"));
+    await writeFile(sidecar, JSON.stringify({ ...record, ...(body === "wrong id" ? { operationId: otherId } : { staged: "nested/staged" }) }));
+  } else await writeFile(sidecar, body);
   const refusal = { ok: false, reason: "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash." };
   expect(await f.undo(id, true)).toEqual(refusal);
-  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toEqual({ ok: false, reason: "Cannot read this operation. Its recovery record is invalid. Restore files from History or the trash." });
+  expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toEqual({ ok: false, reason: "Cannot read this operation. Its recovery record is invalid." });
   expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 it.each(["!", Buffer.from("null").toString("base64url"), Buffer.from("{}").toString("base64url")])("refuses malformed cursors without parser text (%s)", async cursor => {

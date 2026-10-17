@@ -76,6 +76,7 @@ async function save(root: string, record: RecoveryRecord): Promise<void> {
 }
 export async function readDeleteRecovery(root: string, id: string, action: "read" | "undo" = "undo"): Promise<RecoveryRecord | undefined> {
   const refusal = (detail: string) => new Error(`Cannot ${action === "read" ? "read this operation" : "undo the delete"}. ${detail}`);
+  const invalidRecord = `Its recovery record is invalid.${action === "undo" ? " Restore files from History or the trash." : ""}`;
   const metadata = await resolveWorkspaceMetadataDir(root, { create: false });
   if (!metadata) return undefined;
   const dir = join(metadata, "trash");
@@ -87,19 +88,19 @@ export async function readDeleteRecovery(root: string, id: string, action: "read
   if (!entry) return undefined;
   if (Date.now() - entry.mtimeMs > MAX_RECORD_AGE) return undefined;
   if (entry.isSymbolicLink()) throw refusal("Its recovery record is a link.");
-  if (!entry.isFile()) throw refusal("Its recovery record is invalid. Restore files from History or the trash.");
+  if (!entry.isFile()) throw refusal(invalidRecord);
   const body = await readFile(path, "utf8");
   let record: RecoveryRecord;
   try { record = Record.parse(JSON.parse(body)); }
-  catch { throw refusal("Its recovery record is invalid. Restore files from History or the trash."); }
-  if (record.operationId !== id) throw refusal("Its recovery record is invalid. Restore files from History or the trash.");
+  catch { throw refusal(invalidRecord); }
+  if (record.operationId !== id) throw refusal(invalidRecord);
   const paths = [record.base, ...record.paths, ...record.emptyFolders, ...(record.copies?.map(copy => copy.path) ?? []),
     ...[record.progress, record.result].flatMap(result => [...(result?.restored ?? []), ...(result?.remaining.map(item => item.path) ?? [])])];
   if (paths.some(path => !validPath(path, record.base))) {
     throw refusal("Its recovery paths are invalid.");
   }
   if (record.staged !== undefined && (!validPath(record.staged, record.staged) || record.staged.includes("/"))) {
-    throw refusal("Its recovery record is invalid. Restore files from History or the trash.");
+    throw refusal(invalidRecord);
   }
   return record;
 }
@@ -331,7 +332,7 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
       result.remaining.push({ path, reason: empty
         ? `dohc could not recreate ${path}. Check the old path, then create the folder there.`
         : code(error) === "EEXIST"
-        ? `${path} now occupies the old path. ${pendingCopy ? "Move it first. " : ""}The deleted file stays at ${trashPath}.`
+        ? `${path} now occupies the old path. ${pendingCopy && !sourceMissing ? "Move it first. " : ""}${sourceMissing ? "Its trash copy is gone." : `The deleted file stays at ${trashPath}.`}`
         : sourceMissing
         ? pendingCopy
           && await checkedTarget(root, path, record.base).then(info).then(entry => entry?.isFile()).catch(() => false)
