@@ -166,6 +166,10 @@ if (config) {
   for (const ext of ["md", "markdown", "txt", "csv", "json"]) {
     check(fileExtensions.includes(ext), `Open with dohc association includes .${ext}`);
   }
+  for (const ext of ["txt", "csv", "json"]) {
+    const entry = config.fileAssociations?.find((candidate) => [candidate.ext].flat().includes(ext));
+    check(entry?.rank === "Alternate", `.${ext} association never makes dohc the default app (rank Alternate)`);
+  }
   check(
     Array.isArray(config.protocols) &&
       config.protocols.length === 1 &&

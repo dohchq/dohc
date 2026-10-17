@@ -8,7 +8,6 @@ import { deferred } from "../testing/deferred";
 import { timelinePage, type TimelinePage } from "../testing/historyPageFixture";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopRoot } from "./DesktopRoot";
-import type { Workspace } from "./DesktopWorkspaceShell";
 import { makeBridge, OTHER_WORKSPACE, WORKSPACE } from "./DesktopWorkspaceShell.testHarness";
 
 function historyPage(workspaceId: string, id: string, summary: string): TimelinePage {
@@ -33,7 +32,6 @@ it("remounts the shell when main activates B and keeps A's late history answer o
   const B_ONLY = "B_ONLY wrote the B note";
   const heldA = deferred<TimelinePage>();
   let holdA = false;
-  let activate: ((workspace: Workspace) => void) | null = null;
   const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
     windowRole: "workspace" as const,
     getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [WORKSPACE, OTHER_WORKSPACE] })),
@@ -43,12 +41,6 @@ it("remounts the shell when main activates B and keeps A's late history answer o
     takeWorkspacePathOpenFailures: vi.fn(async () => []),
     onShareHandoffStatus: vi.fn(() => () => undefined),
     getShareHandoffStatus: vi.fn(async (): Promise<ShareHandoffStatus> => ({ status: "idle" })),
-    onWorkspaceActivated: vi.fn((callback: (workspace: Workspace) => void) => {
-      activate = callback;
-      return () => {
-        activate = null;
-      };
-    }),
   });
   // Each answer follows the workspace the read names, so a read from the wrong
   // workspace cannot come back with plausible B rows.
@@ -87,9 +79,9 @@ it("remounts the shell when main activates B and keeps A's late history answer o
   );
 
   // Main activates B in this window, and B paints its own history.
-  expect(activate).not.toBeNull();
+  expect(bridge.onWorkspaceActivated).toHaveBeenCalled();
   act(() => {
-    activate?.(OTHER_WORKSPACE);
+    bridge.emitWorkspaceActivated(OTHER_WORKSPACE);
   });
   await waitFor(() => {
     const shell = screen.getByTestId("workspace-shell");

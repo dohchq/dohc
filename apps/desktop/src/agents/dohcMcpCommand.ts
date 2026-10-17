@@ -15,6 +15,13 @@ export function isAppImageBoot(
   return Boolean(env.APPIMAGE);
 }
 
+/** True for a macOS app that runs from a mounted disk image or from the
+ * temporary copy App Translocation makes of a quarantined download. Either
+ * path goes away, so nothing that outlives this launch may name it. */
+export function isTemporaryMacAppPath(path: string): boolean {
+  return path.startsWith("/Volumes/") || path.includes("/AppTranslocation/");
+}
+
 /**
  * The dohc-mcp command a chat session config points the user's AI tool at.
  *
@@ -28,7 +35,8 @@ export function isAppImageBoot(
  * A packaged Linux AppImage returns null when its persistent cli-bin copy
  * is unavailable. The caller must not write a command in that case: the
  * fallback resources path is inside the AppImage's temporary FUSE mount and
- * must never reach a config file or a spawned process's environment.
+ * must never reach a config file or a spawned process's environment. A
+ * packaged macOS app on a temporary path returns null for the same reason.
  */
 export function resolveDohcMcpCommand(input: {
   isPackaged: boolean;
@@ -43,11 +51,14 @@ export function resolveDohcMcpCommand(input: {
   if (!input.isPackaged) return "dohc-mcp";
   const platform = input.platform ?? process.platform;
   let cliBinDir: string;
+  const resourcesPath = input.resourcesPath ?? dirname(process.execPath);
   if (platform === "linux" && isAppImageBoot(env)) {
     if (!input.linuxStableCliBinDir) return null;
     cliBinDir = input.linuxStableCliBinDir;
+  } else if (platform === "darwin" && isTemporaryMacAppPath(resourcesPath)) {
+    return null;
   } else {
-    cliBinDir = resolve(input.resourcesPath ?? dirname(process.execPath), "cli-bin");
+    cliBinDir = resolve(resourcesPath, "cli-bin");
   }
   return join(
     cliBinDir,

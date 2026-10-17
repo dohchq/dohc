@@ -355,6 +355,10 @@ export const WorkspaceSummary = z.object({
 });
 export type WorkspaceSummary = z.infer<typeof WorkspaceSummary>;
 
+// A workspace main activates in a window, and the workspace-relative file to
+// open there once it is ready, as when the OS opens a file with dohc.
+export const WorkspaceActivated = WorkspaceSummary.extend({ file: PATH_STRING.optional() });
+
 export const WorkspaceRegistryResult = z.object({
   workspaces: z.array(WorkspaceSummary),
 });
@@ -7250,9 +7254,9 @@ export interface DohcDesktopBridge
   // before they reach renderer code. Returns an unsubscribe function.
   onMenuCommand(listener: (command: MenuCommand) => void): () => void;
   // Native Open Recent / OS "Open with dohc" activation. Main sends a full
-  // workspace summary; the preload strips and validates it before the root
-  // swaps workspaces.
-  onWorkspaceActivated(listener: (workspace: WorkspaceSummary) => void): () => void;
+  // workspace summary, with the file to open once this window shows that
+  // workspace. The preload strips and validates both.
+  onWorkspaceActivated(listener: (workspace: WorkspaceSummary, file?: string) => void): () => void;
   // A folder failure is waiting: take it with takeWorkspacePathOpenFailures.
   onWorkspacePathOpenFailed(listener: () => void): () => void;
   // Auto-update state pushes from main, validated against UpdateStateEvent in
