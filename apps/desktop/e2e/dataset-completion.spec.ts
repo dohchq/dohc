@@ -358,8 +358,8 @@ test("@dataset-completion board and calendar page all records and save governed 
     const eventBox = await event.boundingBox();
     const dayBox = await calendarRow.locator(".rbc-day-bg").nth((originalDay + 1) % 7).boundingBox();
     if (!eventBox || !dayBox) throw Error("The calendar event and destination day must be visible.");
-    // The date background sits beneath the calendar row. Move the real pointer to
-    // its coordinates so the calendar's foreground drag surface receives the drop.
+    // The date background sits beneath the calendar row. Move Playwright's pointer
+    // to its coordinates so the calendar's foreground drag surface receives the drop.
     await page.mouse.move(eventBox.x + eventBox.width / 2, eventBox.y + eventBox.height / 2);
     await page.mouse.down();
     await page.mouse.move(dayBox.x + dayBox.width / 2, dayBox.y + dayBox.height / 2, { steps: 20 });

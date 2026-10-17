@@ -212,9 +212,10 @@ export function createDesktopCliServer<State>(
           if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Write in the owning workspace.");
           const current = activity.engineCaptureFor(workspace.workspaceId);
           if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
+          const attachmentId = operation.workspace.attachmentId;
           finish = await work(operation, {
             capture: current, requestId, trashItem: dependencies.trashItem,
-            markDeleted: path => dependencies.markDeletedUnderPath(operation.workspace.attachmentId, path),
+            markDeleted: path => dependencies.markDeletedUnderPath(attachmentId, path),
           });
         });
       } catch (error) {

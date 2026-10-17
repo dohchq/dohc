@@ -289,10 +289,8 @@ async function press(page: Page, button: Locator, timeout?: number): Promise<voi
   await page.keyboard.press("Enter");
 }
 
-// Playwright opens the window on the real desktop, so Chromium hovers what
-// lies under the OS pointer, which can rest on a part. A pointer moved
-// through the page takes its place, here on the page's header, outside
-// every part. An OS pointer that moves over the window still reaches it.
+// E2E windows ignore OS mouse events. Park Playwright's CDP pointer on the
+// page's header, outside every part and control, so captures have no hover.
 const PARKED = { x: 2, y: 2 };
 async function parkPointer(page: Page): Promise<void> {
   await page.mouse.move(PARKED.x, PARKED.y);

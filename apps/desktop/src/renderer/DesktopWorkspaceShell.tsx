@@ -953,14 +953,15 @@ export function DesktopWorkspaceShell(props: {
   // outlives both, so its Try again reopens the dialog with the address that
   // failed, or whichever of the two now applies, once the source has closed.
   // An open deletion review holds the account until it ends, so a Try again
-  // then does nothing: no sign-in, Disconnect, or new review starts under it.
+  // then runs nothing and keeps its row: no sign-in, Disconnect, or new
+  // review starts under it.
   const reportConnectionError = useCallback(
     (error: ConnectionErrorReport) => {
       reportShellFailure({
         message: error.message,
         cause: error.cause,
         retry: () => {
-          if (reviewingAccountDeletion()) return;
+          if (reviewingAccountDeletion()) return false;
           if (error.retry?.()) return;
           if (error.serverUrl === null) return openCloud();
           setCloudRetryServerUrl(error.serverUrl);
@@ -1009,7 +1010,7 @@ export function DesktopWorkspaceShell(props: {
           message: error.message,
           cause: error.cause,
           retry: () => {
-            if (reviewingAccountDeletion()) return;
+            if (reviewingAccountDeletion()) return false;
             if (!error.retry?.()) openSettings("cloud");
           },
         });
