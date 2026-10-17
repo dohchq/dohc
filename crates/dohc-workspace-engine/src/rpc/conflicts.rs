@@ -662,8 +662,8 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
-            // Without capture an owed update lasts only until the daemon
-            // stops, so a replay reconciles too.
+            // A replay reconciles too: the update its original owed may not
+            // have run.
             if matches!(&result.primary, ApplyDisposition::Applied(_))
                 || self.reconciles_collections_itself(&open)
             {
@@ -720,8 +720,8 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
-            // Without capture an owed update lasts only until the daemon
-            // stops, so a replay reconciles too.
+            // A replay reconciles too: the update its original owed may not
+            // have run.
             if matches!(&result.primary, ApplyDisposition::Applied(_))
                 || self.reconciles_collections_itself(&open)
             {

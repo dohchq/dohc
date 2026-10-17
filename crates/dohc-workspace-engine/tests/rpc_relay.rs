@@ -2848,7 +2848,9 @@ async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
 
 /// Commit a pulled cursor through the real supervisor while the session lock
 /// is held. The commit's follow-up waits on that lock, so the request is
-/// stopped after its cursor is durable and before it answers.
+/// stopped after its cursor is durable and before it answers. A cancelled
+/// commit keeps waiting for the lock; an expired one stops at its deadline
+/// and answers while the lock is still held.
 async fn commit_stopped_after_its_cursor_lands(expire: bool) {
     let workspace_id = if expire {
         "rpc-relay-commit-expired"
@@ -2917,28 +2919,31 @@ async fn commit_stopped_after_its_cursor_lands(expire: bool) {
         );
         tokio::task::yield_now().await;
     }
-    if expire {
+    let held = if expire {
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(61)).await;
+        Some(session_ops)
     } else {
         assert!(supervisor.cancel(id));
-    }
-    tokio::task::yield_now().await;
-    assert!(
-        matches!(
-            answer.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ),
-        "the landed commit is answered by its handler"
-    );
-    drop(session_ops);
-    if expire {
-        tokio::time::resume();
-    }
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(
+                answer.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "the landed commit is answered by its handler"
+        );
+        drop(session_ops);
+        None
+    };
     let committed = answer
         .await
         .expect("answered")
         .expect("a commit stopped after its cursor landed answers committed");
+    drop(held);
+    if expire {
+        tokio::time::resume();
+    }
     assert_eq!(committed.response.result["committed"], json!(true));
     assert_eq!(stored_cursor().as_deref(), Some("1"));
     id += 1;

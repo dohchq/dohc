@@ -44,7 +44,7 @@ use std::time::Duration;
 pub(super) const MAX_OPEN_HANDLES: usize = 64;
 
 /// How long a landed step waits for the capture gate before it leaves its
-/// Collections update to the next write, push, or commit.
+/// Collections update to the next write, push, or terminal page's commit.
 const OWED_COLLECTIONS_GATE_WAIT: Duration = Duration::from_secs(2);
 
 /// A `capture.hold`: the apply gate it holds, and when it ends unless the
@@ -97,7 +97,8 @@ pub(crate) struct OpenWorkspace {
     /// token only if no newer cursor of its kind was issued since.
     pub(super) cursors_issued: [std::sync::atomic::AtomicU64; 3],
     /// A landed step changed what this workspace's Collections hold and the
-    /// update has not run yet. The next write, push, or commit runs it.
+    /// update has not run yet. The next write, push, or terminal page's
+    /// commit runs it.
     pub(super) collections_owed: std::sync::atomic::AtomicBool,
 }
 
@@ -529,7 +530,9 @@ impl EngineService {
     /// Run an owed Collections update after a landed step, which answers with
     /// what landed either way. A renewed `capture.hold` can keep the gate
     /// forever, so the wait for it is bounded. An update that cannot run now
-    /// stays owed to the next write, push, or commit.
+    /// stays owed to the next write, push, or terminal page's commit. The
+    /// update reconciles the whole workspace, so whichever step runs it
+    /// repairs every change still owed.
     pub(super) async fn settle_owed_collections(&self, ctx: &RequestContext, open: &OpenWorkspace) {
         if !open.collections_owed.load(Ordering::SeqCst) {
             return;
@@ -1229,7 +1232,11 @@ impl EngineService {
                 capture_holds: CaptureHolds::default(),
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
                 cursors_issued: Default::default(),
-                collections_owed: Default::default(),
+                // An update owed when the daemon stopped is not recorded, so
+                // the first step after open runs one.
+                collections_owed: std::sync::atomic::AtomicBool::new(
+                    params.reconcile_collections && requested_mode == WorkspaceOpenMode::Full,
+                ),
             }),
         );
         open_guard.disarm();

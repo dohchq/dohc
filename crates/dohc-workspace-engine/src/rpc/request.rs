@@ -93,6 +93,16 @@ pub(super) fn after_landing(ctx: &RequestContext) -> RequestContext {
     }
 }
 
+/// When a wait that follows a landed step gives up: the request's deadline,
+/// or two seconds from now for a request without one. The request then
+/// answers with what landed and leaves the rest to a later step.
+pub(super) fn landed_wait_until(ctx: &RequestContext) -> tokio::time::Instant {
+    ctx.deadline.map_or_else(
+        || tokio::time::Instant::now() + std::time::Duration::from_secs(2),
+        tokio::time::Instant::from_std,
+    )
+}
+
 pub(super) fn required_idempotency_key(request_id: Option<String>) -> Result<String, WireError> {
     request_id
         .filter(|request_id| !request_id.is_empty() && !request_id.chars().any(char::is_control))
