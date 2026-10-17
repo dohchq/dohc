@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, unlink } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { HistoryOperationsStore, MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
@@ -19,6 +20,9 @@ export type DeleteUndoResult = { ok: false; reason: string } | z.infer<typeof Un
 const Record = z.object({
   operationId: z.string(), staged: z.string().optional(), base: z.string(), paths: z.array(z.string()),
   emptyFolders: z.array(z.string()), tracked: z.boolean(),
+  copies: z.array(z.object({
+    path: z.string(), dev: z.number(), ino: z.number(), birthtimeMs: z.number(), size: z.number(), hash: z.string(),
+  })).optional(),
   engine: z.object({ materialized: z.boolean(), momentCount: z.number() }).optional(), result: UndoResult.optional(),
 });
 type RecoveryRecord = z.infer<typeof Record>;
@@ -26,17 +30,6 @@ export type DeleteRecoveryPlan = { operationId: string; record?: RecoveryRecord;
 const code = (error: unknown) => error && typeof error === "object" && "code" in error ? error.code : undefined;
 const info = async (path: string) => lstat(path).catch(error => { if (code(error) === "ENOENT") return null; throw error; });
 const recordName = (id: string) => `delete-${createHash("sha256").update(id).digest("hex")}.json`;
-const copyPrefix = (id: string) => `.dohc-undo-${createHash("sha256").update(id).digest("hex")}.`;
-const copyTempName = /^\.dohc-undo-[a-f0-9]{64}\.[a-f0-9-]{36}\.tmp$/u;
-async function cleanCopies(dir: string, id: string): Promise<void> {
-  const prefix = copyPrefix(id);
-  for (const name of await readdir(dir).catch(() => [])) {
-    if (!name.startsWith(prefix) || !copyTempName.test(name)) continue;
-    const path = join(dir, name);
-    try { if ((await lstat(path)).isFile()) await rm(path, { force: true }); }
-    catch { /* A leftover copy cannot prevent Undo. */ }
-  }
-}
 const MAX_RECORD_AGE = 30 * 24 * 60 * 60 * 1_000;
 const unavailable = "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash.";
 
@@ -59,12 +52,11 @@ function schedulePrune(root: string): void {
 async function prune(root: string): Promise<void> {
   const dir = await trashDir(root);
   for (const name of await readdir(dir)) {
-    if (!/^delete-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name) && !copyTempName.test(name)) continue;
+    if (!/^delete-[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/u.test(name)) continue;
     try {
       const path = join(dir, name), entry = await lstat(path);
       if (entry.isFile() && Date.now() - entry.mtimeMs > MAX_RECORD_AGE) {
-        if (copyTempName.test(name)) await rm(path, { force: true });
-        else await unlink(path);
+        await rm(path, { force: true });
       }
     } catch { /* Cleanup cannot affect another delete or its Undo. */ }
   }
@@ -156,9 +148,13 @@ async function sourcePath(root: string, record: RecoveryRecord, path: string): P
   if (!isInside(dir, parent)) throw new Error("Cannot undo the delete. Its staged path leads outside the workspace trash.");
   return source;
 }
-const fingerprint = async (path: string) => {
+const fingerprint = async (path: string | FileHandle, size?: number) => {
   const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  const range = { start: 0, ...(size === undefined ? {} : { end: size - 1 }) };
+  if (size !== 0) {
+    const stream = typeof path === "string" ? createReadStream(path, range) : path.createReadStream({ ...range, autoClose: false });
+    for await (const chunk of stream) hash.update(chunk);
+  }
   return hash.digest("hex");
 };
 async function alreadyPlaced(source: string, target: string): Promise<boolean> {
@@ -167,11 +163,63 @@ async function alreadyPlaced(source: string, target: string): Promise<boolean> {
   if (a.isSymbolicLink()) return b.isSymbolicLink() && await readlink(source) === await readlink(target);
   return b.isFile() && a.size === b.size && (a.ino !== 0 && a.ino === b.ino && a.dev === b.dev || await fingerprint(source) === await fingerprint(target));
 }
+
+// Retrying through a verified handle cannot remove or overwrite a replacement at the path.
+async function copyExclusive(root: string, record: RecoveryRecord, path: string, source: string, target: string, mode: number): Promise<void> {
+  const pending = record.copies?.find(copy => copy.path === path), occupant = await info(target);
+  const hash = await fingerprint(source), size = (await lstat(source)).size;
+  let writable = true;
+  let file = pending && occupant
+    ? await open(target, "r+").catch(error => {
+      if (code(error) !== "EPERM" && code(error) !== "EACCES") throw error;
+      writable = false;
+      return open(target, "r");
+    })
+    : await open(target, "wx", mode);
+  let complete = false;
+  try {
+    const entry = await file.stat();
+    if (pending && occupant) {
+      if (!occupant.isFile() || !entry.isFile() || pending.ino === 0
+        || entry.dev !== pending.dev || entry.ino !== pending.ino || entry.birthtimeMs !== pending.birthtimeMs
+        || size !== pending.size || hash !== pending.hash || entry.size > size
+        || await fingerprint(file, entry.size) !== await fingerprint(source, entry.size)) {
+        throw Object.assign(new Error("Copy target changed"), { code: "EEXIST" });
+      }
+      // Full bytes may have survived a crash before the receipt. The caller keeps the private source.
+      complete = entry.size === size;
+    }
+    if (!complete && !writable) {
+      await file.chmod(mode | 0o200);
+      await file.close();
+      file = await open(target, "r+");
+      writable = true;
+      const current = await file.stat();
+      if (!current.isFile() || current.dev !== entry.dev || current.ino !== entry.ino || current.birthtimeMs !== entry.birthtimeMs
+        || current.size !== entry.size || await fingerprint(file, current.size) !== await fingerprint(source, current.size)) {
+        throw Object.assign(new Error("Copy target changed"), { code: "EEXIST" });
+      }
+    }
+    if (!complete) {
+      record.copies = [...(record.copies ?? []).filter(copy => copy.path !== path),
+        { path, dev: entry.dev, ino: entry.ino, birthtimeMs: entry.birthtimeMs, size, hash }];
+      // Persist ownership before the first byte. A crash before this save leaves an unclaimed occupant.
+      await save(root, record);
+      await file.writeFile(createReadStream(source));
+    }
+    await file.chmod(mode & 0o7777);
+    if (writable) await file.sync();
+  } finally { await file.close(); }
+  const copy = record.copies!.find(copy => copy.path === path)!, placed = await info(target);
+  if (!placed?.isFile() || placed.dev !== copy.dev || placed.ino !== copy.ino || placed.birthtimeMs !== copy.birthtimeMs
+    || placed.size !== copy.size || await fingerprint(target) !== copy.hash) {
+    throw Object.assign(new Error("Copy target changed"), { code: "EEXIST" });
+  }
+}
 export async function undoDeleteRecovery(root: string, input: { operationId: string; requestId: string }, author: MomentWriteAuthor,
   history: Pick<HistoryOperationsStore, "undoHistoryOperation">, workspaceId: string,
   assertCurrent: () => void, markChanged: () => void): Promise<DeleteUndoResult> {
   const record = await load(root, input.operationId);
-  await cleanCopies(await trashDir(root), input.operationId);
   const engineUndo = () => history.undoHistoryOperation({ workspaceId, operationId: input.operationId,
     requestId: `delete-undo:${input.operationId}`, author });
   if (record.result) {
@@ -219,7 +267,10 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
         if (result.remaining.length === failures && ![...keepSource].some(child => child.startsWith(`${path}/`))) result.restored.splice(start, result.restored.length - start, path);
         return;
       }
-      if (!resuming || !await alreadyPlaced(source!, target)) {
+      if (record.copies?.some(copy => copy.path === path)) {
+        await copyExclusive(root, record, path, source!, target, entry!.mode);
+        keepSource.add(path);
+      } else if (!resuming || !await alreadyPlaced(source!, target)) {
         await mkdir(dirname(target), { recursive: true });
         await checkedTarget(root, path, record.base);
         if (entry?.isSymbolicLink()) {
@@ -232,31 +283,21 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
         } else {
           try {
             await link(source!, target);
-            if (process.platform === "win32") linkedModes.set(target, entry!.mode & 0o7777);
+            if (process.platform === "win32" && (entry!.mode & 0o222) === 0) linkedModes.set(target, entry!.mode & 0o7777);
           } catch (error) {
             if (code(error) === "EEXIST") throw error;
-            const temp = join(await trashDir(root), `${copyPrefix(input.operationId)}${randomUUID()}.tmp`);
-            try {
-              const file = await open(temp, "wx", entry!.mode);
-              try {
-                await file.writeFile(createReadStream(source!));
-                await file.chmod(entry!.mode & 0o7777);
-                await file.sync();
-              } finally { await file.close(); }
-              await checkedTarget(root, path, record.base);
-              // Publish the finished private copy without replacing an occupant.
-              await link(temp, target);
-              if (process.platform === "win32") linkedModes.set(target, entry!.mode & 0o7777);
-            } finally { await rm(temp, { force: true }).catch(() => undefined); }
+            await copyExclusive(root, record, path, source!, target, entry!.mode);
           }
         }
       } else {
         // A resumed copy may have missed its flush. Keep the private source.
         keepSource.add(path);
       }
+      if (record.copies) record.copies = record.copies.filter(copy => copy.path !== path);
       result.restored.push(path);
       markChanged();
     } catch (error) {
+      // An interrupted copy stays journaled and keeps its source until a later Undo succeeds.
       result.remaining.push({ path, reason: empty
         ? `dohc could not recreate ${path}. Check the old path, then create the folder there.`
         : code(error) === "EEXIST"
@@ -266,9 +307,9 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
   };
   for (const path of record.paths) await place(path);
   for (const path of record.emptyFolders) await place(path, true);
-  record.result = result;
+  if (!record.copies?.length) record.result = result;
   await save(root, record);
-  for (const path of result.restored.filter(path => !record.emptyFolders.includes(path) && !keepSource.has(path))) {
+  for (const path of (record.result ? result.restored : []).filter(path => !record.emptyFolders.includes(path) && !keepSource.has(path))) {
     await sourcePath(root, record, path).then(source => rm(source, { recursive: true, force: true })).catch(() => undefined);
   }
   for (const [target, mode] of linkedModes) await chmod(target, mode).catch(() => undefined);

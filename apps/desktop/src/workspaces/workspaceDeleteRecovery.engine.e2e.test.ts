@@ -13,10 +13,7 @@ const copy = vi.hoisted(() => ({ inspect: undefined as undefined | ((temp: strin
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
   return { ...actual,
-    link: async (from: string, to: string) => {
-      if (basename(from) === "index.js") throw Object.assign(new Error("copy required"), { code: "EXDEV" });
-      return actual.link(from, to);
-    },
+    link: async () => { throw Object.assign(new Error("cross-volume link"), { code: "EXDEV" }); },
     open: async (...args: Parameters<typeof actual.open>) => {
       const file = await actual.open(...args);
       if (args[1] === "wx" && !basename(String(args[0])).startsWith("delete-")) {
@@ -58,13 +55,15 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
     const undo = (requestId: string) => undoWorkspaceDelete(operation, { operationId, requestId }, person,
       { workspaceId: workspace.workspaceId, history });
     let inspection: Promise<void> | undefined;
-    copy.inspect = temp => {
+    let inspectedTarget: string | undefined;
+    copy.inspect = target => {
+      inspectedTarget = target;
       inspection = (async () => {
         await writeFile(join(rootPath, "copy-barrier.txt"), "capture reached this copy");
         await capture.flush();
         await waitForPathMoments(capture, "copy-barrier.txt", 1);
-        expect(await readFile(temp, "utf8")).toBe("rowless original\n");
-        expect(await capture.fileObjectIdForPath(relative(rootPath, temp).split("\\").join("/"))).toBeNull();
+        expect(await readFile(target, "utf8")).toBe("rowless original\n");
+        expect(await capture.fileObjectIdForPath(relative(rootPath, target).split("\\").join("/"))).toBeNull();
       })();
       return inspection;
     };
@@ -72,6 +71,7 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
     expect(inspection).toBeDefined();
     await inspection;
     expect(first).toMatchObject({ ok: true, tracked: { momentCount: 1 }, restored: ["folder/node_modules"], remaining: [] });
+    expect(relative(rootPath, inspectedTarget!).split("\\").join("/")).toBe("folder/node_modules/pkg/index.js");
     await expect.poll(() => undo("refresh-folder"), { timeout: REAL_DAEMON_DEADLINE_MS })
       .toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 1 } });
     await expect.poll(() => readFile(join(rootPath, "folder/tracked.txt"), "utf8"), { timeout: REAL_DAEMON_DEADLINE_MS }).toBe("tracked original\n");
