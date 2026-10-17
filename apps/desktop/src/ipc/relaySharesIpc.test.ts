@@ -247,6 +247,7 @@ describe("owner live document enrollment", () => {
         {path: "changed.md", status: "unavailable", reason: "workspace-changed"},
         {path: "refused.md", status: "unavailable", reason: "session-host-refused"},
         {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage"},
+        {path: "diverged.md", status: "unavailable", reason: "session-host-diverged"},
       ]});
     await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
       documents: [
@@ -257,6 +258,8 @@ describe("owner live document enrollment", () => {
         {path: "changed.md", status: "unavailable", reason: "workspace-changed", canResume: false},
         {path: "refused.md", status: "unavailable", reason: "session-host-refused", canResume: true},
         {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage", canResume: true},
+        // Only the server's operator can continue a diverged server copy.
+        {path: "diverged.md", status: "unavailable", reason: "session-host-diverged", canResume: false},
       ], nextCursor: "old.md",
     });
     expect(h.request.mock.calls.map((call) => call[1])).toEqual([

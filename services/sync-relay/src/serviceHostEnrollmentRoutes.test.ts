@@ -25,6 +25,7 @@ async function fixture() {
   const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false,
     blocked: vi.fn((document: {objectId: string}) => blocked.get(document.objectId)),
     unblock: vi.fn((document: {objectId: string}) => blocked.delete(document.objectId)),
+    diverged: vi.fn((_row: {workspaceId: string; replicationEpoch: string; streamIdentity: string}) => false),
     block(objectId: string, why: ServiceActivationBlock = "refused") {blocked.set(objectId, why);}};
   let actor = {workspaceId: scope.workspaceId, userId: "owner-1"};
   const resolveActor = vi.fn(async () => actor);
@@ -151,6 +152,24 @@ it("reports a document without live-editing history apart from other refusals", 
   expect(await documents()).toEqual([{path: binding.currentPath, status: "preparing"}]);
   f.host.block(enrolled.objectId, "refused");
   expect(await documents()).toEqual([{path: binding.currentPath, status: "unavailable", reason: "session-host-refused"}]);
+});
+
+// Proves: a document whose hosted replica diverged reads as its own reason
+// ahead of a block, a Resume cannot change that, and the owner learns nothing
+// of the store. A workspace that changed identity still reads as changed.
+it("reports a document whose hosted replica diverged, and nothing about its store", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const diverged = {path: binding.currentPath, status: "unavailable", reason: "session-host-diverged"};
+  f.host.ready.mockReturnValue(true);
+  f.host.block(enrolled.objectId);
+  f.host.diverged.mockImplementation(row => row.workspaceId === scope.workspaceId && row.replicationEpoch === "epoch" && row.streamIdentity === "stream");
+  const response = await f.handle(f.request());
+  expect(await response.json()).toEqual({ok: true, documents: [diverged]});
+  const resumed = await f.handle(f.request("POST", {path: binding.currentPath}));
+  expect(resumed.status).toBe(202);
+  expect(await resumed.json()).toEqual({ok: true, ...diverged});
+  f.raw.prepare("UPDATE sync_relay_workspaces SET replication_epoch='rotated' WHERE workspace_id=?").run(scope.workspaceId);
+  expect((await (await f.handle(f.request())).json()).documents).toEqual([{path: binding.currentPath, status: "unavailable", reason: "workspace-changed"}]);
 });
 
 it("lists automatic enrollment refusals without enrolling documents or exposing other workspaces", async () => {

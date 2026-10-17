@@ -179,7 +179,7 @@ export async function startServiceLiveHost(options: {
   const parking = new Map<string, number>();
   // Whether an update completed on this daemon.
   let updated = false;
-  // The stores of workspaces whose replica diverged. None attaches again on this daemon, and each store stays where it is.
+  // The stores of workspaces whose replica diverged. None of these stores attaches again on this daemon, and each stays where it is.
   const diverged = new Map<string, string>();
   // When each hosted document is due to unload with no live connection, and
   // the count of connection changes it last saw. An idle unload that started
@@ -625,7 +625,7 @@ export async function startServiceLiveHost(options: {
       }
       // A workspace stays wanted while anything of it may remain in its replica, so one that is not has nothing left to drain.
       for (const workspaceId of [...members.keys()]) if (!desired.has(workspaceId) || changed.includes(workspaceId)) await detach(workspaceId, joined);
-      for (const workspace of workspaces) if (!members.has(workspace.workspaceId) && !diverged.has(workspace.workspaceId)) await attach(workspace, joined);
+      for (const workspace of workspaces) if (!members.has(workspace.workspaceId) && diverged.get(workspace.workspaceId) !== workspace.root) await attach(workspace, joined);
       for (const [key, document] of wanted) {
         if (!hosted.has(key) && members.has(document.target.workspaceId)) {activation.addTarget(document.target, document.objectId); hosted.set(key, document); touch(key);}
       }
@@ -761,7 +761,7 @@ export async function startServiceLiveHost(options: {
        * and unload documents that left, while their workspace stays attached.
        * On a fresh daemon, they first resume departing documents that are
        * still enabled. A workspace that is no longer wanted, or whose identity
-       * changed, detaches at once. A diverged workspace stays detached.
+       * changed, detaches at once. A diverged store stays detached.
        */
       update,
       /**

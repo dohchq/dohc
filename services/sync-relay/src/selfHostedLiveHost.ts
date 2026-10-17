@@ -1,8 +1,8 @@
 import {createHash} from "node:crypto";
 import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
-import {mkdir, mkdtemp, rm, writeFile} from "node:fs/promises";
+import {mkdir, mkdtemp, readdir, rm, writeFile} from "node:fs/promises";
 import {realpathSync, statSync} from "node:fs";
-import {isAbsolute, join, posix, resolve} from "node:path";
+import {basename, isAbsolute, join, posix, resolve} from "node:path";
 import type {Event} from "@dohc/workspace-engine-client";
 import {tmpdir} from "node:os";
 import {setTimeout as delay} from "node:timers/promises";
@@ -88,9 +88,12 @@ export async function startSelfHostedLiveHost(options: {
   // A store keeps its parked documents' activations, so nothing here deletes one.
   const storeName = (row: Pick<ServiceHostEnrollment, "workspaceId" | "replicationEpoch" | "streamIdentity">) => createHash("sha256")
     .update(JSON.stringify(["hosted-v1", history.namespace, row.workspaceId, row.replicationEpoch, row.streamIdentity])).digest("hex");
-  // Workspaces whose hosted replica diverged from the relay. Each stays
-  // detached for the life of this process, its store untouched, and releases nothing.
-  const diverged = new Set<string>();
+  // The stores, by name, whose hosted replica diverged from the relay. Each
+  // stays detached, untouched, and releases nothing. A marker beside the store
+  // keeps it so after a restart, before any pull could find the divergence again.
+  const marker = (name: string) => join(root, `${name}.diverged`);
+  const diverged = new Set((await readdir(root)).flatMap(name => /^([0-9a-f]{64})\.diverged$/.exec(name)?.[1] ?? []));
+  for (const name of diverged) options.onError?.(new Error(`The live editing copy in store ${join(root, name)} diverged from the relay earlier. It stays detached.`));
   // The documents this reconciliation released, or tried to.
   const left = new Set<string>();
   // Blocked documents already reported to the operator.
@@ -137,9 +140,9 @@ export async function startSelfHostedLiveHost(options: {
       return host;
     } finally {await rm(temporary, {recursive: true, force: true});}
   }
-  // The selection, without diverged workspaces.
+  // The selection, without diverged stores.
   const selection = () => {
-    const selected = select(), kept = (row: ServiceHostEnrollment) => !diverged.has(row.workspaceId);
+    const selected = select(), kept = (row: ServiceHostEnrollment) => !diverged.has(storeName(row));
     return {...selected, targets: selected.targets.filter(kept), departing: selected.departing.filter(kept)};
   };
   async function reconcile() {
@@ -155,10 +158,13 @@ export async function startSelfHostedLiveHost(options: {
         if (!discoveryCursor) scannedGeneration = scanGeneration;
       }
       // A diverged store may hold work nobody published. It stays where it is,
-      // and nothing attaches it again, even on a restarted daemon.
+      // and nothing attaches it again, even on a restarted daemon or relay.
       for (const {workspaceId, root: store} of current?.diverged() ?? []) {
-        if (diverged.has(workspaceId)) continue;
-        diverged.add(workspaceId);
+        const name = basename(store);
+        if (diverged.has(name)) continue;
+        diverged.add(name);
+        try {await writeFile(marker(name), JSON.stringify({workspaceId}), {mode: 0o600});}
+        catch (error) {options.onError?.(error);}
         options.onError?.(new Error(`The live editing copy of workspace ${workspaceId} diverged from the relay. It stays detached, and its store is kept at ${store}.`));
       }
       // Only a failed daemon restarts. Membership changes update the running one.
@@ -245,6 +251,8 @@ export async function startSelfHostedLiveHost(options: {
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
     /** Why the running daemon cannot continue the document until its owner tries again, if it cannot. */
     blocked(document: {workspaceId: string; objectId: string}) {return current?.blocked(document);},
+    /** Whether the enrolled document's hosted replica diverged from the relay. Nothing continues it. */
+    diverged(row: Pick<ServiceHostEnrollment, "workspaceId" | "replicationEpoch" | "streamIdentity">) {return diverged.has(storeName(row));},
     /** Lets a blocked document try once more. Returns whether it was blocked. Its next block is reported again. */
     unblock(document: {workspaceId: string; objectId: string}) {
       const unblocked = current?.unblock(document) ?? false;

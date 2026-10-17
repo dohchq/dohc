@@ -76,7 +76,7 @@ export function serviceHostEnrollmentRefusals(storage: SyncRelayStorage, workspa
 
 export function createServiceHostEnrollmentRoutes(options: {
   storage: SyncRelayStorage; history: LiveJournalHistoryAuthority; resolveActor: ResolveActor;
-  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "unblock">;
+  host: Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "reconcile" | "unavailable" | "blocked" | "unblock" | "diverged">;
 }) {
   const {storage, history, host} = options;
   const activation = storage.createServiceActivationStore(history);
@@ -85,6 +85,8 @@ export function createServiceHostEnrollmentRoutes(options: {
     // A Pause still waiting for its document to unload reads as paused.
     if (!row.enabled || row.ownerStop) return {...base, status: "paused"};
     if (!storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) || storage.verifyWorkspaceIdentity(row) !== "matched") return {...base, status: "unavailable", reason: "workspace-changed"};
+    // Nothing its owner does continues a document whose hosted replica diverged. Its store stays for the operator.
+    if (host.diverged(row)) return {...base, status: "unavailable", reason: "session-host-diverged"};
     if (storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) !== row.objectId) return {...base, status: "unavailable", reason: "document-unavailable"};
     // Only the owner's Resume lets the host try a document it could not continue.
     // One with no live-editing history needs its owner to open it first.

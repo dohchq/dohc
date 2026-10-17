@@ -340,16 +340,13 @@ export function listUndrainedServiceHostEnrollments(storage: StorageContext, aft
       ORDER BY workspace_id,path LIMIT ?`).all(SERVICE_HOST_MAX_DOCUMENTS).map(row);
     const retired = storage.db.prepare(`SELECT * FROM ${SERVICE_HOST_ENROLLMENTS} WHERE host_drained_at_ms IS NULL AND retired=1
       AND (workspace_id,path)>(?,?) ORDER BY workspace_id,path LIMIT ?`).all(workspaceId, path, SERVICE_HOST_MAX_DOCUMENTS + 1);
-    const page = retired.slice(0, SERVICE_HOST_MAX_DOCUMENTS).map(row), last = page.at(-1);
-    return {documents: [...active, ...page], nextCursor: retired.length > SERVICE_HOST_MAX_DOCUMENTS && last ? {workspaceId: last.workspaceId, path: last.path} : null};
+    // The host opens an engine handle for each workspace named. The page names
+    // no more workspaces than capacity allows active ones, so together they
+    // stay within the engine's 64 handles. Rows come by workspace, so the page is a prefix.
+    const named = new Set([...new Set(retired.map(value => value.workspace_id))].slice(0, SERVICE_HOST_MAX_WORKSPACES));
+    const page = retired.slice(0, SERVICE_HOST_MAX_DOCUMENTS).filter(value => named.has(value.workspace_id)).map(row), last = page.at(-1);
+    return {documents: [...active, ...page], nextCursor: retired.length > page.length && last ? {workspaceId: last.workspaceId, path: last.path} : null};
   });
-}
-/** The current workspace identities with an undrained enrollment, one per workspace. Each names a hosted store to keep. */
-export function listUndrainedServiceHostWorkspaces(storage: StorageContext): readonly ServiceHostWorkspace[] {
-  return storage.readLiveAuthority(() => storage.db.prepare(`SELECT DISTINCT e.workspace_id,e.owner_user_id,e.replication_epoch,e.stream_identity
-    FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
-    WHERE e.host_drained_at_ms IS NULL AND e.owner_user_id=w.owner_user_id
-      AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity`).all().map(hostWorkspace));
 }
 export function listRetiredServiceHostEnrollments(storage: StorageContext, workspaceId: string, after?: string): {
   documents: readonly ServiceHostEnrollment[]; nextCursor: string | null;
@@ -440,18 +437,27 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
   });
 }
 
-function coveredByEditGrant(storage: StorageContext, enrollment: Pick<ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean {
-  // Admission runs this on every check, so it stops at the first covering share instead of reading them all.
-  const shares = storage.db.prepare(`SELECT s.share_id,s.workspace_id,s.granter_user_id,s.selector_json,s.created_at_ms FROM sync_relay_shares s INDEXED BY ${CANDIDATE_INDEX}
-    WHERE s.workspace_id=? AND s.granter_user_id=?
-      AND EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active' AND g.access='edit')`)
-    .iterate(enrollment.workspaceId, enrollment.ownerUserId);
-  for (const value of shares) {
-    const share: SyncRelayShareRow = {shareId: String(value.share_id), workspaceId: String(value.workspace_id), granterUserId: String(value.granter_user_id),
-      selectorJson: String(value.selector_json), createdAtMs: Number(value.created_at_ms)};
-    const parsed = parseStoredAnyShareSelectorJson(share.selectorJson), selector = parsed && effectiveShareSelector(parsed, "edit");
-    if (selector && isLiveEditShareSelector(selector) && canonicalLiveSelector(share, selector) && visibleSharePath(selector, enrollment.path) === enrollment.path) return true;
+const EDIT_SHARE_COLUMNS = `s.share_id,s.workspace_id,s.granter_user_id,s.selector_json,s.created_at_ms`;
+const ACTIVE_EDIT_GRANT = `EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active' AND g.access='edit')`;
+function coversEnrolledPath(value: Record<string, unknown>, path: string): boolean {
+  const share: SyncRelayShareRow = {shareId: String(value.share_id), workspaceId: String(value.workspace_id), granterUserId: String(value.granter_user_id),
+    selectorJson: String(value.selector_json), createdAtMs: Number(value.created_at_ms)};
+  const parsed = parseStoredAnyShareSelectorJson(share.selectorJson), selector = parsed && effectiveShareSelector(parsed, "edit");
+  return !!selector && isLiveEditShareSelector(selector) && canonicalLiveSelector(share, selector) && visibleSharePath(selector, path) === path;
+}
+function coveredByEditGrant(storage: StorageContext, enrollment: Pick<ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path"> & {shareId?: string}): boolean {
+  // Admission runs this on every update. The share that enrolled the document almost always still covers it, so it is
+  // checked first by key; the rest are read only when it doesn't, and the scan stops at the first that does.
+  if (enrollment.shareId !== undefined) {
+    const own = storage.db.prepare(`SELECT ${EDIT_SHARE_COLUMNS} FROM sync_relay_shares s
+      WHERE s.share_id=? AND s.workspace_id=? AND s.granter_user_id=? AND ${ACTIVE_EDIT_GRANT}`)
+      .get(enrollment.shareId, enrollment.workspaceId, enrollment.ownerUserId);
+    if (own && coversEnrolledPath(own, enrollment.path)) return true;
   }
+  const shares = storage.db.prepare(`SELECT ${EDIT_SHARE_COLUMNS} FROM sync_relay_shares s INDEXED BY ${CANDIDATE_INDEX}
+    WHERE s.workspace_id=? AND s.granter_user_id=? AND ${ACTIVE_EDIT_GRANT}`)
+    .iterate(enrollment.workspaceId, enrollment.ownerUserId);
+  for (const value of shares) if (value.share_id !== enrollment.shareId && coversEnrolledPath(value, enrollment.path)) return true;
   return false;
 }
 /** Whether an active Edit grant on any of the owner's shares still covers the enrolled document. */
@@ -487,13 +493,13 @@ export function releaseServiceHostEnrollment(storage: StorageContext, input: {wo
  * grant of its owner covers its enrolled path.
  */
 export function serviceHostDocumentEnabled(storage: StorageContext, document: {workspaceId: string; objectId: string}): boolean {
-  const value = storage.db.prepare(`SELECT e.enabled,e.retired,e.owner_user_id,e.path,e.replication_epoch,e.stream_identity,
+  const value = storage.db.prepare(`SELECT e.enabled,e.retired,e.owner_user_id,e.path,e.share_id,e.replication_epoch,e.stream_identity,
     w.owner_user_id AS current_owner,w.replication_epoch AS current_epoch,w.stream_identity AS current_stream
     FROM ${SERVICE_HOST_ENROLLMENTS} e JOIN sync_relay_workspaces w USING(workspace_id)
     WHERE e.workspace_id=? AND e.object_id=?`).get(document.workspaceId, document.objectId);
   return !value || (value.enabled === 1 && value.retired === 0 && value.owner_user_id === value.current_owner &&
     value.replication_epoch === value.current_epoch && value.stream_identity === value.current_stream &&
-    coveredByEditGrant(storage, {workspaceId: document.workspaceId, ownerUserId: String(value.owner_user_id), path: String(value.path)}));
+    coveredByEditGrant(storage, {workspaceId: document.workspaceId, ownerUserId: String(value.owner_user_id), path: String(value.path), shareId: String(value.share_id)}));
 }
 
 export function scanServiceHostCandidateShares(storage: StorageContext, after?: ServiceHostCandidateCursor, onlyWorkspaceId?: string): ServiceHostCandidatePage {

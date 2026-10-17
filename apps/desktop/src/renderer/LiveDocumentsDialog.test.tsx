@@ -229,6 +229,11 @@ describe("LiveDocumentsDialog", () => {
           reason: "live-document-without-lineage",
           canResume: true,
         }),
+        row("docs/diverged.md", {
+          status: "unavailable",
+          reason: "session-host-diverged",
+          canResume: false,
+        }),
         row("docs/stopped.md", { status: "retired", canResume: true }),
         row("docs/stopped-gone.md", { status: "retired" }),
       ]),
@@ -248,9 +253,16 @@ describe("LiveDocumentsDialog", () => {
       "Workspace changed",
       "Stopped by the server",
       "Not started",
+      "Server copy doesn't match",
       "Stopped",
       "Stopped",
     ]);
+    // Only a document whose server copy diverged sends its owner to the server's operator.
+    const operator =
+      "The server's copy of this workspace no longer matches the synced one. Contact the server's operator.";
+    expect(screen.getAllByText(operator)).toHaveLength(1);
+    expect(screen.getByTestId("live-document-row-docs/diverged.md").textContent).toContain(operator);
+    expect(actions("docs/diverged.md")).toEqual(["Stop live editing"]);
     // Only the document dohc has never opened says to open it before Resume.
     const openFirst =
       "Live editing can't start until you open this document once in dohc. After you open it, resume live editing.";

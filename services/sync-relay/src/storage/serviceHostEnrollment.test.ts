@@ -2,7 +2,7 @@ import {afterEach, expect, it} from "vitest";
 import {fixture as ticketFixture, binding, scope} from "../liveTickets.test-helper";
 import {openSyncRelayStorage} from "../storage";
 import {authorizeServiceHostReplication, deriveServiceHostBearer, serviceHostReplicationRoute} from "../serviceHostCredential";
-import {serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS} from "./serviceHostEnrollment";
+import {serviceHostDocumentEnabled, SERVICE_HOST_ENROLLMENTS, SERVICE_HOST_MAX_WORKSPACES} from "./serviceHostEnrollment";
 import type {StorageContext} from "./context";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -213,28 +213,30 @@ it("lists the enrollments the host has not drained, including stopped ones, acti
   expect(f.storage.listUndrainedServiceHostEnrollments().documents.map(row => row.path)).toEqual([active.path, "docs/paused.md"]);
 });
 
-// Proves: retired rows come a page at a time after every active row, and the
-// stores to keep come from every undrained current identity, past any page.
-it("pages retired undrained enrollments after the active ones and names every undrained current identity", async () => {
+// Proves: retired rows come a page at a time after every active row. A page
+// names no more workspaces than capacity allows active ones, so the host,
+// which opens one engine handle for each, stays within the engine's 64.
+it("pages retired undrained enrollments after the active ones, a bounded number of workspaces at a time", async () => {
   const f = await fixture(), active = f.enroll();
   const stopped = f.raw.prepare(`INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes)
-    VALUES (?,'object','docs/a.md','owner-1',?,'epoch','stream','retire',0,1,1,1,1)`);
-  // More workspaces than two pages, each with a document stopped while the host was down.
+    VALUES (?,?,?,'owner-1',?,'epoch','stream','retire',0,1,1,1,1)`);
+  // More workspaces than eight pages, each with a document stopped while the host was down. The first has three.
   const workspaces = Array.from({length: 130}, (_, index) => `workspace-${String(index).padStart(3, "0")}`);
-  for (const workspaceId of workspaces) {f.seed(workspaceId, "object", "docs/a.md", `share-${workspaceId}`); stopped.run(workspaceId, `share-${workspaceId}`);}
-  const first = f.storage.listUndrainedServiceHostEnrollments();
-  expect(first.documents.map(row => row.workspaceId)).toEqual([active.workspaceId, ...workspaces.slice(0, 64)]);
-  expect(first.nextCursor).toEqual({workspaceId: workspaces[63], path: "docs/a.md"});
-  const second = f.storage.listUndrainedServiceHostEnrollments(first.nextCursor!);
-  expect(second.documents.map(row => row.workspaceId)).toEqual([active.workspaceId, ...workspaces.slice(64, 128)]);
-  const last = f.storage.listUndrainedServiceHostEnrollments(second.nextCursor!);
-  expect(last).toMatchObject({documents: [{workspaceId: active.workspaceId}, {workspaceId: workspaces[128]}, {workspaceId: workspaces[129]}], nextCursor: null});
-  // An obsolete identity names no store; a drained row keeps none.
-  f.raw.prepare("UPDATE sync_relay_workspaces SET replication_epoch='rotated' WHERE workspace_id=?").run(workspaces[0]);
-  f.raw.prepare(`UPDATE ${SERVICE_HOST_ENROLLMENTS} SET host_drained_at_ms=30 WHERE workspace_id=?`).run(workspaces[1]);
-  const kept = f.storage.listUndrainedServiceHostWorkspaces();
-  expect(kept.map(row => row.workspaceId).sort()).toEqual([active.workspaceId, ...workspaces.slice(2)].sort());
-  expect(kept.find(row => row.workspaceId === workspaces[129])).toEqual({workspaceId: workspaces[129], ownerUserId: "owner-1", replicationEpoch: "epoch", streamIdentity: "stream"});
+  for (const workspaceId of workspaces) {f.seed(workspaceId, "object", "docs/a.md", `share-${workspaceId}`); stopped.run(workspaceId, "object", "docs/a.md", `share-${workspaceId}`);}
+  for (const index of [1, 2]) stopped.run(workspaces[0], `object-${index}`, `docs/${index}.md`, `share-${workspaces[0]}`);
+  const pages = [f.storage.listUndrainedServiceHostEnrollments()];
+  while (pages.at(-1)!.nextCursor) pages.push(f.storage.listUndrainedServiceHostEnrollments(pages.at(-1)!.nextCursor!));
+  expect(pages).toHaveLength(9);
+  for (const {documents} of pages) {
+    expect(documents[0]).toMatchObject({workspaceId: active.workspaceId, path: active.path, retired: false});
+    expect(new Set(documents.slice(1).map(row => row.workspaceId)).size).toBeLessThanOrEqual(SERVICE_HOST_MAX_WORKSPACES);
+  }
+  expect(pages[0]!.documents.slice(1).map(row => [row.workspaceId, row.path])).toEqual([[workspaces[0], "docs/1.md"], [workspaces[0], "docs/2.md"],
+    ...workspaces.slice(0, 16).map(workspaceId => [workspaceId, "docs/a.md"])]);
+  expect(pages[0]!.nextCursor).toEqual({workspaceId: workspaces[15], path: "docs/a.md"});
+  expect(pages.at(-1)).toMatchObject({documents: [{workspaceId: active.workspaceId}, {workspaceId: workspaces[128]}, {workspaceId: workspaces[129]}], nextCursor: null});
+  expect(pages.flatMap(page => page.documents.slice(1).map(row => `${row.workspaceId}/${row.path}`))).toEqual(
+    [`${workspaces[0]}/docs/1.md`, `${workspaces[0]}/docs/2.md`, ...workspaces.map(workspaceId => `${workspaceId}/docs/a.md`)]);
 });
 
 it("refuses altered enrollment schema on reopen", async () => {

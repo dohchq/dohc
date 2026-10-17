@@ -9,7 +9,7 @@ import { useRequestSequence } from "./useRequestSequence";
 export type LiveDocumentRow = {
   path: string;
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "live-document-without-lineage";
+  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
 };
@@ -139,6 +139,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
   if (row.reason === "session-host-refused") return "Stopped by the server";
+  if (row.reason === "session-host-diverged") return "Server copy doesn't match";
   if (row.reason === "live-document-without-lineage") return "Not started";
   switch (row.status) {
     case "ready":
@@ -543,6 +544,12 @@ export function LiveDocumentsDialog({
                 {row.reason === "live-document-without-lineage" ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
                     Live editing can't start until you open this document once in dohc. After you open it, resume live editing.
+                  </p>
+                ) : null}
+                {/* Resume can't help here, so the row offers none. */}
+                {row.reason === "session-host-diverged" ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    The server's copy of this workspace no longer matches the synced one. Contact the server's operator.
                   </p>
                 ) : null}
                 {row.deferredStop ? (

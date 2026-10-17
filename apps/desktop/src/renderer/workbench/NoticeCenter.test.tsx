@@ -1453,6 +1453,12 @@ describe("notice center", () => {
       title: "Live editing can't start",
       body: "The server can't start live editing for a document in this workspace until you open it once in dohc. Open Live documents to see which document. After you open it, resume live editing there.",
     },
+    // A diverged server copy offers no Resume: only the server's operator can continue it.
+    {
+      reason: "session-host-diverged" as const,
+      title: "Live editing stopped",
+      body: "The server stopped live editing because its copy of this workspace no longer matches the synced one. Edits people made live may not have reached your files. People you shared its documents with can't edit them live. Contact the server's operator.",
+    },
   ])("sends a $reason document to the live documents list", async ({ reason, title, body }) => {
     const onOpenLiveDocuments = vi.fn();
     const onRetryLiveDelivery = vi.fn();

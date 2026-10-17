@@ -1408,7 +1408,8 @@ it.each([
 });
 
 // Proves: a diverged replica stops and detaches, its documents stay retained,
-// and no later update attaches the workspace again on this daemon.
+// and no later update attaches its store again on this daemon. A new
+// identity's store is another store, so it attaches.
 it("detaches a diverged workspace for good and retains its documents", async () => {
   const o = await emptyServiceHost(), workspaces = [o.workspace];
   await o.host.update({workspaces, documents: [o.sibling], ...stay});
@@ -1425,6 +1426,11 @@ it("detaches a diverged workspace for good and retains its documents", async () 
   expect(o.membership).toEqual([o.attach, o.detach]);
   expect(o.host.diverged()).toEqual([{workspaceId: "workspace", root: o.workspace.root}]);
   expect(o.host.isDocumentReady(o.document)).toBe(false);
+  const rotatedRoot = join(o.f.root, "workspace-rotated"); await mkdir(rotatedRoot);
+  expect(o.f.storage.rotateWorkspaceIdentity({workspaceId: "workspace", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 10})).toBe("rotated");
+  await o.host.update({workspaces: [{...o.workspace, root: rotatedRoot,
+    hostedReplication: {...o.workspace.hostedReplication!, identity: {replicationEpoch: "epoch-2", streamIdentity: "stream-2"}}}], documents: [], ...stay});
+  expect(o.membership).toEqual([o.attach, o.detach, {...o.attach, params: {...o.attach.params, root: rotatedRoot}}]);
 });
 
 // Proves: a divergence counts before its detach, so a detach the exiting

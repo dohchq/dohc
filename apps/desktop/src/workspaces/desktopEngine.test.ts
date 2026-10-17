@@ -803,8 +803,9 @@ describe("server owner peer lifecycle", () => {
   // Proves: a document the server refused names the workspace's reason over
   // every other, including a frozen document that clears on its own, and
   // stops naming it once the server no longer reports it. Only a document the
-  // server cannot start until its owner opens it outranks a refusal.
-  it("reports a document the server refused ahead of every other reason but one it cannot start", async () => {
+  // server cannot start until its owner opens it outranks a refusal, and a
+  // diverged server copy, which only the server's operator can continue, outranks both.
+  it("reports a document the server refused ahead of every other reason but one it cannot start or whose server copy diverged", async () => {
     const f = fixture(), credentials = new AbortController();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
     const rootPath = await createTestScratch("dohc-server-owner-refused-");
@@ -813,6 +814,7 @@ describe("server owner peer lifecycle", () => {
       currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace", shareId: "share"};
     const refused = {path: "refused.md", status: "unavailable", reason: "session-host-refused"};
     const unopened = {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage"};
+    const diverged = {path: "diverged.md", status: "unavailable", reason: "session-host-diverged"};
     const others = [{path: "changed.md", status: "unavailable", reason: "workspace-changed"}, {path: "moved.md", status: "unavailable", reason: "document-unavailable"}];
     const ready = {path: "a.md", status: "ready", document};
     let rows: unknown[] = others;
@@ -844,6 +846,16 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
       rows = [ready, ...others, unopened, refused]; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      // A diverged server copy outranks all of them, with or without a frozen document.
+      // Each step changes the reason, so no step passes on the one before it.
+      rows = [...others, refused, unopened, diverged]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-diverged"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      rows = [ready, unopened]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage"));
+      rows = [ready, diverged, ...others, unopened, refused]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-diverged"));
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
       // The owner's retry succeeded, so the server no longer reports it.
       rows = [ready, ...others]; f.engine.retryOwnerDelivery("owner");

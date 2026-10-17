@@ -5,6 +5,7 @@ import {basename, join} from "node:path";
 import {tmpdir} from "node:os";
 import {afterEach, expect, it, vi} from "vitest";
 import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
+import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
 import type {ServiceHostedSet} from "./serviceLiveHost";
 import type {ServiceActivationBlock} from "./serviceActivationDriver";
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
@@ -72,6 +73,8 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
       const hold = holdUpdate; holdUpdate = undefined;
       if (hold) {hold.entered.resolve(); await hold.release.promise;}
       if (failUpdate) {const failure = failUpdate; failUpdate = undefined; throw failure;}
+      // The engine opens one handle for each workspace and refuses the 65th.
+      if (desired.workspaces.length > 64) throw new Error("workspace handle limit reached");
       held = [...desired.documents];
       for (const workspaceId of [...attached.keys()]) if (!desired.workspaces.some(row => row.workspaceId === workspaceId)) attached.delete(workspaceId);
       for (const workspace of desired.workspaces) if (!diverged.has(workspace.workspaceId)) attached.set(workspace.workspaceId, workspace.root);
@@ -492,7 +495,7 @@ it("keeps a diverged store in place and its workspace detached across passes and
   expect(f.onError).not.toHaveBeenCalled();
   expect(f.enrollment()).toMatchObject({enabled: true, ownerStop: "pause", hostDrainedAtMs: null});
   expect(f.events.filter(event => event.startsWith("release"))).toEqual([]);
-  expect((await readdir(f.data)).sort()).toEqual([storeName(scope.workspaceId), storeName(workspaceId, "epoch-2", "stream-2")].sort());
+  expect((await readdir(f.data)).sort()).toEqual([storeName(scope.workspaceId), `${storeName(scope.workspaceId)}.diverged`, storeName(workspaceId, "epoch-2", "stream-2")].sort());
   expect(await readdir(store)).toEqual(["replica.sqlite"]);
   expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("unpublished work");
 });
@@ -555,6 +558,32 @@ it("keeps a diverged workspace whose detach failed out of the replacement daemon
   expect(f.updates.at(-1)!.workspaces.map(row => row.workspaceId)).toEqual([workspaceId]);
   expect(f.attachedAfter.at(-1)).toEqual([workspaceId]);
   expect(f.starts).toHaveLength(2);
+});
+
+// Proves: a restarted relay keeps a diverged store detached from its start,
+// before any pull could find the divergence again, and its owner still reads
+// why live editing stopped. The operator hears of it once, and no daemon starts for it.
+it("keeps a diverged store detached and reported after the relay restarts", async () => {
+  const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  const store = join(f.data, storeName(scope.workspaceId)), marker = `${store}.diverged`;
+  f.diverge();
+  await vi.waitFor(() => {f.host.reconcile(); expect(existsSync(marker)).toBe(true);}, {timeout: 10_000});
+  expect(f.host.diverged(f.enrollment()!)).toBe(true);
+  await f.host.close();
+  const onError = vi.fn();
+  const restarted = await startSelfHostedLiveHost({trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), storage: f.storage, history: f.history,
+    root: f.data, engineExecutable: process.execPath, relayOrigin: "https://relay.test", key: new Uint8Array(32).fill(9), frameChanges: f.frameChanges, startHost: f.startHost, onError});
+  cleanup.push(() => restarted.close());
+  expect(restarted.diverged(f.enrollment()!)).toBe(true);
+  expect(onError.mock.calls).toEqual([[expect.objectContaining({message: `The live editing copy in store ${store} diverged from the relay earlier. It stays detached.`})]]);
+  const routes = createServiceHostEnrollmentRoutes({storage: f.storage, history: f.history, host: restarted,
+    resolveActor: async () => ({workspaceId: scope.workspaceId, userId: "owner-1"})});
+  const response = await routes(new Request(`https://relay.test/sync/${scope.workspaceId}/live-host`, {headers: {authorization: "Bearer account-token"}}));
+  expect(await response.json()).toEqual({ok: true, documents: [{path: binding.currentPath, status: "unavailable", reason: "session-host-diverged"}]});
+  const passes = vi.spyOn(f.storage, "listUndrainedServiceHostEnrollments");
+  await vi.waitFor(() => {restarted.reconcile(); expect(passes.mock.calls.length).toBeGreaterThanOrEqual(3);}, {timeout: 10_000});
+  expect(f.starts).toHaveLength(1);
+  expect(onError).toHaveBeenCalledTimes(1);
 });
 
 // Proves: startup deletes nothing: not a store no enrollment names, not what
@@ -805,7 +834,8 @@ it("drains the workspace of a renamed last document and keeps its store and its 
 });
 
 // Proves: a page of stopped documents that stay gives way to the next, so
-// every one of them reaches its replica and is released. Every store stays.
+// every one of them reaches its replica and is released. Every store stays,
+// and no update asks for more workspaces than the engine opens.
 it("reaches stopped documents past a page of ones that stay and keeps every store", async () => {
   const workspaces = Array.from({length: 130}, (_, index) => `stopped-${String(index).padStart(3, "0")}`);
   const last = storeName(workspaces.at(-1)!), stale = "e".repeat(64);
@@ -822,12 +852,16 @@ it("reaches stopped documents past a page of ones that stay and keeps every stor
     for (const name of [last, stale]) {await mkdir(join(data, name)); await writeFile(join(data, name, "marker"), name);}
   }});
   await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
+  const undrained = () => f.raw.prepare("SELECT DISTINCT workspace_id FROM sync_relay_service_host_enrollments WHERE host_drained_at_ms IS NULL ORDER BY workspace_id")
+    .all().map(row => row.workspace_id);
   expect(await readFile(join(f.data, last, "marker"), "utf8")).toBe(last);
   expect(await readFile(join(f.data, stale, "marker"), "utf8")).toBe(stale);
   await vi.waitFor(() => expect(f.updates.some(update => update.departing.some(row => row.workspaceId === workspaces.at(-1)))).toBe(true), {timeout: 10_000});
-  expect(f.storage.listUndrainedServiceHostWorkspaces()).toHaveLength(131);
+  expect(undrained()).toHaveLength(131);
   f.pending.delete("object-stopped");
-  await vi.waitFor(() => expect(f.storage.listUndrainedServiceHostWorkspaces().map(row => row.workspaceId)).toEqual([scope.workspaceId]), {timeout: 20_000});
+  await vi.waitFor(() => expect(undrained()).toEqual([scope.workspaceId]), {timeout: 20_000});
+  expect(f.onError).not.toHaveBeenCalled();
+  expect(Math.max(...f.updates.map(update => update.workspaces.length))).toBeLessThanOrEqual(64);
   expect(await readFile(join(f.data, last, "marker"), "utf8")).toBe(last);
   expect(existsSync(join(f.data, storeName(workspaces[0]!)))).toBe(true);
 });

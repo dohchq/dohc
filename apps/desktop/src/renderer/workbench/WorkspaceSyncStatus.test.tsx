@@ -219,6 +219,11 @@ describe("sync status surface", () => {
     },
     {
       delivery: "retrying" as const,
+      reason: "session-host-diverged" as const,
+      label: "Live editing stopped",
+    },
+    {
+      delivery: "retrying" as const,
       reason: "live-document-without-lineage" as const,
       label: "Live editing can't start",
     },

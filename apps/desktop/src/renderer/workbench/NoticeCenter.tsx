@@ -237,6 +237,16 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
+  // Nothing the owner does in dohc continues a server copy that diverged, so
+  // nothing offers a Resume. Live documents shows which documents it stopped.
+  if (reason === "session-host-diverged") {
+    return {
+      title: "Live editing stopped",
+      body: "The server stopped live editing because its copy of this workspace no longer matches the synced one. Edits people made live may not have reached your files. People you shared its documents with can't edit them live. Contact the server's operator.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
   // A Resume alone fails again: the server can start only a document that
   // dohc has opened once, so the owner's first step is to open it.
   if (reason === "live-document-without-lineage") {
