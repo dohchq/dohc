@@ -317,6 +317,7 @@ A `--full` run always keeps going. On the shared host, the queue keeps going onl
 Every night at 03:07, the `dohc-verification-nightly` scheduled task submits a full verification of main's head: every gate, every package, every repository test, and every proof.
 It covers everything merged since the last nightly that passed, and it runs before the rest of the line. A head that already passed is not verified again.
 It keeps going after a failure, so triage sees the failures of both jobs.
+A PR run lets desktop unit test files share workers. A full run, the nightly included, runs each desktop unit test file in a worker of its own, so a test that passes only when another file runs before it in the same worker fails there.
 `pnpm verify:queue status` shows the last passing nightly. Submit one by hand with `pnpm verify:queue nightly`.
 A failed nightly means a merged change broke main, or the selection of affected packages or repository tests missed something. Find the change that broke it and revert or fix it the same day.
 The [`verification-triage` skill](../../.agents/skills/verification-triage/SKILL.md) has the procedure.

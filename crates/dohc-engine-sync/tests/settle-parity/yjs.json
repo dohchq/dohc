@@ -60,7 +60,7 @@
     "updates": [
       "AQf8orySAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2sHAPyivJIDAQYEAPyivJIDAgZmZW5jZWQoAQRtZXRhEmRvaGNNYXJrZG93blNvdXJjZQF3D35+fgpmZW5jZWQKfn5+CigBBG1ldGEYZG9oY01hcmtkb3duU291cmNlU2hhMjU2AXdAMjI3NzMzOTcxMmU0OGQ4NTc4MmZkZDA1N2RlNDcxNTQxYzVlMmE2YjE1ZTI1MDNlZWVmMzk3MzRhZjJkOGUxZigBBG1ldGEiZG9oY01hcmtkb3duU291cmNlUHJvamVjdGlvblNoYTI1NgF3QGJkYjZkZTI0MDNmMjVkMDcxNjEzYmZlZTdkZjM2ZTY3YTA5NjViNzdjODBmYjI4ZTJjZmNjNDJhZjMyNGZkYmUA"
     ],
-    "markdown": "```\nfenced\n```"
+    "markdown": "~~~\nfenced\n~~~\n"
   },
   {
     "name": "lexical-7",
@@ -74,7 +74,7 @@
     "updates": [
       "AQXikJ7XCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZSgBBG1ldGESZG9oY01hcmtkb3duU291cmNlAXcEKioqCigBBG1ldGEYZG9oY01hcmtkb3duU291cmNlU2hhMjU2AXdAZTVlNjFmZWQyOTFjZWZlOGJkMmMyYjg5NWIzMDAxZTY3OTkzMWMzZDkzZjM1OTdmYjVlMjdiNWJjYWU4ZjgyNSgBBG1ldGEiZG9oY01hcmtkb3duU291cmNlUHJvamVjdGlvblNoYTI1NgF3QGNiM2Y5MWQ1NGVlZTMwZTUzZTM1YjJiOTk5MDVmNzBmMTY5ZWQ1NDlmZDc4OTA5ZDNkYWMyZGVmYzllZDhkM2IA"
     ],
-    "markdown": "---"
+    "markdown": "***"
   },
   {
     "name": "lexical-9",
@@ -270,14 +270,14 @@
     "updates": [
       "AQnpzOLZAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfpzOLZAwEDDmhvcml6b250YWxSdWxlh+nM4tkDAgMJcGFyYWdyYXBoBwDpzOLZAwMGBADpzOLZAwQRRW1wdHkgZnJvbnRtYXR0ZXIoAQRtZXRhEmRvaGNNYXJrZG93blNvdXJjZQF3Gy0tLQotLS0KCkVtcHR5IGZyb250bWF0dGVyCigBBG1ldGEYZG9oY01hcmtkb3duU291cmNlU2hhMjU2AXdANzE4ZjA1ODFhMmNiMzNhZDY5NDE4Njc0MmU2OTc5YjM1MTNiZTczZGZlZjg3MjkxY2Q5ODBjOWVlNjczY2E0ZCgBBG1ldGEiZG9oY01hcmtkb3duU291cmNlUHJvamVjdGlvblNoYTI1NgF3QDNmNDRhNWY1M2UwZGExZjFiOGVkZmE2YTZjZTBmZDkwMTJiZjljYTI3YmQxZTU0MWU1ZWE1MmZiZDRjYjI5ZWEA"
     ],
-    "markdown": "---\n\n---\n\nEmpty frontmatter"
+    "markdown": "***\n\n---\n\nEmpty frontmatter"
   },
   {
     "name": "lexical-37",
     "updates": [
       "AQvupu6jCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfupu6jCAEDCXBhcmFncmFwaAcA7qbuowgCBgQA7qbuowgDFXVuY2xvc2VkOiBmcm9udG1hdHRlcofupu6jCAIDCXBhcmFncmFwaAcA7qbuowgZBgQA7qbuowgaBEJvZHkoAQRtZXRhEmRvaGNNYXJrZG93blNvdXJjZQF3IC0tLQp1bmNsb3NlZDogZnJvbnRtYXR0ZXIKCkJvZHkKKAEEbWV0YRhkb2hjTWFya2Rvd25Tb3VyY2VTaGEyNTYBd0BiOGNlNmJmZDA1Mjk2NDhlNmE2Yzg5NWM3ODQ0NDNhYzY5ZjlkNWNjMTI2MTM0NmNhZDEzM2RiMDBmMjg2ZDZjKAEEbWV0YSJkb2hjTWFya2Rvd25Tb3VyY2VQcm9qZWN0aW9uU2hhMjU2AXdANGI0MTMxZjkyODAwYzZmZjYxYzBiYjQyMGM5Yjk0M2VmMmEyOGY2ZjdiMGZjZjUzN2U3OTE2NDcyY2UzMTE3MgA="
     ],
-    "markdown": "---\nunclosed: frontmatter\n\nBody\n"
+    "markdown": "***\n\nunclosed: frontmatter\n\nBody"
   },
   {
     "name": "source-stale-after-edit",
@@ -462,7 +462,7 @@
     "updates": [
       "AQzRztrsDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfRztrsDwEDB2hlYWRpbmcHANHO2uwPAgYEANHO2uwPAzRiaWc6IDkyMjMzNzIwMzY4NTQ3NzU4MDgKc21hbGw6IC05MjIzMzcyMDM2ODU0Nzc1ODA5KADRztrsDwIFbGV2ZWwBfQKH0c7a7A8CAwlwYXJhZ3JhcGgHANHO2uwPOQYEANHO2uwPOgRCb2R5KAEEbWV0YRJkb2hjTWFya2Rvd25Tb3VyY2UBd0MtLS0KYmlnOiA5MjIzMzcyMDM2ODU0Nzc1ODA4CnNtYWxsOiAtOTIyMzM3MjAzNjg1NDc3NTgwOQotLS0KCkJvZHkKKAEEbWV0YRhkb2hjTWFya2Rvd25Tb3VyY2VTaGEyNTYBd0BlNjJhMGVlY2Q4NzkxMzliMjQ2MWI0NjJjYzY1OGIxODI4ZWMyN2Y5ZDY0ZjYzZjczMDI5Y2Y5OGZjMWExMjE3KAEEbWV0YSJkb2hjTWFya2Rvd25Tb3VyY2VQcm9qZWN0aW9uU2hhMjU2AXdANjI3YjU2MzZjYzU1NzVmMTYxNzBlZTcwOGVkZGEzOGNlNDVkM2MxZGM0MjQ1N2RiODY5NGI3NmJjODUyOWM3NgA="
     ],
-    "markdown": "---\n\n## big: 9223372036854775808\nsmall: -9223372036854775809\n\nBody"
+    "markdown": "***\n\n## big: 9223372036854775808\nsmall: -9223372036854775809\n\nBody"
   },
   {
     "name": "yaml-negative-zero",
