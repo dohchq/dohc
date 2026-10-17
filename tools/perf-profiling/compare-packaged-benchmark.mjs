@@ -1,3 +1,5 @@
+import { compareDocumentSize } from './document-size-summary.mjs';
+import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,7 +18,7 @@ const MIN_AUTOMATION_RUNS = 5;
 
 // Settings that change what a receipt measures. The limits may differ: they decide which cases are
 // comparable, through each case's fixture digest.
-const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain'];
+const COMPARED_SETTINGS = ['scenario', 'runCount', 'keystrokes', 'fixtureFiles', 'records', 'idleSeconds', 'switches', 'profileRenderer', 'profileMain', 'documentMiB', 'relaySessions', 'updatesPerSecond', 'churnEdits', 'documentMode'];
 
 function check(metric, baseline, candidate, margin, percentile = 'p95') {
   const field = percentile === 'p50' ? 'P50' : 'P95';
@@ -40,7 +42,7 @@ export function compareSummaries(baseline, candidate, margin = DEFAULT_MARGIN) {
   for (const [label, summary] of [['baseline', baseline], ['candidate', candidate]]) {
     if (summary.status !== 'complete') problems.push(`The ${label} receipt is ${summary.status}, not complete.`);
   }
-  for (const key of COMPARED_SETTINGS) {
+  for (const key of COMPARED_SETTINGS.filter(key => candidate.settings?.scenario !== 'document-size' || !['runCount'].includes(key))) {
     if (JSON.stringify(baseline.settings?.[key]) !== JSON.stringify(candidate.settings?.[key])) problems.push(`The receipts differ in ${key}.`);
   }
   if (baseline.diagnostic || candidate.diagnostic) problems.push('A profiled receipt cannot serve as a performance comparison.');
@@ -51,6 +53,10 @@ export function compareSummaries(baseline, candidate, margin = DEFAULT_MARGIN) {
   const baselineRuns = fewestRuns(baseline), candidateRuns = fewestRuns(candidate);
   if ([baselineRuns, candidateRuns].some(count => count !== null && count < MIN_AUTOMATION_RUNS)) {
     problems.push(`Automation cases need at least ${MIN_AUTOMATION_RUNS} runs on each side; the fewest recorded are baseline: ${baselineRuns ?? 'no cases'}, candidate: ${candidateRuns ?? 'no cases'}.`);
+  }
+  if (candidate.settings?.scenario === 'document-size') {
+    const documentSize = compareDocumentSize(baseline, candidate, margin);
+    return { ...documentSize, pass: problems.length === 0 && documentSize.pass, margin, problems: [...problems, ...documentSize.problems], documentSize };
   }
   const checks = [];
   if (baseline.collection || candidate.collection) checks.push(check('collection open to rows painted', baseline.collection?.openToRowsPaintedMs, candidate.collection?.openToRowsPaintedMs, margin));
@@ -98,7 +104,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   if (directories.length !== 2 || directories.some(value => value.startsWith('--'))) {
     throw Error('Usage: node compare-packaged-benchmark.mjs <baseline-directory> <candidate-directory> [--margin-percent 10] [--automation-margin-percent 25] [--floor-ms 17]');
   }
-  const [baseline, candidate] = await Promise.all(directories.map(async directory => summarize(JSON.parse(await readFile(join(resolve(directory), 'result.json'), 'utf8')))));
+  // A document-size candidate records the hash of the baseline receipt its extensions used.
+  const [baseline, candidate] = await Promise.all(directories.map(async directory => {
+    const text = await readFile(join(resolve(directory), 'result.json'));
+    return { ...(await summarize(JSON.parse(text))), resultSha256: createHash('sha256').update(text).digest('hex') };
+  }));
   const comparison = { baseline: resolve(directories[0]), candidate: resolve(directories[1]), ...compareSummaries(baseline, candidate, margin) };
   await writeFile(join(resolve(directories[1]), 'comparison.json'), JSON.stringify(comparison, null, 2));
   console.log(JSON.stringify(comparison, null, 2));

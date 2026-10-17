@@ -10,6 +10,7 @@ import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CHANNELS } from "./channels";
+import { SetAppPinnedPayload } from "./bridgeContract";
 import type { OperationDefinition } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import mainIpc from "./ipcExposure.main.json";
@@ -23,6 +24,7 @@ const publicVerbs = Object.entries(CLI_COMMANDS).flatMap(([group, command]) => O
 const socketVerbs = cliRequestSchema.options.map(option => option.shape.verb.value).sort();
 
 function carriesWorkspaceId(payload: z.core.$ZodType): boolean {
+  if (payload instanceof z.ZodVoid) return false;
   if (payload instanceof z.ZodObject) return "workspaceId" in payload.shape;
   if (payload instanceof z.ZodUnion) return payload.options.map(carriesWorkspaceId).some(Boolean);
   if (payload instanceof z.ZodPipe) return carriesWorkspaceId(payload.in);
@@ -33,6 +35,13 @@ function carriesWorkspaceId(payload: z.core.$ZodType): boolean {
 function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "scope" | "payload"> & {
   readonly handlerCheck?: { readonly check: string; readonly reason: string };
 }) {
+  // The selector chooses a pin in the device's user settings, not workspace access.
+  if (row.channel === "desktop:set-app-pinned") {
+    expect(row.payload).toBe(SetAppPinnedPayload);
+    expect(row.scope).toBe("device");
+    expect(row.guard).toBe("trusted-sender");
+    return;
+  }
   const workspacePayload = carriesWorkspaceId(row.payload);
   expect(["device", "workspace"]).toContain(row.scope);
   if (row.guard === "active-workspace" || workspacePayload) expect(row.scope, row.channel).toBe("workspace");
@@ -54,6 +63,15 @@ describe("main inventories", () => {
       "move-workspace-path", "delete-workspace-path", "export-workspace-zip",
       "export-document-file", "import-workspace-files", "read-workspace-text",
       "write-workspace-text", "write-workspace-asset", "pick-image-files", "open-file-externally",
+    ].map(name => `desktop:${name}`);
+    expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
+  });
+  it("records the 13 migrated settings operations", () => {
+    const channels = [
+      "get-user-settings", "reload-user-settings", "set-user-settings", "set-app-pinned",
+      "reset-user-settings", "get-user-settings-file-path", "open-user-settings-file",
+      "open-workspace-settings-file", "get-workspace-settings", "set-workspace-settings",
+      "reset-workspace-settings", "get-workspace-ui-state", "set-workspace-ui-state",
     ].map(name => `desktop:${name}`);
     expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
   });
@@ -82,6 +100,7 @@ describe("capability identities and exposure", () => {
   const workspacePayload = z.object({ workspaceId: z.string() });
   const devicePayload = z.object({});
   it.each([
+    ["void", z.void(), false],
     ["pipe input", workspacePayload.pipe(workspacePayload), true],
     ["transform input", workspacePayload.transform(() => ({})), true],
     ["transform output only", devicePayload.transform(() => ({ workspaceId: "output-only" })), false],
