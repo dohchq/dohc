@@ -119,6 +119,7 @@ export interface SyncRelayLogInput {
   recordedAtMs: number;
   admittedAuthorSnapshot?: LiveAuthorSnapshot;
   settlementAdmission?: import("./hostedSettlement").SettlementAdmission;
+  relayAdmission?: import("./relayAdmission").RelayAdmission;
 }
 
 export interface SyncRelayLogRow extends SyncRelayLogInput {
@@ -614,7 +615,7 @@ export interface SyncRelayStorage {
   hasKeptServiceHostEnrollment(workspaceId: string, path: string): boolean;
   readServiceHostEnrollment(workspaceId: string, path: string): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string): {documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[]; nextCursor: string | null};
-  currentServiceHostWorkspace(workspaceId: string): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
+  currentServiceHostWorkspace(workspaceId: string, includeUndrained?: boolean): import("./serviceHostEnrollment").ServiceHostWorkspace | null;
   readServiceHostFeedScope(workspaceId: string): import("./serviceHostFeed").ServiceHostFeedScope | null;
   listServiceHostDocumentRows(input: {workspaceId: string; objectId: string; afterRelaySeq: number; limit: number}): SyncRelayLogRow[];
   /** Stores blob bytes the service host uploaded, with its proof of holding them. */
@@ -698,7 +699,7 @@ export interface SyncRelayStorage {
   captureStanding(): () => void;
   createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority, activation?: ServiceActivationAccess): LiveCommittedDeliveryStore;
   createServiceActivationStore(history: LiveJournalHistoryAuthority): ServiceActivationStore;
-  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult;
+  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }, reserveBytes?: (size: number) => void): LiveUpdateJournalCutResult;
   commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput, activation?: ServiceActivationAccess): RelayLiveUpdateJournalResult;
   readCommittedLiveUpdate(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; journalCursor: number }): CommittedLiveUpdateResult;
   readReplicaLiveJournal(input: ReplicaLiveJournalRead): Promise<ReplicaLiveJournalPage>;
@@ -832,6 +833,9 @@ export interface SyncRelayStorage {
     // a gap where a concurrent revoke commits after the check but before the
     // transaction opens.
     guard?: (context: AppendLogBatchGuardContext) => void;
+    // Runs after the guard, under the same lock, with the ops at coordinates
+    // the log does not hold yet. It may refuse an op or mark it departed.
+    admit?: (ops: SyncRelayLogInput[]) => void;
   }): AppendLogBatchResult;
   fetchLogPage(input: {
     workspaceId: string;

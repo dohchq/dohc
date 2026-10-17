@@ -1236,6 +1236,46 @@ fn prepares_one_forward_restore_of_an_exact_source_point_and_replays_after_resta
     assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 1);
 }
 
+/// Part 5's held fence: a restore fence trusted the binding's durable
+/// `available` flag, which a released held document keeps. A hosted document
+/// its scope holds but not ready refuses a new fence; a saved one replays.
+#[test]
+fn a_hosted_document_that_is_not_ready_refuses_a_new_restore_fence() {
+    let mut f = Fixture::new("# Baseline\n");
+    f.edit("# Edited\n", 7);
+    let set = |f: &mut Fixture, sql: &str| {
+        f.store
+            .write_with(&NoFaults, |tx| tx.execute_batch(sql).map_err(write_sql))
+            .unwrap();
+    };
+    set(
+        &mut f,
+        "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+           VALUES ('workspace','service-host:host','epoch','stream',1); \
+         INSERT INTO hosted_replicas (workspace_id,scope_generation,created_at_ms) VALUES ('workspace',1,1); \
+         INSERT INTO hosted_documents (workspace_id,object_id,path,state,held_reason,scope_generation) \
+           VALUES ('workspace','object','a.md','held','hosted-backfill-work-waiting',1);",
+    );
+    let input = f.fence_input();
+    let fence = |f: &mut Fixture| {
+        f.owner
+            .fence_restore(&mut f.store, input.clone(), f.host.clone(), 50, &NoFaults)
+    };
+    assert!(matches!(fence(&mut f), Err(ApplicationError::Conflict)));
+    assert_eq!(f.store.table_row_count("live_restore_fences").unwrap(), 0);
+
+    set(
+        &mut f,
+        "UPDATE hosted_documents SET state='ready',held_reason=NULL",
+    );
+    let receipt = fence(&mut f).unwrap();
+    set(
+        &mut f,
+        "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting'",
+    );
+    assert_eq!(fence(&mut f).unwrap(), receipt);
+}
+
 #[test]
 fn same_content_point_still_prepares_a_forward_owner_operation() {
     let mut f = Fixture::new("# Same 😀\n");
@@ -3622,4 +3662,166 @@ fn restore_fence_keeps_host_progress_when_its_observed_checkpoint_is_stale() {
         ]);
         Ok::<_, rusqlite::Error>(())
     }).unwrap();
+}
+
+/// A hosted pass releases a held document this way: its handle stops
+/// applying, and its binding stays available, so the update it accepted
+/// still proves for the host's push.
+#[test]
+fn a_released_registration_still_proves_the_update_it_accepted() {
+    use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+    let mut f = Fixture::new("Original");
+    let update = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Accepted")
+        .unwrap();
+    f.accept(update.clone(), 1);
+    f.owner.release(&f.binding.object_id);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let proof = f
+        .store
+        .read_with(|conn| {
+            contains_in(
+                conn,
+                &key,
+                &f.binding.current_path,
+                Some(&f.binding.lineage_claim_id),
+                PublicationContentKind::Ydoc,
+                &hex_sha256(&update),
+                &mut 4_000_000,
+            )
+        })
+        .unwrap();
+    assert_eq!(proof, PublicationProof::Contained);
+    let next = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Refused")
+        .unwrap();
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "event-2".into(),
+                    update_digest: hex_sha256(&next),
+                    journal_cursor: 2,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 2,
+            },
+            first_seen: vec![],
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
+        },
+        update_bytes: next,
+    };
+    assert_eq!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap(),
+        ApplicationResult::Pending(ApplicationPending::ApplicabilityUnavailable)
+    );
+}
+
+/// Opus's slice 2 review: a reconnect or a close wrote `available=0`, and a
+/// document held meanwhile could not register again, so the update it
+/// accepted could never prove and its queued write stalled the host's push.
+/// On a hosted replica both retire registrations in memory only, like a
+/// release; an ordinary host still marks the binding unavailable.
+#[test]
+fn a_hosted_reconnect_or_close_keeps_a_held_documents_accepted_update_provable() {
+    use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+    for (hosted, reconnect) in [(true, false), (true, true), (false, false)] {
+        let mut f = Fixture::new("Original");
+        let update = f
+            .doc
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Accepted")
+            .unwrap();
+        f.accept(update.clone(), 1);
+        let set = |f: &mut Fixture, sql: &str| {
+            f.store
+                .write_with(&NoFaults, |tx| tx.execute_batch(sql).map_err(write_sql))
+                .unwrap();
+        };
+        if hosted {
+            set(
+                &mut f,
+                "INSERT OR IGNORE INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+                   VALUES ('workspace','service-host:host','epoch','stream',1); \
+                 INSERT INTO hosted_replicas (workspace_id,scope_generation,created_at_ms) VALUES ('workspace',1,1); \
+                 INSERT INTO hosted_documents (workspace_id,object_id,path,state,scope_generation) \
+                   VALUES ('workspace','object','a.md','ready',1);",
+            );
+        }
+        let held =
+            "UPDATE hosted_documents SET state='held',held_reason='hosted-backfill-work-waiting'";
+        let mut reconnected = f.host.clone();
+        reconnected.connection_id = "reconnected".into();
+        if reconnect {
+            set(&mut f, held);
+            assert!(matches!(
+                f.owner.register(
+                    &mut f.store,
+                    "namespace".into(),
+                    reconnected.clone(),
+                    f.binding.clone()
+                ),
+                Err(ApplicationError::Conflict)
+            ));
+        } else {
+            f.owner.invalidate(&mut f.store).unwrap();
+            if hosted {
+                set(&mut f, held);
+                assert!(matches!(
+                    f.owner.register(
+                        &mut f.store,
+                        "namespace".into(),
+                        reconnected,
+                        f.binding.clone()
+                    ),
+                    Err(ApplicationError::Conflict)
+                ));
+            }
+        }
+        let available: bool = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT available FROM live_device_application_bindings",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(available, hosted, "hosted {hosted}, reconnect {reconnect}");
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let proof = f.store.read_with(|conn| {
+            contains_in(
+                conn,
+                &key,
+                &f.binding.current_path,
+                Some(&f.binding.lineage_claim_id),
+                PublicationContentKind::Ydoc,
+                &hex_sha256(&update),
+                &mut 4_000_000,
+            )
+        });
+        assert_eq!(
+            proof.ok() == Some(PublicationProof::Contained),
+            hosted,
+            "hosted {hosted}, reconnect {reconnect}"
+        );
+    }
 }

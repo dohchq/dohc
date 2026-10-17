@@ -308,31 +308,74 @@ describe("markdown document opening state", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
-  it("keeps the properties panel out of an opening document", async () => {
+  it("shows an opening document's properties and refuses their edits", async () => {
     useAutoAdvancingFakeTimers();
     // The panel writes frontmatter through the same disk save as the body, so
-    // it is part of the refusal. It is also lazy — a bare queryByTestId would
-    // pass while the chunk was merely still loading, proving nothing. Load the
-    // module first, then absence means refusal.
-    await import("./PropertiesPanel");
+    // it is part of the refusal. Opening, it draws the pills where they will
+    // be, with no field that takes typing, no × and no +.
     const { bridgeMock, answerNotEngineBacked } = makeHeldOpenBridge();
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: `---\nstatus: draft\n---\n\n${DOC_MARKDOWN}`,
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("markdown-open-state");
 
+    const value = (await screen.findByTestId("property-value")) as HTMLInputElement;
+    expect(value.value).toBe("draft");
+    expect(value.readOnly, "`readOnly={refused}` → `readOnly={locked}`. An opening document's property takes typing, and the edit autosaves to disk under the artifact the engine is binding.").toBe(true);
+    expect(screen.queryByTestId("property-remove")).toBeNull();
+    expect(screen.queryByTestId("property-add")).toBeNull();
+    fireEvent.change(value, { target: { value: "done" } });
     await advanceAutosaveDebounce();
-    expect(screen.queryByTestId("properties-panel"), "`{!readOnly && !opening ?` → `{!readOnly ?`. The panel mounts during the held open and its property edits autosave to disk. It would still be mounted at the end of this window — `opening` does not flicker.").toBeNull();
     expect(bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
 
-    // The same surface, one state later, does show it — so the absence above
-    // was this branch refusing, not a chunk that never arrived.
+    // One state later the same panel takes edits.
     // Wait for the call that creates `settle` (see the note above): the open
     // state renders one commit before the bridge is asked.
     await waitFor(() =>
       expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
     );
     answerNotEngineBacked();
+    await screen.findByTestId("property-add");
+    expect((screen.getByTestId("property-value") as HTMLInputElement).readOnly).toBe(false);
+  });
+
+  it("draws an opening document where the ready one draws it", async () => {
+    const { bridgeMock, bind } = makeHeldOpenBridge();
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: `---\nicon: 🎒\n---\n\n${DOC_MARKDOWN}`,
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-open-state");
+    await waitFor(() =>
+      expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph."),
+    );
+
+    // The properties draw where they will be, and the block as written starts
+    // closed, as it does once the properties take edits.
     await screen.findByTestId("properties-panel");
+    const asWritten = () => screen.getByTestId("frontmatter-as-written").querySelector("details");
+    expect(asWritten()?.open, "`propertiesShown={!readOnly}` → `propertiesShown={!readOnly && !opening}`. The block opens while the document opens, then closes when it is ready and moves the body.").toBe(false);
+    // The body draws with the editor's own rules (styles.css
+    // .dohc-notion-editor): its column, type and block spacing. No block
+    // carries a look of its own that would beat them.
+    const body = screen.getByText("Base paragraph.").parentElement;
+    expect(body?.classList.contains("dohc-notion-editor"), "The read body keeps its own type and spacing, so each block moves when the editor replaces it.").toBe(true);
+    expect(body?.querySelector("h1")?.className).toBe("");
+    expect(body?.querySelector("p")?.className).toBe("");
+
+    await waitFor(() =>
+      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
+    );
+    bind();
+    await screen.findByTestId("markdown-source-toggle");
+    expect(asWritten()?.open).toBe(false);
   });
 
   it("gives up the bound editor the moment a version switch reopens the session", async () => {

@@ -1,3 +1,6 @@
+import { observePresenceOwner, recordPresenceOwnerLastKey, waitForPresenceOwner, readPresenceOwner, validatePresenceWorkload, samplePresenceClock, validatePresenceClocks, rebasePresenceWindow, withPresencePeers } from './presence-owner.mjs';
+import { startTypingTrace, stopTypingTraceAfterFrames, measureTypingTrace, typingTraceMark } from './presence-typing-trace.mjs';
+import { acquireProfilingSlot } from './admission.mjs';
 import { summarize } from './summarize-packaged-benchmark.mjs';
 import { DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
 import { compareDocumentSize, documentCaseBlocked, documentExtensionTarget } from './document-size-summary.mjs';
@@ -38,21 +41,25 @@ if (options.scenario === 'document-size' && options.documentMode === 'dry-run') 
 }
 if (process.platform !== 'win32') throw Error('The packaged release benchmark requires Windows');
 const root = resolve('.');
-const { output, binary, label, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records, findCap, writeCap } = options;
+const { output, binary, label, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records, findCap, writeCap, presencePeers } = options;
 await createEvidenceDirectory(output);
 const json = (path, value) => writeFile(path, JSON.stringify(value, null, 2));
 const settings = { runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records,
   ...(scenario === 'collection' ? { findCap, writeCap } : {}),
+  ...(scenario === 'presence' ? { presencePeers, selectionHz: 20, peerTypingHz: 5, presenceTiming: 'event-latency-v1' } : {}),
   ...(scenario === 'document-size' ? { documentMiB: options.documentMiB, relaySessions: options.relaySessions, updatesPerSecond: options.updatesPerSecond, churnEdits: options.churnEdits, documentMode: options.documentMode, label: options.label } : {}) };
 const receipt = { label, binary, packageCommit: options.packageCommit, engineCommit: options.engineCommit,
   startedAt: new Date().toISOString(), platform: process.platform, node: process.version, settings, runs: [], status: 'setup' };
 const feedRequests = [];
-let feed, active, windowController, helperStartup, workload, goToFixture;
+let feed, active, windowController, helperStartup, workload, goToFixture, presenceFixture, profilingSlot;
 const automationFailures = [];
 const cancellation = benchmarkCancellation();
 const documentDeadline = new AbortController();
-if(scenario==='document-size') cancellation.signal=AbortSignal.any([cancellation.signal,documentDeadline.signal]);
+if (scenario === 'document-size') cancellation.signal = AbortSignal.any([cancellation.signal, documentDeadline.signal]);
+
 try {
+if (scenario === 'presence') profilingSlot = acquireProfilingSlot(process.env, { metadata: { purpose: 'packaged presence typing', checkout: root } });
+const benchmarkSignal = AbortSignal.any([cancellation.signal, ...(profilingSlot ? [profilingSlot.signal] : [])]);
 await json(join(output, 'result.json'), receipt);
 const require = createRequire(join(root, 'apps/desktop/package.json'));
 const exec = promisify(execFile);
@@ -120,6 +127,7 @@ Object.assign(receipt, {
   ...(scenario === 'go-to-mixed' ? { goToFixtureSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'go-to-packaged-fixture.mts')),
     goToFixtureGeneratorsSha256: await sha256Tree(root, ['packages/mcp/src/tools.ts', 'apps/desktop/src/renderer/collections/schemaAuthoring.ts',
       'apps/desktop/e2e/helpers/syncRelay.ts', 'apps/desktop/src/testing/relayFilePeer.ts']) } : {}),
+  ...(scenario === 'presence' ? { presenceFixtureSha256: await sha256(join(root, 'apps/desktop/e2e/helpers/presenceBenchmark.ts')), presenceRuleSha256: await sha256(join(root, 'tools/perf-profiling/packaged-presence.mjs')), presenceTraceSha256: await sha256(join(root, 'tools/perf-profiling/presence-typing-trace.mjs')), presenceOwnerSha256: await sha256(join(root, 'tools/perf-profiling/presence-owner.mjs')) } : {}),
   ...(scenario === 'chat-history' ? { cliLauncher, seedScript, seedScriptSha256: await sha256(seedScript) } : {}),
   ...(scenario === 'collection' ? { automationsModule, automationsModuleSha256: await sha256(automationsModule), datasetCliScript, datasetCliSha256: await sha256(datasetCliScript) } : {}),
   harnessCheckout: root, harnessCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
@@ -128,7 +136,7 @@ Object.assign(receipt, {
     'Fresh profile/process is not cold OS filesystem cache. Restart reuses the same profile and workspace.',
     'Startup/switch/open wall times include CDP/Playwright detection and scheduling; readiness is observed DOM plus two animation frames, not an instrumented compositor presentation.',
     'Startup renderer timestamps record observer installation, the expected visible non-inert editor predicate, and a second animation-frame callback. Already-ready samples are left-censored; no earlier readiness time is inferred and no overhead is subtracted.',
-    'Only PerformanceEventTiming.duration is called input-to-next-paint here. Chromium quantizes durations to 8ms and does not report event entries below the requested 16ms floor. Missing samples stay missing.',
+    scenario === 'presence' ? 'Presence input-to-next-paint is the uncensored KEY_PRESSED EventLatency trace slice through presentation. Every trusted key must match once. Reported keydown Event Timing is supplemental and must agree within 5ms (4ms rounding plus 1ms).' : 'Only PerformanceEventTiming.duration is called input-to-next-paint here. Chromium quantizes durations to 8ms and does not report event entries below the requested 16ms floor. Missing samples stay missing.',
     'Keyboard uses trusted Chromium CDP input; physical keyboard/OS delivery before Chromium is not measured. EventTiming measures presentation opportunity, not photons.',
     'Idle measures a small local workspace without cloud or sync peers. Minimized is the background condition; it does not model every occlusion/power mode.',
     'Win32 IsWindowVisible/IsIconic verifies the owned app window. DOM visibility is recorded separately because CDP may keep it visible while minimized. A persistent prewarmed Win32 helper verifies the window before readiness; individual round-trip overhead remains included and separately recorded.',
@@ -169,10 +177,10 @@ let profileOrdinal = 0;
 async function waitUntil(read, timeout = 60000) {
   const started = performance.now();
   while (performance.now() - started < timeout) {
-    cancellation.signal.throwIfAborted();
+    benchmarkSignal.throwIfAborted();
     const value = await read();
     if (value) return value;
-    await delay(50, undefined, { signal: cancellation.signal });
+    await delay(50, undefined, { signal: benchmarkSignal });
   }
   throw Error(`Condition did not settle within ${timeout}ms`);
 }
@@ -195,7 +203,7 @@ async function fixture(runDir, documentCase) {
   const fixtureHashes = [];
   const sizeDocument = documentCase ? documentFixture(documentCase.mib, documentCase.shape) : null;
   for (let index = 0; index < 2; index++) {
-    cancellation.signal.throwIfAborted();
+    benchmarkSignal.throwIfAborted();
     const workspace = { workspaceId: `perf4-package-${index}`, rootPath: join(runDir, `workspace-${index}`).replaceAll('\\', '/'), kind: 'personal', mode: 'local-first' };
     await mkdir(join(workspace.rootPath, '.dohc'), { recursive: true });
     await json(join(workspace.rootPath, '.dohc/manifest.json'), { version: 1, workspaceId: workspace.workspaceId, kind: workspace.kind, mode: workspace.mode });
@@ -214,7 +222,7 @@ async function fixture(runDir, documentCase) {
       workspaceHash.update(`${name}.md\0${content}\0`);
     }
     for (let begin = 2; begin < (scenario === 'go-to-mixed' ? 2 : fixtureFiles); begin += 32) {
-      cancellation.signal.throwIfAborted();
+      benchmarkSignal.throwIfAborted();
       const batch = [];
       for (let n = begin; n < Math.min(fixtureFiles, begin + 32); n++) {
         const name = `fixture-${String(n).padStart(6, '0')}.txt`;
@@ -227,7 +235,7 @@ async function fixture(runDir, documentCase) {
     const collection = scenario === 'collection' && index === 0 ? collectionFixtureFiles(records) : [];
     if (collection.length) await mkdir(join(workspace.rootPath, dirname(collection[0].path)));
     for (let begin = 0; begin < collection.length; begin += 32) {
-      cancellation.signal.throwIfAborted();
+      benchmarkSignal.throwIfAborted();
       await Promise.all(collection.slice(begin, begin + 32).map(file => {
         workspaceHash.update(`${file.path}\0${file.content}\0`);
         return writeFile(join(workspace.rootPath, file.path), file.content);
@@ -259,8 +267,8 @@ async function launch(runDir, fixture, phase) {
   }
   const started = performance.now();
   const startedAt = Date.now();
-  cancellation.signal.throwIfAborted();
-  const child = spawn(binary, packagedLaunchArgs(fixture.profile, profileArgs), { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false });
+  benchmarkSignal.throwIfAborted();
+  const child = spawn(binary, packagedLaunchArgs(fixture.profile, profileArgs), { cwd: root, env: { ...env, ...fixture.presenceEnvironment }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: false });
   const launchStages = { spawnReturnedObservedMs: performance.now() - started };
   let logs = '';
   for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => { logs += chunk; });
@@ -291,7 +299,7 @@ async function launch(runDir, fixture, phase) {
   // The launch failure path owns shutdown if either rejects.
   void readiness.catch(() => {});
   const windowControlStart = performance.now();
-  const windowState = await waitForVisibleWindow(() => setWindowState(active, 'inspect'), { signal: cancellation.signal });
+  const windowState = await waitForVisibleWindow(() => setWindowState(active, 'inspect'), { signal: benchmarkSignal });
   const windowControlObservedMs = performance.now() - windowControlStart;
   if (!windowState.visible || windowState.minimized) throw Error('Fresh release window is not visible; startup sample invalid');
   launchStages.visibleWindowVerifiedObservedMs = performance.now() - started;
@@ -345,51 +353,82 @@ async function openDoc(page, name) {
   await page.locator('[contenteditable="true"]').waitFor({ timeout: 120000 });
   return { openObservedMs, editActivationObservedMs };
 }
-async function typing(page, name) {
+async function typing(page, name, { rich = false, arm, beforeInput = () => {}, afterInput = () => {} } = {}) {
   const windowState = await setWindowState(active, 'visible');
   const { openObservedMs, editActivationObservedMs } = await openDoc(page, name);
   console.log(JSON.stringify({ label, phase: 'typing-start', name, openObservedMs, editActivationObservedMs }));
-  const editor = page.locator('[contenteditable="true"]');
+  if (rich && await page.locator('[contenteditable="true"].cm-content').count()) {
+    await page.getByRole('button', { name: 'WYSIWYG', exact: true }).click();
+    await page.locator('[contenteditable="true"].tiptap').waitFor({ timeout: 120000 });
+  }
+  const editor = page.locator(rich ? '[contenteditable="true"].tiptap' : '[contenteditable="true"]');
   const mode = await editor.evaluate(element => element.classList.contains('tiptap') ? 'rich' : element.classList.contains('cm-content') ? 'source' : 'unknown');
   await editor.click({ position: { x: 30, y: 30 } });
   await page.keyboard.press('Control+End');
   await painted(page);
-  await page.evaluate(() => {
-    const state = window.__packagedEvents = { events: [], inputs: [], longTasks: [], supported: PerformanceObserver.supportedEntryTypes.includes('event') };
-    state.onInput = event => state.inputs.push({ timestamp: performance.now(), trusted: event.isTrusted, type: event.inputType });
-    document.addEventListener('input', state.onInput, true);
-    if (state.supported) {
-      state.observer = new PerformanceObserver(list => state.events.push(...list.getEntries().map(e => ({ name: e.name, startTime: e.startTime, duration: e.duration, processingStart: e.processingStart, processingEnd: e.processingEnd, interactionId: e.interactionId }))));
-      state.observer.observe({ type: 'event', durationThreshold: 16 });
+  if (rich) await editor.evaluate(observePresenceOwner);
+  const clockBefore = rich ? await samplePresenceClock(page, { retryAfterPaint: () => painted(page) }) : null;
+  const trace = rich ? await startTypingTrace(page) : null;
+  let traceResult;
+  try {
+    await page.evaluate(traced => {
+      const state = window.__packagedEvents = { events: [], inputs: [], keys: [], longTasks: [], supported: PerformanceObserver.supportedEntryTypes.includes('event') };
+      state.onInput = event => state.inputs.push({ timestamp: performance.now(), trusted: event.isTrusted, type: event.inputType });
+      document.addEventListener('input', state.onInput, true);
+      state.onKeyDown = event => state.keys.push({ timestamp: performance.now(), eventTimestamp: event.timeStamp, trusted: event.isTrusted, key: event.key });
+      if (traced) document.addEventListener('keydown', state.onKeyDown, true);
+      if (state.supported) {
+        state.observer = new PerformanceObserver(list => state.events.push(...list.getEntries().map(e => ({ name: e.name, startTime: e.startTime, duration: e.duration, processingStart: e.processingStart, processingEnd: e.processingEnd, interactionId: e.interactionId }))));
+        state.observer.observe({ type: 'event', durationThreshold: 16 });
+      }
+      state.longObserver = new PerformanceObserver(list => state.longTasks.push(...list.getEntries().map(e => ({ startTime: e.startTime, duration: e.duration }))));
+      state.longObserver.observe({ type: 'longtask' });
+    }, Boolean(trace));
+    await beforeInput();
+    const samples = [];
+    for (let index = 0; index < keystrokes; index++) {
+      const start = await page.evaluate(mark => { if (mark) performance.mark(mark); return performance.now(); }, trace ? typingTraceMark(index, 'before') : null);
+      await page.keyboard.press('x');
+      if (index === keystrokes - 1) {
+        await afterInput();
+      }
+      await painted(page);
+      const end = await page.evaluate(mark => { if (mark) performance.mark(mark); return performance.now(); }, trace ? typingTraceMark(index, 'after') : null);
+      samples.push({ index, start, end, dispatchToTwoRafMs: end - start });
+      if (rich && index === keystrokes - 1) await editor.evaluate(recordPresenceOwnerLastKey);
+      // An intentionally paced user workload, not a sleep used as a correctness assertion.
+      if (!rich || index < keystrokes - 1) await delay(80, undefined, { signal: benchmarkSignal });
     }
-    state.longObserver = new PerformanceObserver(list => state.longTasks.push(...list.getEntries().map(e => ({ startTime: e.startTime, duration: e.duration }))));
-    state.longObserver.observe({ type: 'longtask' });
-  });
-  const samples = [];
-  for (let index = 0; index < keystrokes; index++) {
-    const start = await page.evaluate(() => performance.now());
-    await page.keyboard.press('x');
-    await painted(page);
-    const end = await page.evaluate(() => performance.now());
-    samples.push({ index, start, end, dispatchToTwoRafMs: end - start });
-    // An intentionally paced user workload, not a sleep used as a correctness assertion.
-    await delay(80, undefined, { signal: cancellation.signal });
-  }
-  await page.waitForFunction(count => window.__packagedEvents.inputs.length === count, keystrokes);
-  const timing = await page.evaluate(() => {
-    const s = window.__packagedEvents;
-    if (s.observer) s.events.push(...s.observer.takeRecords().map(e => ({ name: e.name, startTime: e.startTime, duration: e.duration, processingStart: e.processingStart, processingEnd: e.processingEnd, interactionId: e.interactionId })));
-    s.longTasks.push(...s.longObserver.takeRecords().map(e => ({ startTime: e.startTime, duration: e.duration })));
-    s.observer?.disconnect(); s.longObserver.disconnect(); document.removeEventListener('input', s.onInput, true);
-    return { supported: s.supported, events: s.events, inputs: s.inputs, longTasks: s.longTasks };
-  });
-  for (const sample of samples) {
-    const events = timing.events.filter(e => e.startTime >= sample.start && e.startTime <= sample.end && e.interactionId > 0);
-    sample.inputToNextPaintMs = events.length ? Math.max(...events.map(e => e.duration)) : null;
-    sample.events = events;
-  }
-  if (!timing.inputs.every(input => input.trusted)) throw Error('Untrusted input observed');
-  return { name, mode, windowState, paragraphs: name === 'small.md' ? 100 : 5000, openObservedMs, editActivationObservedMs, samples, ...timing };
+    const clockSync = rich ? validatePresenceClocks(clockBefore, await samplePresenceClock(page, { retryAfterPaint: () => painted(page) })) : null;
+    await page.waitForFunction(count => window.__packagedEvents.inputs.length === count, keystrokes);
+    const timing = await page.evaluate(() => {
+      const s = window.__packagedEvents;
+      if (s.observer) s.events.push(...s.observer.takeRecords().map(e => ({ name: e.name, startTime: e.startTime, duration: e.duration, processingStart: e.processingStart, processingEnd: e.processingEnd, interactionId: e.interactionId })));
+      s.longTasks.push(...s.longObserver.takeRecords().map(e => ({ startTime: e.startTime, duration: e.duration })));
+      s.observer?.disconnect(); s.longObserver.disconnect(); document.removeEventListener('input', s.onInput, true); document.removeEventListener('keydown', s.onKeyDown, true);
+      return { supported: s.supported, events: s.events, inputs: s.inputs, keys: s.keys, longTasks: s.longTasks, timeOrigin: performance.timeOrigin };
+    });
+    for (const sample of samples) {
+      const events = timing.events.filter(e => e.startTime >= sample.start && e.startTime <= sample.end && e.interactionId > 0);
+      sample.inputToNextPaintMs = events.length ? Math.max(...events.map(e => e.duration)) : null;
+      sample.events = events;
+    }
+    if (!timing.inputs.every(input => input.trusted)) throw Error('Untrusted input observed');
+    const typingWindow = rich ? { start: timing.keys[0].eventTimestamp, end: timing.keys.at(-1).eventTimestamp } : null;
+    const peerTypingWindow = rich ? rebasePresenceWindow(typingWindow, clockBefore) : null;
+    const ownerPresence = rich && arm === 'solo' ? await editor.evaluate(readPresenceOwner, typingWindow) : undefined;
+    let traceEvidence;
+    if (trace) {
+      traceResult = await stopTypingTraceAfterFrames(page, trace);
+      const tracePath = join(dirname(active.logPath), `presence-${arm}-${name}.trace.json`);
+      await writeFile(tracePath, traceResult.raw);
+      const measured = measureTypingTrace(traceResult.events, samples, timing);
+      samples.splice(0, samples.length, ...measured.samples);
+      traceEvidence = { source: 'EventLatency', categories: traceResult.categories, browser: traceResult.browser, path: tracePath, validation: measured.validation };
+    }
+    return { name, mode, windowState, paragraphs: name === 'small.md' ? 100 : 5000, openObservedMs, editActivationObservedMs, samples, ...timing,
+      ...(traceEvidence ? { trace: traceEvidence, typingWindow, peerTypingWindow, clockSync, ownerPresence } : {}) };
+  } finally { if (trace && !traceResult) await trace.stop(); }
 }
 function parseNativeLaunchMarks(log) {
   const line = log.match(/\[desktop\] launch marks \(ms since process start\): ([^\r\n]+)/)?.[1];
@@ -444,7 +483,7 @@ async function switchTo(page, index) {
   return { to: index, selectedObservedMs, editablePaintObservedMs, allPhasesObservedMs: performance.now() - started, ...details, cpuProfilePath };
 }
 async function snapshot(pid) {
-  const { stdout } = await exec('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', join(dirname(fileURLToPath(import.meta.url)), 'packaged-process-snapshot.ps1'), '-AppProcessId', String(pid)], { windowsHide: true, signal: cancellation.signal, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
+  const { stdout } = await exec('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', join(dirname(fileURLToPath(import.meta.url)), 'packaged-process-snapshot.ps1'), '-AppProcessId', String(pid)], { windowsHide: true, signal: benchmarkSignal, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
   return JSON.parse(stdout);
 }
 async function setWindowState(instance, state) {
@@ -460,7 +499,7 @@ async function idle(instance, state) {
   const samples = [await snapshot(instance.child.pid)];
   const started = performance.now();
   while (performance.now() - started < idleSeconds * 1000) {
-    await delay(Math.min(5000, Math.max(1, idleSeconds * 1000 - (performance.now() - started))), undefined, { signal: cancellation.signal });
+    await delay(Math.min(5000, Math.max(1, idleSeconds * 1000 - (performance.now() - started))), undefined, { signal: benchmarkSignal });
     samples.push(await snapshot(instance.child.pid));
   }
   const deltas = { cpuMs: 0, readBytes: 0, writeBytes: 0, otherBytes: 0, readOperations: 0, writeOperations: 0, otherOperations: 0 };
@@ -667,7 +706,7 @@ async function tableHolds(page, expected, timeoutMs = 180000) {
   }, to);
   for (let held = await scroll('end'); held !== expected; held = await scroll('end')) {
     if (performance.now() - started > timeoutMs) throw Error(`The Collection table held ${held} of ${expected} records after ${timeoutMs}ms`);
-    await delay(250, undefined, { signal: cancellation.signal });
+    await delay(250, undefined, { signal: benchmarkSignal });
   }
   await scroll('top');
   return performance.now() - started;
@@ -690,7 +729,7 @@ async function sampleDuring(settled, pid, root, automation) {
   while (!done) {
     snapshots.push(await snapshot(pid));
     headerPeakBytes = Math.max(headerPeakBytes, (await journalBytes(root, automation)).headerBytes);
-    await Promise.race([finished, delay(1000, undefined, { signal: cancellation.signal })]);
+    await Promise.race([finished, delay(1000, undefined, { signal: benchmarkSignal })]);
   }
   return { snapshots, headerPeakBytes };
 }
@@ -700,7 +739,7 @@ async function verifyDocuments(root, spec, outcome, createdPaths) {
     const verification = verifyCase(spec, outcome, await readDocumentCase(root, spec, loadYaml, createdPaths));
     // Settlement writes the Markdown after the run settles.
     if (verification.ok || performance.now() - started > 120000) return { ...verification, settledOnDiskObservedMs: verification.ok ? performance.now() - started : null };
-    await delay(500, undefined, { signal: cancellation.signal });
+    await delay(500, undefined, { signal: benchmarkSignal });
   }
 }
 async function automationCase(instance, runDir, kind, spec, surface) {
@@ -711,7 +750,7 @@ async function automationCase(instance, runDir, kind, spec, surface) {
   await dismissToasts(page);
   const previousRuns = await readRunJournal(root, automation);
   const previousNotices = await readAutomationNotices(page);
-  const quiet = await waitForQuiet({ sample: () => snapshot(pid), appPid: pid, signal: cancellation.signal });
+  const quiet = await waitForQuiet({ sample: () => snapshot(pid), appPid: pid, signal: benchmarkSignal });
   const before = quiet.snapshot;
   const { settled } = await press(page, name, outcomeTexts(spec.name, surface.label));
   // The closing snapshot starts as the run settles, not after sampling or typing ends.
@@ -768,7 +807,7 @@ async function automationPhase(instance, runDir, data) {
   const written = performance.now();
   await mkdir(join(workspace.rootPath, DOCUMENT_FOLDER));
   for (let begin = 0; begin < files.length; begin += 32) {
-    cancellation.signal.throwIfAborted();
+    benchmarkSignal.throwIfAborted();
     await Promise.all(files.slice(begin, begin + 32).map(file => writeFile(join(workspace.rootPath, file.path), file.content)));
   }
   await page.locator(`[data-testid="tree-row"][data-path="${DOCUMENT_FOLDER}"][data-collection="true"]`).waitFor({ timeout: 120000 });
@@ -792,11 +831,11 @@ async function soak(instance, data, runDir) {
   const sample = async cycle => ({ cycle, ...aggregateByKind(await snapshot(instance.child.pid), instance.child.pid) });
   const result = data.soak = { minutes: soakMinutes, searchQuery: SOAK_SEARCH_QUERY, goToQuery: 'small', cycles: [], samples: [await sample(0)], elapsedMs: null };
   const heaps = heapSnapshotMinutes.length ? await startRendererHeapSnapshots({
-    session: await page.context().newCDPSession(page), output: runDir, minutes: heapSnapshotMinutes, signal: cancellation.signal,
+    session: await page.context().newCDPSession(page), output: runDir, minutes: heapSnapshotMinutes, signal: benchmarkSignal,
   }) : null;
   result.heapSnapshots = heaps?.records ?? [];
   try {
-    await runSoakCycles({ minutes: soakMinutes, heaps, signal: cancellation.signal,
+    await runSoakCycles({ minutes: soakMinutes, heaps, signal: benchmarkSignal,
       runCycle: async index => {
         const started = performance.now();
         const cycle = { index };
@@ -862,13 +901,13 @@ async function documentRelay(runDir, documentCase, deadline) {
   const settingsPath=join(relayDir,'settings.json');await json(settingsPath,relaySettings);
   const relayRequire=createRequire(join(root,'services/sync-relay/package.json'));
   await runOwnedCommand(process.execPath,['--import',relayRequire.resolve('tsx'),join(root,'tools/perf-profiling/document-size-runner.mjs'),'run',settingsPath],
-    {cwd:root,env,signal:cancellation.signal,timeoutMs:Math.max(1,deadline-performance.now()),log:join(relayDir,'runner.log')});
+    {cwd:root,env,signal:benchmarkSignal,timeoutMs:Math.max(1,deadline-performance.now()),log:join(relayDir,'runner.log')});
   (receipt.documentRelays ??= {})[documentCase.key]=JSON.parse(await readFile(join(relayDir,'relay.json'),'utf8'));
 }
 
   await cancellation.run(() => (workload = (async () => {
   const helperStarted = performance.now();
-  helperStartup = startWindowController({ signal: cancellation.signal, onSpawn(child) { receipt.windowHelper = { pid: child.pid }; } });
+  helperStartup = startWindowController({ signal: benchmarkSignal, onSpawn(child) { receipt.windowHelper = { pid: child.pid }; } });
   windowController = await helperStartup;
   receipt.windowHelper = { pid: windowController.pid, prewarmMs: performance.now() - helperStarted };
   await json(join(output, 'result.json'), receipt);
@@ -879,7 +918,7 @@ async function documentRelay(runDir, documentCase, deadline) {
   if(scenario==='document-size') {deadlineTimer=setTimeout(()=>documentDeadline.abort(Error('Six-hour document-size deadline: incomplete evidence is inconclusive')),6*60*60*1000);deadlineTimer.unref();}
   try {
   for (let index = 0; index < tasks.length; index++) {
-    cancellation.signal.throwIfAborted();
+    benchmarkSignal.throwIfAborted();
     if(scenario==='document-size' && performance.now()>=deadline)throw Error('Six-hour deadline reached; evidence is inconclusive');
     const runDir = join(output, 'run-'+(index+1));
     const data = { index:index+1 }; receipt.runs.push(data); await mkdir(runDir,{recursive:true});
@@ -893,7 +932,7 @@ async function documentRelay(runDir, documentCase, deadline) {
     if (scenario === 'document-size') {
       const phase = async (instance, name, extra={}) => {
         await filesListed(instance.page, fixtureFiles+2);
-        const row=await measurePackagedDocument({instance,fixture:f.sizeDocument,options,signal:cancellation.signal,snapshot,phase:name,proof:repetition<=3,...extra});
+        const row=await measurePackagedDocument({instance,fixture:f.sizeDocument,options,signal:benchmarkSignal,snapshot,phase:name,proof:repetition<=3,...extra});
         await openDoc(instance.page,'small.md');return row;
       };
       data.documentSize={...documentCase,repetition,phases:[]};
@@ -968,6 +1007,46 @@ async function documentRelay(runDir, documentCase, deadline) {
       await json(join(output, 'result.json'), receipt);
       continue;
     }
+    if (scenario === 'presence') {
+      // Open both canonical engine documents before reading their snapshots at rest.
+      for (const name of ['small.md', 'large.md']) await openDoc(fresh.page, name);
+      await shutdown(runDir, fresh);
+      const relayRequire = createRequire(join(root, 'services/sync-relay/package.json'));
+      const { tsImport } = relayRequire('tsx/esm/api');
+      const { createPresenceFixture } = await tsImport('../../apps/desktop/e2e/helpers/presenceBenchmark.ts', import.meta.url);
+      presenceFixture = await createPresenceFixture({ workspace: f.workspaces[0], profile: f.profile, runDir, signal: benchmarkSignal });
+      f.presenceEnvironment = presenceFixture.environment;
+      fresh = await launch(runDir, f, 'presence-host');
+      await presenceFixture.register();
+      data.presence = { fixture: presenceFixture.receipt, solo: [], peers: [] };
+      for (const name of ['small.md', 'large.md']) {
+        await openDoc(fresh.page, name);
+        await presenceFixture.activate(name);
+        const solo = await typing(fresh.page, name, { rich: true, arm: 'solo' });
+        data.presence.solo.push(solo);
+        await json(join(output, 'result.json'), receipt);
+        if (!solo.trace.validation.pass) throw Error('Solo typing trace validation failed: ' + solo.trace.validation.problems.join('; '));
+        const peers = await presenceFixture.peers(name, presencePeers);
+        await withPresencePeers(peers, async () => {
+          const typed = await typing(fresh.page, name, { rich: true, arm: 'peers', beforeInput: () => peers.start(), afterInput: () => peers.stop() });
+          typed.workload = await peers.finish(typed.peerTypingWindow);
+          const sentEdits = typed.workload.peerCounts.reduce((sum, peer) => sum + peer.edits, 0);
+          await waitForPresenceOwner(fresh.page, sentEdits);
+          typed.ownerPresence = await fresh.page.locator('[contenteditable="true"].tiptap').evaluate(readPresenceOwner, typed.typingWindow);
+          typed.workload = validatePresenceWorkload(typed.workload, typed.ownerPresence);
+          data.presence.peers.push(typed);
+          await json(join(output, 'result.json'), receipt);
+          if (!typed.workload.pass) throw Error('Presence peer rates, schedule, or owner delivery failed');
+          if (!typed.trace.validation.pass) throw Error('Peer typing trace validation failed: ' + typed.trace.validation.problems.join('; '));
+        });
+        await json(join(output, 'result.json'), receipt);
+      }
+      await shutdown(runDir, fresh);
+      await presenceFixture.stop(); presenceFixture = null;
+      profilingSlot.check();
+      await json(join(output, 'result.json'), receipt);
+      continue;
+    }
     if (scenario === 'go-to-mixed') {
       const relayRequire = createRequire(join(root, 'services/sync-relay/package.json'));
       const { tsImport } = relayRequire('tsx/esm/api');
@@ -979,11 +1058,11 @@ async function documentRelay(runDir, documentCase, deadline) {
         return api[method](payload);
       }, { method, payload });
       goToFixture = await provisionGoToFixture({ workspace: f.workspaces[0], profile: f.profile, runDir,
-        files: fixtureFiles, signal: cancellation.signal, call: bridgeCall(),
+        files: fixtureFiles, signal: benchmarkSignal, call: bridgeCall(),
         createApp: (appRoot, title, agent) => createApp({ root: f.workspaces[0].rootPath, home: f.profile }, { appRoot, title }, agent),
         cli: async args => (await runOwnedCommand(process.execPath, [cliLauncher, ...args], {
           cwd: f.workspaces[0].rootPath, env: { ...env, DOHC_STATE_DIR: f.profile, NODE_NO_WARNINGS: '1' },
-          timeoutMs: 120000, signal: cancellation.signal, log: join(runDir, 'go-to-cli-' + randomUUID() + '.log'),
+          timeoutMs: 120000, signal: benchmarkSignal, log: join(runDir, 'go-to-cli-' + randomUUID() + '.log'),
         })).stdout,
         signIn: async (baseUrl, userId) => {
           await shutdown(runDir, fresh);
@@ -1078,7 +1157,7 @@ async function documentRelay(runDir, documentCase, deadline) {
     }
     // Idle only once per package, after foreground work has settled for a fixed workload pause.
     if (index === 0) {
-      await delay(10000, undefined, { signal: cancellation.signal });
+      await delay(10000, undefined, { signal: benchmarkSignal });
       console.log(JSON.stringify({ label, phase: 'visible-idle-start', seconds: idleSeconds }));
       data.idle = [await idle(fresh, 'visible')];
       await json(join(output, 'result.json'), receipt);
@@ -1108,7 +1187,7 @@ async function documentRelay(runDir, documentCase, deadline) {
     for(const mib of [...options.documentMiB].filter(n=>n<=eligible).reverse()) {
       const runDir=join(output,'soak-'+mib);await mkdir(runDir);
       const f=await fixture(runDir,{mib,shape:'formatted-retained'}),instance=await launch(runDir,f,'soak');
-      const row=await measurePackagedDocument({instance,fixture:f.sizeDocument,options,signal:cancellation.signal,snapshot,phase:'soak',soak:true,proof:false,peerMode:'churn'});
+      const row=await measurePackagedDocument({instance,fixture:f.sizeDocument,options,signal:benchmarkSignal,snapshot,phase:'soak',soak:true,proof:false,peerMode:'churn'});
       receipt.documentSoaks.push(row);await shutdown(runDir,instance);await json(join(output,'result.json'),receipt);
       const value=(await summarize(receipt));
       if(compareDocumentSize(documentBaseline ?? value,value,DEFAULT_MARGIN).selectedMiB===mib || label==='baseline' || options.documentMode==='pilot')break;
@@ -1116,7 +1195,7 @@ async function documentRelay(runDir, documentCase, deadline) {
     }
   }
   } finally {clearTimeout(deadlineTimer);}
-  cancellation.signal.throwIfAborted();
+  benchmarkSignal.throwIfAborted();
   if (automationFailures.length) throw Error(`Collection automation cases failed: ${automationFailures.join('; ')}`);
   receipt.status = 'complete';
   })()));
@@ -1134,6 +1213,10 @@ async function documentRelay(runDir, documentCase, deadline) {
   }
   if (!cancellation.signal.aborted) process.exitCode = 1;
 } finally {
+  if (presenceFixture) {
+    try { await presenceFixture.stop(); }
+    catch (cleanupError) { receipt.fixtureCleanupError = cleanupError.stack; receipt.status = 'failed'; process.exitCode = 1; }
+  }
   if (goToFixture) {
     try { await goToFixture.stop(); }
     catch (cleanupError) { receipt.fixtureCleanupError = cleanupError.stack; receipt.status = 'failed'; process.exitCode = 1; }
@@ -1156,6 +1239,7 @@ async function documentRelay(runDir, documentCase, deadline) {
     receipt.status = 'failed';
     receipt.error ??= cancellation.signal.reason.stack;
   }
+  if (profilingSlot) { receipt.hostContext = profilingSlot.evidence; profilingSlot.release(); }
   receipt.completedAt = new Date().toISOString(); receipt.feedRequests = feedRequests;
   try { await json(join(output, 'result.json'), receipt); }
   finally { cancellation.dispose(); }

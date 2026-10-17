@@ -4811,6 +4811,39 @@ mod doc_cache_reset_tests {
         ));
     }
 
+    fn complete_checked_delete_materialization(store: &EngineStore, root: &std::path::Path) {
+        let job = store
+            .load_materialization_job("restore-delete-mat_restore-delete")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            dohc_engine_files::materialize::materialize_one_ordinary(
+                store,
+                root,
+                &job,
+                &dohc_engine_files::MaterializeOptions {
+                    holds: None,
+                    policy: dohc_engine_files::DurabilityPolicy::per_os(),
+                    replacer: &dohc_engine_files::StdReplacer,
+                    backoff: &dohc_engine_files::NoBackoff,
+                    now_ms: 4,
+                    faults: &NoFaults,
+                },
+            )
+            .unwrap(),
+            dohc_engine_files::JobOutcome::AlreadyMaterialized
+        );
+        assert_eq!(
+            store
+                .load_materialization_job(&job.job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Complete
+        );
+        assert!(!root.join("record.md").exists());
+    }
+
     fn checked_delete_replay(store: &mut EngineStore, root: &std::path::Path) {
         super::super::materialization::replay_pending_materializations(
             store,
@@ -4971,6 +5004,7 @@ mod doc_cache_reset_tests {
                     &expected,
                     FaultPoint::MaterializeAfterKnownCopyDeletion,
                 );
+                complete_checked_delete_materialization(&store, &root);
                 if failure == "commit" {
                     let armed = Arc::new(AtomicBool::new(true));
                     store
@@ -5035,6 +5069,74 @@ mod doc_cache_reset_tests {
 
     #[test]
     fn conditional_restore_delete_complete_version_switch_discards_publication() {
+        checked_delete_version_switch_discards_publication(true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conditional_restore_delete_pending_retained_version_switch_discards_publication() {
+        checked_delete_version_switch_discards_publication(false);
+    }
+
+    #[cfg(unix)]
+    fn assert_pending_retained_checked_delete(store: &EngineStore, root: &std::path::Path) {
+        assert_eq!(
+            store
+                .load_materialization_job("restore-delete-mat_restore-delete")
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Pending
+        );
+        let rows = store.retained_displacements_after(0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(root.join(&rows[0].source_path).is_file());
+        assert!(!root.join("record.md").exists());
+    }
+
+    #[cfg(unix)]
+    fn assert_retained_checked_delete_source(
+        store: &EngineStore,
+        root: &std::path::Path,
+        row: &dohc_engine_storage::RetainedDisplacement,
+    ) {
+        use std::os::unix::fs::MetadataExt;
+        // Membership in this table is the retained state; neither replay ends it.
+        assert_eq!(
+            store.retained_displacements_after(0).unwrap(),
+            vec![row.clone()]
+        );
+        assert!(
+            store
+                .list_kept_displacements("workspace")
+                .unwrap()
+                .is_empty()
+        );
+        let staged = root.join(&row.source_path);
+        let metadata = std::fs::metadata(&staged).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.dev().to_string(), row.device);
+        assert_eq!(metadata.ino().to_string(), row.inode);
+        assert_eq!(hex_sha256(&std::fs::read(staged).unwrap()), row.digest);
+    }
+
+    #[cfg(unix)]
+    fn checked_delete_projection_identity(
+        root: &std::path::Path,
+        row: &dohc_engine_storage::RetainedDisplacement,
+    ) -> (u64, u64) {
+        use std::os::unix::fs::MetadataExt;
+        let target = std::fs::metadata(root.join("record.md")).unwrap();
+        let identity = (target.dev(), target.ino());
+        assert_ne!(
+            (identity.0.to_string(), identity.1.to_string()),
+            (row.device.clone(), row.inode.clone()),
+            "the retained original must not become the replacement projection"
+        );
+        identity
+    }
+
+    fn checked_delete_version_switch_discards_publication(complete: bool) {
         for binary in [false, true] {
             let (root, mut store, input, expected) = checked_delete_fixture(binary);
             crash_checked_delete(
@@ -5044,6 +5146,15 @@ mod doc_cache_reset_tests {
                 &expected,
                 FaultPoint::MaterializeAfterKnownCopyDeletion,
             );
+            if complete {
+                complete_checked_delete_materialization(&store, &root);
+            } else {
+                #[cfg(unix)]
+                assert_pending_retained_checked_delete(&store, &root);
+            }
+            #[cfg(unix)]
+            let retained =
+                (!complete).then(|| store.retained_displacements_after(0).unwrap().remove(0));
             create_checked_delete_version(&mut store);
             let switched = super::super::versions::switch_active_version_on_store(
                 &mut store,
@@ -5074,6 +5185,19 @@ mod doc_cache_reset_tests {
                 expected
             );
             assert_eq!(checked_delete_count(&store), 0);
+            #[cfg(unix)]
+            if let Some(row) = retained {
+                assert_retained_checked_delete_source(&store, &root, &row);
+                let identity = checked_delete_projection_identity(&root, &row);
+                checked_delete_replay(&mut store, &root);
+                assert_retained_checked_delete_source(&store, &root, &row);
+                assert_eq!(checked_delete_projection_identity(&root, &row), identity);
+                assert_eq!(
+                    hex_sha256(&std::fs::read(root.join("record.md")).unwrap()),
+                    expected
+                );
+                assert_eq!(checked_delete_count(&store), 0);
+            }
         }
     }
 
@@ -5081,6 +5205,16 @@ mod doc_cache_reset_tests {
     fn conditional_restore_delete_pending_discard_restores_current_snapshot_before_capture() {
         checked_delete_discard_restores_current_snapshot(
             FaultPoint::MaterializeAfterRenameBeforeComplete,
+            false,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conditional_restore_delete_pending_retained_discard_restores_snapshot() {
+        checked_delete_discard_restores_current_snapshot(
+            FaultPoint::MaterializeAfterKnownCopyDeletion,
+            false,
         );
     }
 
@@ -5088,10 +5222,11 @@ mod doc_cache_reset_tests {
     fn conditional_restore_delete_complete_discard_restores_current_snapshot_before_capture() {
         checked_delete_discard_restores_current_snapshot(
             FaultPoint::MaterializeAfterKnownCopyDeletion,
+            true,
         );
     }
 
-    fn checked_delete_discard_restores_current_snapshot(point: FaultPoint) {
+    fn checked_delete_discard_restores_current_snapshot(point: FaultPoint, complete: bool) {
         #[derive(Default)]
         struct RecordedWrites(std::sync::Mutex<Vec<String>>);
         impl SelfWriteRecorder for RecordedWrites {
@@ -5106,6 +5241,16 @@ mod doc_cache_reset_tests {
             for crash_finish in [false, true] {
                 let (root, mut store, input, expected) = checked_delete_fixture(binary);
                 crash_checked_delete(&root, &mut store, &input, &expected, point);
+                if complete {
+                    complete_checked_delete_materialization(&store, &root);
+                } else if point == FaultPoint::MaterializeAfterKnownCopyDeletion {
+                    #[cfg(unix)]
+                    assert_pending_retained_checked_delete(&store, &root);
+                }
+                #[cfg(unix)]
+                let retained = (!complete
+                    && point == FaultPoint::MaterializeAfterKnownCopyDeletion)
+                    .then(|| store.retained_displacements_after(0).unwrap().remove(0));
                 change_checked_delete_content(&mut store, &root, binary);
                 dohc_engine_files::recover_displacements(
                     &store,
@@ -5197,6 +5342,19 @@ mod doc_cache_reset_tests {
                         .unwrap()
                         .contains(&hex_sha256(b"Owner bytes KEEP"))
                 );
+                #[cfg(unix)]
+                if let Some(row) = retained {
+                    assert_retained_checked_delete_source(&store, &root, &row);
+                    let identity = checked_delete_projection_identity(&root, &row);
+                    checked_delete_replay(&mut store, &root);
+                    assert_retained_checked_delete_source(&store, &root, &row);
+                    assert_eq!(checked_delete_projection_identity(&root, &row), identity);
+                    assert_eq!(
+                        std::fs::read(root.join("record.md")).unwrap(),
+                        b"Owner bytes KEEP"
+                    );
+                    assert_checked_delete_capture_keeps_file(&mut store, &root);
+                }
             }
         }
     }
@@ -5314,7 +5472,7 @@ mod doc_cache_reset_tests {
                             .unwrap()
                             .is_empty()
                     );
-                    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
+                    assert_only_retained_staged_originals(&store, &root);
                     assert!(!dohc_engine_files::workspace_recovery_unavailable(&root));
                     if change == "unchanged" {
                         assert!(!root.join("record.md").exists());
@@ -5432,6 +5590,31 @@ mod doc_cache_reset_tests {
         }
     }
 
+    fn assert_only_retained_staged_originals(store: &EngineStore, root: &std::path::Path) {
+        let staging = root.join(".dohc/engine/displaced");
+        let files = std::fs::read_dir(&staging).unwrap().count();
+        let retained = store.retained_displacements_after(0).unwrap();
+        let rows: Vec<_> = retained
+            .iter()
+            .filter(|row| root.join(&row.source_path).parent() == Some(staging.as_path()))
+            .collect();
+        assert_eq!(
+            files,
+            rows.len(),
+            "every staged original must have a retained row"
+        );
+        #[cfg(windows)]
+        assert!(
+            rows.is_empty(),
+            "Windows releases known originals immediately"
+        );
+        for row in rows {
+            let bytes = std::fs::read(root.join(&row.source_path)).unwrap();
+            assert_eq!(hex_sha256(&bytes), row.digest);
+            assert_eq!(bytes.len() as i64, row.size);
+        }
+    }
+
     #[test]
     fn conditional_restore_delete_finish_storage_error_rechecks_snapshot() {
         use std::sync::{
@@ -5450,12 +5633,13 @@ mod doc_cache_reset_tests {
                 let (root, mut store, input, expected) = checked_delete_fixture(binary);
                 let commits = Arc::new(AtomicUsize::new(0));
                 let hook_commits = commits.clone();
+                let final_commit = if cfg!(unix) { 4 } else { 3 };
                 store
                     .read_with(|conn| {
-                        // Preparation, finish preview and disk receipt commit first.
-                        // Fail the final transaction after the staged copy is unlinked.
+                        // Preparation, finish preview, disk receipt, and POSIX retention commit first.
+                        // Fail the final transaction after disposing of the staged source.
                         conn.commit_hook(Some(move || {
-                            hook_commits.fetch_add(1, Ordering::SeqCst) == 3
+                            hook_commits.fetch_add(1, Ordering::SeqCst) == final_commit
                         }))
                         .unwrap();
                         Ok::<_, StorageError>(())
@@ -5474,7 +5658,7 @@ mod doc_cache_reset_tests {
                     matches!(result, Err(RuntimeError::Storage(_))),
                     "{result:?}"
                 );
-                assert_eq!(commits.load(Ordering::SeqCst), 4);
+                assert_eq!(commits.load(Ordering::SeqCst), final_commit + 1);
                 store
                     .read_with(|conn| {
                         conn.commit_hook(None::<fn() -> bool>).unwrap();
@@ -5490,12 +5674,7 @@ mod doc_cache_reset_tests {
                         .status,
                     JobStatus::Complete
                 );
-                assert_eq!(
-                    std::fs::read_dir(root.join(".dohc/engine/displaced"))
-                        .unwrap()
-                        .count(),
-                    0
-                );
+                assert_only_retained_staged_originals(&store, &root);
                 store.write_with(&NoFaults, |tx| {
                     if state == "captured" {
                         let retired = dohc_engine_domain::capture_retire_in_tx(tx, &dohc_engine_domain::CaptureRetire {

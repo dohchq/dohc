@@ -19,7 +19,10 @@ export const audience = "https://share.example.test";
 export const key = new Uint8Array(32).fill(13);
 export const table = "sync_relay_live_session_tickets";
 export const marker = "live-session-tickets-v1";
-export async function fixture(options?: OpenSyncRelayStorageOptions) {
+const defaultScope = scope, defaultBinding = binding;
+export async function fixture(options?: OpenSyncRelayStorageOptions, identity?: {userId: string; grantId: string; objectId: string; workspaceId?: string; shareId?: string}) {
+  const scope = {...defaultScope, ...(identity ? {shareId: identity.shareId ?? defaultScope.shareId, userId: identity.userId, grantId: identity.grantId, workspaceId: identity.workspaceId ?? defaultScope.workspaceId} : {})};
+  const binding = {...defaultBinding, ...(identity ? {objectId: identity.objectId, workspaceId: scope.workspaceId} : {})};
   const root = await mkdtemp(join(tmpdir(), "dohc-named-ticket-"));
   const path = join(root, "relay.sqlite");
   let time = 1000;
