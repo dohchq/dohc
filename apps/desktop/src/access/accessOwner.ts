@@ -11,17 +11,18 @@ import type { RegistryEntry } from "../workspaces/registryStore";
 import { serverUrlsMatch } from "../workspaces/chatRelayIdentity";
 
 export function ownerAccessRoster(
-  workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "shareView">,
+  workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "pausedRemote" | "shareView">,
   credentials: CloudCredentials | null,
   observation: (workspaceId: string) => RosterObservation,
 ): AccessRosterObservation {
   const unavailable = (unknownReason: NonNullable<AccessAnswer["unknownReason"]>): AccessRosterObservation =>
     ({ listing: null, checkedAtMs: null, freshness: "unknown", unknownReason });
   if (workspace.shareView) return { listing: null, checkedAtMs: null, freshness: "unknown", visibility: "hidden" };
-  if (!workspace.remote) return unavailable("not-synced");
+  const remote = workspace.remote ?? workspace.pausedRemote;
+  if (!remote) return unavailable("not-synced");
   if (!credentials) return unavailable("signed-out");
-  if (!serverUrlsMatch(workspace.remote.serverUrl, credentials.serverUrl)) return unavailable("other-server");
-  if (workspace.remote.ownerUserId !== credentials.userId) return unavailable("other-account");
+  if (!serverUrlsMatch(remote.serverUrl, credentials.serverUrl)) return unavailable("other-server");
+  if (remote.ownerUserId !== credentials.userId) return unavailable("other-account");
   if (!credentials.relayUrl) return unavailable("unreadable");
   return observation(workspace.workspaceId);
 }

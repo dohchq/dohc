@@ -2,7 +2,16 @@ import type { BrowserWindow, MenuItemConstructorOptions } from "electron";
 import { SHORTCUTS, shortcutAccelerators, type ShortcutId } from "../shortcuts/shortcutRegistry";
 import { basename } from "node:path";
 import type { MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
+import { COMMAND_ROWS, type StaticCommandId } from "../renderer/commands/commandRows";
 import type { ZoomStep } from "../settings/userSettings";
+
+// Each item's label is its palette row's label, so the menu and the palette
+// cannot disagree. The menu already groups by category, so "View: Chats" shows
+// as "Chats". The palette does not list itself, so it has no row.
+function menuLabel(id: MenuCommand | StaticCommandId): string {
+  if (id === "command-palette") return "Command palette";
+  return COMMAND_ROWS[id].label.replace(/^View: /, "");
+}
 
 // Real application menu (File/Edit/View/Go/Help). Custom items send a
 // MenuCommand to the focused window's renderer, where the shell routes it
@@ -32,13 +41,13 @@ export function buildMenuTemplate(options: {
 }): MenuItemConstructorOptions[] {
   const isMac = options.platform === "darwin";
   const command = (
-    label: string,
     name: MenuCommand,
     enabled = true,
   ): MenuItemConstructorOptions[] => {
+    const label = menuLabel(name);
     const accelerators = shortcutAccelerators(name);
     return (accelerators.length ? accelerators : [undefined]).map((accelerator, index) => ({
-      label: index > 0 ? label + " (Alternate)" : label,
+      label: index > 0 ? label + " (alternate)" : label,
       enabled,
       ...(index > 0 ? { visible: false } : {}),
       ...(accelerator ? { accelerator } : {}),
@@ -63,13 +72,13 @@ export function buildMenuTemplate(options: {
     {
       label: "File",
       submenu: [
-        ...command("New File", "new-file"),
-        ...command("New Folder…", "new-folder"),
-        ...command("New Collection…", "new-collection"),
+        ...command("new-file"),
+        ...command("new-folder"),
+        ...command("new-collection"),
         { type: "separator" },
-        ...command("Open Workspace…", "open-workspace"),
+        ...command("open-workspace"),
         {
-          label: "Open Recent",
+          label: "Open recent",
           submenu:
             recentWorkspaces.length > 0
               ? recentWorkspaces.map((workspace) => ({
@@ -81,15 +90,15 @@ export function buildMenuTemplate(options: {
                       workspace,
                     ),
                 }))
-              : [{ label: "No Recent Workspaces", enabled: false }],
+              : [{ label: "No recent workspaces", enabled: false }],
         },
-        ...command("Import Files…", "import-files"),
-        ...command("Export Workspace as Zip…", "export-workspace"),
+        ...command("import-files"),
+        ...command("export-workspace"),
         { type: "separator" },
-        ...command("Close Tab", "close-tab"),
+        ...command("close-tab"),
         // VS Code convention: CommandOrControl+W closes the tab in the
         // renderer. The close role uses a separate window shortcut.
-        { role: "close", label: "Close Window", accelerator: shortcutAccelerators("close-window")[0] },
+        { role: "close", label: "Close window", accelerator: shortcutAccelerators("close-window")[0] },
       ],
     },
     {
@@ -107,17 +116,14 @@ export function buildMenuTemplate(options: {
     {
       label: "View",
       submenu: [
-        ...command("Command Palette", "command-palette"),
-        ...command("Go To", "quick-open"),
-        ...command(
-          "New Editor Group Right",
-          "new-editor-group-right",
-        ),
+        ...command("command-palette"),
+        ...command("quick-open"),
+        ...command("new-editor-group-right"),
         { type: "separator" },
-        ...command("Toggle Sidebar", "toggle-sidebar"),
-        ...command("Toggle About", "toggle-about"),
-        ...command("Chats", "show-chats"),
-        ...command("Toggle Theme", "toggle-theme"),
+        ...command("toggle-sidebar"),
+        ...command("toggle-about"),
+        ...command("show-chats"),
+        ...command("toggle-theme"),
         { type: "separator" },
         // Main-owned zoom, not the Electron zoom roles: the zoomIn role only
         // answers CommandOrControl+Plus, which needs Shift on most layouts —
@@ -127,13 +133,13 @@ export function buildMenuTemplate(options: {
         // mount the workspace shell, and every path persists the level. The
         // hidden items keep the shifted and numpad chords live.
         ...([
-          { label: "Reset Zoom", id: "zoom-reset", step: "reset" },
-          { label: "Zoom In", id: "zoom-in", step: "in" },
-          { label: "Zoom Out", id: "zoom-out", step: "out" },
+          { id: "zoom-reset", step: "reset" },
+          { id: "zoom-in", step: "in" },
+          { id: "zoom-out", step: "out" },
         ] as const).flatMap((zoom) =>
           shortcutAccelerators(zoom.id).map(
             (accelerator, index): MenuItemConstructorOptions => ({
-              label: zoom.label,
+              label: menuLabel(zoom.id),
               accelerator,
               ...(index > 0 ? { visible: false } : {}),
               click: () => options.stepZoom(zoom.step),
@@ -148,19 +154,15 @@ export function buildMenuTemplate(options: {
     },
     {
       label: "Go",
-      submenu: [...command("Settings", "settings")],
+      submenu: [...command("settings")],
     },
     // Standard macOS Window menu (minimize/zoom/front + window list).
     ...(isMac ? [{ role: "windowMenu" } as const] : []),
     {
       label: "Help",
       submenu: [
-        ...command("Check for Updates…", "check-updates"),
-        ...command(
-          "Update and Restart",
-          "install-update",
-          options.canInstallUpdate === true,
-        ),
+        ...command("check-updates"),
+        ...command("install-update", options.canInstallUpdate === true),
         { type: "separator" },
         { label: "About dohc", click: () => options.showAbout() },
       ],

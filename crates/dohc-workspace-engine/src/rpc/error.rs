@@ -432,6 +432,9 @@ fn map_domain(error: DomainError) -> WireError {
         DomainError::InvalidText { .. } => (InvalidParams, "invalid-text"),
         DomainError::NotSecretPath => (InvalidParams, "not-secret-path"),
         DomainError::SecretMomentNotFound => (InvalidParams, "moment-not-found"),
+        DomainError::CheckedDeleteReplicationDependents => {
+            (ErrorCode::Conflict, "checked-delete-replication-dependents")
+        }
         // The caller matches the code prefix and shows the reason.
         DomainError::InvalidInput {
             reason: reason @ dohc_engine_domain::HOSTED_REPLICA_WRITE_REFUSED,
@@ -569,6 +572,15 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_delete_replication_dependents_have_a_known_reason() {
+        let wire = super::map_runtime(dohc_engine_runtime::RuntimeError::Domain(
+            dohc_engine_domain::DomainError::CheckedDeleteReplicationDependents,
+        ));
+        assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Conflict);
+        assert_eq!(wire.message, "checked-delete-replication-dependents");
+    }
+
     #[test]
     fn conditional_restore_delete_materialization_reason_reaches_rpc() {
         for error in [

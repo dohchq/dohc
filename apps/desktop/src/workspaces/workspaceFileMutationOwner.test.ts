@@ -37,6 +37,7 @@ interface TestEvent {
 interface TestWorkspace {
   workspaceId: string;
   rootPath: string;
+  readOnly?: boolean;
   shareView?: unknown;
   shareMounts?: unknown;
 }
@@ -207,7 +208,9 @@ async function harness(options: {
   };
   let account = "account-alice";
   const deletedBy: string[] = [];
+  const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => { throw new Error("Unexpected Undo"); }) };
   const owner = createWorkspaceFileMutationOwner({
+    historyFor: () => history,
     assertTrustedSender,
     withRendererWorkspaceOperation,
     shareViewFiles: { change },
@@ -221,6 +224,7 @@ async function harness(options: {
     rootPath,
     workspace,
     owner,
+    history,
     change,
     assertTrustedSender,
     rendererOperationCalls,
@@ -1046,7 +1050,7 @@ describe("WorkspaceFileMutationOwner", () => {
         workspaceId: test.workspace.workspaceId,
         relativePath: "notes/delete.md",
       }),
-    ).resolves.toEqual({ trashed: true });
+    ).resolves.toEqual({ trashed: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/u), undo: { available: false, paths: ["notes/delete.md"], reason: `Cannot undo the delete. notes/delete.md is ${process.platform === "win32" ? "in the Recycle Bin" : "in the Trash"}. Restore it there.` } });
 
     expect(test.ownsDocument).toHaveBeenCalledWith(
       attachmentB,
@@ -1212,7 +1216,7 @@ describe("WorkspaceFileMutationOwner", () => {
         workspaceId: test.workspace.workspaceId,
         relativePath: "notes",
       }),
-    ).resolves.toEqual({ trashed: false });
+    ).resolves.toEqual({ trashed: false, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/u), undo: { available: true } });
 
     expect(trace).toEqual([
       "settle:notes",
@@ -1245,7 +1249,7 @@ describe("WorkspaceFileMutationOwner", () => {
     await entered.promise;
     test.switchAccount("account-bob");
     release.resolve();
-    await expect(deleting).resolves.toMatchObject({ trashed: true });
+    await expect(deleting).resolves.toEqual({ trashed: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/u), undo: { available: true } });
     expect(test.deletedBy).toEqual(["account-alice"]);
   });
 
@@ -1261,7 +1265,7 @@ describe("WorkspaceFileMutationOwner", () => {
     await expect(test.owner.deletePath(trustedEvent, {
       workspaceId: test.workspace.workspaceId,
       relativePath: "notes",
-    })).resolves.toEqual({ trashed: false });
+    })).resolves.toEqual({ trashed: false, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/u), undo: { available: true } });
     await expect(access(join(test.rootPath, "notes"))).rejects.toThrow();
     const [entry] = await readdir(join(test.rootPath, ".dohc/trash"));
     expect(await readFile(join(test.rootPath, ".dohc/trash", entry!, "a.md"), "utf8")).toBe("text\n");
@@ -1298,7 +1302,7 @@ describe("WorkspaceFileMutationOwner", () => {
         workspaceId: test.workspace.workspaceId,
         relativePath: "alias/a.md",
       }),
-    ).resolves.toEqual({ trashed: true });
+    ).resolves.toEqual({ trashed: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/u), undo: { available: true } });
 
     expect(trace).toEqual(["settle:notes/a.md", "marked", "finish:true"]);
     expect(test.markDeletedUnderPath).toHaveBeenCalledWith(
@@ -1628,4 +1632,22 @@ describe("WorkspaceFileMutationOwner", () => {
     expect(test.notifyRenderer).toHaveBeenCalledWith(test.workspace.workspaceId);
     expect(test.logError).not.toHaveBeenCalled();
   });
+});
+
+it("admits operation Undo through the mutation owner and refuses other operations without an engine Undo", async () => {
+  const h = await harness();
+  const payload = { workspaceId: h.workspace.workspaceId, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111" };
+  await expect(h.owner.undoHistoryOperation({ trusted: false }, payload)).rejects.toThrow();
+  await expect(h.owner.undoHistoryOperation(trustedEvent, { ...payload, workspaceId: "other" })).rejects.toThrow();
+  await expect(h.owner.undoHistoryOperation(trustedEvent, { ...payload, operationId: "11111111-1111-4111-8111-111111111111" })).rejects.toThrow();
+  expect(h.history.readHistoryPage).not.toHaveBeenCalled();
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "Cannot undo this change yet. Only a delete can be undone." });
+  h.history.readHistoryPage.mockResolvedValue({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null } as never);
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
+  expect(h.history.undoHistoryOperation).not.toHaveBeenCalled();
+  h.workspace.readOnly = true;
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
+  h.workspace.readOnly = false;
+  h.workspace.shareView = { access: "read-only" };
+  expect(await h.owner.undoHistoryOperation(trustedEvent, payload)).toEqual({ ok: false, reason: "History operations require the owning workspace. Open it to continue." });
 });

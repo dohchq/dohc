@@ -34,6 +34,9 @@ import {
   YDocPathNotInVersionError,
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
+import { workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
+import { createWorkspaceSyncStop } from "./stopWorkspaceSync";
+import { createRegistryStore } from "./registryStore";
 import { createTestScratch } from "./testTemp";
 import { createEngineYDocSessionIpc, DOCUMENT_EDIT_SHARED_WARNING } from "./engineYDocSessionIpc";
 import { CHANNELS } from "../ipc/channels";
@@ -718,6 +721,71 @@ it("settles an open record before a person's delete and credits the person in Hi
   const deleted = (await capture.listMoments()).moments.filter(row => row.operation === "delete" && row.path === PATH);
   expect(deleted).toMatchObject([{ metadata: { origin: "local-file" }, authors: [{ kind: "human", humanId: "person" }] }]);
   editor.destroy();
+});
+
+it("settles live edits into Markdown before stopping sync and permits local editing afterward", async () => {
+  const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
+  const credentials = { serverUrl: remote.serverUrl, userId: "owner", email: "owner@test", token: "token" };
+  const registry = createRegistryStore(join(root, "registry.json"));
+  registry.register({ workspaceId: WORKSPACE_ID, rootPath: root, kind: "personal", mode: "local-first", remote });
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Typed immediately before stopping sync.");
+  const closeRelay = vi.fn(async () => {
+    const settledMarkdown = await readFile(join(root, PATH), "utf8");
+    expect(settledMarkdown).toContain("Typed immediately before stopping sync.");
+    // The loopback's file map must observe the artifact written by settlement.
+    seedYdoc("main", settledMarkdown);
+    expect(daemon.leases.size).toBe(0);
+    expect(registry.find(WORKSPACE_ID)?.remote).toBeUndefined();
+    await sessions.closeWorkspace({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID });
+  });
+  const stop = createWorkspaceSyncStop({
+    person: async () => ({ kind: "person", personId: "local" }), cleanupFailed: vi.fn(),
+    pauseStatus: pause => workspaceSyncPauseStatus(pause, "local"),
+    withOwnerHostPaused: work => work(), prepare: () => capture.settleAndCloseLiveSessionsForSyncPause(), resume: async () => {},
+    pauseRemote: (id, pause) => registry.pauseRemote(id, pause), closeActivity: async () => {
+      await expect(capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined })).rejects.toThrow();
+      await capture.settleAndCloseAllLiveSessions();
+      await capture.stop();
+    }, closeRelay,
+    openActivity: async () => {
+      capture = createWorkspaceEngineCapture({ workspaceId: WORKSPACE_ID, rootPath: root,
+        attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions, onError: context => captureErrors.push(context) });
+    }, notify: () => {},
+    status: () => ({ state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
+      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 1,
+      ...(registry.find(WORKSPACE_ID)?.syncPause ? { syncPause: workspaceSyncPauseStatus(registry.find(WORKSPACE_ID)!.syncPause!, "local") } : {}) }),
+  });
+  await expect(stop({ workspace: registry.find(WORKSPACE_ID)!, assertCurrent: () => {} })).resolves.toMatchObject({ workspaceSynced: false, syncPause: { author: { kind: "person", personId: "local", self: true } } });
+  expect(registry.find(WORKSPACE_ID)?.syncPause?.author).toEqual({ kind: "person", personId: "local" });
+  expect(closeRelay).toHaveBeenCalledOnce();
+  const methods = requests.map(request => request.method);
+  expect(methods.indexOf(YDOC_METHOD.settle)).toBeLessThan(methods.indexOf(YDOC_METHOD.close));
+  const local = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  const localEditor = mirrorEditor(local);
+  typeIntoBody(localEditor, "Edited after stopping sync.");
+  await local.settleNow();
+  const localText = await readFile(join(root, PATH), "utf8");
+  expect(localText).toContain("Edited after stopping sync.");
+  expect(localText).toContain("Typed immediately before stopping sync.");
+  await local.close(); editor.destroy(); localEditor.destroy();
+});
+
+it("keeps unsettled live edits available when stopping sync cannot settle them", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  const editor = mirrorEditor(session);
+  typeIntoBody(editor, "Do not drop this unsettled edit.");
+  settleRefusal = wireRefusal("persist-failed", "INTERNAL");
+  await expect(capture.settleAndCloseLiveSessionsForSyncPause()).rejects.toThrow();
+  expect(methodCount(YDOC_METHOD.close)).toBe(0);
+  settleRefusal = null;
+  const resumeAdmission = await capture.settleAndCloseLiveSessionsForSyncPause();
+  expect(await readFile(join(root, PATH), "utf8")).toContain("Do not drop this unsettled edit.");
+  await expect(capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined })).rejects.toThrow();
+  resumeAdmission();
+  const local = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+  await local.close(); editor.destroy();
 });
 
 it("journals a live editor update through the Rust Y.Doc provider and suppresses its mirror write", async () => {

@@ -161,6 +161,9 @@
       "app.responses.list",
       "app.responses.undo"
     ],
+    "stopSync": [
+      "workspace.sync.stop"
+    ],
     "shareCopy": [
       "share.copy.read"
     ],
@@ -169,6 +172,12 @@
     ],
     "accountDelete": [
       "account.delete"
+    ],
+    "historyOperation": [
+      "history.operation.read"
+    ],
+    "historyUndo": [
+      "history.operation.undo"
     ]
   },
   "public": {
@@ -244,8 +253,11 @@
     "automation run": "automation.run.read",
     "automation retry": "automation.run.retry",
     "automation press": "automation.button.press",
+    "sync stop": "workspace.sync.stop",
     "share copy": "share.copy.read",
     "account deletePreview": "account.delete.preview",
-    "account delete": "account.delete"
+    "account delete": "account.delete",
+    "history operation": "history.operation.read",
+    "history undo": "history.operation.undo"
   }
 }

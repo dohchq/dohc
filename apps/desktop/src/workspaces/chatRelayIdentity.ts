@@ -79,23 +79,21 @@ export function resolveShareViewRelayAuthorId(
 }
 
 export function resolveWorkspaceRelayAuthorId(
-  workspace: Pick<RegistryEntry, "remote">,
+  workspace: Pick<RegistryEntry, "remote" | "pausedRemote">,
   credentials: CloudCredentials | null,
 ): string | undefined {
-  if (
-    !workspace.remote ||
-    !workspaceRemoteMatchesCredentials(workspace.remote, credentials)
-  ) {
+  const remote = workspace.remote ?? workspace.pausedRemote;
+  if (!remote || !workspaceRemoteMatchesCredentials(remote, credentials)) {
     return;
   }
-  return workspace.remote.ownerUserId;
+  return remote.ownerUserId;
 }
 
 export function assertSyncEnrollmentCredentials(
-  workspace: Pick<RegistryEntry, "remote">,
+  workspace: Pick<RegistryEntry, "remote" | "pausedRemote">,
   credentials: Pick<CloudCredentials, "serverUrl" | "userId">,
 ): void {
-  const remote = workspace.remote;
+  const remote = workspace.remote ?? workspace.pausedRemote;
   if (!remote) return;
   if (!serverUrlsMatch(remote.serverUrl, credentials.serverUrl)) {
     throw new Error("Sign in to the cloud server this workspace uses.");
@@ -106,7 +104,7 @@ export function assertSyncEnrollmentCredentials(
 }
 
 export async function resolveChatRelayIdentity(input: {
-  workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "sharedChannels" | "shareView">;
+  workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "pausedRemote" | "sharedChannels" | "shareView">;
   credentials: CloudCredentials | null;
   store: ChatRelayIdentityStore;
   target: ChatRelayIdentityTarget;
@@ -128,7 +126,7 @@ export async function resolveChatRelayIdentity(input: {
 // The synchronous half of resolveChatRelayIdentity, for a caller that already
 // resolved the target's joined channel.
 export function chatRelayAuthorId(
-  workspace: Pick<RegistryEntry, "remote" | "shareView">,
+  workspace: Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView">,
   joinedChannel: JoinedSharedChannel | null,
   credentials: CloudCredentials | null,
 ): string | undefined {
@@ -186,7 +184,7 @@ export function readLocalChatActor(message: Pick<ChatMessage, "authorActorKey" |
 }
 
 export async function resolveThreadActorIssuer(input: {
-  readWorkspace(): Pick<RegistryEntry, "workspaceId" | "remote" | "sharedChannels" | "shareView"> | null;
+  readWorkspace(): Pick<RegistryEntry, "workspaceId" | "remote" | "pausedRemote" | "sharedChannels" | "shareView"> | null;
   store: ChatRelayIdentityStore;
   threadId: string;
   // Fence caller attachment/session replacement as well as registry replacement.
@@ -223,7 +221,7 @@ export async function resolveThreadActorIssuer(input: {
       workspaceId, sharedChannels: workspace.sharedChannels, store: guardedStore, target: { threadId },
     });
     check();
-    const serverUrl = joined ? joined.serverUrl : workspace.remote?.serverUrl;
+    const serverUrl = joined ? joined.serverUrl : (workspace.remote ?? workspace.pausedRemote)?.serverUrl;
     if (!serverUrl) return null;
     try {
       return createActorIssuer(serverUrl);

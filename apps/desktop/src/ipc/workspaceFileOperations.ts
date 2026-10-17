@@ -7,6 +7,8 @@ import {
   MoveWorkspacePathPayload,
   DeleteWorkspacePathPayload,
   DeleteWorkspacePathResult,
+  UndoHistoryOperationPayload,
+  UndoHistoryOperationResult,
   ExportWorkspaceZipPayload,
   ExportWorkspaceZipResult,
   ExportDocumentFilePayload,
@@ -66,6 +68,15 @@ export const workspaceFileOperations = {
       reason: "The mutation owner retains renderer admission, writable/share checks, and its mutation lease.",
     },
     payload: DeleteWorkspacePathPayload, result: DeleteWorkspacePathResult,
+  },
+  undoHistoryOperation: {
+    capabilityId: "history.operation.undo", channel: "desktop:undo-history-operation",
+    scope: "workspace", guard: "trusted-sender",
+    handlerCheck: {
+      check: "workspaceFileMutationOwner.runAdmittedMutation + undoWorkspaceHistoryOperation/withExclusiveWorkspaceOperation",
+      reason: "The mutation owner retains renderer admission, writable/share checks, and its mutation lease.",
+    },
+    payload: UndoHistoryOperationPayload, result: UndoHistoryOperationResult,
   },
   exportWorkspaceZip: {
     capabilityId: "file.zip.export", channel: "desktop:export-workspace-zip",

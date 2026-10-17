@@ -17,6 +17,17 @@ const WORKSPACE = resolve("/workspace");
 const PROJECT = resolve("/workspace/project");
 
 const TOKEN = "a".repeat(64);
+it("stops sync through main without a caller-supplied workspace or identity", async () => {
+  const request = vi.fn(async () => ({ ok: true, workspaceId: "workspace", workspaceSynced: false }));
+  const result = await executeCli({ argv: ["sync", "stop", "--json", "--as-agent", "--agent", "Claude"], cwd: "/workspace", env: {}, request });
+  expect(result.exitCode).toBe(0);
+  expect(request).toHaveBeenCalledWith(expect.objectContaining({
+    verb: "stopSync", args: { cwd: resolve("/workspace"), actor: "agent", agent: "Claude" },
+  }));
+  expect(JSON.parse(result.stdout)).toMatchObject({ workspaceSynced: false });
+  expect((await executeCli({ argv: ["sync", "stop", "other-workspace"], env: {}, request })).exitCode).toBe(1);
+});
+
 it("lists Button inspection states and confirmations through the desktop socket", async () => {
   const result = { ok: true, buttons: [{ field: "Send", state: { kind: "ready", automationId: "collection:Billing#send", irreversible: [{ name: "destination/send", label: "Send" }] } },
     { field: "Later", state: { kind: "unchecked", reason: "Host unavailable" } }] };
@@ -161,6 +172,20 @@ describe("executeCli", () => {
       expect.any(String),
       expectedTimeoutMs,
     );
+  });
+
+  it.each([undefined, 1234])("waits up to 90 seconds for Undo, preserving an explicit timeout (%s)", async timeoutMs => {
+    const stateDir = await tempStateDir();
+    const transport = vi.fn(async () => ({
+      protocolVersion: CLI_PROTOCOL_VERSION, ok: true,
+      result: { ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [] },
+    }));
+    const result = await executeCli({
+      argv: ["history", "undo", "dohc-operation:11111111-1111-4111-8111-111111111111"],
+      env: {}, client: { stateDir, transport, platform: "linux", ...(timeoutMs === undefined ? {} : { timeoutMs }) },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(transport).toHaveBeenCalledWith(join(stateDir, "dohc-cli.sock"), expect.any(String), timeoutMs ?? 90_000);
   });
 
   it("passes the ambient run id through every chat write request only", async () => {

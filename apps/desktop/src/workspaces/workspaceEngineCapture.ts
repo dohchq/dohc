@@ -593,6 +593,7 @@ export interface WorkspaceEngineCapture {
   // Workspace lifecycle close: flush and retire every live editor session
   // before the capture releases its store.
   settleAndCloseAllLiveSessions(): Promise<void>;
+  settleAndCloseLiveSessionsForSyncPause(): Promise<() => void>;
   // Version operations (PR 0M-4). Mutating operations run on the capture
   // chain; reads are served directly by the store (which already orders
   // reads after its own writes). All reject to the caller on failure.
@@ -1736,7 +1737,7 @@ export function createWorkspaceEngineCapture(
   let observationResync: Promise<void> = Promise.resolve();
   let stopped = false;
   let shuttingDown = false;
-  const ydocOpenAbort = new AbortController();
+  let ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
   let daemonCaptureHealthQueued = false;
@@ -4124,13 +4125,14 @@ export function createWorkspaceEngineCapture(
       // failed there — holding the chain for that ladder and rejecting with a
       // rebind error the surface reads as an ordinary fallback, which is the
       // writable plain editor this bound exists to prevent.
-      return enqueueResult("open ydoc session", () =>
-        options.rustEngineSessions.withRetryBudget(
+      return enqueueResult("open ydoc session", () => {
+        ydocOpenAbort.signal.throwIfAborted();
+        return options.rustEngineSessions.withRetryBudget(
           YDOC_OPEN_RETRY_DEADLINE_MS,
           openYDocSessionTask,
           ydocOpenAbort.signal,
-        ),
-      );
+        );
+      });
 
       async function openYDocSessionTask(): Promise<WorkspaceEngineYDocProviderSession | RecordEditSession> {
         // This session's own place in time, captured before anything else
@@ -5957,6 +5959,29 @@ export function createWorkspaceEngineCapture(
           "Saved latest edits before closing the workspace",
         ),
       );
+    },
+
+    async settleAndCloseLiveSessionsForSyncPause() {
+      const admission = ydocOpenAbort;
+      admission.abort();
+      const resumeAdmission = () => {
+        if (ydocOpenAbort === admission && !stopped && !captureWaitAbort.signal.aborted) {
+          ydocOpenAbort = new AbortController();
+        }
+      };
+      try {
+        await enqueueResult("close live sessions for sync pause", () =>
+          settleAndCloseLiveYDocSessions(
+            () => true,
+            "Saved latest edits before stopping sync",
+          ),
+        );
+      } catch (error) {
+        resumeAdmission();
+        throw error;
+      }
+      // Keep admission closed until capture retires or the caller cancels the pause.
+      return resumeAdmission;
     },
 
     async listVersions() {

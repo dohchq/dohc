@@ -1,3 +1,5 @@
+import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
+import { WorkspaceSyncPause, workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
@@ -64,6 +66,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_publish_app: Object.values(APP_PUBLICATION_CAPABILITIES),
   dohc_list_workspaces: ["workspace.list"],
   dohc_workspace_status: ["workspace.status"],
+  dohc_stop_workspace_sync: ["workspace.sync.stop"],
   dohc_list_changes: ["history.list"],
   dohc_list_kept_copies: ["file.kept.list"],
   dohc_save_kept_copy: ["file.kept.save"],
@@ -76,6 +79,8 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_create_document: ["document.create"],
   dohc_write_file: ["file.write"],
   dohc_create_directory: ["folder.create"],
+  dohc_read_operation: ["history.operation.read"],
+  dohc_undo_operation: ["history.operation.undo"],
   dohc_move_path: ["file.move"],
   dohc_delete_path: ["file.delete"],
   dohc_detect_apps: ["app.detect"],
@@ -867,6 +872,8 @@ interface RegistryWorkspace {
   kind: string;
   mode?: string;
   remote?: RemoteIdentity;
+  pausedRemote?: RemoteIdentity;
+  syncPause?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause;
   confirmedRemovedShares?: Array<{ shareId: string; removedAtMs: number }>;
 }
 
@@ -1030,6 +1037,11 @@ function removedShareStatus(workspace: RegistryWorkspace | null) {
   return removedShares.length ? {removedShares} : {};
 }
 
+export async function stopWorkspaceSync(ctx: ToolContext, agent?: string) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to stop its sync." };
+  return requestCli(ctx, "stopSync", { ...(agent ? { agent } : {}) });
+}
+
 export async function workspaceStatus(ctx: ToolContext) {
   const [manifest, remote, credentials, entry] = await Promise.all([
     readSyncManifest(ctx),
@@ -1038,8 +1050,16 @@ export async function workspaceStatus(ctx: ToolContext) {
     findWorkspaceEntry(ctx),
   ]);
   const serverUrl = remote?.serverUrl ?? manifest?.serverUrl;
-  const synced = remote !== null || nonEmptyString(manifest?.serverUrl);
+  const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
   const credential = credentialStatusFor(remote, credentials);
+  const pause = !entry?.shareView ? WorkspaceSyncPause.safeParse(entry?.syncPause) : null;
+  let syncPause: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseStatus | undefined;
+  if (pause?.success) {
+    const identity = pause.data.author.kind === "person"
+      ? await readJson<unknown>(join(ctx.home, "dohc-local-id.json")) : null;
+    const personId = isRecord(identity) && typeof identity.id === "string" ? identity.id : null;
+    syncPause = workspaceSyncPauseStatus(pause.data, personId);
+  }
   return {
     ...(entry?.shareView ? {receivedShare: {
       subjectName: normalizeShareLabel(entry.shareView.subjectName) ?? shareSubjectFallback(entry.shareView.grantedSelector),
@@ -1047,6 +1067,7 @@ export async function workspaceStatus(ctx: ToolContext) {
       access: ctx.shareAccess ?? null,
     }} : {}),
     synced,
+    ...(syncPause ? { syncPause } : {}),
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
@@ -1871,6 +1892,17 @@ async function requestCli<Verb extends CliVerb>(
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
+}
+
+export async function readOperation(ctx: ToolContext, args: { operationId: string; cursor?: string }) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };
+  if (!HistoryOperationId.safeParse(args.operationId).success) return { ok: false as const, reason: "Use an operation id from history list: dohc-operation: followed by a UUID." };
+  return requestCli(ctx, "historyOperation", args);
+}
+export async function undoOperation(ctx: ToolContext, args: { operationId: string }, agent?: string) {
+  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };
+  if (!HistoryOperationId.safeParse(args.operationId).success) return { ok: false as const, reason: "Use an operation id from history list: dohc-operation: followed by a UUID." };
+  return requestCli(ctx, "historyUndo", { operationId: args.operationId, ...(agent ? { agent } : {}) });
 }
 
 export async function getShareCopyDetails(ctx: ToolContext, input: unknown) {

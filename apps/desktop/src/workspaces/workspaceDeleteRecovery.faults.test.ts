@@ -1,13 +1,18 @@
-import { chmod, mkdir, readFile, readdir, readlink, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { readDeleteRecovery, undoDeleteRecovery } from "./workspaceDeleteRecovery";
+import { undoWorkspaceHistoryOperation } from "./workspaceHistoryOperations";
+import { chmod, mkdir, readFile, readdir, readlink, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { existsSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { createTestScratch } from "./testTemp";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
-import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, undoWorkspaceDelete, type PathChangeOptions } from "./workspaceFileMoves";
+import { executeCli } from "@dohc/cli";
+import { undoOperation } from "@dohc/mcp/tools";
+import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
+import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
 
-const faults = vi.hoisted(() => ({ openError: "", opened: [] as string[], reads: [] as string[], recordSaves: 0, failRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false, beforePublish: undefined as undefined | ((target: string) => Promise<void>), copyTemps: [] as string[], copyTarget: "", sourceLimit: false, failRemove: false, beforeResume: undefined as undefined | (() => Promise<void>), modeCalls: [] as string[] }));
+const faults = vi.hoisted(() => ({ removeAfterStat: "", openError: "", opened: [] as string[], reads: [] as string[], recordSaves: 0, failRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false, beforePublish: undefined as undefined | ((target: string) => Promise<void>), copyTemps: [] as string[], copyTarget: "", sourceLimit: false, failRemove: false, beforeResume: undefined as undefined | (() => Promise<void>), modeCalls: [] as string[] }));
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
   return { ...actual,
@@ -21,7 +26,7 @@ vi.mock("node:fs/promises", async original => {
       }
       return actual.rm(...args);
     },
-    lstat: async (path: string) => { const entry = await actual.lstat(path); faults.visited.push(String(path)); return entry; },
+    lstat: async (path: string) => { const entry = await actual.lstat(path); if (String(path) === faults.removeAfterStat) await actual.rm(path); faults.visited.push(String(path)); return entry; },
     unlink: async (path: string) => {
       if (String(path) === faults.blockedPrune) { faults.pruneAttempts++; throw Object.assign(new Error("record held open"), { code: "EPERM" }); }
       return actual.unlink(path);
@@ -88,7 +93,7 @@ async function fixture(systemAccepts = false, tracked = ["folder/tracked.txt"]) 
   const write = async (path: string, body: string) => { await mkdir(join(root, "folder"), { recursive: true }); await writeFile(join(root, path), body); };
   await write("folder/tracked.txt", "tracked");
   await write("folder/rowless.txt", "not retained");
-  const operation = { state: {}, signal: new AbortController().signal, workspace: { attachmentId: Symbol(), rootPath: root, readOnly: false, shareView: undefined as unknown }, assertCurrent: vi.fn() };
+  const operation = { state: {}, signal: new AbortController().signal, workspace: { workspaceId: "test", attachmentId: Symbol(), rootPath: root, readOnly: false, shareView: undefined as unknown }, assertCurrent: vi.fn() };
   const recordDelete = vi.fn(async () => "moment");
   const capture: PathChangeOptions["capture"] = { changePathsAs: async (_paths, _author, work) =>
     work({ policy: await readWorkspaceEnginePolicy(root), recordDisk: async () => tracked, delete: recordDelete } as never) };
@@ -96,11 +101,11 @@ async function fixture(systemAccepts = false, tracked = ["folder/tracked.txt"]) 
     if (!systemAccepts) throw new Error("OS refuses");
     await rm(path, { recursive: true });
   } };
-  const history = { undoHistoryOperation: vi.fn(async () => ({ operationId: "unused", versionId: "main", momentCount: 1,
+  const history = { readHistoryPage: vi.fn(async () => ({ moments: tracked.map(path => ({ operation: "delete", path })), protectedMoments: [], nextCursor: null }) as never), undoHistoryOperation: vi.fn(async () => ({ operationId: "unused", versionId: "main", momentCount: 1,
     compensationOperationId: "undo", deduped: false, materialized: false })) };
   const remove = (hand = false) => hand ? deleteWorkspacePathByHand(operation, "folder", person, options)
     : prepareDeleteWorkspacePathAs(operation, "folder", person, options).then(finish => finish());
-  const undo = (id: string, requestId = "first") => undoWorkspaceDelete(operation, { operationId: id, requestId }, person, { workspaceId: "test", history });
+  const undo = (id: string) => undoWorkspaceHistoryOperation(operation, { operationId: id }, person, { agent: false, history });
   return { root, write, remove, undo, operation, recordDelete, history, options };
 }
 async function deleted(f: Awaited<ReturnType<typeof fixture>>) {
@@ -110,6 +115,35 @@ async function deleted(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe("delete recovery failures", () => {
+  it("names the deleted folder when a resumed restore finds a file at its path", async () => {
+    const f = await fixture(false, []);
+    const id = await deleted(f);
+    const record = (await readDeleteRecovery(f.root, id))!;
+    record.engine = { materialized: true, momentCount: 0 };
+    await writeFile(join(f.root, "folder"), "occupant");
+    const result = await undoDeleteRecovery(f.root, record, person, f.history, "test", () => undefined, () => undefined);
+    expect(result).toMatchObject({ ok: true, restored: [], remaining: [{ path: "folder", retry: false,
+      reason: `folder now occupies the old path. The deleted folder stays at .dohc/trash/${record.staged}.` }] });
+    expect(await readFile(join(f.root, "folder"), "utf8")).toBe("occupant");
+    expect(await readFile(join(f.root, ".dohc/trash", record.staged!, "rowless.txt"), "utf8")).toBe("not retained");
+    expect(await f.undo(id)).toEqual(result);
+  });
+  it("reports a missing trash copy when a folder occupies an interrupted copy's path", async () => {
+    const f = await fixture(); const id = await deleted(f);
+    faults.copyOnly = true; faults.failCopy = "write";
+    try {
+      expect(await f.undo(id)).toMatchObject({ remaining: [{ retry: true }] });
+      faults.failCopy = "";
+      await rm(faults.copyTarget); await mkdir(faults.copyTarget);
+      const record = (await readDeleteRecovery(f.root, id))!;
+      faults.removeAfterStat = join(f.root, ".dohc/trash", record.staged!, "rowless.txt");
+      const result = await undoDeleteRecovery(f.root, record, person, f.history, "test", () => undefined, () => undefined);
+      expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt", retry: false,
+        reason: "folder/rowless.txt now occupies the old path. Its trash copy is gone." }] });
+      expect(await f.undo(id)).toEqual(result);
+      expect((await stat(faults.copyTarget)).isDirectory()).toBe(true);
+    } finally { faults.copyOnly = false; faults.failCopy = ""; faults.removeAfterStat = ""; }
+  });
   it.each([false, true])("restores a read-only rowless file without reopening it for writing (copy=%s)", async copyOnly => {
     const f = await fixture();
     await chmod(join(f.root, "folder/rowless.txt"), 0o444);
@@ -153,7 +187,7 @@ describe("delete recovery failures", () => {
     const id = await deleted(f);
     f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("old tracked path occupied"));
     expect(await f.undo(id)).toEqual({ ok: false, reason: "old tracked path occupied" });
-    expect(await f.undo(id, "second")).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
+    expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
     const calls = f.history.undoHistoryOperation.mock.calls as unknown as [{ requestId: string }][];
     expect(calls.map(([input]) => input.requestId)).toEqual([`delete-undo:${id}`, `delete-undo:${id}`]);
   });
@@ -164,7 +198,7 @@ describe("delete recovery failures", () => {
       operationId: id, versionId: "main", momentCount: 1, compensationOperationId: "undo", deduped: false, materialized: false,
     }; });
     expect(await f.undo(id)).toMatchObject({ ok: false });
-    expect(await f.undo(id, "second")).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
+    expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"] });
   });
   it.each([false, true])("a failed recovery save does not fail a completed delete (hand=%s)", async hand => {
     const f = await fixture();
@@ -291,11 +325,16 @@ describe("delete recovery placement and receipts", () => {
         if (change === "parent link") await symlink(trash, join(f.root, "folder"), process.platform === "win32" ? "junction" : "dir");
       }
       const result = await f.undo(id);
-      expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt",
+      if (change === "parent link") {
+        expect(result).toEqual({ ok: false, reason: "Cannot undo the delete. folder/rowless.txt now leads somewhere else." });
+        return;
+      }
+      expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt", retry: change !== "source",
         reason: change === "source"
           ? "folder/rowless.txt may be incomplete. Its trash copy is gone."
           : `dohc could not put folder/rowless.txt back. It stays at .dohc/trash/${staged}/rowless.txt.`,
       }] });
+      if (change === "source") expect(await f.undo(id)).toEqual(result);
       expect(existsSync(faults.copyTarget)).toBe(change === "source");
       if (change !== "source") expect(await readFile(join(trash, staged, "rowless.txt"), "utf8")).toBe("not retained");
     } finally { faults.copyOnly = false; faults.failCopy = ""; faults.failPlace = false; }
@@ -388,7 +427,7 @@ describe("delete recovery placement and receipts", () => {
       expect((await stat(faults.copyTarget)).mode & 0o222).toBe(0);
     } finally { faults.sourceLimit = false; faults.failRemove = false; faults.readOnly = false; }
   });
-  it.each([["write", "same"], ["write", "fresh"], ["flush", "same"], ["close", "same"], ["readonly", "same"], ["readonly-write", "same"]])("retries an interrupted owned copy (%s, %s request id)", async (failure, request) => {
+  it.each(["write", "flush", "close", "readonly", "readonly-write"])("retries an interrupted owned copy (%s)", async failure => {
     const f = await fixture();
     if (failure === "readonly-write") await chmod(faults.copyTarget, 0o444);
     const id = await deleted(f);
@@ -402,7 +441,7 @@ describe("delete recovery placement and receipts", () => {
       expect(record.copies.find((copy: { path: string }) => copy.path === "folder/rowless.txt")).toMatchObject({ ino: (await stat(faults.copyTarget)).ino, size: 12 });
       faults.failCopy = ""; faults.failFlush = false;
       if (failure === "readonly" || failure === "readonly-write") { await chmod(faults.copyTarget, 0o444); faults.readOnly = true; }
-      expect(await f.undo(id, request === "same" ? "first" : "next")).toMatchObject({ restored: ["folder/rowless.txt"], remaining: [] });
+      expect(await f.undo(id)).toMatchObject({ restored: ["folder/rowless.txt"], remaining: [] });
       expect(await readFile(faults.copyTarget, "utf8")).toBe("not retained");
     } finally { faults.copyOnly = false; faults.failCopy = ""; faults.failFlush = false; faults.failRemove = false; faults.readOnly = false; }
   });
@@ -462,7 +501,7 @@ describe("delete recovery placement and receipts", () => {
       const trash = join(f.root, ".dohc/trash");
       const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
       expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt",
-        reason: `folder/rowless.txt now occupies the old path. The deleted file stays at .dohc/trash/${staged}/rowless.txt.` }] });
+        retry: false, reason: `folder/rowless.txt now occupies the old path. The deleted file stays at .dohc/trash/${staged}/rowless.txt.` }] });
       expect(await readFile(join(trash, staged, "rowless.txt"), "utf8")).toBe("not retained");
     } finally { faults.copyOnly = false; faults.beforePublish = undefined; }
   });
@@ -546,7 +585,7 @@ describe("delete recovery placement and receipts", () => {
     const id = await deleted(f);
     const first = await f.undo(id);
     f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("engine down or author mismatch"));
-    expect(await f.undo(id, "next")).toEqual(first);
+    expect(await f.undo(id)).toEqual(first);
   });
   it("restores a relative directory link from its original location", async () => {
     const f = await fixture();
@@ -567,7 +606,7 @@ describe("delete recovery placement and receipts", () => {
     expect(await f.undo(id)).toMatchObject({ tracked: { state: "restoring", momentCount: 1 } });
     f.history.undoHistoryOperation.mockResolvedValueOnce({ operationId: id, versionId: "main", momentCount: 1,
       compensationOperationId: "undo", deduped: true, materialized: true });
-    expect(await f.undo(id, "next")).toMatchObject({ tracked: { state: "restored", momentCount: 1 } });
+    expect(await f.undo(id)).toMatchObject({ tracked: { state: "restored", momentCount: 1 } });
   });
   it.each([false, true])("names a missing staged source before engine commit (whole folder=%s)", async whole => {
     const f = await fixture();
@@ -586,11 +625,11 @@ describe("delete recovery placement and receipts", () => {
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     await vi.waitFor(() => expect(faults.visited).toContain(join(trash, record)));
     await utimes(join(trash, record), new Date(0), new Date(0));
-    expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining("missing or expired") });
+    expect(await f.undo(id)).toMatchObject({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
     await f.write("folder/tracked.txt", "new");
     await f.write("folder/rowless.txt", "new");
     await f.remove();
-    expect(await readdir(trash)).not.toContain(record);
+    expect(await readdir(trash)).toContain(record);
     expect(await readFile(join(trash, staged, "rowless.txt"), "utf8")).toBe("not retained");
   });
   it.runIf(process.platform === "win32")("offers no Undo for an 8.3-shaped name", async () => {
@@ -609,4 +648,38 @@ describe("delete recovery placement and receipts", () => {
     await writeFile(join(outside, "original.txt"), "original target");
     expect(await readFile(join(f.root, "folder/link/original.txt"), "utf8")).toBe("original target");
   });
+});
+
+it.each(["ipc", "cli", "mcp"] as const)("shows an occupied pending copy and retries it through %s", async door => {
+  const f = await fixture(); const id = await deleted(f);
+  faults.copyOnly = true; faults.failCopy = "write";
+  try {
+    expect(await f.undo(id)).toMatchObject({ remaining: [{ retry: true }] });
+    faults.failCopy = ""; await rm(faults.copyTarget); await writeFile(faults.copyTarget, "occupant");
+    const owner = createWorkspaceFileMutationOwner({
+      historyFor: () => f.history, assertTrustedSender: () => undefined,
+      withRendererWorkspaceOperation: async (_event, _id, work) => work({ workspace: f.operation.workspace,
+        authorityId: f.operation.workspace.attachmentId, capture: null,
+        yDocSessions: { withDocumentUnowned: async (_id, _path, work) => work(), markDeletedUnderPath: () => undefined }, assertCurrent: () => undefined }),
+      shareViewFiles: { change: async () => { throw new Error("No share writes"); } }, trashItem: async () => undefined,
+      localPerson: async () => person, notifyRenderer: () => undefined, shareViewEdited: () => undefined, logError: () => undefined,
+    });
+    const call = async () => {
+      if (door === "ipc") return owner.undoHistoryOperation({}, { workspaceId: "test", operationId: id });
+      if (door === "mcp") return undoOperation({ root: f.root, home: f.root, request: async () => f.undo(id) }, { operationId: id });
+      return executeCli({ argv: ["history", "undo", id], cwd: f.root, request: async () => f.undo(id) });
+    };
+    const recordBefore = (await readDeleteRecovery(f.root, id))!;
+    const reason = `folder/rowless.txt now occupies the old path. Move it first. The deleted file stays at .dohc/trash/${recordBefore.staged}/rowless.txt.`;
+    const occupied = await call();
+    if (door === "cli") expect(occupied).toMatchObject({ exitCode: 1, stdout: expect.stringContaining(reason) });
+    else expect(occupied).toMatchObject({ ok: true, remaining: [{ retry: true, reason }] });
+    expect(await readFile(faults.copyTarget, "utf8")).toBe("occupant");
+    await rename(faults.copyTarget, faults.copyTarget + ".occupant");
+    const finished = await call();
+    if (door === "cli") expect(finished).toMatchObject({ exitCode: 0 }); else expect(finished).toMatchObject({ ok: true, remaining: [] });
+    expect(await readFile(faults.copyTarget, "utf8")).toBe("not retained");
+    const record = JSON.parse(await readFile(join(f.root, ".dohc/trash", (await readdir(join(f.root, ".dohc/trash"))).find(name => name.endsWith(".json"))!), "utf8"));
+    expect(JSON.stringify(record)).not.toContain('"retry"');
+  } finally { faults.copyOnly = false; faults.failCopy = ""; }
 });

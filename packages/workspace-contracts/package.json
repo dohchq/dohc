@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./workspace-sync": "./src/workspaceSync.ts",
     "./actor-presentation": "./src/actorPresentation.ts",
     "./workspace-ref": "./src/workspaceRef.ts",
     "./actor-identity": "./src/actorIdentity.ts",
@@ -26,6 +27,7 @@
     "./domain": "./src/domain.ts",
     "./domain-values": "./src/domainValues.ts",
     "./engine": "./src/engine.ts",
+    "./history-operation": "./src/historyOperation.ts",
     "./file-version": "./src/fileVersion.ts",
     "./kinds": "./src/kinds.ts",
     "./live-documents": "./src/liveDocuments.ts",

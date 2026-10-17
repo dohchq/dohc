@@ -30,6 +30,8 @@
     "grep",
     "groups",
     "groupsFull",
+    "historyOperation",
+    "historyUndo",
     "inbox",
     "keptCopies",
     "moment",
@@ -41,6 +43,7 @@
     "saveKeptCopy",
     "shareCopy",
     "show",
+    "stopSync",
     "threads"
   ],
   "internalVerbs": [
@@ -78,6 +81,8 @@
     "fileChats",
     "grep",
     "groups",
+    "historyOperation",
+    "historyUndo",
     "inbox",
     "moment",
     "moments",
@@ -87,9 +92,11 @@
     "reply",
     "shareCopy",
     "show",
+    "stopSync",
     "threads"
   ],
   "publicGroups": [
+    "sync",
     "access",
     "share",
     "document",
@@ -101,6 +108,7 @@
     "account"
   ],
   "publicVerbs": [
+    "sync stop",
     "access object",
     "access sharing",
     "share copy",
@@ -165,6 +173,8 @@
     "app reviewReactivation",
     "app responses",
     "app undo-responses",
+    "history operation",
+    "history undo",
     "history list",
     "history show",
     "automation list",
@@ -181,13 +191,14 @@
     "top": {
       "prefix": "Usage: dohc <command> <verb> [arguments] [options]\n\nRun dohc inside a workspace folder while the dohc app is open.\n\nCommands:\n",
       "commands": [
+        {"group":"sync","block":"  sync         Stop syncing this workspace on this computer.\n               stop\n"},
         {"group":"access","block":"  access       Read observed object grants and Sharing inventories.\n               object, sharing\n"},
         {"group":"share","block":"  share        Read copy details for an owned share grant.\n               copy\n"},
         {"group":"document","block":"  document     Read, edit, and create live Markdown documents. List and start\n               chats on tracked files.\n               read, edit, create, chats, comment\n"},
         {"group":"chat","block":"  chat         Read and post in Groups and threads.\n               groups, threads, inbox, show, post, reply, react, grep, export\n"},
         {"group":"dataset","block":"  dataset      Create, change, and use transactional Collections.\n               list, describe, history, historyRevision, prepareHistoryRestore,\n               permissions, setGrant, removeGrant, lifecycle, archive, restore,\n               deletePreview, delete, pendingAttempts, reconcileAttempt,\n               cancelAttempt, export, prepareRecovery, claimRecovery,\n               discardRecovery, upload, file, createForm,\n               prepareRelationChoices, create, prepare, approve, discard,\n               prepareMigration, migrationPreviewPage, prepareSchemaChange,\n               approveMigration, discardMigration, invoke\n"},
         {"group":"app","block":"  app          Approve, open, and share apps.\n               createLink, listLocal, prepareLocal, launchLocal, list, prepare,\n               approve, cancel, withdraw, revokeCollection, reviewReactivation,\n               responses, undo-responses\n"},
-        {"group":"history","block":"  history      Read the changes History records for files.\n               list, show\n"},
+        {"group":"history","block":"  history      Read History changes and undo deletes.\n               operation, undo, list, show\n"},
         {"group":"automation","block":"  automation   Press Button fields, read an automation's runs, and try a failed\n               run again.\n               list, switch, buttons, runs, run, retry, press\n"},
         {"group":"account","block":"  account      Review and delete the server account the dohc app is connected\n               to.\n               deletePreview, delete\n"}
       ],
@@ -263,7 +274,9 @@
     "app reviewReactivation": "Usage: dohc app reviewReactivation '<JSON>' [options]\n\nPrepare a stopped publication to publish again.\n\nFields: workspaceId, publicationId\nReview the result, then approve.\n\nRun dohc inside a workspace folder while the dohc app is open.\nEach verb takes one JSON object that names workspaceId. Find workspaceId in\n.dohc/manifest.json at the workspace root.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
     "app responses": "Usage: dohc app responses '<JSON>' [options]\n\nList responses link holders sent through a share link.\n\nFields: workspaceId, grantId\nOptional fields: publicPrincipalId, afterAcceptanceId, limit\n\nRun dohc inside a workspace folder while the dohc app is open.\nEach verb takes one JSON object that names workspaceId. Find workspaceId in\n.dohc/manifest.json at the workspace root.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
     "app undo-responses": "Usage: dohc app undo-responses '<JSON>' [options]\n\nRemove responses link holders sent through a share link.\n\nFields: workspaceId, grantId, operationId\nOptional fields: publicPrincipalId, afterAcceptanceId, limit\noperationId names this removal. Retry failed items with the same operationId.\n\nRun dohc inside a workspace folder while the dohc app is open.\nEach verb takes one JSON object that names workspaceId. Find workspaceId in\n.dohc/manifest.json at the workspace root.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
-    "history": "Usage: dohc history <verb> [arguments] [options]\n\nRead the changes History records for files.\n\nVerbs:\n  list   List changes to files, newest first.\n  show   Print a file's text as one change left it.\n\nRun dohc inside a workspace folder while the dohc app is open.\nChanges come from the active version of the workspace.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc history <verb> --help to see its arguments and options.\n",
+    "history": "Usage: dohc history <verb> [arguments] [options]\n\nRead History changes and undo deletes.\n\nVerbs:\n  operation   List the paths changed by one operation.\n  undo        Undo a delete recorded in History.\n  list        List changes to files, newest first.\n  show        Print a file's text as one change left it.\n\nRun dohc inside a workspace folder while the dohc app is open.\nChanges come from the active version of the workspace.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc history <verb> --help to see its arguments and options.\n",
+    "history operation": "Usage: dohc history operation <operation> [options]\n\nList the paths changed by one operation.\n\nRun dohc inside a workspace folder while the dohc app is open.\nChanges come from the active version of the workspace.\n\nOptions:\n  --cursor <cursor>   Continue from the cursor on the previous operation page.\n  --as-agent          Post and read chat as an agent.\n  --json              Print the result as JSON.\n  --help              Show help. -h does the same.\n",
+    "history undo": "Usage: dohc history undo <operation> [options]\n\nUndo a delete recorded in History.\n\nRun dohc inside a workspace folder while the dohc app is open.\nChanges come from the active version of the workspace.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
     "history list": "Usage: dohc history list [<path>] [options]\n\nList changes to files, newest first.\n\nWith a path, list that file's own changes, across its renames. Each line starts\nwith the change's ID.\n\nRun dohc inside a workspace folder while the dohc app is open.\nChanges come from the active version of the workspace.\n\nOptions:\n  --limit <count>   List at most this many changes. The default is 50, the most\n                    500.\n  --as-agent        Post and read chat as an agent.\n  --json            Print the result as JSON.\n  --help            Show help. -h does the same.\n",
     "history show": "Usage: dohc history show <change> [options]\n\nPrint a file's text as one change left it.\n\nFind the change's ID with history list. With --json, print both sides and the\nchange's details.\n\nRun dohc inside a workspace folder while the dohc app is open.\nChanges come from the active version of the workspace.\n\nOptions:\n  --before     Print the text from before the change instead.\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
     "automation": "Usage: dohc automation <verb> [arguments] [options]\n\nPress Button fields, read an automation's runs, and try a failed run again.\n\nVerbs:\n  list      Read a Collection's automation definitions and on/off file state.\n  switch    Switch one automation on or off in its file.\n  buttons   Inspect Button fields and the actions they require you to confirm.\n  runs      List an automation's runs on this computer, newest first.\n  run       Show one run: what started it, what each step changed, and why it\n            failed.\n  retry     Try a failed run again. It resumes after the last step that\n            finished.\n  press     Press a Button field on one record, as a person clicks it in dohc.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Collection by its folder in the workspace, and an automation by its id in\nthe Collection's automations.yaml.\nEach computer keeps the runs of the automations it ran. Try again follows the\nsame rules as in dohc.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc automation <verb> --help to see its arguments and options.\n",
@@ -276,6 +289,8 @@
     "automation press": "Usage: dohc automation press <collection> <button> <record> [options]\n\nPress a Button field on one record, as a person clicks it in dohc.\n\nName the record by its id, or a dataset record by its primary key as JSON.\nThe press prints the id of the run it started. Follow it with automation run.\nWith --as-agent, the press is recorded as the agent's, for you. A press from an\nagent run that an automation started is the agent's too, and counts in that\nchain of automations, which stops after 4 steps.\nIn a shared view, a press goes to the owner's computer, which runs it, as in\ndohc.\n\nRun dohc inside a workspace folder while the dohc app is open.\nName a Collection by its folder in the workspace, and an automation by its id in\nthe Collection's automations.yaml.\nEach computer keeps the runs of the automations it ran. Try again follows the\nsame rules as in dohc.\n\nOptions:\n  --table <table>      Name the table when the button is in more than one table\n                       of a dataset Collection.\n  --confirm <action>   Run this action, which dohc cannot undo. The press names\n                       each action it would run. Repeat for more actions.\n  --request-id <id>    Send the same id again, after a timeout for example, to\n                       get the same press instead of a second one.\n  --as-agent           Post and read chat as an agent.\n  --json               Print the result as JSON.\n  --help               Show help. -h does the same.\n",
     "account": "Usage: dohc account <verb> [arguments] [options]\n\nReview and delete the server account the dohc app is connected to.\n\nVerbs:\n  deletePreview   List what deleting the connected server account removes.\n  delete          Delete the connected server account and the workspaces it owns\n                  on the server.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUnlike other commands, account verbs also work outside a workspace folder.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc account <verb> --help to see its arguments and options.\n",
     "account deletePreview": "Usage: dohc account deletePreview [options]\n\nList what deleting the connected server account removes.\n\nThe result holds the server and previewToken that delete needs. The token\nexpires after five minutes.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUnlike other commands, account verbs also work outside a workspace folder.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n",
-    "account delete": "Usage: dohc account delete [options]\n\nDelete the connected server account and the workspaces it owns on the server.\n\ndohc reads the account password from stdin, or asks for it when stdin is a\nterminal. Never pass it as an argument.\nThis cannot be undone. Copies on this computer stay. People you shared with lose\naccess and keep their copies.\nIf you create an account again later, the server will not accept your old copies\nof the deleted workspaces. Its backups keep the data until they expire.\nWhen the server cannot finish at once, the account stays blocked and the server\nfinishes later. Either way, the dohc app disconnects from the server. If it\ncannot, delete exits 1 and says how to finish.\nIf the preview expired or changed, run deletePreview again.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUnlike other commands, account verbs also work outside a workspace folder.\n\nOptions:\n  --server <address>        Use server from deletePreview. Required.\n  --preview-token <token>   Use previewToken from deletePreview. Required.\n  --as-agent                Post and read chat as an agent.\n  --json                    Print the result as JSON.\n  --help                    Show help. -h does the same.\n"
+    "account delete": "Usage: dohc account delete [options]\n\nDelete the connected server account and the workspaces it owns on the server.\n\ndohc reads the account password from stdin, or asks for it when stdin is a\nterminal. Never pass it as an argument.\nThis cannot be undone. Copies on this computer stay. People you shared with lose\naccess and keep their copies.\nIf you create an account again later, the server will not accept your old copies\nof the deleted workspaces. Its backups keep the data until they expire.\nWhen the server cannot finish at once, the account stays blocked and the server\nfinishes later. Either way, the dohc app disconnects from the server. If it\ncannot, delete exits 1 and says how to finish.\nIf the preview expired or changed, run deletePreview again.\n\nRun dohc inside a workspace folder while the dohc app is open.\nUnlike other commands, account verbs also work outside a workspace folder.\n\nOptions:\n  --server <address>        Use server from deletePreview. Required.\n  --preview-token <token>   Use previewToken from deletePreview. Required.\n  --as-agent                Post and read chat as an agent.\n  --json                    Print the result as JSON.\n  --help                    Show help. -h does the same.\n",
+    "sync": "Usage: dohc sync <verb> [arguments] [options]\n\nStop syncing this workspace on this computer.\n\nVerbs:\n  stop   Stop this computer's sync after saving live document edits.\n\nRun dohc inside a workspace folder while the dohc app is open.\nLocal files, documents, records, and history stay here. Shares and\nprotected-file keys are retained.\nGroups you joined and received-share mounts keep syncing.\nTurn sync on in Settings to resume the same workspace.\n\nOptions:\n  --as-agent   Post and read chat as an agent.\n  --json       Print the result as JSON.\n  --help       Show help. -h does the same.\n\nRun dohc sync <verb> --help to see its arguments and options.\n",
+    "sync stop": "Usage: dohc sync stop [options]\n\nStop this computer's sync after saving live document edits.\n\nRun dohc inside a workspace folder while the dohc app is open.\nLocal files, documents, records, and history stay here. Shares and\nprotected-file keys are retained.\nGroups you joined and received-share mounts keep syncing.\nTurn sync on in Settings to resume the same workspace.\n\nOptions:\n  --agent <name>   Record this agent name when --as-agent is set.\n  --as-agent       Post and read chat as an agent.\n  --json           Print the result as JSON.\n  --help           Show help. -h does the same.\n"
   }
 }

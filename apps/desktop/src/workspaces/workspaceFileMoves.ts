@@ -4,7 +4,7 @@ import { constants } from "node:fs";
 import { copyFile, link, lstat, mkdir, readdir, realpath, rename, rmdir, unlink } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
 import type { CliResultByVerb } from "@dohc/cli/protocol";
-import type { HistoryOperationsStore, MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
+import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
@@ -13,7 +13,7 @@ import type { AuthoredPathChanges, WorkspaceEngineCapture } from "./workspaceEng
 import { historyExcludesSubtree, historyPathAdmission, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
 import { deletePath, moveIntoWorkspaceTrash, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
-import { finishDeleteRecovery, stageDeleteRecovery, undoDeleteRecovery, type DeleteRecovery, type DeleteRecoveryPlan, type DeleteUndoResult } from "./workspaceDeleteRecovery";
+import { finishDeleteRecovery, stageDeleteRecovery, type DeleteRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
 type PathChangeWorkspace = { rootPath: string; readOnly?: boolean; shareView?: unknown };
 
@@ -232,6 +232,7 @@ export async function prepareMoveWorkspacePathAs<Workspace extends PathChangeWor
 ): Promise<() => Promise<CliResultByVerb["fileMove"]>> {
   const rootPath = operation.workspace.rootPath;
   const failed = `dohc could not move ${input.fromPath}.`;
+  const operationId = `${OPERATION_ID_PREFIX}${randomUUID()}`;
   try {
     assertWritable(operation);
     const changed = await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
@@ -239,7 +240,7 @@ export async function prepareMoveWorkspacePathAs<Workspace extends PathChangeWor
       // The capture settles, closes and checks these endpoints before the hold.
       const endpoints = [(await admitPath(rootPath, input.fromPath)).physical, (await admitPath(rootPath, input.toPath)).physical];
       return await options.capture.changePathsAs<Changed<{ fromPath: string; toPath: string; withoutHistory: string[]; replacedWithoutHistory: string[] }, MoveFailure>>(endpoints,
-        { operation: "move", author, operationId: `${OPERATION_ID_PREFIX}${randomUUID()}` },
+        { operation: "move", author, operationId },
         async engine => {
           // Admission runs here, with capture held, right before the disk changes.
           assertWritable(operation);
@@ -374,7 +375,7 @@ export async function prepareMoveWorkspacePathAs<Workspace extends PathChangeWor
         trashed: await toSystemTrash(options, staged),
         withoutHistory: replacedWithoutHistory,
       };
-      return { ok: true, ...done, ...(withoutHistory.length ? { withoutHistory } : {}),
+      return { ok: true, operationId, ...done, ...(withoutHistory.length ? { withoutHistory } : {}),
         ...(replaced === undefined ? {} : { replaced: { ...replaced,
           ...(replaced.trashed || staged === undefined ? {} : { trashPath: workspaceTrashPath(staged) }) } }) };
     };
@@ -634,24 +635,4 @@ export async function deleteWorkspacePathByHand(
     throw new Error(`${path} is in ${where}. ${outcome.refused}`);
   }
   return { trashed: outcome.trashed, ...("recovery" in outcome ? outcome.recovery : {}) };
-}
-
-// Main-only seam. PR 3 supplies each door's path floor and share authority.
-export async function undoWorkspaceDelete(
-  operation: PathChangeOperation,
-  input: { operationId: string; requestId: string },
-  author: MomentWriteAuthor,
-  options: { workspaceId: string; history: Pick<HistoryOperationsStore, "undoHistoryOperation"> },
-): Promise<DeleteUndoResult> {
-  const root = operation.workspace.rootPath;
-  try {
-    assertWritable(operation);
-    return await withExclusiveWorkspaceOperation(root, async markChanged => {
-      assertWritable(operation);
-      return await undoDeleteRecovery(root, input, author, options.history, options.workspaceId,
-        () => assertWritable(operation), markChanged);
-    });
-  } catch (error) {
-    return { ok: false, reason: reason(error, "dohc could not undo the delete.") };
-  }
 }

@@ -659,52 +659,6 @@ pub(super) fn replay_pending_materializations(
         },
     )?;
     reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
-    let checked_jobs = store.read_with(|conn| {
-        let mut stmt = conn
-            .prepare(
-                "SELECT job_id FROM materialization_jobs \
-                 WHERE workspace_id = ?1 AND job_id GLOB 'restore-delete-mat_*'",
-            )
-            .map_err(StorageError::corrupt_public)?;
-        stmt.query_map([scope.workspace_id], |r| r.get::<_, String>(0))
-            .map_err(StorageError::corrupt_public)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StorageError::corrupt_public)
-    })?;
-    for job_id in checked_jobs {
-        if !holds.is_empty()
-            && let Some(job) = store.load_materialization_job(&job_id)?
-            && holds.blocks(&job.target_path)
-        {
-            continue;
-        }
-        let recorder: &dyn SelfWriteRecorder = scope.self_writes.unwrap_or(&());
-        match super::versioned::publish_checked_delete_on_store(
-            store,
-            root_dir,
-            scope.workspace_id,
-            &job_id,
-            recorder,
-            now_ms,
-            faults,
-            true,
-            false,
-            Some(holds),
-        ) {
-            Ok(()) => {}
-            Err(RuntimeError::OperationCrashed) => return Err(RuntimeError::OperationCrashed),
-            Err(RuntimeError::CaptureFileHeld { .. }) => {}
-            Err(error) => {
-                let disposition = if matches!(store.load_materialization_job(&job_id), Ok(Some(_)))
-                {
-                    "deferred"
-                } else {
-                    "refused"
-                };
-                eprintln!("engine: checked deletion {disposition} during recovery: {error}");
-            }
-        }
-    }
     let mut jobs = if let Some(selected) = selected {
         let mut jobs = selected
             .iter()
@@ -726,7 +680,7 @@ pub(super) fn replay_pending_materializations(
             && selected.is_none_or(|selected| selected.contains(&job.job_id))
     });
     let jobs = switch_parent_deletes_first(jobs);
-    (|| -> Result<MaterializationReplaySummary, RuntimeError> {
+    let summary = (|| -> Result<MaterializationReplaySummary, RuntimeError> {
         let mut summary = MaterializationReplaySummary {
             parked: 0,
             completed: 0,
@@ -1061,7 +1015,48 @@ pub(super) fn replay_pending_materializations(
         }
         reconcile_settlement_attempts(store, scope.workspace_id, now_ms, faults)?;
         Ok(summary)
-    })()
+    })()?;
+    let checked_jobs = store.read_with(|conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT job_id FROM materialization_jobs \
+                 WHERE workspace_id = ?1 AND job_id GLOB 'restore-delete-mat_*'",
+            )
+            .map_err(StorageError::corrupt_public)?;
+        stmt.query_map([scope.workspace_id], |r| r.get::<_, String>(0))
+            .map_err(StorageError::corrupt_public)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::corrupt_public)
+    })?;
+    for job_id in checked_jobs {
+        let recorder: &dyn SelfWriteRecorder = scope.self_writes.unwrap_or(&());
+        match super::versioned::publish_checked_delete_on_store(
+            store,
+            root_dir,
+            scope.workspace_id,
+            &job_id,
+            recorder,
+            now_ms,
+            faults,
+            true,
+            false,
+            Some(holds),
+        ) {
+            Ok(()) => {}
+            Err(RuntimeError::OperationCrashed) => return Err(RuntimeError::OperationCrashed),
+            Err(RuntimeError::CaptureFileHeld { .. }) => {}
+            Err(error) => {
+                let disposition = if matches!(store.load_materialization_job(&job_id), Ok(Some(_)))
+                {
+                    "deferred"
+                } else {
+                    "refused"
+                };
+                eprintln!("engine: checked deletion {disposition} during recovery: {error}");
+            }
+        }
+    }
+    Ok(summary)
 }
 
 #[allow(clippy::too_many_arguments)]

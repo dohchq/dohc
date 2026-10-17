@@ -156,6 +156,27 @@ describe("deleting the server account from Settings", () => {
     expect((await screen.findAllByText(DELETED)).length).toBeGreaterThan(0);
   });
 
+  it.each([false, true])("does not retry a sync change during deletion review (synced: %s)", async synced => {
+    const { bridge } = deletionBridge(async () => ({ ok: true, finished: true, email: "me@dohc.test", server, disconnectError: null }));
+    const changeSync = vi.fn(async () => { throw new Error("dohc could not change this workspace's sync."); });
+    Object.assign(bridge, { cloudEnableSync: changeSync, cloudStopSync: changeSync });
+    bridge.cloudStatus = vi.fn(async () => ({ ...SIGNED_IN, workspaceSynced: synced, workspaceSyncConnected: synced }));
+    renderShell(bridge);
+    await openSyncSettings();
+    fireEvent.click(screen.getByRole("switch", { name: "Sync this workspace" }));
+    await screen.findByTestId("workspace-shell-error");
+
+    fireEvent.click(screen.getByTestId("cloud-delete-account"));
+    await screen.findByTestId("server-account-delete-scope");
+    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+    await act(async () => {});
+
+    expect(changeSync).toHaveBeenCalledTimes(1);
+    expect(bridge.cloudLogout).not.toHaveBeenCalled();
+    expect(bridge.deleteServerAccount).not.toHaveBeenCalled();
+    expect(screen.getByTestId("server-account-delete")).toBeTruthy();
+  });
+
   it("reads the status again when the review is cancelled", async () => {
     const { bridge } = deletionBridge(async () => ({ ok: true, finished: true, email: "me@dohc.test", server, disconnectError: null }));
     renderShell(bridge);

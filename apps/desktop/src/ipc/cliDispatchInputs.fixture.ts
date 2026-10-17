@@ -28,6 +28,7 @@ const jsonFields: Readonly<Record<string, unknown>> = {
 };
 
 export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>> = {
+  "sync stop": [],
   "access object": ['{"kind":"path","path":"Notes/a.md"}'],
   "access sharing": ["received"],
   "share copy": ["share", "grant"],
@@ -39,6 +40,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "chat groups": [], "chat threads": ["group"], "chat inbox": [], "chat show": ["thread"],
   "chat post": ["group", "Post"], "chat reply": ["thread", "Reply"], "chat react": ["message", "thumbsup"],
   "chat grep": ["pattern"], "chat export": ["--out", "exports"],
+  "history operation": ["dohc-operation:11111111-1111-4111-8111-111111111111"], "history undo": ["dohc-operation:11111111-1111-4111-8111-111111111111"],
   "history list": [], "history show": ["change"],
   "automation list": ["Tasks"], "automation buttons": ["Tasks"],
   "automation switch": ["Tasks", "stamp", "on", "--base", hash, "--submit-id", "switch-1"],

@@ -426,6 +426,7 @@ export function PageIdentity(props: PageIdentityProps) {
               data-testid="page-icon-picker"
               className="dohc-page-identity__picker"
               role="dialog"
+              aria-modal="true"
               aria-label="Choose an icon"
             >
               <div className="dohc-page-identity__picker-grid">

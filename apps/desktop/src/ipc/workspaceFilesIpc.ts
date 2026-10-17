@@ -280,6 +280,7 @@ export function createWorkspaceFilesIpc<
     createWorkspaceFolder: (input, { event }) => workspaceFileMutations.createFolder(event, input),
     moveWorkspacePath: (input, { event }) => workspaceFileMutations.movePath(event, input),
     deleteWorkspacePath: (input, { event }) => workspaceFileMutations.deletePath(event, input),
+    undoHistoryOperation: (input, { event }) => workspaceFileMutations.undoHistoryOperation(event, input),
     exportWorkspaceZip: async (input, { event }) => {
       const inactiveMessage =
         "Export stopped because this window changed workspaces.";

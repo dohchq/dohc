@@ -114,11 +114,11 @@ const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (r
   if (request.verb === "fileMove") {
     await mkdir(dirname(join(request.args.cwd, request.args.toPath)), { recursive: true });
     await rename(join(request.args.cwd, request.args.fromPath), join(request.args.cwd, request.args.toPath));
-    return { ok: true, fromPath: request.args.fromPath, toPath: request.args.toPath };
+    return { ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", fromPath: request.args.fromPath, toPath: request.args.toPath };
   }
   if (request.verb === "fileDelete") {
     await rm(join(request.args.cwd, request.args.path), { recursive: true });
-    return { ok: true, path: request.args.path, trashed: true };
+    return { ok: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: { available: true }, path: request.args.path, trashed: true };
   }
   if (request.verb === "moments") {
     return {
@@ -451,6 +451,30 @@ describe("mcp tools operate on allowed paths", () => {
     });
   });
 
+  it("workspace_status shows who paused without treating the retained binding as active sync", async () => {
+    await withWorkspace(async ctx => {
+      const syncPause = { atMs: 42, author: { kind: "agent", agentId: "Claude", onBehalfOf: "person-local", depth: 0 } };
+      await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({ version: 1, workspaces: [{
+        workspaceId: "ws-1", rootPath: ctx.root, kind: "personal", pausedRemote: { serverUrl: "https://server.test", ownerUserId: "owner" }, syncPause,
+      }] }));
+      expect(await workspaceStatus(ctx)).toMatchObject({ synced: false, scope: "local", syncPause });
+    });
+  });
+
+  it("workspace_status identifies this computer's person without an account", async () => {
+    await withWorkspace(async ctx => {
+      const syncPause = { atMs: 42, author: { kind: "person", personId: "local:person" } };
+      await writeFile(join(ctx.home, "dohc-local-id.json"), JSON.stringify({ id: "local:person" }));
+      await writeFile(join(ctx.home, "dohc-workspaces.json"), JSON.stringify({ version: 1, workspaces: [{
+        workspaceId: "ws-1", rootPath: ctx.root, kind: "personal", pausedRemote: { serverUrl: "https://server.test", ownerUserId: "owner" }, syncPause,
+      }] }));
+      expect(await workspaceStatus(ctx)).toMatchObject({ synced: false, syncPause: { atMs: 42,
+        author: { kind: "person", personId: "local:person", self: true } } });
+      await writeFile(join(ctx.home, "dohc-local-id.json"), JSON.stringify({ id: "local:other" }));
+      const other = await workspaceStatus(ctx);
+      expect(other.syncPause?.author).toEqual({ kind: "person", personId: "local:person", self: false });
+    });
+  });
   it("workspace_status reports a matching cloud credential as connected", async () => {
     await withWorkspace(async (ctx) => {
       await bindCloudWorkspace(ctx);

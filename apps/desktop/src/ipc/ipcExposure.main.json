@@ -35,6 +35,7 @@
     "desktop:cloud-logout",
     "desktop:cloud-session-changed",
     "desktop:cloud-status",
+    "desktop:cloud-stop-sync",
     "desktop:collection-automations-changed",
     "desktop:compare-workspace-versions",
     "desktop:confirm-collection-automation-step",
@@ -296,6 +297,7 @@
     "desktop:typing-recovery",
     "desktop:unblock-relay-share-discussion-principal",
     "desktop:undo-collection-automation-run",
+    "desktop:undo-history-operation",
     "desktop:undo-relay-share",
     "desktop:undo-stop-and-restore",
     "desktop:unmount-share",
@@ -337,6 +339,7 @@
     "desktop:list-notices": "trusted-sender",
     "desktop:mark-notices": "trusted-sender",
     "desktop:run-skipped-schedule-now": "trusted-sender",
-    "desktop:retry-automation-notice": "trusted-sender"
+    "desktop:retry-automation-notice": "trusted-sender",
+    "desktop:undo-history-operation": "trusted-sender"
   }
 }

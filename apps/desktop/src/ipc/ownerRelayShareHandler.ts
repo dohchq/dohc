@@ -10,7 +10,7 @@ export function assertOriginalWorkspace(workspace: { shareView?: unknown }): voi
 }
 
 type OwnerRelayShareDependencies<Workspace, Credentials> = {
-  remoteForWorkspace(workspace: Workspace): Promise<{
+  remoteForWorkspace(workspace: Workspace, options?: { allowPaused: boolean }): Promise<{
     credentials: Credentials;
     credentialGeneration: number;
   }>;
@@ -30,11 +30,12 @@ export function createOwnerRelayShareOperation<
       session: ReturnType<typeof credentialScopedOperation>,
     ) => Promise<Result>,
     assertWorkspace?: (workspace: Workspace) => void,
+    options?: { allowPaused: boolean },
   ): Promise<Result> {
     operation.assertCurrent();
     assertWorkspace?.(operation.workspace);
     const { credentials, credentialGeneration } =
-      await dependencies.remoteForWorkspace(operation.workspace);
+      await dependencies.remoteForWorkspace(operation.workspace, options);
     const session = credentialScopedOperation({
       assertCurrent: () => operation.assertCurrent(),
       capturedGeneration: credentialGeneration,
@@ -68,12 +69,13 @@ export function createOwnerRelayShareHandler<
       session: ReturnType<typeof credentialScopedOperation>,
     ) => Promise<Result>,
     assertWorkspace?: (workspace: Workspace) => void,
+    options?: { allowPaused: boolean },
   ): Promise<Result> {
     return dependencies.withWorkspaceOperation(
       sender,
       workspaceId,
       OWNER_RELAY_SHARE_INACTIVE_MESSAGE,
-      operation => read(operation, work, assertWorkspace),
+      operation => read(operation, work, assertWorkspace, options),
     );
   };
 }

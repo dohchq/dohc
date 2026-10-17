@@ -106,6 +106,17 @@ async function listed(shares: unknown, links: unknown[] = []): Promise<RosterLis
   return answer.listing;
 }
 
+it("keeps paused owner reach and cached recipients instead of treating it as reattached", async () => {
+  const listing = await listed({ granted: [row()] });
+  const entry: RegistryEntry = { workspaceId: WORKSPACE, rootPath: "/trip", kind: "personal", mode: "local-first",
+    pausedRemote: remote, shareRoster: { ...listing, version: 1, listedAtMs: 42 } };
+  const roster = reachRosterFor({ entry, localUserId: null, localPersonId: null, history: "synced", latest: null, next: "" });
+  expect(roster).toMatchObject({ kind: "owner", ownerUserId: "u-owner", grants: [anaOnRoster] });
+  const [reach] = checkAutomationReach(roster, { id: "local", collection: { path: "Trip", name: "Trip" }, codeFiles: [],
+    steps: [{ kind: "change-records", collection: { path: "Trip", name: "Trip" } }] });
+  expect(reach.allowed).toBe(true);
+});
+
 describe("roster from the relay's listings", () => {
   it("loads missing History names once per inventory without fetching known names or changing the roster", async () => {
     const roster = await listed({ granted: [row()] });
@@ -572,6 +583,50 @@ describe("keeping the roster current", () => {
     };
   }
 
+  it("refuses a paused pulled-after roster until an authenticated listing answers", async () => {
+    seed();
+    store.markShareRosterPulled(WORKSPACE);
+    store.pauseRemote(WORKSPACE);
+    const { list, rosters: r } = rosters(async () => offline);
+    const roster = await r.forRun(WORKSPACE);
+    expect(roster).toEqual(unchecked(offline.next));
+    const [reach] = checkAutomationReach(roster, { id: "new-editor", collection: { path: "Trip", name: "Trip" }, codeFiles: [],
+      steps: [{ kind: "change-records", collection: { path: "Private", name: "Private" } }] });
+    expect(reach.allowed).toBe(false);
+    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBe(true);
+    const revoked = await listed({ granted: [row({ revokedAtMs: 10 })] });
+    list.mockResolvedValue(answered(revoked));
+    now += SHARE_ROSTER_FRESH_MS;
+    await r.requestRefresh(WORKSPACE);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(store.find(WORKSPACE)?.shareRoster?.pulledAfter).toBeUndefined();
+    expect(await r.forRun(WORKSPACE)).toMatchObject({ kind: "owner", grants: [] });
+    expect(r.observation(WORKSPACE).listing).toEqual(revoked);
+  });
+
+  it("preserves signed-out advice for a paused pulled-after roster", async () => {
+    seed(); store.markShareRosterPulled(WORKSPACE); store.pauseRemote(WORKSPACE);
+    const { rosters: r } = rosters(async () => ({ kind: "unanswered", partial: false, next: "Sign in to your server first." }));
+    expect(await r.forRun(WORKSPACE)).toEqual(unchecked("Sign in to your server first."));
+  });
+
+  it("asks to turn sync on when a paused workspace has no roster or listing answer", async () => {
+    store.pauseRemote(WORKSPACE);
+    const { rosters: r, list } = rosters(async () => offline);
+    expect(await r.cached(WORKSPACE)).toEqual(unchecked("Turn sync on in Settings → Sync and sharing, then try again."));
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("does not read local identity or sync history for a paused owner", async () => {
+    seed(); store.pauseRemote(WORKSPACE);
+    const localUserId = vi.fn(), localPersonId = vi.fn(), syncHistory = vi.fn();
+    const r = createShareRosters({
+      findWorkspace: store.find, saveRoster: store.setShareRoster, markRosterPulled: store.markShareRosterPulled,
+      listRoster: async () => offline, localUserId, localPersonId, syncHistory, logError: vi.fn(),
+    });
+    expect(await r.cached(WORKSPACE)).toEqual(cached);
+    expect(localUserId).not.toHaveBeenCalled(); expect(localPersonId).not.toHaveBeenCalled(); expect(syncHistory).not.toHaveBeenCalled();
+  });
   it("lists at open and every 10 minutes while open, and stops at close", async () => {
     const { list, rosters: r } = rosters(async () => answered({ grants: [ana], links: [], formerGrants: [], endedGrants: [] }));
     r.open(WORKSPACE);

@@ -2427,6 +2427,35 @@ describe("sync answers after Settings closed", () => {
     expect(bridge.cloudEnableSync).toHaveBeenCalledTimes(1);
   });
 
+  // Pausing needs no account, so a signed-out pause's Try again goes back to
+  // the switch, not to Connect server.
+  it("reopens Settings for a signed-out pause that fails after Settings closed", async () => {
+    const stop = deferred<never>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      cloudStopSync: vi.fn(() => stop.promise),
+    });
+    bridge.cloudStatus = vi.fn(async () => ({
+      connected: false, email: "", serverUrl: "", workspaceSynced: true, workspaceSyncConnected: false, workspaceSyncOwned: true,
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("activity-settings"));
+    await user.click(await screen.findByTestId("settings-nav-cloud"));
+    await user.click(await screen.findByRole("switch", { name: "Sync this workspace" }));
+    await waitFor(() => expect(bridge.cloudStopSync).toHaveBeenCalled());
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("settings-dialog")).toBeNull());
+    await act(async () => {
+      stop.reject(new Error("dohc could not pause sync for this workspace."));
+    });
+
+    await user.click(await screen.findByTestId("workspace-shell-error-retry"));
+    expect(await screen.findByTestId("settings-section-cloud")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-server-url")).toBeNull();
+    expect(bridge.cloudStopSync).toHaveBeenCalledTimes(1);
+  });
+
   it("does not show one workspace's failed enable in the next workspace", async () => {
     const enable = deferred<void>();
     const bridge = Object.assign(makeBridge(Promise.resolve(null)), {

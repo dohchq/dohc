@@ -22,7 +22,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
 }>(dependencies: {
   callerKey(caller: Caller): string;
   withWorkspaceOperation<Result>(caller: Caller, workspaceId: string, work: (operation: Operation) => Promise<Result>): Promise<Result>;
-  remoteForWorkspace(workspace: Workspace): Promise<{ credentials: CloudCredentials; credentialGeneration: number }>;
+  remoteForWorkspace(workspace: Workspace, options?: { allowPaused: boolean }): Promise<{ credentials: CloudCredentials; credentialGeneration: number }>;
   currentCredentialGeneration(): number;
   flushCapture(workspace: Workspace): Promise<void>;
   withAdapter<Result>(workspace: Workspace, work: (adapter: VersionedLiveAdapter) => Promise<Result>): Promise<Result | null>;
@@ -56,7 +56,8 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
       operation.assertCurrent(); operation.signal.throwIfAborted();
       if (local) return local;
       if (input.action === "prepareLocal" || input.action === "listLocal" || input.action === "launchLocal") throw new Error("Local apps are unavailable. Restart dohc and try again.");
-      const remote = await dependencies.remoteForWorkspace(operation.workspace);
+      const remote = await dependencies.remoteForWorkspace(operation.workspace,
+        input.action === "withdraw" || input.action === "revokeCollection" ? { allowPaused: true } : undefined);
       const session = credentialScopedOperation({ assertCurrent: () => operation.assertCurrent(), capturedGeneration: remote.credentialGeneration, currentGeneration: dependencies.currentCredentialGeneration });
       session.assertCurrent();
       const remoteData = createRemoteDatasetData({ workspaceId: input.workspaceId, ...remote, signal: operation.signal,
