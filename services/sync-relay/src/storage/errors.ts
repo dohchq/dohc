@@ -23,6 +23,14 @@ export class SyncRelayBlobMissingError extends RelayError {
   }
 }
 
+/** A log append's answer for blobs it may not reference, whatever the reason. */
+export function logBlobsMissing(missing: readonly string[]): SyncRelayBlobMissingError {
+  return new SyncRelayBlobMissingError(
+    `log append references ${missing.length} blob(s) not stored on the relay ` +
+      `(first: ${missing[0]}); (re-)upload the blob(s) and retry`,
+  );
+}
+
 export class LiveJournalAdmittedCapacityError extends Error {
   readonly source = "admitted-cut";
   readonly reason = "capacity-refused";

@@ -1,5 +1,5 @@
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentRunStatusResult,
   DesktopUserSettingsResult,
@@ -18,7 +18,6 @@ export function useAgentSetup(
   // switch and its reset never pairs one workspace's run with another.
   const [agentRunStatus, setAgentRunStatus] = useState<{ workspaceId: string; run: AgentRunStatusResult } | null>(null);
   const agentSetupRequestRef = useRef(0);
-  const bootstrapAgentStatusRead = useRef<Promise<AgentRunStatusResult> | null>(null);
 
   const agentSetup = useMemo<AgentSetupSummary | null>(() => {
     if (!workspaceIsReady || !userSettings || agentRunStatus?.workspaceId !== workspaceId) return null;
@@ -33,19 +32,14 @@ export function useAgentSetup(
     };
   }, [agentRunStatus, userSettings, workspaceId, workspaceIsReady]);
 
-  // The workspace-scoped half of the setup snapshot is also the initial
-  // agent-status answer for the history lane. Both consumers share this promise.
+  // The workspace-scoped half of the setup snapshot.
   useEffect(() => {
     const version = agentSetupRequestRef.current + 1;
     agentSetupRequestRef.current = version;
     setAgentRunStatus(null);
-    bootstrapAgentStatusRead.current = null;
     if (!workspaceIsReady) return;
-    const read = bridge().getAgentRunStatus({
-      workspaceId,
-    });
-    bootstrapAgentStatusRead.current = read;
-    void read
+    void bridge()
+      .getAgentRunStatus({ workspaceId })
       .then((run) => {
         if (agentSetupRequestRef.current !== version) return;
         setAgentRunStatus({ workspaceId, run });
@@ -63,7 +57,6 @@ export function useAgentSetup(
     const wasOpen = previousSettingsSection.current !== null;
     previousSettingsSection.current = settingsSection;
     if (!workspaceIsReady || !wasOpen || settingsSection !== null) return;
-    bootstrapAgentStatusRead.current = null;
     const version = agentSetupRequestRef.current + 1;
     agentSetupRequestRef.current = version;
     void bridge()
@@ -76,14 +69,5 @@ export function useAgentSetup(
       });
   }, [workspaceId, settingsSection, workspaceIsReady]);
 
-  const readAgentStatusForHistory = useCallback(() => {
-    const bootstrapRead = bootstrapAgentStatusRead.current;
-    if (bootstrapRead) {
-      bootstrapAgentStatusRead.current = null;
-      return bootstrapRead;
-    }
-    return bridge().getAgentRunStatus({ workspaceId });
-  }, [workspaceId]);
-
-  return { agentSetup, readAgentStatusForHistory };
+  return { agentSetup };
 }

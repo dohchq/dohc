@@ -142,6 +142,7 @@ fn finish(store: &mut EngineStore, relay: &mut Relay) -> usize {
             operation(),
             &LeaseRegistry::default(),
             &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
         ) {
             Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => break,
             Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING => {
@@ -263,6 +264,7 @@ fn base_repair_group_wider_than_a_batch_commits_whole_and_chooses_lowest_sequenc
             operation(),
             &LeaseRegistry::default(),
             &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
         ) {
             Ok(_) => break,
             Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING => {
@@ -348,6 +350,7 @@ fn base_repair_batch_reuses_answers_when_pending_groups_shift_boundaries() {
             operation(),
             &LeaseRegistry::default(),
             &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
         ) {
             Ok(_) => break,
             Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING => {
@@ -361,6 +364,7 @@ fn base_repair_batch_reuses_answers_when_pending_groups_shift_boundaries() {
                         skipped: 0,
                         current_max_origin_seq: -1,
                         settlement_refusals: Vec::new(),
+                        hosted_refusals: Vec::new(),
                     })
                 } else {
                     relay.answer(&request)
@@ -757,6 +761,7 @@ fn passive_store_base_repair_never_posts_a_confirmation() {
             operation(),
             &LeaseRegistry::default(),
             &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
         ) {
             Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => {
                 assert_eq!(remaining(&store), 0);

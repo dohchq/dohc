@@ -208,6 +208,7 @@ export function rowToLogRow(row: Record<string, unknown>): SyncRelayLogRow {
     recordedAtMs: Number(row.recorded_at_ms),
     relaySeq: Number(row.relay_seq),
     ...(row.settlement_admission_json == null ? {} : {settlementAdmission:JSON.parse(String(row.settlement_admission_json)) as import("./hostedSettlement").SettlementAdmission}),
+    ...(row.relay_admission == null ? {} : {relayAdmission: String(row.relay_admission) as import("./relayAdmission").RelayAdmission}),
     ...(row.admitted_author_snapshot_json == null ? {} : {
       admittedAuthorSnapshot: parseSettlementAuthors(JSON.parse(String(row.admitted_author_snapshot_json))),
     }),

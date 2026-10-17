@@ -133,15 +133,6 @@ export function SettingsDialog(props: {
   // Hands a settings change to the person's agent. Absent while chats are off.
   askAgent?: AskAgent;
   onClose: () => void;
-  onAgentActiveChange?: (update: {
-    active: boolean;
-    /**
-     * True only when this panel started or ended the run itself. An
-     * observation may be older than a refresh the shell already has in
-     * flight, so it must never supersede one.
-     */
-    mutated: boolean;
-  }) => void;
   /** The shell's server connection for this workspace, for Sync and sharing. */
   cloud?: CloudSettings;
   /** Closes Settings and opens the Sharing view on a lane or a share search found. */
@@ -784,7 +775,6 @@ export function SettingsDialog(props: {
                   runner,
                 })
               }
-              onAgentActiveChange={props.onAgentActiveChange}
             />
           </div>
         );

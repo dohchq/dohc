@@ -65,7 +65,7 @@ export function assertLiveAuthorColumns(db: SqliteDb): void {
 function assertSchema(db: SqliteDb): void {
   assertLiveAuthorColumns(db);
   assertObject(db, LIVE_AUTHOR_CLIENTS, "table", LIVE_AUTHOR_CLIENTS, clientSql);
-  const columns = db.prepare("PRAGMA table_info(sync_relay_log)").all().filter(r => Number(r.cid) >= 7 && r.name !== "settlement_admission_json");
+  const columns = db.prepare("PRAGMA table_info(sync_relay_log)").all().filter(r => Number(r.cid) >= 7 && r.name !== "settlement_admission_json" && r.name !== "relay_admission");
   require(JSON.stringify(columns.map(r => [r.cid,r.name,r.type,r.notnull,r.dflt_value,r.pk])) ===
     JSON.stringify([[7,"admitted_author_snapshot_json","TEXT",0,null,0]]));
   assertColumnSql(db, "sync_relay_log", logColumn);

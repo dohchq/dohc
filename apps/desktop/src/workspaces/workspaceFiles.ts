@@ -1172,6 +1172,7 @@ export async function deletePath(
   rootPath: string,
   relativePath: string,
   trashItem: (absolutePath: string) => Promise<void>,
+  onFallback?: (staged: string) => void,
 ): Promise<{ trashed: boolean }> {
   const validated = validateUserWritePath(relativePath);
   if (!validated.ok) {
@@ -1221,7 +1222,8 @@ export async function deletePath(
     await trashItem(target);
     return { trashed: true };
   } catch {
-    await moveIntoWorkspaceTrash(rootPath, target);
+    const staged = await moveIntoWorkspaceTrash(rootPath, target);
+    onFallback?.(staged);
     return { trashed: false };
   }
 }
