@@ -265,6 +265,25 @@ enum RelayIoRequest {
     ShareCollectionWrite(ShareCollectionWriteRequest),
 }
 
+impl RelayIoRequest {
+    /// Whether the relay may store something once this request is issued.
+    fn changes_relay(&self) -> bool {
+        !matches!(
+            self,
+            RelayIoRequest::Pull(_)
+                | RelayIoRequest::PullHosted(_)
+                | RelayIoRequest::LookupCoordinates(_)
+                | RelayIoRequest::Probe(_)
+                | RelayIoRequest::BlobsHave(_)
+                | RelayIoRequest::DownloadBlobs(_)
+                | RelayIoRequest::DownloadKeyEnvelope(_)
+                | RelayIoRequest::SharedChannelPull(_)
+                | RelayIoRequest::ShareViewPull(_)
+                | RelayIoRequest::ShareBlob(_)
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 enum RelayIoResponse {
     /// Answers both log pushes.
@@ -1936,7 +1955,7 @@ impl ActorHandle {
         native_settlements: bool,
         operation: RelayOperation,
         leases: LeaseRegistry,
-        token: CancellationToken,
+        mut token: CancellationToken,
         reservation: Option<Arc<dyn Send + Sync>>,
         execute_io: F,
     ) -> Result<RelayOperationOutcome, RuntimeError>
@@ -1948,6 +1967,9 @@ impl ActorHandle {
             native_settlements,
             ..DeferredRelayTransport::default()
         };
+        // Once the relay may have stored something, the operation runs to its
+        // end so the request answers with what landed. Until then each step
+        // and each effect-free read stops on cancellation.
         loop {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
@@ -2019,6 +2041,9 @@ impl ActorHandle {
                     let request = transport
                         .take_pending()
                         .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
+                    if request.changes_relay() {
+                        token = CancellationToken::new();
+                    }
                     let io_request = request.clone();
                     let result = tokio::select! {
                         biased;

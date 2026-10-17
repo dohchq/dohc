@@ -120,11 +120,7 @@ impl BlobEgressBudget {
         cancellation: &OperationCancellation,
         operation: &str,
     ) -> Result<tokio::sync::OwnedSemaphorePermit, WireError> {
-        let bytes = usize::try_from(byte_length)
-            .ok()
-            .filter(|bytes| *bytes <= BLOB_EGRESS_BYTE_BUDGET)
-            .and_then(|bytes| u32::try_from(bytes).ok())
-            .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))?;
+        let bytes = Self::permits_for(byte_length)?;
         tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
@@ -134,6 +130,29 @@ impl BlobEgressBudget {
                 permit.map_err(|_| WireError::new(ErrorCode::Internal, "blob egress budget unavailable"))
             }
         }
+    }
+
+    /// Reserve for the blob of a request whose work landed. The wait ignores
+    /// the request's cancellation and ends at `until`, when it answers
+    /// OVERLOADED `blob-egress-capacity`, which clients retry after backoff.
+    pub(super) async fn reserve_landed(
+        &self,
+        byte_length: i64,
+        until: tokio::time::Instant,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, WireError> {
+        let bytes = Self::permits_for(byte_length)?;
+        tokio::time::timeout_at(until, Arc::clone(&self.permits).acquire_many_owned(bytes))
+            .await
+            .map_err(|_| WireError::new(ErrorCode::Overloaded, "blob-egress-capacity"))?
+            .map_err(|_| WireError::new(ErrorCode::Internal, "blob egress budget unavailable"))
+    }
+
+    fn permits_for(byte_length: i64) -> Result<u32, WireError> {
+        usize::try_from(byte_length)
+            .ok()
+            .filter(|bytes| *bytes <= BLOB_EGRESS_BYTE_BUDGET)
+            .and_then(|bytes| u32::try_from(bytes).ok())
+            .ok_or_else(|| WireError::new(ErrorCode::Internal, "state-corrupt"))
     }
 }
 

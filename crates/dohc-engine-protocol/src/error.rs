@@ -28,9 +28,11 @@ pub enum ErrorCode {
     MethodNotFound,
     /// The request params failed method-level validation.
     InvalidParams,
-    /// The request deadline elapsed before the engine finished.
+    /// The request deadline elapsed and the work did not happen. A request
+    /// whose work landed before its deadline answers with that work's result.
     DeadlineExceeded,
-    /// The request was cancelled by the client or by session teardown.
+    /// The client or session teardown cancelled the request and the work did
+    /// not happen. A request whose work landed first answers with its result.
     Cancelled,
     /// Bounded queues are full; explicit backpressure.
     Overloaded,
