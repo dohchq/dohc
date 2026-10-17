@@ -9,6 +9,7 @@ import {
 import { type StorageContext } from "./context";
 import { accountIsFenced, workspaceIsDeleted } from "./accountDeletion";
 import { SyncRelayQuotaExceededError } from "./errors";
+import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
 
 function workspaceIdentityFromRow(
   row: Record<string, unknown>,
@@ -298,6 +299,7 @@ export function rotateWorkspaceIdentity(storage: StorageContext, input: {
            WHERE workspace_id = ?`,
         )
         .run(input.workspaceId);
+      forgetReplicaCurrentViewCaches(storage,input.workspaceId);
       return "rotated";
     });
   }

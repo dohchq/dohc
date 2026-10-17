@@ -318,6 +318,15 @@ export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   return {
     handle: principal.handle,
     activate,
+    // Recipient reads apply their own selector and fences in the read transaction.
+    currentReadView(workspaceId: string) {
+      const entry = entries.get(workspaceId);
+      const stored = options.storage.readReplicaCurrentView(workspaceId);
+      const memory = entry && standingCurrent(entry.lease) ? entry.newest : undefined;
+      const view = memory && (!stored || memory.logCursor >= stored.logCursor && memory.journalCursor >= stored.journalCursor) ? memory : stored;
+      if (!view) return null;
+      return {view, previous: stored ?? undefined};
+    },
     currentView(workspaceId: string) {
       const entry = entries.get(workspaceId);
       const stored = options.storage.readReplicaCurrentView(workspaceId);
