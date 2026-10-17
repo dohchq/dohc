@@ -5,15 +5,29 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
-import type { FindDatasetCollectionResult, TimelineEntry } from "../ipc/bridgeContract";
+import type { FindDatasetCollectionResult, TimelineEntry, WorkspaceUiState } from "../ipc/bridgeContract";
+import { deferred } from "../testing/deferred";
 import { timelinePage } from "../testing/historyPageFixture";
-import { WORKSPACE, makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
+import type { ConnectedTransactionalCollectionProps } from "./ConnectedTransactionalCollection";
+import { transactionalCollectionTabPath } from "./workbench/workbenchState";
+import { STORED_STATE, WORKSPACE, makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
 
 // The Collection page and its History are real; only the records table,
-// which reads records, stands aside.
+// which reads records, stands aside. While `page.loading` is set, the page
+// suspends as its first load does.
+const page = vi.hoisted(() => ({ loading: null as Promise<void> | null }));
 vi.mock("./TransactionalCollectionPage", () => ({
   TransactionalCollectionPage: () => <div data-testid="collection-records" />,
 }));
+vi.mock("./ConnectedTransactionalCollection", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./ConnectedTransactionalCollection")>();
+  return {
+    ConnectedTransactionalCollection: (props: ConnectedTransactionalCollectionProps) => {
+      if (page.loading) throw page.loading;
+      return <actual.ConnectedTransactionalCollection {...props} />;
+    },
+  };
+});
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const budget: DatasetDescription = { datasetId: id(1), name: "Budget", revision: 4, revisionSha256: "a".repeat(64),
@@ -22,9 +36,10 @@ const budget: DatasetDescription = { datasetId: id(1), name: "Budget", revision:
 const change: TimelineEntry = { kind: "collection", datasetId: budget.datasetId, name: "Budget", sortAtMs: 200, change: {
   revision: 4, operation: "addRow", callerReference: null, recordedAtMs: 200, approvedRevisionHash: "a".repeat(64), changesetBytes: 10, attachmentCount: 0,
 } };
+const budgetTab = transactionalCollectionTabPath("budget/dataset.json", id(2));
 
-function collectionShell() {
-  const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+function collectionShell(state: WorkspaceUiState | null = null) {
+  const bridge = Object.assign(makeBridge(Promise.resolve(state)), {
     findDatasetCollection: vi.fn(async (): Promise<FindDatasetCollectionResult> => ({ status: "unavailable" })),
   });
   bridge.listHistory = vi.fn(async () => timelinePage([change], { workspaceId: WORKSPACE.workspaceId }));
@@ -73,5 +88,46 @@ describe("a Collection change in the History timeline", () => {
     expect(await within(screen.getByTestId("editor-group-primary")).findByTestId("collection-records")).toBeTruthy();
     const history = await screen.findByRole("dialog", { name: "Collection history" });
     expect(await within(history).findByText("addRow")).toBeTruthy();
+  });
+
+  // The row opens the tab in the focused group, so only that group's page
+  // opens History.
+  it("opens one History when its Collection shows in two editor groups", async () => {
+    const user = userEvent.setup();
+    collectionShell({ ...STORED_STATE, activeEditorGroup: "right", editorGroups: [
+      { id: "primary", tabs: [budgetTab], activeTab: budgetTab, size: 0.5 },
+      { id: "right", tabs: [budgetTab], activeTab: budgetTab, size: 0.5 },
+    ] });
+    for (const group of ["primary", "right"]) {
+      expect(await within(screen.getByTestId(`editor-group-${group}`)).findByTestId("collection-records")).toBeTruthy();
+    }
+    await user.click(await collectionRow(user));
+    const [history, ...more] = await screen.findAllByRole("dialog", { name: "Collection history" });
+    expect(more).toEqual([]);
+    expect(screen.getByTestId("editor-group-right").contains(history!)).toBe(true);
+    await user.click(within(history!).getByRole("button", { name: "Close" }));
+    expect(screen.queryAllByRole("dialog", { name: "Collection history" })).toEqual([]);
+  });
+
+  // A tab closed before its page loaded takes its ask with it.
+  it("opens the Collection without History after the row's tab closed while it loaded", async () => {
+    const loading = deferred();
+    page.loading = loading.promise;
+    try {
+      const user = userEvent.setup();
+      collectionShell();
+      await user.click(await collectionRow(user));
+      await user.click(await screen.findByRole("button", { name: "Close Expenses" }));
+      page.loading = null;
+      loading.resolve();
+
+      await user.click(screen.getByTestId("activity-explorer"));
+      await user.click(within(screen.getByRole("region", { name: "Collections" })).getByRole("button", { name: "Expenses" }));
+      expect(await within(screen.getByTestId("editor-group-primary")).findByTestId("collection-records")).toBeTruthy();
+      expect(screen.queryByRole("dialog", { name: "Collection history" })).toBeNull();
+    } finally {
+      page.loading = null;
+      loading.resolve();
+    }
   });
 });

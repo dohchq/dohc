@@ -2497,12 +2497,16 @@ export function DesktopWorkspaceShell(props: {
     [openVirtualTab],
   );
   // A History timeline row opens its Collection on that Collection's
-  // History. The tab's page takes the ask once and clears it.
-  const [collectionHistoryTab, setCollectionHistoryTab] = useState<string | null>(null);
+  // History. The ask names the tab instance the row opened, in the focused
+  // group: the same Collection in another group is another instance, and a
+  // closed instance never returns. Its page takes the ask once and clears it.
+  const [collectionHistoryTab, setCollectionHistoryTab] = useState<WorkbenchTab | null>(null);
   const openCollectionHistory = useCallback((datasetPath: string, tableId: string) => {
     const path = transactionalCollectionTabPath(datasetPath, tableId);
     openVirtualTab(path);
-    setCollectionHistoryTab(path);
+    const { editorGroups, activeEditorGroup } = wbRef.current;
+    const group = editorGroups.find((candidate) => candidate.id === activeEditorGroup);
+    setCollectionHistoryTab(group?.tabs.find((tab) => tab.path === path) ?? null);
   }, [openVirtualTab]);
   const clearCollectionHistory = useCallback(() => setCollectionHistoryTab(null), []);
   const onMoreDataCollections = useCallback(() => {
@@ -5581,7 +5585,7 @@ export function DesktopWorkspaceShell(props: {
                   onError={collectionReports.onError}
                   onSettled={collectionReports.onSettled}
                   onNotice={collectionReports.onNotice}
-                  historyRequested={collectionHistoryTab === tabPath}
+                  historyRequested={collectionHistoryTab !== null && tab === collectionHistoryTab}
                   onHistoryShown={clearCollectionHistory}
                   onFormCreated={appRoot => {
                     void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
