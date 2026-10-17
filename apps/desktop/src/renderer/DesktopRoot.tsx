@@ -1,6 +1,6 @@
 import { bindOwnPresentation } from "./workbench/actorPresentation";
 import { useRequestSequence } from "./useRequestSequence";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
   DesktopUserSettingsResult,
   ShareHandoffStatus,
@@ -18,6 +18,8 @@ import { ChevronRight } from "lucide-react";
 import { readError } from "../ipc/errorWords";
 import { errorDetails } from "./shell/copyDetails";
 import { StandaloneNotices } from "./shell/connectionNotices";
+import { ShellErrorReporter } from "./shell/useShellError";
+import { useMenuCommandsWithoutWorkspace } from "./appMenuCommands";
 import { CopyButton } from "./ui/CopyButton";
 import { useSentNotices } from "./shell/useSentNotices";
 import { useHeldWorkspacePathOpenFailures, WorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
@@ -31,6 +33,17 @@ import { TITLEBAR_HEIGHT_PX } from "./tokens";
 const LazyStatesPage = lazy(() =>
   import("./dev/StatesPage").then((module) => ({ default: module.StatesPage })),
 );
+
+// The registry error has no workspace shell; it answers menu commands
+// itself and reports into its own notices.
+function RegistryErrorMenuCommands() {
+  const reportFailure = useContext(ShellErrorReporter);
+  useMenuCommandsWithoutWorkspace(useCallback(
+    (message: string, cause: unknown) => reportFailure?.({ message, cause }),
+    [reportFailure],
+  ));
+  return null;
+}
 
 export function DesktopRoot() {
   useEffect(() => bindOwnPresentation(bridge()), []);
@@ -229,20 +242,6 @@ export function DesktopRoot() {
     document.title = shownWorkspace ? workspaceName(shownWorkspace) : "dohc";
   }, [shownWorkspace]);
 
-  // The workspace shell answers menu commands. Without it, such as in the
-  // manager or before the first workspace, nothing has a tab to close, so
-  // Close tab closes the window on macOS. Before the registry loads, a
-  // command waits in the preload for the shell.
-  const showsShell = loaded && !loadError && !statesPageOpen && shownWorkspace !== null;
-  useEffect(() => {
-    if (!loaded || showsShell) return;
-    return bridge().onMenuCommand((command) => {
-      if (command === "close-tab" && bridge().platform === "darwin") {
-        void bridge().closeThisWindow().catch(() => undefined);
-      }
-    });
-  }, [loaded, showsShell]);
-
   // Signal first paint when real content is about to mount (not while the
   // registry IPC is still pending and the root renders null).
   useEffect(() => {
@@ -268,6 +267,7 @@ export function DesktopRoot() {
     ]);
     return (
       <StandaloneNotices>
+      <RegistryErrorMenuCommands />
       <div className="relative flex h-screen flex-col items-center justify-center gap-2 bg-bg px-8 text-center">
         {/* No title bar here, so this strip moves the window. */}
         <div aria-hidden className="titlebar-drag absolute inset-x-0 top-0" style={{ height: TITLEBAR_HEIGHT_PX }} />

@@ -7,24 +7,27 @@ export interface OpenPathFailureWindow {
     isCrashed(): boolean;
     isLoadingMainFrame(): boolean;
     getURL(): string;
-    on(event: "did-finish-load", listener: () => void): unknown;
+    on(event: "did-finish-load" | "did-stop-loading", listener: () => void): unknown;
     on(event: "destroyed" | "render-process-gone", listener: () => void): unknown;
     on(event: "did-fail-load", listener: (event: unknown, code: number, description: string, url: string, isMainFrame: boolean) => void): unknown;
-    off(event: "did-finish-load", listener: () => void): unknown;
+    off(event: "did-finish-load" | "did-stop-loading", listener: () => void): unknown;
     off(event: "destroyed" | "render-process-gone", listener: () => void): unknown;
     off(event: "did-fail-load", listener: (event: unknown, code: number, description: string, url: string, isMainFrame: boolean) => void): unknown;
   };
 }
 
-// Separate from startup's load handling: report readiness must also handle
-// an already-loaded renderer and a window that closes while loading.
-export function whenOpenPathFailureTargetReady(window: OpenPathFailureWindow): Promise<boolean> {
+// Separate from startup's load handling: open-failure reports and menu
+// commands also reach an already-loaded renderer, and a window that closes
+// while loading. The main frame still counts as loading between
+// did-finish-load and did-stop-loading, so either event means ready.
+export function whenRendererReady(window: OpenPathFailureWindow): Promise<boolean> {
   const contents = window.webContents;
   if (window.isDestroyed() || contents.isDestroyed() || contents.isCrashed()) return Promise.resolve(false);
   if (contents.getURL() && !contents.isLoadingMainFrame()) return Promise.resolve(true);
   return new Promise<boolean>((resolve) => {
     const settle = (ready: boolean) => {
       contents.off("did-finish-load", onLoad);
+      contents.off("did-stop-loading", onLoad);
       contents.off("did-fail-load", onFail);
       window.off("closed", onClosed);
       contents.off("destroyed", onClosed);
@@ -37,6 +40,7 @@ export function whenOpenPathFailureTargetReady(window: OpenPathFailureWindow): P
       if (isMainFrame && code !== -3) settle(false);
     };
     contents.on("did-finish-load", onLoad);
+    contents.on("did-stop-loading", onLoad);
     contents.on("did-fail-load", onFail);
     window.on("closed", onClosed);
     contents.on("destroyed", onClosed);
@@ -50,7 +54,7 @@ export function captureOpenPathFailureTarget<Session extends { workspaceId: stri
 ) {
   const session = context.currentSession();
   const admitted = context.admittedCount();
-  const ready = whenOpenPathFailureTargetReady(window);
+  const ready = whenRendererReady(window);
   return {
     whenReady: () => ready,
     isCurrent: (opened?: { workspaceId: string } | null) => {

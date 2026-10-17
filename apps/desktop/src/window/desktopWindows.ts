@@ -12,6 +12,7 @@ import type { createMainWindow as createMainWindowImplementation } from "./creat
 import type { ZoomStep } from "../settings/userSettings";
 import type { readCachedUserSettingsFile as readSettings } from "../settings/userSettingsStore";
 import type { RendererWorkspaceSessionOwner } from "./rendererWorkspaceSessionOwner";
+import { whenRendererReady } from "./openPathFailureTarget";
 
 interface DesktopWindowsDependencies {
   app: Pick<
@@ -19,7 +20,6 @@ interface DesktopWindowsDependencies {
     "isReady" | "isPackaged" | "getVersion" | "clearRecentDocuments" | "addRecentDocument" | "setUserTasks"
     | "setAboutPanelOptions"
   >;
-  BrowserWindow: Pick<typeof BrowserWindow, "getAllWindows">;
   Menu: Pick<typeof Menu, "setApplicationMenu" | "buildFromTemplate">;
   dialog: Pick<Dialog, "showErrorBox" | "showMessageBox">;
   process: Pick<NodeJS.Process, "platform" | "execPath" | "argv">;
@@ -47,7 +47,7 @@ interface DesktopWindowsDependencies {
 
 export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   const {
-    app, BrowserWindow, Menu, dialog, process, workspaceSummaries, currentUpdateState,
+    app, Menu, dialog, process, workspaceSummaries, currentUpdateState,
     stateDir, readCachedUserSettingsFile, createMainWindow,
   } = dependencies;
 
@@ -167,8 +167,12 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     return workspaceWindows.live();
   }
 
+  // Where a menu command or an opened file lands: the focused window when it
+  // shows dohc, else a workspace window, else the manager. Never the hidden
+  // export window, which shows nothing.
   function targetWindow(window: BrowserWindow | undefined): BrowserWindow | undefined {
-    return window ?? liveWorkspaceWindow() ?? BrowserWindow.getAllWindows()[0];
+    if (window && showsNotices(window)) return window;
+    return liveWorkspaceWindow() ?? (managerWindow && !managerWindow.isDestroyed() ? managerWindow : undefined);
   }
 
   // Activation opens a workspace in a window that runs the workspace
@@ -234,21 +238,36 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     }
   }
 
-  // macOS keeps dohc running with no window open. A menu command then opens
-  // one and runs there once its renderer loads; the preload holds it until
-  // the window's workspace shell listens.
+  // Menu commands for a window whose renderer has not loaded, in the order
+  // they were chosen. A message sent before the preload runs is lost.
+  const loadingMenuCommands = new Map<BrowserWindow, MenuCommand[]>();
+
+  // macOS keeps dohc running with no window open, so a menu command may open
+  // one. A loading window takes its commands in order once it loads; the
+  // preload then holds them until the window listens.
   function sendMenuCommand(window: BrowserWindow | undefined, command: MenuCommand): void {
-    const target = targetWindow(window);
-    if (target) {
+    let target = targetWindow(window);
+    if (!target) {
+      target = createWorkspaceWindow();
+      focusShareHandoffWindowWhenReady(target);
+    }
+    const queued = loadingMenuCommands.get(target);
+    if (queued) {
+      queued.push(command);
+      return;
+    }
+    if (target.webContents.getURL() && !target.webContents.isLoadingMainFrame()) {
       target.webContents.send(CHANNELS.menuCommand, command);
       return;
     }
-    const created = createWorkspaceWindow();
-    focusShareHandoffWindowWhenReady(created);
-    void whenRendererLoaded(created).then(
-      () => created.webContents.send(CHANNELS.menuCommand, command),
-      () => undefined,
-    );
+    const loading = target;
+    const commands = [command];
+    loadingMenuCommands.set(loading, commands);
+    void whenRendererReady(loading).then((ready) => {
+      loadingMenuCommands.delete(loading);
+      if (!ready) return;
+      for (const next of commands) loading.webContents.send(CHANNELS.menuCommand, next);
+    });
   }
 
   function refreshApplicationMenu(): void {

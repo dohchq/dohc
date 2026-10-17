@@ -929,7 +929,7 @@ function workspaceSummaries(): WorkspaceSummary[] {
 const devToolsGranted = devToolsEnabled(process.env, app);
 
 const desktopWindows = createDesktopWindows({
-  app, BrowserWindow, Menu, dialog, process, workspaceSummaries, currentUpdateState,
+  app, Menu, dialog, process, workspaceSummaries, currentUpdateState,
   stateDir, readCachedUserSettingsFile, createMainWindow,
   // Menu clicks arrive after startup, when the settings owner exists.
   stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step),

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ShareHandoffStatus, WorkspaceActivityEvent } from "../ipc/bridgeContract";
+import type { MenuCommand, ShareHandoffStatus, UpdateCheckResult, WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DesktopRoot } from "./DesktopRoot";
 import { COPY_FAILURE } from "./ui/CopyButton";
@@ -963,20 +963,31 @@ describe("opening a notice in another workspace", () => {
   });
 });
 
-describe("the window's title and Close tab", () => {
-  function stub(options: { windowRole: "workspace" | "manager"; platform: NodeJS.Platform; workspaces: Workspace[] }) {
-    let menu: ((command: "close-tab" | "settings") => void) | null = null;
+describe("the window's title and menu commands", () => {
+  function stub(options: {
+    windowRole: "workspace" | "manager";
+    platform: NodeJS.Platform;
+    workspaces: Workspace[];
+    registryFails?: boolean;
+  }) {
+    let menu: ((command: MenuCommand) => void) | null = null;
     const closeThisWindow = vi.fn(async () => undefined);
     vi.stubGlobal("dohcDesktop", {
       windowRole: options.windowRole,
       platform: options.platform,
       ...windowBridge(),
-      onMenuCommand: vi.fn((listener: (command: "close-tab" | "settings") => void) => {
+      onMenuCommand: vi.fn((listener: (command: MenuCommand) => void) => {
         menu = listener;
         return () => { if (menu === listener) menu = null; };
       }),
       closeThisWindow,
-      getWorkspaceRegistry: vi.fn(async () => ({ workspaces: options.workspaces })),
+      checkForUpdates: vi.fn(async (): Promise<UpdateCheckResult> => ({
+        checked: false, state: { status: "error", message: "This build does not update itself." },
+      })),
+      getWorkspaceRegistry: vi.fn(async () => {
+        if (options.registryFails) throw new Error("dohc could not read dohc-workspaces.json.");
+        return { workspaces: options.workspaces };
+      }),
       cloudStatus: vi.fn(async () => ({ connected: false })),
       onCloudSessionChanged: vi.fn(() => () => undefined),
       getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" as const })),
@@ -986,10 +997,12 @@ describe("the window's title and Close tab", () => {
       onShareHandoffStatus: vi.fn(() => () => undefined),
       getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
       dismissShareHandoff: vi.fn(async () => undefined),
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
     });
     return {
       closeThisWindow,
-      send: (command: "close-tab" | "settings") => act(() => menu?.(command)),
+      send: (command: MenuCommand) => act(() => menu?.(command)),
       listening: () => menu !== null,
     };
   }
@@ -1013,12 +1026,15 @@ describe("the window's title and Close tab", () => {
     expect(document.title).toBe("dohc");
   });
 
-  it.each(["darwin", "win32"] as const)("closes a window with no tabs from Close tab only on macOS (%s)", async (platform) => {
-    const root = stub({ windowRole: "manager", platform, workspaces: [workspace("trip")] });
+  it.each(["darwin", "win32"] as const)("answers menu commands on the registry error screen (%s)", async (platform) => {
+    const root = stub({ windowRole: "workspace", platform, workspaces: [], registryFails: true });
     render(<DesktopRoot />);
-    await screen.findByTestId("first-run");
-    root.send("settings");
-    expect(root.closeThisWindow).not.toHaveBeenCalled();
+    await screen.findByText("dohc couldn't read its workspace registry");
+    expect(document.title).toBe("dohc");
+
+    root.send("check-updates");
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("No update check was started.");
+
     root.send("close-tab");
     expect(root.closeThisWindow).toHaveBeenCalledTimes(platform === "darwin" ? 1 : 0);
   });
