@@ -31,16 +31,21 @@ export type DeleteRecoveryPlan = { operationId: string; record?: RecoveryRecord;
 const code = (error: unknown) => error && typeof error === "object" && "code" in error ? error.code : undefined;
 const info = async (path: string) => lstat(path).catch(error => { if (code(error) === "ENOENT") return null; throw error; });
 const recordName = (id: string, kind = "delete") => `${kind}-${createHash("sha256").update(id).digest("hex")}.json`;
-// Undo waits outside the workspace queue; reads can inspect the staged record.
-const pendingDeletes = new Map<string, Promise<void>>();
-export function beginPendingDeleteRecovery(operationId: string): () => void {
-  let resolve!: () => void;
-  pendingDeletes.set(operationId, new Promise<void>(done => { resolve = done; }));
-  return () => { pendingDeletes.delete(operationId); resolve(); };
+// Waiters never hold the workspace queue. A move read waits for its record too.
+const pendingRecoveries = new Map<string, { done: Promise<void>; waitForReads: boolean }>();
+export function beginPendingRecovery(operationId: string, options: { signal?: AbortSignal; waitForReads?: boolean } = {}): () => void {
+  let resolve!: () => void, retirement: ReturnType<typeof addAbortListener> | undefined;
+  const pending = { done: new Promise<void>(done => { resolve = done; }), waitForReads: options.waitForReads ?? false };
+  const finish = () => { if (pendingRecoveries.get(operationId) === pending) pendingRecoveries.delete(operationId); retirement?.[Symbol.dispose](); resolve(); };
+  pendingRecoveries.set(operationId, pending);
+  if (options.signal?.aborted) finish();
+  else if (options.signal) retirement = addAbortListener(options.signal, finish);
+  return finish;
 }
-export async function waitForDeleteRecovery(operationId: string, signal?: AbortSignal): Promise<void> {
-  const pending = pendingDeletes.get(operationId);
-  if (!pending || signal?.aborted) return;
+export async function waitForRecovery(operationId: string, signal?: AbortSignal, action: "read" | "undo" = "undo"): Promise<void> {
+  const entry = pendingRecoveries.get(operationId);
+  if (!entry || signal?.aborted || (action === "read" && !entry.waitForReads)) return;
+  const pending = entry.done;
   if (!signal) { await pending; return; }
   let retirement!: ReturnType<typeof addAbortListener>;
   const retired = new Promise<void>(done => { retirement = addAbortListener(signal, () => done()); });

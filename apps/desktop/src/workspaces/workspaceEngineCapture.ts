@@ -5903,10 +5903,11 @@ export function createWorkspaceEngineCapture(
                 // size History keeps or no longer UTF-8, is deleted as capture would delete it.
                 const onDisk = new Set(files);
                 const kept = new Set(held);
-                for (const head of await listTextFileMetadata(engine, versionId)) {
-                  if (!pathIsAtOrUnder(head.path, path) || kept.has(head.path) || !historyPathAdmission(policy)(head.path)) continue;
-                  await deleteIfTracked(engine, versionId, head.path,
-                    { origin: "local-file", summary: `Deleted ${pathBasename(head.path)}` }, undefined, !onDisk.has(head.path));
+                const heads = await engine.listTextFileMetadata({ workspaceId, versionId, under: path });
+                for (const headPath of [path, ...heads.map(head => head.path)]) {
+                  if (!pathIsAtOrUnder(headPath, path) || kept.has(headPath) || !historyPathAdmission(policy)(headPath)) continue;
+                  await deleteIfTracked(engine, versionId, headPath,
+                    { origin: "local-file", summary: `Deleted ${pathBasename(headPath)}` }, undefined, !onDisk.has(headPath));
                 }
                 return held;
               },

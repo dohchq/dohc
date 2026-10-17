@@ -31,7 +31,7 @@ import type { AuthoredPathChanges, WorkspaceEngineMomentSummary, WorkspaceEngine
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
-import { readDeleteRecovery, waitForDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
+import { readDeleteRecovery, waitForRecovery } from "../workspaces/workspaceDeleteRecovery";
 
 function deferred() {
   let release!: () => void;
@@ -747,7 +747,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
       .toMatchObject({ ok: false, reason: expect.stringContaining("retired workspace authority") });
     expect(f.dependencies.trashItem).toHaveBeenCalledOnce();
     const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
-    await waitForDeleteRecovery(operationId);
+    await waitForRecovery(operationId);
     const record = await readDeleteRecovery(f.root, operationId);
     expect(record?.staged).toBeDefined();
     expect(await readFile(join(f.root, ".dohc/trash", record!.staged!), "utf8")).toBe("original");

@@ -12,9 +12,9 @@ import { realRelativeInRoot } from "@dohc/workspace-core/realPath";
 import { withExclusiveWorkspaceOperation, withSharedWorkspaceOperation } from "./workspaceAssets";
 import { historyExcludesSubtree, historyPathAdmission, readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
-import { waitForDeleteRecovery, missingDeleteRecoveryReason, readDeleteRecovery, undoDeleteRecovery, type RecoveryRecord, type DeleteUndoResult } from "./workspaceDeleteRecovery";
+import { waitForRecovery, missingDeleteRecoveryReason, readDeleteRecovery, undoDeleteRecovery, type RecoveryRecord, type DeleteUndoResult } from "./workspaceDeleteRecovery";
 
-type Operation = { workspace: { workspaceId: string; rootPath: string; readOnly?: boolean; shareView?: unknown }; assertCurrent(): void };
+type Operation = { workspace: { workspaceId: string; rootPath: string; readOnly?: boolean; shareView?: unknown }; signal?: AbortSignal; assertCurrent(): void };
 export type OperationHistory = Pick<VersionedLiveAdapter, "readHistoryPage" | "undoHistoryOperation">;
 export function createOperationHistory(withAdapter: <T>(work: (adapter: OperationHistory) => Promise<T>) => Promise<T | null>): OperationHistory {
   const requireResult = <T>(result: T | null): T => {
@@ -135,6 +135,8 @@ export async function readWorkspaceHistoryOperation(operation: Operation, input:
     writable(operation); operationId(input.operationId);
     const { rootPath, workspaceId } = operation.workspace;
     const cursor = input.cursor === undefined ? undefined : decodeCursor(input.cursor, workspaceId, input.operationId);
+    await waitForRecovery(input.operationId, operation.signal, "read");
+    if (operation.signal?.aborted) throw new Error("This workspace was closed. Open it again.");
     return await withSharedWorkspaceOperation(rootPath, async () => {
       writable(operation);
       const record = cursor ? undefined : await readDeleteRecovery(rootPath, input.operationId, "read");
@@ -157,7 +159,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
   try {
     writable(operation); operationId(input.operationId);
     const { rootPath, workspaceId } = operation.workspace;
-    await waitForDeleteRecovery(input.operationId, operation.signal);
+    await waitForRecovery(input.operationId, operation.signal);
     if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");
     writable(operation);
     return await withExclusiveWorkspaceOperation(rootPath, async markChanged => {

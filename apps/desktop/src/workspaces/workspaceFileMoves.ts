@@ -14,7 +14,7 @@ import { historyExcludesSubtree, historyPathAdmission, type WorkspaceEnginePolic
 import { deletePath, moveIntoWorkspaceTrash, movePath, prepareWorkspaceMove, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
 import { realRelativeInRoot } from "@dohc/workspace-core/realPath";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
-import { beginPendingDeleteRecovery, finishDeleteRecovery, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
+import { beginPendingRecovery, finishDeleteRecovery, stageDeleteRecovery, type OperationRecovery, type DeleteRecoveryPlan } from "./workspaceDeleteRecovery";
 
 import { finishMoveRecovery } from "./workspaceMoveRecovery";
 
@@ -245,7 +245,7 @@ async function toSystemTrash(options: Pick<PathChangeOptions, "trashItem">, stag
   }
 }
 
-type MoveOptions = Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null; markChanged?: () => void; byHand?: boolean; admit?: () => Promise<void> };
+type MoveOptions = Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null; markChanged?: () => void; onRecorded?: (path: string, operationId: string) => () => void; byHand?: boolean; admit?: () => Promise<void> };
 
 export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(
   operation: WorkspaceAuthorityOperation<Workspace, State>, input: { fromPath: string; toPath: string; overwrite?: boolean },
@@ -302,7 +302,7 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
           `A rename cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`);
       }
       const endpoints = prepared ? [prepared.physicalFromPath, prepared.physicalToPath] : [(await admitPath(rootPath, input.fromPath)).physical, (await admitPath(rootPath, input.toPath)).physical];
-      const work = async (engine: AuthoredPathChanges | null): Promise<Changed<{ fromPath: string; toPath: string; withoutHistory: string[]; replacedWithoutHistory: string[] } & OperationRecovery, MoveFailure>> => {
+      const work = async (engine: AuthoredPathChanges | null): Promise<Changed<{ fromPath: string; toPath: string; withoutHistory: string[]; replacedWithoutHistory: string[]; recovery: DeleteRecoveryPlan; from: string; to: string; overwritten: boolean }, MoveFailure>> => {
           // Admission runs here, with capture held, right before the disk changes.
           assertWritable(operation);
           await options.admit?.();
@@ -429,12 +429,18 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
               ...(deleted.length ? { deleted } : {}), ...(rowless.length ? { withoutHistory: rowless } : {}), ...(replaced ? { replaced } : {}) } };
           }
           gone = [from.relative, ...(dest ? [destBase] : [])];
-          const saved = await finishMoveRecovery(rootPath, recovery, from.relative, to.relative, dest !== undefined);
-          return { done: { fromPath: from.path, toPath: to.path, withoutHistory, replacedWithoutHistory, ...saved }, ...(change.staged !== undefined ? { trash: change.staged } : {}) };
+          return { done: { fromPath: from.path, toPath: to.path, withoutHistory, replacedWithoutHistory, recovery, from: from.relative, to: to.relative, overwritten: dest !== undefined }, ...(change.staged !== undefined ? { trash: change.staged } : {}) };
         };
-      return options.capture && endpoints.every(engineAddresses)
+      const changed = await (options.capture && endpoints.every(engineAddresses)
         ? options.capture.changePathsAs(endpoints, { operation: "move", author, operationId }, work, () => gone)
-        : work(null);
+        : work(null));
+      if ("failed" in changed) return changed;
+      const { recovery, from, to, overwritten, ...done } = changed.done;
+      const release = recovery.record && !recovery.noUndo ? options.onRecorded?.(done.toPath, operationId) : undefined;
+      try {
+        const saved = await finishMoveRecovery(rootPath, recovery, from, to, overwritten);
+        return { ...changed, done: { ...done, ...saved } };
+      } finally { release?.(); }
     };
     const changed = await (options.markChanged ? change(options.markChanged) : withExclusiveWorkspaceOperation(rootPath, change));
     if ("failed" in changed) return async () => changed.failed;
@@ -549,7 +555,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
   const rootPath = operation.workspace.rootPath;
   const failed = `dohc could not delete ${path}.`;
   const operationId = `${OPERATION_ID_PREFIX}${randomUUID()}`;
-  const releaseRecovery = beginPendingDeleteRecovery(operationId);
+  const releaseRecovery = beginPendingRecovery(operationId);
   try {
     assertWritable(operation);
     const changed = await withExclusiveWorkspaceOperation(rootPath, async markChanged => {

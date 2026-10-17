@@ -9,7 +9,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
 import { moveWorkspacePathByHand, prepareMoveWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
 import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
-import { undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
+import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deferred } from "../testing/deferred";
 
@@ -24,8 +24,9 @@ const id = "dohc-operation:11111111-1111-4111-8111-111111111111";
 async function fixture() {
   const rootPath = await createTestScratch("move-undo-");
   const write = async (path: string, text = path) => { await mkdir(dirname(join(rootPath, path)), { recursive: true }); await writeFile(join(rootPath, path), text); };
+  const retirement = new AbortController();
   const operation = { workspace: { rootPath, workspaceId: "move-test", attachmentId: Symbol("move-test"), readOnly: false, shareView: undefined as unknown },
-    signal: new AbortController().signal, state: {}, assertCurrent: vi.fn() };
+    signal: retirement.signal, state: {}, assertCurrent: vi.fn() };
   const members: { path: string; beforePath: string; operation: "rename"; momentId: string }[] = [];
   const objects = new Map<string, string>();
   let activeOperationId = "", compensationCount = 0, placed = false, restoring = false;
@@ -68,7 +69,7 @@ async function fixture() {
     if (!result.ok) throw new Error(result.reason);
     return { ...result, path: result.toPath };
   };
-  return { rootPath, write, operation, options, capture, members, objects, history, move, moveFolder, undo, recordPath,
+  return { rootPath, write, operation, retirement, options, capture, members, objects, history, move, moveFolder, undo, recordPath,
     compensationCount: () => compensationCount, restoring: (value: boolean) => { restoring = value; } };
 }
 it.each([false, true])("returns a person's rename operation through IPC and keeps later typing through agent=%s Undo", async byAgent => {
@@ -245,4 +246,67 @@ it("reports a placement failure without inventing an occupant and retries it", a
     reason: "dohc could not put folder/oversized.bin back. It stays at archive/folder/oversized.bin." }] });
   expect(await f.undo()).toMatchObject({ ok: true, restored: ["folder/oversized.bin"], remaining: [] });
   expect(f.compensationCount()).toBe(1);
+});
+
+it("returns a committed person rename while its record saves, with read and Undo outside the queue", async () => {
+  const f = await fixture(); await f.write("a.txt");
+  const entered = deferred<void>(), release = deferred<void>();
+  const actual = recovery.saveRecoveryRecord;
+  vi.spyOn(recovery, "saveRecoveryRecord").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; await actual(...args); });
+  const moved = await f.move("a.txt", "b.txt"); await entered.promise;
+  expect(f.members).toEqual([expect.objectContaining({ operation: "rename", path: "b.txt", beforePath: "a.txt" })]);
+  expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("a.txt");
+  const shared = vi.spyOn(assets, "withSharedWorkspaceOperation"), exclusive = vi.spyOn(assets, "withExclusiveWorkspaceOperation");
+  const waiting = vi.spyOn(recovery, "waitForRecovery");
+  const reading = readWorkspaceHistoryOperation(f.operation, { operationId: moved.operationId! }, f.history);
+  const undoing = f.undo();
+  expect(waiting).toHaveBeenCalledTimes(2); expect(shared).not.toHaveBeenCalled(); expect(exclusive).not.toHaveBeenCalled();
+  expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  release.resolve();
+  expect(await reading).toMatchObject({ ok: true, members: [expect.objectContaining({ operation: "rename" })] });
+  expect(await undoing).toMatchObject({ ok: true, tracked: { state: "restored" } });
+});
+
+it("releases pending record waiters on retirement before they take the workspace queue", async () => {
+  const f = await fixture(); await f.write("a.txt");
+  const entered = deferred<void>(), release = deferred<void>();
+  vi.spyOn(recovery, "saveRecoveryRecord").mockImplementationOnce(async () => { entered.resolve(); await release.promise; throw new Error("retired"); });
+  const moved = await f.move("a.txt", "b.txt"); await entered.promise;
+  const shared = vi.spyOn(assets, "withSharedWorkspaceOperation"), exclusive = vi.spyOn(assets, "withExclusiveWorkspaceOperation");
+  const reading = readWorkspaceHistoryOperation(f.operation, { operationId: moved.operationId! }, f.history);
+  const undoing = f.undo().catch(error => error.message);
+  f.retirement.abort();
+  expect(await reading).toEqual({ ok: false, reason: "This workspace was closed. Open it again." });
+  expect(await undoing).toBe("This workspace was closed. Open it again.");
+  await recovery.waitForRecovery(moved.operationId!);
+  expect(shared).not.toHaveBeenCalled(); expect(exclusive).not.toHaveBeenCalled();
+  expect(f.history.readHistoryPage).not.toHaveBeenCalled(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  release.resolve();
+  await assets.withSharedWorkspaceOperation(f.rootPath, async () => undefined);
+});
+
+it("keeps the committed file and History after a stop loses the pending recovery save", async () => {
+  const f = await fixture(); await f.write("a.txt", "kept");
+  const entered = deferred<void>(), release = deferred<void>();
+  vi.spyOn(recovery, "saveRecoveryRecord").mockImplementationOnce(async () => { entered.resolve(); await release.promise; throw new Error("process stopped before save"); });
+  const moved = await f.move("a.txt", "b.txt"); await entered.promise;
+  expect(f.members).toHaveLength(1); // The visible result already includes the engine commit.
+  release.resolve(); await recovery.waitForRecovery(moved.operationId!);
+  expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("kept");
+  await expect(readFile(f.recordPath())).rejects.toMatchObject({ code: "ENOENT" });
+  expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the rename. Its recovery record is missing or expired. Rename it back yourself." });
+  expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+});
+
+it("does not publish a person rename before the engine and capture finish", async () => {
+  const f = await fixture(); await f.write("a.txt");
+  const entered = deferred<void>(), release = deferred<void>();
+  const actual = f.capture.changePathsAs;
+  vi.spyOn(f.capture, "changePathsAs").mockImplementation(async (...args) => {
+    const changed = await actual(...args); entered.resolve(); await release.promise; return changed;
+  });
+  const settled = vi.fn(); const moving = f.move("a.txt", "b.txt").then(value => { settled(); return value; });
+  await entered.promise; expect(f.members).toHaveLength(1); expect(settled).not.toHaveBeenCalled();
+  release.resolve(); const moved = await moving; await recovery.waitForRecovery(moved.operationId!);
+  expect(settled).toHaveBeenCalledOnce();
 });

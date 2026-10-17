@@ -41,7 +41,7 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { LocalPersonAuthor } from "./desktopRecordEdits";
 import { undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
-import type { DeleteUndoResult } from "./workspaceDeleteRecovery";
+import { beginPendingRecovery, type DeleteUndoResult } from "./workspaceDeleteRecovery";
 import { deleteWorkspacePathByHand, moveWorkspacePathByHand } from "./workspaceFileMoves";
 import {
   createFile,
@@ -303,11 +303,20 @@ export function createWorkspaceFileMutationOwner<
     movePath: async (event, payload) => {
       const request = admitMutation(event, payload, MoveWorkspacePathPayload.parse);
       const person = await dependencies.localPerson();
-      return runAdmittedMutation(event, request, async ({ input, workspace, receivedShare, capture, authorityId, yDocSessions, assertCurrent }) => {
+      let resolve!: (value: MoveWorkspacePathResult) => void, reject!: (error: unknown) => void;
+      const result = new Promise<MoveWorkspacePathResult>((done, failed) => { resolve = done; reject = failed; });
+      const recording = runAdmittedMutation(event, request, async ({ input, workspace, signal, receivedShare, capture, authorityId, yDocSessions, assertCurrent }) => {
         if (!receivedShare) {
           assertWritableWorkspace(workspace);
           return MoveWorkspacePathResult.parse(await moveWorkspacePathByHand({ workspace, assertCurrent }, input, person, {
             capture, requestId: randomUUID(), trashItem: dependencies.trashItem,
+            onRecorded: (path, operationId) => {
+              assertCurrent();
+              const value = MoveWorkspacePathResult.parse({ path, operationId, undo: { available: true } });
+              const release = beginPendingRecovery(operationId, { signal, waitForReads: true });
+              resolve(value);
+              return release;
+            },
             markDeleted: path => yDocSessions.markDeletedUnderPath(authorityId, path),
             admit: () => refuseMoveAcrossShareMount(workspace.rootPath, input.fromPath, input.toPath,
               storedShareMounts(workspace), shareMountRegistryIsPresent(workspace)),
@@ -324,6 +333,8 @@ export function createWorkspaceFileMutationOwner<
           return MoveWorkspacePathResult.parse({ path });
         });
       });
+      void recording.then(resolve, reject);
+      return result;
     },
 
     undoHistoryOperation: async (event, payload) => {

@@ -1274,3 +1274,40 @@ describe("History operation admission",()=>{
     } finally {await f.engine().stop();}
   });
 });
+
+it("limits move metadata reads to its roots and removes stale descendants without touching prefix siblings", async () => {
+  let held = false;
+  const requests: Request[] = [];
+  const f = await fixture({ beforeRequest: async request => {
+    requests.push(request);
+    if (request.method === "capture.hold") { held = true; await rm(join(f.rootPath, "dir/stale.txt")); }
+  } });
+  for (const path of ["dir/kept.txt", "dir/stale.txt", "directory/sibling.txt"]) await write(f.rootPath, path, path);
+  await f.start(); requests.length = 0;
+  try {
+    const sibling = await f.engine().fileObjectIdForPath("directory/sibling.txt");
+    expect(await f.move("dir", "moved")).toMatchObject({ ok: true });
+    expect(held).toBe(true);
+    const holdIndex = requests.findIndex(request => request.method === "capture.hold");
+    const lists = requests.slice(holdIndex).filter(request => request.method === VERSIONED_METHOD.textList);
+    expect(lists.length).toBeGreaterThan(0);
+    expect(lists.every(request => ["dir/", "moved/"].includes((request.params as { afterPath?: string }).afterPath ?? ""))).toBe(true);
+    expect(await f.engine().fileObjectIdForPath("dir/stale.txt")).toBeNull();
+    expect(await f.engine().fileObjectIdForPath("directory/sibling.txt")).toBe(sibling);
+    expect(await f.engine().fileObjectIdForPath("moved/kept.txt")).not.toBeNull();
+  } finally { await f.engine().stop(); }
+});
+
+it("cleans an exact root head that becomes oversized under the capture hold", async () => {
+  const f = await fixture({ beforeRequest: async request => {
+    if (request.method === "capture.hold") await write(f.rootPath, "a.txt", "x".repeat(11 * 1024 * 1024));
+  } });
+  await write(f.rootPath, "a.txt", "tracked first"); await f.start();
+  try {
+    expect(await f.engine().fileObjectIdForPath("a.txt")).not.toBeNull();
+    expect(await f.move("a.txt", "b.txt")).toMatchObject({ ok: true, withoutHistory: ["b.txt"] });
+    expect(await f.engine().fileObjectIdForPath("a.txt")).toBeNull();
+    expect(await f.engine().fileObjectIdForPath("b.txt")).toBeNull();
+    expect((await readFile(join(f.rootPath, "b.txt"))).length).toBe(11 * 1024 * 1024);
+  } finally { await f.engine().stop(); }
+});
