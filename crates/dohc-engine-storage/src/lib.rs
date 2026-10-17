@@ -29,18 +29,25 @@
 pub mod backup;
 pub mod blob;
 pub mod capture_file_holds;
+#[cfg(feature = "fault-injection")]
+pub mod capture_phase;
 pub mod diagnostics;
 mod durability;
 pub mod error;
 pub mod faults;
 pub mod limits;
+pub mod links;
 pub mod materialize;
 pub mod remote_changes;
 pub mod replica;
 pub mod store;
 
+mod checkpoint;
 pub(crate) mod migration;
 pub(crate) mod schema;
+mod search_generation;
+
+pub use search_generation::search_generation;
 
 pub use backup::{
     BackupManifest, BackupOutcome, BackupRecord, FreeSpaceProbe, RealFreeSpace,
@@ -61,8 +68,9 @@ pub use limits::{
 pub use materialize::{
     Displacement, DisplacementResolution, DisplacementSpec, DisplacementState, JobStatus,
     MaterializationJob, MaterializationJobSpec, MaterializationOperation, Preimage,
-    cancel_pending_jobs_for_path, enqueue_delete_job, enqueue_job, pending_switch_jobs_in,
-    record_completed_job, stamp_secret_capture_owned, upsert_projection_job,
+    RetainedDisplacement, cancel_pending_jobs_for_path, enqueue_delete_job, enqueue_job,
+    pending_switch_jobs_in, record_completed_job, stamp_secret_capture_owned,
+    upsert_projection_job,
 };
 pub use remote_changes::{count_remote_change_in_tx, remote_changes_applied_in};
 pub use store::{EngineStore, TxnOutcome};

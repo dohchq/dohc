@@ -397,6 +397,37 @@ it.each(["recover", "close", "close-during-retry", "terminal", "wrong-code"] as 
   peer.destroy();
 });
 
+it("retries a resync refused for egress capacity and keeps the edit made meanwhile", async () => {
+  const engine = seedPlaintextEngine("seed"), scheduler = settleScheduler();
+  const refusal = new DaemonRefusalError({code: "OVERLOADED", message: "blob-egress-capacity", retry: "afterBackoff"},
+    new Error("daemon response"));
+  let resyncs = 0;
+  const transport: EngineTransport = {
+    ...forwardYdocBlobEgress(engine),
+    onEvent: handler => engine.onEvent(event => handler(event.name === YDOC_EVENT.remoteUpdate
+      ? {...event, payload: {sessionId: (event.payload as {sessionId: string}).sessionId, resyncRequired: true}} : event)),
+    async sendRequest(request) {
+      if (request.method === YDOC_METHOD.resync && ++resyncs === 1) throw refusal;
+      return engine.sendRequest(request);
+    },
+  };
+  const provider = await openEngineYdocProviderSession({transport, workspace: WORKSPACE, versionId: VERSION, path: PATH,
+    contentKind: "plaintext", onRemoteUpdate() {}, scheduleSettle: scheduler.schedule});
+  const peer = new Y.Doc(); Y.applyUpdate(peer, provider.initialUpdate);
+  const vector = Y.encodeStateVector(peer); peer.getText("plainText").insert(0, "remote ");
+  engine.applyRemoteUpdate(provider.nativeOwner!.sessionId, Y.encodeStateAsUpdate(peer, vector));
+  await drain();
+  expect(resyncs).toBe(1);
+  await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(4, " local")), {armSettle: false});
+  expect(scheduler.armed, "drop blob-egress-capacity from the transient set -> no retry is armed").toHaveLength(1);
+  scheduler.fire(); await drain();
+  expect(resyncs).toBe(2);
+  expect(provider.doc.getText("plainText").toString()).toBe("remote seed local");
+  expect(engine.sessionText(provider.nativeOwner!.sessionId)).toBe("remote seed local");
+  await provider.close();
+  peer.destroy();
+});
+
 it("resyncs an invalidation queued as the previous state finishes applying", async () => {
   const engine = seedPlaintextEngine("seed");
   const adapter = new YdocLiveAdapter({...forwardYdocBlobEgress(engine), sendRequest: request => engine.sendRequest(request),
@@ -2228,6 +2259,7 @@ describe("YdocLiveAdapter", () => {
     options?: {
       settleDebounceMs?: number;
       blocker?: "file-locked" | "engine-store-busy" | "settlement-materialization-pending";
+      replicated?: boolean;
     },
   ) {
     const engine = seedPlaintextEngine();
@@ -2247,7 +2279,11 @@ describe("YdocLiveAdapter", () => {
         if (request.method === YDOC_METHOD.settle && blocked.held) {
           throw refusal;
         }
-        return engine.sendRequest(request);
+        const response = await engine.sendRequest(request);
+        if (options?.replicated && (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync || request.method === YDOC_METHOD.recordUpdate)) {
+          return { ...response, result: { ...(response.result as Record<string, JsonValue>), lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
+        }
+        return response;
       },
     };
     const settleErrors: unknown[] = [];
@@ -2337,68 +2373,110 @@ describe("YdocLiveAdapter", () => {
     await provider.close({ settle: false });
   });
 
-  it("retries an engine-store-busy settle until the store frees, then saves", async () => {
-    // A busy SQLite handle is dohc's own writers meeting, and the store
-    // reports itself intact and the operation retryable. It used to reach the
-    // caller as INTERNAL / retry "no", so the settle stood down on a condition
-    // that clears by waiting and the user's edits reached the file only on
-    // some unrelated later settle. The ladder now re-arms on it beside the
-    // file lock.
-    const { provider, blocked, refusal, settleErrors, settled, delays, scheduler } =
-      await openAgainstABlockedSettle("typed while the store was busy", {
-        settleDebounceMs: 100,
-        blocker: "engine-store-busy",
-      });
-
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      expect(scheduler.armed).toHaveLength(1);
+  it("waits out store catch-up without surfacing a settle error", async () => {
+    vi.useFakeTimers();
+    try {
+      const { provider, blocked, settleErrors, settled, scheduler } =
+        await openAgainstABlockedSettle("typed while the store was busy", {
+          settleDebounceMs: 100, blocker: "engine-store-busy",
+        });
       scheduler.fire();
-      await drain();
-    }
-    // Every failure re-armed the next attempt and none went quiet.
-    expect(settleErrors).toEqual([refusal, refusal, refusal]);
-    expect(settled).toEqual([]);
-
-    // The contention clears; the pending retry lands the write by itself.
-    blocked.held = false;
-    scheduler.fire();
-    await drain();
-    expect(settled).toHaveLength(1);
-    expect(scheduler.armed).toHaveLength(0);
-    // The rungs are the busy store's, capped at 1s rather than the lock's 10s.
-    expect(delays).toEqual([100, 100, 200, 400]);
-
-    await provider.close({ settle: false });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(settleErrors).toEqual([]);
+      expect(settled).toEqual([]);
+      blocked.held = false;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toHaveLength(1);
+      expect(settleErrors).toEqual([]);
+      expect(scheduler.armed).toHaveLength(0);
+      await provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
   });
 
-  it("caps the busy-store ladder far below the file lock's", async () => {
-    // The two waits are for different things. A file lock is held by a
-    // program outside dohc and can last as long as that program does; SQLite
-    // contention is dohc's own and clears in milliseconds. One shared cap
-    // would either hold a document unsettled for ten seconds over a
-    // millisecond of contention, or retry a locked file too eagerly to be
-    // worth bounding.
-    const busy = await openAgainstABlockedSettle("typed while the store was busy", {
-      settleDebounceMs: 4000,
+  it("surfaces a persistent store refusal when its total budget expires", async () => {
+    vi.useFakeTimers();
+    try {
+      const busy = await openAgainstABlockedSettle("typed while the store was busy", {
+        settleDebounceMs: 4000, blocker: "engine-store-busy",
+      });
+      busy.scheduler.fire();
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(busy.settleErrors).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(busy.settleErrors).toEqual([busy.refusal]);
+      expect(busy.settled).toEqual([]);
+      expect(busy.delays).toEqual([4000, 1000]);
+      expect(busy.scheduler.armed).toHaveLength(1);
+      await busy.provider.close({ settle: false });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("cancels a busy debounced settle before giving close its one budget", async () => {
+    vi.useFakeTimers();
+    const fixture = await openAgainstABlockedSettle("preserved during busy teardown", {
       blocker: "engine-store-busy",
     });
-    const lockedFile = await openAgainstABlockedSettle("typed against a lock", {
-      settleDebounceMs: 4000,
-    });
-
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      busy.scheduler.fire();
-      await drain();
-      lockedFile.scheduler.fire();
-      await drain();
+    try {
+      fixture.engine.markSessionReplicated(fixture.provider.nativeOwner!.sessionId);
+      fixture.scheduler.fire();
+      await vi.advanceTimersByTimeAsync(100);
+      let finished = false;
+      const closing = fixture.provider.close().then(
+        () => { finished = true; return undefined; },
+        error => { finished = true; return error; },
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(finished).toBe(true);
+      expect(await closing).toBeInstanceOf(YdocReleasedWithSettleFailureError);
+      expect(fixture.engine.activeSessionIds()).toHaveLength(0);
+      fixture.blocked.held = false;
+      const reopened = await openEngineYdocProviderSession({
+        transport: { ...forwardYdocBlobEgress(fixture.engine),
+          onEvent: handler => fixture.engine.onEvent(handler),
+          sendRequest: request => fixture.engine.sendRequest(request) },
+        workspace: WORKSPACE, versionId: VERSION, path: PATH, contentKind: "plaintext",
+        onRemoteUpdate: () => undefined, scheduleSettle: () => () => undefined,
+      });
+      expect(reopened.doc.getText("plainText").toString()).toContain("preserved during busy teardown");
+      await reopened.close({ settle: false });
+    } finally {
+      fixture.blocked.held = false;
+      await vi.runAllTimersAsync();
+      await fixture.provider.close({ settle: false });
+      vi.useRealTimers();
     }
-    // Both ladders start at the debounce the caller asked for and are then
-    // held down to their own ceiling.
-    expect(busy.delays).toEqual([4000, 1000, 1000, 1000]);
-    expect(lockedFile.delays).toEqual([4000, 4000, 8000, 10_000]);
+  });
 
-    await busy.provider.close({ settle: false });
-    await lockedFile.provider.close({ settle: false });
+  it("waits out catch-up on the verified replicated-lineage close path", async () => {
+    vi.useFakeTimers();
+    const fixture = await openAgainstABlockedSettle("replicated close", {
+      blocker: "engine-store-busy", replicated: true,
+    });
+    try {
+      fixture.blocked.held = false;
+      await fixture.provider.settleNow();
+      fixture.engine.markSessionReplicated(fixture.provider.nativeOwner!.sessionId);
+      expect(fixture.provider.lineageClaimId).toBe("owner-claim");
+      fixture.blocked.held = true;
+      let finished = false;
+      const closing = fixture.provider.close().then(
+        () => { finished = true; return undefined; },
+        error => { finished = true; return error; },
+      );
+      await vi.advanceTimersByTimeAsync(500);
+      expect(finished).toBe(false);
+      fixture.blocked.held = false;
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await closing).toBeUndefined();
+      expect(fixture.settleErrors).toEqual([]);
+      expect(fixture.settled).toHaveLength(1);
+      expect(fixture.engine.activeSessionIds()).toHaveLength(0);
+    } finally {
+      fixture.blocked.held = false;
+      await vi.runAllTimersAsync();
+      await fixture.provider.close({ settle: false });
+      vi.useRealTimers();
+    }
   });
 
   // A provider whose JOURNAL write is refused busy `refusals` times before the

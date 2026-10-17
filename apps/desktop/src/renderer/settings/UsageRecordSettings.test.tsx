@@ -79,7 +79,7 @@ describe("usage record in Privacy", () => {
     expect(within(rows[1]!).getAllByRole("cell").map(c => c.textContent)).toEqual(["0", "2", "0", NOT_COUNTED, "yesterday"]);
     expect(rows[3]!.dataset.counted).toBe("false");
     expect(within(rows[3]!).getAllByTitle(NOT_COUNTED)).toHaveLength(4);
-    // No door counts automation in this build, so its heading is marked too.
+    // This fixture has no counted Automation pairs, so its heading is marked too.
     const automation = screen.getByRole("columnheader", { name: /Automation/ });
     expect(within(automation).getByTitle(NOT_COUNTED)).toBeTruthy();
     expect(within(screen.getByRole("columnheader", { name: /^dohc$/ })).queryByTitle(NOT_COUNTED)).toBeNull();

@@ -152,6 +152,10 @@ export type PageIdentityProps = (
   // Read-only surfaces (truncated / shared views) show the identity but never
   // edit it.
   readOnly?: boolean;
+  // An editable page whose document is still opening refuses edits, and
+  // holds the box of every control it will show, so nothing moves when it
+  // becomes editable.
+  opening?: boolean;
   // Enter, or ArrowDown on the title's last line, moves focus into the body
   // editor's start.
   onEnterBody?: () => void;
@@ -210,7 +214,8 @@ function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
 export function PageIdentity(props: PageIdentityProps) {
   const ydoc = props.ydoc ?? null;
   const body = props.body ?? "";
-  const readOnly = props.readOnly ?? false;
+  const opening = (props.opening ?? false) && !props.readOnly;
+  const readOnly = (props.readOnly ?? false) || opening;
   const [ydocRevision, setYdocRevision] = useState(0);
 
   useEffect(() => {
@@ -409,6 +414,11 @@ export function PageIdentity(props: PageIdentityProps) {
               <Smile size={15} aria-hidden />
               Add icon
             </button>
+          ) : opening ? (
+            <button type="button" disabled tabIndex={-1} aria-hidden className={`${ADD_ICON} invisible`}>
+              <Smile size={15} aria-hidden />
+              Add icon
+            </button>
           ) : null}
           {pickerOpen ? (
             <div
@@ -416,6 +426,7 @@ export function PageIdentity(props: PageIdentityProps) {
               data-testid="page-icon-picker"
               className="dohc-page-identity__picker"
               role="dialog"
+              aria-modal="true"
               aria-label="Choose an icon"
             >
               <div className="dohc-page-identity__picker-grid">

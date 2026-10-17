@@ -29,6 +29,10 @@ type CompletionBatch = Arc<std::sync::Mutex<Option<std::collections::HashMap<Str
 #[derive(Debug)]
 pub struct EngineStore {
     conn: Connection,
+    checkpoints: Option<crate::checkpoint::Checkpoints>,
+    checkpoint_changes: u64,
+    #[cfg(feature = "fault-injection")]
+    harness_commits: u64,
     freshly_created: bool,
     database_path: PathBuf,
     passive: bool,
@@ -93,6 +97,10 @@ impl EngineStore {
             crate::schema::open_engine_db_with_store_role(path, now_ms, root_token, work, true)?;
         Ok(Self {
             conn: opened.conn,
+            checkpoints: None,
+            checkpoint_changes: 0,
+            #[cfg(feature = "fault-injection")]
+            harness_commits: 0,
             freshly_created: opened.freshly_created,
             database_path: path.to_path_buf(),
             passive: true,
@@ -123,8 +131,34 @@ impl EngineStore {
         let opened = open_engine_db(path, now_ms, work)?;
         Ok(EngineStore {
             conn: opened.conn,
+            checkpoints: None,
+            checkpoint_changes: 0,
             freshly_created: opened.freshly_created,
             database_path: path.to_path_buf(),
+            passive: false,
+            #[cfg(feature = "fault-injection")]
+            harness_commits: 0,
+            completed_batch: Arc::default(),
+        })
+    }
+
+    /// Open the actor's writer with automatic checkpoints disabled before migrations.
+    /// Startup fails if its background checkpoint connection cannot start.
+    pub fn open_for_actor(
+        path: &Path,
+        now_ms: i64,
+        root_token: Option<&str>,
+        work: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, StorageError> {
+        let opened = crate::schema::open_engine_db_for_actor(path, now_ms, root_token, work)?;
+        Ok(EngineStore {
+            checkpoint_changes: opened.conn.total_changes(),
+            conn: opened.conn,
+            checkpoints: opened.checkpoints,
+            freshly_created: opened.freshly_created,
+            database_path: path.to_path_buf(),
+            #[cfg(feature = "fault-injection")]
+            harness_commits: 0,
             passive: false,
             completed_batch: Arc::default(),
         })
@@ -143,8 +177,12 @@ impl EngineStore {
             crate::schema::open_engine_db_with_root_token(path, now_ms, Some(token), work)?;
         Ok(EngineStore {
             conn: opened.conn,
+            checkpoints: None,
+            checkpoint_changes: 0,
             freshly_created: opened.freshly_created,
             database_path: path.to_path_buf(),
+            #[cfg(feature = "fault-injection")]
+            harness_commits: 0,
             passive: false,
             completed_batch: Arc::default(),
         })
@@ -166,8 +204,12 @@ impl EngineStore {
         let passive = crate::schema::store_is_passive(&opened.conn)?;
         Ok(EngineStore {
             conn: opened.conn,
+            checkpoints: None,
+            checkpoint_changes: 0,
             freshly_created: false,
             database_path: path.to_path_buf(),
+            #[cfg(feature = "fault-injection")]
+            harness_commits: 0,
             passive,
             completed_batch: Arc::default(),
         })
@@ -197,6 +239,88 @@ impl EngineStore {
     /// existing v2 store.
     pub fn was_freshly_created(&self) -> bool {
         self.freshly_created
+    }
+
+    /// Request background work and finish only bounded writer-side tails.
+    pub fn request_checkpoint(&mut self) {
+        #[cfg(feature = "fault-injection")]
+        let _checkpoint = crate::capture_phase::Measure::new("writer_checkpoint_and_request");
+        let changes = self.conn.total_changes();
+        if self.checkpoints.is_none() || changes == self.checkpoint_changes {
+            return;
+        }
+        self.checkpoint_changes = changes;
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.checkpoint_on_writer_if_needed(&self.conn);
+        }
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.request();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkpoint_worker_running_for_test(&self) -> bool {
+        self.checkpoints.as_ref().is_some_and(|c| !c.has_stopped())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_checkpoint_worker_for_test(&mut self) {
+        self.checkpoints.as_mut().unwrap().stop_for_test();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkpoint_work_for_test(&self) -> (u64, i64) {
+        self.checkpoints
+            .as_ref()
+            .map_or((0, 0), |c| c.writer_work_for_test())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkpoint_completed_for_test(&self) -> u64 {
+        self.checkpoints.as_ref().unwrap().completed_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_checkpoint_completion_for_test(&self, before: u64) {
+        self.checkpoints
+            .as_ref()
+            .unwrap()
+            .wait_for_completion_for_test(before);
+    }
+
+    fn prepare_write(&mut self) -> Result<(), StorageError> {
+        #[cfg(feature = "fault-injection")]
+        let _admission = crate::capture_phase::Measure::new("prepare_write");
+        if self.checkpoints.as_ref().is_some_and(|c| c.has_stopped()) {
+            let replacement = crate::checkpoint::Checkpoints::start(&self.database_path)?;
+            replacement.request();
+            self.checkpoints.replace(replacement);
+        }
+        if let Some(checkpoints) = &self.checkpoints {
+            checkpoints.prepare_for_write(&self.conn)?;
+        }
+
+        Ok(())
+    }
+
+    /// Admit a connection-level mutation that manages its own savepoint.
+    pub fn mutate_with_connection<T, E>(
+        &mut self,
+        f: impl FnOnce(&Connection) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<StorageError>,
+    {
+        self.prepare_write().map_err(E::from)?;
+        let result = f(&self.conn);
+        self.request_checkpoint();
+        result
+    }
+
+    /// Committed writer transactions, excluding schema initialization.
+    #[cfg(feature = "fault-injection")]
+    pub fn commit_count_for_harness(&self) -> u64 {
+        self.harness_commits
     }
 
     /// The path used to open this store. Higher layers use the canonical
@@ -275,7 +399,29 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        Self::write_on_connection(&self.conn, faults, f)
+        #[cfg(feature = "fault-injection")]
+        let mut phase = crate::capture_phase::Phase::new("storage_transaction", None, 0, true);
+        #[cfg(feature = "fault-injection")]
+        let changes = self.conn.total_changes();
+        #[cfg(feature = "fault-injection")]
+        crate::capture_phase::wal(&self.conn, &mut phase, true);
+        self.prepare_write().map_err(E::from)?;
+        let outcome = Self::write_on_connection(&self.conn, faults, f)?;
+        self.record_write_outcome(&outcome);
+        #[cfg(feature = "fault-injection")]
+        {
+            crate::capture_phase::wal(&self.conn, &mut phase, false);
+            phase.field(
+                "total_changes_delta",
+                self.conn.total_changes().saturating_sub(changes),
+            );
+            phase.finish(match &outcome {
+                TxnOutcome::Committed(_) => "committed",
+                TxnOutcome::Crashed { committed: true } => "committed-before-crash",
+                _ => "rolled-back",
+            });
+        }
+        Ok(outcome)
     }
 
     /// One FULL commit syncs this transaction and every earlier WAL commit.
@@ -287,9 +433,26 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
-        crate::durability::with_full_synchronous(&self.conn, |conn| {
+        self.prepare_write().map_err(E::from)?;
+        let outcome = crate::durability::with_full_synchronous(&self.conn, |conn| {
             Self::write_on_connection(conn, faults, f)
-        })
+        })?;
+        self.record_write_outcome(&outcome);
+        Ok(outcome)
+    }
+
+    fn record_write_outcome<T>(&mut self, outcome: &TxnOutcome<T>) {
+        if matches!(
+            outcome,
+            TxnOutcome::Committed(_) | TxnOutcome::Crashed { committed: true }
+        ) {
+            self.request_checkpoint();
+            #[cfg(feature = "fault-injection")]
+            {
+                self.harness_commits += 1;
+                crate::capture_phase::count("commits", 1);
+            }
+        }
     }
 
     fn write_on_connection<T, E>(
@@ -300,9 +463,15 @@ impl EngineStore {
     where
         E: From<StorageError>,
     {
+        #[cfg(feature = "fault-injection")]
+        let begin_phase = crate::capture_phase::Measure::new("BEGIN");
         let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
             .map_err(StorageError::persist)?;
 
+        #[cfg(feature = "fault-injection")]
+        drop(begin_phase);
+        #[cfg(feature = "fault-injection")]
+        let callback_phase = crate::capture_phase::Measure::new("transaction_callback");
         let value = match f(&tx) {
             Ok(value) => value,
             Err(err) => {
@@ -313,6 +482,8 @@ impl EngineStore {
             }
         };
 
+        #[cfg(feature = "fault-injection")]
+        drop(callback_phase);
         // Cancel/crash point is between durable steps, never mid-commit: the
         // closure has issued all SQL but nothing is durable yet.
         if should_crash(faults, FaultPoint::StorageBeforePersist) {
@@ -320,7 +491,11 @@ impl EngineStore {
             return Ok(TxnOutcome::Crashed { committed: false });
         }
 
+        #[cfg(feature = "fault-injection")]
+        let commit_phase = crate::capture_phase::Measure::new("COMMIT");
         tx.commit().map_err(StorageError::persist)?;
+        #[cfg(feature = "fault-injection")]
+        drop(commit_phase);
 
         if should_crash(faults, FaultPoint::StorageAfterCommitBeforeAck) {
             return Ok(TxnOutcome::Crashed { committed: true });
@@ -707,5 +882,154 @@ impl EngineStore {
         self.conn
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
             .map_err(StorageError::corrupt)
+    }
+}
+
+impl EngineStore {
+    fn require_materialization_owner(&self) -> Result<(), StorageError> {
+        if self.is_passive() {
+            return Err(StorageError::InvalidInput {
+                reason: "passive store cannot materialize",
+            });
+        }
+        Ok(())
+    }
+
+    /// Read at most 128 retained originals after the stable cursor.
+    pub fn retained_displacements_after(
+        &self,
+        after: i64,
+    ) -> Result<Vec<crate::RetainedDisplacement>, StorageError> {
+        materialize::retained_rows(&self.conn, after)
+    }
+    pub fn retain_displacement(
+        &self,
+        row: &crate::RetainedDisplacement,
+    ) -> Result<i64, StorageError> {
+        self.require_materialization_owner()?;
+        materialize::retain(&self.conn, row)
+    }
+    /// FULL-commit exact changed bytes and their new quiet-period baseline together.
+    pub fn record_retained_read(
+        &self,
+        old: &crate::RetainedDisplacement,
+        new: &crate::RetainedDisplacement,
+        bytes: &[u8],
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        materialize::record_retained_read(&self.conn, old, new, bytes, now_ms)
+    }
+    pub fn release_retained(&self, id: i64) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        self.conn
+            .execute(
+                "DELETE FROM materialization_retained WHERE displacement_id=?1",
+                [id],
+            )
+            .map_err(StorageError::persist)?;
+        Ok(())
+    }
+    /// FULL precedes a rename outside the default staging tree. Without this
+    /// location recovery cannot find the surviving source after a power loss.
+    pub fn remember_staging(&self, job_id: &str, directory: &str) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        materialize::with_full_commit(&self.conn, |tx| {
+            tx.execute("INSERT INTO materialization_staging_locations(job_id,directory) VALUES(?1,?2) ON CONFLICT(job_id) DO UPDATE SET directory=excluded.directory",rusqlite::params![job_id,directory]).map_err(StorageError::persist)?;
+            Ok(())
+        })
+    }
+    pub fn staging_location(&self, job_id: &str) -> Result<Option<String>, StorageError> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT directory FROM materialization_staging_locations WHERE job_id=?1",
+                [job_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt)
+    }
+    pub fn staging_locations(&self) -> Result<Vec<String>, StorageError> {
+        let mut q = self
+            .conn
+            .prepare("SELECT DISTINCT directory FROM materialization_staging_locations ORDER BY directory")
+            .map_err(StorageError::corrupt)?;
+        q.query_map([], |r| r.get(0))
+            .map_err(StorageError::corrupt)?
+            .collect::<Result<_, _>>()
+            .map_err(StorageError::corrupt)
+    }
+}
+
+impl EngineStore {
+    pub fn is_retained_source(&self, path: &str) -> Result<bool, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM materialization_retained WHERE source_path=?1)",
+                [path],
+                |r| r.get(0),
+            )
+            .map_err(StorageError::corrupt)
+    }
+    pub fn retained_names_for_job(&self, job_id: &str) -> Result<Vec<String>, StorageError> {
+        let mut q = self
+            .conn
+            .prepare_cached("SELECT source_path FROM materialization_retained WHERE job_id=?1")
+            .map_err(StorageError::corrupt)?;
+        let paths = q
+            .query_map([job_id], |r| r.get::<_, String>(0))
+            .map_err(StorageError::corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::corrupt)?;
+        Ok(paths
+            .into_iter()
+            .filter_map(|p| p.rsplit('/').next().map(str::to_owned))
+            .collect())
+    }
+}
+
+impl EngineStore {
+    /// Promote an oversized retained source to the existing kept-copy path.
+    /// FULL preserves its unreadable-source record before ending retention.
+    pub fn keep_oversized_retained(
+        &self,
+        row: &crate::RetainedDisplacement,
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        let name = row
+            .source_path
+            .rsplit('/')
+            .next()
+            .ok_or(StorageError::InvalidInput {
+                reason: "retained source has no name",
+            })?;
+        materialize::with_full_commit(&self.conn, |tx| {
+            tx.execute("INSERT INTO materialization_displacements (job_id,workspace_id,target_path,displaced_name,expected_sha256,content_sha256,state,displaced_sha256,created_at_ms,resolved_at_ms) SELECT ?1,?2,?3,?4,'',NULL,'kept',NULL,?5,?5 WHERE EXISTS(SELECT 1 FROM materialization_retained WHERE displacement_id=?6)",rusqlite::params![row.job_id,row.workspace_id,row.target_path,name,now_ms,row.displacement_id]).map_err(StorageError::persist)?;
+            tx.execute(
+                "DELETE FROM materialization_retained WHERE displacement_id=?1",
+                [row.displacement_id],
+            )
+            .map_err(StorageError::persist)?;
+            Ok(())
+        })
+    }
+    pub fn forget_staging_directory(&self, directory: &str) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        self.conn
+            .execute(
+                "DELETE FROM materialization_staging_locations WHERE directory=?1",
+                [directory],
+            )
+            .map_err(StorageError::persist)?;
+        Ok(())
+    }
+}
+
+impl Drop for EngineStore {
+    fn drop(&mut self) {
+        // Join the checkpointer before closing the writer and its ownership lock.
+        self.checkpoints.take();
     }
 }

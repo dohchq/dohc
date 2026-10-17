@@ -30,6 +30,7 @@ import type { DatasetDefinition, DatasetDescription, DatasetOperationKind } from
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   isInvalidInputRefusal,
+  isEngineStoreBusyRefusal,
   type AutomationClaim,
   type AutomationClaimSummary,
   type SharedChangeAuthor,
@@ -376,6 +377,7 @@ export interface CollectionAutomationsOptions {
    * dataset's. A drain and a Stop and restore pass each tell it once.
    */
   onRunsChanged(): void;
+  onUsageSuccess?: CollectionAutomationRunDependencies["onUsageSuccess"];
   /**
    * Sends the notice for an automation's newest failure on this computer,
    * and takes back the notice for its failure `replaces` counted, if any.
@@ -4853,7 +4855,8 @@ export class CollectionAutomations {
         }
       }
     } catch (error) {
-      this.options.onError("drain Collection automation claims", error);
+      if (isEngineStoreBusyRefusal(error)) this.scheduleBusyRetry();
+      else this.options.onError("drain Collection automation claims", error);
     } finally {
       for (const held of release) this.owed.set(held.claim.claimId, { held, action: { kind: "release" } });
       if (!stop.aborted) await this.payOwed(true);
@@ -4894,7 +4897,8 @@ export class CollectionAutomations {
           this.owed.delete(id);
           this.waitingFor.delete(id);
         } else {
-          this.options.onError(`${action.kind} automation claim "${id}"`, error);
+          if (isEngineStoreBusyRefusal(error)) this.scheduleBusyRetry();
+          else this.options.onError(`${action.kind} automation claim "${id}"`, error);
         }
         continue;
       }
@@ -5310,11 +5314,10 @@ export class CollectionAutomations {
       }, { once: true });
     });
     try {
-      const run = Promise.resolve().then(() => runClaim(controller.signal)).catch((error: unknown): CollectionAutomationRunOutcome => ({
-        kind: "failed",
-        error: errorText(error),
-        timedOut: controller.signal.aborted,
-      }));
+      const run = Promise.resolve().then(() => runClaim(controller.signal)).catch((error: unknown): CollectionAutomationRunOutcome =>
+        isEngineStoreBusyRefusal(error)
+          ? { kind: "wait", reason: "busy" }
+          : { kind: "failed", error: errorText(error), timedOut: controller.signal.aborted });
       // The hold ends only when the run's writes have really stopped, even
       // after the deadline's grace, or a close, gave up waiting for them.
       started = true;
@@ -5419,6 +5422,7 @@ export class CollectionAutomations {
         return owned === undefined ? false : this.recordVerdicts(roster, [owned], steps);
       },
       makeDurable: (claimId) => this.makeWritesDurable(claimId),
+      onUsageSuccess: this.options.onUsageSuccess,
       withReads: (work) => this.withLiveEngine(work),
       withRecordWrites: this.options.withRecordWrites,
       collectionIdOf: (path) => this.collections.get(path) ?? null,

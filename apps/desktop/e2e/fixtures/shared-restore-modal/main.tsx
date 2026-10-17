@@ -74,6 +74,7 @@ const moments: EngineMomentRecord[] = Array.from({ length: 40 }, (_, index) => (
   origin: "local-file",
   momentOrder: 40 - index,
 }));
+const entries = moments.map((moment) => ({ kind: "file" as const, moment }));
 
 function SharedRestoreFixture() {
   const [open, setOpen] = useState(false);
@@ -129,10 +130,9 @@ function SharedRestoreFixture() {
           day heading level with the review's title. */}
       <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-panel-2 pt-20">
         <EngineHistoryView
-          moments={moments}
+          entries={entries}
           hasMore={false}
           loadingMore={false}
-          protectedTruncated={false}
           onLoadMore={ignore}
           onOpenMoment={ignore}
         />

@@ -1,3 +1,4 @@
+import { retryStoreBusy } from "../daemon/storeBusyRetry";
 import type * as Y from "yjs";
 import {
   isEngineStoreBusyRefusal,
@@ -28,13 +29,8 @@ const DEFAULT_SETTLE_DEBOUNCE_MS = 800;
 // artifact stays stale after the lock releases.
 const LOCKED_SETTLE_RETRY_CAP_MS = 10_000;
 
-// The retry ceiling for a settle refused `engine-store-busy` (dohc's own
-// database was busy). An order of magnitude below the lock's, because the two
-// waits are for different things: a file lock is held by a program outside
-// dohc and can last as long as that program does, while SQLite contention is
-// dohc's own writers meeting and clears in milliseconds. Walking out to ten
-// seconds for it would hold the document unsettled far longer than the
-// condition it waits on lasts.
+// After the foreground budget expires, report the refusal and retain the
+// existing scheduled retry. This ceiling bounds each scheduled delay.
 const STORE_BUSY_SETTLE_RETRY_CAP_MS = 1_000;
 
 // How far this failure's retry ladder may walk out, or null for a terminal refusal.
@@ -213,6 +209,7 @@ export async function openEngineYdocProviderSession(
       return () => clearTimeout(timer);
     });
 
+  const settleRetryController = new AbortController();
   let closed = false;
   let closeComplete = false;
   let journalChain: Promise<void> = Promise.resolve();
@@ -267,7 +264,10 @@ export async function openEngineYdocProviderSession(
     notifyError(options.onLocalEditError, error);
   }
 
-  async function runSettle(summary?: string): Promise<YdocSettleResult> {
+  async function runSettle(
+    summary?: string,
+    retrySignal = settleRetryController.signal,
+  ): Promise<YdocSettleResult> {
     // Each outcome names its settle, including a failure before the native write.
     const token = ++settleTokens;
     notifySettleStart(token);
@@ -280,8 +280,9 @@ export async function openEngineYdocProviderSession(
         await session.resendMissingState();
         if (localEditError !== null) throw localEditError;
         const revision = documentRevision;
-        const result = await session.settle(
-          summary !== undefined ? { summary } : undefined,
+        const result = await retryStoreBusy(() =>
+          session.settle(summary !== undefined ? { summary } : undefined),
+          retrySignal,
         );
         // Artifact verification must finish before close can reuse this settle.
         const verified = await options.onSettled?.(result, token);
@@ -392,6 +393,7 @@ export async function openEngineYdocProviderSession(
   async function beginTeardown(): Promise<boolean> {
     if (closeComplete) return true;
     closed = true;
+    settleRetryController.abort();
     cancelSettle?.();
     cancelSettle = null;
     unsubscribeRemote();
@@ -502,6 +504,7 @@ export async function openEngineYdocProviderSession(
 
     async close(closeOptions) {
       if (await beginTeardown()) return;
+      const closeRetryController = new AbortController();
       let preCloseError: unknown;
       // Reuse verification only after pending resyncs land. Replicated
       // release still settles engine-only changes; local-only release keeps
@@ -514,14 +517,17 @@ export async function openEngineYdocProviderSession(
         try {
           await session.resyncIfNeeded();
           if (settledRevision !== documentRevision || session.missingLocalState) {
-            await runSettle(closeOptions?.summary ?? "session close");
+            await runSettle(closeOptions?.summary ?? "session close", closeRetryController.signal);
           } else if (session.lineageClaimId !== null) {
             // Replicated lineage can contain owner frames whose notice has
             // not arrived. Settle it without repeating artifact verification,
             // then release separately so terminal refusals still release.
             const token = ++settleTokens;
             try {
-              const result = await session.settle({ summary: closeOptions?.summary ?? "session close" });
+              const result = await retryStoreBusy(
+                () => session.settle({ summary: closeOptions?.summary ?? "session close" }),
+                closeRetryController.signal,
+              );
               if (!result.materialized) {
                 throw new Error("dohc could not write the file (blocked target). The write is pending a retry.");
               }

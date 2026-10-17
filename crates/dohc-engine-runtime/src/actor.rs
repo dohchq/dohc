@@ -39,6 +39,8 @@ mod journal;
 mod live_application;
 mod materialization;
 mod relay;
+#[cfg(unix)]
+mod retained;
 mod search;
 mod secrets;
 mod versioned;
@@ -49,7 +51,7 @@ pub use capture::{
     CAPTURE_NEW_FILE_LIVE, CapturePassSettlement, CapturePlacementPath,
     MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, WorkspaceRootGuard,
 };
-pub use collections::CollectionReconciliation;
+pub use collections::{CollectionCommitListener, CollectionReconciliation};
 pub use dohc_engine_sync::SharingDeclined;
 pub use live_application::{ActorLiveApplicationHandle, ActorLiveApplicationOwner};
 pub use materialization::{PostCommitMaterializeOutcome, SelfWriteRecorder};
@@ -68,6 +70,8 @@ pub use ydoc::{
 
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
+pub use crate::links::LinkDrainMetrics;
+use crate::links::{DrainWorker, SharedMetrics};
 use dohc_engine_collab::WriterDocCache;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use std::path::PathBuf;
@@ -164,6 +168,7 @@ type RegistrationWork =
 
 enum Command {
     Run(ActorWork),
+    WakeLinks,
     /// Work that may release live application registrations in the same step.
     RunWithRegistrations(RegistrationWork),
     LiveApplication(Box<live_application::Request>),
@@ -192,7 +197,13 @@ pub struct WorkspaceActor {
     close_permit: Option<OwnedPermit<Command>>,
     state: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
+    #[cfg(unix)]
+    retention: Option<retained::Worker>,
+    #[cfg(unix)]
+    retention_root: retained::Root,
     claims: ClaimAnnouncer,
+    link_metrics: SharedMetrics,
+    link_drain_holds: Arc<AtomicU64>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
 }
 
@@ -312,6 +323,10 @@ impl WorkspaceActor {
         // context, so the open result must not depend on a tokio runtime.
         let (startup_tx, startup_rx) = std_sync_channel::<Result<bool, StorageError>>(1);
 
+        let link_metrics = SharedMetrics::default();
+        let worker_metrics = Arc::clone(&link_metrics);
+        let link_drain_holds = Arc::new(AtomicU64::new(0));
+        let worker_link_drain_holds = Arc::clone(&link_drain_holds);
         let worker_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
@@ -323,6 +338,8 @@ impl WorkspaceActor {
                     root_token,
                     rx,
                     worker_state,
+                    worker_metrics,
+                    worker_link_drain_holds,
                     startup_tx,
                     writer_lock,
                     work,
@@ -331,18 +348,35 @@ impl WorkspaceActor {
             .map_err(RuntimeError::ThreadSpawn)?;
 
         match startup_rx.recv() {
-            Ok(Ok(store_freshly_created)) => Ok(WorkspaceActor {
-                identity,
-                generation,
-                mode,
-                store_freshly_created,
-                tx,
-                close_permit,
-                state,
-                worker: Some(worker),
-                claims: ClaimAnnouncer::default(),
-                current_views: Arc::default(),
-            }),
+            Ok(Ok(store_freshly_created)) => {
+                #[allow(unused_mut)]
+                let mut actor = WorkspaceActor {
+                    identity,
+                    generation,
+                    mode,
+                    store_freshly_created,
+                    tx,
+                    close_permit,
+                    state,
+                    worker: Some(worker),
+                    #[cfg(unix)]
+                    retention: None,
+                    #[cfg(unix)]
+                    retention_root: retained::Root::default(),
+                    claims: ClaimAnnouncer::default(),
+                    link_metrics,
+                    link_drain_holds,
+                    current_views: Arc::default(),
+                };
+                #[cfg(unix)]
+                if matches!(mode, ActorOpenMode::ReadWrite) {
+                    actor.retention = Some(retained::Worker::spawn(
+                        actor.handle(),
+                        actor.retention_root.clone(),
+                    )?);
+                }
+                Ok(actor)
+            }
             Ok(Err(storage_err)) => {
                 let _ = worker.join();
                 Err(RuntimeError::Storage(storage_err))
@@ -361,6 +395,10 @@ impl WorkspaceActor {
             tx: self.tx.clone(),
             state: Arc::clone(&self.state),
             claims: self.claims.clone(),
+            #[cfg(unix)]
+            retained_root: self.retention_root.clone(),
+            link_metrics: Arc::clone(&self.link_metrics),
+            link_drain_holds: Arc::clone(&self.link_drain_holds),
             current_views: Arc::clone(&self.current_views),
         }
     }
@@ -408,6 +446,12 @@ impl WorkspaceActor {
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
+        #[cfg(unix)]
+        if let Some(retention) = &mut self.retention {
+            retention.stop();
+            // Finish an in-flight changed read while the writer can still commit it.
+            retention.join();
+        }
         match self.close_permit.take() {
             // Reserved slot: instant, fair, FIFO-respecting delivery.
             Some(permit) => {
@@ -439,14 +483,56 @@ impl Drop for WorkspaceActor {
 /// current view projection cache.
 #[derive(Clone)]
 pub struct ActorHandle {
+    #[cfg(unix)]
+    retained_root: retained::Root,
     identity: EngineDbIdentity,
     tx: mpsc::Sender<Command>,
     state: Arc<AtomicU8>,
     claims: ClaimAnnouncer,
+    link_metrics: SharedMetrics,
+    link_drain_holds: Arc<AtomicU64>,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
 }
 
+/// Keeps derived link writes behind capture, including its queued commands.
+/// Dropping the last hold wakes an idle actor without polling.
+#[must_use]
+pub struct LinkDrainHold {
+    holds: Arc<AtomicU64>,
+    tx: mpsc::Sender<Command>,
+}
+impl Drop for LinkDrainHold {
+    fn drop(&mut self) {
+        if self.holds.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // A full queue already has foreground work to wake the actor.
+            let _ = self.tx.try_send(Command::WakeLinks);
+        }
+    }
+}
+
 impl ActorHandle {
+    pub fn hold_link_drain(&self) -> LinkDrainHold {
+        self.link_drain_holds.fetch_add(1, Ordering::AcqRel);
+        LinkDrainHold {
+            holds: Arc::clone(&self.link_drain_holds),
+            tx: self.tx.clone(),
+        }
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub async fn commit_count_for_harness(&self) -> Result<u64, RuntimeError> {
+        self.run(|store, _| Ok(store.commit_count_for_harness()))
+            .await
+    }
+
+    /// Engine diagnostics for the derived index; no store read or drain.
+    pub fn link_drain_metrics(&self) -> LinkDrainMetrics {
+        self.link_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Hear every Group automation claim this workspace's chat writes and
     /// relay passes commit. The latest listener replaces an earlier one.
     pub fn listen_for_automation_claims(&self, listener: AutomationClaimListener) {
@@ -591,17 +677,17 @@ impl ActorHandle {
         root: std::path::PathBuf,
     ) -> Result<Vec<(String, String)>, RuntimeError> {
         self.run(move |store, _| {
-            Ok(store
-                .list_kept_displacements(&workspace_id)?
-                .into_iter()
-                .map(|row| {
-                    (
-                        row.target_path,
-                        format!(".dohc/engine/displaced/{}", row.displaced_name),
-                    )
-                })
-                .filter(|(_, path)| std::fs::symlink_metadata(root.join(path)).is_ok())
-                .collect())
+            let mut files = Vec::new();
+            for row in store.list_kept_displacements(&workspace_id)? {
+                let dir = store
+                    .staging_location(&row.job_id)?
+                    .unwrap_or_else(|| ".dohc/engine/displaced".into());
+                let path = format!("{dir}/{}", row.displaced_name);
+                if std::fs::symlink_metadata(root.join(&path)).is_ok() {
+                    files.push((row.target_path, path));
+                }
+            }
+            Ok(files)
         })
         .await
     }
@@ -666,6 +752,8 @@ fn worker_main(
     root_token: Option<String>,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
+    link_metrics: SharedMetrics,
+    link_drain_holds: Arc<AtomicU64>,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
     writer_lock: Option<WriterLock>,
     work_count: Option<Arc<AtomicU64>>,
@@ -697,10 +785,8 @@ fn worker_main(
                 Ok(store)
             }
         })
-    } else if let Some(token) = &root_token {
-        EngineStore::open_with_root_token(&db_path, now_ms, token, work_count.clone())
     } else {
-        EngineStore::open_counting(&db_path, now_ms, work_count.clone())
+        EngineStore::open_for_actor(&db_path, now_ms, root_token.as_deref(), work_count.clone())
     } {
         Ok(store) => store,
         Err(err) => {
@@ -723,6 +809,12 @@ fn worker_main(
     // successful open also observes Ready. The same handshake carries the
     // store's authoritative freshness disposition; no caller infers it from
     // file existence or actor-registry ownership.
+    #[cfg(test)]
+    {
+        let mut metrics = link_metrics.lock().unwrap();
+        metrics.worker_starts_at_publication = Some(metrics.worker_starts);
+        metrics.actor_batches_at_publication = Some(metrics.actor_batches);
+    }
     state.store(LifecycleState::Ready.as_u8(), Ordering::Release);
     if startup_tx.send(Ok(store_freshly_created)).is_err() {
         // The spawner unwound before the actor was built; nothing to serve.
@@ -740,7 +832,92 @@ fn worker_main(
     // Blocking recv on the tokio channel keeps the SQLite work on this
     // dedicated thread, off the async runtime. `blocking_recv` returns `None`
     // once every sender is dropped.
-    while let Some(cmd) = rx.blocking_recv() {
+    // Publish before link startup, then let queued foreground commands win.
+    // An idle reopened store must also resume its durable drain without a
+    // foreground request; link-drain holds still postpone startup and slices.
+    let mut links_started = false;
+    let mut links = None;
+    let mut timer = None;
+    loop {
+        // Serve a queued foreground command before each background slice.
+        // The timer runtime ends before synchronous commands execute.
+        let cmd = match rx.try_recv() {
+            Ok(cmd) => Some(cmd),
+            Err(mpsc::error::TryRecvError::Disconnected) => break,
+            Err(mpsc::error::TryRecvError::Empty) => {
+                if !links_started
+                    && matches!(mode, ActorOpenMode::ReadWrite)
+                    && link_drain_holds.load(Ordering::Acquire) == 0
+                {
+                    links_started = true;
+                    match DrainWorker::new(Arc::clone(&link_metrics)) {
+                        Ok(worker) => {
+                            links = Some(worker);
+                            timer = tokio::runtime::Builder::new_current_thread()
+                                .enable_time()
+                                .build()
+                                .ok();
+                            #[cfg(test)]
+                            if timer.is_some() {
+                                link_metrics.lock().unwrap().timer_starts += 1;
+                            }
+                        }
+                        Err(_) => eprintln!("links parser could not start; pending work retained"),
+                    }
+                }
+                #[cfg(test)]
+                {
+                    // Count after startup so observing this slot also observes
+                    // whether the hold prevented worker and timer creation.
+                    link_metrics.lock().unwrap().idle_slots += 1;
+                }
+                match (&mut links, &timer) {
+                    (Some(worker), Some(timer))
+                        if link_drain_holds.load(Ordering::Acquire) == 0 =>
+                    {
+                        #[cfg(feature = "fault-injection")]
+                        let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+                            "actor_background_slice",
+                            None,
+                            0,
+                            true,
+                        );
+                        #[cfg(feature = "fault-injection")]
+                        phase.field("link_drain_holds", link_drain_holds.load(Ordering::Acquire));
+                        let delay = worker.tick(&mut store);
+                        #[cfg(feature = "fault-injection")]
+                        {
+                            phase.finish("completed");
+                            drop(phase);
+                        }
+                        let parser_pending = worker.waiting_for_parser();
+                        if delay == std::time::Duration::MAX && !parser_pending {
+                            rx.blocking_recv()
+                        } else {
+                            if delay.is_zero() {
+                                continue;
+                            }
+                            timer.block_on(async {
+                                tokio::select! {
+                                    biased;
+                                    cmd = rx.recv() => cmd,
+                                    () = worker.parser_finished(), if parser_pending => None,
+                                    () = async { tokio::time::sleep(delay).await },
+                                        if delay != std::time::Duration::MAX => None,
+                                }
+                            })
+                        }
+                    }
+                    _ => rx.blocking_recv(),
+                }
+            }
+        };
+        let Some(cmd) = cmd else {
+            if rx.is_closed() {
+                break;
+            }
+            continue;
+        };
         // Counted as each command starts, so its caller sees the count by the
         // time its reply arrives.
         if let Some(work) = &work_count {
@@ -756,6 +933,7 @@ fn worker_main(
         }
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
+            Command::WakeLinks => {}
             Command::RunWithRegistrations(work) => {
                 work(&mut store, &mut doc_cache, &mut live_applications);
             }
@@ -769,6 +947,7 @@ fn worker_main(
                 break;
             }
         }
+        store.request_checkpoint();
         if state.load(Ordering::Acquire) == LifecycleState::RecoveryRequired.as_u8() {
             break;
         }
@@ -777,6 +956,7 @@ fn worker_main(
     // Normal exit: drop the connection explicitly, then the `_closed_guard`
     // publishes Closed as it falls out of scope (same ordering the guard
     // guarantees on a panic unwind).
+    drop(links);
     drop(store);
 }
 
@@ -858,6 +1038,201 @@ mod saturation_tests {
     use std::time::{Duration, Instant};
     use tokio::sync::Semaphore;
 
+    // Prepare the real command channel and holds before worker_main publishes.
+    // This removes the race between spawn returning and its first idle slot.
+    fn spawn_prequeued_actor(
+        db: &std::path::Path,
+        prepare: impl FnOnce(&ActorHandle),
+    ) -> WorkspaceActor {
+        let identity = EngineDbIdentity::resolve_or_create(db).unwrap();
+        let writer_lock = acquire_writer_lock(db).unwrap();
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let state = Arc::new(AtomicU8::new(LifecycleState::Opening.as_u8()));
+        let metrics = SharedMetrics::default();
+        let holds = Arc::new(AtomicU64::new(0));
+        let mut actor = WorkspaceActor {
+            identity,
+            generation: 1,
+            mode: ActorOpenMode::ReadWrite,
+            store_freshly_created: false,
+            close_permit: Some(tx.clone().try_reserve_owned().unwrap()),
+            tx,
+            state,
+            worker: None,
+            #[cfg(unix)]
+            retention: None,
+            #[cfg(unix)]
+            retention_root: retained::Root::default(),
+            claims: ClaimAnnouncer::default(),
+            link_metrics: metrics,
+            link_drain_holds: holds,
+            current_views: Arc::default(),
+        };
+        prepare(&actor.handle());
+        let (startup_tx, startup_rx) = std_sync_channel(1);
+        let db = db.to_owned();
+        let state = Arc::clone(&actor.state);
+        let metrics = Arc::clone(&actor.link_metrics);
+        let holds = Arc::clone(&actor.link_drain_holds);
+        actor.worker = Some(std::thread::spawn(move || {
+            worker_main(
+                db,
+                2,
+                ActorOpenMode::ReadWrite,
+                None,
+                rx,
+                state,
+                metrics,
+                holds,
+                startup_tx,
+                Some(writer_lock),
+                None,
+            );
+        }));
+        actor.store_freshly_created = startup_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert!(!actor.store_freshly_created, "exercise a reopened store");
+        actor
+    }
+
+    #[test]
+    fn commands_queued_at_publication_finish_before_link_worker_and_timer_start() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        drop(EngineStore::open(&db, 1).unwrap());
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let mut actor = spawn_prequeued_actor(&db, |handle| {
+            for command in 0..3 {
+                let metrics = Arc::clone(&handle.link_metrics);
+                let state = Arc::clone(&handle.state);
+                let completed = completed_tx.clone();
+                handle
+                    .tx
+                    .try_send(Command::Run(Box::new(move |store, _| {
+                        assert_eq!(state.load(Ordering::Acquire), LifecycleState::Ready.as_u8());
+                        let migrations = store
+                            .read_with(|conn| {
+                                conn.query_row(
+                                    "SELECT COUNT(*) FROM engine_migrations",
+                                    [],
+                                    |row| row.get::<_, i64>(0),
+                                )
+                            })
+                            .unwrap();
+                        assert!(migrations > 0);
+                        let metrics = metrics.lock().unwrap();
+                        completed
+                            .send((command, metrics.worker_starts, metrics.timer_starts))
+                            .unwrap();
+                    })))
+                    .unwrap();
+            }
+        });
+        let completed: Vec<_> = (0..3)
+            .map(|_| completed_rx.recv_timeout(Duration::from_secs(5)).unwrap())
+            .collect();
+        actor.close().unwrap();
+        assert_eq!(completed, [(0, 0, 0), (1, 0, 0), (2, 0, 0)]);
+    }
+
+    #[tokio::test]
+    async fn link_drain_hold_before_first_idle_slot_postpones_startup_until_release() {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        drop(EngineStore::open(&db, 1).unwrap());
+        let mut hold = None;
+        let mut actor = spawn_prequeued_actor(&db, |handle| {
+            hold = Some(handle.hold_link_drain());
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if actor.handle().link_drain_metrics().idle_slots > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("actor reaches an idle slot while the hold is active");
+        // Commands still run while held, after publication returns to the caller.
+        for _ in 0..2 {
+            actor
+                .handle()
+                .run(|_, _| Ok(()))
+                .await
+                .expect("foreground command while held");
+            let metrics = actor.handle().link_drain_metrics();
+            assert_eq!(
+                metrics.worker_starts, 0,
+                "hold must postpone parser startup"
+            );
+            assert_eq!(metrics.timer_starts, 0, "hold must postpone timer startup");
+        }
+        drop(hold.take());
+        // Drop wakes the empty queue. No foreground request drives startup.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let metrics = actor.handle().link_drain_metrics();
+                if metrics.worker_starts == 1 && metrics.timer_starts == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the next idle slot starts links after the last hold drops");
+        actor.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn reopened_actor_publishes_before_link_work_and_resumes_while_idle() {
+        use dohc_engine_domain::VersionedTextStore;
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &dohc_engine_storage::NoFaults)
+            .unwrap();
+        drop(store);
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 2).unwrap().actor;
+        assert_eq!(
+            actor.state.load(Ordering::Acquire),
+            LifecycleState::Ready.as_u8()
+        );
+        {
+            let metrics = actor.link_metrics.lock().unwrap();
+            assert_eq!(
+                metrics.worker_starts_at_publication,
+                Some(0),
+                "no link startup before publication"
+            );
+            assert_eq!(
+                metrics.actor_batches_at_publication,
+                Some(0),
+                "no link writes before publication"
+            );
+        }
+        // No actor command follows open: a reader observes autonomous resume.
+        let reader =
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let ready: bool = reader.query_row(
+                    "SELECT seed_phase='ready' FROM link_index_state WHERE workspace_id='ws' AND version_id='main'",
+                    [], |r| r.get(0),
+                ).unwrap();
+                if ready { break; }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await.unwrap();
+        drop(reader);
+        supervisor.close(&db).unwrap();
+    }
+
     #[test]
     fn passive_store_restart_without_active_slot_fails_closed() {
         let scratch = ScratchDir::new().unwrap();
@@ -897,8 +1272,25 @@ mod saturation_tests {
             })
             .await
             .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while actor.link_drain_metrics().idle_slots == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("passive actor reaches an idle slot before close");
         supervisor.close(&db).unwrap();
         assert!(refused, "a restart must keep local origination disabled");
+        assert_eq!(
+            actor.link_drain_metrics().worker_starts,
+            0,
+            "passive actors must never create a DrainWorker, even without queued work"
+        );
+        assert_eq!(
+            actor.link_drain_metrics().actor_batches,
+            0,
+            "passive actors must never run the link drain"
+        );
     }
 
     #[test]

@@ -13,6 +13,10 @@ import {
   type DesktopSettingsProps,
 } from "./LazyDesktopSettings";
 
+vi.mock("./SettingsDialog", () => ({
+  SettingsDialog: () => <div data-testid="settings-dialog">Settings ready</div>,
+}));
+
 function RecoveredSettings(_props: DesktopSettingsProps) {
   return <div data-testid="settings-dialog">Settings ready</div>;
 }
@@ -89,5 +93,30 @@ describe("LazyDesktopSettings", () => {
       await pending;
     });
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+  });
+
+  it("reopens without the loading skeleton once the chunk has loaded", async () => {
+    const first = render(<LazyDesktopSettings {...settingsProps()} />);
+    expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
+    first.unmount();
+
+    const observer = new MutationObserver(() => undefined);
+    observer.observe(document.body, { childList: true, subtree: true });
+    render(<LazyDesktopSettings {...settingsProps()} />);
+    const added = observer.takeRecords().flatMap((record) => [...record.addedNodes]);
+    observer.disconnect();
+
+    expect(
+      screen.queryByTestId("settings-dialog"),
+      "a fresh lazy per mount suspends again and shows the skeleton for a module already loaded",
+    ).toBeTruthy();
+    expect(
+      added.some(
+        (node) =>
+          node instanceof Element &&
+          (node.matches('[data-testid="settings-loading"]') ||
+            node.querySelector('[data-testid="settings-loading"]') !== null),
+      ),
+    ).toBe(false);
   });
 });

@@ -106,6 +106,7 @@ export function createNamedShareTransportRoutes(
         limit,
         "authenticated",
         half,
+        ["user", actor.userId],
       );
       const hold = parseLinkLogHold(url.searchParams.get("hold"));
       if (hold > 0 && page.ops.length === 0 && !page.hasMore && page.nextCursor === since) {
@@ -115,7 +116,7 @@ export function createNamedShareTransportRoutes(
           const fresh = requireShareAction(route.shareId, actor.userId, "read");
           if (fresh.share.workspaceId !== share.workspaceId ||
               (channelWireId !== null && chatSideOf(fresh.effectiveSelector)?.channelWireId !== channelWireId)) throw notFound();
-          return filteredLogPage(share.workspaceId, share.shareId, fresh.effectiveSelector, scanSince, limit, "authenticated", half);
+          return filteredLogPage(share.workspaceId, share.shareId, fresh.effectiveSelector, scanSince, limit, "authenticated", half, ["user", actor.userId]);
         };
         while (!request.signal.aborted && Date.now() < deadline) {
           try {

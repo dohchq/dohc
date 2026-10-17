@@ -91,8 +91,8 @@ export const APP_RESULTS: Record<AppAction, AppKind[]> = {
   prepare: ["prepared"],
   approve: ["published"],
   cancel: ["cancelled"],
-  withdraw: ["withdrawn"],
-  revokeCollection: ["collectionRevoked"],
+  withdraw: ["withdrawn", "withdrawalUnconfirmed"],
+  revokeCollection: ["collectionRevoked", "withdrawalUnconfirmed"],
   reviewReactivation: ["prepared"],
 };
 

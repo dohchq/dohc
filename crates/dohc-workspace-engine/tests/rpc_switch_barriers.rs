@@ -5,6 +5,7 @@ use common::*;
 use dohc_engine_collab::Ydoc;
 use dohc_engine_protocol::{
     error::ErrorCode,
+    supervisor::{Supervisor, SupervisorConfig},
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
@@ -66,7 +67,8 @@ async fn fixture(
     let transport = Arc::new(InProcessTransport::new(Arc::new(service)));
     let opened = bounded(
         "workspace.open",
-        transport.call(
+        call_with_busy_retry(
+            &transport,
             RequestContext::unbounded(),
             request(
                 1,
@@ -95,7 +97,8 @@ async fn open_additional_workspace(
     std::fs::write(scratch.path().join("notes.md"), "other base").expect("seed disk");
     let opened = bounded(
         "additional workspace.open",
-        transport.call(
+        call_with_busy_retry(
+            transport,
             RequestContext::unbounded(),
             request(
                 id,
@@ -125,7 +128,8 @@ async fn call(
 ) -> Value {
     bounded(
         method,
-        transport.call(
+        call_with_busy_retry(
+            transport,
             RequestContext::unbounded(),
             request(id, method, Some(handle.clone()), params),
         ),
@@ -144,7 +148,8 @@ async fn call_error(
 ) -> dohc_engine_protocol::error::WireError {
     bounded(
         method,
-        transport.call(
+        call_with_busy_retry(
+            transport,
             RequestContext::unbounded(),
             request(id, method, Some(handle.clone()), params),
         ),
@@ -163,9 +168,12 @@ async fn call_with_idempotency(
 ) -> Result<Value, dohc_engine_protocol::error::WireError> {
     let mut request = request(id, method, Some(handle.clone()), params);
     request.idempotency_key = Some(idempotency_key.to_owned());
-    bounded(method, transport.call(RequestContext::unbounded(), request))
-        .await
-        .map(|response| response.result)
+    bounded(
+        method,
+        call_with_busy_retry(transport, RequestContext::unbounded(), request),
+    )
+    .await
+    .map(|response| response.result)
 }
 
 async fn create_feature(
@@ -200,7 +208,8 @@ async fn switch_to(
 ) -> Result<Value, dohc_engine_protocol::error::WireError> {
     bounded(
         "versions.setActive",
-        transport.call(
+        call_with_busy_retry(
+            transport,
             RequestContext::unbounded(),
             request(
                 id,
@@ -898,7 +907,7 @@ async fn cancelled_set_active_keeps_the_owned_fence_until_the_switch_finishes() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cancelled_set_active_returns_while_the_owned_fence_finishes_detached() {
+async fn cancelled_set_active_answers_with_the_fence_it_started() {
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (_scratch, transport, handle, workspace_id) =
@@ -935,29 +944,99 @@ async fn cancelled_set_active_returns_while_the_owned_fence_finishes_detached() 
     .await;
 
     cancel.cancel();
-    let interrupted = tokio::time::timeout(Duration::from_secs(1), switching)
-        .await
-        .expect("cancelled in-process caller must not await the detached fence")
-        .expect("switch task")
-        .expect_err("cancelled switch");
-    assert_eq!(interrupted.code, ErrorCode::Cancelled);
-
+    assert!(
+        !switching.is_finished(),
+        "a started fence is awaited, not answered for"
+    );
     probe.release_version_commit();
-    for id in 4..24 {
-        let active = call(
-            &transport,
-            &handle,
-            id,
-            "versions.active",
-            json!({ "workspaceId": workspace_id }),
-        )
-        .await;
-        if active["id"] == json!(feature) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("the detached setActive continuation did not commit");
+    let switched = bounded("cancelled setActive", switching)
+        .await
+        .expect("switch task")
+        .expect("the committed switch answers with its version");
+    assert_eq!(switched.result["id"], json!(feature));
+    let active = call(
+        &transport,
+        &handle,
+        4,
+        "versions.active",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    assert_eq!(active["id"], json!(feature));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fork_cancelled_at_the_session_lock_answers_cancelled_and_creates_nothing() {
+    let probe = CaptureApplyProbe::default();
+    let service = Arc::new(EngineService::with_capture_apply_probe_for_harness(
+        probe.clone(),
+    ));
+    let scratch = ScratchDir::new().expect("scratch");
+    std::fs::write(scratch.path().join("notes.md"), "main base").expect("seed disk");
+    let workspace_id = "ws-switch-barrier-cancel-at-session-lock";
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let opened = bounded(
+        "workspace.open",
+        transport.call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            ),
+        ),
+    )
+    .await
+    .expect("open");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    wait_until_capture_ready(&transport, &handle, 1_000_000).await;
+
+    let session_ops = service
+        .session_ops_for_harness(&handle)
+        .await
+        .expect("session lock");
+    probe.pause_next_version_fence();
+    let supervisor = Supervisor::new(SupervisorConfig::default(), Arc::clone(&service));
+    let answer = supervisor
+        .try_submit(request(
+            2,
+            "versions.createNamed",
+            Some(handle.clone()),
+            json!({
+                "workspaceId": workspace_id,
+                "name": "never created",
+                "fromVersionId": "main",
+            }),
+        ))
+        .expect("admitted");
+    // The fence holds the capture barrier; its next wait is the session lock.
+    bounded(
+        "createNamed capture barrier",
+        probe.wait_until_version_fence_paused(),
+    )
+    .await;
+    probe.release_version_fence();
+    assert!(supervisor.cancel(2));
+    let error = bounded("cancelled createNamed", answer)
+        .await
+        .expect("answered")
+        .expect_err("nothing landed");
+    assert_eq!(error.code, ErrorCode::Cancelled);
+    drop(session_ops);
+    let versions = call(&transport, &handle, 3, "versions.list", json!({})).await;
+    assert!(
+        !versions["versions"]
+            .as_array()
+            .expect("versions")
+            .iter()
+            .any(|version| version["name"] == json!("never created")),
+        "{versions}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

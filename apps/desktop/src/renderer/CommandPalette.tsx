@@ -1,4 +1,4 @@
-import { shortcutText } from "../shortcuts/shortcutRegistry";
+import { matchShellShortcut, shortcutText } from "../shortcuts/shortcutRegistry";
 import { Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { rendererMarks } from "../performance/rendererMarks";
@@ -18,6 +18,7 @@ export function CommandPalette(props: {
   testId?: string;
   placeholder?: string;
   ariaLabel?: string;
+  toggleShortcut?: "command-palette" | "quick-open";
   // Optional ranking seam: Quick Open passes its prepared path
   // ranker. Default palettes keep the simple substring filter.
   rank?: (query: string, commands: Command[]) => Command[];
@@ -74,7 +75,17 @@ export function CommandPalette(props: {
   }
 
   return (
-    <Overlay onClose={props.onClose}>
+    <Overlay
+      onClose={props.onClose}
+      panelProps={{
+        onKeyDown: (event) => {
+          if (matchShellShortcut(event.nativeEvent) === (props.toggleShortcut ?? "command-palette")) {
+            event.preventDefault();
+            props.onClose();
+          }
+        },
+      }}
+    >
       <div
         data-testid={props.testId ?? "command-palette"}
         className="dohc-popover w-135 max-w-[80vw] overflow-hidden rounded-xl border border-line bg-panel"
@@ -96,8 +107,7 @@ export function CommandPalette(props: {
               setSelectedIndex(0);
             }}
             onKeyDown={(event) => {
-              if (event.key === "Escape") props.onClose();
-              else if (event.key === "ArrowDown") {
+              if (event.key === "ArrowDown") {
                 event.preventDefault();
                 moveSelection(1);
               } else if (event.key === "ArrowUp") {

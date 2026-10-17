@@ -5,7 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { ChangeAttributionWire, SharedFileUpdate, SharedFileUpdateState } from "@dohc/workspace-engine-client";
-import { isIdempotencyKeyReuseRefusal, YdocOwnerDraftPendingError } from "@dohc/workspace-engine-client";
+import { isEngineStoreBusyRefusal, isIdempotencyKeyReuseRefusal, YdocOwnerDraftPendingError } from "@dohc/workspace-engine-client";
 import {
   RECORD_ID_FRONTMATTER_KEY,
   isRecordId,
@@ -471,6 +471,14 @@ export async function createCollectionRecord(
   context: CollectionRecordEditContext,
   input: CreateCollectionRecordInput,
 ): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | CreationPartial> {
+  return createRecord(context, input);
+}
+
+async function createRecord(
+  context: CollectionRecordEditContext,
+  input: CreateCollectionRecordInput,
+  onFailure?: (error: unknown) => void,
+): ReturnType<typeof createCollectionRecord> {
   const prepared = prepareCollectionRecord(input);
   const entries = writableFieldEntries(input.fields ?? {});
   throwIfAborted(context.signal);
@@ -525,6 +533,8 @@ export async function createCollectionRecord(
   } catch (error) {
     // A transport or lease can fail after the write landed.
     if (error instanceof AutomationCreationSkipped || checkingExistingFile) throw error;
+    onFailure?.(error instanceof Error && isEngineStoreBusyRefusal(error.cause) ? error.cause : error);
+
     const diskId = await fileRecordId(context, path).catch(() => null);
     if (!durable && diskId !== requestedId) throw error;
     if (diskId !== null && ["write", "capture", "index"].includes(failedStage)) recordId = diskId;
@@ -596,11 +606,13 @@ export function collectionRecordWrites(context: CollectionRecordEditContext): Co
       settleUnchanged: input.idempotencyKeyPrefix !== undefined,
     }),
     create: async (input) => {
-      const result = await createCollectionRecord(context, input);
+      let failure: unknown;
+      const result = await createRecord(context, input, error => { failure = error; });
       if ("kind" in result) {
         if (result.retry.mode === "resume" && result.retry.recordId) {
           await input.onPartial?.({ path: result.created[0]!, recordId: result.retry.recordId });
         }
+        if (isEngineStoreBusyRefusal(failure)) throw failure;
         throw new CreationPartialError(result);
       }
       return result;
@@ -750,6 +762,9 @@ async function waitForRecord(
       }).pipe(Effect.catch(error => {
         // A refusal during reconciliation can recover on the next announcement.
         lastError = error;
+        if (isEngineStoreBusyRefusal(error)) {
+          return Effect.sleep(100).pipe(Effect.andThen(Queue.offer(changes, undefined)), Effect.as(null));
+        }
         return Effect.succeed(null);
       }));
       if (adopted !== null) return adopted;

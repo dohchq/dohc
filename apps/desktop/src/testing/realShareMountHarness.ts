@@ -52,6 +52,7 @@ export function createRealShareMountHarness(input: {
   const commands: ShareMountCommands<typeof workspace> = createShareMountCommands({
     readMounts: () => workspace.shareMounts,
     updateMounts: async (_workspaceId, update) => { workspace.shareMounts = [...update(workspace.shareMounts)]; },
+    currentCredentialGeneration: () => 0,
     loadCredentials: async () => ({
       relayUrl: input.relay.baseUrl, token: input.relay.token, email: input.recipientEmail,
     }),

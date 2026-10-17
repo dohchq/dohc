@@ -8,9 +8,25 @@ export type WorkspaceRefTarget =
   | { readonly kind: "table"; readonly datasetId: string; readonly tableId: string }
   | { readonly kind: "version"; readonly versionId: string };
 
+export type WorkspaceRefSource =
+  | { readonly workspaceId: string; readonly receivedSource?: never }
+  | { readonly receivedSource: string; readonly workspaceId?: never };
+
+export const isReceivedSource = (value: unknown): value is string =>
+  typeof value === "string" && /^share-source:v1:[0-9a-f]{64}$/u.test(value);
+export const isReceivedObject = (value: unknown): value is string =>
+  typeof value === "string" && /^share-object:v1:[0-9a-f]{64}$/u.test(value);
+
+export function isWorkspaceRefSource(value: unknown): value is WorkspaceRefSource {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const source = value as Record<string, unknown>;
+  return "workspaceId" in source ? !("receivedSource" in source) && typeof source.workspaceId === "string" && source.workspaceId.length > 0
+    : isReceivedSource(source.receivedSource);
+}
+
 /** Native identity and display labels. A reference grants no access. */
 export interface WorkspaceRef<Target extends WorkspaceRefTarget = WorkspaceRefTarget> {
-  readonly workspaceId: string;
+  readonly source: WorkspaceRefSource;
   readonly target: Target;
   readonly labels: {
     readonly path?: string;
@@ -23,7 +39,10 @@ export type WorkspaceFileRef = WorkspaceRef<Extract<WorkspaceRefTarget, { kind: 
 
 /** Labels can change without changing the referenced object. */
 export function workspaceRefsEqual(left: WorkspaceRef, right: WorkspaceRef): boolean {
-  if (left.workspaceId !== right.workspaceId || left.target.kind !== right.target.kind) return false;
+  if (!isWorkspaceRefSource(left.source) || !isWorkspaceRefSource(right.source) || left.target.kind !== right.target.kind) return false;
+  if ("workspaceId" in left.source
+    ? !("workspaceId" in right.source) || left.source.workspaceId !== right.source.workspaceId
+    : "workspaceId" in right.source || left.source.receivedSource !== right.source.receivedSource) return false;
   const other = right.target;
   switch (left.target.kind) {
     case "file": return other.kind === "file" && left.target.objectId === other.objectId;

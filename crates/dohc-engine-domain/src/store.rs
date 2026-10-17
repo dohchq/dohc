@@ -1155,6 +1155,9 @@ impl<'a> VersionedTextStore<'a> {
                 params![ws, input.new_version_id, input.from_version_id],
             )
             .map_err(DomainError::sql_persist)?;
+            dohc_engine_storage::links::copy_version_in_tx(
+                tx, ws, &input.from_version_id, &input.new_version_id,
+            ).map_err(DomainError::sql_persist)?;
             crate::secrets::fork_version_in_tx(
                 tx,
                 ws,

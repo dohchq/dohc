@@ -1219,14 +1219,18 @@ pub(super) fn materialize_relay_page_on_store(
     let mut projections: Vec<SwitchProjection> = Vec::new();
     let mut batch_aliases = HashSet::new();
     let mut deleted: Vec<String> = Vec::new();
+    // Cancellation stops the page only until its first change lands; after
+    // that the page runs to its end.
+    let mut changed = false;
     for (key, change, _) in page {
-        if token.is_cancelled() {
+        if !changed && token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
         if batch_aliases
             .iter()
             .any(|planned: &Vec<String>| planned.starts_with(&key) || key.starts_with(planned))
         {
+            changed |= !projections.is_empty();
             run_relay_batch(
                 store,
                 root_dir,
@@ -1244,6 +1248,7 @@ pub(super) fn materialize_relay_page_on_store(
                 .iter()
                 .filter(|path| is_inside(&path_key(path), &key))
             {
+                changed = true;
                 remove_emptied_folders(root_dir, path, Some(&change.path));
             }
         }
@@ -1307,7 +1312,7 @@ pub(super) fn materialize_relay_page_on_store(
             inline,
         ));
     }
-    if token.is_cancelled() {
+    if !changed && token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
     run_relay_batch(
@@ -1324,9 +1329,6 @@ pub(super) fn materialize_relay_page_on_store(
         for path in &deleted {
             remove_emptied_folders(root_dir, path, None);
         }
-    }
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
     }
     Ok(())
 }

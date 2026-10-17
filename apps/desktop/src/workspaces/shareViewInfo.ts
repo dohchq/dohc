@@ -1,3 +1,4 @@
+import { receivedReferencePin, type ReceivedReferencePin } from "./workspaceFileReferenceScopes";
 import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
 import {
   type ShareAccess,
@@ -30,6 +31,7 @@ export interface ShareUnconfirmedChanges {
 }
 
 export interface ShareViewInfo {
+  receivedIdentity?: ReceivedReferencePin;
   subjectName?: string | null;
   sharerName?: string | null;
   shareId: string;
@@ -173,6 +175,7 @@ export async function fetchShareViewInfo(input: {
     throw new ShareSelectorInvalidError(input.shareId);
   }
   return {
+    receivedIdentity: receivedReferencePin(body),
     shareId: String(body.shareId ?? input.shareId),
     granterUserId: String(body.granterUserId ?? ""),
     subjectName: normalizeShareLabel(body.subjectName),

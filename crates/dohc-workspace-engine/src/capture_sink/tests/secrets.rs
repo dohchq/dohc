@@ -131,6 +131,7 @@ fn secret_changed_ingest_consumes_an_engine_self_write() {
     let self_writes = SelfWriteSuppression::default();
     self_writes.record(WORKSPACE_ID, ".env", &hex_sha256(b"MODE=feature\n"));
     let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+        cancel: dohc_engine_files::CancellationToken::new(),
         self_writes,
         ..bound_sink_params(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 4)
     });

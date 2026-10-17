@@ -69,7 +69,7 @@ export const SHORTCUTS = {
   "palette-move": { owner: "palette", accelerators: ["Up", "Down"], keys: ["↑↓"] },
   "palette-accept": { owner: "palette", accelerators: ["Enter"], keys: ["↵"] },
   "palette-dismiss": { owner: "palette", accelerators: ["Escape"], keys: ["esc"] },
-  "dev-panel": { owner: "dev", accelerators: ["CommandOrControl+Shift+D"], hint: "Ctrl Shift D" },
+  "dev-panel": { owner: "dev", accelerators: ["CommandOrControl+Shift+D"] },
 } as const satisfies Partial<Record<StaticCommandId | OwnedShortcutId, ShortcutDefinition>>;
 
 export type ShortcutId = keyof typeof SHORTCUTS;
@@ -81,11 +81,17 @@ export function shortcutAccelerators(id: StaticCommandId | OwnedShortcutId): rea
   return Object.hasOwn(SHORTCUTS, id) ? SHORTCUTS[id as ShortcutId].accelerators : [];
 }
 
+// macOS shows modifiers as symbols, in the order Control, Option, Shift, Command.
+const MAC_MODIFIERS: Readonly<Record<string, string>> = { Ctrl: "⌃", Alt: "⌥", Shift: "⇧", CommandOrControl: "⌘" };
+const MAC_ORDER = Object.keys(MAC_MODIFIERS);
+
 export function shortcutKeys(id: ShortcutId, platform: string | undefined): readonly string[] {
   const row: ShortcutDefinition = SHORTCUTS[id];
-  return row.keys ?? row.accelerators[0]!.split("+").map((key) =>
-    key === "CommandOrControl" ? (platform === "darwin" ? "⌘" : "Ctrl") : key,
-  );
+  if (row.keys) return row.keys;
+  const keys = row.accelerators[0]!.split("+");
+  if (platform !== "darwin") return keys.map((key) => key === "CommandOrControl" ? "Ctrl" : key);
+  const rank = (key: string) => MAC_ORDER.includes(key) ? MAC_ORDER.indexOf(key) : MAC_ORDER.length;
+  return [...keys].sort((a, b) => rank(a) - rank(b)).map((key) => MAC_MODIFIERS[key] ?? key);
 }
 
 export function shortcutText(id: ShortcutId, platform: string | undefined): string {
@@ -97,8 +103,14 @@ export function shortcutText(id: ShortcutId, platform: string | undefined): stri
 // The shell accepts either modifier on every platform, as it did before the
 // extraction. Editor keymaps still get the event first and own their chords.
 export function matchShellShortcut(event: KeyboardEvent): ShellShortcutId | null {
+  if (event.repeat || event.isComposing) return null;
+  return matchShellShortcutChord(event);
+}
+
+// Modal guards also consume held and composing chords before native menu fallback.
+export function matchShellShortcutChord(event: KeyboardEvent): ShellShortcutId | null {
   if (!(event.metaKey || event.ctrlKey) || (event.metaKey && event.ctrlKey)
-    || event.defaultPrevented || event.repeat || event.isComposing) return null;
+    || event.defaultPrevented) return null;
   for (const id of Object.keys(SHORTCUTS) as ShortcutId[]) {
     const row: ShortcutDefinition = SHORTCUTS[id];
     if (row.owner !== "shell" && row.owner !== "history-restore") continue;

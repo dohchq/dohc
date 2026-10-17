@@ -270,8 +270,8 @@ pub struct RequestContext {
     /// Cooperative cancellation: long-running handlers must observe this
     /// between units of work and at await points.
     pub cancel: CancelSignal,
-    /// Absolute deadline, when the request carries one. The supervisor also
-    /// enforces it non-cooperatively.
+    /// Absolute deadline, when the request carries one. On expiry the
+    /// supervisor signals `cancel` and awaits the handler's answer.
     pub deadline: Option<Instant>,
     /// Capabilities negotiated by the framed session. Direct in-process calls
     /// default to none and may opt in explicitly.

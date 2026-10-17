@@ -51,7 +51,7 @@ describe("application menu template", () => {
 
   it("clicking a custom item sends its MenuCommand to the clicked window", () => {
     const { template, sendCommand } = build();
-    const newFile = items(template, "File").find((i) => i.label === "New File");
+    const newFile = items(template, "File").find((i) => i.label === "New file");
     const fakeWindow = { id: 1 };
     (newFile?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "new-file");
@@ -60,9 +60,9 @@ describe("application menu template", () => {
   it("keeps file import and zip export as separate File-menu commands", () => {
     const { template, sendCommand } = build();
     const fileItems = items(template, "File");
-    const importFiles = fileItems.find((entry) => entry.label === "Import Files…");
+    const importFiles = fileItems.find((entry) => entry.label === "Import files");
     const exportWorkspace = fileItems.find(
-      (entry) => entry.label === "Export Workspace as Zip…",
+      (entry) => entry.label === "Export workspace as zip",
     );
     const fakeWindow = { id: 4 };
 
@@ -76,9 +76,9 @@ describe("application menu template", () => {
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "export-workspace");
   });
 
-  it("Open Recent lists known workspaces and activates the picked one", () => {
+  it("Open recent lists known workspaces and activates the picked one", () => {
     const { template, openRecentWorkspace, recentWorkspaces } = build();
-    const openRecent = items(template, "File").find((i) => i.label === "Open Recent");
+    const openRecent = items(template, "File").find((i) => i.label === "Open recent");
     const recentItems = openRecent?.submenu as MenuItemConstructorOptions[];
     expect(recentItems?.[0]?.label).toBe("personal");
     expect(recentItems?.[0]?.sublabel).toBe("/Users/sam/work/personal");
@@ -94,7 +94,7 @@ describe("application menu template", () => {
     );
   });
 
-  it("Open Recent has a disabled empty state when no workspaces are known", () => {
+  it("Open recent has a disabled empty state when no workspaces are known", () => {
     const sendCommand = vi.fn();
     const showAbout = vi.fn();
     const template = buildMenuTemplate({
@@ -105,20 +105,20 @@ describe("application menu template", () => {
       stepZoom: vi.fn(),
       showAbout,
     });
-    const openRecent = items(template, "File").find((i) => i.label === "Open Recent");
+    const openRecent = items(template, "File").find((i) => i.label === "Open recent");
     const recentItems = openRecent?.submenu as MenuItemConstructorOptions[];
-    expect(recentItems).toEqual([{ label: "No Recent Workspaces", enabled: false }]);
+    expect(recentItems).toEqual([{ label: "No recent workspaces", enabled: false }]);
   });
 
   it("renderer-owned accelerators are displayed but not registered", () => {
     const { template } = build();
     for (const [menu, label, accelerator] of [
-      ["File", "New File", "CommandOrControl+N"],
-      ["File", "Close Tab", "CommandOrControl+W"],
-      ["View", "Command Palette", "CommandOrControl+Shift+P"],
-      ["View", "Go To", "CommandOrControl+P"],
-      ["View", "New Editor Group Right", "CommandOrControl+\\"],
-      ["View", "Toggle Sidebar", "CommandOrControl+B"],
+      ["File", "New file", "CommandOrControl+N"],
+      ["File", "Close tab", "CommandOrControl+W"],
+      ["View", "Command palette", "CommandOrControl+Shift+P"],
+      ["View", "Go to", "CommandOrControl+P"],
+      ["View", "New editor group right", "CommandOrControl+\\"],
+      ["View", "Toggle sidebar", "CommandOrControl+B"],
       ["View", "Toggle About", "CommandOrControl+Alt+B"],
       ["Go", "Settings", "CommandOrControl+,"],
     ] as const) {
@@ -128,11 +128,11 @@ describe("application menu template", () => {
     }
   });
 
-  it("routes New Editor Group Right through the native application menu", () => {
+  it("routes New editor group right through the native application menu", () => {
     const { template, sendCommand } = build(false, "darwin");
     const fakeWindow = { id: 8 };
     const moveToGroup = items(template, "View").find(
-      (entry) => entry.label === "New Editor Group Right",
+      (entry) => entry.label === "New editor group right",
     );
     (moveToGroup?.click as (a: unknown, b: unknown) => void)(
       undefined,
@@ -162,7 +162,7 @@ describe("application menu template", () => {
   it("keeps a hidden CommandOrControl+K command-palette alias active", () => {
     const { template, sendCommand } = build(false, "darwin");
     const alias = items(template, "View").find(
-      (entry) => entry.label === "Command Palette (Alternate)",
+      (entry) => entry.label === "Command palette (alternate)",
     );
 
     expect(alias).toMatchObject({
@@ -257,8 +257,8 @@ describe("application menu template", () => {
   it("routes Help update actions through renderer commands", () => {
     const { template, sendCommand } = build(false, "linux", true);
     const helpItems = items(template, "Help");
-    const check = helpItems.find((i) => i.label === "Check for Updates…");
-    const install = helpItems.find((i) => i.label === "Update and Restart");
+    const check = helpItems.find((i) => i.label === "Check for updates");
+    const install = helpItems.find((i) => i.label === "Update and restart");
     const fakeWindow = { id: 5 };
 
     (check?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
@@ -271,7 +271,7 @@ describe("application menu template", () => {
   it("disables Help restart when no update is installable", () => {
     const { template } = build();
     const install = items(template, "Help").find(
-      (i) => i.label === "Update and Restart",
+      (i) => i.label === "Update and restart",
     );
 
     expect(install?.enabled).toBe(false);

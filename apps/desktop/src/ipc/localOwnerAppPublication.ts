@@ -20,14 +20,16 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
   const preparing = new Set<string>();
   return async (input: OwnerAppPublicationRequest, callerKey: string, operation: Operation, attribution?: ApprovalAgent | null): Promise<OwnerAppPublicationResult | null> => {
     const agent = parseApprovalAgent(attribution);
-    if (input.action !== "prepareLocal" && input.action !== "listLocal" && input.action !== "launchLocal" && input.action !== "approve" && input.action !== "cancel" && input.action !== "withdraw") return null;
+    if (input.action !== "prepareLocal" && input.action !== "listLocal" && input.action !== "launchLocal" && input.action !== "approve" && input.action !== "cancel" &&
+      input.action !== "withdraw" && input.action !== "revokeCollection") return null;
     const current = () => { operation.signal.throwIfAborted(); operation.assertCurrent(); };
     current();
-    if (input.action === "withdraw") {
+    if (input.action === "withdraw" || input.action === "revokeCollection") {
       const local = await deps.datasetForWorkspace(operation.workspace, operation.signal); current();
+      // Other IDs belong to the sync service. A local app has no access to revoke apart from its approval.
       if (!local.apps.has(input.publicationId)) return null;
-      const result = local.apps.withdraw(input.publicationId, input.expectedAuthorityRevision); current();
-      return OwnerAppPublicationResult.parse({ kind: "withdrawn", ...result });
+      const result = await local.apps.withdraw(input.publicationId, input.expectedAuthorityRevision); current();
+      return OwnerAppPublicationResult.parse(input.action === "revokeCollection" && result.kind === "withdrawn" ? { ...result, kind: "collectionRevoked" } : result);
     }
     if (input.action === "launchLocal") {
       const dataset = await deps.datasetForWorkspace(operation.workspace, operation.signal);
@@ -75,7 +77,7 @@ export function createLocalOwnerAppPublicationHandler<Workspace extends { worksp
       current();
       if (!prepared) throw new Error("dohc could not capture this app. Restart dohc and try again.");
       const candidate = prepared.candidate;
-      if (candidate.capabilities[0]?.kind !== "dataset") throw new Error("Connect this app to a Collection before preparing app data.");
+      if (!candidate.capabilities[0]) throw new Error("Connect this app to a Collection before preparing app data.");
       const approvalId = randomUUID(), digest = createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
       const clear = () => { pending.delete(approvalId); operation.signal.removeEventListener("abort", clear); clearTimeout(expiry); };
       const expiry = setTimeout(clear, 10 * 60_000); expiry.unref();

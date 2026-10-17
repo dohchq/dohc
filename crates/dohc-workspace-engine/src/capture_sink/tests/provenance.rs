@@ -57,6 +57,7 @@ fn a_reconcile_run_stamps_its_summary_and_correlation_on_every_moment() {
 
     let actor = supervisor.open(&db, 2).expect("open actor").actor;
     let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+        cancel: dohc_engine_files::CancellationToken::new(),
         provenance: CaptureProvenance {
             summary: Some("Reconciled offline edits".to_owned()),
             correlation_id: Some("reconcile-test-pass".to_owned()),

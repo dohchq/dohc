@@ -3,7 +3,7 @@ import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/acc
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
   ActorPresentation,
@@ -17,6 +17,7 @@ import type {
   HistoryPolicyUnreadableResult,
   SitePackageInfo,
   SyncStatusResult,
+  TimelineEntry,
   UsageRecordResult,
   UsageRecordRow,
   WorkspaceFileEntry,
@@ -72,7 +73,7 @@ import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
-import { MomentRow } from "../workbench/EngineHistory";
+import { EngineHistoryView, MomentRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
   AboutAccessView,
@@ -125,9 +126,14 @@ const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-su
 // menus from EDITOR_MENU_BOX's margin and their boxes' heights.
 const SHADOW_ROOM = "p-10";
 
+// The parts the page renders, when it renders only some.
+const ShownParts = createContext<ReadonlySet<string> | undefined>(undefined);
+
 // A part whose subject is not a menu but which holds one, such as a header
 // with its document menu, is captured with its menus closed (`menusAtRest`).
 function Section(props: { part: string; title: string; children: ReactNode; menusAtRest?: boolean }) {
+  const shown = useContext(ShownParts);
+  if (shown && !shown.has(props.part)) return null;
   return (
     <section data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined} className="flex flex-col gap-3">
       <SectionLabel as="h3" className="m-0">
@@ -587,6 +593,48 @@ const RECOVERY_MOMENT: EngineMomentRecord = {
   momentOrder: 7,
 };
 
+// One History timeline across two days: a file change, a version starting,
+// a labelled record change by an automation, a rules change an agent
+// approved that main could not date, the workspace starting, and an
+// unlabelled record change with no date or place. Only a rules change can
+// carry its approving agent. Local times, as above.
+const TIMELINE_BUDGET = "00000000-0000-4000-8000-0000000000b1";
+const TIMELINE_GUESTS = "00000000-0000-4000-8000-0000000000b2";
+const TIMELINE_FILE: TimelineEntry = { kind: "file", moment: {
+  id: "moment-timeline-plan", versionId: "main", path: "trip/plan.md", recordedAtMs: new Date(2026, 6, 8, 10, 12).getTime(),
+  operation: "write", origin: "local-file", momentOrder: 9, summary: "Added the ferry times",
+} };
+function timelineVersion(id: string, kind: "main" | "named", name: string, createdAtMs: number): TimelineEntry {
+  return { kind: "version", version: { id, workspaceId: "states", kind, name, createdAtMs } };
+}
+function timelineChange(datasetId: string, name: string, revision: number, recordedAtMs: number | null, sortAtMs: number | null,
+  by?: { automation?: string; rulesApprovedBy?: string }): TimelineEntry {
+  const rules = by?.rulesApprovedBy;
+  return { kind: "collection", datasetId, name, sortAtMs, change: {
+    revision, operation: rules ? "Fields and rules" : "addGuest", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64),
+    changesetBytes: rules ? 0 : 120, attachmentCount: 0,
+    ...(by?.automation ? { automation: { automationId: `automations.yaml#${by.automation}`, depth: 1, name: by.automation } } : {}),
+    ...(rules ? {
+      approvalAgent: { kind: "agent" as const, label: rules, labelSource: "agent-declared" as const },
+      schema: { previousRevisionHash: "b".repeat(64), revisionHash: "a".repeat(64) },
+    } : {}),
+  } };
+}
+const TIMELINE_DATED = timelineChange(TIMELINE_BUDGET, "Budget", 12, new Date(2026, 6, 8, 9, 44).getTime(), new Date(2026, 6, 8, 9, 44).getTime(), { automation: "Stamp the date" });
+const TIMELINE_MIXED: TimelineEntry[] = [
+  TIMELINE_FILE,
+  timelineVersion("version-draft", "named", "Draft itinerary", new Date(2026, 6, 8, 9, 58).getTime()),
+  TIMELINE_DATED,
+  timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { rulesApprovedBy: "trip-agent" }),
+  timelineVersion("main", "main", "Main", new Date(2026, 6, 7, 18, 0).getTime()),
+  timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null),
+];
+// Budget's definition labels its operation; Guests' is not loaded here.
+const TIMELINE_COLLECTIONS = new Map([
+  [TIMELINE_BUDGET, { name: "Budget", operationLabels: new Map([["addGuest", "Add guest"]]), open: noop }],
+  [TIMELINE_GUESTS, { name: "Guests" }],
+]);
+
 // The About tab on the drawing's document: who wrote what, who has it.
 const ABOUT_PATH = "notes/product-plan.md";
 const ABOUT_THREADS: ChatThreadRecord[] = [
@@ -601,8 +649,11 @@ const aboutMoment = (moment: Partial<EngineMomentRecord> & { id: string; recorde
   ...moment,
 });
 const ABOUT_MOMENTS: EngineMomentRecord[] = [
-  aboutMoment({ id: "about-agent", recordedAtMs: new Date(2026, 6, 8, 9, 30).getTime(), momentOrder: 9, agentAuthorName: "Nova", summary: "Tightened the launch list" }),
-  aboutMoment({ id: "about-person", recordedAtMs: new Date(2026, 6, 8, 8, 55).getTime(), momentOrder: 8, namedAuthor: { userId: "sam", label: "Sam Rivera" } }),
+  aboutMoment({ id: "about-agent", recordedAtMs: new Date(2026, 6, 8, 9, 30).getTime(), momentOrder: 9, agentAuthorName: "Nova", summary: "Tightened the launch list",
+    authors: [{ kind: "agent", agentId: "nova", agentRunId: "run-nova", onBehalfOf: "ice" }],
+    authorPresentations: [{ group: "states-nova", hue: null, self: false }] }),
+  aboutMoment({ id: "about-person", recordedAtMs: new Date(2026, 6, 8, 8, 55).getTime(), momentOrder: 8, namedAuthor: { userId: "sam", label: "Sam Rivera" },
+    authors: [{ kind: "named", userId: "sam", grantId: "grant-sam", grantGeneration: 1 }], authorPresentations: [SAMPLE_SAM] }),
   aboutMoment({ id: "about-local", recordedAtMs: new Date(2026, 6, 7, 17, 20).getTime(), momentOrder: 6, origin: "local-file" }),
 ];
 const aboutGrant = (grant: Partial<AccessShareRow> & { grantId: string }): AccessShareRow => ({
@@ -1392,6 +1443,17 @@ function Pane(props: { theme: "light" | "dark" }) {
         <ColorControl label="Accent" value="#6b7230" onChange={noop} />
       </Section>
 
+      <Section part="native-controls" title="Native controls">
+        <Specimen label="checkboxes and radios in the theme's colors, checked ones in the accent (Explorer's archived toggle)">
+          <div className="flex flex-col">
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" defaultChecked={false} />Archived collections</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" defaultChecked />Archived collections</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="radio" name={`native-radio-${theme}`} defaultChecked={false} />Off</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="radio" name={`native-radio-${theme}`} defaultChecked />On</label>
+          </div>
+        </Specimen>
+      </Section>
+
       <Section part="list-rows" title="List rows">
         <ul role="tree" aria-label="Rows" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
           <Row name="rest" folder />
@@ -1646,6 +1708,38 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="restore refused">
           <div className={SHADOW_ROOM}>
             <WorkspaceErrorToast error={REFUSED_RESTORE_TOAST} onRetry={noop} onHide={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="history-timeline" title="History timeline">
+        <Specimen label="files, versions and Collections, with day headings">
+          <div className="flex h-[500px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={TIMELINE_MIXED} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="partial: a Collection did not load">
+          <div className="flex h-[260px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[TIMELINE_FILE, TIMELINE_DATED]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              unavailableSources={[{ datasetId: TIMELINE_GUESTS }]} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="Collections left out by the limit">
+          <div className="flex h-[240px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[TIMELINE_FILE]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              omittedSources={14} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="one Collection, unavailable">
+          <div className="flex h-48 w-[300px] flex-col rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              unavailableSources={[{ datasetId: TIMELINE_GUESTS }]} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="loading">
+          <div className="flex h-48 w-[300px] flex-col rounded-lg border border-line bg-panel">
+            <SkeletonRows layout="panel" label="Loading history..." />
           </div>
         </Specimen>
       </Section>
@@ -2865,7 +2959,8 @@ const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedS
   { label: "server disconnected", syncStatus: { ...SYNCED_STATUS, state: "cloud-disconnected" }, failedSaves: 0 },
 ];
 
-export function StatesPage() {
+// `parts` renders only those parts, so a test renders only what it checks.
+export function StatesPage(props: { parts?: ReadonlySet<string> }) {
   // The light pane has no rule of its own: it reads the document's light
   // tokens. The document is held light while the page is open and given back
   // its theme on close.
@@ -2888,8 +2983,10 @@ export function StatesPage() {
         </SecondaryButton>
       </header>
       <div className="grid grid-cols-2">
-        <Pane theme="light" />
-        <Pane theme="dark" />
+        <ShownParts.Provider value={props.parts}>
+          <Pane theme="light" />
+          <Pane theme="dark" />
+        </ShownParts.Provider>
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { historyActivitySql, historyStatement } from "@dohc/app-backend-runtime/dataset-host";
+import { createLocalDatasetHistoryReader } from "./localDatasetHistoryReader";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -21,6 +21,8 @@ import type { compileDatasetOperations } from "@dohc/app-backend-runtime/dataset
 import { createLocalAppStore, type LocalAppStore } from "./localAppStore";
 import { createLocalApps } from "./localApps";
 import { createLocalDatasetApps, localDatasetAppStorage, type LocalDatasetAppContext } from "./localDatasetApps";
+import { createLocalCollectionApps, localCollectionAppStorage, type LocalCollectionEngine } from "./localCollectionApps";
+import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { createDatasetAttempts } from "@dohc/app-backend-runtime/dataset-attempts";
 import { createLocalDatasetMigrations, type PrepareLocalDatasetMigration } from "./localDatasetMigration";
 import { createLocalDatasetRecovery } from "./localDatasetRecovery";
@@ -85,6 +87,10 @@ export interface LocalDatasetHostOptions {
   onAutomationClaims?(failed: boolean): void;
   /** A dataset's approved rules or lifecycle changed, so the executor re-indexes. */
   onDatasetsChanged?(): void;
+  /** This attachment's workspace engine for document Collection apps. Throws while it is unavailable. */
+  collectionEngine?(): LocalCollectionEngine;
+  /** Who a local Collection app's response is made by: the agent run active now, or the person here. */
+  collectionAuthor?(): Promise<MomentWriteAuthor>;
 }
 export interface LocalDatasetPreparation {
   preparationId: string;
@@ -154,6 +160,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   }
   const { DatabaseSync: Sqlite } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
   const db: DatabaseSync = new Sqlite(path, { allowExtension: false });
+  const historyReader = createLocalDatasetHistoryReader(path, options.workspaceId);
   let closed = false, closePromise: Promise<void> | undefined, transactionSequence = 0;
   const lifetime = new AbortController(), active = new Set<Promise<unknown>>();
   const owner: OwnerContext = { owner: true };
@@ -175,6 +182,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
   function signal(input?: AbortSignal) { assertCurrent(); return input ? AbortSignal.any([input, lifetime.signal]) : lifetime.signal; }
   function transaction<T>(work: () => T): T {
     assertCurrent();
+    return commit(work);
+  }
+  /** Without the session check: admitted Collection creates still record their outcomes while the host closes. */
+  function commit<T>(work: () => T): T {
     const nested = db.isTransaction, savepoint = `local_dataset_${++transactionSequence}`;
     db.exec(nested ? `SAVEPOINT ${savepoint}` : "BEGIN IMMEDIATE");
     try { const result = work(); db.exec(nested ? `RELEASE ${savepoint}` : "COMMIT"); return result; }
@@ -184,10 +195,12 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     assertCurrent(); const result = work(); active.add(result);
     try { return await result; } finally { active.delete(result); }
   }
-  function charge(datasetId: string, bytes: number) {
+  /** Charges a Dataset's usage, or with null the Collection app ledger. */
+  function charge(datasetId: string | null, bytes: number) {
     if (!Number.isSafeInteger(bytes)) throw new Error("Invalid Collection storage allocation.");
     const changed = db.prepare("UPDATE local_dataset_budget SET bytes=bytes+? WHERE singleton=1 AND bytes+?>=0 AND bytes+?<=?").run(bytes, bytes, bytes, maxStoredBytes);
     if (changed.changes !== 1) throw new Error("Collection storage is full. Delete an unused Collection permanently to release storage. Exporting alone does not release storage.");
+    if (datasetId === null) { db.prepare("UPDATE local_collection_app_usage SET bytes=bytes+? WHERE singleton=1").run(bytes); return; }
     db.prepare("INSERT OR IGNORE INTO local_dataset_usage VALUES(?,0)").run(datasetId);
     db.prepare("UPDATE local_dataset_usage SET bytes=bytes+? WHERE dataset_id=?").run(bytes,datasetId);
   }
@@ -198,6 +211,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       db.exec(`CREATE TABLE IF NOT EXISTS local_dataset_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),workspace_id TEXT NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS local_dataset_budget(singleton INTEGER PRIMARY KEY CHECK(singleton=1),bytes INTEGER NOT NULL CHECK(bytes>=0)) STRICT;
       CREATE TABLE IF NOT EXISTS local_dataset_usage(dataset_id TEXT PRIMARY KEY,bytes INTEGER NOT NULL CHECK(bytes>=0)) STRICT;
+      CREATE TABLE IF NOT EXISTS local_collection_app_usage(singleton INTEGER PRIMARY KEY CHECK(singleton=1),bytes INTEGER NOT NULL CHECK(bytes>=0)) STRICT;
       CREATE TABLE IF NOT EXISTS local_dataset_files(
         workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,file_id TEXT NOT NULL,key TEXT NOT NULL,
         metadata TEXT NOT NULL,content BLOB NOT NULL,created_at_ms INTEGER NOT NULL,expires_at_ms INTEGER NOT NULL,
@@ -207,8 +221,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       db.prepare("INSERT OR IGNORE INTO local_dataset_identity VALUES(1,?)").run(workspaceId);
       if (db.prepare("SELECT workspace_id FROM local_dataset_identity WHERE singleton=1").get()!.workspace_id !== workspaceId) throw new Error("This Collection store belongs to another workspace.");
       db.prepare("INSERT OR IGNORE INTO local_dataset_budget VALUES(1,0)").run();
+      db.prepare("INSERT OR IGNORE INTO local_collection_app_usage VALUES(1,0)").run();
+      // Collection app storage is outside Dataset usage, so a build without it refuses the store.
       const budget = Number(db.prepare("SELECT bytes FROM local_dataset_budget WHERE singleton=1").get()!.bytes);
-      const tracked = Number(db.prepare("SELECT coalesce(sum(bytes),0) AS bytes FROM local_dataset_usage").get()!.bytes);
+      const tracked = Number(db.prepare("SELECT coalesce(sum(bytes),0)+(SELECT bytes FROM local_collection_app_usage) AS bytes FROM local_dataset_usage").get()!.bytes);
       if (budget !== tracked) throw new Error("This development Collection store predates per-Collection storage accounting. Export it with the previous build before resetting the store.");
     });
     const journal = createDatasetJournal({ db, transaction });
@@ -234,6 +250,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     } while (stageCursor);
     let apps: ReturnType<typeof createLocalDatasetApps>;
     let appStore: LocalAppStore;
+    let localApps: ReturnType<typeof createLocalApps>;
     const exportDirectory = join(directory, "exports");
     const host = createDatasetHost<LocalContext>({ db, transaction, journal, supervisor, runtime: options.runtime, persistentRuntime: options.persistentRuntime,
       wakeAutomations: (_scope, failed) => { if (!closed) options.onAutomationClaims?.(failed); },
@@ -440,15 +457,10 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       cancelAttempt(input: { datasetId: string; reference: string; acknowledge: true }) { assertCurrent(); return host.cancelAttempt(owner, { workspaceId, ...input }); },
       historyRevision(input: { datasetId: string; revisionSha256: string }) { assertCurrent(); return host.historyRevision(owner, { workspaceId, ...input }); },
       historyHeads(input: { positions?: Array<{ datasetId: string; beforeRevision: number }>; limit?: number; sourceIds?: string[] } = {}) {
-        return transaction(() => {
-          const identities = "SELECT c.dataset_id FROM dohc_dataset_catalog c LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND COALESCE(l.archived,0)=0 UNION SELECT dataset_id FROM local_dataset_transfers WHERE workspace_id=?";
-          const sourceIds = input.sourceIds ?? historyStatement(db, `SELECT c.dataset_id FROM (${identities}) c LEFT JOIN dohc_dataset_journals j ON j.workspace_id=? AND j.dataset_id=c.dataset_id ORDER BY ${historyActivitySql} DESC,c.dataset_id LIMIT 129`)
-            .all(workspaceId, workspaceId, workspaceId).map(row => String(row.dataset_id));
-          const transferred = historyStatement(db, "SELECT dataset_id FROM local_dataset_transfers WHERE workspace_id=? AND dataset_id IN (SELECT value FROM json_each(?))")
-            .all(workspaceId, JSON.stringify(sourceIds)).map(row => String(row.dataset_id));
-          const sourceCount = input.positions ? 0 : Number(historyStatement(db, `SELECT count(*) AS count FROM (${identities})`).get(workspaceId, workspaceId)?.count ?? 0);
-          const positions = input.positions ?? sourceIds.filter(id => !transferred.includes(id)).map(datasetId => ({ datasetId, beforeRevision: Number.MAX_SAFE_INTEGER }));
-          return { transferred, sourceIds, sourceCount, pages: host.historyHeads(owner, { workspaceId, positions, limit: input.limit, skip: transferred }) };
+        return tracked(async () => {
+          const result = await historyReader.read(input);
+          assertCurrent();
+          return result;
         });
       },
       history(input: { datasetId: string; beforeRevision?: number; limit?: number; metadataOnly?: boolean; signal?: AbortSignal }) { assertCurrent(); return host.history(owner, { workspaceId, ...input }); },
@@ -612,13 +624,27 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       close(): Promise<void> {
         return closePromise ??= (async () => {
           closed = true; pending.clear(); migrations.clear(); lifetime.abort();
+          // Admitted Collection responses settle within their own deadline and still record their outcomes.
+          await localApps.close();
           await Promise.allSettled([...active]);
           await recovery.close();
-          try { await supervisor!.close(); } finally { db.close(); }
+          try { await historyReader.close(); } finally {
+            try { await supervisor!.close(); } finally { db.close(); }
+          }
         })();
       },
     };
-    appStore = createLocalAppStore({ db, sources: [localDatasetAppStorage(db)], assertCurrent, transaction, charge: (_kind, resourceId, bytes) => charge(resourceId, bytes) });
+    appStore = createLocalAppStore({ db, sources: [localDatasetAppStorage(db), localCollectionAppStorage(db)], assertCurrent, transaction,
+      charge: (kind, resourceId, bytes) => charge(kind === "dataset" ? resourceId : null, bytes) });
+    const collections = createLocalCollectionApps({ db, store: appStore, workspaceId, assertCurrent, transaction: commit, charge: bytes => charge(null, bytes),
+      engine() {
+        if (!options.collectionEngine) throw new Error("Document Collection apps are unavailable here.");
+        return options.collectionEngine();
+      },
+      author() {
+        if (!options.collectionAuthor) throw new Error("Document Collection apps are unavailable here.");
+        return options.collectionAuthor();
+      } });
     apps = createLocalDatasetApps({ db, store: appStore, workspaceId, ownerId, assertCurrent, agentRun: () => options.agentRun?.() ?? null, localPersonId: () => options.localPersonId(),
       approved: datasetId => host.approvedArtifacts(owner, { workspaceId, datasetId }),
       bind: (datasetId, appId, binding, commit) => host.setBinding(owner, { workspaceId, datasetId, appId, binding }, commit),
@@ -639,11 +665,21 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         });
       },
     });
-    return { ...local, apps: createLocalApps(appStore, apps) };
+    localApps = createLocalApps(appStore, apps, collections);
+    return { ...local, apps: localApps };
   } catch (error) {
     closed = true; lifetime.abort();
-    try { await supervisor?.close(); } finally { db.close(); }
+    try { await historyReader.close(); } finally {
+      try { await supervisor?.close(); } finally { db.close(); }
+    }
     throw error;
   }
 }
 export type LocalDatasetHost = Awaited<ReturnType<typeof createLocalDatasetHost>>;
+
+/** Whether the workspace already has its local store. Checking never creates one. */
+export const localDatasetStoreExists = (workspaceRoot: string) => lstat(join(workspaceRoot, ".dohc", "datasets", "state.sqlite")).then(() => true, () => false);
+/** After attachment or engine reconnection, settles admitted Collection app responses in an existing store. */
+export async function reconcileExistingLocalCollectionApps(workspaceRoot: string, open: () => Promise<Pick<LocalDatasetHost, "apps">>): Promise<void> {
+  if (await localDatasetStoreExists(workspaceRoot)) (await open()).apps.reconcile();
+}

@@ -5,7 +5,7 @@ import type { JournalDb } from "@dohc/app-backend-runtime/journal";
 import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
 import type { ClosedAppBuild } from "./closedAppCompiler";
 
-export type LocalAppKind = "dataset";
+export type LocalAppKind = "dataset" | "collection";
 export type LocalAppPrepared = { candidate: AppPublicationCandidate; files: ClosedAppBuild["files"] };
 export interface LocalAppStorage {
   kind: LocalAppKind;
@@ -13,6 +13,8 @@ export interface LocalAppStorage {
   artifactTable: string;
   resourceColumn: string;
   ensureSchema(): void;
+  /** Throws while a publication still has admitted work that replacing it would orphan. */
+  assertRetirable?(publicationId: string): void;
 }
 export interface LocalAppRow {
   kind: LocalAppKind; publicationId: string; appRoot: string; resourceId: string;
@@ -66,12 +68,14 @@ export function createLocalAppStore(options: {
       const stale = 'active_kind=? AND NOT EXISTS(SELECT 1 FROM ' + table + ' p WHERE p.app_root=local_app_roots.app_root AND p.publication_id=local_app_roots.active_publication_id AND p.active=1 AND p.authority_revision=local_app_roots.revision)';
       assertCanAdvance('SELECT revision FROM local_app_roots WHERE ' + stale, [storage.kind]);
       db.prepare('UPDATE local_app_roots SET revision=revision+1,active_kind=NULL,active_publication_id=NULL WHERE ' + stale).run(storage.kind);
-      const untracked = 'active=1 AND NOT EXISTS(SELECT 1 FROM local_app_roots r WHERE r.app_root=p.app_root AND r.active_kind=? AND r.active_publication_id=p.publication_id AND r.revision=p.authority_revision)';
+      // Only explicit replacement moves a root another kind holds.
+      const free = 'NOT EXISTS(SELECT 1 FROM local_app_roots o WHERE o.app_root=p.app_root AND o.active_kind<>?)';
+      const untracked = 'active=1 AND ' + free + ' AND NOT EXISTS(SELECT 1 FROM local_app_roots r WHERE r.app_root=p.app_root AND r.active_kind=? AND r.active_publication_id=p.publication_id AND r.revision=p.authority_revision)';
       const revision = 'MAX(authority_revision,(SELECT revision FROM local_app_roots r WHERE r.app_root=p.app_root))';
-      assertCanAdvance('SELECT ' + revision + ' AS revision FROM ' + table + ' p WHERE ' + untracked, [storage.kind]);
-      db.prepare('DELETE FROM local_app_approval_provenance WHERE publication_id IN (SELECT publication_id FROM ' + table + ' p WHERE ' + untracked + ')').run(storage.kind);
-      db.prepare('UPDATE ' + table + ' AS p SET authority_revision=' + revision + '+1 WHERE ' + untracked).run(storage.kind);
-      db.prepare('INSERT INTO local_app_roots SELECT app_root,authority_revision,?,publication_id FROM ' + table + ' WHERE active=1 ON CONFLICT(app_root) DO UPDATE SET revision=excluded.revision,active_kind=excluded.active_kind,active_publication_id=excluded.active_publication_id').run(storage.kind);
+      assertCanAdvance('SELECT ' + revision + ' AS revision FROM ' + table + ' p WHERE ' + untracked, [storage.kind, storage.kind]);
+      db.prepare('DELETE FROM local_app_approval_provenance WHERE publication_id IN (SELECT publication_id FROM ' + table + ' p WHERE ' + untracked + ')').run(storage.kind, storage.kind);
+      db.prepare('UPDATE ' + table + ' AS p SET authority_revision=' + revision + '+1 WHERE ' + untracked).run(storage.kind, storage.kind);
+      db.prepare('INSERT INTO local_app_roots SELECT app_root,authority_revision,?,publication_id FROM ' + table + ' p WHERE active=1 AND ' + free + ' ON CONFLICT(app_root) DO UPDATE SET revision=excluded.revision,active_kind=excluded.active_kind,active_publication_id=excluded.active_publication_id').run(storage.kind, storage.kind);
       db.exec('UPDATE local_app_roots AS r SET revision=MAX(revision,COALESCE((SELECT MAX(authority_revision) FROM ' + table + ' p WHERE p.app_root=r.app_root),0)) WHERE active_publication_id IS NULL');
     }
     db.exec('DELETE FROM local_app_approval_provenance WHERE ' + options.sources.map(storage => 'NOT EXISTS(SELECT 1 FROM ' + storage.publicationTable + ' p WHERE p.publication_id=local_app_approval_provenance.publication_id)').join(' AND '));
@@ -93,15 +97,23 @@ export function createLocalAppStore(options: {
     options.assertCurrent();
     return options.sources.flatMap(storage => rows(storage, "WHERE app_root=?", [appRoot]));
   }
+  /** Whether this device's authority for the app root names this row. */
+  function held(value: LocalAppRow) {
+    const authority = root(value.appRoot);
+    return value.active && authority?.active_kind === value.kind && authority.active_publication_id === value.publicationId && authority.revision === value.authorityRevision;
+  }
   return {
     row,
+    held,
     has(publicationId: string) { return !!lookup(publicationId); },
     list,
+    /** `displaced` is another kind's publication that holds the root; the commit deactivates it. */
     activate(input: { kind: LocalAppKind; resourceId: string; publicationId: string; prepared: LocalAppPrepared; agent?: ApprovalAgent | null }, signal: AbortSignal,
-      bind: (previous: LocalAppRow | undefined, commit: () => void) => void) {
+      bind: (previous: LocalAppRow | undefined, displaced: LocalAppRow | undefined, commit: () => void) => void) {
       options.assertCurrent(); signal.throwIfAborted();
       const storage = source(input.kind), candidate = parseAppPublicationCandidate(input.prepared.candidate, APP_PUBLICATION_LIMITS);
-      const previous = list(candidate.appRoot).find(value => value.kind === input.kind);
+      const atRoot = list(candidate.appRoot), previous = atRoot.find(value => value.kind === input.kind);
+      const displaced = atRoot.find(value => value.kind !== input.kind && held(value));
       if (input.prepared.files.length !== candidate.files.length) throw new Error("App bundle files changed. Prepare the app again.");
       const files = candidate.files.map(metadata => {
         const matches = input.prepared.files.filter(file => file.path === metadata.path), file = matches[0];
@@ -109,20 +121,20 @@ export function createLocalAppStore(options: {
           throw new Error("App bundle files changed. Prepare the app again.");
         return { path: file.path, bytes: Uint8Array.from(file.bytes) };
       });
-      if (previous?.publicationId === input.publicationId && previous.active) {
-        row(input.publicationId, previous.authorityRevision);
-        return { publicationId: input.publicationId, authorityRevision: previous.authorityRevision };
-      }
+      if (previous?.publicationId === input.publicationId && held(previous))
+        return { publicationId: input.publicationId, authorityRevision: row(input.publicationId, previous.authorityRevision).authorityRevision };
       const json = JSON.stringify(candidate), provenance = JSON.stringify({ agent: parseApprovalAgent(input.agent),
         committedCandidateDigest: createHash("sha256").update(json).digest("hex"), sourceRevision: candidate.sourceRevision, capabilities: candidate.capabilities });
       const storageBytes = Buffer.byteLength(json) + Buffer.byteLength(provenance) + files.reduce((sum, file) => sum + file.bytes.byteLength, 0) + 512;
       let authorityRevision = 0;
-      bind(previous, () => {
+      bind(previous, displaced, () => options.transaction(() => {
         signal.throwIfAborted(); options.assertCurrent();
         const currentRoot = root(candidate.appRoot);
         const count = Number(db.prepare("SELECT count(*) AS count FROM local_app_roots WHERE active_publication_id IS NOT NULL").get()!.count);
         if (!currentRoot?.active_publication_id && count >= 64) throw new Error("Remove an app before approving another one.");
         authorityRevision = nextRevision(candidate.appRoot);
+        for (const retired of [previous, displaced]) if (retired) source(retired.kind).assertRetirable?.(retired.publicationId);
+        if (displaced) db.prepare('UPDATE ' + source(displaced.kind).publicationTable + ' SET active=0,authority_revision=? WHERE publication_id=?').run(authorityRevision, displaced.publicationId);
         if (previous) {
           db.prepare('DELETE FROM local_app_approval_provenance WHERE publication_id=?').run(previous.publicationId);
           db.prepare('DELETE FROM ' + storage.artifactTable + ' WHERE publication_id=?').run(previous.publicationId);
@@ -135,20 +147,26 @@ export function createLocalAppStore(options: {
         db.prepare('INSERT INTO local_app_approval_provenance VALUES(?,?)').run(input.publicationId, provenance);
         for (const file of files) db.prepare('INSERT INTO ' + storage.artifactTable + ' VALUES(?,?,?)').run(input.publicationId, file.path, file.bytes);
         writeRoot({ appRoot: candidate.appRoot, kind: input.kind, publicationId: input.publicationId }, authorityRevision, true);
-      });
+      }));
       row(input.publicationId, authorityRevision);
       return { publicationId: input.publicationId, authorityRevision };
     },
+    /**
+     * Ends the publication's authority at the next revision. Repeating at the revision a withdrawal or replacement
+     * already ended it changes nothing, so its caller can confirm admitted work settled.
+     */
     withdraw(publicationId: string, expected: number, bind: (row: LocalAppRow, commit: () => void) => void) {
+      const value = lookup(publicationId);
+      if (value && !held(value) && value.authorityRevision === expected) return { kind: value.kind, publicationId, authorityRevision: expected };
       const checked = row(publicationId, expected), storage = source(checked.kind);
       let authorityRevision = 0;
-      bind(checked, () => {
+      bind(checked, () => options.transaction(() => {
         row(publicationId, expected);
         authorityRevision = nextRevision(checked.appRoot);
         db.prepare('UPDATE ' + storage.publicationTable + ' SET active=0,authority_revision=? WHERE publication_id=?').run(authorityRevision, publicationId);
         writeRoot(checked, authorityRevision, false);
-      });
-      return { publicationId, authorityRevision };
+      }));
+      return { kind: checked.kind, publicationId, authorityRevision };
     },
     browserPublication(publicationId: string) {
       const checked = row(publicationId), storage = source(checked.kind);

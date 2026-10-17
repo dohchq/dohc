@@ -1,3 +1,4 @@
+import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
 import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { parseDatasetRevision, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
@@ -83,4 +84,31 @@ export function readDatasetHistoryRevision(db: JournalDb, scope: DatasetScope, r
   if (revision.datasetId !== scope.datasetId || revision.revisionSha256 !== revisionSha256) throw new Error("The saved Collection revision does not match this change.");
   const approval = db.prepare("SELECT agent_json FROM dohc_dataset_approval_provenance WHERE workspace_id=? AND dataset_id=? AND approved_revision_hash=? ORDER BY revision LIMIT 1").get(scope.workspaceId,scope.datasetId,revisionSha256);
   return { revision, schemaSql: String(schemaSql), operationSource: String(operationSource), ...(approval ? {approvalAgent:parseApprovalAgent(JSON.parse(String(approval.agent_json)))} : {}) };
+}
+
+export function datasetHistoryLineage(db: JournalDb, key: DatasetScope): string {
+  const row = historyStatement(db, "SELECT checkpoint_digest AS digest FROM dohc_dataset_journals WHERE workspace_id=? AND dataset_id=? AND checkpoint_revision=0 UNION ALL SELECT json_extract(cursor_json,'$.digest') AS digest FROM dohc_dataset_checkpoint_history WHERE workspace_id=? AND dataset_id=? AND revision=0 LIMIT 1")
+    .get(key.workspaceId, key.datasetId, key.workspaceId, key.datasetId);
+  if (!row) throw new DatasetHostError("conflict", "Collection history lineage is unavailable.");
+  return String(row.digest);
+}
+
+/** Read-only metadata. The caller owns workspace authorization and the read snapshot. */
+export function readDatasetHistoryHeads(db: JournalDb, raw: { workspaceId: string; positions?: Array<{ datasetId: string; beforeRevision: number }>; skip?: string[]; limit?: number; maxSources?: number }) {
+  const workspaceId = raw.workspaceId, limit = raw.limit ?? 51;
+  if (typeof workspaceId !== "string" || !workspaceId.length || workspaceId.includes("\0") || Buffer.byteLength(workspaceId) > 256) throw new DatasetHostError("invalid", "Invalid Collection id.");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new DatasetHostError("invalid", "Invalid Collection history page.");
+  const positions = raw.positions && new Map(raw.positions.map(p => [p.datasetId, p.beforeRevision]));
+  const skip = new Set(raw.skip);
+  const select = "SELECT c.dataset_id,json_extract(c.revision_json,'$.definition.name') AS name,j.revision FROM dohc_dataset_catalog c JOIN dohc_dataset_journals j ON j.workspace_id=c.workspace_id AND j.dataset_id=c.dataset_id LEFT JOIN dohc_dataset_lifecycle l ON l.workspace_id=c.workspace_id AND l.dataset_id=c.dataset_id WHERE c.workspace_id=? AND COALESCE(l.archived,0)=0";
+  const rows = positions
+    ? [...positions.keys()].flatMap(datasetId => { const row = historyStatement(db, select + " AND c.dataset_id=?").get(workspaceId, datasetId); return row ? [row] : []; })
+    : historyStatement(db, select + ` ORDER BY ${historyActivitySql} DESC,c.dataset_id LIMIT ?`).all(workspaceId, raw.maxSources ?? 129);
+  const pages = rows.filter(row => !skip.has(String(row.dataset_id)) && (!positions || positions.has(String(row.dataset_id)))).map(row => {
+    const datasetId = String(row.dataset_id), key = { workspaceId, datasetId }, before = positions?.get(datasetId) ?? Number.MAX_SAFE_INTEGER;
+    if (!Number.isSafeInteger(before) || before < 1) throw new DatasetHostError("invalid", "Invalid Collection history position.");
+    return { datasetId, name: String(row.name), headRevision: Number(row.revision), lineage: datasetHistoryLineage(db, key),
+      ...readDatasetHistory(db, key, undefined, before, limit, true) };
+  });
+  return pages;
 }

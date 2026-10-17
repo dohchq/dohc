@@ -975,10 +975,9 @@ function resolvedThreadPath(
 // owner's log to the file's current path and tested by name, never taken from
 // a client's word or from the display-only `linkedPathHint`.
 //
-// Across the boundary a thread's link travels as `linkedPath` and never as
-// `linkedObjectId`: the served moment deliberately drops the granter's object
-// id (see the moment branch below), so the recipient's store mints its own and
-// a granter object id would mean nothing there.
+// This filter serves the admitted path. Recipient decoration replaces it with
+// a per-recipient object token and a serve-time path hint when a key is present.
+// The granter's real object id never crosses the boundary.
 //
 // Chat ops are blob-free, so every decision here carries `blobSha256s: []` —
 // the share-blob route reads exactly that to decide reachability, and a chat
@@ -1034,10 +1033,9 @@ function filterFileChatOpForPathShare(
     served.linkedPath = servedPath;
     return { allowed: true, payload: served, blobSha256s: [] };
   }
-  // The four thread-scoped kinds serve their allowlist and nothing else. The
-  // attachment row stays the opaque chip the channel branch serves: its
-  // objectId/pathHint could name a file outside the share, so they are absent
-  // from the list and the recipient renders a chip it cannot follow.
+  // The four thread-scoped kinds first serve their allowlist. Recipient
+  // decoration adds token/path metadata only for attachments inside the selector.
+  // Outside-selector attachments stay opaque, without an object id or path.
   return {
     allowed: true,
     payload: pickServed(record, SERVED_CHAT_FIELDS[opKind as keyof typeof SERVED_CHAT_FIELDS]),
