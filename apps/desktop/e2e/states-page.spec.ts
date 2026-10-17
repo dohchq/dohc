@@ -72,6 +72,9 @@ const PARTS = [
   "page-identity",
   "settings-sync",
   "data-grid",
+  "tab-strip-overflow",
+  "tab-glyphs",
+  "composer-poll",
   "chat-messages",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
@@ -107,6 +110,12 @@ function mismatch(expected: Pixels, actual: Pixels): string | null {
     if (expected.data.compare(actual.data, offset, offset + 4, offset, offset + 4) !== 0) differing += 1;
   }
   return differing === 0 ? null : `differs in ${differing} pixels`;
+}
+
+// The same comparison from the encoded files. Equal files are equal images,
+// so the common case skips decoding both.
+function pngMismatch(expected: Buffer, actual: Buffer): string | null {
+  return expected.equals(actual) ? null : mismatch(decode(expected), decode(actual));
 }
 
 // Among the others, a part sits elsewhere on the raster's tiles than alone,
@@ -154,7 +163,7 @@ async function captureStill(page: Page, clip: Box): Promise<{ pixels: Buffer; un
   let unsettled: string | null = null;
   for (let captures = 1; captures < STILL_CAPTURES; captures += 1) {
     const next = await page.screenshot({ ...CSS_PIXELS, clip });
-    unsettled = mismatch(decode(pixels), decode(next));
+    unsettled = pngMismatch(pixels, next);
     pixels = next;
     if (unsettled === null) break;
   }
@@ -186,7 +195,7 @@ async function compareWithBaseline(name: string, actual: Buffer): Promise<string
   const path = info.snapshotPath(`${name}.png`);
   const mode = info.config.updateSnapshots;
   const baseline = existsSync(path) ? readFileSync(path) : null;
-  const difference = baseline ? mismatch(decode(baseline), decode(actual)) : null;
+  const difference = baseline ? pngMismatch(baseline, actual) : null;
   const write = baseline === null ? mode !== "none" : mode === "all" || (mode === "changed" && difference !== null);
   if (write) {
     mkdirSync(dirname(path), { recursive: true });
@@ -227,21 +236,24 @@ async function forceMarkedStates(cdp: Cdp, scope: string): Promise<void> {
     nodeId: root.nodeId,
     selector: `${scope} [data-force-state]`,
   });
-  for (const nodeId of nodeIds) {
+  // Each command waits a round trip on a page this tall, so they go out
+  // together; the browser still runs them in order.
+  const forced = await Promise.all(nodeIds.map(async (nodeId) => {
     const { attributes } = await cdp.send("DOM.getAttributes", { nodeId });
     const marks = new Map<string, string>();
     for (let index = 0; index < attributes.length; index += 2) {
       marks.set(attributes[index] ?? "", attributes[index + 1] ?? "");
     }
     const state = marks.get("data-force-state");
-    if (!state) continue;
+    if (!state) return null;
     const target = marks.get("data-force-target");
     const targetId = target
       ? (await cdp.send("DOM.querySelector", { nodeId, selector: target })).nodeId
       : nodeId;
     if (!targetId) throw new Error(`no element matches data-force-target="${target}"`);
-    await cdp.send("CSS.forcePseudoState", { nodeId: targetId, forcedPseudoClasses: state.split(" ") });
-  }
+    return { nodeId: targetId, forcedPseudoClasses: state.split(" ") };
+  }));
+  await Promise.all(forced.map((force) => force && cdp.send("CSS.forcePseudoState", force)));
 }
 
 // Opened from the keyboard, so no pointer is left over the trigger or lands
@@ -412,6 +424,30 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       const label = page.getByTestId(`states-tab-row-actions-cut-${theme}`).locator(".truncate");
       if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
         failures.push(`the narrow tab row's save state (${theme}) is not cut short`);
+      }
+    }
+    // An overflowing strip fades only the edges it can still scroll past,
+    // 24px each, and its active tab sits clear of them. Each specimen must
+    // really overflow the way its label says, or its capture proves nothing.
+    for (const theme of THEMES) {
+      for (const [at, left, right] of [["start", false, true], ["middle", true, true], ["end", true, false]] as const) {
+        const strip = page.getByTestId(`states-tab-strip-overflow-${at}-${theme}`).getByRole("tablist");
+        const shown = await strip.evaluate((el) => {
+          const list = el.getBoundingClientRect();
+          const tab = el.querySelector('[role="tab"][data-active]')?.getBoundingClientRect();
+          return {
+            left: el.hasAttribute("data-overflow-left"),
+            right: el.hasAttribute("data-overflow-right"),
+            before: tab ? tab.left - list.left : -1,
+            after: tab ? list.right - tab.right : -1,
+          };
+        });
+        if (shown.left !== left || shown.right !== right) {
+          failures.push(`the strip at the ${at} (${theme}) fades left ${shown.left} and right ${shown.right}`);
+        }
+        if (shown.before < (left ? 24 : 0) || shown.after < (right ? 24 : 0)) {
+          failures.push(`the strip at the ${at} (${theme}) shows its active tab under a fade or cut`);
+        }
       }
     }
 
