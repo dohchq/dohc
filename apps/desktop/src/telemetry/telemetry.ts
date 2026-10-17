@@ -1,4 +1,4 @@
-import { chatOperations } from "../ipc/bridgeContract";
+import { chatOperations } from "../ipc/chatOperations";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
