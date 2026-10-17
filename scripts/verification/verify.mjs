@@ -477,6 +477,8 @@ export async function verify(args) {
             report.statesPage = `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`; save();
           }
         }
+        // Desktop specs that open a browser page use the same pinned browser as the PR gate's account proof.
+        if (mode === "e2e") await proofStep("browser-install", ...pnpm(["exec", "playwright", "install", "chromium"]), env);
         const tags = mode === "pr" ? desktopProofTags() : {selected: ["@verification-smoke"], required: ["@verification-smoke"]};
         const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", tags.selected.join("|")];
         const jsonReport = join(output, "playwright.json");

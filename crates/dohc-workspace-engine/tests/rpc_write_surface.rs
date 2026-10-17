@@ -3468,9 +3468,18 @@ async fn active_secret_delete_refuses_non_regular_target_and_leaves_job_pending(
 
     let target = scratch.path().join(".env");
     std::fs::remove_file(&target).expect("remove prior plaintext");
+    // A socket path must fit SUN_LEN (104 bytes on macOS), which the scratch
+    // path can exceed. Bind at a short path and move the socket into place;
+    // the listener keeps it live at the target.
     #[cfg(unix)]
-    let socket =
-        std::os::unix::net::UnixListener::bind(&target).expect("socket at secret delete path");
+    let socket = {
+        let short =
+            std::path::PathBuf::from(format!("/tmp/dohc-sock-{}-{workspace}", std::process::id()));
+        let _ = std::fs::remove_file(&short);
+        let socket = std::os::unix::net::UnixListener::bind(&short).expect("bind short socket");
+        std::fs::rename(&short, &target).expect("socket at secret delete path");
+        socket
+    };
     #[cfg(not(unix))]
     {
         std::fs::create_dir(&target).expect("directory at secret delete path");
