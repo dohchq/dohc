@@ -11,7 +11,7 @@ use crate::records::{
     SnapshotRecord, TextSnapshot,
 };
 use dohc_engine_storage::{FaultInjector, cancel_pending_jobs_for_path};
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 impl<'a> VersionedTextStore<'a> {
     /// Delete a materialized text file from one version, preserving other
@@ -614,6 +614,20 @@ fn delete_text_in_tx_prepared(
     Ok(result)
 }
 
+/// Whether immutable replication state still references this moment.
+pub fn moment_has_replication_dependents_in(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_id: &str,
+) -> Result<bool, DomainError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replication_log
+           WHERE workspace_id=?1 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?2)
+         OR EXISTS(SELECT 1 FROM replication_pending_conflict_moments WHERE workspace_id=?1 AND moment_id=?2)",
+        params![workspace_id,moment_id], |row| row.get(0),
+    ).map_err(DomainError::sql_corrupt)
+}
+
 /// Complete or discard a deletion whose disk publication has not been journaled.
 pub fn finish_checked_delete_in_tx(
     tx: &Transaction<'_>,
@@ -624,7 +638,23 @@ pub fn finish_checked_delete_in_tx(
     let moment = get_moment(tx, workspace_id, moment_id)?.ok_or(DomainError::FileNotFound)?;
     let result = delete_result_from_moment(tx, workspace_id, moment, false)?;
     if applied {
-        tx.execute("DELETE FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND path=?3 AND object_id=?4", params![workspace_id, result.moment.version_id, result.moment.path, result.object.object_id]).map_err(DomainError::sql_persist)?;
+        let current_path: Option<String> = tx
+            .query_row(
+                "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![workspace_id, result.moment.version_id, result.object.object_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)?;
+        tx.execute(
+            "DELETE FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![
+                workspace_id,
+                result.moment.version_id,
+                result.object.object_id
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
         tx.execute(
             "DELETE FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
             params![
@@ -634,42 +664,23 @@ pub fn finish_checked_delete_in_tx(
             ],
         )
         .map_err(DomainError::sql_persist)?;
-        dohc_engine_storage::capture_file_holds::clear_orphaned_in(
-            tx,
-            workspace_id,
-            &result.moment.version_id,
-            &result.moment.path,
-        )?;
+        if let Some(path) = &current_path {
+            dohc_engine_storage::capture_file_holds::clear_orphaned_in(
+                tx,
+                workspace_id,
+                &result.moment.version_id,
+                path,
+            )?;
+            cancel_pending_jobs_for_path(tx, workspace_id, path, result.moment.recorded_at_ms)?;
+        }
         crate::collections::index_historical_record_owner_moment_in_tx(
             tx,
             workspace_id,
             result.moment.moment_order,
         )?;
-        cancel_pending_jobs_for_path(
-            tx,
-            workspace_id,
-            &result.moment.path,
-            result.moment.recorded_at_ms,
-        )?;
     } else {
-        let referenced: bool = tx
-            .query_row(
-                "SELECT EXISTS(
-                   SELECT 1 FROM replication_log
-                   WHERE workspace_id=?1 AND op_kind='moment.append'
-                     AND json_extract(payload_json,'$.momentId')=?2
-                 ) OR EXISTS(
-                   SELECT 1 FROM replication_pending_conflict_moments
-                   WHERE workspace_id=?1 AND moment_id=?2
-                 )",
-                params![workspace_id, moment_id],
-                |row| row.get(0),
-            )
-            .map_err(DomainError::sql_corrupt)?;
-        if referenced {
-            return Err(DomainError::InvalidInput {
-                reason: "checked delete moment has replication dependents",
-            });
+        if moment_has_replication_dependents_in(tx, workspace_id, moment_id)? {
+            return Err(DomainError::CheckedDeleteReplicationDependents);
         }
         tx.execute(
             "DELETE FROM engine_requests WHERE result_seq=?1 AND kind='versioned'",

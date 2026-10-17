@@ -32,6 +32,7 @@ pub use recovery_import::{
     RecoveryImport, RecoveryImportOutcome, RecoveryImportResult, RecoveryUpdate,
 };
 mod chats;
+mod checked_deletes;
 mod collections;
 mod history_operations;
 pub use history_operations::{HistoryOperation, HistoryUndoResult};
