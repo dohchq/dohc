@@ -29,7 +29,7 @@ async function fixture() {
   const members: { path: string; beforePath: string; operation: "rename"; momentId: string }[] = [];
   const objects = new Map<string, string>();
   let activeOperationId = "", compensationCount = 0, placed = false, restoring = false;
-  const capture: PathChangeOptions["capture"] = { changePathsAs: async (_paths, authored, work) => {
+  const capture: PathChangeOptions["capture"] & Pick<import("./workspaceEngineCapture").WorkspaceEngineCapture, "beginFileRename"> = { beginFileRename: async () => async () => undefined, changePathsAs: async (_paths, authored, work) => {
     activeOperationId = authored.operationId;
     return work({ policy: await readWorkspaceEnginePolicy(rootPath),
       recordDisk: async (_base, files) => files.filter(path => !path.endsWith("oversized.bin")),
@@ -63,7 +63,12 @@ async function fixture() {
   const move = (fromPath: string, toPath: string) => owner.movePath({}, { workspaceId: "move-test", fromPath, toPath });
   const undo = (operationId = activeOperationId, byAgent = false) => undoWorkspaceHistoryOperation(operation, { operationId }, byAgent ? agent : person, { history, agent: byAgent });
   const recordPath = () => join(rootPath, ".dohc/trash", `move-${createHash("sha256").update(activeOperationId).digest("hex")}.json`);
-  return { rootPath, write, operation, options, capture, members, objects, history, move, undo, recordPath,
+  const moveFolder = async (fromPath: string, toPath: string) => {
+    const result = await (await prepareMoveWorkspacePathAs(operation, { fromPath, toPath }, agent, options))();
+    if (!result.ok) throw new Error(result.reason);
+    return { ...result, path: result.toPath };
+  };
+  return { rootPath, write, operation, options, capture, members, objects, history, move, moveFolder, undo, recordPath,
     compensationCount: () => compensationCount, restoring: (value: boolean) => { restoring = value; } };
 }
 it.each([false, true])("returns a person's rename operation through IPC and keeps later typing through agent=%s Undo", async byAgent => {
@@ -75,25 +80,38 @@ it.each([false, true])("returns a person's rename operation through IPC and keep
   expect(await readFile(join(f.rootPath, "a.txt"), "utf8")).toBe("typed after rename");
   expect(f.objects.get("a.txt")).toBe(object);
 });
-it("puts a mixed person's folder back, including whole rowless folders and links, and removes the destination", async () => {
-  const f = await fixture(); const outside = await createTestScratch("move-link-");
-  for (const path of ["folder/tracked.txt", "folder/oversized.bin", "folder/node_modules/pkg/index.js", "folder/.env"]) await f.write(path);
-  await symlink(outside, join(f.rootPath, "folder/link"), process.platform === "win32" ? "junction" : "dir");
-  await f.move("folder", "archive/folder"); const object = f.objects.get("archive/folder/tracked.txt");
+it.each([false, true])("keeps a person's folder on the base capture path with unavailable Undo, rename=%s", async renameOnly => {
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.write("folder/node_modules/pkg/index.js");
+  const finished = vi.fn(async () => undefined);
+  const begin = vi.fn(async () => finished);
+  Object.assign(f.capture, { beginFileRename: begin });
+  const authored = vi.spyOn(f.capture, "changePathsAs");
+  const moved = await f.move("folder", renameOnly ? "renamed" : "archive/folder");
+  expect(moved).toEqual({ path: renameOnly ? "renamed" : "archive/folder", undo: { available: false, paths: [],
+    reason: `Undo for a folder ${renameOnly ? "rename" : "move"} isn't available yet. ${renameOnly ? "Rename" : "Move"} it back yourself.` } });
+  expect(begin).toHaveBeenCalledWith("folder", renameOnly ? "renamed" : "archive/folder");
+  expect(finished).toHaveBeenCalledWith(true); expect(authored).not.toHaveBeenCalled();
+  await expect(readdir(join(f.rootPath, ".dohc/trash"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+it("puts an agent's folder and oversized entry back with each object and removes the destination", async () => {
+  const f = await fixture();
+  for (const path of ["folder/tracked.txt", "folder/oversized.bin", "folder/rowless/oversized.bin"]) await f.write(path);
+  await f.moveFolder("folder", "archive/folder"); const object = f.objects.get("archive/folder/tracked.txt");
   const record = JSON.parse(await readFile(f.recordPath(), "utf8"));
-  expect(record.entries.sort()).toEqual(["folder/.env", "folder/link", "folder/node_modules", "folder/oversized.bin"]);
-  await f.write("archive/folder/node_modules/new.txt", "new after move");
-  expect(await f.undo()).toMatchObject({ ok: true, remaining: [] });
-  expect(await readFile(join(f.rootPath, "folder/node_modules/new.txt"), "utf8")).toBe("new after move");
-  expect((await filesystem.lstat(join(f.rootPath, "folder/link"))).isSymbolicLink()).toBe(true);
+  expect(record.entries.sort()).toEqual(["folder/oversized.bin", "folder/rowless"]);
+  await f.write("archive/folder/rowless/new.txt", "added inside a rowless entry");
+  expect(await f.undo(undefined, true)).toMatchObject({ ok: true, remaining: [] });
+  expect(await readFile(join(f.rootPath, "folder/oversized.bin"), "utf8")).toBe("folder/oversized.bin");
+  expect(await readFile(join(f.rootPath, "folder/rowless/new.txt"), "utf8")).toBe("added inside a rowless entry");
   expect(f.objects.get("folder/tracked.txt")).toBe(object);
   await expect(filesystem.lstat(join(f.rootPath, "archive/folder"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 it.each([".env", "node_modules/pkg/index.js", "link"])("refuses an agent's Undo before any engine call when a moved folder contains %s", async hidden => {
   const f = await fixture(); await f.write("folder/tracked.txt");
-  if (hidden === "link") { const outside = await createTestScratch("agent-move-link-"); await symlink(outside, join(f.rootPath, "folder/link"), process.platform === "win32" ? "junction" : "dir"); }
-  else await f.write(`folder/${hidden}`);
-  await f.move("folder", "archive/folder"); const before = await readFile(f.recordPath(), "utf8");
+  await f.moveFolder("folder", "archive/folder");
+  if (hidden === "link") { const outside = await createTestScratch("agent-move-link-"); await symlink(outside, join(f.rootPath, "archive/folder/link"), process.platform === "win32" ? "junction" : "dir"); }
+  else await f.write(`archive/folder/${hidden}`);
+  const before = await readFile(f.recordPath(), "utf8");
   f.history.readHistoryPage.mockClear();
   const refused = await f.undo(undefined, true);
   expect(refused).toMatchObject({ ok: false }); expect(JSON.stringify(refused)).not.toContain(`folder/${hidden}`);
@@ -101,14 +119,14 @@ it.each([".env", "node_modules/pkg/index.js", "link"])("refuses an agent's Undo 
   expect(await readFile(f.recordPath(), "utf8")).toBe(before);
 });
 it.each(["old path", "added file"])("refuses %s without changing disk, the record, History or generation", async kind => {
-  const f = await fixture(); await f.write("folder/tracked.txt"); await f.move("folder", "archive/folder");
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveFolder("folder", "archive/folder");
   await f.write(kind === "old path" ? "folder/occupant.txt" : "archive/folder/added.txt");
   const before = await readFile(f.recordPath(), "utf8");
   expect(await f.undo()).toMatchObject({ ok: false, reason: expect.stringContaining(kind === "old path" ? "occupies the old path" : "The move did not bring archive/folder/added.txt") });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled(); expect(await readFile(f.recordPath(), "utf8")).toBe(before);
 });
 it("refuses a case-only Undo before the floor walks to or calls the engine", async () => {
-  const f = await fixture(); await f.write("folder/a.txt"); await f.write("folder/.env"); const moved = await f.move("folder", "Folder");
+  const f = await fixture(); await f.write("folder/a.txt"); const moved = await f.moveFolder("folder", "Folder"); await f.write("Folder/.env");
   expect(moved.operationId).toBeDefined(); const before = await readFile(f.recordPath(), "utf8");
   f.history.readHistoryPage.mockClear(); vi.mocked(filesystem.readdir).mockClear();
   expect(await f.undo(undefined, true)).toEqual({ ok: false, reason: "Cannot undo the rename. It changed only the letter case. Rename it back yourself." });
@@ -120,19 +138,19 @@ it("saves the record inside the move lock before a queued Undo can enter", async
   const entered = deferred<void>(), release = deferred<void>();
   const actual = recovery.saveRecoveryRecord;
   vi.spyOn(recovery, "saveRecoveryRecord").mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; await actual(...args); });
-  const moving = f.move("folder", "archive/folder"); await entered.promise;
+  const moving = f.moveFolder("folder", "archive/folder"); await entered.promise;
   const undoing = f.undo(); release.resolve();
   await moving; expect(await undoing).toMatchObject({ ok: true, remaining: [] });
 });
 it("replays one compensation across person and agent doors, and refreshes restoring placement", async () => {
-  const f = await fixture(); await f.write("folder/tracked.txt"); await f.move("folder", "archive/folder");
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveFolder("folder", "archive/folder");
   f.restoring(true); expect(await f.undo()).toMatchObject({ ok: true, tracked: { state: "restoring" } });
   f.restoring(false); expect(await f.undo(undefined, true)).toMatchObject({ ok: true, tracked: { state: "restored" } });
   expect(await f.undo()).toMatchObject({ ok: true, tracked: { state: "restored" } }); expect(f.compensationCount()).toBe(1);
   expect(f.history.undoHistoryOperation.mock.calls.every(([input]) => input.requestId.startsWith("move-undo:dohc-operation:"))).toBe(true);
 });
 it("resumes rowless entries after the engine receipt was saved before a crash", async () => {
-  const f = await fixture(); await f.write("folder/tracked.txt"); await f.write("folder/oversized.bin"); await f.move("folder", "archive/folder");
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.write("folder/oversized.bin"); await f.moveFolder("folder", "archive/folder");
   const actual = recovery.saveRecoveryRecord;
   vi.spyOn(recovery, "saveRecoveryRecord").mockImplementationOnce(async (...args) => { await actual(...args); throw new Error("crash after receipt"); });
   expect(await f.undo()).toEqual({ ok: false, reason: "crash after receipt" });
@@ -154,7 +172,7 @@ it("records a move without capture as rowless and undoes it", async () => {
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 it("retries a rowless entry that became occupied after the engine receipt without another compensation", async () => {
-  const f = await fixture(); await f.write("folder/tracked.txt"); await f.write("folder/oversized.bin", "original binary"); await f.move("folder", "archive/folder");
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.write("folder/oversized.bin", "original binary"); await f.moveFolder("folder", "archive/folder");
   const undo = f.history.undoHistoryOperation.getMockImplementation()!;
   f.history.undoHistoryOperation.mockImplementationOnce(async input => { const result = await undo(input); await f.write("folder/oversized.bin", "occupant"); return result; });
   expect(await f.undo()).toMatchObject({ ok: true, remaining: [{ path: "folder/oversized.bin", retry: true,
@@ -166,14 +184,14 @@ it("retries a rowless entry that became occupied after the engine receipt withou
   expect(f.history.undoHistoryOperation).toHaveBeenCalledOnce(); expect(f.compensationCount()).toBe(1);
 });
 it("passes the engine's deleted-member refusal through without saving progress", async () => {
-  const f = await fixture(); await f.write("folder/tracked.txt"); await f.move("folder", "archive/folder");
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveFolder("folder", "archive/folder");
   await rm(join(f.rootPath, "archive/folder/tracked.txt")); const before = await readFile(f.recordPath(), "utf8");
   f.history.undoHistoryOperation.mockRejectedValueOnce(new Error("Undo refused: object moved or removed: archive/folder/tracked.txt"));
   expect(await f.undo()).toEqual({ ok: false, reason: "Undo refused: object moved or removed: archive/folder/tracked.txt" });
   expect(await readFile(f.recordPath(), "utf8")).toBe(before);
 });
 it("distinguishes a missing move record from an unknown operation and refuses corrupt records", async () => {
-  const f = await fixture(); await f.write("folder/tracked.txt"); await f.move("folder", "archive/folder");
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.moveFolder("folder", "archive/folder");
   const record = await readFile(f.recordPath(), "utf8"); await rm(f.recordPath());
   expect(await f.undo()).toEqual({ ok: false, reason: "Cannot undo the move. Its recovery record is missing or expired. Move it back yourself." });
   expect(await f.undo(id)).toEqual({ ok: false, reason: "This operation is not in History." });
@@ -186,7 +204,7 @@ it("distinguishes a missing move record from an unknown operation and refuses co
 it("keeps a completed move when the record save fails and returns no Undo information", async () => {
   const f = await fixture(); await f.write("folder/tracked.txt");
   vi.spyOn(recovery, "saveRecoveryRecord").mockRejectedValueOnce(new Error("full disk"));
-  const moved = await f.move("folder", "archive/folder");
+  const moved = await f.moveFolder("folder", "archive/folder");
   expect(moved).toMatchObject({ path: "archive/folder", operationId: expect.any(String), undo: { available: false, paths: [],
     reason: "Move finished. dohc could not save Undo information. Move it back yourself." } });
   expect(await readFile(join(f.rootPath, "archive/folder/tracked.txt"), "utf8")).toBe("folder/tracked.txt");
@@ -219,7 +237,7 @@ it("keeps queued work current after refusal and invalidates it after completed U
 });
 
 it("reports a placement failure without inventing an occupant and retries it", async () => {
-  const f = await fixture(); await f.write("folder/tracked.txt"); await f.write("folder/oversized.bin"); await f.move("folder", "archive/folder");
+  const f = await fixture(); await f.write("folder/tracked.txt"); await f.write("folder/oversized.bin"); await f.moveFolder("folder", "archive/folder");
   const denied = Object.assign(new Error("access denied"), { code: "EACCES" });
   vi.spyOn(filesystem, "link").mockRejectedValueOnce(denied);
   vi.spyOn(filesystem, "copyFile").mockRejectedValueOnce(denied);

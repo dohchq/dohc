@@ -245,7 +245,7 @@ async function toSystemTrash(options: Pick<PathChangeOptions, "trashItem">, stag
   }
 }
 
-type MoveOptions = Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null; byHand?: boolean; admit?: () => Promise<void> };
+type MoveOptions = Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null; markChanged?: () => void; byHand?: boolean; admit?: () => Promise<void> };
 
 export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace, State>(
   operation: WorkspaceAuthorityOperation<Workspace, State>, input: { fromPath: string; toPath: string; overwrite?: boolean },
@@ -255,10 +255,32 @@ export function prepareMoveWorkspacePathAs<Workspace extends PathChangeWorkspace
 }
 
 export async function moveWorkspacePathByHand(operation: PathChangeOperation, input: { fromPath: string; toPath: string },
-  person: Extract<MomentWriteAuthor, { kind: "human" }>, options: MoveOptions): Promise<{ path: string } & OperationRecovery> {
-  const result = await (await prepareMoveWorkspacePath(operation, input, person, { ...options, byHand: true }))();
-  if (!result.ok) throw new Error(result.reason);
-  return { path: result.toPath, operationId: result.operationId, undo: result.undo };
+  person: Extract<MomentWriteAuthor, { kind: "human" }>, options: Omit<MoveOptions, "capture" | "markChanged" | "byHand"> & { capture: Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename"> | null }): Promise<{ path: string; operationId?: string; undo: OperationRecovery["undo"] }> {
+  return withExclusiveWorkspaceOperation(operation.workspace.rootPath, async markChanged => {
+    assertWritable(operation);
+    await options.admit?.();
+    const prepared = await prepareWorkspaceMove(operation.workspace.rootPath, input.fromPath, input.toPath);
+    if ((await stat(join(operation.workspace.rootPath, prepared.physicalFromPath))).isDirectory()) {
+      const fromKind = liveDocumentKindForPath(prepared.physicalFromPath), toKind = liveDocumentKindForPath(prepared.physicalToPath);
+      if (options.capture && fromKind !== null && fromKind !== toKind) throw new Error(
+        `A rename cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`);
+      const finishRename = await options.capture?.beginFileRename(prepared.physicalFromPath, prepared.physicalToPath);
+      try {
+        await movePath(operation.workspace.rootPath, prepared.physicalFromPath, prepared.physicalToPath);
+        markChanged();
+        await finishRename?.(true);
+        const rename = dirname(prepared.physicalFromPath) === dirname(prepared.physicalToPath);
+        return { path: prepared.visibleResultPath, undo: { available: false,
+          reason: `Undo for a folder ${rename ? "rename" : "move"} isn't available yet. ${rename ? "Rename" : "Move"} it back yourself.`, paths: [] } };
+      } catch (error) {
+        await finishRename?.(false);
+        throw error;
+      }
+    }
+    const result = await (await prepareMoveWorkspacePath(operation, input, person, { ...options, byHand: true, markChanged }))();
+    if (!result.ok) throw new Error(result.reason);
+    return { path: result.toPath, operationId: result.operationId, undo: result.undo };
+  });
 }
 
 async function prepareMoveWorkspacePath(operation: PathChangeOperation,
@@ -269,7 +291,7 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
   const operationId = `${OPERATION_ID_PREFIX}${randomUUID()}`;
   try {
     assertWritable(operation);
-    const changed = await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
+    const change = async (markChanged: () => void) => {
       let gone: string[] = [];
       // The capture settles, closes and checks these endpoints before the hold.
       await options.admit?.();
@@ -413,7 +435,8 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
       return options.capture && endpoints.every(engineAddresses)
         ? options.capture.changePathsAs(endpoints, { operation: "move", author, operationId }, work, () => gone)
         : work(null);
-    });
+    };
+    const changed = await (options.markChanged ? change(options.markChanged) : withExclusiveWorkspaceOperation(rootPath, change));
     if ("failed" in changed) return async () => changed.failed;
     // The replaced destination leaves the workspace trash for the system
     // trash, as a deleted file does, or stays when the system refuses.

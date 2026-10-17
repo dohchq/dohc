@@ -171,7 +171,7 @@ describe("registered workspace file handlers", () => {
     await writeFile(join(h.workspace.rootPath, "before.md"), "move me");
     await expect(h.invoke(workspaceFileOperations.moveWorkspacePath.channel, {
       workspaceId: "workspace", fromPath: "before.md", toPath: "after.md",
-    })).resolves.toEqual({ path: "after.md" });
+    })).resolves.toEqual({ path: "after.md", operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
     expect(await readFile(join(h.workspace.rootPath, "after.md"), "utf8")).toBe("move me");
     await expect(readFile(join(h.workspace.rootPath, "before.md"))).rejects.toMatchObject({ code: "ENOENT" });
   });

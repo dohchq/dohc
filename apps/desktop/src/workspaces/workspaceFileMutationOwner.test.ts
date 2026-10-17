@@ -43,7 +43,7 @@ interface TestWorkspace {
   shareMounts?: unknown;
 }
 
-type MutationCapture = Pick<WorkspaceEngineCapture, "changePathsAs">;
+type MutationCapture = Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename">;
 // What a test gives the harness: changePathsAs settles through this
 // settleAndCloseLiveSessionsForPath as the real capture settles first.
 type TestCapture = Pick<WorkspaceEngineCapture, "settleAndCloseLiveSessionsForPath"> & Partial<MutationCapture>;
@@ -280,7 +280,7 @@ async function harness(options: {
             finishDebts(gone);
           }
         };
-      capture = { changePathsAs: next.changePathsAs ?? pathChanges };
+      capture = { changePathsAs: next.changePathsAs ?? pathChanges, beginFileRename: next.beginFileRename ?? (async () => async () => undefined) };
     },
   };
 }

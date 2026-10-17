@@ -6,7 +6,7 @@ import { createLiveLinkedChatStore } from "./liveLinkedChatStore";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
 import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "./workspaceHistoryOperations";
 import { prepareMoveWorkspacePathAs } from "./workspaceFileMoves";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { rm, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 import { expect, it, vi } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
@@ -104,7 +104,7 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
   }
 }, REAL_DAEMON_TEST_TIMEOUT_MS);
 
-it.skipIf(engine.missing)("undoes a person's folder through IPC and an agent's rename through the real socket", async () => {
+it.skipIf(engine.missing)("undoes a person's file through IPC and an agent's rename and folder through the real socket", async () => {
   const rootPath = await createTestScratch("dohc-move-undo-engine-");
   await mkdir(join(rootPath, "folder/node_modules/pkg"), { recursive: true });
   await writeFile(join(rootPath, "folder/tracked.txt"), "before\n");
@@ -132,15 +132,15 @@ it.skipIf(engine.missing)("undoes a person's folder through IPC and an agent's r
       trashItem: async () => { throw new Error("No trash expected"); }, localPerson: async () => person,
       notifyRenderer: () => undefined, shareViewEdited: () => undefined, logError: () => undefined,
     });
-    const moved = await owner.movePath({}, { workspaceId: workspace.workspaceId, fromPath: "folder", toPath: "archive/folder" });
-    expect(moved).toMatchObject({ path: "archive/folder", operationId: expect.any(String), undo: { available: true } });
-    await writeFile(join(rootPath, "archive/folder/tracked.txt"), "typed after move\n");
+    const moved = await owner.movePath({}, { workspaceId: workspace.workspaceId, fromPath: "folder/tracked.txt", toPath: "archive/tracked.txt" });
+    expect(moved).toMatchObject({ path: "archive/tracked.txt", operationId: expect.any(String), undo: { available: true } });
+    await writeFile(join(rootPath, "archive/tracked.txt"), "typed after move\n");
     const undo = () => owner.undoHistoryOperation({}, { workspaceId: workspace.workspaceId, operationId: moved.operationId! });
     await expect.poll(undo, { timeout: REAL_DAEMON_DEADLINE_MS }).toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 1 } });
     expect(await readFile(join(rootPath, "folder/tracked.txt"), "utf8")).toBe("typed after move\n");
     expect(await readFile(join(rootPath, "folder/node_modules/pkg/index.js"), "utf8")).toBe("rowless\n");
     expect(await capture.fileObjectIdForPath("folder/tracked.txt")).toBe(object);
-    await expect(stat(join(rootPath, "archive/folder"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(join(rootPath, "archive/tracked.txt"))).rejects.toMatchObject({ code: "ENOENT" });
 
     const context: CliWorkspaceContext = {
       ...workspace, readOnly: false,
@@ -176,6 +176,7 @@ it.skipIf(engine.missing)("undoes a person's folder through IPC and an agent's r
         });
       } finally { socket.destroy(); }
     };
+    await rm(join(rootPath, "folder/node_modules"), { recursive: true });
     const renamed = await request("fileMove", { fromPath: "folder/tracked.txt", toPath: "folder/renamed.txt", requestId: "real-agent-rename" });
     expect(renamed).toMatchObject({ ok: true, undo: { available: true } });
     const operationId = (renamed as { operationId: string }).operationId;
@@ -187,6 +188,12 @@ it.skipIf(engine.missing)("undoes a person's folder through IPC and an agent's r
       author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: person.humanId } });
     expect(replay).toMatchObject({ deduped: true, momentCount: 1 });
     await agentUndo();
+    const folder = await request("fileMove", { fromPath: "folder", toPath: "archive/folder", requestId: "real-agent-folder" });
+    expect(folder).toMatchObject({ ok: true, undo: { available: true } });
+    await expect.poll(() => request("historyUndo", { operationId: (folder as { operationId: string }).operationId }),
+      { timeout: REAL_DAEMON_DEADLINE_MS }).toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 1 } });
+    expect(await capture.fileObjectIdForPath("folder/tracked.txt")).toBe(object);
+    await expect(stat(join(rootPath, "archive/folder"))).rejects.toMatchObject({ code: "ENOENT" });
   } finally {
     await server?.close(); await capture.stop(); await sessions.closeAll(); await lifecycle.stop();
   }

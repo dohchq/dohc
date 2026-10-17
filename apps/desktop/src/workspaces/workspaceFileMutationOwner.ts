@@ -103,7 +103,7 @@ export interface WorkspaceFileMutationAuthority<
   assertCurrent(): void;
 }
 
-type MutationCapture = Pick<WorkspaceEngineCapture, "changePathsAs">;
+type MutationCapture = Pick<WorkspaceEngineCapture, "changePathsAs" | "beginFileRename">;
 
 function assertWritableWorkspace(
   workspace: WorkspaceFileMutationWorkspace,
