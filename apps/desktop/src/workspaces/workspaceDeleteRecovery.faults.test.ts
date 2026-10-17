@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, readdir, readlink, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, readlink, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
@@ -6,10 +6,17 @@ import { createTestScratch } from "./testTemp";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, undoWorkspaceDelete, type PathChangeOptions } from "./workspaceFileMoves";
 
-const faults = vi.hoisted(() => ({ failRecord: false, copyOnly: false, failFlush: false, readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[] }));
+const faults = vi.hoisted(() => ({ failRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false }));
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
   return { ...actual,
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      // Node can clear a Windows read-only flag before unlinking the staged hard link.
+      if (process.platform === "win32" && faults.readOnly && !faults.copyOnly) {
+        await actual.chmod(String(args[0]), 0o666).catch(() => undefined);
+      }
+      return actual.rm(...args);
+    },
     lstat: async (path: string) => { faults.visited.push(String(path)); return actual.lstat(path); },
     unlink: async (path: string) => {
       if (String(path) === faults.blockedPrune) { faults.pruneAttempts++; throw Object.assign(new Error("record held open"), { code: "EPERM" }); }
@@ -21,14 +28,25 @@ vi.mock("node:fs/promises", async original => {
       return actual.link(from, to);
     },
     open: async (...args: Parameters<typeof actual.open>) => {
-      if (faults.failPlace && String(args[0]).endsWith("rowless.txt")) throw new Error("placement refused");
+      const copying = String(args[0]).includes("rowless.txt") && args[1] === "wx";
+      if (faults.failPlace && String(args[0]).includes("rowless.txt")) throw new Error("placement refused");
       if (faults.readOnly && String(args[0]).endsWith("rowless.txt") && args[1] === "r+") {
         throw Object.assign(new Error("read-only file"), { code: "EPERM" });
       }
       const file = await actual.open(...args);
+      if (copying) {
+        const write = file.writeFile.bind(file), close = file.close.bind(file), changeMode = file.chmod.bind(file);
+        file.writeFile = async (...input) => {
+          if (faults.failCopy === "write") { await write("partial"); throw new Error("disk full"); }
+          await write(...input);
+          faults.exposed = existsSync(String(args[0]).replace(/\.[a-f0-9-]{36}\.tmp$/u, ""));
+        };
+        file.chmod = async mode => { faults.copyModes.push(Number(mode)); return changeMode(mode); };
+        file.close = async () => { await close(); if (faults.failCopy === "close") throw new Error("close failed"); };
+      }
       const sync = file.sync.bind(file);
       file.sync = async () => {
-        if (String(args[0]).endsWith("rowless.txt")) {
+        if (copying) {
           faults.flushed.push(String(args[0]));
           if (faults.failFlush) throw new Error("flush failed");
         }
@@ -77,6 +95,7 @@ describe("delete recovery failures", () => {
     try {
       expect(await f.undo(id)).toMatchObject({ ok: true, restored: ["folder/rowless.txt"], remaining: [] });
       expect(await readFile(join(f.root, "folder/rowless.txt"), "utf8")).toBe("not retained");
+      expect((await stat(join(f.root, "folder/rowless.txt"))).mode & 0o222).toBe(0);
     } finally { faults.readOnly = false; faults.copyOnly = false; }
   });
   it("keeps a delete's Undo when an expired record cannot be pruned", async () => {
@@ -185,18 +204,34 @@ describe("delete recovery failures", () => {
 
 
 describe("delete recovery placement and receipts", () => {
-  it.each([false, true])("flushes copied bytes before removing the private source (flush refuses=%s)", async failFlush => {
+  it.each(["", "write", "flush", "close"])("publishes only complete flushed copies and keeps failed copies private (failure=%s)", async failure => {
     const f = await fixture();
+    if (failure === "flush") await chmod(join(f.root, "folder/rowless.txt"), 0o444);
     const id = await deleted(f);
     const trash = join(f.root, ".dohc/trash");
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
-    faults.copyOnly = true; faults.failFlush = failFlush; faults.flushed = [];
+    faults.copyOnly = true; faults.failFlush = failure === "flush"; faults.failCopy = failure; faults.flushed = []; faults.exposed = false;
     try {
       const result = await f.undo(id);
-      expect(faults.flushed).toEqual([join(f.root, "folder/rowless.txt")]);
-      expect(existsSync(join(trash, staged, "rowless.txt"))).toBe(failFlush);
-      expect(result).toMatchObject({ restored: ["folder/rowless.txt"], remaining: [] });
-    } finally { faults.copyOnly = false; faults.failFlush = false; }
+      expect(existsSync(join(f.root, "folder/rowless.txt"))).toBe(!failure);
+      expect(await readdir(join(f.root, "folder"))).toEqual(failure ? [] : ["rowless.txt"]);
+      expect(existsSync(join(trash, staged, "rowless.txt"))).toBe(!!failure);
+      expect(result).toMatchObject(failure ? { restored: [], remaining: [{ path: "folder/rowless.txt" }] }
+        : { restored: ["folder/rowless.txt"], remaining: [] });
+      if (!failure) { expect(faults.flushed).toHaveLength(1); expect(faults.exposed).toBe(false); }
+    } finally { faults.copyOnly = false; faults.failFlush = false; faults.failCopy = ""; }
+  });
+  it("copies the source mode exactly before flushing, independent of umask", async () => {
+    const f = await fixture();
+    await chmod(join(f.root, "folder/rowless.txt"), 0o664);
+    const mode = (await stat(join(f.root, "folder/rowless.txt"))).mode & 0o7777;
+    const id = await deleted(f);
+    faults.copyOnly = true; faults.copyModes = [];
+    try {
+      expect(await f.undo(id)).toMatchObject({ restored: ["folder/rowless.txt"], remaining: [] });
+      expect(faults.copyModes).toEqual([mode]);
+      expect((await stat(join(f.root, "folder/rowless.txt"))).mode & 0o7777).toBe(mode);
+    } finally { faults.copyOnly = false; }
   });
   it("reports placed children when a rowless folder is only partly placed", async () => {
     const f = await fixture(false, []);
@@ -211,13 +246,13 @@ describe("delete recovery placement and receipts", () => {
       expect(existsSync(join(trash, staged, "rowless.txt"))).toBe(true);
     } finally { faults.failPlace = false; }
   });
-  it("recreates an empty folder after OS trash accepts", async () => {
+  it.each([false, true])("recreates an empty folder after OS trash accepts (already exists=%s)", async exists => {
     const f = await fixture(true, []);
     await rm(join(f.root, "folder"), { recursive: true });
     await mkdir(join(f.root, "folder"));
     const result = await f.remove(true);
     expect(result.undo).toEqual({ available: true });
-    await mkdir(join(f.root, "folder"));
+    if (exists) await mkdir(join(f.root, "folder"));
     expect(await f.undo(result.operationId!)).toMatchObject({ ok: true, restored: ["folder"], remaining: [] });
     expect(await readdir(join(f.root, "folder"))).toEqual([]);
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();

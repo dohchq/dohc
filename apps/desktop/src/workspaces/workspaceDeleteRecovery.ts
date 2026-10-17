@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { link, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, unlink } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { HistoryOperationsStore, MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
@@ -188,6 +188,7 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
   const result: z.infer<typeof UndoResult> = { ok: true,
     tracked: { state: record.engine.materialized ? "restored" : "restoring", momentCount: record.engine.momentCount }, restored: [], remaining: [] };
   const keepSource = new Set<string>();
+  const linkedModes = new Map<string, number>();
   const place = async (path: string, empty = false): Promise<void> => {
     assertCurrent();
     const trashPath = `.dohc/trash/${record.staged}${path.slice(record.base.length)}`;
@@ -214,14 +215,24 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
           const directory = await stat(referent).then(value => value.isDirectory(), () => false);
           await symlink(destination, target, directory ? process.platform === "win32" && isAbsolute(destination) ? "junction" : "dir" : "file");
         } else {
-          await link(source!, target).catch(async error => {
+          try {
+            await link(source!, target);
+            if (process.platform === "win32") linkedModes.set(target, entry!.mode & 0o7777);
+          } catch (error) {
             if (code(error) === "EEXIST") throw error;
-            const file = await open(target, "wx", entry!.mode);
+            const temp = `${target}.${randomUUID()}.tmp`;
             try {
-              await file.writeFile(createReadStream(source!));
-              await file.sync().catch(() => { keepSource.add(path); });
-            } finally { await file.close(); }
-          });
+              const file = await open(temp, "wx", entry!.mode);
+              try {
+                await file.writeFile(createReadStream(source!));
+                await file.chmod(entry!.mode & 0o7777);
+                await file.sync();
+              } finally { await file.close(); }
+              await checkedTarget(root, path, record.base);
+              if (await info(target)) throw Object.assign(new Error("Target exists"), { code: "EEXIST" });
+              await rename(temp, target);
+            } finally { await rm(temp, { force: true }).catch(() => undefined); }
+          }
         }
       } else {
         // A resumed copy may have missed its flush. Keep the private source.
@@ -244,5 +255,6 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
   for (const path of result.restored.filter(path => !record.emptyFolders.includes(path) && !keepSource.has(path))) {
     await sourcePath(root, record, path).then(source => rm(source, { recursive: true, force: true })).catch(() => undefined);
   }
+  for (const [target, mode] of linkedModes) await chmod(target, mode).catch(() => undefined);
   return result;
 }
