@@ -3,7 +3,7 @@ import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/acc
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { SAVED_HERE, SAVING, saveProblem, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { AlertTriangle, Bot, CheckCircle2, Globe2, MessageSquare, MoreHorizontal, SearchX } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import type {
   ActorPresentation,
@@ -125,9 +125,14 @@ const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-su
 // menus from EDITOR_MENU_BOX's margin and their boxes' heights.
 const SHADOW_ROOM = "p-10";
 
+// The parts the page renders, when it renders only some.
+const ShownParts = createContext<ReadonlySet<string> | undefined>(undefined);
+
 // A part whose subject is not a menu but which holds one, such as a header
 // with its document menu, is captured with its menus closed (`menusAtRest`).
 function Section(props: { part: string; title: string; children: ReactNode; menusAtRest?: boolean }) {
+  const shown = useContext(ShownParts);
+  if (shown && !shown.has(props.part)) return null;
   return (
     <section data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined} className="flex flex-col gap-3">
       <SectionLabel as="h3" className="m-0">
@@ -2837,7 +2842,8 @@ const TITLE_BAR_STATUSES: { label: string; syncStatus: SyncStatusResult; failedS
   { label: "server disconnected", syncStatus: { ...SYNCED_STATUS, state: "cloud-disconnected" }, failedSaves: 0 },
 ];
 
-export function StatesPage() {
+// `parts` renders only those parts, so a test renders only what it checks.
+export function StatesPage(props: { parts?: ReadonlySet<string> }) {
   // The light pane has no rule of its own: it reads the document's light
   // tokens. The document is held light while the page is open and given back
   // its theme on close.
@@ -2860,8 +2866,10 @@ export function StatesPage() {
         </SecondaryButton>
       </header>
       <div className="grid grid-cols-2">
-        <Pane theme="light" />
-        <Pane theme="dark" />
+        <ShownParts.Provider value={props.parts}>
+          <Pane theme="light" />
+          <Pane theme="dark" />
+        </ShownParts.Provider>
       </div>
     </div>
   );
