@@ -6,7 +6,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { StrictMode, Suspense } from "react";
-import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { createHash } from "node:crypto";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { FileInspector } from "./FileInspector";
 import { replaceYDocWithMarkdown } from "./FileInspector.remote-fixture";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
@@ -51,6 +52,10 @@ vi.mock("yjs", async (importOriginal) => {
   } };
 });
 
+vi.mock("./editor/artifactSource", () => ({
+  prepareArtifactSource: () => undefined,
+  projectArtifactSource: async (doc: Y.Doc) => (await import("@dohc/ydoc-projection")).yDocToArtifactMarkdown(doc),
+}));
 setupFileInspectorTests();
 
 // "View markdown as source" on the ENGINE path: the toggle shows a READ-ONLY
@@ -242,6 +247,22 @@ describe("engine markdown source view", () => {
     const toggle = await screen.findByTestId("markdown-source-toggle");
     return { bridgeMock, pushRemoteMarkdown, toggle, view };
   }
+
+  it("source view returns the witnessed settled file bytes", async () => {
+    const source = "---\nzebra: last\ntitle: \"Outside\"\nalpha: first\n---\n\n- one\n- two\n\n";
+    const doc = markdownToYDoc(source);
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    doc.getMap("meta").set("dohcMarkdownSource", source);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+    const {bridgeMock} = makeEngineBridge(source);
+    bridgeMock.openEngineYDocSession.mockResolvedValue({available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1});
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    fireEvent.click(await screen.findByTestId("markdown-source-toggle"));
+    await waitFor(() => expect(codeEditorText(screen.getByTestId("view-markdown-source"))).toBe(source));
+    doc.destroy();
+  });
 
   it("toggles a read-only source projection (frontmatter included) and back", async () => {
     const user = userEvent.setup();

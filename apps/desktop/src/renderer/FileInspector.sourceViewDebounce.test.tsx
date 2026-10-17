@@ -7,7 +7,7 @@ import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import "./SourceCodeEditor";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
-import { yDocToMarkdown } from "./editor/import-export";
+import { yDocToArtifactMarkdown } from "./editor/import-export";
 import { FileInspector } from "./FileInspector";
 import { replaceYDocWithMarkdown } from "./FileInspector.remote-fixture";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
@@ -16,7 +16,7 @@ vi.mock("./editor/import-export", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./editor/import-export")>();
   return {
     ...actual,
-    yDocToMarkdown: vi.fn(actual.yDocToMarkdown),
+    yDocToArtifactMarkdown: vi.fn(actual.yDocToArtifactMarkdown),
   };
 });
 
@@ -159,7 +159,7 @@ describe("FileInspector engine source update scheduling", () => {
     const doc = markdownToYDoc(INITIAL_MARKDOWN);
     engineDocState = engineState(doc);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    const serialize = vi.mocked(yDocToMarkdown);
+    const serialize = vi.mocked(yDocToArtifactMarkdown);
     serialize.mockClear();
 
     vi.useFakeTimers();
@@ -180,7 +180,7 @@ describe("FileInspector engine source update scheduling", () => {
   it("bounds source serializations during a sustained update burst", async () => {
     const doc = markdownToYDoc(INITIAL_MARKDOWN);
     await openSourceView(doc);
-    const serialize = vi.mocked(yDocToMarkdown);
+    const serialize = vi.mocked(yDocToArtifactMarkdown);
     serialize.mockClear();
     vi.useFakeTimers();
 
@@ -199,7 +199,7 @@ describe("FileInspector engine source update scheduling", () => {
   it("renders the latest update on the trailing edge", async () => {
     const doc = markdownToYDoc(INITIAL_MARKDOWN);
     await openSourceView(doc);
-    const serialize = vi.mocked(yDocToMarkdown);
+    const serialize = vi.mocked(yDocToArtifactMarkdown);
     serialize.mockClear();
     vi.useFakeTimers();
 
@@ -224,7 +224,7 @@ describe("FileInspector engine source update scheduling", () => {
   it("never paints a queued projection after a document switch", async () => {
     const firstDoc = markdownToYDoc(INITIAL_MARKDOWN);
     const view = await openSourceView(firstDoc);
-    const serialize = vi.mocked(yDocToMarkdown);
+    const serialize = vi.mocked(yDocToArtifactMarkdown);
     serialize.mockClear();
     vi.useFakeTimers();
 

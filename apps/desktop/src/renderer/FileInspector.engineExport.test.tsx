@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 // @vitest-environment jsdom
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -100,7 +102,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
 
   beforeEach(() => {
     engineDocState.available = true;
-    engineDocState.doc = new Y.Doc();
+    engineDocState.doc = markdownToYDoc(LIVE_BODY);
     engineDocState.saveState = { kind: "saved-here" };
     vi.stubGlobal(
       "ResizeObserver",
@@ -119,6 +121,47 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     vi.clearAllMocks();
     engineDocState.available = false;
     engineDocState.doc = null;
+  });
+
+  it("copies the witnessed settled artifact from the live Y.Doc", async () => {
+    const source = "---\nzebra: last\ntitle: \"Outside\"\nalpha: first\n---\n\n- one\n- two\n\n";
+    const doc = markdownToYDoc(source);
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    doc.getMap("meta").set("dohcMarkdownSource", source);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+    engineDocState.doc = doc;
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", {value: {writeText}, configurable: true});
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("editor-stub");
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(source));
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(doc));
+    remote.getMap("frontmatter").set("title", "Remote title");
+    Y.applyUpdate(doc, Y.encodeStateAsUpdate(remote));
+    writeText.mockClear();
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(yDocToMarkdown(doc)));
+
+    const changeText = (node: Y.XmlFragment | Y.XmlElement): boolean => {
+      for (const child of node.toArray()) {
+        if (child instanceof Y.XmlText && child.toString().includes("one")) {
+          child.insert(0, "Edited ");
+          return true;
+        }
+        if (child instanceof Y.XmlElement && changeText(child)) return true;
+      }
+      return false;
+    };
+    expect(changeText(doc.getXmlFragment("body"))).toBe(true);
+    writeText.mockClear();
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(yDocToMarkdown(doc)));
+    remote.destroy();
   });
 
   it("copies the live editor markdown even while the properties panel is open", async () => {
@@ -141,7 +184,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
 
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(LIVE_BODY));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(LIVE_BODY.trimEnd()));
     expect(writeText).not.toHaveBeenCalledWith("# Stale disk body\n");
   });
 
@@ -184,7 +227,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
 
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(
-        `---\ntitle: Live Title\nicon: 🚀\n---\n\n${LIVE_BODY}`,
+        `---\ntitle: Live Title\nicon: 🚀\n---\n\n${LIVE_BODY.trimEnd()}`,
       ),
     );
   });
@@ -207,7 +250,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
 
     await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith(`${EDGE_FRONTMATTER}${LIVE_BODY}`),
+      expect(writeText).toHaveBeenCalledWith(`${EDGE_FRONTMATTER}Body`),
     );
   });
 
@@ -225,7 +268,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
       expect(bridgeMock.exportDocumentFile).toHaveBeenCalledWith(
         expect.objectContaining({
           kind: "markdown",
-          content: `${EDGE_FRONTMATTER}${LIVE_BODY}`,
+          content: `${EDGE_FRONTMATTER}Body`,
         }),
       ),
     );

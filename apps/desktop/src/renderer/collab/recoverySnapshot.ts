@@ -34,10 +34,11 @@ export function loadProjectionModule(): Promise<ProjectionModule> {
 // the module resolves, so the doc is snapshotted synchronously at the event
 // and projected to markdown lazily, off a reconstructed doc.
 export function markdownFromSnapshot(snapshot: Uint8Array): Promise<string> {
-  return loadProjectionModule().then(({ yDocToMarkdown }) => {
+  return loadProjectionModule().then(({ yDocToArtifactMarkdown }) => {
     const rebuilt = new Y.Doc();
     Y.applyUpdate(rebuilt, snapshot);
-    return yDocToMarkdown(rebuilt);
+    try { return yDocToArtifactMarkdown(rebuilt); }
+    finally { rebuilt.destroy(); }
   });
 }
 
@@ -141,8 +142,8 @@ export async function restoreRecoveryDraftText(text: string): Promise<string> {
   // and handing it over is why both halves are stored.
   if (recovered === null) return text.slice(0, match.index);
   try {
-    const { yDocToMarkdown } = await loadProjectionModule();
-    return yDocToMarkdown(recovered);
+    const { yDocToArtifactMarkdown } = await loadProjectionModule();
+    return yDocToArtifactMarkdown(recovered);
   } finally {
     recovered.destroy();
   }

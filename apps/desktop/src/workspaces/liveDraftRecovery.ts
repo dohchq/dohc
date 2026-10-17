@@ -76,7 +76,7 @@ async function readableRecoveryRecords(rows: readonly RecoveryRow[], workspaceId
         try {Y.applyUpdate(doc, Buffer.from(parsed.data.updateBase64, "base64"));} catch {continue;}
         const project = record.contentKind === "scene"
           ? (await import("@dohc/excalidraw-scene")).exportPortableScene
-          : (await import("@dohc/ydoc-projection")).yDocToMarkdown;
+          : (await import("@dohc/ydoc-projection")).yDocToArtifactMarkdown;
         try {text = project(doc);} catch {continue;}
       } finally { doc.destroy(); }
     }
@@ -136,7 +136,7 @@ export async function preserveUnsentLiveDraft(directory: string, workspaceId: st
     Y.applyUpdate(snapshot, update);
     let text: string;
     if (input.contentKind === "plaintext") text = snapshot.getText("plainText").toString();
-    else if (input.contentKind === "richdoc") text = (await import("@dohc/ydoc-projection")).yDocToMarkdown(snapshot);
+    else if (input.contentKind === "richdoc") text = (await import("@dohc/ydoc-projection")).yDocToArtifactMarkdown(snapshot);
     else throw new Error("This document format cannot enter text draft recovery.");
     await preserveLiveDraft(directory, workspaceId, { path: input.path, objectId: input.objectId, contentKind: input.contentKind, text, update });
   } finally { snapshot.destroy(); }

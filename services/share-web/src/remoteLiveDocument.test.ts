@@ -7,6 +7,7 @@ import {markdownToYDoc, yDocToMarkdown} from "@dohc/ydoc-projection";
 import {createLiveFrameSession, encodeLiveFrameSync, type LiveFrame} from "@dohc/live-session-contract/live-frame";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {createLinkLiveClient} from "./linkLiveClient";
+import {replaceLiveText} from "./liveTextEdit";
 import {remoteLiveDocument} from "./remoteLiveDocument";
 import {LIVE_UPDATE_REFUSAL_VALUES, type LiveUpdateRefusal} from "@dohc/live-session-contract/live-update-admission";
 import {LINK_REFUSALS, linkRefusalBody, type LinkRefusalCode} from "@dohc/security-contract/link-refusal";
@@ -27,8 +28,8 @@ it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])("returns the same scope
   expect(result).toMatchObject({ok: false, outcome: "not-applied", error: LINK_REFUSALS[code].error});
 });
 
-async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.provider.maxPendingUpdateBytes, result?: LiveUpdateRefusal | "application-pending") {
-  const doc = markdownToYDoc("Hello **world**.\n");
+async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.provider.maxPendingUpdateBytes, result?: LiveUpdateRefusal | "application-pending", source = "Hello **world**.\n") {
+  const doc = markdownToYDoc(source);
   const server = new WebSocketServer({port: 0, host: "127.0.0.1", perMessageDeflate: false, handleProtocols: () => "dohc-live-v1"});
   await once(server, "listening");
   const address = server.address(); if (typeof address === "string" || !address) throw Error("No test listener");
@@ -89,8 +90,8 @@ async function fixture(acknowledge: boolean, maxPendingUpdateBytes = limits.prov
     limits: {maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 8192, timeoutMs: 10_000}, browserLimits: limits,
     async resolveMaterial() {return {ok: true, capabilityToken: "A".repeat(43), profileSecret: "B".repeat(43), setCookie: null, currentCapability: async () => "A".repeat(43)};},
     async fetchRelay() {throw Error("Not used");}});
-  return {doc, submitted, ack, run: () => remoteLiveDocument({client, limits: {...limits, provider: {...limits.provider, maxPendingUpdateBytes}}, discriminator: "abcdefghijkl", cookie: "test=cookie", signal: AbortSignal.timeout(20_000),
-    async request(path) {return Response.json(path.endsWith("document") ? {objectId: "document"} : {token: "ab".repeat(32), publicPrincipalId: "public-link-agent", expiresAtMs: Date.now() + 60_000});}}, "doc.md", {find: "world", replacement: "friend"})};
+  return {doc, submitted, ack, run: (read = false) => remoteLiveDocument({client, limits: {...limits, provider: {...limits.provider, maxPendingUpdateBytes}}, discriminator: "abcdefghijkl", cookie: "test=cookie", signal: AbortSignal.timeout(20_000),
+    async request(path) {return Response.json(path.endsWith("document") ? {objectId: "document"} : {token: "ab".repeat(32), publicPrincipalId: "public-link-agent", expiresAtMs: Date.now() + 60_000});}}, "doc.md", read ? undefined : {find: "world", replacement: "friend"})};
 }
 
 it("waits for host acknowledgement over the real live socket", async () => {
@@ -123,4 +124,19 @@ it.each(LIVE_UPDATE_REFUSAL_VALUES)("reports the host refusal %s as not applied"
 it("keeps application-pending ambiguous", async () => {
   const f = await fixture(false, limits.provider.maxPendingUpdateBytes, "application-pending");
   expect(await f.run()).toMatchObject({ok: false, outcome: "unknown"});
+});
+
+it("share reads return the witnessed artifact then canonical text after a remote edit", async () => {
+  const source = "---\nzebra: last\ntitle: \"Outside\"\nalpha: first\n---\n\n- one\n- two\n\n";
+  const f = await fixture(true, limits.provider.maxPendingUpdateBytes, undefined, source);
+  const doc = f.doc;
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    doc.getMap("meta").set("dohcMarkdownSource", source);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+  expect(await f.run(true)).toMatchObject({ok: true, markdown: source});
+  doc.getMap("frontmatter").set("title", "Remote title");
+  expect(await f.run(true)).toMatchObject({ok: true, markdown: yDocToMarkdown(doc)});
+  replaceLiveText(doc.getXmlFragment("body"), "one", "edited body");
+  expect(await f.run(true)).toMatchObject({ok: true, markdown: yDocToMarkdown(doc)});
 });

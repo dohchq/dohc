@@ -98,6 +98,19 @@ afterEach(() => {
 });
 
 describe("DocumentMenu", () => {
+  it("discards a serialization that completes after switching documents", async () => {
+    const user = userEvent.setup();
+    stubClipboard();
+    let complete!: (text: string) => void;
+    const pending = new Promise<string>(resolve => { complete = resolve; });
+    const view = render(<DocumentMenu workspaceId="ws-1" documentKey="a" suggestedName="Note" getMarkdown={() => pending} />);
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    view.rerender(<DocumentMenu workspaceId="ws-2" documentKey="b" suggestedName="Note" getMarkdown={() => "New document"} />);
+    await act(async () => {complete("Old document"); await pending;});
+    expect(writeText).not.toHaveBeenCalled();
+  });
+
   it("is closed until the trigger is clicked, then opens a labeled menu", async () => {
     const user = userEvent.setup();
     renderMenu();

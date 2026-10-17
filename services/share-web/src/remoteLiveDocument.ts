@@ -1,5 +1,5 @@
 import {createNamedLiveProvider, type NamedLiveProviderState} from "@dohc/ydoc-projection/named-live-provider";
-import {yDocToMarkdown} from "@dohc/ydoc-projection";
+import {yDocToArtifactMarkdown} from "@dohc/ydoc-projection";
 import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import type {createLinkLiveClient} from "./linkLiveClient";
 import {replaceLiveText} from "./liveTextEdit";
@@ -89,7 +89,7 @@ export async function remoteLiveDocument(options: {
       await waitFor(current, state => state.pendingUpdates === 0 && state.lastApplied !== null, signal);
       return {ok: true, path, source: "live", outcome: "applied", acknowledgement: current.state().lastApplied};
     }
-    return {ok: true, path, markdown: yDocToMarkdown(current.doc), source: "live"};
+    return {ok: true, path, markdown: yDocToArtifactMarkdown(current.doc), source: "live"};
   } catch (error) {
     const state = provider?.state();
     const refused = state?.status === "quarantined" && LIVE_UPDATE_REFUSAL_VALUES.some(reason => reason === state.reason);

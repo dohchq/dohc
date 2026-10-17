@@ -195,7 +195,7 @@ it.each(["richdoc", "scene"] as const)("skips one %s record whose projection thr
   const project = () => {throw new Error("invalid document content");};
   vi.resetModules();
   if (kind === "scene") vi.doMock("@dohc/excalidraw-scene", () => ({...scene, exportPortableScene: project}));
-  else vi.doMock("@dohc/ydoc-projection", () => ({...markdown, yDocToMarkdown: project}));
+  else vi.doMock("@dohc/ydoc-projection", () => ({...markdown, yDocToArtifactMarkdown: project}));
   try {
     const recovery = await import("./liveDraftRecovery");
     const records = await recovery.listLiveDraftRecovery(directory, "workspace");
@@ -530,4 +530,17 @@ it.each([false, true])("keeps recovery records until registry removal succeeds: 
     expect(removeWorkspace.mock.invocationCallOrder[0]).toBeLessThan(removeDrafts.mock.invocationCallOrder[0]!);
     expect(await readdir(directory)).toEqual([]);
   }
+});
+
+it("recovery text matches the witnessed settled artifact, including frontmatter order", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-artifact-recovery-")); directories.push(directory);
+  const source = "---\nzebra: last\ntitle: \"Outside\"\nalpha: first\n---\n\n- one\n- two\n\n";
+  const doc = markdownToYDoc(source);
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    doc.getMap("meta").set("dohcMarkdownSource", source);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+  await preserveUnsentLiveDraft(directory, "workspace", {path: "note.md", objectId: "object", contentKind: "richdoc", doc});
+  expect((await listLiveDraftRecovery(directory, "workspace"))[0]!.text).toBe(source);
+  doc.destroy();
 });
