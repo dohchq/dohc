@@ -11,64 +11,10 @@ import {
   type JoinedChannelAnswer,
 } from "./ipc/bridgeContract";
 
-interface WorkspacePayload {
-  workspaceId: string;
-}
-
-interface WorkspaceContext {
-  workspace: { workspaceId: string };
-}
-
 export type MainChatIpcHandler<Event, Result> = (
   event: Event,
   payload: unknown,
 ) => Promise<Result>;
-
-export function createWritableChatIpcHandler<
-  Event,
-  Payload extends WorkspacePayload,
-  Context extends WorkspaceContext,
-  Result,
->(input: {
-  parsePayload: (payload: unknown) => Payload;
-  requireContext: (workspaceId: string) => Promise<Context>;
-  // The write gate, over the whole context — not just its workspace, because
-  // a file share's right is a LEVEL the context carries.
-  //
-  // `null` is a call site stating that this handler has no write to gate:
-  // it must be spelled, never defaulted, so a new handler cannot arrive
-  // ungated by omission.
-  assertWritable: ((context: Context) => void) | null;
-  run: (context: Context, payload: Payload) => Promise<Result>;
-  afterWrite?: Array<(context: Context, payload: Payload, result: Result) => void>;
-}): MainChatIpcHandler<Event, Result> {
-  return async (_event, rawPayload) => {
-    const payload = input.parsePayload(rawPayload);
-    const context = await input.requireContext(payload.workspaceId);
-    input.assertWritable?.(context);
-    const result = await input.run(context, payload);
-    for (const effect of input.afterWrite ?? []) effect(context, payload, result);
-    return result;
-  };
-}
-
-export function createMarkChatThreadReadIpcHandler<
-  Event,
-  Payload extends WorkspacePayload,
-  Context extends WorkspaceContext,
-  Result,
->(input: {
-  parsePayload: (payload: unknown) => Payload;
-  requireContext: (workspaceId: string) => Promise<Context>;
-  run: (context: Context, payload: Payload) => Promise<Result>;
-}): MainChatIpcHandler<Event, Result> {
-  return createWritableChatIpcHandler({
-    ...input,
-    // Read state belongs to this reader, stays local, and never replicates.
-    // Neither a share level nor a joined-channel grant gates this operation.
-    assertWritable: null,
-  });
-}
 
 // The joined lane's read, as a handler a test can drive without booting
 // Electron. It exists as a seam because the scoping is the whole contract of
@@ -110,24 +56,6 @@ export function createListJoinedSharedChannelsIpcHandler<
         }),
     );
   };
-}
-
-export function createChatChannelIpcHandler<
-  Event,
-  Payload extends WorkspacePayload,
-  Context extends WorkspaceContext,
-  Result,
->(input: {
-  parsePayload: (payload: unknown) => Payload;
-  requireContext: (workspaceId: string) => Promise<Context>;
-  assertWritable: ((context: Context) => void) | null;
-  run: (context: Context, payload: Payload) => Promise<Result>;
-  queueCloudSync: (workspaceId: string) => void;
-}): MainChatIpcHandler<Event, Result> {
-  return createWritableChatIpcHandler({
-    ...input,
-    afterWrite: [({ workspace }) => input.queueCloudSync(workspace.workspaceId)],
-  });
 }
 
 export async function chatViewerAuthorId(input: {
