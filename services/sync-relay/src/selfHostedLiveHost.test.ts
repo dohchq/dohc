@@ -561,7 +561,7 @@ it("tells the operator a document without lineage must be opened on a desktop fi
   const f = await fixture(); await f.waitStarted(1); await f.waitUpdate(["docs/a.md"]);
   f.block(binding.objectId, "without-lineage");
   await vi.waitFor(() => {f.host.reconcile(); expect(f.onError).toHaveBeenCalled();}, {timeout: 10_000});
-  expect(f.onError.mock.calls).toEqual([[expect.objectContaining({message: `Live editing of docs/a.md in workspace ${scope.workspaceId} cannot start: the document has no live-editing history. Its owner must open it once in dohc on a desktop, then try again. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`})]]);
+  expect(f.onError.mock.calls).toEqual([[expect.objectContaining({message: `Live editing of docs/a.md in workspace ${scope.workspaceId} cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. Its store is kept at ${join(f.data, storeName(scope.workspaceId))}.`})]]);
   expect(f.host.blocked(binding)).toBe("without-lineage");
   await f.waitPasses();
   expect(f.onError).toHaveBeenCalledTimes(1);

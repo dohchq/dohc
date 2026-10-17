@@ -1067,7 +1067,7 @@ it("pushes a write the host accepted before it reconnected, while another docume
   await proof.retire();
   await vi.waitFor(async () => {
     expect(proof.live().coordinate.connectionId).not.toBe(before);
-    expect((await proof.documents())[0]).toEqual({path: "docs/a.md", status: "unavailable", reason: "session-host-refused"});
+    expect((await proof.documents())[0]).toEqual({path: "docs/a.md", status: "unavailable", reason: "live-edit-unadmitted"});
   }, {timeout: 30000});
   expect(proof.hosted()).toEqual({state: "held", reason: "hosted-live-edit-unadmitted"});
   expect(proof.unpushed()).toEqual(expect.arrayContaining(waiting));
@@ -1121,7 +1121,7 @@ it("blocks a document its owner edited while live editing was stopped, and Resum
   await stopLiveEditing(proof);
   // The owner keeps editing on their device, where no session host admits the edit.
   await proof.ownerEdit(doc => doc.getMap("frontmatter").set("whileStopped", "ordinary-owner"));
-  const refused = [{path: "docs/a.md", status: "unavailable", reason: "session-host-refused"}];
+  const refused = [{path: "docs/a.md", status: "unavailable", reason: "live-edit-unadmitted"}];
   const attempts = () => proof.started("captureOwnerActivation");
   expect((await proof.route("POST", {shareId: "share"})).status).toBe(202);
   await vi.waitFor(async () => expect(await proof.documents()).toEqual(refused), {timeout: 30000});
@@ -1131,10 +1131,10 @@ it("blocks a document its owner edited while live editing was stopped, and Resum
   const blocked = attempts(), pulls = harness.pulls.length;
   await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
   expect(attempts()).toBe(blocked);
-  // The operator hears once where its work is kept. The owner hears only that live editing stopped.
+  // The operator hears once why it cannot resume and where its work is kept.
   expect(proof.reports.filter(report => report.startsWith("Live editing of docs/a.md"))).toEqual(
-    [`Live editing of docs/a.md in workspace workspace stopped until its owner tries again. Its store is kept at ${proof.store}.`]);
-  // Try again: Resume gives it exactly one more attempt, in the store it has.
+    [`Live editing of docs/a.md in workspace workspace cannot resume: the document changed while live editing was off, and the session host's copy is missing that edit. Its owner can keep editing it in dohc. Its store is kept at ${proof.store}.`]);
+  // Try again: Resume gives it exactly one more attempt, in the store it has, which blocks again.
   const resumed = await proof.route("POST", {path: "docs/a.md"});
   expect(resumed.status).toBe(202); expect(resumed.body.reason).toBeUndefined();
   await vi.waitFor(async () => {expect(attempts()).toBe(blocked + 1); expect(await proof.documents()).toEqual(refused);}, {timeout: 30000});
@@ -1147,8 +1147,9 @@ it("blocks a document its owner edited while live editing was stopped, and Resum
 
 // Until the session host starts a document's Y.Doc itself (#2069), a file only
 // written as text has nothing to activate, so it blocks instead of retrying.
-// Its owner only opens it, as the Notice tells them, and Resume activates it.
-it("blocks a document written only as text, and activates it once its owner opens it and tries again", () => withSelfHostProof("self-host-without-lineage", async proof => {
+// Its owner only opens it, as the Notice tells them, and the lineage that
+// reaches the relay gives it one more attempt, which activates it.
+it("blocks a document written only as text, and activates it once its owner opens it", () => withSelfHostProof("self-host-without-lineage", async proof => {
   const attempts = () => proof.started("captureOwnerActivation"), from = harness.calls.length;
   const failures = () => harness.calls.slice(from).filter(call => call.method === "captureOwnerActivation" && call.status === "failed").map(call => call.message);
   const plain = await proof.ownerDocument("docs/plain.md", "Written as text", {seeded: false});
@@ -1161,17 +1162,15 @@ it("blocks a document written only as text, and activates it once its owner open
   await vi.waitFor(() => expect(harness.pulls.length).toBeGreaterThan(pulls + 12), {timeout: 30000});
   expect(attempts()).toBe(blocked);
   expect(proof.reports.filter(report => report.startsWith("Live editing of docs/plain.md"))).toEqual([
-    `Live editing of docs/plain.md in workspace workspace cannot start: the document has no live-editing history. Its owner must open it once in dohc on a desktop, then try again. Its store is kept at ${proof.store}.`]);
-  // Its owner opens it on their device without changing it, which starts its Y.Doc, and the host's replica receives it.
+    `Live editing of docs/plain.md in workspace workspace cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. Its store is kept at ${proof.store}.`]);
+  // Its owner opens it on their device without changing it, which starts its Y.Doc and pushes it to the relay.
+  // The next pass pulls it into the host's replica and captures once more, with no Resume.
   await plain.open();
-  const claim = () => proof.serviceRead(engine => engine.prepare("SELECT lineage_claim_status AS status, lineage_claim_id AS id FROM ydoc_docs WHERE workspace_id='workspace' AND object_id=?")
-    .get(plain.objectId)) as {status: string; id: string | null} | undefined;
-  await vi.waitFor(() => expect(claim()?.status).toBe("exact"), {timeout: 30000});
-  expect(attempts()).toBe(blocked);
-  // Try again: Resume gives it one more attempt, which activates it.
-  expect((await proof.route("POST", {path: "docs/plain.md"})).status).toBe(202);
   await vi.waitFor(async () => expect(await proof.documents()).toContainEqual(expect.objectContaining({path: "docs/plain.md", status: "ready"})), {timeout: 30000});
   expect(attempts()).toBe(blocked + 1);
-  expect(proof.activation("docs/plain.md")?.source.lineageClaimId).toBe(claim()!.id);
-  return {attemptsBeforeResume: blocked, failures: failures(), reports: proof.reports};
+  const claim = proof.serviceRead(engine => engine.prepare("SELECT lineage_claim_status AS status, lineage_claim_id AS id FROM ydoc_docs WHERE workspace_id='workspace' AND object_id=?")
+    .get(plain.objectId)) as {status: string; id: string | null} | undefined;
+  expect(claim?.status).toBe("exact");
+  expect(proof.activation("docs/plain.md")?.source.lineageClaimId).toBe(claim!.id);
+  return {attemptsBeforeOpen: blocked, failures: failures(), reports: proof.reports};
 }), 120000);
