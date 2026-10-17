@@ -153,7 +153,7 @@ export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPla
       plan.noUndo = `Cannot undo the delete. ${record.paths.join(", ")} ${record.paths.length === 1 ? "is" : "are"} ${where}. Restore ${record.paths.length === 1 ? "it" : "them"} there.`;
     }
     if (plan.noUndo) {
-      if (replaceStagedRecord) await unlink(join(await trashDir(root), recordName(operationId))).catch(error => { if (code(error) !== "ENOENT") throw error; });
+      if (replaceStagedRecord) await unlink(join(await trashDir(root), recordName(operationId))).catch(() => undefined);
       return { operationId, undo: { available: false, reason: plan.noUndo, paths: record.paths } };
     }
     await save(root, record);
@@ -277,7 +277,7 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
       if (occupant && !(record.emptyFolders.includes(path) && occupant.isDirectory())) return { ok: false, reason: `Cannot undo the delete. ${path} now occupies the old path. Move it first.` };
       if (record.paths.includes(path)) {
         const source = await sourcePath(root, record, path).catch(error => { if (code(error) === "ENOENT") return undefined; throw error; });
-        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in the workspace trash. Check the ${systemTrash}.` };
+        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in the workspace trash, and History has no copy of it. Check the ${systemTrash}.` };
       }
     }
     assertCurrent();

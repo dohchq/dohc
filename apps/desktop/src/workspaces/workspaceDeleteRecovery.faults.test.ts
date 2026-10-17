@@ -241,14 +241,15 @@ describe("delete recovery failures", () => {
     f.options.trashItem = async path => { await trash(path); faults.failUnlinkRecord = true; };
     try {
       const result = await f.remove();
-      expect(result).toMatchObject({ ok: true, trashed: true, undo: { available: false, reason: expect.stringContaining("could not save Undo information") } });
+      expect(result).toMatchObject({ ok: true, trashed: true, undo: { available: false,
+        reason: `Cannot undo the delete. folder is in the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}. Restore it there.` } });
       expect(faults.failUnlinkRecord).toBe(false);
       const record = await readDeleteRecovery(f.root, result.operationId!);
       expect(record?.staged).toBeDefined();
       expect(existsSync(join(f.root, ".dohc/trash", record!.staged!))).toBe(false);
       expect(await readFile(join(f.os, record!.staged!, "rowless.txt"), "utf8")).toBe("not retained");
       expect(await f.undo(result.operationId!)).toEqual({ ok: false,
-        reason: `Cannot undo the delete. folder is no longer in the workspace trash. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.` });
+        reason: `Cannot undo the delete. folder is no longer in the workspace trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.` });
       expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
     } finally { faults.failUnlinkRecord = false; }
   });
@@ -643,7 +644,7 @@ describe("delete recovery placement and receipts", () => {
     const trash = join(f.root, ".dohc/trash");
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     await rm(whole ? join(trash, staged) : join(trash, staged, "rowless.txt"), { recursive: true });
-    expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining(`is no longer in the workspace trash. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.`) });
+    expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining(`is no longer in the workspace trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.`) });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
   it("expires metadata without deleting fallback bytes", async () => {
