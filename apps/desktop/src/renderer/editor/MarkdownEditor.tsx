@@ -23,6 +23,7 @@ import {
   DohcMarkdownTable,
   DohcTaskItem,
   escapeHighlightMarkdown,
+  MarkdownListItem,
   MarkdownOrderedList,
   MarkdownTaskList,
 } from "@dohc/ydoc-projection/markdown-extensions";
@@ -118,6 +119,7 @@ import {
   type BlockMenuEntry,
   type BlockMenuState,
 } from "./blockControls";
+import { TABLE_CELL_MIN_WIDTH } from "./tableSizing";
 import {
   makeCodeBlockChromePlugin,
   makeCodeBlockContinuationPlugin,
@@ -268,6 +270,7 @@ const DROP_CURSOR_OPTIONS = { color: "var(--dohc-accent)", width: 2 };
 const LOCAL_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
   orderedList: false,
+  listItem: false,
   dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
@@ -275,6 +278,7 @@ const COLLAB_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
   undoRedo: false,
   orderedList: false,
+  listItem: false,
   dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
@@ -309,12 +313,13 @@ const TABLE_EXTENSION = DohcMarkdownTable.configure({
   // A useful default column measure makes appended columns grow the table
   // past the reading column instead of compressing every cell indefinitely.
   // The tableWrapper owns horizontal scrolling in styles.css.
-  cellMinWidth: 120,
+  cellMinWidth: TABLE_CELL_MIN_WIDTH,
   // The block gutter selects a whole table as a node, so Backspace and Delete
   // remove it. Tiptap otherwise turns that selection into a cell selection.
   allowTableNodeSelection: true,
 });
 const STATIC_EDITOR_EXTENSIONS = [
+  MarkdownListItem,
   MarkdownOrderedList,
   MarkdownTaskList,
   DohcTaskItem,

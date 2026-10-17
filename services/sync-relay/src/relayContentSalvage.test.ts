@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -105,7 +105,7 @@ it("rejects a manifest whose continuity nonce differs from its database", async 
   const f = fixture(), directory = join(f.root, "snapshot"), output = join(f.root, "salvage");
   await backupRelayDeployment(f.configPath, directory);
   const manifest = JSON.parse(readFileSync(join(directory, "manifest.json"), "utf8"));
-  writeFileSync(join(directory, "manifest.json"), JSON.stringify({ ...manifest, nonce: "0".repeat(manifest.nonce.length) }));
+  writeFileSync(join(directory, "manifest.json"), JSON.stringify({ ...manifest, nonce: randomUUID() }));
   await expect(salvageRelayContent(directory, output)).rejects.toThrow(/provenance/);
   expect(existsSync(join(output, "recovery.json"))).toBe(false);
 });

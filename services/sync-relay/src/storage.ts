@@ -480,8 +480,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveDocumentAuthorityStorage.registerLiveDocumentBaseline(this, input);
   }
 
-  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult {
-    return liveUpdateJournalStorage.readLiveUpdateJournalCut(this, input);
+  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }, reserveBytes?: (size: number) => void): LiveUpdateJournalCutResult {
+    return liveUpdateJournalStorage.readLiveUpdateJournalCut(this, input, reserveBytes);
   }
 
   commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput, activation?: ServiceActivationAccess): RelayLiveUpdateJournalResult {

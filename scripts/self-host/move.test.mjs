@@ -18,7 +18,8 @@ async function envFile(t, contents) {
   await writeFile(path, valid + contents);
   return path;
 }
-const folders = { dohc_self_host_sync_relay: "sync-relay", dohc_self_host_relay_continuity: "continuity", dohc_self_host_host_data: "host-data" };
+const folders = { dohc_self_host_sync_relay: "sync-relay", dohc_self_host_relay_continuity: "continuity", dohc_self_host_host_data: "host-data",
+  dohc_self_host_snapshots: "snapshots" };
 const bind = folder => ({ type: "none", o: "bind", device: `/mnt/disk/dohc/${folder}` });
 const config = { name: "dohc-self-host", services: { postgres: { image: "postgres:17.9-alpine" } }, volumes: {
   dohc_self_host_postgres: { name: "dohc-self-host_dohc_self_host_postgres" },
@@ -98,6 +99,10 @@ test("move never starts when a file the deployment needs is missing", async t =>
     assert.equal(started(mock.calls), false, missing.join());
     assert.equal(changed(mock.calls), false, missing.join());
   }
+  // Snapshot state and host data on the disk are not a relay deployment.
+  const leftovers = host({ files: ["/pg/PG_VERSION", "/snapshots/notifications.json", "/host-data/automations/replica.db"] });
+  assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), leftovers.run, () => {}), /No relay deployment found in \/mnt\/disk\/dohc/);
+  assert.equal(started(leftovers.calls), false);
 });
 
 test("move never starts when Docker cannot complete a check", async t => {
@@ -139,6 +144,9 @@ test("move refuses while a running container can write the deployment's storage 
     [{ containers: [container("backup", { Type: "bind", Source: "/mnt/disk", RW: true }), container("agent", { Type: "bind", Source: "/", RW: true })] },
       "backup (/mnt/disk), agent (/)"],
     [{ containers: [container("old-sync-relay-1", { Type: "bind", Source: "/mnt/disk/dohc/host-data", RW: true })] }, "old-sync-relay-1 (/mnt/disk/dohc/host-data)"],
+    // The old host's snapshot job still writes its staging on the disk.
+    [{ volumes: { ...accounts, old_snapshots: { Driver: "local", Options: bind("snapshots") } },
+      containers: [container("old-relay-snapshot-1", { Type: "volume", Name: "old_snapshots", RW: true })] }, "old-relay-snapshot-1 (old_snapshots)"],
   ];
   for (const [options, named] of writers) {
     const mock = host(options);
@@ -195,11 +203,14 @@ test("with an external database, move needs dohc accounts there and keeps every 
 
 test("move refuses existing volumes stored outside the data disk and leaves them unchanged", async t => {
   const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n");
-  for (const relay of [{ Driver: "local", Options: null }, { Driver: "local", Options: { ...bind("sync-relay"), device: "/mnt/old-disk/dohc/sync-relay" } }]) {
-    const mock = host({ volumes: { ...accounts, "dohc-self-host_dohc_self_host_sync_relay": relay } });
-    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}),
-      /Docker volume dohc-self-host_dohc_self_host_sync_relay keeps its data in .*, not \/mnt\/disk\/dohc\/sync-relay/);
-    assert.ok(mock.calls.every(([command, ...args]) => command === "docker" && (args.includes("config") || args[0] === "volume" && args[1] === "inspect")));
+  for (const folder of ["sync-relay", "snapshots"]) {
+    const name = `dohc-self-host_${Object.keys(folders).find(key => folders[key] === folder)}`;
+    for (const volume of [{ Driver: "local", Options: null }, { Driver: "local", Options: { ...bind(folder), device: `/mnt/old-disk/dohc/${folder}` } }]) {
+      const mock = host({ volumes: { ...accounts, [name]: volume } });
+      assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}),
+        new RegExp(`Docker volume ${name} keeps its data in .*, not /mnt/disk/dohc/${folder}`));
+      assert.ok(mock.calls.every(([command, ...args]) => command === "docker" && (args.includes("config") || args[0] === "volume" && args[1] === "inspect")));
+    }
   }
 });
 
