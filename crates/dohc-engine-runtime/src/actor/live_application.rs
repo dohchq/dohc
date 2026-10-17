@@ -1213,7 +1213,7 @@ impl Request {
                 let _reservation = reconstruction.reservation;
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
                     if cancel.is_cancelled() {
-                        return Err(RuntimeError::ActorUnavailable);
+                        return Err(RuntimeError::Cancelled);
                     }
                     with_settlement(
                         store,

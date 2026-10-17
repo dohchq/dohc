@@ -6385,13 +6385,36 @@ async fn cancelled_blob_egress_never_produces_a_service_payload() {
         )
         .expect("point snapshot at large blob");
     drop(connection);
+    // A read handed to the actor answers what it read, so a client without
+    // the `blobs` capability still gets the metadata and no payload.
     let ctx = RequestContext::unbounded();
+    ctx.cancel.cancel();
+    let metadata = ProtocolEngineService::call(
+        service.as_ref(),
+        ctx,
+        request(
+            4,
+            "versionedBinary.readBlob",
+            Some(handle.clone()),
+            json!({
+                "workspaceId": workspace,
+                "sha256": sha256,
+            }),
+        ),
+    )
+    .await
+    .expect("a cancelled read without blobs answers its metadata");
+    assert_eq!(metadata.response.result["bytesBase64"], Value::Null);
+    assert_eq!(metadata.response.result["byteLength"], 64 * 1024);
+    assert!(metadata.blob_egress.is_none());
+
+    let ctx = RequestContext::unbounded().with_capability("blobs");
     ctx.cancel.cancel();
     let error = ProtocolEngineService::call(
         service.as_ref(),
         ctx,
         request(
-            4,
+            5,
             "versionedBinary.readBlob",
             Some(handle),
             json!({
@@ -6403,6 +6426,11 @@ async fn cancelled_blob_egress_never_produces_a_service_payload() {
     .await
     .expect_err("cancelled egress");
     assert_eq!(error.code, ErrorCode::Cancelled);
+    assert!(
+        error.message.contains("egress budget"),
+        "refused at the egress reservation: {}",
+        error.message
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

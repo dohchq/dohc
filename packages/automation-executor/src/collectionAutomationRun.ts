@@ -139,6 +139,8 @@ export interface CollectionRecordWrites {
 }
 
 export interface CollectionAutomationRunDependencies {
+  /** Local aggregate observer, after the run's durable successful completion. */
+  onUsageSuccess?(invocation: import("./automationUsage").AutomationUsageInvocation): void;
   /** Sync earlier writes in this workspace's engine before saving run completion. */
   makeDurable(claimId?: string): Promise<void>;
   checkPresser?(): Promise<void>;

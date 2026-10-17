@@ -317,6 +317,7 @@ impl EngineService {
                             Some(observer),
                         )
                         .await;
+                    // The settlement committed, so its reconcile runs to the end.
                     if observed.load(std::sync::atomic::Ordering::SeqCst) {
                         let reconciliation = host
                             .open
@@ -329,7 +330,7 @@ impl EngineService {
                                 Arc::new(self_writes.scoped(&host.open.root)),
                                 now_ms,
                                 Arc::new(NoFaults),
-                                token,
+                                dohc_engine_runtime::CancellationToken::new(),
                             )
                             .await
                             .map_err(|error| {
@@ -357,17 +358,11 @@ impl EngineService {
                 }
             }
         });
-        let outcome = tokio::select! {
-            biased;
-            outcome=operation=>outcome,
-            ()=cancellation.token.cancelled()=>return Err(cancellation.interruption("native restore")),
-        };
+        let outcome = operation.await;
         retirement.0 = None;
+        // The writer withholds the answer when its guard is no longer current.
         let (status, bytes) = outcome
             .map_err(|_| WireError::new(ErrorCode::Internal, "native restore interrupted"))??;
-        if !guard.is_current() {
-            return Err(guard.unavailable());
-        }
         let digest = dohc_engine_storage::hex_sha256(&bytes);
         Ok(ServiceResponse {
             response: Response {

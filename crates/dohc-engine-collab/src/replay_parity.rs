@@ -991,6 +991,14 @@ thread_local! {
     /// Test seam for the scratch-apply error lifecycle. The mutation
     /// probe is set before this fires, matching a real `Ydoc::apply` failure.
     static SCRATCH_APPLY_ERROR_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REPLAY_VALIDATION_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Replay validations on this thread, including cached and deferred gates.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn replay_validation_calls_for_test() -> u64 {
+    REPLAY_VALIDATION_CALLS.with(std::cell::Cell::get)
 }
 
 /// Run `f` with the replay gate armed: while armed, any gate invocation fails
@@ -1214,6 +1222,8 @@ fn validate_replay_parity_contained(
     scratch_mutated: Option<&mut bool>,
     audit_scratch: bool,
 ) -> Result<GateValidation, CollabError> {
+    #[cfg(any(test, feature = "test-support"))]
+    REPLAY_VALIDATION_CALLS.with(|calls| calls.set(calls.get() + 1));
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         validate_replay_parity_inner(
             base,

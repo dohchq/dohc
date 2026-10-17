@@ -1188,3 +1188,63 @@ it("skips the engine barrier when planned fields already hold their value", asyn
     .resolves.toEqual({ kind: "done" });
   expect(barriers).toBe(0);
 });
+
+// Exercise the actual coordinator, so saved completion also proves replay exclusion.
+describe("automation usage", () => {
+  const cases = [
+    { id: "collection.record.edit", steps: "[{set: {Count: 2}}, {set: {Count: 3}}]" },
+    { id: "collection.record.create", steps: "[{add-record: {Title: One}, collection: Log}, {add-record: {Title: Two}, collection: Log}]" },
+    { id: "chat.post", steps: "[{post: Hello, group: Trip}, {post: Again, group: Trip}]" },
+    { id: "chat.reply", steps: "[{direct-message: Hello, to: [friend]}, {direct-message: Again, to: [friend]}]" },
+  ];
+  it.each(cases)("counts $id once after success, excluding refusal, failure and completed replay", async ({ id, steps }) => {
+    const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: " + steps);
+    const space = workspace([task("rec_t", { Count: 1 })]), store = await scratchStore();
+    const roster = { kind: "owner" as const, ownerUserId: "owner", grants: [{ grantId: "friend", recipientUserId: "friend", recipientEmail: null,
+      files: null, channel: { wireId: "dm", canPost: true } }] };
+    const dependencies = space.dependencies(store);
+    const calls: Array<{ capabilityId: string; door: string }> = [];
+    const observed = { ...dependencies, onUsageSuccess: (pair: { capabilityId: string; door: string }) => { calls.push(pair); } };
+    let problem: string | null = "refused";
+    observed.withRecordWrites = async (signal, work) => {
+      if (problem) throw Error(problem);
+      return dependencies.withRecordWrites(signal, work);
+    };
+    observed.chat = { hasMessage: async () => false,
+      directory: async () => chatDirectoryOf([
+        { id: "trip", wireId: "trip", name: "Trip", slug: "trip", kind: "channel", type: "posts", runningThreadId: null },
+        { id: "dm", wireId: "dm", name: "Friend", slug: "friend", kind: "dm", type: "chat", runningThreadId: "thread" },
+      ], roster), write: async () => { if (problem) throw Error(problem); } };
+    const signal = new AbortController().signal;
+    const run = (attempt: number) => runCollectionAutomation(observed, { claim: added(attempt), automation: definition,
+      collection: { path: "Tasks", name: "Tasks" }, roster, signal, stopped: signal });
+    expect(await run(1)).toMatchObject({ kind: "failed" });
+    expect(calls).toEqual([]);
+    problem = "write failed";
+    expect(await run(2)).toMatchObject({ kind: "failed" });
+    expect(calls).toEqual([]);
+    problem = null;
+    expect(await run(3)).toEqual({ kind: "done" });
+    expect(calls).toEqual([{ capabilityId: id, door: "automation" }]);
+    // Restarted dispatcher sees the saved outcome instead of invoking an action.
+    expect(await run(3)).toEqual({ kind: "done" });
+    expect(await run(4)).toEqual({ kind: "done" });
+    expect(calls).toEqual([{ capabilityId: id, door: "automation" }]);
+  });
+
+  it("does not count Find, unchanged fields, or a partial run, but counts a later completed change", async () => {
+    const space = workspace([task("rec_t", { Count: 1 })]), store = await scratchStore();
+    const calls: Array<{ capabilityId: string; door: string }> = [];
+    const dependencies = { ...space.dependencies(store), onUsageSuccess: (pair: { capabilityId: string; door: string }) => { calls.push(pair); } };
+    const signal = new AbortController().signal;
+    const run = (steps: string, claimId: string) => runCollectionAutomation(dependencies, {
+      claim: { ...added(), claimId }, automation: automation("id: chain\nname: Chain\nwhen: record-added\ndo: " + steps),
+      collection: { path: "Tasks", name: "Tasks" }, roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: signal });
+    expect(await run("[{find: 'true', collection: Tasks, as: found}, {set: {Count: 1}}]", "unchanged")).toEqual({ kind: "done" });
+    expect(calls).toEqual([]);
+    expect(await run("[{set: {Count: 2}}, {run-file: absent.js}]", "partial")).toMatchObject({ kind: "failed" });
+    expect(calls).toEqual([]);
+    expect(await run("[{set: {Count: 3}}]", "success")).toEqual({ kind: "done" });
+    expect(calls).toEqual([{ capabilityId: "collection.record.edit", door: "automation" }]);
+  });
+});
