@@ -2131,14 +2131,14 @@ describe("chatDispatchService", () => {
       authorUserId: "user_local",
     });
     const second = await createAgentThread(fixture, {
-      body: "Run after the failed note.",
+      body: "Run after the failed notice.",
       authorUserId: "user_local",
     });
     await activate(fixture);
     const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
     if (!claim) throw new Error("Expected a live run.");
-    const noteError = new Error("dispatch notice failed");
-    noticeFailures.push(noteError);
+    const noticeError = new Error("dispatch notice failed");
+    noticeFailures.push(noticeError);
 
     fixture.spawnCalls[0]!.process.emitExit(7);
     await fixture.service.scanWorkspace(WORKSPACE_ID);
@@ -2151,7 +2151,7 @@ describe("chatDispatchService", () => {
     expect(
       fixture.readDispatch(first.messageId, first.threadId).state,
     ).toBe("done");
-    expect(fixture.errors).toContain(noteError);
+    expect(fixture.errors).toContain(noticeError);
     expect(fixture.spawnCalls).toHaveLength(2);
     expect(fixture.spawnCalls[1]!.options.env.DOHC_CHAT_THREAD).toBe(second.threadId);
   });
@@ -2789,7 +2789,7 @@ describe("chatDispatchService", () => {
     expect(fixture.errors).toContain(persistenceError);
   });
 
-  it("times out a run, posts the timeout note, and escalates its process group", async () => {
+  it("times out a run, posts the timeout notice, and escalates its process group", async () => {
     vi.useFakeTimers();
     const fixture = await createFixture({
       runner: { timeoutMinutes: 1 },
@@ -3008,14 +3008,14 @@ describe("chatDispatchService", () => {
       ],
     });
     await createAgentThread(fixture, {
-      body: "Stop after the note store fails.",
+      body: "Stop after the notice store fails.",
       authorUserId: "user_local",
     });
     await activate(fixture);
     const claim = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0];
     if (!claim) throw new Error("Expected a live run.");
-    const noteError = new Error("dispatch notice failed");
-    noticeFailures.push(noteError);
+    const noticeError = new Error("dispatch notice failed");
+    noticeFailures.push(noticeError);
 
     await expect(
       fixture.service.stopAgentRun(WORKSPACE_ID, claim.run.runId),
@@ -3035,7 +3035,7 @@ describe("chatDispatchService", () => {
       failureHandled: true,
       failureReason: "user-stop",
     });
-    expect(fixture.errors).toContain(noteError);
+    expect(fixture.errors).toContain(noticeError);
   });
 
   it.each([undefined, "claude", "codex"] as const)("passes the spawn contract in a %s runner self-test", async (tool) => {

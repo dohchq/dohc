@@ -1327,7 +1327,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         await markRunFailureHandled(live.workspace, live.claim.run);
       } catch (error) {
         reportError(error);
-        // Mark the stopped run handled so app-quit recovery never retries it.
         await dispatch.markFailureHandled(
           live.claim.run.runId,
           durableDispatchRequest,
