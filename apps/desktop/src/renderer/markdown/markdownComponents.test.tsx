@@ -68,6 +68,19 @@ describe("MARKDOWN_COMPONENTS tables", () => {
     expect(table?.querySelectorAll(":is(th, td) > p")).toHaveLength(6);
   });
 
+  it("sizes columns as the editor does, so a wide table scrolls", () => {
+    const header = `| ${Array.from({ length: 10 }, (_, i) => `C${i}`).join(" | ")} |`;
+    const view = renderMarkdown(`${header}\n|${" --- |".repeat(10)}\n|${" x |".repeat(10)}`);
+
+    // Tiptap's TableView: each column at least 120px, the table at least
+    // their sum, so ten columns outgrow the 752px frame and scroll.
+    const table = view.container.querySelector("table");
+    expect(table?.style.minWidth, "The table keeps only `width: 100%`, so a wide table squeezes its columns, then widens when the editor replaces it.").toBe("1200px");
+    const cols = table?.querySelectorAll(":scope > colgroup > col") ?? [];
+    expect(cols).toHaveLength(10);
+    expect((cols[0] as HTMLTableColElement).style.minWidth).toBe("120px");
+  });
+
   it("renders a table that a split document carries in one chunk", () => {
     // Over the incremental threshold, so the body is split into chunks. A
     // table holds no blank line, so it must survive as one block.

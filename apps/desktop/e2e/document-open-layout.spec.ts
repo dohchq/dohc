@@ -15,7 +15,23 @@ import {
 // session binds, the editor replaces it. Every block must already sit where
 // the editor puts it, or the page jumps as the open finishes.
 
-const DOC = `# Packing list
+// Enough properties to wrap onto several lines, and a table wider than the
+// reading column, which scrolls in its frame.
+const WIDE_HEADER = `| ${Array.from({ length: 10 }, (_, i) => `Day ${i + 1}`).join(" | ")} |`;
+const DOC = `---
+status: draft
+owner: Planning group
+destination: Lofoten islands
+season: late summer
+budget: 2400 EUR
+travellers: four adults
+transport: ferry and rental car
+lodging: rorbu cabins
+priority: high
+review: before booking
+---
+
+# Packing list
 
 A paragraph under the first heading.
 
@@ -36,6 +52,10 @@ const bags = 2;
 | Item | Count |
 | --- | --- |
 | Tent | 1 |
+
+${WIDE_HEADER}
+|${" --- |".repeat(10)}
+|${" Hike |".repeat(10)}
 
 The last paragraph.
 `;
@@ -92,6 +112,8 @@ async function measureBlocks(page: Page): Promise<Record<string, Box | null>> {
       return { x: round(rect.x), y: round(rect.y), width: round(rect.width), height: round(rect.height) };
     };
     const paragraphs = root.querySelectorAll(":scope > p");
+    const tables = root.querySelectorAll("table");
+    const properties = view?.querySelectorAll('[data-testid="property-row"]') ?? [];
     const topmatter = Object.fromEntries(
       [...(view?.querySelector(".group\\/topmatter")?.children ?? [])].map((child, index) => [
         `topmatter${index}`,
@@ -109,9 +131,14 @@ async function measureBlocks(page: Page): Promise<Record<string, Box | null>> {
       h3: box(root.querySelector(":scope > h3")),
       quote: box(root.querySelector(":scope > blockquote")),
       code: box(root.querySelector(":scope > pre")),
-      table: box(root.querySelector("table")),
-      headerCell: box(root.querySelector("table th")),
-      bodyCell: box(root.querySelector("table td")),
+      firstProperty: box(properties[0]),
+      lastProperty: box(properties[properties.length - 1]),
+      table: box(tables[0]),
+      headerCell: box(tables[0]?.querySelector("th")),
+      bodyCell: box(tables[0]?.querySelector("td")),
+      wideFrame: box(tables[1]?.parentElement),
+      wideTable: box(tables[1]),
+      wideLastHeaderCell: box(tables[1]?.querySelector("th:last-child")),
       lastParagraph: box(paragraphs[paragraphs.length - 1]),
     };
   });
@@ -166,12 +193,14 @@ test("an opening document draws each block where the ready editor draws it", asy
     await explorerRow(page, "notes/packing.md").click();
     await expect(page.getByTestId("markdown-edit-toggle")).toBeDisabled({ timeout: 20_000 });
     await expect(page.getByTestId("view-markdown")).toContainText("The last paragraph.");
+    await expect(page.getByTestId("property-row")).toHaveCount(10);
     const opening = await settledBlocks(page);
     await shoot(page, shotDir, "opening");
 
     await releaseDocumentOpens(desktop);
     await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 20_000 });
     await expect(page.getByTestId("markdown-editor")).toBeVisible();
+    await expect(page.getByTestId("property-add")).toBeVisible();
     const ready = await settledBlocks(page);
     await shoot(page, shotDir, "ready");
 

@@ -2336,14 +2336,12 @@ export function MarkdownView(props: {
               opening={opening}
             />
             {recordButtons}
-            {/* Opening, the panel's loading line holds its row and the block
-                as written starts as it will once the open answers, so the
-                ready document draws in the same place. */}
-            {readOnly ? null : opening ? (
-              <PropertiesFallback />
-            ) : (
+            {/* Opening, the panel draws its pills where they will be and the
+                block as written starts as it will once the open answers, so
+                the ready document draws in the same place. */}
+            {readOnly ? null : (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
+                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} opening={opening} />
               </Suspense>
             )}
             <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />

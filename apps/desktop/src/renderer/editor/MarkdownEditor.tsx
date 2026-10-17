@@ -118,6 +118,7 @@ import {
   type BlockMenuEntry,
   type BlockMenuState,
 } from "./blockControls";
+import { TABLE_CELL_MIN_WIDTH } from "./tableSizing";
 import {
   makeCodeBlockChromePlugin,
   makeCodeBlockContinuationPlugin,
@@ -309,7 +310,7 @@ const TABLE_EXTENSION = DohcMarkdownTable.configure({
   // A useful default column measure makes appended columns grow the table
   // past the reading column instead of compressing every cell indefinitely.
   // The tableWrapper owns horizontal scrolling in styles.css.
-  cellMinWidth: 120,
+  cellMinWidth: TABLE_CELL_MIN_WIDTH,
   // The block gutter selects a whole table as a node, so Backspace and Delete
   // remove it. Tiptap otherwise turns that selection into a cell selection.
   allowTableNodeSelection: true,
