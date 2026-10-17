@@ -1100,6 +1100,54 @@ mod collection_adoption_update_tests {
     }
 
     #[test]
+    fn relation_cleanup_skips_a_never_opened_indented_code_referrer() {
+        let (scratch, mut store, mut cache) = fixture();
+        capture(
+            &mut store,
+            "tasks/collection.yaml",
+            "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
+            3,
+        );
+        let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\nInstall:\n\n    npm i foo";
+        capture(&mut store, "tasks/a.md", text, 4);
+        std::fs::write(scratch.path().join("tasks/a.md"), text).unwrap();
+        let snapshot = VersionedTextStore::new(&mut store)
+            .read_text("workspace", "main", "tasks/a.md")
+            .unwrap()
+            .unwrap();
+        let result = cleanup_collection_relation_on_store(
+            &mut store,
+            &mut cache,
+            &CollectionRelationCleanupCandidate {
+                source_record_id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                source_file_path: "tasks/a.md".into(),
+                source_object_id: snapshot.object_id,
+                field_name: "related".into(),
+                target_record_id: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                many: false,
+            },
+            "workspace",
+            "main",
+            scratch.path(),
+            &LeaseRegistry::new(),
+            &(),
+            5,
+            &dohc_engine_storage::NoFaults,
+            &CancellationToken::new(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            CollectionRelationCleanupExecution::Skipped
+        ));
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/a.md")).unwrap(),
+            text
+        );
+    }
+
+    #[test]
     fn relation_cleanup_skips_a_symlink_referrer_then_retries_after_replacement() {
         let (scratch, mut store, mut cache) = fixture();
         seed_relation_referrers(&mut store, &mut cache, scratch.path());
@@ -1786,7 +1834,14 @@ fn cleanup_collection_relation_on_store(
             .ok_or(DomainError::StateCorrupt {
                 reason: "collection relation cleanup has no Markdown artifact seed",
             })?;
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, seed)?;
+        match doc.rewrite_content_to_markdown(ContentKind::Richdoc, seed) {
+            Err(CollabError::MarkdownNotRepresentable) => {
+                return Ok(CollectionRelationCleanupExecution::Skipped);
+            }
+            result => {
+                result?;
+            }
+        }
         let seed_update = doc.encode_full_state();
         lineage_claim_id = ydoc_record_update_on_store(
             store,
