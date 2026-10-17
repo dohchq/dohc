@@ -32,6 +32,7 @@ import {
   movedPointer,
   revealMenuRow,
 } from "../ui/Menu";
+import { isComposingKey } from "../ui/keys";
 
 export interface FileMentionCandidate {
   path: string;
@@ -432,7 +433,7 @@ export function MentionComposer(props: {
       // IME guard first: Enter during composition confirms the composed
       // characters — it must never accept a mention candidate or send, even
       // when the mention menu is open. Let the browser handle the keystroke.
-      if (event.nativeEvent.isComposing) return;
+      if (isComposingKey(event)) return;
       if (showMenu) {
         if (event.key === "ArrowDown") {
           event.preventDefault();
@@ -480,7 +481,7 @@ export function MentionComposer(props: {
       }
       // isComposing: Enter during IME composition confirms characters — never
       // sends. Matches the shared ChatComposer contract.
-      if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+      if (event.key === "Enter" && !event.shiftKey && !isComposingKey(event)) {
         event.preventDefault();
         props.onSend();
         return;

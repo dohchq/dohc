@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Editor } from "@tiptap/core";
 import { ChevronDown, ChevronUp, Replace, X } from "lucide-react";
 import { shortcutTitle } from "../../shortcuts/shortcutRegistry";
+import { isComposingKey } from "../ui/keys";
 import {
   buildReplaceActiveTransaction,
   buildReplaceAllTransaction,
@@ -71,6 +72,7 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
           value={state.query}
           onChange={(event) => dispatch({ type: "setQuery", query: event.target.value })}
           onKeyDown={(event) => {
+            if (isComposingKey(event)) return;
             if (event.key === "Enter") {
               event.preventDefault();
               dispatch({ type: event.shiftKey ? "prev" : "next" });
@@ -146,6 +148,7 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
               dispatch({ type: "setReplacement", replacement: event.target.value })
             }
             onKeyDown={(event) => {
+              if (isComposingKey(event)) return;
               if (event.key === "Escape") {
                 event.preventDefault();
                 close();

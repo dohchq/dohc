@@ -9,6 +9,7 @@ import {
   type RefObject,
 } from "react";
 import { IconButton } from "./controls";
+import { isComposingKey } from "./keys";
 import { useDismiss } from "./useDismiss";
 
 export type MenuItem = {
@@ -195,12 +196,6 @@ const ROW_TONE = {
   danger: { base: MENU_ROW_TONE.danger, hover: "hover:bg-hover" },
 };
 
-// During IME composition, Enter, Escape and the arrows work the candidate
-// list. Some browsers mark those keys only with keyCode 229.
-function composing(event: KeyboardEvent): boolean {
-  return event.nativeEvent.isComposing || event.keyCode === 229;
-}
-
 function isField(row: MenuRow): row is MenuField {
   return "field" in row;
 }
@@ -303,7 +298,7 @@ export function Menu(props: {
   const current = () => rowElements.current.findIndex((row) => row === document.activeElement);
   const onKeyDown = (event: KeyboardEvent) => {
     const inField = typing();
-    if (inField && composing(event)) return;
+    if (inField && isComposingKey(event)) return;
     const arrow = event.key === "ArrowDown" || event.key === "ArrowUp";
     const letter = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
     // A field keeps Home, End and the typed letters; the arrows leave it.
@@ -409,12 +404,12 @@ export function Menu(props: {
                     onKeyDownCapture={(event) => {
                       if (event.key !== "Escape") return;
                       event.stopPropagation();
-                      if (composing(event) || field.busy) return;
+                      if (isComposingKey(event) || field.busy) return;
                       refocus.current = entry.id;
                       field.onCancel();
                     }}
                     onKeyDown={(event) => {
-                      if (event.key !== "Enter" || composing(event)) return;
+                      if (event.key !== "Enter" || isComposingKey(event)) return;
                       event.preventDefault();
                       if (!field.busy) field.onSubmit();
                     }}

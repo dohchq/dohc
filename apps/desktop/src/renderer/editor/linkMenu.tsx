@@ -1,5 +1,6 @@
 import { hasPrimaryModifier, shortcutTitle } from "../../shortcuts/shortcutRegistry";
 import { isEditableEditor } from "./pmHelpers";
+import { isComposingKey } from "../ui/keys";
 // Link editing UI: the StarterKit Link mark + autolink are already active in
 // the schema (round-trips as `[text](url)` via @tiptap/markdown) — this file
 // is the missing UI layer on top of it.
@@ -384,7 +385,7 @@ export function LinkMenu({
             setInvalid(false);
           }}
           onKeyDown={(event) => {
-            if (event.key === "Enter") {
+            if (event.key === "Enter" && !isComposingKey(event)) {
               event.preventDefault();
               confirm();
             }

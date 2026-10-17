@@ -67,6 +67,17 @@ describe("CommandPalette keyboard selection", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("leaves an Enter that confirms an IME composition to the input method", () => {
+    const { ran, onClose } = setup();
+    const input = screen.getByRole("textbox", { name: "Command" });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+    fireEvent.keyDown(input, { key: "ArrowDown", isComposing: true });
+    expect(ran).toEqual([]);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(selectedLabel()).toBe("alpha");
+  });
+
   it("Arrow keys move the selection (wrapping) and Enter runs it", async () => {
     const { ran, onClose } = setup();
     expect(selectedLabel()).toBe("alpha");

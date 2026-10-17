@@ -78,6 +78,21 @@ async function renameTo(path: string, name: string): Promise<void> {
 }
 
 describe("Explorer rename", () => {
+  it("keeps renaming through an Enter or Escape that an input method owns", async () => {
+    render(<Explorer {...explorerProps()} />);
+    const input = await beginRename("report.csv");
+    fireEvent.change(input, { target: { value: "旅" } });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Escape", keyCode: 229 });
+    await act(async () => {});
+    expect(screen.getByTestId("tree-edit-input")).toBe(input);
+    expect(moveWorkspacePath).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(moveWorkspacePath).toHaveBeenCalledWith(expect.objectContaining({ fromPath: "report.csv", toPath: "旅.csv" })),
+    );
+  });
+
   it("gives a new name without an extension the file's own extension", async () => {
     render(<Explorer {...explorerProps()} />);
     await renameTo("report.csv", "summary");

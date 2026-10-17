@@ -1,6 +1,7 @@
 import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { useFocusSurface } from "../ui/focusReturn";
+import { isComposingKey } from "../ui/keys";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { FileGlyph, KindGlyph, listedFileKind, ObjectGlyph } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
@@ -1470,9 +1471,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           readOnly={editPending}
           onChange={(event) => setEditValue(event.target.value)}
           onKeyDown={(event) => {
+            event.stopPropagation();
+            if (isComposingKey(event)) return;
             if (event.key === "Escape") finishEdit(false, true);
             else if (event.key === "Enter") finishEdit(true, true);
-            event.stopPropagation();
           }}
           onBlur={() => { renameFocus.current = null; finishEdit(true); }}
           // The name keeps the row's exact type (13px sans, square) — F2

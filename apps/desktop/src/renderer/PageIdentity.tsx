@@ -1,4 +1,5 @@
 import { useFocusReturn } from "./ui/focusReturn";
+import { isComposingKey } from "./ui/keys";
 import {
   frontmatterEditsRefused,
   markdownFrontmatterEditsRefused,
@@ -297,7 +298,7 @@ export function PageIdentity(props: PageIdentityProps) {
     const elsewhere = (event: Event) => {
       if (event.target === titleRef.current) return;
       // A key the input method still owns is part of the composition.
-      if (event instanceof KeyboardEvent && (event.isComposing || event.keyCode === 229)) return;
+      if (event instanceof KeyboardEvent && isComposingKey(event)) return;
       endComposition();
     };
     const events = ["pointerdown", "keydown"] as const;
@@ -451,7 +452,7 @@ export function PageIdentity(props: PageIdentityProps) {
                   spellCheck={false}
                   onChange={(event) => setEmojiInput(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" && emojiInput.trim()) {
+                    if (event.key === "Enter" && !isComposingKey(event) && emojiInput.trim()) {
                       event.preventDefault();
                       chooseIcon(emojiInput);
                     }
@@ -523,8 +524,7 @@ export function PageIdentity(props: PageIdentityProps) {
           }}
           onKeyDown={(event) => {
             // During IME composition, Enter and ArrowDown pick a candidate.
-            // Some browsers mark that key only with keyCode 229.
-            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+            if (isComposingKey(event)) return;
             const plain = !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
             if (
               event.key === "Enter" ||

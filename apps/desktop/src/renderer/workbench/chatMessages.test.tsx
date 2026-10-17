@@ -70,6 +70,12 @@ describe("ChatComposer Enter-to-send", () => {
     expect(onSend).toHaveBeenCalledTimes(1);
   });
 
+  it("does not send on an Enter that IME marks only with keyCode 229", () => {
+    const { onSend } = renderComposer();
+    fireEvent.keyDown(screen.getByTestId("test-chat-composer"), { key: "Enter", keyCode: 229 });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it("does not send on Shift+Enter (newline stays a newline)", () => {
     const { onSend } = renderComposer();
     fireEvent.keyDown(screen.getByTestId("test-chat-composer"), {

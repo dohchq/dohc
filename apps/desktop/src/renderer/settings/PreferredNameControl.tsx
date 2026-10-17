@@ -1,4 +1,5 @@
 import { useEffect, useState, type KeyboardEvent } from "react";
+import { isComposingKey } from "../ui/keys";
 import {
   MAX_PREFERRED_NAME_LENGTH,
   preferredNameFromInput,
@@ -49,6 +50,7 @@ export function PreferredNameControl(props: {
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (isComposingKey(event)) return;
     if (event.key === "Enter") event.currentTarget.blur();
     if (event.key === "Escape") {
       event.preventDefault();

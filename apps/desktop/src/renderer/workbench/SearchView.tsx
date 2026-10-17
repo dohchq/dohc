@@ -14,6 +14,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { SearchResultsEventEntry } from "../../ipc/bridgeContract";
 import { rendererMarks } from "../../performance/rendererMarks";
 import { EmptyState, SecondaryButton, SectionLabel } from "../ui/controls";
+import { isComposingKey } from "../ui/keys";
 import {
   GROUP_WINDOW_STEP,
   groupVisibleEntries,
@@ -336,6 +337,7 @@ export function SearchView(props: {
   }, [selectedIndex]);
 
   function onInputKeyDown(event: React.KeyboardEvent): void {
+    if (isComposingKey(event)) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       setSelected(

@@ -7,6 +7,7 @@ import { ChatAvatar } from "./ChatAvatar";
 import { ComposerSendButton } from "./ComposerSendButton";
 import { basenameOf } from "../path";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { isComposingKey } from "../ui/keys";
 import { Database, File, FileText, Image, SmilePlus } from "lucide-react";
 import {
   memo,
@@ -475,7 +476,7 @@ export function MessageReactions(props: {
       <input aria-label="Search emoji or paste any emoji" placeholder="Search or paste an emoji" value={query}
         onChange={(event) => { setQuery(event.currentTarget.value); setVisibleCount(96); }}
         className="mb-2 w-full rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] text-ink"
-        onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (choices[0]) { toggle(choices[0], byEmoji.some((group) => group.emoji === choices[0] && group.mine)); setPickerOpen(false); triggerRef.current?.focus(); } } }} />
+        onKeyDown={(event) => { if (event.key === "Enter" && !isComposingKey(event)) { event.preventDefault(); if (choices[0]) { toggle(choices[0], byEmoji.some((group) => group.emoji === choices[0] && group.mine)); setPickerOpen(false); triggerRef.current?.focus(); } } }} />
       <div className="grid h-56 content-start grid-cols-8 gap-0.5 overflow-y-auto">
       {choices.slice(0, visibleCount).map((emoji) => {
         const mine = index.has(emoji) ? (byEmoji[index.get(emoji) as number]?.mine ?? false) : false;
@@ -945,7 +946,7 @@ export function ChatComposer(props: {
         onKeyDown={(event) => {
           // isComposing: Enter during IME composition (CJK input) confirms
           // the composed characters — it must never submit the message.
-          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+          if (event.key === "Enter" && !event.shiftKey && !isComposingKey(event)) {
             event.preventDefault();
             props.onSend();
           } else if (event.key === "Escape" && props.onEscape) {

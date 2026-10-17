@@ -23,6 +23,7 @@ import {
 } from "./ui/DataGrid";
 import { SegmentedControl, type SegmentedOption } from "./ui/SegmentedControl";
 import { StateMark } from "./ui/StateMark";
+import { isComposingKey } from "./ui/keys";
 import {
   useAutosavedTextDraft,
   type DraftFlush,
@@ -224,7 +225,7 @@ const DELETE_BUTTON =
 // An Enter that finishes composing a character is the input method's.
 const endEditOnEnter = (onEndEdit: (cellIndex: number) => void, cellIndex: number) =>
   (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "Enter" && !event.nativeEvent.isComposing) onEndEdit(cellIndex);
+    if (event.key === "Enter" && !isComposingKey(event)) onEndEdit(cellIndex);
   };
 
 const CsvTableHeader = memo(function CsvTableHeader({
