@@ -631,7 +631,7 @@ const TIMELINE_MIXED: TimelineEntry[] = [
 ];
 // Budget's definition labels its operation; Guests' is not loaded here.
 const TIMELINE_COLLECTIONS = new Map([
-  [TIMELINE_BUDGET, { name: "Budget", operationLabels: new Map([["addGuest", "Add guest"]]), open: noop }],
+  [TIMELINE_BUDGET, { name: "Budget", operationLabels: new Map([["addGuest", "Add guest"]]), openHistory: noop }],
   [TIMELINE_GUESTS, { name: "Guests" }],
 ]);
 
