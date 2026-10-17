@@ -718,6 +718,9 @@ importers:
 
   packages/workspace-auth:
     dependencies:
+      '@dohc/security-contract':
+        specifier: workspace:*
+        version: link:../security-contract
       '@dohc/workspace-contracts':
         specifier: workspace:*
         version: link:../workspace-contracts

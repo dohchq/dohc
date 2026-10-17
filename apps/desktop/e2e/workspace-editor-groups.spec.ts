@@ -80,7 +80,9 @@ async function expectActiveMark(page: Page, active: Locator, inactive: Locator, 
 async function dragTabTo(page: Page, tab: Locator, group: Locator) {
   const from = (await tab.boundingBox())!;
   const to = (await group.boundingBox())!;
-  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+  // Press near the tab's start, as a person would: in a narrow group the
+  // tab-row actions cover the rest of the tab.
+  await page.mouse.move(from.x + Math.min(16, from.width / 2), from.y + from.height / 2);
   await page.mouse.down();
   await page.mouse.move(to.x + to.width / 2, to.y + 80, { steps: 8 });
   await page.mouse.up();

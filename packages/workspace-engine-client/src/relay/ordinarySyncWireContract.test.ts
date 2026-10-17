@@ -87,6 +87,7 @@ const holds = [
   { objectId: "c", reason: "hosted-conflict-parent-withheld", conflictId: "conflict" },
   { objectId: "d", reason: "hosted-backfill-work-waiting" },
   { objectId: "e", reason: "hosted-scope-path-mismatch", scopePath: "docs/e.md", headPath: null },
+  { objectId: "f", reason: "hosted-live-edit-unadmitted" },
 ];
 const hosted = { fetched: 2, applied: 1, refused: 1, skipped: 0, conflictsOpened: 0, hasMore: true,
   pendingCursor: { kind: "hosted", token: "opaque-issued-token" }, changedPaths: [change], refusals: [refusal], sharingDeclined: [], held: holds,

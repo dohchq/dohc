@@ -197,28 +197,122 @@ export interface PreparedGoToRow extends PreparedQuickOpenPath {
   record: GoToFile | string | GoToCollection | GoToApp | GoToVersion | GoToGroup;
   ended: boolean;
   visible: boolean;
+  characterMask: number;
+  characterMaskHigh: number;
+  boundaryMask: number;
+  boundaryMaskHigh: number;
+  // Preparation bookkeeping may change; queries read ranking metadata instead.
+  includedRevision: number;
   listingGeneration: number;
 }
 
-function applyGoToPathState(row: PreparedGoToRow, listing: GoToListing, visibilityForPath: ReturnType<typeof prepareVisibilityPolicy>): void {
-  const share = listing.receivedRoots.find(root => root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/"));
-  row.ended = share?.ended ?? false;
-  row.visible = share ? !share.damaged : listing.visibility.status === "ready" &&
-    visibilityForPath(row.path).visibility !== "hidden";
+function goToRowKey(row: PreparedGoToRow): string {
+  return row.target.kind === "version" || row.target.kind === "group" ? row.target.id : row.path;
+}
+function sameGoToRecord(kind: GoToKind, previous: PreparedGoToRow["record"], next: PreparedGoToRow["record"]): boolean {
+  if (previous === next) return true;
+  switch (kind) {
+    case "file": { const a = previous as GoToFile, b = next as GoToFile; return a.path === b.path && a.kind === b.kind && a.icon === b.icon; }
+    case "folder": return previous === next;
+    case "collection": { const a = previous as GoToCollection, b = next as GoToCollection; return a.path === b.path && a.objectId === b.objectId; }
+    case "app": { const a = previous as GoToApp, b = next as GoToApp; return a.root === b.root && a.title === b.title; }
+    case "version": { const a = previous as GoToVersion, b = next as GoToVersion; return a.id === b.id && a.name === b.name; }
+    case "group": { const a = previous as GoToGroup, b = next as GoToGroup; return a.id === b.id && a.name === b.name && a.kind === b.kind; }
+  }
+}
+function withGoToRanks(row: PreparedGoToRow, pinned: ReadonlySet<string>, recent: ReadonlyMap<string, number>): PreparedGoToRow {
+  const pinnedRank = pinned.has(row.path) ? 0 : 1, recentRank = recent.get(row.path) ?? Number.MAX_SAFE_INTEGER;
+  return row.pinnedRank === pinnedRank && row.recentRank === recentRank ? row : { ...row, pinnedRank, recentRank, includedRevision: -1 };
 }
 
-function samePathVerdicts(a: GoToListing, b: GoToListing | undefined): boolean {
-  if (!b || a.visibility.status !== b.visibility.status) return false;
+function* applyGoToPathState(row: PreparedGoToRow, listing: GoToListing, work: { operations: number }, visibilityForPath: ReturnType<typeof prepareVisibilityPolicy>): Generator<void, PreparedGoToRow> {
+  let share: GoToListing["receivedRoots"][number] | undefined;
+  for (const root of listing.receivedRoots) {
+    if (root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/")) { share = root; break; }
+    if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
+  }
+  const ended = share?.ended ?? false;
+  // Keep the published host verdict while a listing is degraded or unavailable.
+  // The admission pass withholds host rows until a ready policy arrives.
+  const visible = share ? !share.damaged : listing.visibility.status === "ready"
+    ? visibilityForPath(row.path).visibility !== "hidden"
+    : row.visible;
+  return row.ended === ended && row.visible === visible ? row : { ...row, ended, visible, includedRevision: -1 };
+}
+
+function samePathVerdicts(a: GoToListing | undefined, b: GoToListing | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.visibility.status !== b.visibility.status) return false;
   if (!sameVisibilityPolicy(a.visibility.rules, b.visibility.rules)) return false;
-  return a.receivedRoots === b.receivedRoots || a.receivedRoots.length === b.receivedRoots.length &&
-    a.receivedRoots.every((root, i) => {
-      const previous = b.receivedRoots[i];
-      return root.path === previous.path && root.ended === previous.ended && root.damaged === previous.damaged;
-    });
+  return sameEntries(a.receivedRoots, b.receivedRoots, (x, y) => x.path === y.path && x.ended === y.ended && x.damaged === y.damaged);
+}
+function sameVisibilityVerdicts(a: GoToListing | undefined, b: GoToListing | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b || !sameVisibilityPolicy(a.visibility.rules, b.visibility.rules)) return false;
+  return sameEntries(a.receivedRoots, b.receivedRoots, (x, y) => x.path === y.path && x.ended === y.ended && x.damaged === y.damaged);
+}
+function sameEntries<T>(a: readonly T[] | undefined, b: readonly T[] | undefined, equal: (a: T, b: T) => boolean): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i] && !equal(a[i], b[i])) return false;
+  return true;
+}
+const samePaths = (a: readonly string[] | undefined, b: readonly string[] | undefined) => sameEntries(a, b, (x, y) => x === y);
+function sameSources(a: GoToSources, b: GoToSources): boolean {
+  return samePathVerdicts(a.listing, b.listing) &&
+    sameEntries(a.listing?.files, b.listing?.files, (x, y) => x.path === y.path && x.kind === y.kind && x.icon === y.icon) &&
+    samePaths(a.listing?.folders, b.listing?.folders) &&
+    sameEntries(a.collections, b.collections, (x, y) => x.path === y.path && x.objectId === y.objectId) &&
+    sameEntries(a.apps, b.apps, (x, y) => x.root === y.root && x.title === y.title) &&
+    sameEntries(a.versions, b.versions, (x, y) => x.id === y.id && x.name === y.name) &&
+    sameEntries(a.groups, b.groups, (x, y) => x.id === y.id && x.name === y.name && x.kind === y.kind);
 }
 
-function* mapEntries<T, U>(entries: readonly T[], map: (entry: T) => U): Generator<U> {
-  for (const entry of entries) yield map(entry);
+// A collision can admit extra work, but cannot reject a subsequence match.
+function characterMasks(text: string): [number, number] {
+  let low = 0, high = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    let bit: number;
+    if (code >= 97 && code <= 122) bit = code - 97;
+    else if (code >= 48 && code <= 57) bit = code - 48 + 26;
+    else {
+      const separator = "/-_. ".indexOf(text[i]);
+      bit = separator >= 0 ? 36 + separator : 41 + code % 23;
+    }
+    if (bit < 32) low |= 1 << bit;
+    else high |= 1 << (bit - 32);
+  }
+  return [low, high];
+}
+function boundaryCharacters(text: string): string {
+  let characters = text[0] ?? "";
+  for (let i = 1; i < text.length; i++) {
+    if ("/-_. ".includes(text[i - 1]) && !characters.includes(text[i])) characters += text[i];
+  }
+  return characters;
+}
+function preparedGoToTier(query: string, row: PreparedGoToRow, canPrefix: boolean, canBoundary: boolean, slash: boolean, fastSubsequence: boolean): number | null {
+  if (!query) return TIER_SUBSTRING;
+  if (canPrefix && row.lowercaseBasename.startsWith(query)) return TIER_BASENAME_PREFIX;
+  const path = row.lowercasePath;
+  if (canBoundary && startsAtWordBoundary(path, query)) return TIER_WORD_BOUNDARY;
+  if ((!slash && row.lowercaseBasename.endsWith(query)) || path.includes(query)) return TIER_SUBSTRING;
+  if (query.length > 1) {
+    if (!fastSubsequence) return isSubsequence(query, path) ? TIER_FUZZY : null;
+    let position = -1;
+    for (let i = 0; i < query.length; i++) {
+      position = path.indexOf(query[i], position + 1);
+      if (position === -1) return null;
+    }
+    return TIER_FUZZY;
+  }
+  return null;
+}
+
+function compareGoToOrder(a: PreparedGoToRow, b: PreparedGoToRow): number {
+  return a.path.length - b.path.length ||
+    (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) || a.sourceIndex - b.sourceIndex;
 }
 
 const KNOWN_EXTENSIONS = new Set<string>(Object.values(FILE_KIND_RECORDS).flatMap(record => [...record.extensions]));
@@ -227,250 +321,464 @@ export function isGoToPathQuery(query: string): boolean {
 }
 
 const EMPTY_CONTEXT: QuickOpenContext = { pinned: [], recent: [] };
-function sameStrings(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((value, i) => value === b[i]);
-}
 
 // One instance belongs to one mounted shell. It consumes committed snapshots;
 // source owners keep their own newest-answer-wins guards and refresh triggers.
 // No I/O, identity resolution, relay sync, or source preparation happens in query.
+export const GO_TO_SLICE_BUDGET_MS = 4;
+const GO_TO_CHUNK_SIZE = 128;
+export interface GoToPreparation {
+  // Returns true when this run is complete or has been superseded.
+  step(now?: () => number): boolean;
+  cancel(): void;
+}
+
 export class GoToIndex {
   readonly workspaceId: string;
   revision = 0;
+  preparing = false;
+  private withholding = false;
   lastPreparationCount = 0;
-  lastScanCount = 0;
   lastVisibilityCheckCount = 0;
-  private visibilityForPath = prepareVisibilityPolicy([]);
-  rows: readonly PreparedGoToRow[] = [];
+  lastScanCount = 0;
+  private completeRows: readonly PreparedGoToRow[] = [];
+  private orderedRows: readonly PreparedGoToRow[] = [];
+  private queryMetadata = new Int32Array(0);
+  private filteredRows: { revision: number; removed: ReadonlySet<string>; rows: readonly PreparedGoToRow[] } | undefined;
+  lastReorderedCount = 0;
+  private removed = new Set<string>();
+  get rows(): readonly PreparedGoToRow[] { return this.rowsWithout(this.removed); }
+  rowsWithout(removed: ReadonlySet<string>): readonly PreparedGoToRow[] {
+    if (this.withholding) return [];
+    if (!removed.size) return this.completeRows;
+    if (this.filteredRows?.revision !== this.revision || this.filteredRows.removed !== removed) {
+      this.filteredRows = { revision: this.revision, removed, rows: this.completeRows.filter(row => !removed.has(row.id)) };
+    }
+    return this.filteredRows.rows;
+  }
   private files: PreparedGoToRow[] = [];
   private listingGeneration = 0;
   private readonly subsets = new Map<GoToKind, Map<string, PreparedGoToRow>>();
   private sources: GoToSources = {};
-  private verdictListing: GoToListing | undefined;
-  private preparation: Generator<void> | null = null;
-  private queued: { sources: GoToSources; context: QuickOpenContext } | null = null;
+  private requestedSources: GoToSources = {};
   private context: QuickOpenContext = EMPTY_CONTEXT;
+  private requestedContext: QuickOpenContext = EMPTY_CONTEXT;
+  private visibilityForPath = prepareVisibilityPolicy([]);
+  private verdictListing: GoToListing | undefined;
+  private active: GoToPreparation | null = null;
+  private interrupted = false;
   private matches: { query: string; revision: number; indices: Int32Array; count: number } | null = null;
 
   constructor(workspaceId: string) { this.workspaceId = workspaceId; }
 
-  // Synchronous callers and background preparation share one implementation.
-  update(sources: GoToSources, context: QuickOpenContext = this.context): void {
-    this.queuePreparation(sources, context);
-    while (!this.prepareSlice(Infinity)) { /* Drain for non-renderer callers. */ }
+  // Equal content starts no run. Only background tasks prepare rows.
+  update(sources: GoToSources, context: QuickOpenContext = this.requestedContext): GoToPreparation | null {
+    const nextSources: GoToSources = {
+      listing: sources.listing ?? this.requestedSources.listing,
+      collections: sources.collections ?? this.requestedSources.collections,
+      apps: sources.apps ?? this.requestedSources.apps,
+      versions: sources.versions ?? this.requestedSources.versions,
+      groups: sources.groups ?? this.requestedSources.groups,
+    };
+    if (!this.interrupted && sameSources(nextSources, this.requestedSources) &&
+      samePaths(context.pinned, this.requestedContext.pinned) && samePaths(context.recent, this.requestedContext.recent)) {
+      this.lastPreparationCount = 0;
+      this.lastVisibilityCheckCount = 0;
+      return this.active;
+    }
+    this.active?.cancel();
+    this.requestedSources = nextSources;
+    this.requestedContext = context;
+    this.withholding ||= !samePathVerdicts(nextSources.listing, this.sources.listing);
+    this.removed = this.removedKeys(nextSources);
+    this.preparing = true;
+    const counter = { operations: 0 };
+    const work = this.prepare(this.requestedSources, context, counter);
+    const run: GoToPreparation = {
+      step: (now = () => performance.now()) => {
+        if (this.active !== run) return true;
+        // Check once per 128 operations, with headroom below the 4 ms target.
+        const deadline = now() + GO_TO_SLICE_BUDGET_MS - 3;
+        do {
+          if (work.next().done) {
+            this.active = null;
+            this.preparing = false;
+            this.withholding = false;
+            this.filteredRows = undefined;
+            return true;
+          }
+        } while (now() < deadline);
+        return false;
+      },
+      cancel: () => {
+        if (this.active !== run) return;
+        work.return(undefined);
+        this.active = null;
+        this.interrupted = true;
+        // Published rows remain usable after a safe cancellation.
+      },
+    };
+    this.active = run;
+    return run;
   }
 
-  queuePreparation(sources: GoToSources, context: QuickOpenContext = this.context): void {
-    this.queued = { sources, context };
+  canQuery(listing?: GoToListing): boolean {
+    return !this.withholding && samePathVerdicts(listing ?? this.sources.listing, this.sources.listing);
   }
 
-  prepareSlice(budgetMs = 2): boolean {
-    const deadline = performance.now() + budgetMs;
-    do {
-      if (!this.preparation) {
-        if (!this.queued) return true;
-        const { sources, context } = this.queued;
-        this.queued = null;
-        this.preparation = this.prepare(sources, context);
-      }
-      if (this.preparation.next().done) this.preparation = null;
-      if (!this.preparation && !this.queued) return true;
-    } while (performance.now() < deadline);
-    return false;
+  removedKeys(sources: GoToSources): Set<string> {
+    const removed = new Set<string>();
+    const compare = <T>(kind: GoToKind, next: readonly T[] | undefined, previous: readonly T[] | undefined, key: (entry: T) => string) => {
+      if (!next || next === previous || !previous) return;
+      const keys = new Set(next.map(key));
+      for (const entry of previous) if (!keys.has(key(entry))) removed.add(kind + ":" + key(entry));
+    };
+    compare("collection", sources.collections ?? this.requestedSources.collections, this.sources.collections, entry => entry.path);
+    compare("app", sources.apps ?? this.requestedSources.apps, this.sources.apps, entry => entry.root);
+    compare("version", sources.versions ?? this.requestedSources.versions, this.sources.versions, entry => entry.id);
+    const groups = sources.groups ?? this.requestedSources.groups;
+    if (groups !== this.sources.groups) compare("group", groups?.filter(entry => entry.kind === "channel"), this.sources.groups?.filter(entry => entry.kind === "channel"), entry => entry.id);
+    return removed;
   }
 
-  private *prepare(sources: GoToSources, context: QuickOpenContext): Generator<void> {
+  cancel(): void { this.active?.cancel(); }
+
+  private *prepare(sources: GoToSources, context: QuickOpenContext, work: { operations: number }): Generator<void> {
     this.lastPreparationCount = 0;
     this.lastVisibilityCheckCount = 0;
-    // Withholding hides host rows without discarding their published verdicts.
-    const listing = sources.listing ? {
-      ...sources.listing,
-      visibility: sources.listing.visibility.status === "unavailable"
-        ? this.verdictListing?.visibility ?? sources.listing.visibility : sources.listing.visibility,
-    } : this.verdictListing;
-    const verdictsChanged = !!listing && !samePathVerdicts(listing, this.verdictListing);
-    const availabilityChanged = !!sources.listing && sources.listing.visibility.status !== this.sources.listing?.visibility.status;
-    if (listing && (!this.verdictListing || !sameVisibilityPolicy(listing.visibility.rules, this.verdictListing.visibility.rules))) {
-      this.visibilityForPath = prepareVisibilityPolicy(listing.visibility.rules);
+    this.lastReorderedCount = 0;
+    const force = this.interrupted;
+    const forceVerdicts = force && this.withholding;
+    if (force && !forceVerdicts) {
+      // Repair positions and admission markers without sorting the completed order.
+      for (let i = 0; i < this.completeRows.length; i++) {
+        const row = this.completeRows[i];
+        row.sourceIndex = i;
+        row.includedRevision = this.revision;
+        if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
+      }
     }
-    const applyPathState = (row: PreparedGoToRow, snapshot: GoToListing) => {
-      this.lastVisibilityCheckCount += 1;
-      applyGoToPathState(row, snapshot, this.visibilityForPath);
-    };
     let changed = false;
-    const replace = function* (this: GoToIndex, kind: GoToKind, entries: Iterable<{
-      key: string; label: string; path: string; record: PreparedGoToRow["record"];
-      glyphId: PreparedGoToRow["glyphId"]; ended?: boolean; visible?: boolean;
-    }>): Generator<void> {
-      const previous = this.subsets.get(kind);
-      const next = new Map<string, PreparedGoToRow>();
-      for (const entry of entries) {
-        if (kind === "group" && (entry.record as GoToGroup).kind !== "channel") { yield; continue; }
-        let row = previous?.get(entry.key);
-        const isNew = !row || row.path !== entry.path || row.label !== entry.label;
-        if (!row || isNew) {
-          const lowercasePath = entry.path.toLowerCase();
-          row = {
-            id: kind + ":" + entry.key, kind, label: entry.label,
-            path: entry.path, lowercasePath, lowercaseBasename: entry.label.toLowerCase(),
-            glyphId: entry.glyphId, record: entry.record, ended: entry.ended ?? false,
-            visible: entry.visible ?? true, pinnedRank: context.pinned.includes(entry.path) ? 0 : 1,
-            recentRank: context.recent.lastIndexOf(entry.path) === -1 ? Number.MAX_SAFE_INTEGER : context.recent.lastIndexOf(entry.path),
-            sourceIndex: 0, listingGeneration: 0,
-            target: kind === "version" || kind === "group"
-              ? { workspaceId: this.workspaceId, kind, id: entry.key }
-              : { workspaceId: this.workspaceId, kind, path: entry.path },
-          };
-          this.lastPreparationCount += 1;
-        } else {
-          // IPC can replace every record after one rename. Preserve matching fields.
-          row.record = entry.record;
-          row.glyphId = entry.glyphId;
-          if (kind === "version" || kind === "group") {
-            row.ended = entry.ended ?? false;
-            row.visible = entry.visible ?? true;
-          }
-        }
-        if (isNew && (kind === "folder" || kind === "collection" || kind === "app")) {
-          if (listing) applyPathState(row, listing); else row.visible = false;
-        }
-        next.set(entry.key, row);
-        yield;
-      }
-      this.subsets.set(kind, next);
-      changed = true;
-    };
-    if (sources.listing && sources.listing !== this.sources.listing) {
-      const snapshot = listing!;
-      const previous = this.sources.listing;
-      if (!previous || snapshot.files !== previous.files || snapshot.folders !== previous.folders || verdictsChanged || availabilityChanged) {
-        const next = this.subsets.get("file") ?? new Map<string, PreparedGoToRow>();
-        const generation = ++this.listingGeneration;
-        const removedCandidates: PreparedGoToRow[] = [];
+    const priorVerdictListing = this.verdictListing;
+    const verdictListing = sources.listing?.visibility.status === "unavailable" && priorVerdictListing
+      ? { ...sources.listing, visibility: priorVerdictListing.visibility }
+      : sources.listing;
+    const visibilityForPath = verdictListing && !sameVisibilityPolicy(verdictListing.visibility.rules, priorVerdictListing?.visibility.rules ?? [])
+      ? prepareVisibilityPolicy(verdictListing.visibility.rules) : this.visibilityForPath;
+    const pinned = new Set<string>();
+    const recent = new Map<string, number>();
+    for (const path of context.pinned) { pinned.add(path); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
+    for (let i = 0; i < context.recent.length; i++) { recent.set(context.recent[i], i); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
+    const contextChanged = force || !samePaths(context.pinned, this.context.pinned) || !samePaths(context.recent, this.context.recent);
+    // Context updates keep the path order and copy only query ranking metadata.
+    if (!force && sameSources(sources, this.sources)) {
+      const metadata = this.queryMetadata.slice();
+      const ordered = this.orderedRows.slice(), complete = this.completeRows.slice();
+      for (const [kind, subset] of this.subsets) {
         let fileIndex = 0;
-        for (const file of snapshot.files) {
-          const previousAtIndex = this.files[fileIndex];
-          let row = previousAtIndex?.path === file.path ? previousAtIndex : next.get(file.path);
-          if (previousAtIndex && previousAtIndex !== row) removedCandidates.push(previousAtIndex);
-          const isNew = !row;
-          if (!row) {
-            row = {
-              id: "file:" + file.path, kind: "file", label: basenameOf(file.path),
-              path: file.path, lowercasePath: file.path.toLowerCase(), lowercaseBasename: basenameOf(file.path).toLowerCase(),
-              glyphId: file.kind === "database" ? FILE_KIND_RECORDS.database.glyphId : fileKindForPath(file.path).glyphId,
-              record: file, ended: false, visible: true,
-              pinnedRank: context.pinned.includes(file.path) ? 0 : 1,
-              recentRank: context.recent.lastIndexOf(file.path) === -1 ? Number.MAX_SAFE_INTEGER : context.recent.lastIndexOf(file.path),
-              sourceIndex: fileIndex, listingGeneration: 0, target: { workspaceId: this.workspaceId, kind: "file", path: file.path },
-            };
-            this.lastPreparationCount += 1;
-            next.set(file.path, row);
-          } else {
-            if ((row.record as GoToFile).kind !== file.kind) {
-              row.glyphId = file.kind === "database" ? FILE_KIND_RECORDS.database.glyphId : fileKindForPath(file.path).glyphId;
-            }
-            row.record = file;
-          }
-          if (isNew || verdictsChanged) {
-            applyPathState(row, snapshot);
-          }
-          if (row.listingGeneration !== generation) this.files[fileIndex++] = row;
-          row.listingGeneration = generation;
-          yield;
+        for (const previous of kind === "file" ? this.files : subset.values()) {
+          const row = withGoToRanks(previous, pinned, recent);
+          if (row !== previous) subset.set(goToRowKey(row), row);
+          if (kind === "file") this.files[fileIndex++] = row;
+          if (complete[previous.sourceIndex] === previous) complete[previous.sourceIndex] = row;
+          if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
         }
-        for (let i = fileIndex; i < this.files.length; i++) { removedCandidates.push(this.files[i]); yield; }
-        this.files.length = fileIndex;
-        for (const row of removedCandidates) { if (row.listingGeneration !== generation) next.delete(row.path); yield; }
-        this.subsets.set("file", next);
-        changed = true;
-        yield* replace.call(this, "folder", mapEntries(snapshot.folders, path => ({
-          key: path, path, label: basenameOf(path), record: path, glyphId: "folder",
-        })));
       }
-      this.sources.listing = sources.listing;
-      this.verdictListing = snapshot;
-      changed ||= availabilityChanged;
+      for (let i = 0; i < this.orderedRows.length; i++) {
+        const row = complete[this.orderedRows[i].sourceIndex];
+        row.includedRevision = this.revision + 1;
+        metadata[i * 8 + 5] = row.pinnedRank;
+        metadata[i * 8 + 7] = recent.get(row.path) ?? -1;
+        ordered[i] = row;
+        if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
+      }
+      this.queryMetadata = metadata;
+      this.orderedRows = ordered;
+      this.completeRows = complete;
+      this.context = context;
+      this.sources = sources;
+      this.revision += 1;
+      this.matches = null;
+      return;
     }
-    if (sources.collections && sources.collections !== this.sources.collections) {
-      yield* replace.call(this, "collection", mapEntries(sources.collections, record => ({
-        key: record.path, path: record.path, label: basenameOf(record.path), record, glyphId: "table",
-      })));
-      this.sources.collections = sources.collections;
+    const index = this;
+    function* replace(kind: GoToKind, entries: Iterable<{
+      key: string; label: string; path: string; record: PreparedGoToRow["record"];
+      glyphId: PreparedGoToRow["glyphId"]; previous?: PreparedGoToRow;
+    } | null>, verdictsChanged = true): Generator<void> {
+      const previous = index.subsets.get(kind);
+      const next = kind === "file" ? previous ?? new Map<string, PreparedGoToRow>() : new Map<string, PreparedGoToRow>();
+      const generation = kind === "file" ? ++index.listingGeneration : 0;
+      const files: PreparedGoToRow[] = [];
+      const removed: PreparedGoToRow[] = [];
+      if (kind === "file") index.subsets.set(kind, next);
+      for (const entry of entries) {
+        if (!entry) { if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; continue; }
+        let row = kind === "file" ? entry.previous : previous?.get(entry.key);
+        const existing = row;
+        if (kind === "file" && row?.listingGeneration === generation) { if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; continue; }
+        const isNew = !row || row.path !== entry.path || row.label !== entry.label;
+        if (!row || row.path !== entry.path || row.label !== entry.label) {
+          const lowercasePath = entry.path.toLowerCase();
+          const lowercaseBasename = entry.label.toLowerCase();
+          const masks = characterMasks(lowercasePath + (kind === "app" ? lowercaseBasename : ""));
+          const boundaries = boundaryCharacters(lowercasePath);
+          const boundaryMasks = characterMasks(boundaries);
+          row = {
+            id: kind + ":" + entry.key, kind, label: entry.label, path: entry.path, lowercasePath, lowercaseBasename,
+            characterMask: masks[0], characterMaskHigh: masks[1],
+            boundaryMask: boundaryMasks[0], boundaryMaskHigh: boundaryMasks[1],
+            glyphId: entry.glyphId, record: entry.record, ended: false, visible: true,
+            pinnedRank: pinned.has(entry.path) ? 0 : 1, recentRank: recent.get(entry.path) ?? Number.MAX_SAFE_INTEGER,
+            sourceIndex: 0, includedRevision: -1, listingGeneration: 0,
+            target: kind === "version" || kind === "group"
+              ? { workspaceId: index.workspaceId, kind, id: entry.key }
+              : { workspaceId: index.workspaceId, kind, path: entry.path },
+          };
+          index.lastPreparationCount += 1;
+        }
+        if (row.glyphId !== entry.glyphId || !sameGoToRecord(kind, row.record, entry.record)) {
+          row = { ...row, record: entry.record, glyphId: entry.glyphId, includedRevision: -1 };
+        }
+        if (kind === "file" || kind === "folder" || kind === "collection" || kind === "app") {
+          if (isNew || verdictsChanged) {
+            if (sources.listing) {
+              index.lastVisibilityCheckCount += 1;
+              row = yield* applyGoToPathState(row, verdictListing!, work, visibilityForPath);
+            }
+            else if (row.visible) row = { ...row, visible: false, includedRevision: -1 };
+          }
+        }
+        if (row !== existing || kind !== "file") next.set(entry.key, row);
+        if (kind === "file") {
+          const old = index.files[files.length];
+          if (old && old.path !== row.path) removed.push(old);
+          row.listingGeneration = generation; files.push(row);
+        }
+        if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
+      }
+      if (kind === "file") {
+        for (let i = files.length; i < index.files.length; i++) { removed.push(index.files[i]); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
+        // Interrupted passes can add entries before publishing their file array.
+        for (const entry of force ? next.keys() : removed) {
+          if (typeof entry === "string") {
+            if (next.get(entry)?.listingGeneration !== generation) next.delete(entry);
+          } else if (entry.listingGeneration !== generation && next.get(entry.path)?.listingGeneration !== generation) next.delete(entry.path);
+          if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
+        }
+        index.files = files;
+      }
+      index.subsets.set(kind, next);
+      changed = true;
     }
-    if (sources.apps && sources.apps !== this.sources.apps) {
-      yield* replace.call(this, "app", mapEntries(sources.apps, record => ({
-        key: record.root, path: record.root, label: record.title, record, glyphId: "box",
-      })));
-      this.sources.apps = sources.apps;
+    const visibilityVerdictsChanged = forceVerdicts || !sameVisibilityVerdicts(verdictListing, priorVerdictListing);
+    if (sources.listing && (force || sources.listing !== this.sources.listing)) {
+      const snapshot = sources.listing;
+      if (force || snapshot.files !== this.sources.listing?.files || visibilityVerdictsChanged) yield* replace("file", (function* () {
+        const previous = index.subsets.get("file");
+        let entry: { key: string; path: string; label: string; record: GoToFile; glyphId: PreparedGoToRow["glyphId"]; previous?: PreparedGoToRow } | undefined;
+        for (const file of snapshot.files) {
+          const row = previous?.get(file.path);
+          const glyphId = row && (row.record as GoToFile).kind === file.kind ? row.glyphId :
+            file.kind === "database" ? FILE_KIND_RECORDS.database.glyphId : fileKindForPath(file.path).glyphId;
+          if (!entry) entry = { key: file.path, path: file.path, label: row?.label ?? basenameOf(file.path), record: file, glyphId, previous: row };
+          else {
+            entry.key = file.path; entry.path = file.path; entry.label = row?.label ?? basenameOf(file.path);
+            entry.record = file; entry.glyphId = glyphId; entry.previous = row;
+          }
+          yield entry;
+        }
+      })(), visibilityVerdictsChanged);
+      if (force || snapshot.folders !== this.sources.listing?.folders || visibilityVerdictsChanged) yield* replace("folder", (function* () {
+        for (const path of snapshot.folders) yield { key: path, path, label: basenameOf(path), record: path, glyphId: "folder" as const };
+      })(), visibilityVerdictsChanged);
+      changed = true;
     }
-    if (sources.versions && sources.versions !== this.sources.versions) {
-      yield* replace.call(this, "version", mapEntries(sources.versions, record => ({
-        key: record.id, path: record.name, label: record.name, record, glyphId: "layers",
-      })));
-      this.sources.versions = sources.versions;
+    if (sources.collections && (force || sources.collections !== this.sources.collections)) {
+      yield* replace("collection", (function* () {
+        for (const record of sources.collections!) yield { key: record.path, path: record.path, label: basenameOf(record.path), record, glyphId: "table" as const };
+      })(), visibilityVerdictsChanged);
     }
-    if (sources.groups && sources.groups !== this.sources.groups) {
-      yield* replace.call(this, "group", mapEntries(sources.groups, record => ({
-        key: record.id, path: record.name, label: record.name, record, glyphId: "messages-square",
-      })));
-      this.sources.groups = sources.groups;
+    if (sources.apps && (force || sources.apps !== this.sources.apps)) {
+      yield* replace("app", (function* () {
+        for (const record of sources.apps!) yield { key: record.root, path: record.root, label: record.title, record, glyphId: "box" as const };
+      })(), visibilityVerdictsChanged);
     }
-    const contextChanged = !sameStrings(context.pinned, this.context.pinned) || !sameStrings(context.recent, this.context.recent);
+    if (sources.versions && (force || sources.versions !== this.sources.versions)) {
+      yield* replace("version", (function* () {
+        for (const record of sources.versions!) yield { key: record.id, path: record.name, label: record.name, record, glyphId: "layers" as const };
+      })());
+    }
+    if (sources.groups && (force || sources.groups !== this.sources.groups)) {
+      yield* replace("group", (function* () {
+        // Yield even for excluded rows, so exclusions cannot create one long slice.
+        for (const record of sources.groups!) {
+          if (record.kind === "channel") yield { key: record.id, path: record.name, label: record.name, record, glyphId: "messages-square" as const };
+          else yield null;
+        }
+      })());
+    }
     if (!changed && !contextChanged) return;
-    this.context = context;
-    const pinned = contextChanged ? new Set(context.pinned) : null;
-    const recent = contextChanged ? new Map(context.recent.map((path, i) => [path, i])) : null;
     const rows: PreparedGoToRow[] = [];
-    for (const [kind, subset] of this.subsets) for (const row of kind === "file" ? this.files : subset.values()) {
-      if (pinned && recent) {
-        row.pinnedRank = pinned.has(row.path) ? 0 : 1;
-        row.recentRank = recent.get(row.path) ?? Number.MAX_SAFE_INTEGER;
+    const addedRows: PreparedGoToRow[] = [];
+    let previousKeptIndex = -1;
+    for (const [kind, subset] of this.subsets) {
+      let fileIndex = 0;
+      for (const previous of kind === "file" ? this.files : subset.values()) {
+        let row = previous;
+        if (contextChanged) row = withGoToRanks(row, pinned, recent);
+        if (visibilityVerdictsChanged && (kind === "folder" || kind === "collection" || kind === "app")) {
+          if (sources.listing) {
+            index.lastVisibilityCheckCount += 1;
+            row = yield* applyGoToPathState(row, verdictListing!, work, visibilityForPath);
+          }
+          else if (row.visible) row = { ...row, visible: false, includedRevision: -1 };
+        }
+        if (row !== previous) subset.set(goToRowKey(row), row);
+        if (kind === "file") this.files[fileIndex++] = row;
+        const pathBacked = kind === "file" || kind === "folder" || kind === "collection" || kind === "app";
+        const mounted = sources.listing?.visibility.status !== "ready" && sources.listing?.receivedRoots.some(root => root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/"));
+        const withheldHostPath = pathBacked && sources.listing?.visibility.status !== "ready" && !mounted;
+        if (row.visible && !withheldHostPath && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) {
+          if (forceVerdicts || row.includedRevision !== this.revision || row.sourceIndex < previousKeptIndex) {
+            addedRows.push(row);
+            row.includedRevision = -1;
+          } else previousKeptIndex = row.sourceIndex;
+          row.sourceIndex = rows.length;
+          rows.push(row);
+        }
+        if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
       }
-      if (verdictsChanged && (kind === "folder" || kind === "collection" || kind === "app")) {
-        if (listing) applyPathState(row, listing);
-        else row.visible = false;
-      }
-      // A Collection replaces its ordinary folder row.
-      const pathBacked = kind === "file" || kind === "folder" || kind === "collection" || kind === "app";
-      const withheld = pathBacked && this.sources.listing?.visibility.status !== "ready" &&
-        !this.sources.listing?.receivedRoots.some(root => root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/"));
-      if (row.visible && !withheld && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) rows.push(row);
+    }
+    // Sort only newly admitted rows, then merge them into the previous order.
+    // Bounded native sorts handle small runs; merge copies yield in chunks.
+    this.lastReorderedCount = addedRows.length;
+    let added = addedRows;
+    let buffer = new Array<PreparedGoToRow>(addedRows.length);
+    const sortRunSize = 32;
+    for (let left = 0; left < added.length; left += sortRunSize) {
+      const run = added.slice(left, left + sortRunSize).sort(compareGoToOrder);
+      for (let i = 0; i < run.length; i++) added[left + i] = run[i];
       yield;
     }
-    for (let i = 0; i < rows.length; i++) { rows[i].sourceIndex = i; yield; }
-    this.rows = rows;
+    for (let width = sortRunSize; width < added.length; width *= 2) {
+      for (let left = 0; left < added.length; left += width * 2) {
+        const middle = Math.min(left + width, added.length);
+        const right = Math.min(left + width * 2, added.length);
+        let a = left, b = middle;
+        for (let to = left; to < right; to++) {
+          const first = added[a], second = added[b];
+          if (a < middle && (b >= right || compareGoToOrder(first, second) <= 0)) buffer[to] = added[a++];
+          else buffer[to] = added[b++];
+          if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
+        }
+      }
+      [added, buffer] = [buffer, added];
+    }
+    const ordered: PreparedGoToRow[] = [];
+    let at = 0;
+    for (const row of forceVerdicts ? [] : this.orderedRows) {
+      if (rows[row.sourceIndex] === row && row.includedRevision === this.revision) {
+        while (at < added.length && compareGoToOrder(added[at], row) <= 0) {
+          ordered.push(added[at++]);
+          if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
+        }
+        ordered.push(row);
+      }
+      if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
+    }
+    while (at < added.length) { ordered.push(added[at++]); if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield; }
+    const metadata = new Int32Array(ordered.length * 8);
+    for (let i = 0; i < ordered.length; i++) {
+      const row = ordered[i];
+      const offset = i * 8;
+      metadata[offset] = row.characterMask;
+      metadata[offset + 1] = row.characterMaskHigh;
+      metadata[offset + 2] = row.boundaryMask;
+      metadata[offset + 3] = row.boundaryMaskHigh;
+      metadata[offset + 4] = row.lowercaseBasename.charCodeAt(0);
+      metadata[offset + 5] = row.pinnedRank;
+      metadata[offset + 6] = row.kind === "file" ? 0 : row.kind === "app" ? 3 : 1;
+      metadata[offset + 7] = recent.get(row.path) ?? -1;
+      row.includedRevision = this.revision + 1;
+      if (++work.operations % GO_TO_CHUNK_SIZE === 0) yield;
+    }
+    this.orderedRows = ordered;
+    this.queryMetadata = metadata;
+    this.sources = sources;
+    this.visibilityForPath = visibilityForPath;
+    if (verdictListing) this.verdictListing = verdictListing;
+    this.context = context;
+    this.interrupted = false;
+    this.completeRows = rows;
     this.revision += 1;
     this.matches = null;
   }
 
-  query(query: string, limit = 50): PreparedGoToRow[] {
-    if (this.preparation || this.queued) return [];
+  query(query: string, limit = 50, removed: ReadonlySet<string> = this.removed): PreparedGoToRow[] {
     const boundedLimit = Math.max(0, Math.floor(limit));
-    if (boundedLimit === 0) return [];
+    if (boundedLimit === 0 || this.withholding) { this.lastScanCount = 0; return []; }
     const q = query.toLowerCase();
-    const rows = this.rows;
+    const rows = this.orderedRows;
+    const metadata = this.queryMetadata;
+    const [mask, maskHigh] = characterMasks(q);
+    const fastSubsequence = !/[\uD800-\uDFFF]/.test(q);
+    const exactSingleCharacter = q.length === 1 && (/[a-z0-9]/.test(q) || "/-_. ".includes(q));
+    const firstCharacter = q.charCodeAt(0);
+    const [firstMask, firstMaskHigh] = characterMasks(q[0] ?? "");
+    const slash = q.includes("/");
     const previous = this.matches;
     const narrow = previous && previous.revision === this.revision && q.startsWith(previous.query);
     const indices = narrow ? previous.indices : new Int32Array(rows.length);
     const scanCount = narrow ? previous.count : rows.length;
     let count = 0;
-    const selected: ScoredQuickOpenPath<PreparedGoToRow>[] = [];
+    const buckets: PreparedGoToRow[][] = Array.from({ length: 16 }, () => []);
+    const recentBuckets: { row: PreparedGoToRow; rank: number }[][] = Array.from({ length: 16 }, () => []);
     const pathQuery = isGoToPathQuery(q);
     for (let at = 0; at < scanCount; at++) {
       const i = narrow ? indices[at] : at;
-      const row = rows[i];
-      let tier = quickOpenMatchTierLowercase(q, row.lowercasePath, row.lowercaseBasename);
-      if (row.kind === "app") {
+      const offset = i * 8;
+      if ((metadata[offset] & mask) !== mask || (metadata[offset + 1] & maskHigh) !== maskHigh) continue;
+      let tier: number | null;
+      if (exactSingleCharacter) {
+        tier = metadata[offset + 4] === firstCharacter ? TIER_BASENAME_PREFIX :
+          (metadata[offset + 2] & mask) === mask && (metadata[offset + 3] & maskHigh) === maskHigh ? TIER_WORD_BOUNDARY : TIER_SUBSTRING;
+      } else {
+        const row = rows[i];
+        tier = preparedGoToTier(q, row, metadata[offset + 4] === firstCharacter,
+          (metadata[offset + 2] & firstMask) === firstMask && (metadata[offset + 3] & firstMaskHigh) === firstMaskHigh, slash, fastSubsequence);
+      }
+      const flags = metadata[offset + 6];
+      if (flags & 2) {
+        const row = rows[i];
         const nameTier = quickOpenMatchTierLowercase(q, row.lowercaseBasename, row.lowercaseBasename);
         if (nameTier !== null) tier = tier === null ? nameTier : Math.min(tier, nameTier);
       }
       if (tier === null) continue;
       indices[count++] = i;
-      insertBounded(selected, row, tier, boundedLimit, pathQuery && row.kind !== "file" ? 1 : 0);
+      if (removed.size && removed.has(rows[i].id)) continue;
+      const priority = pathQuery && (flags & 1) ? 1 : 0;
+      const bucketIndex = (priority * 2 + metadata[offset + 5]) * 4 + tier;
+      const rank = metadata[offset + 7];
+      if (rank !== -1) recentBuckets[bucketIndex].push({ row: rows[i], rank });
+      else if (buckets[bucketIndex].length < boundedLimit) buckets[bucketIndex].push(rows[i]);
     }
     this.lastScanCount = scanCount;
     // Compact one current match set in place. All unseen matches survive narrowing.
     this.matches = { query: q, revision: this.revision, indices, count };
-    return selected.map(candidate => candidate.prepared);
+    const result: PreparedGoToRow[] = [];
+    for (let i = 0; i < buckets.length; i++) {
+      // Stable path order breaks equal recency ties, including names of different kinds.
+      recentBuckets[i].sort((a, b) => a.rank - b.rank);
+      for (const candidate of recentBuckets[i]) {
+        if (result.length === boundedLimit) return result;
+        result.push(candidate.row);
+      }
+      for (const row of buckets[i]) {
+        if (result.length === boundedLimit) return result;
+        result.push(row);
+      }
+    }
+    return result;
   }
 }
