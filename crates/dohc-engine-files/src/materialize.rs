@@ -724,6 +724,29 @@ fn probe_projection_target_in(
     }
 }
 
+/// A no-follow observation for publication recovery.
+pub enum PublicationTarget {
+    Absent,
+    Bytes(Vec<u8>),
+    /// A non-file target or a file larger than the bounded reader can retain.
+    Untracked,
+}
+
+/// Read a publication target without following links or changing disk.
+pub fn read_publication_target(
+    root: &Path,
+    rel: &str,
+) -> Result<PublicationTarget, MaterializeError> {
+    let root = std::fs::canonicalize(root).map_err(|error| MaterializeError::io(root, &error))?;
+    let target = resolve_target(&root, rel)?;
+    ensure_target_symlink_free(&root, &target)?;
+    match read_current_no_follow(&target)? {
+        CurrentTarget::Present(bytes) => Ok(PublicationTarget::Bytes(bytes)),
+        CurrentTarget::Absent => Ok(PublicationTarget::Absent),
+        CurrentTarget::Oversized => Ok(PublicationTarget::Untracked),
+    }
+}
+
 /// Hash a write precondition without applying capture's text or binary caps.
 pub fn write_precondition_sha256(
     root: &Path,
