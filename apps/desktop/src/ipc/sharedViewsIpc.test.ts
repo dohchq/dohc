@@ -1,3 +1,5 @@
+import { symlink } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WatcherStatusResult } from "@dohc/workspace-engine-client";
 import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
@@ -9,6 +11,9 @@ import { SharePinInvalidError } from "../workspaces/shareViewRecords";
 import { buildShareCode } from "../workspaces/syncCode";
 import { deferred } from "../testing/deferred";
 import { createSharedViewsIpcHarness as harness, credentials, info, outcome, ready } from "../testing/sharedViewsIpcHarness";
+import { canonicalWorkspaceRoot, createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
+import { assertActiveWorkspaceOperationLease } from "../workspaces/workspaceAssets";
+import { createTestScratch } from "../workspaces/testTemp";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -23,6 +28,28 @@ it.each(["background", "manual"] as const)("binds the %s shared-view refresh bef
   await expect(h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { ...payload, workspaceId: "other" }))
     .rejects.toThrow("window changed workspaces");
   services.forEach(service => expect(service).not.toHaveBeenCalled());
+});
+
+it("opens a share into a folder chosen through a link and refreshes it under the folder's real path", async () => {
+  const real = await createTestScratch("dohc-share-real-");
+  const chosen = join(await createTestScratch("dohc-share-link-"), "received");
+  await symlink(real, chosen, process.platform === "win32" ? "junction" : "dir");
+  const homeDir = await createTestScratch("dohc-share-home-");
+  const h = await harness({ rootPath: await createTestScratch("dohc-share-existing-"), canonicalizeRoot: canonicalWorkspaceRoot });
+  h.roots.approveRoot(chosen);
+  h.createFolder.mockImplementation(input => createWorkspaceFolder({ ...input, homeDir, kind: "personal" }));
+  // The real share files refuse a lease taken on another spelling of the root.
+  h.reconcile.mockImplementation(async lease => {
+    assertActiveWorkspaceOperationLease(canonicalWorkspaceRoot(real), lease);
+    return { kind: "refresh", outcome };
+  });
+
+  await expect(h.invoke(sharedViewAccessOperations.openSharedView.channel, { ...h.openPayload, rootPath: chosen }))
+    .resolves.toBeTruthy();
+
+  const opened = [...h.registry.values()].filter(entry => entry.workspaceId !== h.workspace.workspaceId);
+  expect(opened.map(entry => entry.rootPath)).toEqual([canonicalWorkspaceRoot(real)]);
+  expect(h.reconcile).toHaveBeenCalledOnce();
 });
 
 it.each(["accept", "refresh"])("%s saves only a nonempty relay owner id", async operation => {

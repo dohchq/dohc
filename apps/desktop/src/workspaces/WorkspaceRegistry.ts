@@ -1,5 +1,4 @@
 import { app } from "electron";
-import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
@@ -12,6 +11,7 @@ import {
   type ShareMountRecord,
   type ShareViewIdentity,
 } from "./registryStore";
+import { canonicalWorkspaceRoot } from "./createWorkspaceFolder";
 import { storedShareMounts } from "./shareViewFilesTarget";
 import { recordReceivedShare, recordSynced } from "./syncHistory";
 
@@ -49,20 +49,22 @@ export function listWorkspaces(): RegistryEntry[] {
   return store().list();
 }
 
+// Stores the root by its real path, so a folder reached through a link has
+// the one root every workspace operation receives.
 export function registerWorkspace(workspace: RegistryEntry): void {
-  const canonicalRoot = realpathSync.native(workspace.rootPath);
+  const rootPath = canonicalWorkspaceRoot(workspace.rootPath);
   for (const existing of store().list()) {
-    let existingCanonicalRoot: string;
+    let existingRoot: string;
     try {
-      existingCanonicalRoot = realpathSync.native(existing.rootPath);
+      existingRoot = canonicalWorkspaceRoot(existing.rootPath);
     } catch {
       continue;
     }
-    if (existingCanonicalRoot === canonicalRoot) {
+    if (existingRoot === rootPath) {
       throw new Error(`Folder is already attached: ${existing.rootPath}`);
     }
   }
-  store().register(workspace);
+  store().register({ ...workspace, rootPath });
 }
 
 export function findWorkspace(workspaceId: string): RegistryEntry | null {

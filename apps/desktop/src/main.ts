@@ -227,6 +227,7 @@ import {
   titleBarOverlayOptions,
 } from "./window/createMainWindow";
 import {
+  canonicalWorkspaceRoot,
   createWorkspaceFolder,
   type CreatedWorkspace,
 } from "./workspaces/createWorkspaceFolder";
@@ -2026,8 +2027,9 @@ const forgetWorkspace = createWorkspaceForget({
 });
 
 const createJoinedWorkspace = createJoinedWorkspaceRunner({
+  canonicalizeRoot: canonicalWorkspaceRoot,
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
-  createFolder: createWorkspaceFolder,
+  createFolder: (input) => createWorkspaceFolder({ ...input, homeDir: effectiveHome() }),
   register: registerReservedPhysicalWorkspace,
   remove: async (binding,cleanup)=>{await removePhysicalWorkspace(binding,cleanup);},
   release: (reservation, cleanup) =>
@@ -5742,7 +5744,7 @@ const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
     }, folder);
   },
   register: async (rootPath) => {
-    const created = await createWorkspaceFolder({ rootPath, kind: "personal" });
+    const created = await createWorkspaceFolder({ rootPath, homeDir: effectiveHome(), kind: "personal" });
     const workspace = WorkspaceSummary.parse(created);
     registerPhysicalWorkspace(created);
     return workspace;

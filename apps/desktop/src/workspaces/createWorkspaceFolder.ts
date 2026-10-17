@@ -3,20 +3,32 @@ import {
   ReservedWorkspaceIdError,
   createWorkspaceManifest,
   defaultWorkspaceMode,
+  normalizeAbsolutePath,
   validateAttachedFolder,
+  validateWorkspaceRootChoice,
   type WorkspaceKind,
 } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { recordNeverSynced, recordSynced } from "./syncHistory";
 
 export interface CreatedWorkspace {
   workspaceId: string;
+  // Always canonicalWorkspaceRoot's spelling.
   rootPath: string;
   kind: WorkspaceKind;
   mode: ReturnType<typeof defaultWorkspaceMode>;
+}
+
+// A workspace folder's one spelling: its real path after every link, in the
+// app's forward-slash form. The registry holds only this spelling, so the root
+// it lists and the root a workspace operation receives are the same string.
+// Throws when the folder does not exist.
+export function canonicalWorkspaceRoot(rootPath: string): string {
+  return normalizeAbsolutePath(realpathSync.native(rootPath));
 }
 
 // The mount code creates this on first use; it is exported so every path
@@ -80,6 +92,8 @@ async function inspectManifest(metadataDir: string): Promise<ManifestState> {
 
 export async function createWorkspaceFolder(input: {
   rootPath: string;
+  // The home folder the root must not resolve to.
+  homeDir: string;
   kind: Extract<WorkspaceKind, "personal" | "shared">;
   // Join flow (0P-C): a fresh folder adopting a synced workspace's identity
   // gets the sync id instead of a random one, so the local engine store and
@@ -94,14 +108,31 @@ export async function createWorkspaceFolder(input: {
   }
 
   await mkdir(input.rootPath, { recursive: true });
-  const metadataDir = await resolveWorkspaceMetadataDir(input.rootPath);
+  // Judge the folder a link leads to, not the link: a link to the home folder
+  // or a disk is refused like the folder itself. Everything below writes and
+  // registers this same real path.
+  const rootPath = canonicalWorkspaceRoot(input.rootPath);
+  let home = input.homeDir;
+  try {
+    home = canonicalWorkspaceRoot(home);
+  } catch {
+    // A home folder that does not exist is no folder's real path.
+  }
+  const rootCheck = validateWorkspaceRootChoice(rootPath, home, process.platform);
+  if (!rootCheck.ok) throw new Error(rootCheck.reason);
+  const metadataDir = await resolveWorkspaceMetadataDir(rootPath);
+  // The metadata resolver reads the real path again. A different answer means
+  // a folder on the path became a link after the check above.
+  if (normalizeAbsolutePath(dirname(metadataDir)) !== rootPath) {
+    throw new Error("The folder changed while dohc was opening it. Open it again.");
+  }
   const state = await inspectManifest(metadataDir);
   // A folder that is already a dohc workspace keeps its identity — sync and
   // history hang off workspaceId, so overwriting the manifest severs them.
   if (state.kind === "valid") {
     return {
       workspaceId: state.workspaceId,
-      rootPath: input.rootPath,
+      rootPath,
       kind: state.workspaceKind === "cloud-only" ? input.kind : state.workspaceKind,
       mode: state.mode,
     };
@@ -121,11 +152,11 @@ export async function createWorkspaceFolder(input: {
   );
   // A folder that had no manifest was never a dohc workspace. A join names
   // the synced workspace's id, and its folder records that it synced.
-  if (input.workspaceId === undefined) await recordNeverSynced(input.rootPath);
-  else await recordSynced(input.rootPath);
+  if (input.workspaceId === undefined) await recordNeverSynced(rootPath);
+  else await recordSynced(rootPath);
   return {
     workspaceId: manifest.workspaceId,
-    rootPath: input.rootPath,
+    rootPath,
     kind: input.kind,
     mode: manifest.mode,
   };

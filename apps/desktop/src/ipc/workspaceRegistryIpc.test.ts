@@ -23,8 +23,9 @@ async function registryHarness() {
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const summaries: WorkspaceSummary[] = [];
   const steps: string[] = [];
-  const createFolder = vi.fn(async (input: { rootPath: string; kind: "personal" | "shared" }) => {
+  const createFolder = vi.fn(async ({ homeDir, ...input }: { rootPath: string; homeDir: string; kind: "personal" | "shared" }) => {
     steps.push("create");
+    expect(homeDir).toBe(home);
     return { workspaceId: "workspace", ...input, mode: defaultWorkspaceMode(input.kind) };
   });
   const register = vi.fn((summary: WorkspaceSummary) => { steps.push("register"); summaries.push(summary); });

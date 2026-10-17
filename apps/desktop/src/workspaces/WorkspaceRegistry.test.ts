@@ -1,6 +1,7 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { canonicalWorkspaceRoot } from "./createWorkspaceFolder";
 import { mergeShareSkippedOps, type RegistryEntry } from "./registryStore";
 import { endJoinedChannel, mergeJoinedChannel } from "./sharedChannels";
 import { updateShareMountRecords, withoutShareMountRecords } from "./shareMounts";
@@ -136,5 +137,25 @@ describe("changes that wait on the folder record", () => {
       { ...mount("a"), ended: true, skippedOps: { ...skippedOps, acknowledgedGeneration: skippedOps.generation } },
       ended(mount("b")),
     ]);
+  });
+});
+
+describe("a folder reached through a link", () => {
+  it("is stored by its real path and refused again under any spelling", async () => {
+    const real = await createTestScratch("dohc-registry-real-");
+    const links = await createTestScratch("dohc-registry-links-");
+    const link = join(links, "linked");
+    const otherLink = join(links, "linked-again");
+    for (const path of [link, otherLink]) await symlink(real, path, process.platform === "win32" ? "junction" : "dir");
+    const entry = (workspaceId: string, rootPath: string): RegistryEntry =>
+      ({ workspaceId, rootPath, kind: "personal", mode: "local-first" });
+
+    registerWorkspace(entry("w-linked", link));
+
+    expect(findWorkspace("w-linked")?.rootPath).toBe(canonicalWorkspaceRoot(real));
+    for (const [workspaceId, rootPath] of [["w-real", real], ["w-again", otherLink]] as const) {
+      expect(() => registerWorkspace(entry(workspaceId, rootPath))).toThrow("Folder is already attached");
+      expect(findWorkspace(workspaceId)).toBeNull();
+    }
   });
 });

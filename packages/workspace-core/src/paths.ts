@@ -67,23 +67,26 @@ type RootChoiceValidation =
   | { ok: false; reason: string };
 
 // Registry policy: a workspace root must be a real folder choice — never the
-// filesystem root or the home directory itself, which would hand workspace
-// file operations the user's entire disk or home. Callers must use the
-// returned normalized path so registry equality checks are canonical.
+// filesystem root, a disk, or the home directory itself, which would hand
+// workspace file operations the user's entire disk or home. Callers must use
+// the returned normalized path so registry equality checks are canonical.
 export function validateWorkspaceRootChoice(
   rootPath: string,
   homeDir: string,
+  platform: string,
 ): RootChoiceValidation {
   const attached = validateAttachedFolder(rootPath);
   if (!attached.ok) return attached;
   const normalized = normalizeAbsolutePath(rootPath);
   const home = normalizeAbsolutePath(homeDir);
-  // Filesystem root, a drive root (C:), or a UNC server/share root (//server,
-  // //server/share) — never a workspace.
+  // Filesystem root, a drive root (C:), a UNC server/share root (//server,
+  // //server/share), or macOS's /Volumes and the disks mounted in it — never
+  // a workspace.
   if (
     normalized === "/" ||
     /^[A-Za-z]:$/.test(normalized) ||
-    /^\/\/[^/]*(\/[^/]*)?$/.test(normalized)
+    /^\/\/[^/]*(\/[^/]*)?$/.test(normalized) ||
+    (platform === "darwin" && /^\/volumes(\/[^/]+)?$/i.test(normalized))
   ) {
     return { ok: false, reason: "workspace root cannot be the filesystem root" };
   }

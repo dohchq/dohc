@@ -13,7 +13,7 @@ import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
 import { createShareRosterStore } from "./shareRosterStore";
 import type { ShareRoster } from "../automations/shareRoster";
 import type { RosterListing } from "@dohc/automation-executor/roster-listing";
-import type { CreatedWorkspace } from "./createWorkspaceFolder";
+import { canonicalWorkspaceRoot, type CreatedWorkspace } from "./createWorkspaceFolder";
 import type { ConfirmedShareRemoval } from "./recipientShareReconciliation";
 import type { ShareUnconfirmedChanges, ShareViewSelector } from "./shareViewInfo";
 
@@ -385,6 +385,16 @@ interface RegistryFile {
   workspaces: RegistryEntry[];
 }
 
+// An entry saved through a link moves to its folder's real path, the spelling
+// registration stores. A folder that is gone keeps its saved path.
+function withRealRoot(entry: RegistryEntry): RegistryEntry {
+  try {
+    return { ...entry, rootPath: canonicalWorkspaceRoot(entry.rootPath) };
+  } catch {
+    return entry;
+  }
+}
+
 export function createRegistryStore(registryFile: string) {
   // The process exclusively owns this file (single-instance lock), so the
   // parsed registry is cached after first read and refreshed on write.
@@ -439,7 +449,7 @@ export function createRegistryStore(registryFile: string) {
     if (!Array.isArray(obj.workspaces)) {
       throw new Error(`Workspace registry "workspaces" is not an array (${registryFile}).`);
     }
-    cache = { version: 1, workspaces: (obj.workspaces as RegistryEntry[]).map(withRoster) };
+    cache = { version: 1, workspaces: (obj.workspaces as RegistryEntry[]).map((entry) => withRoster(withRealRoot(entry))) };
     return cache;
   }
 
