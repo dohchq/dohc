@@ -9,7 +9,7 @@ const Metadata = z.object({ formatVersion: z.literal(1), version: z.number().int
 
 export function createShareRosterStore(directory: string) {
   const file = (entry: RegistryEntry) => join(directory, `${observationKey([
-    entry.workspaceId, entry.remote?.ownerUserId ?? "", entry.remote?.serverUrl ?? "",
+    entry.workspaceId, (entry.remote ?? entry.pausedRemote)?.ownerUserId ?? "", (entry.remote ?? entry.pausedRemote)?.serverUrl ?? "",
   ])}.json`);
   const cache = new Map<string, ShareRoster | undefined>();
   return {

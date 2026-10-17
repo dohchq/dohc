@@ -277,6 +277,7 @@ function historyPolicyUnreadable(refusal: HistoryPolicyRefusal) {
 }
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
+  stopSync?(author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<CliResultByVerb["stopSync"]>;
   shareCopy?(input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   access?: {
     object(input: import("zod").infer<typeof import("@dohc/workspace-contracts/access").ObjectAccessInput>): Promise<import("@dohc/workspace-contracts/access").AccessAnswer>;
@@ -2292,6 +2293,11 @@ async function dispatchWorkspace(
     throw new CliCommandError("--choose needs --resolve <message>");
   }
   switch (request.verb) {
+    case "stopSync":
+      if (context.readOnly || !context.stopSync) throw new CliCommandError("Open the owning workspace to stop its sync.");
+      return context.stopSync(writeActor(request.args.actor, context, options) === "agent"
+        ? { kind: "agent", agentId: claimedAgentName(request.args.agent, context, options) ?? UNNAMED_AGENT_ID, onBehalfOf: options.localPersonId(), depth: options.agentRunDepth(context.workspaceId) }
+        : undefined);
     case "shareCopy":
       if (context.readOnly || !context.shareCopy) throw new CliCommandError("Share copy details require the owning workspace.");
       return context.shareCopy({ shareId: request.args.shareId, grantId: request.args.grantId });

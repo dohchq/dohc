@@ -81,6 +81,8 @@ function buildCliRequest(
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId, ...(command.cursor ? { cursor: command.cursor } : {}) } };
     case "historyUndo":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId } };
+    case "stopSync":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, ...(command.agent ? { agent: command.agent } : {}) } };
     case "shareCopy":
       return { protocolVersion: common.protocolVersion, verb: command.verb, args: { cwd: common.cwd, actor: common.actor, shareId: command.shareId, grantId: command.grantId } };
     case "accountDeletePreview":

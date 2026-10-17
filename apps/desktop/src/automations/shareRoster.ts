@@ -59,23 +59,24 @@ export function reachRosterFor(input: {
 }): ReachRoster {
   const { entry } = input;
   if (entry.shareView) return { kind: "shared-view" };
+  const remote = entry.remote ?? entry.pausedRemote;
   // A workspace that synced keeps its grants on the relay even after it is
   // forgotten and attached again, which drops its server connection from the
   // registry. With no connection dohc cannot list them, so who can edit it
   // is unknown until it syncs again. A record dohc cannot read may say it
   // synced, so it counts the same. Only a folder with no record, as one made
   // before dohc kept it, or one that says it never synced, is its owner's.
-  if (!entry.remote && (input.history === "synced" || input.history === "unknown")) {
+  if (!remote && (input.history === "synced" || input.history === "unknown")) {
     return { kind: "unknown", problem: { kind: "unchecked", next: SYNC_AGAIN } };
   }
   // Only this computer's person can edit a workspace that does not sync, even
   // with no account signed in.
-  if (!entry.remote) {
+  if (!remote) {
     const local = input.localPersonId === null ? {} : { localPersonId: input.localPersonId };
     return { kind: "owner", ownerUserId: input.localUserId, grants: [], ...local };
   }
   // The registry is a file on disk. A copy it cannot read is unchecked, not empty.
-  return ownerRoster(entry.remote.ownerUserId, input.latest ?? entry.shareRoster, input.next);
+  return ownerRoster(remote.ownerUserId, input.latest ?? entry.shareRoster, input.next);
 }
 
 interface RosterState {
@@ -203,7 +204,8 @@ export function createShareRosters(dependencies: {
 
   async function listOnce(workspaceId: string, state: RosterState): Promise<void> {
     const workspace = dependencies.findWorkspace(workspaceId);
-    if (!workspace?.remote || workspace.shareView) return;
+    const remote = workspace?.remote ?? workspace?.pausedRemote;
+    if (!workspace || !remote || workspace.shareView) return;
     state.lastAttemptMs = nowMs();
     const listedAtMs = wallNowMs();
     const capturedContext = context(workspaceId);
@@ -220,9 +222,10 @@ export function createShareRosters(dependencies: {
       answer = UNUSABLE_ROSTER;
     }
     const current = dependencies.findWorkspace(workspaceId);
+    const currentRemote = current?.remote ?? current?.pausedRemote;
     if (state.retired || context(workspaceId) !== capturedContext || !current ||
-        current.rootPath !== workspace.rootPath || current.remote?.ownerUserId !== workspace.remote.ownerUserId ||
-        current.remote?.serverUrl !== workspace.remote.serverUrl) return;
+        current.rootPath !== workspace.rootPath || currentRemote?.ownerUserId !== remote.ownerUserId ||
+        currentRemote?.serverUrl !== remote.serverUrl) return;
     if (answer.kind === "unanswered") {
       state.invalidated = true;
       state.noAnswer = { next: answer.next, partial: (state.noAnswer?.partial ?? false) || answer.partial };
@@ -295,19 +298,19 @@ export function createShareRosters(dependencies: {
     if (state.unsaved && state.unsaved.context !== context(workspaceId)) state.unsaved = null;
     if (!entry) return { kind: "unknown", problem: { kind: "unchecked", next: "Open this workspace, then try again." } };
     const noAnswer = state.noAnswer;
-    if (entry.remote && !entry.shareView && (overlapped || stale(workspaceId, state))) {
-      const next = state.markFailed
-        ? "Check that your disk has free space, then try again."
-        : noAnswer?.next ?? "Try again in a moment.";
-      return { kind: "unknown", problem: { kind: "unchecked", next } };
+    const remote = entry.remote ?? entry.pausedRemote;
+    const next = noAnswer?.next ?? (entry.pausedRemote ? "Turn sync on in Settings → Sync and sharing, then try again." : "Try again in a moment.");
+    if (remote && !entry.shareView && (overlapped || stale(workspaceId, state))) {
+      return { kind: "unknown", problem: { kind: "unchecked", next: state.markFailed
+        ? "Check that your disk has free space, then try again." : next } };
     }
     return reachRosterFor({
       entry,
-      localUserId: entry.remote ? null : await dependencies.localUserId(),
-      localPersonId: entry.remote ? null : await dependencies.localPersonId(entry),
-      history: entry.remote ? null : await dependencies.syncHistory(entry),
+      localUserId: remote ? null : await dependencies.localUserId(),
+      localPersonId: remote ? null : await dependencies.localPersonId(entry),
+      history: remote ? null : await dependencies.syncHistory(entry),
       latest: state.unsaved?.listing ?? null,
-      next: noAnswer?.next ?? "Try again in a moment.",
+      next,
     });
   }
 

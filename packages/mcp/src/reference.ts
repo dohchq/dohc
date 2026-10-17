@@ -110,6 +110,7 @@ export const HISTORY_RESULTS: Record<string, CliSocketVerb> = {
   show: "moment",
 };
 
+export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
 const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy" };
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {
@@ -173,7 +174,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
   dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
   dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
-  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl? }`. `scope` is `\"local\"` or `\"cloud\"`.",
+  dohc_stop_workspace_sync: { cli: "stopSync" },
+  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl?, syncPause? }`. `scope` is `\"local\"` or `\"cloud\"`.",
   dohc_list_changes: { cli: "moments" },
   dohc_read_change: { cli: "moment" },
   dohc_read_operation: { cli: "historyOperation" },
@@ -443,14 +445,15 @@ function verbReturns(command: string, name: string): string {
       : command === "document"
         ? DOCUMENT_RESULTS[name]
         : command === "automation" ? AUTOMATION_RESULTS[name]
-          : command === "access" ? ACCESS_RESULTS[name] : command === "share" ? SHARE_RESULTS[name]
-            : command === "account" ? ACCOUNT_RESULTS[name] : undefined;
+          : command === "access" ? ACCESS_RESULTS[name]
+            : command === "sync" ? SYNC_RESULTS[name] : command === "share" ? SHARE_RESULTS[name]
+              : command === "account" ? ACCOUNT_RESULTS[name] : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb)) throw new Error(`dohc ${command} ${name} has no result schema.`);
     const result = jsonSchema(cliResultSchemas[socketVerb as CliSocketVerb], "output");
-    // A history, document, automation, or account refusal exits with its reason instead of printing JSON.
+    // Refusals exit with their reason instead of printing JSON.
     const printed = (branches(result) ?? [result])
-      .filter((branch) => !["history", "document", "automation", "account"].includes(command) || branch.properties?.ok?.const !== false);
+      .filter((branch) => !["history", "document", "automation", "sync", "account"].includes(command) || branch.properties?.ok?.const !== false);
     const shapes = printed.map((branch) => shapeText(branch).replace(/^\{ /, "{ schemaVersion, "));
     const socketNote = command === "access" ? ` Uses socket verb \`${socketVerb}\`.` : "";
     return `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.${socketNote}`;
@@ -490,6 +493,7 @@ function commandSection(name: string, command: CliCommandSpec): string {
   if (name === "history") checkCovered(name, Object.keys(command.verbs), Object.keys(HISTORY_RESULTS));
   if (name === "document") checkCovered(name, Object.keys(command.verbs), Object.keys(DOCUMENT_RESULTS));
   if (name === "automation") checkCovered(name, Object.keys(command.verbs), Object.keys(AUTOMATION_RESULTS));
+  if (name === "sync") checkCovered(name, Object.keys(command.verbs), Object.keys(SYNC_RESULTS));
   if (name === "share") checkCovered(name, Object.keys(command.verbs), Object.keys(SHARE_RESULTS));
   if (name === "access") checkCovered(name, Object.keys(command.verbs), Object.keys(ACCESS_RESULTS));
   if (name === "account") checkCovered(name, Object.keys(command.verbs), Object.keys(ACCOUNT_RESULTS));
@@ -500,6 +504,7 @@ function commandSection(name: string, command: CliCommandSpec): string {
     command.summary,
     command.notes.join(" "),
     name === "access" ? ACCESS_NOTES : "",
+    name === "sync" ? "The pause result records who paused and when. A person author has kind person, personId, and self. Show you when self is true. Person pause labels do not use profile names. An agent author has kind agent, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority." : "",
     ...verbs.map(([verbName, verb]) => verbSection(name, verbName, verb)),
   ].filter(Boolean).join("\n\n");
 }

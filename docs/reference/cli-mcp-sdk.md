@@ -78,7 +78,17 @@ Report whether this workspace is local-only or cloud-synced.
 
 No arguments.
 
-Returns `{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl? }`. `scope` is `"local"` or `"cloud"`.
+Returns `{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`.
+
+### `dohc_stop_workspace_sync`
+
+Stop this computer's sync for the owning workspace after saving live document edits. Keep local work, shares, history, and protected-file keys. Groups you joined and received-share mounts keep syncing. Record who paused and when. Resume in Settings.
+
+Changes the workspace, so a shared view does not offer it.
+
+No arguments.
+
+Returns `{ ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, author } } | { ok: false, reason }`.
 
 ### `dohc_read_operation`
 
@@ -516,6 +526,26 @@ Two environment variables also change what the CLI does:
 
 - `DOHC_RUN_ID` links the messages that `post` and `reply` write to a local agent run.
 - `DOHC_STATE_DIR` names the app's state folder when the CLI cannot find the running app in its default place.
+
+### `dohc sync`
+
+Stop syncing this workspace on this computer.
+
+Local files, documents, records, and history stay here. Shares and protected-file keys are retained. Groups you joined and received-share mounts keep syncing. Turn sync on in Settings to resume the same workspace.
+
+The pause result records who paused and when. A person author has kind person, personId, and self. Show you when self is true. Person pause labels do not use profile names. An agent author has kind agent, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority.
+
+#### `dohc sync stop`
+
+```sh
+dohc sync stop [options]
+```
+
+Stop this computer's sync after saving live document edits.
+
+- `--agent <name>`: Record this agent name when --as-agent is set.
+
+With `--json`, prints `{ schemaVersion, ok: true, workspaceId, workspaceSynced: false, syncPause?: { atMs, author } }`.
 
 ### `dohc access`
 

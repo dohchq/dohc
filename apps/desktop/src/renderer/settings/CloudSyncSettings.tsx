@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Sparkles } from "lucide-react";
 import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { buildSyncCode } from "../../workspaces/syncCode";
 import { bridge } from "../bridge";
-import { SYNC_PAUSED_FOR_ACCOUNT } from "../cloudSyncWords";
+import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
 import type { ConnectionErrorReport } from "../shell/connectionNotices";
+import { formatChatTime } from "../time";
 import { PrimaryButton, SecondaryButton } from "../ui/controls";
 import { CopyField, type CopySecret } from "../ui/CopyButton";
 import { SkeletonRows } from "../ui/SkeletonRows";
@@ -14,6 +16,14 @@ import { SettingRow, SwitchControl } from "./SettingRow";
 
 const SYNC_CODE_SECRET: CopySecret = { what: "the workspace code", again: "Copy it again from Settings." };
 const MIN_PASSPHRASE_LENGTH = 8;
+// What turning sync off leaves alone. Groups and received shares sync on
+// their own, so a pause here does not reach them.
+export const SYNC_OFF_KEEPS = "Turning this off keeps your work, history, and shares; groups you joined keep syncing.";
+export const SYNC_OFF_KEEPS_WITH_RECEIVED =
+  "Turning this off keeps your work, history, and shares; groups you joined and files shared with you keep syncing.";
+// Why the switch cannot turn on while nobody is signed in. Connect server sits
+// in the row above.
+export const SYNC_ON_NEEDS_SERVER = "Connect your server to turn sync on.";
 
 // The shell's own read of this workspace's server connection, so opening
 // Settings reads nothing new.
@@ -31,49 +41,68 @@ export type CloudSettings = {
   // A failure that reaches every workspace, such as Disconnect's. It goes to
   // whichever workspace is open when it arrives, with no workspace guard.
   onAccountError: (error: ConnectionErrorReport) => void;
+  // Whether shared-with-me holds a received share, which keeps syncing while
+  // this workspace's sync is off.
+  hasReceivedShares?: boolean;
   // Opens the deletion review. The shell owns it, so it outlives this page
   // and the account row.
   onDeleteAccount: (account: { email: string; server: string }) => void;
 };
 
+type SyncPause = NonNullable<CloudStatusResult["syncPause"]>;
+
 type WorkspaceSync = Required<Pick<
   CloudStatusResult,
   "workspaceSynced" | "workspaceSyncConnected" | "workspaceSecretState"
->>;
+>> & { syncPause?: SyncPause };
 
 type PassphrasePurpose = "protect" | "unlock";
 
-// Settings' Sync and sharing page: the signed-in account with Disconnect, and
-// whether this workspace syncs. Connecting a server is a flow, not a setting,
-// so a page with nobody signed in offers the button that opens it.
+// Settings' Sync and sharing page: the server account and this workspace's
+// local sync setting. Pausing needs no account.
 export function CloudSyncSettings(props: {
   workspaceId: string;
   sharedView?: boolean;
   cloud: CloudSettings;
 }) {
   const { status } = props.cloud;
-  // A successful enable shows at once, until the shell's next read replaces it.
-  const [enabled, setEnabled] = useState<WorkspaceSync | null>(null);
-  const [syncBusy, setSyncBusy] = useState(false);
+  // A successful enable or stop shows at once, until the shell's next read
+  // replaces it.
+  const [changed, setChanged] = useState<WorkspaceSync | null>(null);
+  const [syncBusy, setSyncBusy] = useState<"enable" | "stop" | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [passphrasePurpose, setPassphrasePurpose] = useState<PassphrasePurpose | null>(null);
   const [passphrase, setPassphrase] = useState("");
   // Bumped on a workspace switch and when the page closes, so an answer that
   // arrives after either paints nothing here.
   const requests = useRequestSequence([props.workspaceId]);
+  // Protect and Unlock turn sync on, which needs an account, so signing out
+  // also drops an enable still waiting: its answer must not reopen the form.
+  // Counted apart from requests, so stops and enables still supersede each other.
+  const signedOut = status?.connected === false;
+  const signOuts = useRef(0);
 
   useEffect(() => {
-    setSyncBusy(false);
+    setSyncBusy(null);
     setSyncError(null);
     setPassphrasePurpose(null);
     setPassphrase("");
   }, [props.workspaceId]);
-  useEffect(() => setEnabled(null), [status, props.workspaceId]);
+  useEffect(() => setChanged(null), [status, props.workspaceId]);
+  useEffect(() => {
+    if (!signedOut) return;
+    signOuts.current += 1;
+    setSyncBusy((busy) => (busy === "enable" ? null : busy));
+    setSyncError(null);
+    setPassphrasePurpose(null);
+    setPassphrase("");
+  }, [signedOut]);
 
-  const sync: WorkspaceSync = enabled ?? {
+  const sync: WorkspaceSync = changed ?? {
     workspaceSynced: status?.workspaceSynced ?? false,
     workspaceSyncConnected: status?.workspaceSyncConnected ?? false,
     workspaceSecretState: status?.workspaceSecretState ?? "none",
+    ...(status?.syncPause ? { syncPause: status.syncPause } : {}),
   };
   const relayUrl = status?.relayUrl?.trim() ?? "";
   // The join handle: one copyable line carrying the workspace id and its
@@ -89,13 +118,14 @@ export function CloudSyncSettings(props: {
 
   async function enableSync() {
     const request = requests.next();
+    const signOutsAtStart = signOuts.current;
     // The callbacks of the workspace this attempt is for. The page can close
     // before main answers, and the result still matters: the shell's status
     // and its notices hear it, for this workspace only.
     const cloud = props.cloud;
-    const here = () => requests.isCurrent(request);
+    const here = () => requests.isCurrent(request) && signOuts.current === signOutsAtStart;
     const purpose = passphrasePurpose;
-    setSyncBusy(true);
+    setSyncBusy("enable");
     setSyncError(null);
     try {
       await bridge().cloudEnableSync({
@@ -103,7 +133,7 @@ export function CloudSyncSettings(props: {
         ...(purpose ? { passphrase } : {}),
       });
       if (here()) {
-        setEnabled({
+        setChanged({
           workspaceSynced: true,
           workspaceSyncConnected: true,
           workspaceSecretState: purpose === "unlock" ? "protected-key-present" : sync.workspaceSecretState,
@@ -138,7 +168,46 @@ export function CloudSyncSettings(props: {
         },
       });
     } finally {
-      if (here()) setSyncBusy(false);
+      if (here()) setSyncBusy(null);
+    }
+  }
+
+  // A local pause: main keeps the workspace's relay claim, shares, and history,
+  // and turning sync on again resumes it.
+  async function stopSync() {
+    const request = requests.next();
+    const cloud = props.cloud;
+    const workspaceId = props.workspaceId;
+    const here = () => requests.isCurrent(request);
+    const secretState = sync.workspaceSecretState;
+    setSyncBusy("stop");
+    setSyncError(null);
+    try {
+      const result = await bridge().cloudStopSync();
+      if (here() && result.workspaceId === workspaceId) {
+        setChanged({
+          workspaceSynced: false,
+          workspaceSyncConnected: false,
+          workspaceSecretState: secretState,
+          ...(result.syncPause ? { syncPause: result.syncPause } : {}),
+        });
+        setPassphrasePurpose(null);
+        setPassphrase("");
+      }
+      cloud.onChanged();
+    } catch (cause) {
+      cloud.onError({
+        message: ipcErrorMessage(cause, "dohc could not pause sync for this workspace."),
+        cause,
+        serverUrl: null,
+        retry: () => {
+          if (!here()) return false;
+          void stopSync();
+          return true;
+        },
+      });
+    } finally {
+      if (here()) setSyncBusy(null);
     }
   }
 
@@ -156,30 +225,35 @@ export function CloudSyncSettings(props: {
     );
   }
 
-  if (!status.connected) {
-    return (
-      <SettingRow title="Server" testId="settings-row-server">
-        <PrimaryButton size="compact" data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
-          Connect server
-        </PrimaryButton>
-      </SettingRow>
-    );
-  }
+  const connectRow = (
+    <SettingRow title="Server" testId="settings-row-server">
+      <PrimaryButton size="compact" data-testid="settings-cloud-connect" onClick={props.cloud.onConnect}>
+        Connect server
+      </PrimaryButton>
+    </SettingRow>
+  );
+  // Signed out, a workspace this computer's person owns still offers its
+  // switch: pausing needs no account, and turning sync on does.
+  if (!status.connected && !status.workspaceSyncOwned) return connectRow;
 
-  const paused = sync.workspaceSynced && !sync.workspaceSyncConnected;
+  const unconfirmed = sync.workspaceSynced && !sync.workspaceSyncConnected;
+  const syncPause = sync.workspaceSynced ? undefined : sync.syncPause;
+  const needsServer = !status.connected && !sync.workspaceSynced;
   const secretState = sync.workspaceSynced && sync.workspaceSyncConnected ? sync.workspaceSecretState : "none";
 
   return (
     <>
-      <CloudAccountRow
-        email={status.email ?? ""}
-        presentation={status.ownPresentation}
-        serverUrl={status.serverUrl ?? ""}
-        networkAccess={status.networkAccess ?? null}
-        onSettled={props.cloud.onChanged}
-        onError={props.cloud.onAccountError}
-        onDelete={props.cloud.onDeleteAccount}
-      />
+      {status.connected ? (
+        <CloudAccountRow
+          email={status.email ?? ""}
+          presentation={status.ownPresentation}
+          serverUrl={status.serverUrl ?? ""}
+          networkAccess={status.networkAccess ?? null}
+          onSettled={props.cloud.onChanged}
+          onError={props.cloud.onAccountError}
+          onDelete={props.cloud.onDeleteAccount}
+        />
+      ) : connectRow}
       {/* Main refuses to enroll a shared view: it syncs through its share. */}
       {props.sharedView ? null : (
         <>
@@ -187,10 +261,21 @@ export function CloudSyncSettings(props: {
             title="Sync this workspace"
             testId="settings-row-sync-workspace"
             description={
-              paused ? (
+              unconfirmed ? (
                 <span data-testid="cloud-workspace-relink" className="text-danger">
-                  {SYNC_PAUSED_FOR_ACCOUNT}
+                  {SYNC_UNCONFIRMED_ACCOUNT}
                 </span>
+              ) : syncPause || needsServer ? (
+                <>
+                  {syncPause ? <SyncPausedLine pause={syncPause} /> : null}
+                  {needsServer ? (
+                    <span data-testid="cloud-sync-needs-server" className="block">
+                      {SYNC_ON_NEEDS_SERVER}
+                    </span>
+                  ) : null}
+                </>
+              ) : sync.workspaceSynced ? (
+                props.cloud.hasReceivedShares ? SYNC_OFF_KEEPS_WITH_RECEIVED : SYNC_OFF_KEEPS
               ) : undefined
             }
           >
@@ -198,25 +283,25 @@ export function CloudSyncSettings(props: {
                 resumes sync when it owns the workspace. Another account
                 gets main's reason in a notice, and Disconnect above is the
                 way to the right one. */}
-            {paused ? (
+            {unconfirmed && status.connected ? (
               <SecondaryButton
                 size="compact"
                 data-testid="cloud-relink-workspace"
-                disabled={syncBusy}
+                disabled={syncBusy !== null}
                 onClick={() => void enableSync()}
               >
                 Try again
               </SecondaryButton>
             ) : null}
-            {/* Main has no way to stop syncing one workspace yet, so on
-                reads as on and stays on. Disconnect stops sync for every
-                workspace. */}
+            {/* Off pauses sync on this computer, and on resumes it, so
+                neither asks first. The switch moves at the click and holds
+                still until main answers. */}
             <SwitchControl
               label="Sync this workspace"
-              checked={sync.workspaceSynced || (syncBusy && passphrasePurpose === null)}
-              readOnly={sync.workspaceSynced}
-              disabled={!sync.workspaceSynced && (syncBusy || passphrasePurpose !== null)}
-              onChange={() => void enableSync()}
+              checked={syncBusy === "stop" ? false : sync.workspaceSynced || (syncBusy === "enable" && passphrasePurpose === null)}
+              busy={syncBusy !== null}
+              disabled={syncBusy !== null || needsServer || (!sync.workspaceSynced && passphrasePurpose !== null)}
+              onChange={(on) => void (on ? enableSync() : stopSync())}
             />
           </SettingRow>
           {syncCode ? (
@@ -234,7 +319,7 @@ export function CloudSyncSettings(props: {
               purpose={passphrasePurpose}
               passphrase={passphrase}
               error={syncError}
-              busy={syncBusy}
+              busy={syncBusy !== null}
               onStart={setPassphrasePurpose}
               onPassphrase={setPassphrase}
               onSubmit={() => void enableSync()}
@@ -243,6 +328,27 @@ export function CloudSyncSettings(props: {
         </>
       )}
     </>
+  );
+}
+
+// Who paused this workspace's sync, and when. An agent carries the agent mark.
+function SyncPausedLine(props: { pause: SyncPause }) {
+  const { author } = props.pause;
+  const time = formatChatTime(props.pause.atMs);
+  // A person pause from another installation id (a copied or reset registry) names nobody.
+  const by = author.kind === "agent" ? (
+    <span className="text-agent">
+      <Sparkles size={12} strokeWidth={1.9} aria-hidden className="mr-0.5 inline align-[-2px]" />
+      <span className="sr-only">agent </span>
+      {author.agentId}
+    </span>
+  ) : author.self ? "you" : null;
+  return (
+    <span data-testid="cloud-sync-paused">
+      Paused{by ? <> by {by}</> : null}
+      {" · "}
+      <time dateTime={time.iso}>{time.label}</time>
+    </span>
   );
 }
 

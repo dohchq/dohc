@@ -172,6 +172,7 @@
   "account.delete.preview",
   "account.delete",
   "agent.run.state.read",
+  "workspace.sync.stop",
   "history.operation.read",
   "history.operation.undo"
 ]

@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { accessCliQueries, createAccessAcquisition, createAccessOwner, type ResolvedAccessObject } from "./accessOwner";
+import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster, type ResolvedAccessObject } from "./accessOwner";
 import { unknownAccess } from "./accessQuery";
 import { hasAccessChat, resolveAccessObject } from "./accessObjectResolution";
 import { deferred } from "../testing/deferred";
@@ -144,6 +144,19 @@ it("answers CLI object and Sharing reads from observations without waiting for r
   expect(h.refresh).not.toHaveBeenCalled();
 });
 
+it("retains paused owner observations only for the owning account", () => {
+  const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
+  const credentials = { ...remote, userId: "owner", email: "owner@test", token: "token", relayUrl: "https://relay.test" };
+  const observation = vi.fn(() => ({ listing: { grants: [], links: [], formerGrants: [], endedGrants: [] }, checkedAtMs: 42, freshness: "stale" as const }));
+  const workspace = { workspaceId: "w", pausedRemote: remote };
+  expect(ownerAccessRoster(workspace, credentials, observation)).toEqual(observation());
+  observation.mockClear();
+  expect(ownerAccessRoster(workspace, { ...credentials, userId: "other" }, observation)).toMatchObject({ freshness: "unknown", unknownReason: "other-account" });
+  expect(ownerAccessRoster(workspace, null, observation)).toMatchObject({ unknownReason: "signed-out" });
+  expect(ownerAccessRoster(workspace, { ...credentials, serverUrl: "https://other.test" }, observation)).toMatchObject({ unknownReason: "other-server" });
+  expect(ownerAccessRoster(workspace, { ...credentials, relayUrl: undefined }, observation)).toMatchObject({ unknownReason: "unreadable" });
+  expect(observation).not.toHaveBeenCalled();
+});
 it("reports a different received server without reading its inventory", async () => {
   const h = harness();
   h.resolve.mockResolvedValue({ ref: path, visibility: "visible", shareId: "received", relayUrl: "https://other-relay.test", recipientUserId: "recipient" });

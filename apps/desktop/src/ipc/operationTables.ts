@@ -1,4 +1,5 @@
 import {
+  workspaceSyncOperations,
   chatOperations,
   systemMotionOperations,
   serverAccountOperations,
@@ -34,6 +35,7 @@ export const OPERATION_TABLES = [
   settingsOperations,
   chatOperations,
   shareCopyOperations,
+  workspaceSyncOperations,
   systemMotionOperations,
   serverAccountOperations,
   accessOperations,

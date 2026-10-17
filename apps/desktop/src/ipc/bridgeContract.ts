@@ -1,3 +1,4 @@
+import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
 export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -1338,6 +1339,7 @@ export const CaptureHoldsEvent = z.object({ workspaceId: WORKSPACE_ID, heldFiles
 export type CaptureHoldsEvent = z.infer<typeof CaptureHoldsEvent>;
 
 const SYNC_STATUS_BASE_FIELDS = {
+  syncPause: WorkspaceSyncPauseStatus.optional(),
   state: z.enum([
     "synced",
     "syncing",
@@ -3561,8 +3563,11 @@ export const CloudStatusResult = z.object({
   serverUrl: z.string().optional(),
   relayUrl: z.string().optional(),
   networkAccess: z.enum(["private", "public"]).optional(),
+  // Local ownership is independent of the server account session.
+  workspaceSyncOwned: z.boolean().optional(),
   // Whether the named workspace has cloud sync enabled (registry remote set).
   workspaceSynced: z.boolean().optional(),
+  syncPause: WorkspaceSyncPauseStatus.optional(),
   // Whether that remote is pinned to the current signed-in account.
   workspaceSyncConnected: z.boolean().optional(),
   workspaceSecretState: z
@@ -3644,6 +3649,33 @@ export const CloudEnableSyncPayload = z.object({
   passphrase: z.string().optional(),
 });
 export type CloudEnableSyncPayload = z.infer<typeof CloudEnableSyncPayload>;
+
+// Main derives the workspace from the requesting window.
+export const CloudStopSyncPayload = z.void();
+export type CloudStopSyncPayload = z.infer<typeof CloudStopSyncPayload>;
+
+export const CloudStopSyncResult = z.object({
+  workspaceId: WORKSPACE_ID,
+  workspaceSynced: z.literal(false),
+  syncPause: WorkspaceSyncPauseStatus.optional(),
+  status: SyncStatusResult,
+}).strict();
+export type CloudStopSyncResult = z.infer<typeof CloudStopSyncResult>;
+
+export const workspaceSyncOperations = {
+  cloudStopSync: {
+    capabilityId: "workspace.sync.stop",
+    channel: "desktop:cloud-stop-sync",
+    payload: CloudStopSyncPayload,
+    result: CloudStopSyncResult,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: {
+      check: "withRendererWorkspaceOperation",
+      reason: "Main derives the workspace from the sending window and fences its physical attachment and renderer session.",
+    },
+  },
+} as const satisfies OperationTable;
 
 // Join a synced workspace on this machine (0P-C): a sync code copied from
 // the machine that already has the workspace, plus a local folder chosen
@@ -6951,7 +6983,8 @@ export const serverAccountOperations = {
 } as const satisfies OperationTable;
 
 export interface DohcDesktopBridge
-  extends OperationBridge<typeof workspaceFileOperations>,
+  extends OperationBridge<typeof workspaceSyncOperations>,
+    OperationBridge<typeof workspaceFileOperations>,
     OperationBridge<typeof settingsOperations>,
     OperationBridge<typeof chatOperations>,
     OperationBridge<typeof shareCopyOperations>,

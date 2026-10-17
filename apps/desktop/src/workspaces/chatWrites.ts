@@ -42,7 +42,7 @@ export interface ChatWritePlace {
   store: ChatWriteStore;
 }
 
-type ChatWorkspace = Pick<RegistryEntry, "remote" | "shareView" | "sharedChannels">;
+type ChatWorkspace = Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView" | "sharedChannels">;
 
 // The target and session a write was admitted under. channelWireId is
 // undefined until a joined channel makes the lookup necessary.
@@ -220,7 +220,7 @@ export function createChatWrites(dependencies: {
     if (input.writer.via === "automation" && !input.writer.local) {
       await warmCredentials();
       const workspace = findWorkspace(place.workspaceId);
-      const synced = workspace?.remote !== undefined || (workspace?.sharedChannels?.length ?? 0) > 0;
+      const synced = (workspace?.remote ?? workspace?.pausedRemote) !== undefined || (workspace?.sharedChannels?.length ?? 0) > 0;
       if (synced && currentCredentials() === null) throw new AutomationChatSessionWait();
     }
     const admission = await admit(place, target);
@@ -228,7 +228,7 @@ export function createChatWrites(dependencies: {
     // A synced workspace's automation waits for a session: without one its
     // message would stay on this computer and reach nobody.
     if (input.writer.via === "automation" && !input.writer.local && authorUserId === undefined &&
-      findWorkspace(place.workspaceId)?.remote !== undefined) {
+      (findWorkspace(place.workspaceId)?.remote ?? findWorkspace(place.workspaceId)?.pausedRemote) !== undefined) {
       throw new AutomationChatSessionWait();
     }
     const actor = await actorFor(input.writer);
