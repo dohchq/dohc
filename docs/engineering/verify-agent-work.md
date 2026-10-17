@@ -77,7 +77,7 @@ Use the canonical runner below. Other agents reuse its evidence instead of recon
 Fetch the PR's target branch. Use its fetched ref as `<target-ref>` below, such as `origin/main`.
 Run `pnpm verify:plan --base <target-ref>` to see the applicable workflow gates.
 When the JavaScript gate applies, the plan also lists the services, prepared builds, and integration proofs it needs.
-The JavaScript gate always runs the complete JavaScript suite: every package's tests, `pnpm test:repo`, the desktop script tests, and every integration proof.
+The JavaScript gate runs the [affected packages'](#affected-packages) tests, the [selected repository tests](#repository-tests), the desktop script tests, and every integration proof.
 Commit the changes. Run `pnpm verify:pr --base <target-ref>` against that clean commit.
 The runner rejects changes to the source or commit during verification.
 The JavaScript gate prepares the engine and desktop, typechecks the whole workspace, then runs repository checks alongside package tests.
@@ -98,7 +98,7 @@ The runner labels its Postgres container and removes it by the recorded containe
 
 On the shared Windows host, a queue service runs PR verifications, one per verification lane.
 After the pre-queue checks, `pnpm verify:pr` hands the commit to the service and reports its progress until it finishes.
-The service verifies the commit in its own checkout, `C:\w\_verification\lane` or `C:\w\_verification\lane-2`, so your checkout is free to change while the request waits.
+The service verifies the commit in one of its own checkouts, `C:\w\_verification\lane` to `lane-4`, so your checkout is free to change while the request waits.
 Stopping `pnpm verify:pr` does not stop the request. Run the same command again to follow it, or to get its result once it has finished.
 Pass `--detach` to submit the request and return at once.
 
@@ -109,15 +109,15 @@ Pass `--detach` to submit the request and return at once.
 - A run that fails a check is reported at once. The service never retries it.
 - A run stops and fails after two hours of awake time. Time the machine spends asleep does not count.
 - While Docker does not respond, runs that need the JavaScript gate wait and Rust-only runs continue.
-- While free memory is below 10 GB, no second run starts. A check that fails after free memory fell below 3 GB during the run is retried as a machine failure.
+- A run beyond the first starts only while free memory is at least 10 GB. The service counts only its own runs here, not inline gates holding a lane. A check that fails after free memory fell below 3 GB during the run is retried as a machine failure.
 - While free disk is below the 40 GB floor, no run starts. The service first deletes the build output of its lanes that have no run.
 
 Each lane runs with its own temp folder, `C:\w\_verification\tmp\<lane>`, which antivirus skips and the service empties before each run.
-Each attempt records the load it verified under in `status.json` and `C:\w\_verification\history.jsonl`: the lane count, the most runs at once, the lowest free memory, and the mean CPU use. Read them before changing the lane count.
+Each attempt records the load it verified under in `status.json` and `C:\w\_verification\history.jsonl`: the highest lane setting while it ran, the most runs at once, the lowest free memory, and the mean CPU use. Read them before changing the lane count, and to tell a failure under three lanes from one under two.
 Each attempt has its own evidence folder, `C:\w\_verification\requests\<id>\attempts\<n>`, and its `result.json` names the request and attempt.
 Read the service's verdict from the request's `status.json`, or from the last line `pnpm verify:pr` prints.
 
-Run `pnpm verify:queue status` to see the service, a pause, the running requests, the line with each request's owner, and wait estimates.
+Run `pnpm verify:queue status` to see the service, a pause, the lane setting, the running requests, the line with each request's owner, and wait estimates.
 Run `pnpm verify:queue cancel <id>` to stop one of your own requests. Never cancel a request another agent submitted. A finished request keeps its verdict.
 
 The service also serves a dashboard at `http://127.0.0.1:4250` on the host. Its Now tab shows what holds each verification lane, a queued request or an agent's inline gate, with its steps and its live output, then the requests ready and waiting for a lane, the next requests in line, and the last day's runs, CPU, and waiting requests. Queue, History, Threads, Tests, and Nightly tabs show the whole line, every run this week, each thread's runs and results, the tests that failed on two or more branches in the last day, the slowest and flaky tests, and the nightly runs.
@@ -126,9 +126,15 @@ When T3 runs on the host, the dashboard names each request by the T3 thread that
 Select a run to see its failing step's test summary, its steps on a timeline, and any of its logs. The dashboard refreshes every few seconds. It records the host's CPU and free memory once a minute in `monitor-load.json` in the queue root.
 When the page cannot reach the dashboard server, it says so and since when, keeps what it last showed, and tries again. It waits at most 15 seconds for each answer.
 
-The dashboard's only change to the queue is its Pause and Resume button. Pause asks for an optional reason and does what `pnpm verify:queue pause` does. Resume does what `pnpm verify:queue resume` does, without asking first.
+The dashboard changes the queue in two ways: its Pause and Resume button, and its lane switch. Pause asks for an optional reason and does what `pnpm verify:queue pause` does. Resume does what `pnpm verify:queue resume` does, without asking first.
 While the queue is paused, every tab shows a banner with the words `pnpm verify:queue status` uses, such as `Paused and idle: safe to restart`. A hold after a computer restart says so. Start estimates count from the resume, such as `40 min after resume`.
 The pause records `by` as `{ "name": "dashboard", "host": "<host name the page used>" }`, and the service log records each pause and resume from the dashboard.
+
+The lane switch beside Pause sets the host's lane count, `verification-lanes`, to 2 or 3 without asking first. It always shows the current setting, including a count of 1 or 4 set on the host.
+At 3, the queue starts a third gate when a request waits and free memory allows another run. The first gate in `C:\w\_verification\lane-3` starts cold, because the service creates that checkout then.
+Switching back to 2 stops nothing. Lane 3 finishes its current gate and takes no more. Until then, every tab shows `Lane 3 closes after its current gate`, and `pnpm verify:queue status` prints the same note.
+The setting stays until someone changes it, through service and computer restarts.
+The queue's history records each change from the dashboard as a `lanes` event, with `by` as for a pause, and the service log records it too.
 
 To open the dashboard from another device, serve it on the tailnet only:
 
@@ -136,10 +142,11 @@ To open the dashboard from another device, serve it on the tailnet only:
 tailscale serve --bg --https=8446 http://127.0.0.1:4250
 ```
 
-Then open `https://<host>.<tailnet>.ts.net:8446`. Every device and user that the tailnet's access rules let reach this port can read the page and pause or resume the queue.
+Then open `https://<host>.<tailnet>.ts.net:8446`. Every device and user that the tailnet's access rules let reach this port can read the page, pause or resume the queue, and switch the lanes.
 Do not use Tailscale Funnel: the page shows branch names and test output. The page refuses every request that arrives through Funnel.
 The page answers only to the host's own names and to tailnet names.
-Pause and resume accept only a JSON `POST` whose `Origin` header names the host the request was sent to. A page from any other origin, including another port on this host or another tailnet machine, cannot send that request, so it cannot pause or resume the queue.
+Pause, resume, and the lane switch accept only a JSON `POST` whose `Origin` header names the host the request was sent to. A page from any other origin, including another port on this host or another tailnet machine, cannot send that request, so it cannot change the queue.
+The lane switch accepts only `{ "lanes": 2 }` or `{ "lanes": 3 }`. The server refuses any other value and changes nothing.
 A write body must arrive within 10 seconds and be at most 4 KB. The server answers a refused write and closes its connection.
 
 The `dohc-verification-queue` scheduled task starts the service at logon and every five minutes if it is not running.
@@ -171,15 +178,17 @@ It defers when registered gates or builds hold or wait for slots.
 If registered work arrives during measurement, it stops its own child and records the run as failed.
 Its host context covers registered lanes and does not prove that the host was otherwise idle.
 
-The host runs one verification at a time unless `verification-lanes` in the slot root contains `2`.
-Every verifier and the queue service read that file, so all of them agree on the count.
-The queue service runs the second lane's requests in `C:\w\_verification\lane-2`. That checkout's build output takes about 10 GB more disk.
+The host runs one verification at a time unless `verification-lanes` in the slot root holds a larger count, up to `4`.
+The queue service and every verifier from #1972 on read that file and agree on the count. Direct `pnpm verify:pr` runs on the host take the same lanes.
+A verifier older than #1972 reads only 1 or 2. While the setting is 3 or 4, its `--inline` gate fails at admission; its queued gates are unaffected, because the service holds their lane.
+The queue service runs each extra lane's requests in its own checkout, `C:\w\_verification\lane-2` to `lane-4`, and creates each one on its first run there. Each one's build output takes about 10 GB more disk.
+Use the dashboard's lane switch for 2 or 3 lanes. For another count, write the file on the host:
 
 ```powershell
-Set-Content C:\w\_locks\verification-lanes 2
+Set-Content C:\w\_locks\verification-lanes 4
 ```
 
-Write `1` to return to one lane. Runs already admitted to the second lane finish first.
+Write a smaller count to return to fewer lanes. Runs already admitted to a lane finish first.
 
 To compare lane counts without changing the host, use an isolated root with its own setting in PowerShell:
 
@@ -205,6 +214,7 @@ A computer restart stops every run in progress, and each one later starts again 
 4. Run `pnpm verify:queue resume`.
 
 The dashboard can do steps 1, 2, and 4: select Pause, wait for the banner `Paused and idle: safe to restart`, and select Resume after the restart.
+With 3 or more lanes, read step 2 from the dashboard or from `status` in a checkout that includes #1972. An older checkout counts inline gates only in lanes 1 and 2, so it can call a restart safe while lane 3 runs.
 
 While the queue is paused, runs in progress finish and no new run starts, the nightly run included. The line keeps its order.
 An inline run that holds a verification lane counts as running. An inline run without a lane waits, says once that the queue is paused, and starts after the resume.
@@ -304,11 +314,12 @@ A `--full` run always keeps going. On the shared host, the queue keeps going onl
 
 ### Nightly run
 
-Every night at 03:07, the `dohc-verification-nightly` scheduled task submits a full verification of main's head: every gate, every package, and every proof.
+Every night at 03:07, the `dohc-verification-nightly` scheduled task submits a full verification of main's head: every gate, every package, every repository test, and every proof.
 It covers everything merged since the last nightly that passed, and it runs before the rest of the line. A head that already passed is not verified again.
 It keeps going after a failure, so triage sees the failures of both jobs.
+A PR run lets desktop unit test files share workers. A full run, the nightly included, runs each desktop unit test file in a worker of its own, so a test that passes only when another file runs before it in the same worker fails there.
 `pnpm verify:queue status` shows the last passing nightly. Submit one by hand with `pnpm verify:queue nightly`.
-A failed nightly means a merged change broke main or an affected-package selection missed something. Find the change that broke it and revert or fix it the same day.
+A failed nightly means a merged change broke main, or the selection of affected packages or repository tests missed something. Find the change that broke it and revert or fix it the same day.
 The [`verification-triage` skill](../../.agents/skills/verification-triage/SKILL.md) has the procedure.
 
 ### Affected packages
@@ -316,8 +327,23 @@ The [`verification-triage` skill](../../.agents/skills/verification-triage/SKILL
 The JavaScript gate runs package tests only for the packages a change affects: the packages its files are in, and every package that depends on them.
 A package depends on another when its manifest says so, or when its files reach into the other's files by a relative path, as some tests import another package's source.
 A change to any file outside the workspace packages, such as a lockfile, a crate, or a root script, runs every package. Documentation changes run none.
-Repository checks and proofs always run. `pnpm verify:plan` lists the selected packages, and `result.json` records them under `packages` and `js-tests/result.json` under `skippedPackages`.
+Proofs always run. `pnpm verify:plan` lists the selected packages, and `result.json` records them under `packages` and `js-tests/result.json` under `skippedPackages`.
 Pass `--full` to run every package. The nightly run on main always does.
+
+### Repository tests
+
+The repository tests check the tooling under `scripts/` and `tools/`.
+A change to a file that they read runs all of them, `pnpm test:repo`.
+The `repository` filter in [`pr-checks.yml`](../../.github/workflows/pr-checks.yml) lists those files: `scripts/`, `tools/`, `.github/`, the root files, every `package.json`, and the few app and crate files that a test reads.
+Any other change that selects the JavaScript gate runs only the tests that read the source tree, `pnpm test:repo:tree`.
+It runs the source checks in `pnpm test:repo:source`, then `packaged-benchmark.test.mjs` and `go-to-packaged-fixture.test.mjs` from `tools/perf-profiling/`, which read package source.
+
+`--full`, `--keep-going`, and an empty diff run every repository test. The nightly run always runs every repository test.
+`pnpm verify:plan` shows the script under `javascript.repositoryTests`, and `result.json` records it under `repositoryTests`.
+When the gate runs only the tree set, the verifier prints `repository tests: tree set only (no tooling change). --full runs every repository test.`
+
+A repository test that reads a file outside `scripts/`, `tools/`, `.github/`, and the root files must add that path to the `repository` filter.
+A test that reads package source goes in `test:repo:tree` as well as `test:repo`, so that every JavaScript change runs it.
 
 ### Slowest tests
 

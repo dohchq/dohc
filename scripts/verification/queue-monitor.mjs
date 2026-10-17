@@ -1,16 +1,16 @@
 // A web dashboard for the verification queue: what each lane runs now and its live
 // output, what waits, and what ran this week. The service serves it on this host only;
 // reach it from other devices through a private Tailscale Serve route. It reads the
-// queue's own files and writes only its load samples and, when asked, the queue's pause,
-// so a fault here can never stop a run.
+// queue's own files and writes only its load samples and, when asked, the queue's pause
+// and the host's lane setting, so a fault here can never stop a run.
 
 import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildQueueStatus, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
-import { lastNightlyPass, listRequests, monitorPort, movedNote, ownerOf, pauseQueue, pauseState, queuePaths, readJson, restartReason, resumeQueue, runOrder, serviceState, terminalStates, writeJson } from "./queue.mjs";
+import { buildQueueStatus, heldVerificationSlots, maxVerificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
+import { closingNote, laneSetting, lastNightlyPass, listRequests, monitorPort, movedNote, ownerOf, pauseQueue, pauseState, queuePaths, readJson, restartReason, resumeQueue, runOrder, serviceState, setLanes, terminalStates, verificationSlotRoot, writeJson } from "./queue.mjs";
 
 const assets = {
   "/": ["index.html", "text/html; charset=utf-8"],
@@ -210,9 +210,10 @@ function sharedFailures(requests, events, now) {
 /**
  * Everything the dashboard shows, from the queue's files. Finished requests are cached
  * by the caller's `finished` map, as the service does, so a refresh reads only live ones.
- * `threadOf` names a request's T3 thread, and `slots` reads who holds the verification slots.
+ * `threadOf` names a request's T3 thread, `slots` reads who holds the verification slots,
+ * and `lanes` reads the host's lane setting.
  */
-export function monitorState(root, { now = Date.now(), days = 7, finished = new Map(), history = historyReader(root), threadOf = () => null, slots = () => null } = {}) {
+export function monitorState(root, { now = Date.now(), days = 7, finished = new Map(), history = historyReader(root), threadOf = () => null, slots = () => null, lanes: readLanes = () => null } = {}) {
   const { record, alive } = serviceState(root, now);
   const requests = listRequests(root, finished);
   for (const entry of requests) if (terminalStates.has(entry.status.state)) finished.set(entry.id, entry);
@@ -227,7 +228,7 @@ export function monitorState(root, { now = Date.now(), days = 7, finished = new 
     const outcome = row.outcome ?? (live ? "running" : "interrupted");
     return [{
       id: entry.id, attempt: row.n, branch: branchOf(entry.request), thread: threadFor(entry.request), nightly: Boolean(entry.request.nightly), scope: entry.request.scope,
-      head: entry.request.head.slice(0, 12), lane: row.lane ?? (live ? live.checkout.endsWith("-2") ? 2 : 1 : null), startedAt: row.startedAt, endedAt, outcome,
+      head: entry.request.head.slice(0, 12), lane: row.lane ?? (live ? Number(live.checkout.match(/-(\d)$/u)?.[1] ?? 1) : null), startedAt: row.startedAt, endedAt, outcome,
       cause: row.cause ?? null, reason: clip(row.reason, 300), awakeMs: live?.awakeMs ?? row.awakeMs ?? null, flaky: row.flaky?.length ?? 0,
       ...(live ? { phase: live.phase, moved: noteOf(entry.status), ...progress(root, entry.id, row.n) } : {}),
     }];
@@ -271,8 +272,9 @@ export function monitorState(root, { now = Date.now(), days = 7, finished = new 
   const all = [...tests.values()];
   const nightly = requests.findLast(entry => entry.request.nightly);
   const pass = lastNightlyPass(requests);
+  const setting = readLanes();
   let lanes;
-  try { lanes = slotView(slots(record?.lanes ?? 1), threadOf); } catch { lanes = null; }
+  try { lanes = slotView(slots(setting?.lanes ?? record?.lanes ?? 1), threadOf); } catch { lanes = null; }
   const pause = pauseState(root, { record, alive }, lanes?.holders.filter(holder => holder.kind === "inline").length ?? 0);
   // Each thread's week: its runs and their results, what it has waiting and running now, and its time in gates.
   const groups = new Map();
@@ -303,6 +305,8 @@ export function monitorState(root, { now = Date.now(), days = 7, finished = new 
     now, days,
     service: record ? { alive, commit: record.commit?.slice(0, 12) ?? null, pid: record.pid, startedAt: record.startedAt, heartbeatAt: record.heartbeatAt, lanes: record.lanes ?? 1, health: record.health ?? null } : null,
     pause: pause && { ...pause, restart: pause.reason === restartReason },
+    // The host's lane setting, which the service reads each tick, and the lanes above it still finishing a gate.
+    laneSetting: setting && { ...setting, note: closingNote(setting.closing) },
     typicalMs, runs, queued, lanes, threads, sharedFailures: sharedFailures(requests, events, now),
     flaky: all.filter(item => item.flaky || item.passedAlone).sort((a, b) => b.passedAlone - a.passedAlone || b.flaky - a.flaky).slice(0, 15).map(({ slow: _slow, ...item }) => item),
     slowest: all.filter(item => item.slow.length).map(item => ({ step: item.step, test: item.test, runs: item.slow.length, medianSeconds: median(item.slow), totalSeconds: Math.round(item.slow.reduce((sum, seconds) => sum + seconds, 0)) }))
@@ -467,7 +471,9 @@ const allowedHost = host => /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/iu.test(h
 
 // The dashboard's only writes. A page on another site cannot send JSON without a CORS preflight,
 // which this server never grants, and a browser names the page's origin, which must be this host.
-const writePaths = { "/api/pause": "pause", "/api/resume": "resume" };
+const writePaths = { "/api/pause": "pause", "/api/resume": "resume", "/api/lanes": "lanes" };
+// The dashboard switches between these lane counts. It shows any count the setting allows, 1 to 4.
+const switchLanes = [2, 3];
 const bodyLimit = 4096;
 // URL drops a scheme's default port, so `Host: pc.ts.net:443` and `Origin: https://pc.ts.net` name one origin.
 const sameHost = (origin, host) => { try { return new URL(`${origin.protocol}//${host}`).host === origin.host; } catch { return false; } };
@@ -503,29 +509,36 @@ async function writeBody(request, waitMs) {
 
 /** Serve the dashboard and its data on this host. Returns the server; `close()` stops it and its sampler. */
 export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log = () => {}, sampleEveryMs, writeWaitMs = 10_000,
-  threadOf = threadDirectory(), slotRoot = process.env.DOHC_VERIFICATION_SLOT_ROOT ?? resolveBuildBudget()?.root }) {
+  threadOf = threadDirectory(), slotRoot = verificationSlotRoot() }) {
   const finished = new Map();
   const history = historyReader(root);
-  // The verification slots live beside the build slots; a second slot directory means a second lane to show.
-  const slots = lanes => slotRoot ? buildQueueStatus({ root: slotRoot, kind: "verification-slot", slots: Math.max(lanes, existsSync(join(slotRoot, "verification-slot-2")) ? 2 : 1) }) : null;
+  // The verification slots live beside the build slots. A held slot above the setting is a lane still finishing its gate, so it is shown too.
+  const slots = lanes => slotRoot ? buildQueueStatus({ root: slotRoot, kind: "verification-slot", slots: Math.max(lanes, ...heldVerificationSlots(slotRoot)) }) : null;
+  const lanes = () => laneSetting(slotRoot);
   let cached = null;
   // Every open page polls; one snapshot serves them all for two seconds.
   const snapshot = () => {
     if (!cached || Date.now() - cached.at > 2000) {
-      const state = monitorState(root, { finished, history, threadOf, slots });
+      const state = monitorState(root, { finished, history, threadOf, slots, lanes });
       cached = { at: Date.now(), state, body: JSON.stringify(state) };
     }
     return cached;
   };
   const load = loadSampler(root, () => snapshot().state, { everyMs: sampleEveryMs });
-  // Pause or resume the queue for the dashboard page, and record the host name it used.
+  // Pause or resume the queue, or set the lane count, for the dashboard page, and record the host name it used.
   const write = async (request, action, send) => {
     const { body, refused, gone } = await writeBody(request, writeWaitMs);
     if (gone) return;
     if (refused) return send(refused[0], "text/plain", refused[1]);
     const host = request.headers.host;
     let answer;
-    if (action === "pause") {
+    if (action === "lanes") {
+      if (!switchLanes.includes(body.lanes)) return send(400, "text/plain", "Choose 2 or 3 lanes.");
+      if (!slotRoot) return send(409, "text/plain", "This host has no verification lane setting.");
+      const { previous, changed } = await setLanes({ root, slotRoot, lanes: body.lanes, by: { name: "dashboard", host } });
+      if (changed) log(`the dashboard at ${host} set the verification lanes to ${body.lanes}, from ${previous ?? "a setting that could not be read"}`);
+      answer = { changed, lanes: body.lanes };
+    } else if (action === "pause") {
       const { pause, changed } = await pauseQueue(root, { reason: body.reason, by: { name: "dashboard", host } });
       if (changed) log(`the dashboard at ${host} paused the queue${pause.reason ? `: ${pause.reason}` : ""}`);
       answer = { changed, pause };
@@ -557,14 +570,14 @@ export function startMonitor({ root, port = monitorPort, host = "127.0.0.1", log
       if (!allowedHost(request.headers.host)) return send(403, "text/plain", "This page answers only on this host and its tailnet name.");
       const url = new URL(request.url, "http://monitor");
       const action = writePaths[url.pathname];
-      if (action) return request.method === "POST" ? void write(request, action, send).catch(failed) : send(405, "text/plain", "Pause and resume take a POST.", { allow: "POST" });
-      if (request.method !== "GET" && request.method !== "HEAD") return send(405, "text/plain", "Only pause and resume change the queue.", { allow: "GET, HEAD" });
+      if (action) return request.method === "POST" ? void write(request, action, send).catch(failed) : send(405, "text/plain", "Pause, resume, and the lane switch take a POST.", { allow: "POST" });
+      if (request.method !== "GET" && request.method !== "HEAD") return send(405, "text/plain", "Only pause, resume, and the lane switch change the queue.", { allow: "GET, HEAD" });
       const query = name => url.searchParams.get(name);
       const asset = assets[url.pathname];
       if (asset) return send(200, asset[1], readFileSync(assetPath(asset[0])));
       if (url.pathname === "/api/state") return send(200, "application/json", snapshot().body);
       if (url.pathname === "/api/run") return json(runDetails(root, query("id"), query("attempt")));
-      if (url.pathname === "/api/log") return json(query("slot") ? slotLog(slots(2), query("slot"), query("file")) : runLog(root, query("id"), query("attempt"), query("file")));
+      if (url.pathname === "/api/log") return json(query("slot") ? slotLog(slots(maxVerificationLanes), query("slot"), query("file")) : runLog(root, query("id"), query("attempt"), query("file")));
       if (url.pathname === "/api/load") return json({ samples: load.read(query("days") === "7" ? 7 : 1, 288, listRequests(root, finished)) });
       return send(404, "text/plain", "Not found.");
     } catch (error) { failed(error); }

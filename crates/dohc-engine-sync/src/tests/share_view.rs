@@ -5313,6 +5313,7 @@ fn origination_and_conflict_outbox_wait_for_owner_contact_not_a_share_cursor() {
                     &NoLiveLeases,
                     1_400,
                 )
+                .map(|outcome| matches!(outcome, TxnOutcome::Crashed { committed: true }))
             } else {
                 commit_relay_cursor(
                     &mut engine,
@@ -5322,11 +5323,9 @@ fn origination_and_conflict_outbox_wait_for_owner_contact_not_a_share_cursor() {
                     &NoLiveLeases,
                     1_400,
                 )
+                .map(|outcome| matches!(outcome, TxnOutcome::Crashed { committed: true }))
             };
-            assert!(matches!(
-                contact.expect("owner contact"),
-                TxnOutcome::Crashed { committed: true }
-            ));
+            assert!(contact.expect("owner contact"));
             drop(engine);
             let mut engine = EngineStore::open(&database, 1_500).unwrap();
             if first_contact_is_push {

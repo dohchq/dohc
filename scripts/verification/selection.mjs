@@ -92,13 +92,19 @@ function workflowFilters(workflow) {
   return yaml.load(filterStep.with.filters);
 }
 
+const matchesFilter = (files, patterns) => files.some(file => patterns.some(pattern => matchesGlob(file, pattern)));
+
 function gatesFromFilters(files, filters) {
-  return Object.fromEntries(["rust", "js"].map(name =>
-    [name, files.some(file => filters[name].some(pattern => matchesGlob(file, pattern)))]));
+  return Object.fromEntries(["rust", "js"].map(name => [name, matchesFilter(files, filters[name])]));
 }
 
 export function selectedGates(files, workflow) {
   return gatesFromFilters(files, workflowFilters(workflow));
+}
+
+/** Whether a change reaches a file that the repository tests read, so the JavaScript gate runs every one of them. */
+export function selectsRepositoryTests(files, workflow) {
+  return matchesFilter(files, workflowFilters(workflow).repository);
 }
 
 export const isGateReader = path => /\.(?:rs|[cm]?[jt]sx?)$/u.test(path);

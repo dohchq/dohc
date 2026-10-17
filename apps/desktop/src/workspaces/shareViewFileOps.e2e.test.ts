@@ -208,6 +208,7 @@ function shareViewFilesOwner(
     schedulingRootPath: harnessed.rootPath,
     rootPath: harnessed.rootPath,
     shareId: SHARE_ID,
+    recipientUserId: "recipient-a",
     granterEmail: "granter@example.com",
     grantedSelector: {
       paths: ["docs"],

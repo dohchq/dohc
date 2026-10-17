@@ -285,7 +285,7 @@ it.skipIf(engine.missing)(
       await expect(deleteWorkspacePathByHand({ workspace, assertCurrent: () => undefined }, "Tasks/hand.md", person, {
         capture, requestId: "hand-delete", markDeleted: () => undefined,
         trashItem: async (target) => { await rename(target, join(systemTrash, basename(target))); },
-      })).resolves.toEqual({ trashed: true });
+      })).resolves.toMatchObject({ trashed: true, operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
       expect(await readFile(join(systemTrash, "hand.md"), "utf8")).toContain(created.recordId);
       await expect(stat(join(root, "Tasks", "hand.md"))).rejects.toThrow();
 

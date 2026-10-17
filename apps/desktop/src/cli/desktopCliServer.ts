@@ -84,6 +84,7 @@ interface DesktopCliServerDependencies<State> {
     > | null;
     queueCloudSync(workspaceId: string): void;
     agentRunDepth(workspaceId: string): number;
+    dispatchedAgentRun(workspaceId: string): boolean;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
   currentDaemon(): Pick<EngineDaemonLifecycle, "requestWorkspace"> | null;
@@ -320,8 +321,13 @@ export function createDesktopCliServer<State>(
       }),
       movePath: (input, origin, requestId) => withPathChange(requestId, (operation, options) =>
         prepareMoveWorkspacePathAs(operation, input, agentWriteAuthor(origin), options)),
-      deletePath: (path, origin, requestId) => withPathChange(requestId, (operation, options) =>
-        prepareDeleteWorkspacePathAs(operation, path, agentWriteAuthor(origin), options)),
+      deletePath: async (path, origin, requestId) => {
+        const result = await withPathChange(requestId, (operation, options) =>
+          prepareDeleteWorkspacePathAs(operation, path, agentWriteAuthor(origin), options));
+        // PR 3 exposes recovery through the agent doors.
+        const { operationId: _operationId, undo: _undo, ...wireResult } = result;
+        return wireResult;
+      },
       // Document reads and edits go through the desktop's live document
       // sessions, the ones its editor holds, so an agent's edit merges into
       // an open editor instead of racing it on disk.
@@ -455,6 +461,7 @@ export function createDesktopCliServer<State>(
       localUserDisplayName,
       localPersonId,
       agentRunDepth: (workspaceId) => activity.agentRunDepth(workspaceId),
+      dispatchedAgentRun: (workspaceId) => activity.dispatchedAgentRun(workspaceId),
       // The renderer did not make this change, so its windows hear about it
       // here. Some CLI writes, such as provisioning General, skip chatWrites,
       // so this queues cloud sync too. The sync engine debounces a second

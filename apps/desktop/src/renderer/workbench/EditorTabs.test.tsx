@@ -191,78 +191,270 @@ describe("EditorTabs strip scrolling", () => {
     expect(strip.className).toContain("dohc-tab-strip");
   });
 
-  // Only the strip scrolls: scrollIntoView would scroll every scrolling
-  // ancestor too, the window included.
-  it("reveals the active tab when activation changes by any means, scrolling only the strip", () => {
-    // jsdom has no layout: each tab is 100px wide at 100px steps, and the
-    // strip shows 150px from its left edge.
-    const geometry = [
-      vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) {
-        return ["a.md", "b.md", "c.md"].indexOf(this.dataset.testid?.slice(4) ?? "") * 100;
-      }),
-      vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(100),
-      vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(150),
-    ];
+  describe("revealing the active tab", () => {
+    // jsdom has no layout: five 100px tabs at 100px steps, then the strip's
+    // 16px of trailing hairline, in a strip `width.current` wide.
+    const fiveTabs = ["a.md", "b.md", "c.md", "d.md", "e.md"].map((path) => ({ path }));
+    const width = { current: 250 };
     const scrollTo = vi.fn(function (this: HTMLElement, options: ScrollToOptions) {
       this.scrollLeft = options.left ?? 0;
     });
-    HTMLElement.prototype.scrollTo = scrollTo as unknown as HTMLElement["scrollTo"];
-    const scrollIntoView = vi.fn();
-    Element.prototype.scrollIntoView = scrollIntoView;
-    const windowScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
-    try {
-    const { rerender } = renderTabs("a.md");
-    const strip = screen.getByRole("tablist");
-    // The first tab is already in view, so mounting scrolls nothing.
-    expect(scrollTo).not.toHaveBeenCalled();
-
-    rerender(
-      <EditorTabs
-        groupId="left"
-        groupNumber={1}
-        tabs={tabs}
-        activeTab="c.md"
-        activeTabDirty={false}
-        recoveryPaths={new Set<string>()}
-        onActivate={noop}
-        onClose={noop}
-        onContextMenu={noop}
-        onMove={noop}
-        onMoveToGroup={noop}
-        onCreateGroupRight={noop}
-      />,
-    );
-    // c.md ends at 300px, past the strip's 150px view: just enough to show it.
-    expect(scrollTo).toHaveBeenCalledTimes(1);
-    expect(scrollTo).toHaveBeenLastCalledWith(expect.objectContaining({ left: 150 }));
-    expect(scrollTo.mock.contexts[0]).toBe(strip);
-
-    rerender(
-      <EditorTabs
-        groupId="left"
-        groupNumber={1}
-        tabs={tabs}
-        activeTab="a.md"
-        activeTabDirty={false}
-        recoveryPaths={new Set<string>()}
-        onActivate={noop}
-        onClose={noop}
-        onContextMenu={noop}
-        onMove={noop}
-        onMoveToGroup={noop}
-        onCreateGroupRight={noop}
-      />,
-    );
-    // a.md starts left of the scrolled view: back to the start.
-    expect(scrollTo).toHaveBeenCalledTimes(2);
-    expect(scrollTo).toHaveBeenLastCalledWith(expect.objectContaining({ left: 0 }));
-    expect(scrollIntoView).not.toHaveBeenCalled();
-    expect(windowScroll).not.toHaveBeenCalled();
-    } finally {
-      for (const spy of geometry) spy.mockRestore();
-      windowScroll.mockRestore();
-      delete (HTMLElement.prototype as { scrollTo?: unknown }).scrollTo;
+    // jsdom has no ResizeObserver: this one reports a resize when told to.
+    const observers = new Set<ResizeObserverCallback>();
+    class TestResizeObserver {
+      callback: ResizeObserverCallback;
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+      }
+      observe() {
+        observers.add(this.callback);
+      }
+      unobserve() {}
+      disconnect() {
+        observers.delete(this.callback);
+      }
     }
+    const resize = (next: number) => {
+      width.current = next;
+      for (const callback of [...observers]) callback([], {} as ResizeObserver);
+    };
+    beforeEach(() => {
+      width.current = 250;
+      observers.clear();
+      vi.stubGlobal("ResizeObserver", TestResizeObserver);
+      vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) {
+        return Math.max(0, fiveTabs.findIndex((tab) => this.dataset.testid === `tab-${tab.path}`)) * 100;
+      });
+      vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(100);
+      vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => width.current);
+      vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockReturnValue(516);
+      HTMLElement.prototype.scrollTo = scrollTo as unknown as HTMLElement["scrollTo"];
+      scrollTo.mockClear();
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+      delete (HTMLElement.prototype as { scrollTo?: unknown }).scrollTo;
+    });
+
+    function renderStrip(activeTab: string, activeTabDirty = false) {
+      return (
+        <EditorTabs
+          groupId="left"
+          groupNumber={1}
+          tabs={fiveTabs}
+          activeTab={activeTab}
+          activeTabDirty={activeTabDirty}
+          recoveryPaths={new Set<string>()}
+          onActivate={noop}
+          onClose={noop}
+          onContextMenu={noop}
+          onMove={noop}
+          onMoveToGroup={noop}
+          onCreateGroupRight={noop}
+        />
+      );
+    }
+
+    // Only the strip scrolls: scrollIntoView would scroll every scrolling
+    // ancestor too, the window included. A revealed tab stops 33px from a
+    // faded edge: the 24px fade and its 9px join.
+    it("reveals the active tab clear of the fades when activation changes by any means, scrolling only the strip", () => {
+      const scrollIntoView = vi.fn();
+      Element.prototype.scrollIntoView = scrollIntoView;
+      const windowScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
+      const { rerender } = render(renderStrip("a.md"));
+      const strip = screen.getByRole("tablist");
+      // The first tab is already in view, so mounting scrolls nothing.
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      // So is b.md, which ends 50px inside the strip's 250px view.
+      rerender(renderStrip("b.md"));
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      // d.md ends at 400px: its end 33px inside the view.
+      rerender(renderStrip("d.md"));
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 183, behavior: "smooth" });
+      expect(scrollTo.mock.contexts[0]).toBe(strip);
+
+      // b.md starts at 100px, left of the view: its start 33px inside.
+      rerender(renderStrip("b.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 67, behavior: "smooth" });
+
+      // e.md is last: the strip scrolls to its end, which has no fade.
+      rerender(renderStrip("e.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 266, behavior: "smooth" });
+
+      // a.md is first: back to the start.
+      rerender(renderStrip("a.md"));
+      expect(scrollTo).toHaveBeenCalledTimes(4);
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, behavior: "smooth" });
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(windowScroll).not.toHaveBeenCalled();
+    });
+
+    it("reveals the active tab at once when the strip narrows it out of view, and leaves an in-view one alone", () => {
+      width.current = 516;
+      const { rerender } = render(renderStrip("d.md"));
+      const strip = screen.getByRole("tablist");
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      // A split narrows the strip to 250px: d.md, ending at 400px, is out of
+      // view, and comes back without an animation.
+      resize(250);
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 183, behavior: "auto" });
+
+      // Widened, the tab is still in view: nothing scrolls.
+      resize(300);
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+
+      // Scrolled away by hand, the strip stays put through scrolling and
+      // re-renders that change neither the active tab nor the width.
+      strip.scrollLeft = 0;
+      fireEvent.scroll(strip);
+      rerender(renderStrip("d.md", true));
+      resize(300);
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+
+      // The next width change reveals it again.
+      resize(260);
+      expect(scrollTo).toHaveBeenCalledTimes(2);
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 173, behavior: "auto" });
+    });
+
+    // Places the tabs a test names at [left, width] over `content` px of tabs
+    // and trailing hairline, and answers where a tab sits in the view.
+    function layOut(content: number, boxes: Record<string, [number, number]>) {
+      const box = (el: HTMLElement) => boxes[el.dataset.testid?.slice(4) ?? ""] ?? [0, 0];
+      vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) {
+        return box(this)[0];
+      });
+      vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+        return box(this)[1];
+      });
+      vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockReturnValue(content);
+      return (path: string) => {
+        const [left, size] = boxes[path] ?? [0, 0];
+        const scrolled = screen.getByRole("tablist").scrollLeft;
+        return { start: left - scrolled, end: left + size - scrolled };
+      };
+    }
+
+    // The strip's end does not fade, so a last tab needs no margin there; the
+    // 33px margin at its start does not fit beside a 224px tab in 250px.
+    it("reveals a last tab with no room for its margin whole, at the strip's end", () => {
+      const span = layOut(640, { "a.md": [0, 100], "e.md": [400, 224] });
+      const { rerender } = render(renderStrip("a.md"));
+      const strip = screen.getByRole("tablist");
+      rerender(renderStrip("e.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 390, behavior: "smooth" });
+      expect(span("e.md")).toEqual({ start: 10, end: 234 });
+
+      // Already shown there, it does not move.
+      rerender(renderStrip("a.md"));
+      strip.scrollLeft = 390;
+      scrollTo.mockClear();
+      rerender(renderStrip("e.md"));
+      expect(scrollTo).not.toHaveBeenCalled();
+    });
+
+    it("reveals a first tab with no room for its margin whole, at the strip's start", () => {
+      const span = layOut(640, { "a.md": [0, 224], "e.md": [400, 100] });
+      const { rerender } = render(renderStrip("e.md"));
+      rerender(renderStrip("a.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, behavior: "smooth" });
+      expect(span("a.md")).toEqual({ start: 0, end: 224 });
+    });
+
+    it("reveals a middle tab with room for both margins clear of both fades, and leaves it where it is clear", () => {
+      const span = layOut(640, { "a.md": [0, 100], "c.md": [300, 150] });
+      const { rerender } = render(renderStrip("a.md"));
+      const strip = screen.getByRole("tablist");
+      rerender(renderStrip("c.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 233, behavior: "smooth" });
+      expect(span("c.md")).toEqual({ start: 67, end: 217 });
+
+      strip.scrollLeft = 250;
+      scrollTo.mockClear();
+      resize(251);
+      expect(scrollTo).not.toHaveBeenCalled();
+    });
+
+    it("reveals a middle tab with no room for both margins whole, as clear of both fades as the room allows", () => {
+      const span = layOut(640, { "a.md": [0, 100], "c.md": [300, 220], "d.md": [300, 190] });
+      const { rerender } = render(renderStrip("a.md"));
+      const strip = screen.getByRole("tablist");
+      // 30px of room: 15px on each side.
+      rerender(renderStrip("c.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 285, behavior: "smooth" });
+      expect(span("c.md")).toEqual({ start: 15, end: 235 });
+
+      // 60px of room clears both 24px fades, if not the joins beside them:
+      // the nearest such scroll, and none while the tab is already clear.
+      rerender(renderStrip("d.md"));
+      expect(scrollTo).toHaveBeenLastCalledWith({ left: 276, behavior: "smooth" });
+      expect(span("d.md")).toEqual({ start: 24, end: 214 });
+      strip.scrollLeft = 270;
+      scrollTo.mockClear();
+      resize(251);
+      expect(scrollTo).not.toHaveBeenCalled();
+    });
+  });
+
+  // styles.css shows each fade from the strip's attributes through a sibling
+  // selector, so the fades follow the strip in its frame. They draw over the
+  // other tabs and under the active one (z-10), and take no clicks.
+  it("draws the edge fades after the strip, under the active tab, taking no clicks", () => {
+    renderTabs("a.md");
+    const strip = screen.getByRole("tablist");
+    const fades = [...screen.getByTestId("editor-tabs").querySelectorAll<HTMLElement>("[data-strip-fade]")];
+    expect(fades.map((fade) => fade.dataset.stripFade)).toEqual(["left", "right"]);
+    for (const fade of fades) {
+      expect(fade.parentElement).toBe(strip.parentElement);
+      expect(strip.compareDocumentPosition(fade) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      const drawn = (fade.className.includes("absolute") ? fade : fade.firstElementChild) as HTMLElement;
+      expect(drawn.className.split(" ")).toEqual(expect.arrayContaining(["pointer-events-none", "z-[6]"]));
+    }
+    expect(screen.getByRole("tab", { selected: true }).className).toContain("z-10");
+  });
+
+  // The fades in styles.css read these: an edge the strip can still scroll
+  // past fades, and an edge it has reached does not.
+  it("marks the edges the strip can still scroll past", () => {
+    renderTabs("a.md");
+    const strip = screen.getByRole("tablist");
+    const edges = () => ({
+      left: strip.hasAttribute("data-overflow-left"),
+      right: strip.hasAttribute("data-overflow-right"),
+    });
+    Object.defineProperty(strip, "clientWidth", { configurable: true, value: 200 });
+    Object.defineProperty(strip, "scrollWidth", { configurable: true, value: 200 });
+    fireEvent.scroll(strip);
+    expect(edges()).toEqual({ left: false, right: false });
+
+    // A pixel over is rounding a fraction of one, not a hidden tab.
+    Object.defineProperty(strip, "scrollWidth", { configurable: true, value: 201 });
+    fireEvent.scroll(strip);
+    expect(edges()).toEqual({ left: false, right: false });
+
+    Object.defineProperty(strip, "scrollWidth", { configurable: true, value: 600 });
+    fireEvent.scroll(strip);
+    expect(edges()).toEqual({ left: false, right: true });
+
+    strip.scrollLeft = 200;
+    fireEvent.scroll(strip);
+    expect(edges()).toEqual({ left: true, right: true });
+
+    strip.scrollLeft = 400;
+    fireEvent.scroll(strip);
+    expect(edges()).toEqual({ left: true, right: false });
+
+    // A pixel short of an edge has reached it.
+    strip.scrollLeft = 399;
+    fireEvent.scroll(strip);
+    expect(edges()).toEqual({ left: true, right: false });
   });
 
   it("translates a vertical wheel into horizontal scroll when overflowing", () => {

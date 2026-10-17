@@ -4,6 +4,14 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { Explorer, TreeRow, type ExplorerProps } from "./Explorer";
+import {
+  GRAPH_TAB_PATH,
+  chatTabPath,
+  collectionTabPath,
+  momentDiffTabPath,
+  siteTabPath,
+  versionCompareTabPath,
+} from "./workbenchState";
 
 afterEach(cleanup);
 
@@ -172,6 +180,64 @@ describe("Explorer kind glyphs", () => {
       expect(glyph.getAttribute("width")).toBe("15");
       expect(glyph.classList.contains(tone)).toBe(true);
     }
+  });
+
+  describe("open editors", () => {
+    function openEditor(path: string): HTMLElement {
+      const row = screen.getAllByTestId("open-editor-row").find((candidate) => candidate.dataset.path === path);
+      if (!row) throw new Error(`no open editor for ${path}`);
+      return row;
+    }
+
+    function openEditors(paths: string[], files: WorkspaceFileEntry[], overrides: Partial<ExplorerProps> = {}) {
+      render(
+        <Explorer
+          {...explorerProps({
+            files,
+            editorGroups: [{ id: "group-1", tabs: paths.map((path) => ({ path })), activeTab: null, size: 1 }],
+            ...overrides,
+          })}
+        />,
+      );
+    }
+
+    it("takes a database from the listing's header check, as its tab does", () => {
+      openEditors(["store.bin", "cache.db", "ledger.sqlite"], [file("store.bin", "database"), file("cache.db"), file("ledger.sqlite", "database")]);
+      expect(glyphOf(openEditor("store.bin")).classList.contains("lucide-database")).toBe(true);
+      expect(glyphOf(openEditor("cache.db")).classList.contains("lucide-file")).toBe(true);
+      expect(glyphOf(openEditor("ledger.sqlite")).classList.contains("lucide-database")).toBe(true);
+    });
+
+    it("shows a page's emoji in place of its glyph without renaming the row", () => {
+      openEditors(["launch.md"], [{ path: "launch.md", kind: "file", icon: "🚀" }]);
+      const row = openEditor("launch.md");
+      expect(row.querySelector("svg:not(.lucide-x)")).toBeNull();
+      expect(within(row).getByText("🚀").getAttribute("aria-hidden")).toBe("true");
+      expect(within(row).getByRole("button", { name: "launch.md" })).toBeTruthy();
+    });
+
+    it("draws an app folder's app as its folder row does", () => {
+      const app = siteTabPath("site");
+      openEditors([app], [file("site/index.html")], { folders: ["site"], appFolders: new Set(["site"]) });
+      const glyph = glyphOf(openEditor(app));
+      expect(glyph.classList.contains("lucide-app-window")).toBe(true);
+      expect(glyph.getAttribute("width")).toBe("15");
+      expect(glyph.getAttribute("aria-hidden")).toBe("true");
+      expect(treeRow("site").querySelector(".lucide-app-window")).not.toBeNull();
+    });
+
+    it("draws every other object's glyph from the map tabs use", () => {
+      const cases: Array<[string, string]> = [
+        [collectionTabPath("people"), "lucide-table-2"],
+        [chatTabPath({ kind: "channel", id: "trip" }), "lucide-hash"],
+        [chatTabPath({ kind: "dm", id: "person" }), "lucide-message-circle"],
+        [versionCompareTabPath("try"), "lucide-layers"],
+        [momentDiffTabPath("moment"), "lucide-file-diff"],
+        [GRAPH_TAB_PATH, "lucide-workflow"],
+      ];
+      openEditors(cases.map(([path]) => path), []);
+      for (const [path, glyph] of cases) expect(glyphOf(openEditor(path)).classList.contains(glyph)).toBe(true);
+    });
   });
 
   it("lets a drop preview color the glyph with its row", () => {
