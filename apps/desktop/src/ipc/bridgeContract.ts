@@ -1,4 +1,3 @@
-import type { chatOperations } from "./chatOperations";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
 export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -111,6 +110,7 @@ import {
   WORKBENCH_MENU_COMMANDS,
 } from "./channels";
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
+import type { chatOperations } from "./chatOperations";
 import type { settingsOperations } from "./settingsOperations";
 import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";

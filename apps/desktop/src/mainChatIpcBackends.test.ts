@@ -8,14 +8,22 @@ import {
   type LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import { describe, expect, it, vi } from "vitest";
-import {
-  createChatChannelIpcHandler,
-  createWritableChatIpcHandler,
-  type MainChatIpcHandler,
-} from "./mainChatIpcHandlers";
+import type { MainChatIpcHandler } from "./mainChatIpcHandlers";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createDesktopLinkedChatStore } from "./workspaces/liveLinkedChatStore";
 import { createTestScratch } from "./workspaces/testTemp";
+
+function createChatFlowHandler<Event, Payload extends { workspaceId: string }, Context, Result>(input: {
+  parsePayload: (payload: unknown) => Payload;
+  requireContext: (workspaceId: string) => Promise<Context>;
+  run: (context: Context, payload: Payload) => Promise<Result>;
+}): MainChatIpcHandler<Event, Result> {
+  return async (_event, rawPayload) => {
+    const payload = input.parsePayload(rawPayload);
+    const context = await input.requireContext(payload.workspaceId);
+    return input.run(context, payload);
+  };
+}
 
 interface TestEvent {
   trusted: boolean;
@@ -68,7 +76,6 @@ function registerChatFlowHandlers(
       }
       return context;
     },
-    assertWritable: null,
   };
 
   ipc.handle(
@@ -81,18 +88,17 @@ function registerChatFlowHandlers(
   );
   ipc.handle(
     chatOperations.createChatChannel.channel,
-    createChatChannelIpcHandler({
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{ workspaceId: string; name: string }>(payload),
       run: async ({ store }, input) =>
         await store.createChannel({ ...input, kind: "channel" }),
-      queueCloudSync: () => undefined,
     }),
   );
   ipc.handle(
     chatOperations.startChannelThread.channel,
-    createWritableChatIpcHandler({
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -120,7 +126,7 @@ function registerChatFlowHandlers(
   );
   ipc.handle(
     chatOperations.sendChatMessage.channel,
-    createWritableChatIpcHandler({
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -157,7 +163,7 @@ function registerChatFlowHandlers(
   );
   ipc.handle(
     chatOperations.markChatThreadRead.channel,
-    createWritableChatIpcHandler({
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -170,7 +176,7 @@ function registerChatFlowHandlers(
   );
   ipc.handle(
     chatOperations.resolveChatDecision.channel,
-    createWritableChatIpcHandler({
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -194,7 +200,7 @@ function registerChatFlowHandlers(
   );
   ipc.handle(
     chatOperations.setChatReaction.channel,
-    createWritableChatIpcHandler({
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -217,7 +223,7 @@ function registerChatFlowHandlers(
   );
   ipc.handle(
     chatOperations.saveChatBookmark.channel,
-    createWritableChatIpcHandler({
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{
@@ -246,7 +252,7 @@ function registerChatFlowHandlers(
   );
   ipc.handle(
     chatOperations.setChatFollow.channel,
-    createWritableChatIpcHandler({
+    createChatFlowHandler({
       ...deps,
       parsePayload: (payload) =>
         parseWorkspacePayload<{

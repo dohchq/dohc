@@ -1,4 +1,3 @@
-import { chatOperations } from "./ipc/chatOperations";
 import { describe, expect, it, vi } from "vitest";
 import {
   ListChatChannelSharesResult,
@@ -8,14 +7,11 @@ import {
   chatShareSessionKey,
   chatViewerAuthorId,
   handleRelayUnauthorized,
-  createChatChannelIpcHandler,
   createListJoinedSharedChannelsIpcHandler,
-  createMarkChatThreadReadIpcHandler,
   reactionsForViewer,
   readRelayChatShareLanes,
   RelaySessionError,
   awaitCredentialGeneration,
-  type MainChatIpcHandler,
 } from "./mainChatIpcHandlers";
 import { scopeJoinedChannels } from "./workspaces/sharedChannels";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
@@ -23,52 +19,6 @@ import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 interface TestEvent {
   trusted: boolean;
   activeWorkspaceId?: string;
-}
-
-interface TestContext {
-  workspace: { workspaceId: string; readOnly: boolean };
-}
-
-type RegisteredHandler = MainChatIpcHandler<TestEvent, unknown>;
-
-function runtimeHarness() {
-  const handlers = new Map<string, RegisteredHandler>();
-  return {
-    handle(channel: string, handler: RegisteredHandler) {
-      handlers.set(channel, async (event, payload) => {
-        if (!event.trusted) throw new Error("Untrusted renderer.");
-        return handler(event, payload);
-      });
-    },
-    invoke(channel: string, payload: unknown, event: TestEvent = { trusted: true }) {
-      const handler = handlers.get(channel);
-      if (!handler) throw new Error(`No runtime handler registered for ${channel}.`);
-      return handler(event, payload);
-    },
-  };
-}
-
-function boundaryDeps(contexts: Map<string, TestContext>) {
-  return {
-    assertTrustedSender(event: TestEvent) {
-      if (!event.trusted) throw new Error("Untrusted renderer.");
-    },
-    parsePayload(payload: unknown) {
-      const parsed = payload as { workspaceId?: unknown };
-      if (typeof parsed?.workspaceId !== "string") throw new Error("Invalid payload.");
-      return { workspaceId: parsed.workspaceId };
-    },
-    async requireContext(workspaceId: string) {
-      const context = contexts.get(workspaceId);
-      if (!context) throw new Error("Workspace not found.");
-      return context;
-    },
-    assertWritable(context: TestContext) {
-      if (context.workspace.readOnly) {
-        throw new Error("This is a shared view — it is read-only.");
-      }
-    },
-  };
 }
 
 describe("runtime main chat IPC boundaries", () => {
@@ -140,137 +90,6 @@ describe("runtime main chat IPC boundaries", () => {
         authorId: "verified-user-id",
       },
     ]);
-  });
-
-  it("rejects channel creation in a read-only workspace", async () => {
-    const workspaceId = "shared-view";
-    const contexts = new Map<string, TestContext>([
-      [workspaceId, { workspace: { workspaceId, readOnly: true } }],
-    ]);
-    const deps = boundaryDeps(contexts);
-    const ipc = runtimeHarness();
-    const create = vi.fn(async () => ({ channelId: "channel-1" }));
-    const cloudSync = vi.fn();
-
-    ipc.handle(
-      chatOperations.createChatChannel.channel,
-      createChatChannelIpcHandler({
-        ...deps,
-        run: create,
-        queueCloudSync: cloudSync,
-      }),
-    );
-
-    await expect(ipc.invoke(chatOperations.createChatChannel.channel, { workspaceId })).rejects.toThrow(
-      /read-only/u,
-    );
-    expect(create).not.toHaveBeenCalled();
-    expect(cloudSync).not.toHaveBeenCalled();
-  });
-
-  it("queues cloud sync after channel creation", async () => {
-    const workspaceId = "owned-workspace";
-    const contexts = new Map<string, TestContext>([
-      [workspaceId, { workspace: { workspaceId, readOnly: false } }],
-    ]);
-    const deps = boundaryDeps(contexts);
-    const ipc = runtimeHarness();
-    const events: string[] = [];
-
-    ipc.handle(
-      chatOperations.createChatChannel.channel,
-      createChatChannelIpcHandler({
-        ...deps,
-        run: async () => {
-          events.push("channel-write");
-          return { channelId: "channel-1" };
-        },
-        queueCloudSync: (id) => events.push(`cloud:${id}`),
-      }),
-    );
-
-    await ipc.invoke(chatOperations.createChatChannel.channel, { workspaceId });
-    expect(events).toEqual(["channel-write", `cloud:${workspaceId}`]);
-  });
-
-  it("updates reader-local state without a write boundary", async () => {
-    interface MarkThreadReadPayload {
-      workspaceId: string;
-      threadId: string;
-      upToSequence: number;
-    }
-    const workspaceId = "joined-workspace";
-    const contexts = new Map<string, TestContext>([
-      [workspaceId, { workspace: { workspaceId, readOnly: false } }],
-    ]);
-    const deps = boundaryDeps(contexts);
-    const ipc = runtimeHarness();
-    const markThreadRead = vi.fn(
-      async (_context: TestContext, _payload: MarkThreadReadPayload) => ({
-        lastReadSequence: 4,
-        revision: 2,
-      }),
-    );
-    const parsePayload = vi.fn((payload): MarkThreadReadPayload => {
-      const parsed = payload as {
-        workspaceId?: unknown;
-        threadId?: unknown;
-        upToSequence?: unknown;
-      };
-      if (
-        typeof parsed.workspaceId !== "string" ||
-        typeof parsed.threadId !== "string" ||
-        typeof parsed.upToSequence !== "number"
-      ) {
-        throw new Error("Invalid payload.");
-      }
-      return {
-        workspaceId: parsed.workspaceId,
-        threadId: parsed.threadId,
-        upToSequence: parsed.upToSequence,
-      };
-    });
-    const requireContext = vi.fn(deps.requireContext);
-    ipc.handle(
-      chatOperations.markChatThreadRead.channel,
-      createMarkChatThreadReadIpcHandler({
-        parsePayload,
-        requireContext,
-        run: markThreadRead,
-      }),
-    );
-
-    await expect(
-      ipc.invoke(chatOperations.markChatThreadRead.channel, {
-        workspaceId,
-        threadId: "thread-view",
-        upToSequence: 4,
-      }),
-    ).resolves.toEqual({ lastReadSequence: 4, revision: 2 });
-
-    const validParseCount = parsePayload.mock.calls.length;
-    await expect(
-      ipc.invoke(
-        chatOperations.markChatThreadRead.channel,
-        { workspaceId, threadId: "thread-view", upToSequence: 4 },
-        { trusted: false },
-      ),
-    ).rejects.toThrow("Untrusted renderer.");
-    expect(parsePayload).toHaveBeenCalledTimes(validParseCount);
-    expect(requireContext).toHaveBeenCalledTimes(1);
-    await expect(
-      ipc.invoke(chatOperations.markChatThreadRead.channel, { workspaceId }),
-    ).rejects.toThrow("Invalid payload.");
-    expect(requireContext).toHaveBeenCalledTimes(1);
-    await expect(
-      ipc.invoke(chatOperations.markChatThreadRead.channel, {
-        workspaceId: "missing-workspace",
-        threadId: "thread-view",
-        upToSequence: 4,
-      }),
-    ).rejects.toThrow("Workspace not found.");
-    expect(requireContext).toHaveBeenCalledTimes(2);
-    expect(markThreadRead).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1219,39 +1038,5 @@ describe("createListJoinedSharedChannelsIpcHandler", () => {
     await expect(
       handler({ trusted: false }, { workspaceId: "ws-1", channelWireIds: [] }),
     ).rejects.toThrow("untrusted");
-  });
-});
-
-// Read state is the reader's own, written locally and never replicated, so a
-// share view marks threads read at every level, and after the share ends.
-describe("chat read state in a share view", () => {
-  const workspaceId = "workspace-share";
-
-  it("marks a thread read at every level and after the share ends", async () => {
-    for (const [label, over] of [
-      ["view", { access: "view" }],
-      ["comment", { access: "comment" }],
-      ["edit", { access: "edit" }],
-      ["ended", { access: "comment", ended: true }],
-    ] as const) {
-      const ipc = runtimeHarness();
-      const run = vi.fn(async () => ({ ok: true }));
-      ipc.handle(
-        chatOperations.markChatThreadRead.channel,
-        createMarkChatThreadReadIpcHandler({
-          parsePayload(payload: unknown) {
-            const parsed = payload as { workspaceId?: unknown };
-            if (typeof parsed?.workspaceId !== "string") throw new Error("Invalid payload.");
-            return { workspaceId: parsed.workspaceId };
-          },
-          requireContext: async () => ({ kind: "share" as const, workspace: { workspaceId }, ...over }),
-          run,
-        }),
-      );
-      await expect(ipc.invoke(chatOperations.markChatThreadRead.channel, { workspaceId })).resolves.toEqual({
-        ok: true,
-      });
-      expect(run, label).toHaveBeenCalledTimes(1);
-    }
   });
 });

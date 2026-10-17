@@ -428,7 +428,7 @@ describe("registered chat reads and reader-local state", () => {
   it.each(["local", "view", "comment", "edit", "ended", "damaged"] as const)("marks a thread read in %s scope without replication", async kind => {
     const test = fixture(kind);
     expect(await test.invoke(chatOperations.markChatThreadRead.channel, { workspaceId: "workspace", threadId: "thread", upToSequence: 3 })).toEqual({ lastReadSequence: 3, revision: 7 });
-    expect(test.storeMethods.markThreadRead).toHaveBeenCalledWith({ workspaceId: "workspace", threadId: "thread", upToSequence: 3 });
+    expect(test.storeMethods.markThreadRead).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace", threadId: "thread", upToSequence: 3 });
     expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
     expect(test.syncSharedChannelsForChatTarget).not.toHaveBeenCalled();
   });
@@ -728,4 +728,63 @@ it("reads both IPC polls back with their decisions from the live chat store", as
     ]));
     expect(decisions.decisions).toHaveLength(2);
   } finally { await sessions.closeWorkspace(workspace); }
+});
+
+
+describe("registered chat channel and read-state boundaries", () => {
+  it("refuses channel creation before writing or syncing a read-only workspace", async () => {
+    const test = fixture();
+    test.workspace.shareView = fixture("view").workspace.shareView;
+    // Let capture resolve so this test reaches the separate workspace write gate.
+    test.requireEngineCapture.mockResolvedValueOnce({ workspace: test.workspace, capture: test.capture });
+    await expect(test.invoke(chatOperations.createChatChannel.channel, { workspaceId: "workspace", name: "Team" }))
+      .rejects.toThrow("Read-only workspace");
+    expect(test.ensureGroupFolder).not.toHaveBeenCalled();
+    expect(test.linkedChatStoreFor).not.toHaveBeenCalled();
+    expect(test.storeMethods.createChannel).not.toHaveBeenCalled();
+    expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
+  });
+
+  it("queues cloud sync only after channel creation finishes", async () => {
+    const test = fixture();
+    const entered = deferred();
+    const written = deferred();
+    const create = test.storeMethods.createChannel.getMockImplementation()!;
+    test.storeMethods.createChannel.mockImplementationOnce(async input => {
+      entered.resolve();
+      await written.promise;
+      return create(input);
+    });
+    const creating = test.invoke(chatOperations.createChatChannel.channel, { workspaceId: "workspace", name: "Team" });
+    await entered.promise;
+    expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
+    written.resolve();
+    await expect(creating).resolves.toMatchObject({ channel: { id: "channel" } });
+    expect(test.activity.queueCloudSync).toHaveBeenCalledExactlyOnceWith("workspace");
+  });
+
+  it("does not queue cloud sync when channel creation fails", async () => {
+    const test = fixture();
+    test.storeMethods.createChannel.mockRejectedValueOnce(new Error("disk full"));
+    await expect(test.invoke(chatOperations.createChatChannel.channel, { workspaceId: "workspace", name: "Team" }))
+      .rejects.toThrow("disk full");
+    expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "untrusted sender", payload: { workspaceId: "workspace", threadId: "thread", upToSequence: 4 }, untrusted: true, error: "Untrusted sender" },
+    { name: "invalid payload", payload: { workspaceId: "workspace" }, untrusted: false, error: /Invalid input/u },
+    { name: "missing workspace", payload: { workspaceId: "missing-workspace", threadId: "thread", upToSequence: 4 }, untrusted: false, error: "Unknown workspace: missing-workspace" },
+  ])("refuses reader-local state for $name before accessing chat scope", async ({ payload, untrusted, error }) => {
+    const test = fixture("view");
+    const result = untrusted
+      ? test.invoke(chatOperations.markChatThreadRead.channel, payload, { sender: { trusted: false } })
+      : test.invoke(chatOperations.markChatThreadRead.channel, payload);
+    await expect(result).rejects.toThrow(error);
+    expect(test.openWorkspaceActivity).not.toHaveBeenCalled();
+    expect(test.requireEngineCapture).not.toHaveBeenCalled();
+    expect(test.linkedChatStoreFor).not.toHaveBeenCalled();
+    expect(test.storeMethods.markThreadRead).not.toHaveBeenCalled();
+    expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
+  });
 });
