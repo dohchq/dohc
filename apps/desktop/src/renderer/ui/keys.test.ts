@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { describe, expect, it } from "vitest";
-import { isComposingKey, isDeleteKey, isMacContextClick, isSendKey } from "./keys";
+import { isComposingKey, isDeleteKey, isMacContextClick, isOptionReturn, isSendKey } from "./keys";
 
 const key = (init: KeyboardEventInit & { keyCode?: number }) => new KeyboardEvent("keydown", init);
 const reactKey = (init: KeyboardEventInit & { keyCode?: number }) => {
@@ -33,6 +33,14 @@ describe("isSendKey", () => {
     ["win32", "Shift+Enter starts a line", { key: "Enter", shiftKey: true }, false],
   ] as const)("on %s, %s", (platform, _name, init, sends) => {
     expect(isSendKey(reactKey(init), platform)).toBe(sends);
+  });
+});
+
+describe("isOptionReturn", () => {
+  it("is ⌥↩ on macOS only", () => {
+    expect(isOptionReturn({ key: "Enter", altKey: true }, "darwin")).toBe(true);
+    expect(isOptionReturn({ key: "Enter", altKey: false }, "darwin")).toBe(false);
+    expect(isOptionReturn({ key: "Enter", altKey: true }, "win32")).toBe(false);
   });
 });
 

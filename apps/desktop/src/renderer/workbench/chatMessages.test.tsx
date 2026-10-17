@@ -70,6 +70,17 @@ describe("ChatComposer Enter-to-send", () => {
     expect(onSend).toHaveBeenCalledTimes(1);
   });
 
+  it("leaves an Escape that cancels an IME composition to the input method", () => {
+    const onEscape = vi.fn();
+    renderComposer({ onEscape });
+    const composer = screen.getByTestId("test-chat-composer");
+    fireEvent.keyDown(composer, { key: "Escape", isComposing: true });
+    fireEvent.keyDown(composer, { key: "Escape", keyCode: 229 });
+    expect(onEscape).not.toHaveBeenCalled();
+    fireEvent.keyDown(composer, { key: "Escape" });
+    expect(onEscape).toHaveBeenCalledOnce();
+  });
+
   it("does not send on an Enter that IME marks only with keyCode 229", () => {
     const { onSend } = renderComposer();
     fireEvent.keyDown(screen.getByTestId("test-chat-composer"), { key: "Enter", keyCode: 229 });

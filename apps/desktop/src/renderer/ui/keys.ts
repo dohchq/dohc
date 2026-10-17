@@ -10,12 +10,14 @@ export function isComposingKey(event: KeyboardEvent | ReactKeyboardEvent): boole
   return key.isComposing || key.keyCode === 229;
 }
 
-/**
- * Whether Enter sends from a message field. Shift+Enter starts a new line,
- * and so does Option+Return on macOS.
- */
+/** On macOS, ⌥↩ starts a new line in a message, as ⇧↩ does. */
+export function isOptionReturn(event: { key: string; altKey: boolean }, platform = window.dohcDesktop?.platform): boolean {
+  return platform === "darwin" && event.altKey && event.key === "Enter";
+}
+
+/** Whether Enter sends from a message field: not ⇧↩, ⌥↩ on macOS, or an IME's Enter. */
 export function isSendKey(event: ReactKeyboardEvent, platform = window.dohcDesktop?.platform): boolean {
-  return event.key === "Enter" && !event.shiftKey && !(platform === "darwin" && event.altKey) && !isComposingKey(event);
+  return event.key === "Enter" && !event.shiftKey && !isOptionReturn(event, platform) && !isComposingKey(event);
 }
 
 /** The key that deletes the selection: Delete, and ⌘⌫ on macOS, as in Finder. */

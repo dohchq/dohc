@@ -944,8 +944,9 @@ export function ChatComposer(props: {
         placeholder={props.placeholder}
         onChange={(event) => props.onChange(event.target.value)}
         onKeyDown={(event) => {
-          // Enter during IME composition (CJK input) confirms the composed
-          // characters — it must never submit the message.
+          // During IME composition (CJK input), Enter confirms the composed
+          // characters and Escape cancels them; neither sends or backs out.
+          if (isComposingKey(event)) return;
           if (isSendKey(event)) {
             event.preventDefault();
             props.onSend();
