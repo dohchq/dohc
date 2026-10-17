@@ -2692,7 +2692,7 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
             )?;
             recovered_sibling = true;
         }
-        let mut update =
+        let (mut update, source_bound) =
             match doc.rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text) {
                 Err(CollabError::MarkdownNotRepresentable)
                     if pristine_empty && empty_seed_never_replicated_in_tx(tx, key)? =>
@@ -2700,20 +2700,21 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
                     retire_complete_ydoc_lineage_in_tx(tx, complete)?;
                     return Ok(LineageFold::NoContent);
                 }
-                // Peers already hold the settled body, so an outside edit that
-                // keeps it, such as a frontmatter change, may fold its nested
-                // items. Parse refusals and quote overflow still apply; the
-                // settled-rule exception below then keeps the exact bytes.
+                // Keep the body XML when the chosen file keeps its settled
+                // body. The final proof below checks the retained XML.
                 Err(CollabError::MarkdownNotRepresentable)
                     if marker.content_kind == ContentKind::Richdoc
                         && last_settled_text_in_tx(tx, key)?.is_some_and(|settled| {
                             markdown_body(&settled) == markdown_body(chosen_text)
                         }) =>
                 {
-                    doc.rewrite_settled_body_for_fold(chosen_text)
-                        .map_err(map_fold_edit_error)?
+                    (
+                        doc.replace_frontmatter_for_fold(chosen_text)
+                            .map_err(map_fold_edit_error)?,
+                        true,
+                    )
                 }
-                result => result.map_err(map_fold_edit_error)?,
+                result => (result.map_err(map_fold_edit_error)?, false),
             };
         // Check the delta before projection, which has a separate byte cap.
         if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
@@ -2728,7 +2729,12 @@ fn fold_projected_complete_ydoc_lineage_in_tx(
             .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
         // Canonical files use the ordinary rewrite and projection. Only a
         // lexical variant needs source storage, scratch replay, and validation.
-        if marker.content_kind == ContentKind::Richdoc && canonical.content != chosen_text {
+        // The frontmatter-only stage already binds this witness.
+        // The exact-source projection proof below still applies to both paths.
+        if !source_bound
+            && marker.content_kind == ContentKind::Richdoc
+            && canonical.content != chosen_text
+        {
             let source_update = doc
                 .preserve_folded_markdown_source(chosen_text)
                 .map_err(map_fold_edit_error)?;

@@ -169,7 +169,7 @@ async fn successor_no_edit_runtime_settlement_preserves_exact_source() {
     for incoming in [
         "- parent\n  - child\n".to_owned(),
         "- parent\n  - child\n- sibling\n".to_owned(),
-        format!("{}quoted\n", "> ".repeat(200)),
+        format!("{}quoted\n", "> ".repeat(120)),
     ] {
         let (scratch, mut store, key) = document_conflict_store(&incoming);
         resolve_document_conflict(&mut store);

@@ -733,7 +733,7 @@ describe("CLI socket server", () => {
 
 
   it("lists and reads changes at CLI and MCP after an Undo adds compensation moments", async () => {
-    const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, assertCurrent: vi.fn() };
+    const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, signal: new AbortController().signal, assertCurrent: vi.fn() };
     await mkdir(join(workspaceRoot, ".dohc"), { recursive: true });
     await mkdir(join(workspaceRoot, "folder"));
     await writeFile(join(workspaceRoot, "folder/tracked.txt"), "original");
@@ -788,7 +788,7 @@ describe("CLI socket server", () => {
   it("refuses non-delete Undo through socket, CLI and MCP without an engine Undo", async () => {
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
     const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
-    const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot, get readOnly() { return context.readOnly; }, shareView: undefined as unknown }, assertCurrent: vi.fn() };
+    const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot, get readOnly() { return context.readOnly; }, shareView: undefined as unknown }, signal: new AbortController().signal, assertCurrent: vi.fn() };
     context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
     const args = { cwd: workspaceRoot, actor: "agent" as const, operationId };
@@ -817,7 +817,7 @@ describe("CLI socket server", () => {
 
   it("returns missing-delete recovery words through the socket, CLI and MCP", async () => {
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
-    const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, assertCurrent: vi.fn() };
+    const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, signal: new AbortController().signal, assertCurrent: vi.fn() };
     const history = { readHistoryPage: vi.fn(async () => ({ moments: [{ operation: "delete", path: "a.txt" }], nextCursor: null }) as never), undoHistoryOperation: vi.fn() };
     context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history);
     context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });

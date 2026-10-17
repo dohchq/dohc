@@ -10,7 +10,7 @@ import { realRelativeInRoot } from "@dohc/workspace-core/realPath";
 import { withExclusiveWorkspaceOperation, withSharedWorkspaceOperation } from "./workspaceAssets";
 import { historyExcludesSubtree, historyPathAdmission, readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
-import { missingDeleteRecoveryReason, readDeleteRecovery, undoDeleteRecovery, type RecoveryRecord, type DeleteUndoResult } from "./workspaceDeleteRecovery";
+import { waitForDeleteRecovery, missingDeleteRecoveryReason, readDeleteRecovery, undoDeleteRecovery, type RecoveryRecord, type DeleteUndoResult } from "./workspaceDeleteRecovery";
 
 type Operation = { workspace: { workspaceId: string; rootPath: string; readOnly?: boolean; shareView?: unknown }; assertCurrent(): void };
 export type OperationHistory = Pick<VersionedLiveAdapter, "readHistoryPage" | "undoHistoryOperation">;
@@ -138,11 +138,14 @@ export async function readWorkspaceHistoryOperation(operation: Operation, input:
     });
   } catch (error) { return failure(error, "read"); }
 }
-export async function undoWorkspaceHistoryOperation(operation: Operation, input: { operationId: string }, author: MomentWriteAuthor,
+export async function undoWorkspaceHistoryOperation(operation: Operation & { signal: AbortSignal }, input: { operationId: string }, author: MomentWriteAuthor,
   options: { history: OperationHistory; agent: boolean }): Promise<DeleteUndoResult> {
   try {
     writable(operation); operationId(input.operationId);
     const { rootPath, workspaceId } = operation.workspace;
+    await waitForDeleteRecovery(input.operationId, operation.signal);
+    if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");
+    writable(operation);
     return await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
       writable(operation);
       const record = await readDeleteRecovery(rootPath, input.operationId);
@@ -161,5 +164,9 @@ export async function undoWorkspaceHistoryOperation(operation: Operation, input:
       if (!record) throw new Error(deleted ? missingDeleteRecoveryReason : unsupported);
       return undoDeleteRecovery(rootPath, record, author, options.history, workspaceId, () => writable(operation), markChanged);
     });
-  } catch (error) { return failure(error, "undo"); }
+  } catch (error) {
+    // Refuse through the authority wrapper before its final currentness check.
+    if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");
+    return failure(error, "undo");
+  }
 }

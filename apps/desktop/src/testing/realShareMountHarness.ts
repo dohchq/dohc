@@ -106,6 +106,7 @@ export function createRealShareMountHarness(input: {
       return work({
         assertCurrent: () => undefined,
         authorityId: workspace.attachmentId, workspace, capture: null,
+        signal: new AbortController().signal,
         yDocSessions: { withDocumentUnowned: unexpected, markDeletedUnderPath: unexpected },
       });
     },
