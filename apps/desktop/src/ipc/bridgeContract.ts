@@ -1581,6 +1581,14 @@ const SHARED_AUTHOR_ID = z.string().min(1).refine(
   "Shared author identifiers are at most 512 UTF-8 bytes.",
 );
 
+// Display only. This token grants no workspace or author authority.
+export const ActorPresentation = z.object({
+  group: z.string(),
+  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose", "olive"]).nullable(),
+  self: z.boolean(),
+});
+export type ActorPresentation = z.infer<typeof ActorPresentation>;
+
 // A Collection automation's name or its Collection's, as History reads it.
 export const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
 const AUTOMATION_AUTHOR_TEXT = z.string().min(1).max(AUTOMATION_AUTHOR_TEXT_MAX);
@@ -1637,7 +1645,7 @@ const EngineMomentAuthor = z.union([
   }).strict(),
 ]);
 
-export const EngineMomentRecord = z.object({
+const EngineMomentFields = z.object({
   id: OPAQUE_ID,
   versionId: OPAQUE_ID,
   path: PATH_STRING,
@@ -1645,6 +1653,8 @@ export const EngineMomentRecord = z.object({
   operation: z.enum(["write", "rename", "delete"]),
   origin: z.enum(["api", "local-file", "restore", "sync", "unknown", "ydoc", "capture-recovery", "capture-recovery-cleared"]),
   authors: z.array(EngineMomentAuthor).min(1).optional(),
+  // How each author looks, in the order of `authors`: the same token chats use.
+  authorPresentations: z.array(ActorPresentation).min(1).optional(),
   // Present only when a dohc-tracked agent run authored the moment; main
   // resolves the configured agent name for local runs. A live author
   // snapshot's agent reads as the name it declared.
@@ -1691,6 +1701,10 @@ export const EngineMomentRecord = z.object({
   contentKind: z.enum(["text", "binary"]).optional(),
   byteLength: z.number().int().nonnegative().optional(),
 });
+const authorsPresented = (moment: { authors?: readonly unknown[]; authorPresentations?: readonly unknown[] }) =>
+  moment.authors?.length === moment.authorPresentations?.length;
+const AUTHORS_PRESENTED = { path: ["authorPresentations"], message: "Every author needs one presentation." };
+export const EngineMomentRecord = EngineMomentFields.refine(authorsPresented, AUTHORS_PRESENTED);
 export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
 
 export const HistoryMomentPosition = z.object({ recordedAtMs: z.number().int(), momentOrder: z.number().int().nonnegative() }).strict();
@@ -1817,7 +1831,7 @@ const ENGINE_MOMENT_BINARY_SIDE = z.object({
   sha256: z.string().min(1).max(128).optional(),
 });
 
-export const EngineMomentDetailRecord = EngineMomentRecord.omit({
+export const EngineMomentDetailRecord = EngineMomentFields.omit({
   momentOrder: true,
 }).extend({
   // null before-text = the moment created the file OR the before side is
@@ -1831,7 +1845,7 @@ export const EngineMomentDetailRecord = EngineMomentRecord.omit({
   // text side and one binary side; each side presents by its own kind.
   beforeBinary: ENGINE_MOMENT_BINARY_SIDE.optional(),
   afterBinary: ENGINE_MOMENT_BINARY_SIDE.optional(),
-});
+}).refine(authorsPresented, AUTHORS_PRESENTED);
 export type EngineMomentDetailRecord = z.infer<typeof EngineMomentDetailRecord>;
 
 // `untracked`: the change is in History, but the current rules no longer
@@ -1925,14 +1939,6 @@ const CHAT_MESSAGE_AUTOMATION = z.object({
   automationId: z.string().min(1).max(1024),
   collectionPath: SAFE_RELATIVE_PATH.nullable(),
 });
-
-// Display only. This token grants no workspace or author authority.
-export const ActorPresentation = z.object({
-  group: z.string(),
-  hue: z.enum(["rust", "amber", "teal", "blue", "indigo", "plum", "rose", "olive"]).nullable(),
-  self: z.boolean(),
-});
-export type ActorPresentation = z.infer<typeof ActorPresentation>;
 
 export const ChatMessageRecord = z.object({
   id: OPAQUE_ID,

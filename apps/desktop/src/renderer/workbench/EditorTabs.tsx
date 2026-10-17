@@ -100,6 +100,11 @@ const REVEAL_MARGIN = EDGE_FADE + CORNER_RADIUS + 1;
 // line runs, and stops above the hairline; it sits above the other tabs and
 // under the active one (z-10), and takes no clicks.
 const STRIP_FADE = "pointer-events-none absolute top-1 bottom-px z-[6] w-6 from-panel to-transparent";
+// The last of the strip's buttons meets the pane edge, where the window edge
+// or the split's separator cuts off an outset focus ring. All of them draw
+// it inset, so the ring keeps one shape as focus moves along them.
+const STRIP_BUTTON =
+  "grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:text-ink focus-visible:-outline-offset-2";
 
 // Scrolls only the strip, and only when the tab is not already clear of the
 // fades: scrollIntoView would also scroll every scrolling ancestor, the
@@ -198,7 +203,9 @@ const Tab = memo(function Tab(props: {
       // transitions slide displaced neighbours; the dragged tab itself
       // follows the pointer with no interpolation.
       // In a split, an inactive group's active tab recedes to muted text.
-      className={`group relative flex h-8 shrink-0 select-none items-center gap-1.5 self-end border px-3 text-[13px] [transform:translateX(0)] transition-[background-color,color,transform] duration-150 data-dragging:z-20 data-dragging:cursor-grabbing data-dragging:transition-none ${
+      // The strip scrolls, so the focus ring is drawn inset, where the
+      // scroller cannot clip it.
+      className={`group relative flex h-8 shrink-0 select-none items-center gap-1.5 self-end border px-3 text-[13px] focus-visible:-outline-offset-2 [transform:translateX(0)] transition-[background-color,color,transform] duration-150 data-dragging:z-20 data-dragging:cursor-grabbing data-dragging:transition-none ${
         props.active
           ? `z-10 rounded-t-lg border-line border-b-bg bg-bg text-ink ${INACTIVE_GROUP_TAB}`
           : "cursor-default border-transparent border-b-line text-muted before:absolute before:inset-y-2 before:-left-px before:w-px before:bg-line first:before:hidden [[data-active]+&::before]:hidden hover:bg-hover hover:text-ink"
@@ -976,7 +983,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
           aria-label="Close editor group"
           title="Close editor group"
           onClick={() => props.onCloseGroup?.(props.groupId)}
-          className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-hover hover:text-ink"
+          className={`${STRIP_BUTTON} hover:bg-hover`}
         >
           <X size={14} aria-hidden />
         </button>
@@ -988,7 +995,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
         title="New editor group right"
         disabled={empty || TAB_KINDS[parseTab(props.activeTab)?.kind ?? "removed"].singleton}
         onClick={() => props.onCreateGroupRight(props.groupId)}
-        className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-subtle"
+        className={`${STRIP_BUTTON} hover:bg-hover disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-subtle`}
       >
         <Columns2 size={14} aria-hidden />
       </button>
@@ -1096,7 +1103,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
               data-testid="tabs-overflow"
               aria-label={`All tabs in editor group ${props.groupNumber}`}
               title={`All tabs in editor group ${props.groupNumber}`}
-              className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:text-ink"
+              className={STRIP_BUTTON}
             >
               <ChevronDown size={14} aria-hidden />
             </button>

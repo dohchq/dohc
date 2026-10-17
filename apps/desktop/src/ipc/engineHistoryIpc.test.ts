@@ -32,6 +32,7 @@ const names: EngineMomentAuthorNames = {
   automation: (automationId) =>
     automationId.startsWith("collection:") ? { name: `Named ${automationId}`, collection: "Tasks" } : null,
   named: (author) => `${author.userId}@example.com (Edit)`,
+  presentations: (authors) => authors.map((author, index) => ({ group: `${author.kind}-${index}`, hue: null, self: false })),
 };
 
 const TEXT_SHA = "a".repeat(64);
@@ -95,6 +96,7 @@ describe("listEngineMomentsForIpc", () => {
     }), names);
     if (!("moments" in response)) throw new Error("Expected ready history");
     expect(response.moments[0]?.authors).toEqual(authors);
+    expect(response.moments[0]?.authorPresentations?.map(token => token.group)).toEqual(authors.map((author, index) => `${author.kind}-${index}`));
     expect(response.moments[0]).not.toHaveProperty("namedAuthor");
     expect(response.moments[0]).not.toHaveProperty("automationAuthor");
     // Several authors read as each of them, in order; none stands in for the rest.
@@ -102,6 +104,24 @@ describe("listEngineMomentsForIpc", () => {
       "Ice", "Agent", "Named collection:Tasks#stamp in Tasks", "ana@example.com (Edit)",
       "Edit link · holder holder", "Link holder 3f9a2c1d", "An unrecorded author",
     ]);
+  });
+
+  it("gives list and detail records one presentation per author, and requires it", async () => {
+    const detail = detailWith({before: null, after: textSide("new")});
+    if (detail.protected) throw new Error("Expected a plaintext moment");
+    detail.moment.authors = [{kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1}, {kind: "agent", agentId: "agent"}];
+    const record = engineMomentDetailForIpc(detail, names);
+    expect(record.authorPresentations).toEqual([{group: "named-0", hue: null, self: false}, {group: "agent-1", hue: null, self: false}]);
+    expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+    const {authorPresentations: _omitted, ...missing} = record;
+    for (const shape of [missing, {...record, authorPresentations: record.authorPresentations!.slice(1)}]) {
+      expect(EngineMomentDetailRecord.safeParse(shape).success).toBe(false);
+      expect(EngineMomentRecord.safeParse({...shape, momentOrder: 1}).success).toBe(false);
+    }
+    expect(EngineMomentRecord.safeParse({...record, momentOrder: 1, authors: undefined, authorPresentations: undefined}).success).toBe(true);
+    // The token names no author: it carries only its group, hue, and self.
+    expect(EngineMomentRecord.parse({...record, momentOrder: 1, authorPresentations: record.authorPresentations!.map(token => ({...token, userId: "ana"}))})
+      .authorPresentations).toEqual(record.authorPresentations);
   });
 
   it("does not reclassify an unknown daemon failure", async () => {
@@ -219,7 +239,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
       {linkAuthor: {kind: "link", grantId: over, grantGeneration: 1, principalId: "holder"}},
       {linkAuthor: {kind: "link", grantId: "grant", grantGeneration: 1, principalId: over}},
     ]) {
-      expect(EngineMomentRecord.omit({momentOrder: true}).safeParse({...record, ...oversized}).success).toBe(false);
+      expect(EngineMomentDetailRecord.safeParse({...record, ...oversized}).success).toBe(false);
     }
   });
 
@@ -353,6 +373,8 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     // Snapshot fields keep the live bound and their exact shape.
     const over = `${"é".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES / 2)}x`;
     const record = engineMomentDetailForIpc(detailWith({before: null, after: textSide("new")}), names);
+    const authorPresentations = names.presentations([{kind: "unattributed"}]);
+    expect(EngineMomentDetailRecord.safeParse({...record, authors: [{kind: "human", humanId: "owner", humanName: "Owner"}], authorPresentations}).success).toBe(true);
     for (const author of [
       {kind: "human", humanId: "owner", humanName: over},
       {kind: "human", humanId: over, humanName: "Owner"},
@@ -362,7 +384,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
       {kind: "link", publicPrincipalId: "public_1", label: "Anonymous", grantId: "grant"},
       {kind: "agent", agentId: "writer", agentName: over},
     ]) {
-      expect(EngineMomentRecord.omit({momentOrder: true}).safeParse({...record, authors: [author]}).success, JSON.stringify(author)).toBe(false);
+      expect(EngineMomentDetailRecord.safeParse({...record, authors: [author], authorPresentations}).success, JSON.stringify(author)).toBe(false);
     }
   });
   it("keeps the plain text moment shape (no binary side fields)", () => {

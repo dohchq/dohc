@@ -1,4 +1,4 @@
-import { historyPageFields } from "../testing/historyPageFixture";
+import { historyPageFields, neutralHistoryPresentations } from "../testing/historyPageFixture";
 import { expect, it, vi } from "vitest";
 import { createHistoryLabels, rosterAuthorLabel } from "./shareRoster";
 import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
@@ -14,7 +14,8 @@ it("renders History while the relay request has not answered", async () => {
   const labels = createHistoryLabels({ snapshot: () => ({ roster, owner: true, context: 1, inventory: 1 }), lookupAccounts: () => pending });
   let rendered = false;
   const reading = listEngineMomentsForIpc(async () => ({ moments: [moment], nextCursor: null, latestMomentOrder: 1, activeVersionId: "main", ...historyPageFields }),
-    { prepare: () => labels.prepare("ws", [author]), named: person => labels.author("ws", person), agent: () => undefined, person: () => undefined, automation: () => null });
+    { prepare: () => labels.prepare("ws", [author]), named: person => labels.author("ws", person), agent: () => undefined, person: () => undefined, automation: () => null,
+      presentations: neutralHistoryPresentations });
   void reading.then(() => { rendered = true; });
   await new Promise<void>(resolve => setImmediate(resolve));
   try { expect(rendered).toBe(true); } finally { finish(null); await reading; }
