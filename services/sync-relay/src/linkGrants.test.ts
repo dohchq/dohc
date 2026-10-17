@@ -16,7 +16,9 @@ import type { SyncRelayHandler } from "./server";
 import { authorizeShareAction } from "./shareAuthorization";
 import { LINK_INVENTORY_PAGE_SIZE, type SyncRelayStorage } from "./storage";
 import {
+  chatChannelCreate,
   seedDependentGrant,
+  sequenced,
   closeTestStorage,
   closeTestStorages,
   countStorageCalls,
@@ -5681,6 +5683,60 @@ describe("relay link grants", () => {
         await h(request(null, "/sync/link-exchange", jsonBody({ secret: chatSecret }))),
       ),
     ).toBe(missing);
+
+    // A Group link serves only an ordinary channel: never a direct message
+    // or an agent channel.
+    storage.appendLogBatch({
+      workspaceId: WORKSPACE,
+      originId: "channels",
+      ops: sequenced([
+        chatChannelCreate("wire-dm", { kind: "dm" }),
+        chatChannelCreate("wire-agent", { kind: "agent" }),
+      ]).map(({ payload, ...op }) => ({ ...op, payloadJson: JSON.stringify(payload) })),
+    });
+    for (const [wire, fill] of [["wire-dm", 8], ["wire-agent", 9]] as const) {
+      storage.createShare({
+        share: {
+          shareId: `share-${wire}`,
+          workspaceId: WORKSPACE,
+          granterUserId: OWNER,
+          selectorJson: JSON.stringify({ kind: "group", channelWireId: wire, paths: [wire], versionId: null }),
+          createdAtMs: 2_030,
+        },
+        grant: {
+          grantId: `grant-${wire}-user`,
+          shareId: `share-${wire}`,
+          principalKind: "user",
+          principalUserId: RECIPIENT,
+          principalEmail: null,
+          access: "read-only",
+          generation: 1,
+          status: "active",
+          createdAtMs: 2_030,
+          revokedAtMs: null,
+          parentGrantId: null,
+        },
+      });
+      expect(
+        (
+          await h(
+            request(OWNER, `/sync/${WORKSPACE}/shares/share-${wire}/links`, jsonBody({ access: "read-only" })),
+          )
+        ).status,
+      ).toBe(404);
+      const groupSecret = Buffer.alloc(32, fill).toString("base64url");
+      seedLinkGrant(storage, {
+        grantId: `grant-${wire}-link`,
+        shareId: `share-${wire}`,
+        secretHash: hmac(groupSecret),
+        access: "read-only",
+      });
+      expect(
+        await denialBytes(
+          await h(request(null, "/sync/link-exchange", jsonBody({ secret: groupSecret }))),
+        ),
+      ).toBe(missing);
+    }
 
     const noKey = handler(storage, { linkKey: undefined });
     expect(

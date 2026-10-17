@@ -3,7 +3,7 @@ import { readBoundedJson } from "@dohc/service-http";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { badRequest, errorResponse, notFound, RelayError, relayError } from "./errors";
+import { badRequest, errorResponse, notFound, RelayError, relayError, type RelayErrorCode } from "./errors";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import { DiscussionActivityCapacityError, linkLogWaitGroup, type DiscussionActivityHub } from "./discussionActivity";
 import type { NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
@@ -12,7 +12,7 @@ import { accountDisplayName } from "./discussionRoutes";
 import { namedShareOrigin, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseLimit, parseString, parseLinkLogHold } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
-import { chatSideOf, filterOpForShare } from "./shareFilter";
+import { chatSideOf, filterOpForShare, type AnyShareSelector, type ChatShareThreadResolver } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
@@ -211,72 +211,10 @@ export function createNamedRecipientChat(options: {
           recheck();
           return json({shareId, channelWireId, message: messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: JSON.parse(row.payloadJson)})});
         }
-        const limit = Math.min(parseLimit(url.searchParams.get("limit")), 100);
-        const since = following ? cursor(url.searchParams.get("since")) : null;
-        if (following && url.searchParams.has("before")) throw badRequest("invalid query");
-        if (!following && url.searchParams.has("hold")) throw badRequest("hold requires since");
-        const hold = following ? parseLinkLogHold(url.searchParams.get("hold")) : 0;
-        let position = following ? since : url.searchParams.has("before") ? cursor(url.searchParams.get("before")) : null;
-        const resolver = options.reads.chatResolverFor(share.workspaceId);
-        const readPage = () => {
-          recheck();
-          const result = storage.fetchChatMessages({workspaceId: share.workspaceId, channelWireId,
-            cursor: position, direction: following ? "newer" : "older", limit});
-          position = result.nextCursor;
-          const messages: NamedChatMessage[] = [];
-          for (const row of result.rows) {
-            if (row.settlementAdmission?.status === "refused") continue;
-            const decision = filterOpForShare(authority.effectiveSelector, row.opKind, row.payloadJson, resolver, "chat");
-            const message = decision.allowed ? messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload}) : null;
-            if (message) messages.push(message);
-          }
-          return {messages, nextCursor: following ? result.nextCursor : result.latestCursor,
-            ...(following ? {hasMore: result.hasMore} : {olderCursor: result.hasMore ? result.nextCursor : null})};
-        };
-        let page = readPage();
-        const caughtUp = () => page.messages.length === 0 && page.nextCursor === since && "hasMore" in page && !page.hasMore;
-        if (following && hold > 0 && caughtUp()) {
-          const deadline = Date.now() + hold;
-          while (!controller.signal.aborted && Date.now() < deadline) {
-            try {
-              await options.activity.wait(linkLogWaitGroup(share.workspaceId), `named:${actor.userId}`, {
-                holdMs: Math.max(1, deadline - Date.now()), signal: controller.signal,
-                shouldPark: () => {
-                  try {page = readPage(); return caughtUp();}
-                  catch {return false;}
-                },
-              });
-            } catch (error) {
-              if (error instanceof DiscussionActivityCapacityError) throw relayError("share_access_rate_limited");
-              throw error;
-            }
-            if (caughtUp()) page = readPage();
-            if (!caughtUp()) break;
-          }
-        }
-        recheck();
-        const envelope = {shareId, channelWireId, ...page};
-        const messages: NamedChatMessage[] = [];
-        let skippedCursor: number | undefined;
-        const partial = (selected: NamedChatMessage[]) => ({...envelope, messages: selected,
-          ...(following ? {nextCursor: (selected[selected.length - 1]?.relaySeq ?? skippedCursor ?? position ?? page.nextCursor), hasMore: true} :
-            {olderCursor: (selected[selected.length - 1]?.relaySeq ?? skippedCursor ?? position ?? page.nextCursor)})});
-        const fits = (value: unknown) => Buffer.byteLength(JSON.stringify(value)) <= limits.maxResponseBytes;
-        let truncated = false;
-        for (const message of page.messages) {
-          let omitted: NamedChatMessage = {...message, body: null, bodyTooLarge: true};
-          if (!fits(partial([omitted]))) {
-            omitted = {...omitted, messageId: `omitted:${message.relaySeq}`, threadId: "",
-              authorUserId: null, authorDisplayName: "", authorOwnerDisplayName: null};
-          }
-          if (!fits(partial([...messages, omitted]))) {
-            if (messages.length === 0) skippedCursor = message.relaySeq;
-            truncated = true; break;
-          }
-          messages.push(fits(partial([...messages, message])) ? message : omitted);
-        }
-        const complete = {...envelope, messages};
-        return json(truncated || !fits(complete) ? partial(messages) : complete);
+        return json(await readSharedChannelPage({storage, resolver: options.reads.chatResolverFor(share.workspaceId),
+          selector: authority.effectiveSelector, workspaceId: share.workspaceId, shareId, channelWireId, query: url.searchParams,
+          recheck, activity: options.activity, waiter: `named:${actor.userId}`, signal: controller.signal,
+          maxResponseBytes: limits.maxResponseBytes, busyCode: "share_access_rate_limited", project: message => message}));
       } catch (error) {return controller.signal.aborted ? cancelledResponse(request) : errorResponse(error);}
       finally {
         if (following) pendingFollows--; else pending--;
@@ -294,4 +232,95 @@ export function createNamedRecipientChat(options: {
     return Promise.race([work, cancelled]);
   };
   return handle;
+}
+
+// One page of a shared channel for a browser reader, named or link: newest
+// first with `before`, or following with `since` and an optional hold.
+// `recheck` throws once the reader's access has ended; it runs before every
+// read, including each wake of a hold, and before the page leaves.
+// `project` is the reader's view of a message, and the byte budget counts it.
+export async function readSharedChannelPage<Message extends {relaySeq: number}>(input: {
+  storage: Pick<SyncRelayStorage, "fetchChatMessages">;
+  resolver: ChatShareThreadResolver;
+  selector: AnyShareSelector;
+  workspaceId: string;
+  shareId: string;
+  channelWireId: string;
+  query: URLSearchParams;
+  recheck(): void;
+  activity: Pick<DiscussionActivityHub, "wait">;
+  waiter: string;
+  signal: AbortSignal;
+  maxResponseBytes: number;
+  busyCode: Extract<RelayErrorCode, "share_access_rate_limited" | "link_read_rate_limited">;
+  project(message: NamedChatMessage): Message;
+}) {
+  const {query, recheck, project} = input;
+  const following = query.has("since");
+  const limit = Math.min(parseLimit(query.get("limit")), 100);
+  const since = following ? cursor(query.get("since")) : null;
+  if (following && query.has("before")) throw badRequest("invalid query");
+  if (!following && query.has("hold")) throw badRequest("hold requires since");
+  const hold = following ? parseLinkLogHold(query.get("hold")) : 0;
+  let position = following ? since : query.has("before") ? cursor(query.get("before")) : null;
+  const readPage = () => {
+    recheck();
+    const result = input.storage.fetchChatMessages({workspaceId: input.workspaceId, channelWireId: input.channelWireId,
+      cursor: position, direction: following ? "newer" : "older", limit});
+    position = result.nextCursor;
+    const messages: NamedChatMessage[] = [];
+    for (const row of result.rows) {
+      if (row.settlementAdmission?.status === "refused") continue;
+      const decision = filterOpForShare(input.selector, row.opKind, row.payloadJson, input.resolver, "chat");
+      const message = decision.allowed ? messageFromOp({relaySeq: row.relaySeq, opKind: row.opKind, payload: decision.payload}) : null;
+      if (message) messages.push(message);
+    }
+    return {messages, nextCursor: following ? result.nextCursor : result.latestCursor,
+      ...(following ? {hasMore: result.hasMore} : {olderCursor: result.hasMore ? result.nextCursor : null})};
+  };
+  let page = readPage();
+  const caughtUp = () => page.messages.length === 0 && page.nextCursor === since && "hasMore" in page && !page.hasMore;
+  if (following && hold > 0 && caughtUp()) {
+    const deadline = Date.now() + hold;
+    while (!input.signal.aborted && Date.now() < deadline) {
+      try {
+        await input.activity.wait(linkLogWaitGroup(input.workspaceId), input.waiter, {
+          holdMs: Math.max(1, deadline - Date.now()), signal: input.signal,
+          shouldPark: () => {
+            try {page = readPage(); return caughtUp();}
+            catch {return false;}
+          },
+        });
+      } catch (error) {
+        if (error instanceof DiscussionActivityCapacityError) throw relayError(input.busyCode);
+        throw error;
+      }
+      if (caughtUp()) page = readPage();
+      if (!caughtUp()) break;
+    }
+  }
+  recheck();
+  const envelope = {shareId: input.shareId, channelWireId: input.channelWireId, ...page};
+  const messages: Message[] = [];
+  let skippedCursor: number | undefined;
+  const partial = (selected: Message[]) => ({...envelope, messages: selected,
+    ...(following ? {nextCursor: (selected[selected.length - 1]?.relaySeq ?? skippedCursor ?? position ?? page.nextCursor), hasMore: true} :
+      {olderCursor: (selected[selected.length - 1]?.relaySeq ?? skippedCursor ?? position ?? page.nextCursor)})});
+  const fits = (value: unknown) => Buffer.byteLength(JSON.stringify(value)) <= input.maxResponseBytes;
+  let truncated = false;
+  for (const message of page.messages) {
+    let omitted = project({...message, body: null, bodyTooLarge: true});
+    if (!fits(partial([omitted]))) {
+      omitted = project({...message, body: null, bodyTooLarge: true, messageId: `omitted:${message.relaySeq}`, threadId: "",
+        authorUserId: null, authorDisplayName: "", authorOwnerDisplayName: null});
+    }
+    if (!fits(partial([...messages, omitted]))) {
+      if (messages.length === 0) skippedCursor = message.relaySeq;
+      truncated = true; break;
+    }
+    const projected = project(message);
+    messages.push(fits(partial([...messages, projected])) ? projected : omitted);
+  }
+  const complete = {...envelope, messages};
+  return truncated || !fits(complete) ? partial(messages) : complete;
 }

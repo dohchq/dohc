@@ -2,11 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, constants } from "node:fs";
 import { copyFile, lstat, mkdir, open, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { backup, DatabaseSync } from "node:sqlite";
 import { validateRelayDeploymentMarker, withRelayDeploymentMaintenance, type DeploymentConfig } from "./relayDeployment";
 import { describeRelaySnapshot, parseRelaySnapshotManifest, relayRelease } from "./relaySnapshot";
 
-type Deployment = { config: Readonly<DeploymentConfig>; stamp: number };
+type Deployment = { config: Readonly<DeploymentConfig>; stamp: number; nonce: string };
 const snapshotName = "relay.sqlite";
 const normalize = (path: string) => process.platform === "win32" ? path.toLowerCase() : path;
 function contains(parent: string, child: string): boolean {
@@ -55,23 +56,20 @@ async function inspectSnapshot(path: string, deployment: Deployment): Promise<vo
   try {
     const checks = db.prepare("PRAGMA integrity_check").all();
     if (checks.length !== 1 || checks[0]?.integrity_check !== "ok") throw new Error("The relay snapshot failed SQLite integrity checks.");
-    validateRelayDeploymentMarker(db, deployment.config, deployment.stamp);
+    validateRelayDeploymentMarker(db, deployment.config, deployment.stamp, deployment.nonce);
   } finally { db.close(); }
 }
 
 /** A cold snapshot contains relay data only. Independent continuity remains on the original host. */
 export async function backupRelayDeployment(configPath: string, directory: string): Promise<void> {
-  await withRelayDeploymentMaintenance(configPath, async deployment => {
+  await withRelayDeploymentMaintenance(configPath, "backup", async deployment => {
     await directoryOutsideDeployment(directory, deployment, true, configPath);
     await canonical(deployment.config.relayPath);
-    for (const suffix of ["-wal", "-journal"]) {
-      if (await stat(deployment.config.relayPath + suffix).then(() => true, error => { if (error.code === "ENOENT") return false; throw error; })) {
-        throw new Error("Stop the relay cleanly before backup. SQLite has an outstanding journal; no snapshot was taken.");
-      }
-    }
-    const source = new DatabaseSync(deployment.config.relayPath, { readOnly: true });
+    const uri = pathToFileURL(deployment.config.relayPath);
+    uri.searchParams.set("immutable", "1");
+    const source = new DatabaseSync(uri.href, { readOnly: true });
     try {
-      validateRelayDeploymentMarker(source, deployment.config, deployment.stamp);
+      validateRelayDeploymentMarker(source, deployment.config, deployment.stamp, deployment.nonce);
       await mkdir(directory, { mode: 0o700 });
       const path = join(directory, snapshotName);
       await backup(source, path);
@@ -94,7 +92,7 @@ async function checkedSnapshot(directory: string, deployment: Deployment): Promi
   await canonical(manifestPath);
   const manifest = parseRelaySnapshotManifest(JSON.parse(await readFile(manifestPath, "utf8")));
   if (manifest.namespace !== deployment.config.namespace || manifest.generation !== deployment.config.generation ||
-      manifest.stamp !== deployment.stamp) {
+      manifest.stamp !== deployment.stamp || manifest.nonce !== deployment.nonce) {
     throw new Error("This snapshot does not match current deployment continuity. Preserve it for recovery; do not reset continuity.");
   }
   const path = join(directory, snapshotName);
@@ -104,12 +102,12 @@ async function checkedSnapshot(directory: string, deployment: Deployment): Promi
 }
 
 export async function checkRelayBackup(configPath: string, directory: string): Promise<void> {
-  await withRelayDeploymentMaintenance(configPath, async deployment => { await checkedSnapshot(directory, deployment); });
+  await withRelayDeploymentMaintenance(configPath, "check-backup", async deployment => { await checkedSnapshot(directory, deployment); });
 }
 
 /** Restore only current relay authority. Auth, service-host data and continuity are never replaced. */
 export async function restoreRelayDeployment(configPath: string, directory: string): Promise<{ preservedDirectory: string }> {
-  return withRelayDeploymentMaintenance(configPath, async deployment => {
+  return withRelayDeploymentMaintenance(configPath, "restore", async deployment => {
     const source = await checkedSnapshot(directory, deployment);
     const relayPath = deployment.config.relayPath;
     const parent = dirname(relayPath);

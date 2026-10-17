@@ -15,13 +15,14 @@ export interface RelaySnapshotManifest {
   namespace: string;
   generation: number;
   stamp: number;
+  nonce: string;
   schemaSha256: string;
   release: string;
   sha256: string;
   createdAt: string;
 }
 
-const manifestKeys = "createdAt,generation,kind,namespace,release,schemaSha256,sha256,stamp,version";
+const manifestKeys = "createdAt,generation,kind,namespace,nonce,release,schemaSha256,sha256,stamp,version";
 const packageMagic = Buffer.from("DOHCSNAP");
 const packageFormat = "dohc-relay-snapshot-package";
 const tagBytes = 16;
@@ -61,6 +62,7 @@ export function parseRelaySnapshotManifest(value: unknown): RelaySnapshotManifes
       manifest.version !== 2 || manifest.kind !== "dohc-relay-snapshot" || !/^[a-f0-9-]{36}$/.test(manifest.namespace) ||
       !Number.isSafeInteger(manifest.generation) || manifest.generation < 1 ||
       !Number.isSafeInteger(manifest.stamp) || manifest.stamp < 0 ||
+      typeof manifest.nonce !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(manifest.nonce) ||
       !/^[a-f0-9]{64}$/.test(manifest.schemaSha256) || !/^[a-f0-9]{64}$/.test(manifest.sha256) ||
       typeof manifest.release !== "string" || !/^[\x21-\x7e]{1,128}$/.test(manifest.release) ||
       typeof manifest.createdAt !== "string" || Number.isNaN(Date.parse(manifest.createdAt))) {
@@ -84,12 +86,12 @@ export async function checkRelaySnapshotDatabase(path: string): Promise<void> {
 /** Reads identity, schema and checksum from the completed copy, never from live continuity. */
 export async function describeRelaySnapshot(path: string, release: string): Promise<RelaySnapshotManifest> {
   const db = new DatabaseSync(path, { readOnly: true });
-  let identity: Pick<RelaySnapshotManifest, "namespace" | "generation" | "stamp">, schemaSha256: string;
+  let identity: Pick<RelaySnapshotManifest, "namespace" | "generation" | "stamp" | "nonce">, schemaSha256: string;
   try {
     const rows = db.prepare("SELECT * FROM sync_relay_continuity").all();
     const marker = rows[0];
     if (rows.length !== 1 || marker?.singleton !== 1) throw new Error("The relay snapshot has no deployment marker.");
-    identity = { namespace: marker.namespace as string, generation: marker.generation as number, stamp: marker.stamp as number };
+    identity = { namespace: marker.namespace as string, generation: marker.generation as number, stamp: marker.stamp as number, nonce: marker.nonce as string };
     const schema = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name").all();
     schemaSha256 = createHash("sha256").update(JSON.stringify(schema)).digest("hex");
   } finally { db.close(); }
@@ -216,7 +218,7 @@ export async function openRelaySnapshot(packagePath: string, key: Buffer, output
     await checkRelaySnapshotDatabase(databasePath);
     const actual = await describeRelaySnapshot(databasePath, manifest.release);
     if (actual.namespace !== manifest.namespace || actual.generation !== manifest.generation ||
-        actual.stamp !== manifest.stamp || actual.schemaSha256 !== manifest.schemaSha256) {
+        actual.stamp !== manifest.stamp || actual.nonce !== manifest.nonce || actual.schemaSha256 !== manifest.schemaSha256) {
       throw new Error("The relay snapshot database does not match its manifest.");
     }
     await rename(databasePath, join(outputDirectory, "relay.sqlite"));

@@ -54,7 +54,8 @@ export async function salvageRelayContent(directory: string, output: string): Pr
     const checks = db.prepare("PRAGMA integrity_check").all();
     if (checks.length !== 1 || checks[0]?.integrity_check !== "ok") throw new Error("The snapshot failed SQLite integrity checks.");
     const marker = db.prepare("SELECT * FROM sync_relay_continuity").get();
-    if (!marker || marker.namespace !== manifest.namespace || marker.generation !== manifest.generation || marker.stamp !== manifest.stamp) {
+    if (!marker || marker.namespace !== manifest.namespace || marker.generation !== manifest.generation || marker.stamp !== manifest.stamp ||
+        marker.nonce !== manifest.nonce) {
       throw new Error("Snapshot provenance does not match its database.");
     }
     const content = db.prepare("SELECT content, byte_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?");

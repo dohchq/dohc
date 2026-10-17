@@ -19,16 +19,19 @@ Use the same environment file and Compose overrides as your running deployment.
 
 The relay keeps an independent continuity record outside its database volume.
 Every accepted mutation advances that record, including permission changes and schema migrations.
-A database with an older stamp cannot start against the current record.
+A database older than the confirmed continuity stamp cannot start.
 This prevents a restored backup from resurrecting revoked access.
 
 Never replace current continuity with an older archived copy.
 An archive does not prove that its server accepted no later work.
 Losing the original continuity prevents supported deployment restoration.
 You can still salvage available file contents from a completed relay snapshot.
-An interrupted write can reserve a continuity stamp before the relay transaction commits.
-That state also refuses startup and cannot be repaired from an older snapshot.
-Preserve its volumes.
+After an interrupted write, start the relay normally.
+Startup makes the committed database state durable, then settles its continuity record.
+An unacknowledged write that committed may be kept.
+The relay confirms continuity before returning a write or serving its result.
+An older database still refuses startup, including a backup from before the last acknowledged write.
+If startup still refuses, preserve its volumes.
 Offline salvage requires an earlier completed relay snapshot; it cannot read the failed deployment or its archive directly.
 
 Automation copies live in `dohc_self_host_host_data`, alongside their engine databases and run history.
@@ -40,6 +43,19 @@ A rebuilt copy cannot recover pending claims or Undo for earlier runs from those
 Due times missed while no computer or server runs schedules do not run later.
 Missed schedules produce a skipped-schedule notice; Group triggers start from the rejoin.
 These rules do not make an older relay snapshot safe to restore.
+
+If the server starts with empty host data and keeps its relay data, it rebuilds its copies from the relay.
+The server loses this work with the host data:
+
+- Run history, and Undo for runs on the server.
+- Changes from automation runs that the server had not yet sent to the relay.
+- Button presses that the server accepted but had not finished.
+  Each of these presses ends instead of running again.
+  A press may have made some of its changes, so check them before pressing again.
+
+An older host data archive does not get this protection.
+Its copies lack the claims made after the archive, so presses accepted since then can run twice.
+Do not put an older host data archive in place of newer host data.
 
 ## Save a relay snapshot
 
@@ -217,7 +233,10 @@ node scripts/self-host/recovery.mjs check-backup /srv/dohc-backups/relay-before-
 node scripts/self-host/recovery.mjs restore /srv/dohc-backups/relay-before-upgrade
 ```
 
-The check requires the snapshot stamp to equal the current continuity stamp.
+After an interrupted write, start the relay once to settle continuity before backup, check-backup or restore.
+Then stop it cleanly.
+If the relay database is missing or corrupt, the relay can't start, so restore without this step.
+The check requires the snapshot stamp and nonce to equal the current continuity record.
 Newer accepted work makes that snapshot unsuitable for repair.
 The restore command checks the copied candidate before replacing any existing relay files.
 It preserves replaced database and SQLite side files under `/data/recovery-<id>`.

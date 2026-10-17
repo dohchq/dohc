@@ -750,7 +750,7 @@ async function localPersonOwns(workspaceId: string): Promise<boolean> {
   await warmCredentialCache();
   const entry = findWorkspace(workspaceId);
   if (!entry || shareViewIsPresent(entry.shareView)) return false;
-  return !entry.remote || cachedCredentials?.userId === entry.remote.ownerUserId;
+  return !entry.remote || workspaceRemoteMatchesCredentials(entry.remote, cachedCredentials);
 }
 
 // A Collection automation step started or stopped waiting for a current
@@ -1520,7 +1520,7 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
     snapshot: (workspaceId) => {
       const workspace = findWorkspace(workspaceId);
       return { roster: shareRosters.observation(workspaceId).listing, shareView: workspace?.shareView,
-        owner: !sender.isDestroyed() && !!workspace?.remote && !workspace.shareView && cachedCredentials?.userId === workspace.remote.ownerUserId,
+        owner: !sender.isDestroyed() && !!workspace?.remote && !workspace.shareView && workspaceRemoteMatchesCredentials(workspace.remote, cachedCredentials),
         context: rosterContext(workspaceId), inventory: workspace?.shareRoster?.version };
     },
     ready: workspaceId => {
@@ -1531,7 +1531,6 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
       if (!workspace?.remote || workspace.shareView) return null;
       await warmCredentialCache();
       const { credentials } = await remoteForWorkspace(workspace);
-      if (credentials.userId !== workspace.remote.ownerUserId) return null;
       return lookupHistoryAccounts(workspaceId, async path => {
         const response = await relayShareResponseWithCredentials(credentials, path, { method: "GET" });
         return { status: response.status, body: await response.json().catch(() => undefined) };
@@ -2605,6 +2604,10 @@ const activity = {
   agentRunDepth: (workspaceId: string) =>
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.agentRunDepth(lease.state.activity),
+    ),
+  dispatchedAgentRun: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      lease.state.dispatchAgentRunId !== null,
     ),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
