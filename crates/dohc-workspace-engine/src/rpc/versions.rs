@@ -811,7 +811,7 @@ impl EngineService {
             })),
         };
         let probe = self.capture_apply_probe.clone();
-        let mut fence = tokio::spawn(async move {
+        let fence = tokio::spawn(async move {
             let _barriers = barriers;
             let token = CancellationToken::new();
             for session_id in session_ids {
@@ -1031,15 +1031,10 @@ impl EngineService {
             };
             Ok(VersionFenceOutcome::Committed(version))
         });
-        tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                Err(cancellation.interruption(operation))
-            }
-            outcome = &mut fence => {
-                outcome.map_err(|_| WireError::new(ErrorCode::Internal, "version fence task failed"))?
-            }
-        }
+        // The fence ignores cancellation once it starts: answer with its outcome.
+        fence
+            .await
+            .map_err(|_| WireError::new(ErrorCode::Internal, "version fence task failed"))?
     }
 
     pub(super) async fn versions_compare_files(

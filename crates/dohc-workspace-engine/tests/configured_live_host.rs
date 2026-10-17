@@ -130,7 +130,7 @@ impl Daemon {
             id,
             method: method.into(),
             workspace,
-            deadline_ms: None,
+            deadline_ms: Some(30_000),
             idempotency_key: None,
             progress: false,
             params,

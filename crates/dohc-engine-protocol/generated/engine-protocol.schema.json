@@ -251,12 +251,12 @@
           "const": "INVALID_PARAMS"
         },
         {
-          "description": "The request deadline elapsed before the engine finished.",
+          "description": "The request deadline elapsed and the work did not happen. A request\nwhose work landed before its deadline answers with that work's result.",
           "type": "string",
           "const": "DEADLINE_EXCEEDED"
         },
         {
-          "description": "The request was cancelled by the client or by session teardown.",
+          "description": "The client or session teardown cancelled the request and the work did\nnot happen. A request whose work landed first answers with its result.",
           "type": "string",
           "const": "CANCELLED"
         },
@@ -552,7 +552,7 @@
       "type": "object",
       "properties": {
         "deadlineMs": {
-          "description": "Relative deadline. The engine clamps it to its maximum and fails the\nrequest with `DEADLINE_EXCEEDED` when it elapses.",
+          "description": "Relative deadline. The engine clamps it to its maximum. When it\nelapses, a request whose work did not happen fails with\n`DEADLINE_EXCEEDED`; one whose work landed answers with its result.\nA live acknowledgement stopped after its work landed gets no answer,\nso `liveApplication.settle` and `liveApplication.fenceRestore` require\na deadline, and the caller treats its expiry as an unknown outcome.",
           "type": [
             "integer",
             "null"
