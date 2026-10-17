@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdir, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { composeArgs, describeWriters, readSettings, storageWriters } from "../../tools/self-host/config.mjs";
+import { composeArgs, describeWriters, readValidSettings, storageWriters } from "../../tools/self-host/config.mjs";
 import { archiveDeployment } from "./archive.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -43,7 +43,7 @@ export function parseRecoveryArguments(args) {
 }
 
 export function recoveryComposeArgs(options) {
-  return composeArgs(options.envFile, readSettings(options.envFile),
+  return composeArgs(options.envFile, readValidSettings(options.envFile),
     ...options.composeFiles.flatMap(path => ["-f", path]), ...(options.project ? ["--project-name", options.project] : []));
 }
 

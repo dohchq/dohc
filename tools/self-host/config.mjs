@@ -15,7 +15,7 @@ export function readSettings(path = '.env.self-host') {
 
 export function validateSettings(settings) {
   const errors = [];
-  for (const name of ['DOHC_RELAY_APP_PUBLICATIONS', 'DOHC_RELAY_AUTOMATIONS']) {
+  for (const name of ['DOHC_RELAY_APP_PUBLICATIONS', 'DOHC_RELAY_AUTOMATIONS', 'DOHC_BEHIND_CLOUDFLARE']) {
     if (settings[name] !== undefined && !['0', '1'].includes(settings[name])) errors.push(`Set ${name} to 0 or 1.`);
   }
   const participants = settings.DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT;
@@ -26,8 +26,30 @@ export function validateSettings(settings) {
     'DOHC_RELAY_EXCHANGE_KEY', 'DOHC_SMTP_HOST', 'DOHC_SMTP_FROM']) {
     if (!settings[name] || /change-me|example\.(com|net|org)/i.test(settings[name])) errors.push(`Set ${name}.`);
   }
-  for (const name of ['POSTGRES_PASSWORD', 'BETTER_AUTH_SECRET', 'DOHC_RELAY_LINK_KEY', 'DOHC_RELAY_EXCHANGE_KEY']) {
+  // The bootstrap generates the bundled database's password. An external database keeps its provider's password.
+  for (const name of [...(settings.DOHC_POSTGRES_HOST ? [] : ['POSTGRES_PASSWORD']), 'BETTER_AUTH_SECRET', 'DOHC_RELAY_LINK_KEY', 'DOHC_RELAY_EXCHANGE_KEY']) {
     if ((settings[name]?.length ?? 0) < 32) errors.push(`${name} must contain at least 32 characters.`);
+  }
+  if (settings.DOHC_POSTGRES_HOST) {
+    if (!/^(?=.{1,253}$)[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$/.test(settings.DOHC_POSTGRES_HOST) ||
+      /(^|\.)example\.(com|net|org)$/i.test(settings.DOHC_POSTGRES_HOST)) {
+      errors.push('Set DOHC_POSTGRES_HOST to your database host name or IPv4 address, or leave it empty to use the bundled database.');
+    }
+    if (!/^[1-9]\d*$/.test(settings.DOHC_POSTGRES_PORT ?? '') || Number(settings.DOHC_POSTGRES_PORT) < 1 || Number(settings.DOHC_POSTGRES_PORT) > 65535) {
+      errors.push('Set DOHC_POSTGRES_PORT to your database port.');
+    }
+    if (!/^(\/(?!\.\.?(\/|$))[a-zA-Z0-9._-]+)+$/.test(settings.DOHC_POSTGRES_CA_FILE ?? '')) {
+      errors.push("Set DOHC_POSTGRES_CA_FILE to the absolute path of your database provider's CA certificate.");
+    }
+  } else if (settings.DOHC_POSTGRES_PORT || settings.DOHC_POSTGRES_CA_FILE) {
+    errors.push('Set DOHC_POSTGRES_HOST to use an external database, or leave DOHC_POSTGRES_PORT and DOHC_POSTGRES_CA_FILE empty.');
+  }
+  // Services connect through a URL. A dot segment or reserved character would come back as another database name.
+  for (const name of ['POSTGRES_DB', 'POSTGRES_USER']) {
+    if (!settings[name]) { if (settings.DOHC_POSTGRES_HOST) errors.push(`Set ${name} for the external database.`); }
+    else if (!/^(?=.*[^.])[a-zA-Z0-9_.-]+$/.test(settings[name])) {
+      errors.push(`Use only letters, digits, underscores, hyphens and dots in ${name}, with at least one character that is not a dot.`);
+    }
   }
   try {
     const origin = new URL(settings.DOHC_PUBLIC_ORIGIN);
@@ -35,6 +57,9 @@ export function validateSettings(settings) {
       origin.host !== settings.DOHC_PUBLIC_HOST || /(^|\.)example\.(com|net|org)$/.test(origin.hostname)) throw new Error();
   } catch { errors.push('Set DOHC_PUBLIC_ORIGIN to your HTTPS origin and DOHC_PUBLIC_HOST to its exact host.'); }
   if (!['public', 'private'].includes(settings.DOHC_SERVER_NETWORK_ACCESS)) errors.push('Set DOHC_SERVER_NETWORK_ACCESS to public or private.');
+  if (settings.DOHC_BEHIND_CLOUDFLARE === '1' && settings.DOHC_SERVER_NETWORK_ACCESS !== 'public') {
+    errors.push('Cloudflare requires public mode. Set DOHC_SERVER_NETWORK_ACCESS to public or DOHC_BEHIND_CLOUDFLARE to 0.');
+  }
   if (settings.DOHC_SERVER_NETWORK_ACCESS === 'public' && /:\d+$/.test(settings.DOHC_PUBLIC_HOST ?? '')) errors.push('Public mode uses HTTPS port 443. Remove the custom port from the origin.');
   if (settings.DOHC_SERVER_NETWORK_ACCESS === 'private' && !/^https:\/\/[^/]+\.ts\.net(?::[0-9]+)?$/.test(settings.DOHC_PUBLIC_ORIGIN ?? '')) {
     errors.push('Private mode requires your Tailscale HTTPS hostname ending in .ts.net.');
@@ -48,10 +73,19 @@ export function validateSettings(settings) {
   return errors;
 }
 
+/** Refuses invalid settings, so a command stops before any Docker or database operation uses them. */
+export function readValidSettings(path) {
+  const settings = readSettings(path), errors = validateSettings(settings);
+  if (errors.length) throw new Error(errors.join('\n'));
+  return settings;
+}
+
 export function composeArgs(envFile, settings, ...args) {
   return ['compose', '--env-file', resolve(envFile), '-f', 'docker-compose.self-host.yml',
     ...(settings.DOHC_SERVER_NETWORK_ACCESS === 'private' ? ['-f', 'tools/self-host/compose.private.yml'] : []),
-    ...(settings.DOHC_DATA_DIRECTORY ? ['-f', 'tools/self-host/compose.data-disk.yml'] : []), ...args];
+    ...(settings.DOHC_DATA_DIRECTORY ? ['-f', 'tools/self-host/compose.data-disk.yml'] : []),
+    ...(settings.DOHC_POSTGRES_HOST ? ['-f', 'tools/self-host/compose.external-postgres.yml'] : []),
+    ...(settings.DOHC_BEHIND_CLOUDFLARE === '1' ? ['-f', 'tools/self-host/compose.cloudflare.yml'] : []), ...args];
 }
 
 // Reads through relay-initialize's volumes, so it checks the folders Docker mounts. It prints whether the deployment's
@@ -90,8 +124,9 @@ export function dataDiskVolumeErrors(config, docker) {
 }
 
 /**
- * A first start needs all three disk folders empty. Every later start needs the relay deployment on the disk.
+ * A first start needs empty relay storage: with a data disk, all three disk folders. Every later start needs the relay deployment.
  * An empty host-data starts: documents rebuild from the relay, but claims in progress are lost (#2016).
+ * Without a data disk, relay-initialize reads the image's empty /host-data, so only the relay's own volumes count.
  */
 export function relayDeploymentError(envFile, settings, docker, firstStart) {
   const { status, stdout } = docker(composeArgs(envFile, settings, 'run', '--rm', '--no-deps', '-T',
@@ -101,38 +136,80 @@ export function relayDeploymentError(envFile, settings, docker, firstStart) {
   try { result = status === 0 ? JSON.parse(stdout.trim().split('\n').at(-1)) : undefined; } catch { result = undefined; }
   if (typeof result?.deployment !== 'boolean' || !Array.isArray(result.holding) ||
     !result.holding.every(folder => Object.values(diskFolders).includes(folder))) {
-    return `Could not check the data disk in ${directory}. Check that the disk is mounted there and Docker is running, then try again.`;
+    return directory ? `Could not check the data disk in ${directory}. Check that the disk is mounted there and Docker is running, then try again.`
+      : "Could not check the relay's Docker volumes. Check that Docker is running, then try again.";
   }
   const relayData = result.holding.some(folder => folder !== 'host-data');
   if (firstStart) {
     if (!result.holding.length) return '';
+    if (!directory) return "The relay's Docker volumes already hold relay data. Start without --first-start.";
     const folders = result.holding.map(folder => `${directory}/${folder}`).join(', ');
     return `${folders} already ${result.holding.length === 1 ? 'holds' : 'hold'} data. A first start needs empty disk folders. ` +
       (relayData ? 'Start without --first-start.' : 'Check that DOHC_DATA_DIRECTORY names a new deployment folder.');
   }
   if (!relayData) {
-    return `No relay deployment found in ${directory}. Mount the data disk there and try again. ` +
-      'Never recreate its folders: setup would create a new deployment.';
+    return directory ? `No relay deployment found in ${directory}. Mount the data disk there and try again. ` +
+      'Never recreate its folders: setup would create a new deployment.'
+      : "The relay's Docker volumes hold no relay deployment. Start on the host that holds them. " +
+        'Start with --first-start only to create a new relay deployment that holds none of the existing workspaces.';
   }
   if (!result.deployment) {
-    return `The relay deployment in ${directory} is missing its record or its database. Keep the disk unchanged and check that it is this deployment's disk.`;
+    return directory ? `The relay deployment in ${directory} is missing its record or its database. Keep the disk unchanged and check that it is this deployment's disk.`
+      : "The relay deployment in the relay's Docker volumes is missing its record or its database. Keep the volumes unchanged and check that this host ran the deployment.";
   }
   return '';
 }
 
-/** Inspects the accounts volume before a container mounts it: mounting a missing volume would create an empty one. */
-export function accountsDatabaseError(config, docker) {
+const lostAccounts = 'Without it, people sign up again as new accounts that cannot open their workspaces.';
+
+/** An external database must hold dohc's schema. The bundled accounts volume is inspected before a container mounts it: mounting a missing volume would create an empty one. */
+export function accountsDatabaseError(envFile, settings, config, docker) {
+  // Each check prints its result, because Docker exits 1 for some of its own failures too.
+  if (settings.DOHC_POSTGRES_HOST) {
+    const { status, stdout } = docker(composeArgs(envFile, settings, 'run', '--rm', '--no-deps', '-T', 'postgres-migrate', 'check-accounts'));
+    const result = status === 0 ? stdout?.trim() : undefined, database = `${settings.POSTGRES_DB} on ${settings.DOHC_POSTGRES_HOST}`;
+    if (result === 'present') return '';
+    if (result === 'missing') return `Database ${database} holds no dohc accounts. Check DOHC_POSTGRES_HOST and POSTGRES_DB, or restore the database from your provider's backup. ${lostAccounts}`;
+    return `Could not check database ${database}. Check that Docker is running and that its host, port, user, password and DOHC_POSTGRES_CA_FILE are correct, then try again.`;
+  }
   const accounts = config.volumes.dohc_self_host_postgres.name;
-  const missing = `Docker volume ${accounts} holds no accounts database. Restore it from the old host or your backup before you start. ` +
-    'Without it, people sign up again as new accounts that cannot open their workspaces.';
+  const missing = `Docker volume ${accounts} holds no accounts database. Restore it from the old host or your backup before you start. ${lostAccounts}`;
   if (!inspectVolume(accounts, docker)) return missing;
-  // The probe prints its result, because Docker exits 1 for some of its own failures too.
   const { status, stdout } = docker(['run', '--rm', '--network', 'none', '--mount', `type=volume,source=${accounts},target=/pg,readonly`,
     '--entrypoint', 'sh', config.services.postgres.image, '-c', 'if test -s /pg/PG_VERSION; then echo present; else echo missing; fi']);
   const result = status === 0 ? stdout?.trim() : undefined;
   if (result === 'present') return '';
   if (result === 'missing') return missing;
   return `Could not check Docker volume ${accounts} for the accounts database. Check that Docker is running and the image ${config.services.postgres.image} is available, then try again.`;
+}
+
+/** Returns `[name, problem]` pairs to check before Compose mounts any volume. An empty problem passes; the first problem ends the checks. */
+export function deploymentChecks(envFile, settings, docker, { start, firstStart }) {
+  const checks = [];
+  let config;
+  if (settings.DOHC_DATA_DIRECTORY) {
+    let problems;
+    try {
+      config = composeConfig(envFile, settings, docker);
+      problems = dataDiskVolumeErrors(config, docker);
+    } catch (error) { problems = [error.message]; }
+    checks.push(['data disk volumes', problems.join(' ')]);
+    if (problems.length) return checks;
+  }
+  // With an external database, a first start creates accounts that would not own an existing relay deployment's workspaces,
+  // and a later start on empty relay volumes would create a new relay deployment under the existing accounts.
+  if (start && (settings.DOHC_DATA_DIRECTORY || settings.DOHC_POSTGRES_HOST)) {
+    const problem = relayDeploymentError(envFile, settings, docker, firstStart);
+    checks.push([settings.DOHC_DATA_DIRECTORY ? 'relay deployment on the data disk' : 'relay deployment', problem]);
+    if (problem) return checks;
+  }
+  // Every start after the first needs the accounts that own the deployment's workspaces.
+  if (start && !firstStart && (settings.DOHC_DATA_DIRECTORY || settings.DOHC_POSTGRES_HOST)) {
+    let problem;
+    try { problem = accountsDatabaseError(envFile, settings, config, docker); } catch (error) { problem = error.message; }
+    checks.push(['accounts database', problem]);
+  }
+  return checks;
 }
 
 const normalizeDirectory = path => path ? posix.normalize(path).replace(/(.)\/+$/, '$1') : undefined;

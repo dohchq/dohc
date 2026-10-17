@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { initialSettings } from "../../tools/self-host/bootstrap.mjs";
 import { parseMoveArguments, runMove } from "./move.mjs";
 
+// Valid settings for a public deployment. Each test's `contents` add to them or replace them.
+const valid = readFileSync(new URL("../../.env.self-host.example", import.meta.url), "utf8") +
+  Object.entries({ ...initialSettings({ origin: "https://dohc.team.invalid", image: "dohc-self-host:v1" }),
+    DOHC_SMTP_HOST: "mail.team.invalid", DOHC_SMTP_FROM: "dohc@team.invalid" }).map(([key, value]) => `${key}=${value}\n`).join("");
 async function envFile(t, contents) {
   const root = await mkdtemp(join(tmpdir(), "dohc-move-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const path = join(root, "deployment.env");
-  await writeFile(path, contents);
+  await writeFile(path, valid + contents);
   return path;
 }
 const folders = { dohc_self_host_sync_relay: "sync-relay", dohc_self_host_relay_continuity: "continuity", dohc_self_host_host_data: "host-data" };
@@ -18,18 +24,24 @@ const config = { name: "dohc-self-host", services: { postgres: { image: "postgre
   dohc_self_host_postgres: { name: "dohc-self-host_dohc_self_host_postgres" },
   ...Object.fromEntries(Object.entries(folders).map(([key, folder]) => [key, { name: `dohc-self-host_${key}`, driver: "local", driver_opts: bind(folder) }])),
 } };
+// The external-database overlay leaves out the bundled database and its volume.
+const externalConfig = { ...config, services: {}, volumes: Object.fromEntries(Object.entries(config.volumes).filter(([key]) => key !== "dohc_self_host_postgres")) };
+const externalSettings = "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\nDOHC_POSTGRES_HOST=db.provider.invalid\nDOHC_POSTGRES_PORT=25060\n" +
+  "DOHC_POSTGRES_CA_FILE=/etc/dohc/postgres-ca.pem\nPOSTGRES_DB=dohc\n";
 const deployment = ["/pg/PG_VERSION", "/continuity/deployment.json", "/data/sync-relay.sqlite"];
 const accounts = { "dohc-self-host_dohc_self_host_postgres": { Driver: "local", Options: null } };
 
 // Runs each Docker check against an in-memory host: `volumes` exist in Docker, `files` exist inside them,
 // and `containers` are running. `fail` names a Docker call that fails without saying why, as a busy or restarting daemon does.
-function host({ files = deployment, volumes = accounts, containers = [], fail = () => false } = {}) {
+// `external` is what the external database's accounts check prints.
+function host({ files = deployment, volumes = accounts, containers = [], fail = () => false, external } = {}) {
   const calls = [], present = new Set(files);
   return { calls, run(command, args) {
     calls.push([command, ...args]);
     if (command !== "docker") return { status: 0, stdout: "" };
-    if (args.includes("config")) return { status: 0, stdout: JSON.stringify(config) };
+    if (args.includes("config")) return { status: 0, stdout: JSON.stringify(external ? externalConfig : config) };
     if (fail(args)) return { status: 125, stdout: "", stderr: "Cannot connect to the Docker daemon." };
+    if (external && args.includes("check-accounts")) return { status: 0, stdout: `${external}\n` };
     if (args[0] === "volume" && args[1] === "inspect") {
       const names = args.slice(2), missing = names.find(name => !volumes[name]);
       return missing ? { status: 1, stdout: "", stderr: `Error response from daemon: get ${missing}: no such volume` }
@@ -156,6 +168,31 @@ test("move never mounts a missing accounts volume", async t => {
   assert.equal(started(mock.calls), false);
 });
 
+test("with an external database, move needs dohc accounts there and keeps every relay check", async t => {
+  const path = await envFile(t, externalSettings);
+  const accountsCheck = calls => calls.find(call => call.includes("check-accounts"));
+  const moved = host({ external: "present", files: deployment.slice(1) });
+  runMove(parseMoveArguments(["--env-file", path]), moved.run, () => {});
+  assert.ok(accountsCheck(moved.calls).includes("tools/self-host/compose.external-postgres.yml"));
+  assert.ok(moved.calls.some(call => call.includes("relay-initialize")));
+  // No local accounts volume exists, so nothing inspects or mounts one.
+  assert.ok(!moved.calls.some(call => call.some(value => value.includes("dohc_self_host_postgres"))));
+  assert.deepEqual(moved.calls.at(-1).slice(1), ["scripts/check-self-host.mjs", "--start", "--env-file", path]);
+  const refusals = [[{ external: "missing" }, /Database dohc on db\.provider\.invalid holds no dohc accounts/],
+    [{ external: "present", fail: args => args.includes("check-accounts") }, /Could not check database dohc on db\.provider\.invalid/],
+    [{ external: "present", files: ["/continuity/deployment.json"] }, /missing its record or its database/]];
+  for (const [options, refusal] of refusals) {
+    const mock = host(options);
+    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal);
+    assert.equal(started(mock.calls), false, String(refusal));
+    assert.equal(changed(mock.calls), false, String(refusal));
+  }
+  // A running writer refuses before the accounts check connects to the database.
+  const written = host({ external: "present", containers: [container("old-sync-relay-1", { Type: "bind", Source: "/mnt/disk/dohc/sync-relay", RW: true })] });
+  assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), written.run, () => {}), /Running containers can write this deployment's storage/);
+  assert.equal(accountsCheck(written.calls), undefined);
+});
+
 test("move refuses existing volumes stored outside the data disk and leaves them unchanged", async t => {
   const path = await envFile(t, "DOHC_DATA_DIRECTORY=/mnt/disk/dohc\n");
   for (const relay of [{ Driver: "local", Options: null }, { Driver: "local", Options: { ...bind("sync-relay"), device: "/mnt/old-disk/dohc/sync-relay" } }]) {
@@ -170,6 +207,17 @@ test("move refuses a deployment that keeps relay data in host volumes before Doc
   const path = await envFile(t, "DOHC_DATA_DIRECTORY=\n"), mock = host();
   assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), /Set DOHC_DATA_DIRECTORY/);
   assert.deepEqual(mock.calls, []);
+});
+
+test("move refuses invalid settings before Docker or the database sees them", async t => {
+  // The host would turn TLS off in the connection URL. The database name would fall back to another database.
+  const refusals = [["DOHC_POSTGRES_HOST=db.provider.invalid:5432/dohc?sslmode=disable&unused=\n", /Set DOHC_POSTGRES_HOST to your database host name/],
+    ["POSTGRES_DB=..\n", /Use only letters, digits, underscores, hyphens and dots in POSTGRES_DB/]];
+  for (const [setting, refusal] of refusals) {
+    const path = await envFile(t, externalSettings + setting), mock = host({ external: "present" });
+    assert.throws(() => runMove(parseMoveArguments(["--env-file", path]), mock.run, () => {}), refusal);
+    assert.deepEqual(mock.calls, [], setting);
+  }
 });
 
 test("move accepts only an env file option", () => {

@@ -2,7 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { accountsDatabaseError, composeConfig, dataDiskVolumeErrors, describeWriters, inspectVolume, readSettings, relayDeploymentError,
+import { accountsDatabaseError, composeConfig, dataDiskVolumeErrors, describeWriters, inspectVolume, readValidSettings, relayDeploymentError,
   storageWriters } from "../../tools/self-host/config.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -12,6 +12,7 @@ Starts this deployment on a new host from its attached data disk, then checks it
 Stop the old server first and make sure it cannot start again.
 The command refuses to start while a running container can write the deployment's storage,
 or without the accounts database and the relay deployment on the disk.
+With DOHC_POSTGRES_HOST set, the accounts database is the external one and must already hold dohc's accounts.
 See "Move to a new host" in docs/how-to/self-host-recovery.md.`;
 
 function spawn(command, args) {
@@ -30,7 +31,7 @@ export function parseMoveArguments(args) {
 }
 
 export function runMove(options, run = spawn, log = console.log) {
-  const settings = readSettings(options.envFile);
+  const settings = readValidSettings(options.envFile);
   if (!settings.DOHC_DATA_DIRECTORY) throw new Error("Set DOHC_DATA_DIRECTORY to the deployment folder on the attached disk.");
   const docker = args => run("docker", args);
   const config = composeConfig(options.envFile, settings, docker);
@@ -46,7 +47,7 @@ export function runMove(options, run = spawn, log = console.log) {
   if (writers.length) {
     throw new Error(`Running containers can write this deployment's storage. Stop them before you start the deployment here: ${describeWriters(writers)}.`);
   }
-  const problem = accountsDatabaseError(config, docker) || relayDeploymentError(options.envFile, settings, docker, false);
+  const problem = accountsDatabaseError(options.envFile, settings, config, docker) || relayDeploymentError(options.envFile, settings, docker, false);
   if (problem) throw new Error(problem);
   log("Found the accounts database and the relay deployment. Starting the deployment.");
   if (run(process.execPath, ["scripts/check-self-host.mjs", "--start", "--env-file", options.envFile]).status !== 0) {

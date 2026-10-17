@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
 import test from 'node:test';
-import { load, YAML11_SCHEMA } from 'js-yaml';
+import { defineMappingTag, defineScalarTag, load, YAML11_SCHEMA } from 'js-yaml';
 import { initialSettings, privateRouteInstructions, updateImageSetting } from '../tools/self-host/bootstrap.mjs';
-import { accountsDatabaseError, validateSettings, composeArgs, dataDiskVolumeErrors, relayDeploymentCheck, relayDeploymentError, supportedComposeVersion } from '../tools/self-host/config.mjs';
-import { relayInitializationRequired } from '../tools/self-host/entrypoint.mjs';
+import { accountsDatabaseError, deploymentChecks, validateSettings, composeArgs, dataDiskVolumeErrors, relayDeploymentCheck, relayDeploymentError, supportedComposeVersion } from '../tools/self-host/config.mjs';
+import { accountsSchemaState, postgresUrl, relayInitializationRequired } from '../tools/self-host/entrypoint.mjs';
 
 const composeText = readFileSync('docker-compose.self-host.yml', 'utf8');
 const compose = load(composeText, { schema: YAML11_SCHEMA });
@@ -226,7 +226,7 @@ test('every later start needs an accounts database, checked before any container
   const config = {services: {postgres: {image: 'postgres:17.9-alpine'}}, volumes: {dohc_self_host_postgres: {name: 'p_postgres'}}};
   const check = (inspect, probe) => {
     const calls = [];
-    const error = accountsDatabaseError(config, args => {
+    const error = accountsDatabaseError('.env.self-host', {}, config, args => {
       calls.push(args);
       return args[0] === 'volume' ? inspect : probe;
     });
@@ -245,6 +245,185 @@ test('every later start needs an accounts database, checked before any container
   assert.throws(() => check({status: 1, stderr: 'Cannot connect to the Docker daemon.'}, {status: 0}), /Docker could not inspect volume p_postgres/);
 });
 
+const RESET = Symbol('!reset');
+const overlaySchema = YAML11_SCHEMA.withTags(defineScalarTag('!reset', {resolve: () => RESET}),
+  defineMappingTag('!reset', {create: () => RESET, addPair: () => '', has: () => false, keys: () => [], get: () => undefined}));
+const externalOverlay = () => load(readFileSync('tools/self-host/compose.external-postgres.yml', 'utf8'), { schema: overlaySchema });
+const external = () => ({...settings(), DOHC_POSTGRES_HOST: 'db.provider.invalid', DOHC_POSTGRES_PORT: '25060',
+  DOHC_POSTGRES_CA_FILE: '/etc/dohc/provider-ca.pem', POSTGRES_PASSWORD: 'provider-password'});
+
+test('an external database leaves out the bundled database, its volume and every wait on it', () => {
+  assert.ok(!composeArgs('.env.self-host', settings(), 'up').includes('tools/self-host/compose.external-postgres.yml'));
+  const args = composeArgs('.env.self-host', {...external(), DOHC_DATA_DIRECTORY: '/mnt/disk/dohc'}, 'up');
+  assert.ok(args.indexOf('tools/self-host/compose.data-disk.yml') < args.indexOf('tools/self-host/compose.external-postgres.yml'));
+  assert.ok(args.indexOf('tools/self-host/compose.external-postgres.yml') < args.indexOf('up'));
+  const overlay = externalOverlay();
+  assert.equal(overlay.services.postgres, RESET);
+  assert.deepEqual(overlay.volumes, {dohc_self_host_postgres: RESET});
+  // These are the only references to the bundled database in the base file, and the overlay resets each one.
+  assert.deepEqual(Object.keys(compose.services).filter(name => compose.services[name].depends_on?.postgres), ['postgres-migrate']);
+  assert.equal(overlay.services['postgres-migrate'].depends_on, RESET);
+  assert.deepEqual(Object.keys(compose.services).filter(name => (compose.services[name].volumes ?? []).some(volume => String(volume).startsWith('dohc_self_host_postgres:'))), ['postgres']);
+  // Every service that connects to the database gets the external host and the provider's CA certificate.
+  const clients = Object.keys(compose.services).filter(name => name !== 'postgres' && compose.services[name].environment?.POSTGRES_PASSWORD);
+  assert.deepEqual(clients, ['postgres-migrate', 'workspace-api', 'sync-relay']);
+  assert.deepEqual(Object.keys(overlay.services).filter(name => !['postgres', 'relay-initialize'].includes(name)), clients);
+  // Relay setup waits for migrations, so a first start whose migrations fail leaves the relay volumes empty for a retry.
+  assert.deepEqual(overlay.services['relay-initialize'], {depends_on: {'postgres-migrate': {condition: 'service_completed_successfully'}}});
+  for (const name of clients) {
+    assert.deepEqual(overlay.services[name].environment, {DOHC_POSTGRES_HOST: '${DOHC_POSTGRES_HOST:?Set DOHC_POSTGRES_HOST}',
+      DOHC_POSTGRES_PORT: '${DOHC_POSTGRES_PORT:?Set DOHC_POSTGRES_PORT}'});
+    // Docker creates a missing source path as an empty folder unless the mount forbids it.
+    assert.deepEqual(overlay.services[name].volumes, [{type: 'bind', source: '${DOHC_POSTGRES_CA_FILE:?Set DOHC_POSTGRES_CA_FILE}',
+      target: '/etc/dohc/postgres-ca.pem', read_only: true, bind: {create_host_path: false}}]);
+  }
+});
+
+// The parser reads the CA certificate that the overlay mounts in each service.
+const providerCa = t => {
+  const read = fs.readFileSync;
+  t.mock.method(fs, 'readFileSync', (path, ...rest) => path === '/etc/dohc/postgres-ca.pem' ? 'provider CA' : read(path, ...rest));
+};
+
+test('services reach an external database only over TLS that verifies its certificate against the provider CA', t => {
+  providerCa(t);
+  const env = {POSTGRES_USER: 'dohc admin', POSTGRES_PASSWORD: 'p@ss/word?#', POSTGRES_DB: 'dohc'};
+  assert.equal(postgresUrl(env), 'postgres://dohc%20admin:p%40ss%2Fword%3F%23@postgres:5432/dohc');
+  const url = new URL(postgresUrl({...env, DOHC_POSTGRES_HOST: 'db.provider.invalid', DOHC_POSTGRES_PORT: '25060'}));
+  assert.equal(url.host, 'db.provider.invalid:25060');
+  assert.equal(decodeURIComponent(url.password), 'p@ss/word?#');
+  assert.deepEqual([...url.searchParams], [['sslmode', 'verify-full'], ['sslrootcert', externalOverlay().services['workspace-api'].volumes[0].target]]);
+});
+
+test("every accepted database and user name reaches the clients' parser unchanged, and no other does", t => {
+  providerCa(t);
+  const env = {...external(), POSTGRES_PASSWORD: 'p@ss/word?#%'};
+  for (const name of ['dohc', 'defaultdb', 'postgres.abcdefgh', 'neon_db-1', 'a..b']) {
+    for (const key of ['POSTGRES_DB', 'POSTGRES_USER']) {
+      assert.deepEqual(validateSettings({...env, [key]: name}), [], `${key}=${name}`);
+      for (const target of [env, {...env, DOHC_POSTGRES_HOST: ''}]) assert.ok(postgresUrl({...target, [key]: name}));
+    }
+  }
+  // Each of these would select another database: ".." and "." drop out of the path, and the rest come back still encoded.
+  for (const name of ['.', '..', 'dohc/accounts', 'dohc?x', 'dohc#x']) {
+    for (const target of [env, settings()]) assert.ok(validateSettings({...target, POSTGRES_DB: name}).some(error => error.includes('Use only letters') && error.includes('POSTGRES_DB')), name);
+    for (const target of [env, {...env, DOHC_POSTGRES_HOST: ''}]) assert.throws(() => postgresUrl({...target, POSTGRES_DB: name}), /do not survive the connection URL/, name);
+  }
+  // A host that carries a path, query or fragment would change the database or turn TLS off.
+  for (const host of ['db.provider.invalid:5432/dohc?sslmode=disable&unused=', 'db.provider.invalid/dohc?sslmode=disable#', 'user@db.provider.invalid']) {
+    assert.throws(() => postgresUrl({...env, DOHC_POSTGRES_HOST: host}), /do not survive the connection URL/, host);
+  }
+});
+
+test('an external database needs its host, port, names that survive its connection URL, and CA certificate', () => {
+  assert.deepEqual(validateSettings(external()), []);
+  // The provider sets an external database's password, so only the bundled one needs the generated length.
+  assert.ok(validateSettings({...settings(), POSTGRES_PASSWORD: 'provider-password'}).some(error => error.includes('POSTGRES_PASSWORD must contain')));
+  assert.ok(validateSettings({...external(), POSTGRES_PASSWORD: 'change-me'}).some(error => error.includes('Set POSTGRES_PASSWORD.')));
+  const refusals = {
+    DOHC_POSTGRES_HOST: ['', 'db.example.com', '-db.invalid', 'db..invalid', 'user@db.invalid', 'db.invalid:5432', 'db.invalid/dohc?sslmode=disable', '[::1]'],
+    DOHC_POSTGRES_PORT: [undefined, '', '0', '05432', '65536', '5432x', ' 5432'],
+    DOHC_POSTGRES_CA_FILE: [undefined, '', 'provider-ca.pem', './ca.pem', '/etc/../ca.pem', '/etc/dohc/ca pem', 'C:/ca.pem'],
+    POSTGRES_DB: [undefined, '', '.', '..', '...', 'dohc/accounts', 'dohc?x', 'dohc#x', 'dohc accounts', 'dohc%2Faccounts'],
+    POSTGRES_USER: [undefined, '', '..', 'dohc@provider', 'dohc:admin', 'dohc admin'],
+  };
+  for (const [name, values] of Object.entries(refusals)) {
+    for (const value of values) assert.ok(validateSettings({...external(), [name]: value}).some(error => error.includes(name)), `${name}=${value}`);
+  }
+  // A port or CA certificate without a host would quietly keep the bundled database.
+  for (const name of ['DOHC_POSTGRES_PORT', 'DOHC_POSTGRES_CA_FILE']) {
+    assert.ok(validateSettings({...settings(), [name]: external()[name]}).some(error => error.includes('Set DOHC_POSTGRES_HOST to use an external database')), name);
+  }
+});
+
+test('a later start with an external database needs dohc accounts there, checked through the migration service', () => {
+  const check = reply => {
+    const calls = [];
+    // No Compose configuration: the check never inspects or mounts a local accounts volume.
+    const error = accountsDatabaseError('.env.self-host', external(), undefined, args => { calls.push(args); return reply; });
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].includes('tools/self-host/compose.external-postgres.yml'));
+    assert.deepEqual(calls[0].slice(calls[0].indexOf('run')), ['run', '--rm', '--no-deps', '-T', 'postgres-migrate', 'check-accounts']);
+    return error;
+  };
+  assert.equal(check({status: 0, stdout: 'present\n'}), '');
+  assert.match(check({status: 0, stdout: 'missing\n'}), /Database dohc on db\.provider\.invalid holds no dohc accounts\. .*Without it, people sign up again/);
+  // Docker exits 1 for some of its own failures, so only the check's own output decides.
+  for (const reply of [{status: 1, stdout: 'present\n'}, {status: 1, stdout: ''}, {status: 0, stdout: ''}, {status: 125, stdout: ''}, {status: null}]) {
+    assert.match(check(reply), /Could not check database dohc on db\.provider\.invalid/, JSON.stringify(reply));
+  }
+});
+
+test('the accounts check finds dohc accounts only where migrations recorded an applied id', async () => {
+  const client = (table, applied) => ({ async query(sql) {
+    if (sql === "select to_regclass('dohc_migrations') is not null as present") return {rows: [{present: table}]};
+    assert.ok(table, 'queried a table that does not exist');
+    assert.equal(sql, 'select exists (select 1 from dohc_migrations) as present');
+    return {rows: [{present: applied}]};
+  } });
+  assert.equal(await accountsSchemaState(client(false, false)), 'missing');
+  assert.equal(await accountsSchemaState(client(true, false)), 'missing');
+  assert.equal(await accountsSchemaState(client(true, true)), 'present');
+});
+
+// Runs the start checks with an external database on Docker volumes. `calls` names each service a check ran.
+const externalChecks = (options, {accounts = 'missing', relay = relayCheck([])} = {}) => {
+  const calls = [];
+  const checks = deploymentChecks('.env.self-host', external(), args => {
+    assert.ok(args.includes('tools/self-host/compose.external-postgres.yml') && !args.includes('tools/self-host/compose.data-disk.yml'));
+    if (args.includes('check-accounts')) { calls.push('check-accounts'); return {status: 0, stdout: `${accounts}\n`}; }
+    if (args.includes('relay-initialize')) { calls.push('relay-initialize'); return relay; }
+    throw new Error(`Unexpected Docker call: ${args.join(' ')}`);
+  }, options);
+  return {checks, calls};
+};
+
+const deployed = relayCheck(['/continuity/deployment.json', '/data/sync-relay.sqlite']);
+
+test('with an external database, every start but the first refuses an empty database before Compose starts it', () => {
+  const later = {start: true, firstStart: false};
+  const refused = externalChecks(later, {relay: deployed}).checks;
+  assert.deepEqual(refused.map(([name]) => name), ['relay deployment', 'accounts database']);
+  assert.match(refused[1][1], /holds no dohc accounts/);
+  assert.deepEqual(externalChecks(later, {accounts: 'present', relay: deployed}),
+    {checks: [['relay deployment', ''], ['accounts database', '']], calls: ['relay-initialize', 'check-accounts']});
+  assert.deepEqual(externalChecks({start: true, firstStart: true}), {checks: [['relay deployment', '']], calls: ['relay-initialize']});
+  assert.deepEqual(externalChecks({start: false, firstStart: false}), {checks: [], calls: []});
+  // Without an external database or a data disk, a start checks neither, as before.
+  assert.deepEqual(deploymentChecks('.env.self-host', settings(), () => assert.fail('Docker ran'), later), []);
+});
+
+test('a first start with an external database refuses relay Docker volumes that already hold relay data', () => {
+  const firstStart = {start: true, firstStart: true};
+  for (const files of [['/continuity/deployment.json', '/data/sync-relay.sqlite'], ['/continuity/deployment.json'], ['/continuity/history/continuity.sqlite']]) {
+    // Fresh accounts in the new database would not own the existing relay data, so the accounts check never runs.
+    assert.deepEqual(externalChecks(firstStart, {relay: relayCheck(files)}), {calls: ['relay-initialize'],
+      checks: [['relay deployment', "The relay's Docker volumes already hold relay data. Start without --first-start."]]}, files.join());
+  }
+  for (const relay of [relayCheck([], true), {status: 1, stdout: ''}, {status: 125, stdout: ''}, {status: null}, {status: 0, stdout: ''}]) {
+    assert.deepEqual(externalChecks(firstStart, {relay}).checks,
+      [['relay deployment', "Could not check the relay's Docker volumes. Check that Docker is running, then try again."]], JSON.stringify(relay));
+  }
+});
+
+test('a later start with an external database refuses relay Docker volumes without the relay deployment', () => {
+  const later = {start: true, firstStart: false};
+  // Empty volumes on a new host, or after relay setup failed: setup would create a new relay deployment under the existing accounts.
+  // Only a deliberate first start, which finds the volumes empty, creates one.
+  assert.deepEqual(externalChecks(later, {accounts: 'present'}), {calls: ['relay-initialize'], checks: [['relay deployment',
+    "The relay's Docker volumes hold no relay deployment. Start on the host that holds them. " +
+    'Start with --first-start only to create a new relay deployment that holds none of the existing workspaces.']]});
+  assert.deepEqual(externalChecks({start: true, firstStart: true}, {accounts: 'present'}).checks, [['relay deployment', '']]);
+  for (const files of [['/continuity/deployment.json'], ['/data/sync-relay.sqlite']]) {
+    assert.deepEqual(externalChecks(later, {accounts: 'present', relay: relayCheck(files)}).checks, [['relay deployment',
+      "The relay deployment in the relay's Docker volumes is missing its record or its database. Keep the volumes unchanged and check that this host ran the deployment."]], files.join());
+  }
+  for (const relay of [relayCheck([], true), {status: 1, stdout: ''}, {status: 0, stdout: ''}]) {
+    assert.deepEqual(externalChecks(later, {accounts: 'present', relay}).checks,
+      [['relay deployment', "Could not check the relay's Docker volumes. Check that Docker is running, then try again."]], JSON.stringify(relay));
+  }
+});
+
 test('the data directory must be an absolute folder without parent segments', () => {
   for (const value of [undefined, '', '/mnt/disk/dohc', '/mnt/HC_Volume_1234/dohc.data']) {
     assert.deepEqual(validateSettings({...settings(), DOHC_DATA_DIRECTORY: value}), []);
@@ -254,8 +433,8 @@ test('the data directory must be an absolute folder without parent segments', ()
   }
 });
 
-test('both gateways refuse internal paths before proxy handles', () => {
-  for (const file of ['Caddyfile', 'Caddyfile.private']) {
+test('every gateway refuses internal paths before proxy handles', () => {
+  for (const file of ['Caddyfile', 'Caddyfile.private', 'Caddyfile.cloudflare']) {
     const config = readFileSync(`tools/self-host/${file}`, 'utf8');
     assert.match(config, /@internal path \/internal\/\*\s+handle @internal \{\s+respond 404\s+\}/);
     assert.ok(config.indexOf('handle @internal') < config.indexOf('handle @account'));
