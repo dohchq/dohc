@@ -729,6 +729,7 @@ mod tests {
                     &original.origin_id,
                     original.origin_seq,
                     std::slice::from_ref(&refusal),
+                    &[],
                     &NoFaults,
                     &NoLiveLeases,
                     20
@@ -831,6 +832,7 @@ mod tests {
                 &op.origin_id,
                 op.origin_seq,
                 std::slice::from_ref(&refusal),
+                &[],
                 &NoFaults,
                 &NoLiveLeases,
                 22,

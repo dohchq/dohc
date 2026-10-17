@@ -2323,7 +2323,7 @@ export function MarkdownView(props: {
         <div
           ref={localDocPaneRef}
           data-testid="view-markdown"
-          className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
           <div className="group/topmatter">
             {/* Title, icon and properties autosave through the same disk write
@@ -2332,20 +2332,22 @@ export function MarkdownView(props: {
               body={draft}
               onChange={onPropertiesDraft}
               filenameStem={filenameStem(props.path)}
-              readOnly={readOnly || opening}
+              readOnly={readOnly}
+              opening={opening}
             />
             {recordButtons}
-            {!readOnly && !opening ? (
+            {/* Opening, the panel draws its pills where they will be and the
+                block as written starts as it will once the open answers, so
+                the ready document draws in the same place. */}
+            {readOnly ? null : (
               <Suspense fallback={<PropertiesFallback />}>
-                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} />
+                <LazyPropertiesPanel body={draft} onChange={onPropertiesDraft} fieldMarks={fieldMarks} opening={opening} />
               </Suspense>
-            ) : null}
-            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly && !opening} />
+            )}
+            <FrontmatterAsWritten markdown={draft} propertiesShown={!readOnly} />
           </div>
-          <div
-            ref={readDocumentRef}
-            className="dohc-readable-text p-6 text-[length:var(--dohc-editor-font-size)] [font-family:var(--dohc-editor-font)]"
-          >
+          {/* The editor's own rules draw the body, so it replaces it in place. */}
+          <div ref={readDocumentRef} className="dohc-readable-text dohc-notion-editor">
             {renderedDocument}
           </div>
           {backlinks}

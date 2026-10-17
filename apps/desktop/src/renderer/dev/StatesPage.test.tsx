@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+// chat-messages forces a hover on a row of a virtualized list. jsdom has no
+// layout, so the list mock renders every row for the forced-state check.
+import "../../testing/legendListMock";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setOwnPresentation } from "../workbench/actorPresentation";

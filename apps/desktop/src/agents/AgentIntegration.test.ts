@@ -56,6 +56,7 @@ function heldClearRace(root: string, order: "queued" | "independent") {
   }
   const integration = createPhysicalAgentIntegration({
     localPersonId: () => "person-local",
+    installId: () => "install-local",
     workspaceIds: () => ["ws"],
     createId: () => ids.shift() ?? "run-extra",
     acquire: () => ({
@@ -338,6 +339,7 @@ describe("AgentIntegration", () => {
       }
       const integration = createPhysicalAgentIntegration({
         localPersonId: () => "person-local",
+        installId: () => "install-local",
         workspaceIds: () => ["ws"],
         createId: () => ids.shift() ?? "run-extra",
         // Mirrors main.ts's adapter: a start clears the previous owned run,
@@ -525,6 +527,7 @@ describe("AgentIntegration", () => {
       const allowSettle = Promise.withResolvers<void>();
       const integration = createPhysicalAgentIntegration({
         localPersonId: () => "person-local",
+        installId: () => "install-local",
         workspaceIds: () => ["ws"],
         acquire: () => {
           const heldState = currentState;
@@ -565,6 +568,7 @@ describe("AgentIntegration", () => {
       const release = vi.fn();
       const integration = createPhysicalAgentIntegration({
         localPersonId: () => "person-local",
+        installId: () => "install-local",
         workspaceIds: () => ["ws"],
         acquire: () => ({
           attachmentId: Symbol.for("test-retired-after-persist"),
@@ -615,6 +619,7 @@ describe("AgentIntegration", () => {
     const clearedSlots: string[] = [];
     const integration = createPhysicalAgentIntegration({
       localPersonId: () => "person-local",
+      installId: () => "install-local",
       workspaceIds: () => ["workspace-first", "workspace-second"],
       acquire: (workspaceId) => ({
         attachmentId: Symbol.for(`test-workspace-attachment:${workspaceId}`),
@@ -637,6 +642,100 @@ describe("AgentIntegration", () => {
     expect(releases).toEqual(["workspace-first", "workspace-second"]);
     expect(firstState.activeRun?.id).toBe("run-first");
     expect(secondState.activeRun).toBeNull();
+  });
+
+  it("marks a run its process left running as interrupted when the next process starts", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      const before = createAgentIntegration({ rootFor: () => root, setAgentRun: (_id, run) => setSlot(run) });
+      const run = await before.startAgentRun("ws");
+      // The process dies here: nothing ends the run.
+      const after = createAgentIntegration({ rootFor: () => root, setAgentRun: (_id, next) => setSlot(next), now: () => 99 });
+      await expect(after.getAgentRunStatus("ws")).resolves.toEqual({
+        activeRun: null,
+        lastRun: expect.objectContaining({ id: run.id, status: "interrupted", endedAt: 99 }),
+      });
+      const persisted = JSON.parse(await readFile(join(root, ".dohc", "agent-runs.json"), "utf8"));
+      expect(persisted).toMatchObject([{ id: run.id, status: "interrupted", endedAt: 99 }]);
+    });
+  });
+
+  it("sweeps another process's and unmarked running runs, and keeps this process's, finished, and other installs' runs", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      await mkdir(join(root, ".dohc"));
+      const path = join(root, ".dohc", "agent-runs.json");
+      const run = (id: string, fields: Record<string, unknown> = {}) => ({
+        id, startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "running", ...fields,
+      });
+      const runs = [
+        run("earlier-process", { incarnation: "process-1", installId: "install-local" }),
+        run("unmarked"),
+        run("this-process", { incarnation: "process-2", installId: "install-local" }),
+        run("other-install", { incarnation: "process-9", installId: "install-other" }),
+        run("finished", { status: "complete", endedAt: 2, incarnation: "process-1", installId: "install-local" }),
+        run("failed", { status: "failed", endedAt: 3 }),
+      ];
+      await writeFile(path, JSON.stringify(runs));
+      const integration = createAgentIntegration({
+        rootFor: () => root,
+        setAgentRun: (_id, next) => setSlot(next),
+        incarnation: "process-2",
+        now: () => 50,
+      });
+      await integration.getAgentRunStatus("ws");
+      expect(JSON.parse(await readFile(path, "utf8"))).toEqual([
+        { ...runs[0], status: "interrupted", endedAt: 50 },
+        { ...runs[1], status: "interrupted", endedAt: 50 },
+        runs[2],
+        runs[3],
+        runs[4],
+        runs[5],
+      ]);
+      // Each workspace sweeps once per process.
+      await writeFile(path, JSON.stringify([run("written-later")]));
+      await integration.getAgentRunStatus("ws");
+      expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject([{ id: "written-later", status: "running" }]);
+    });
+  });
+
+  it("writes nothing when no run needs settling", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      await mkdir(join(root, ".dohc"));
+      const path = join(root, ".dohc", "agent-runs.json");
+      const source = JSON.stringify([
+        { id: "done", startedAt: 1, endedAt: 2, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "complete" },
+      ]);
+      await writeFile(path, source);
+      const integration = createAgentIntegration({ rootFor: () => root, setAgentRun: (_id, run) => setSlot(run) });
+      await integration.getAgentRunStatus("ws");
+      expect(await readFile(path, "utf8")).toBe(source);
+    });
+  });
+
+  it("leaves unreadable history unwritten, falls back for status, and sweeps once it is repaired", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      await mkdir(join(root, ".dohc"));
+      const path = join(root, ".dohc", "agent-runs.json");
+      await writeFile(path, "not JSON\n");
+      const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const integration = createAgentIntegration({
+          rootFor: () => root,
+          setAgentRun: (_id, run) => setSlot(run),
+          now: () => 7,
+        });
+        await expect(integration.getAgentRunStatus("ws")).resolves.toEqual({ activeRun: null, lastRun: null });
+        expect(await readFile(path, "utf8")).toBe("not JSON\n");
+        expect(await readdir(join(root, ".dohc"))).toEqual(["agent-runs.json"]);
+        await writeFile(path, JSON.stringify([
+          { id: "left-open", startedAt: 1, agentId: "dohc-mcp", onBehalfOf: "person-local", status: "running" },
+        ]));
+        await expect(integration.getAgentRunStatus("ws")).resolves.toMatchObject({
+          lastRun: { id: "left-open", status: "interrupted", endedAt: 7 },
+        });
+      } finally {
+        logged.mockRestore();
+      }
+    });
   });
 
   // Same boundary as workspaceUiState: a malicious attached workspace can ship

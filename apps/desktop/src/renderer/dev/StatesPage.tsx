@@ -61,7 +61,7 @@ import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
 import { ThreadMessages } from "../workbench/ChatPosts";
-import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
+import { ChatComposer, ChatMessageList, type ChatReactionControls } from "../workbench/chatMessages";
 import { ComposerModeBar } from "../workbench/ChatsControls";
 import { ComposerCatalogOptions, MentionComposer } from "../workbench/MentionComposer";
 import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddressed";
@@ -798,6 +798,27 @@ function AboutPanelSpecimen(props: { children: ReactNode }) {
   return <div className="flex w-[290px] flex-col rounded-lg border border-line bg-panel pb-2">{props.children}</div>;
 }
 
+// A run in a file's chats, the narrowest conversation. From an earlier year,
+// so its day divider reads the same whenever the page is drawn.
+const CHAT_RUN_AT = new Date(2025, 6, 8, 12, 43).getTime();
+const CHAT_RUN: ChatMessageRecord[] = [
+  { id: "run-1", threadId: "about-chat", ...SAM, body: "The second section reads well.", createdAtMs: CHAT_RUN_AT },
+  { id: "run-2", threadId: "about-chat", ...SAM, body: "Can we cut the last paragraph?", createdAtMs: CHAT_RUN_AT + 2 * 60_000 },
+];
+
+// Its second message hovered, so "12:45" shows in the avatar's column.
+function ChatRunSpecimen() {
+  return (
+    <div data-force-state="hover" data-force-target='[data-message-id="run-2"] > .group'>
+      <AboutPanelSpecimen>
+        <div className="flex h-[180px] flex-col">
+          <ChatMessageList testIdPrefix="states-chat" messages={CHAT_RUN} loading={false} emptyLabel="No messages yet." />
+        </div>
+      </AboutPanelSpecimen>
+    </div>
+  );
+}
+
 const accessSetup = (reason: AccessReason): AccessSetup => ({ reason, openSyncSettings: noop, connect: noop });
 const ACCESS_UNEXPLAINED = accessSetup("unexplained");
 
@@ -1374,6 +1395,17 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       <Section part="color-control" title="Color control">
         <ColorControl label="Accent" value="#6b7230" onChange={noop} />
+      </Section>
+
+      <Section part="native-controls" title="Native controls">
+        <Specimen label="checkboxes and radios in the theme's colors, checked ones in the accent (Explorer's archived toggle)">
+          <div className="flex flex-col">
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" defaultChecked={false} />Archived collections</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" defaultChecked />Archived collections</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="radio" name={`native-radio-${theme}`} defaultChecked={false} />Off</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="radio" name={`native-radio-${theme}`} defaultChecked />On</label>
+          </div>
+        </Specimen>
       </Section>
 
       <Section part="list-rows" title="List rows">
@@ -2591,6 +2623,13 @@ function Pane(props: { theme: "light" | "dark" }) {
               }
               poll={{ choices: ["Lisbon", "Porto", "Madeira"], open: true }} onPollChange={noop} />
           </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="chat-messages" title="Chat messages">
+        <Specimen label="a file's chats in About: a run, its second message hovered at 12:45 PM">
+          <ChatRunSpecimen />
         </Specimen>
       </Section>
     </section>

@@ -214,6 +214,14 @@ describe("styles.css mirrors tokens.ts", () => {
       expect(blocks.light, name).toContain(`${name}: ${value};`);
     }
   });
+
+  // index.html's `light dark` follows the OS, so a dark app on a light OS
+  // drew white native checkboxes.
+  it("native controls follow the app theme and check in the accent", () => {
+    expect(blocks.light).toContain("color-scheme: light;");
+    expect(blocks.dark).toContain("color-scheme: dark;");
+    expect(css).toMatch(/\binput \{\s*accent-color: var\(--dohc-accent\);/);
+  });
 });
 
 // An attenuated state fill (a bg-selected/ or bg-hover/ opacity modifier)

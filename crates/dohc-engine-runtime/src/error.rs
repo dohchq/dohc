@@ -75,7 +75,7 @@ pub enum RuntimeError {
         record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
     },
 
-    /// A hosted document that left the scope cannot retire: the file at its
+    /// A hosted document that left the scope cannot park: the file at its
     /// path holds bytes other than its head. Nothing but the engine writes to
     /// a session host's root, so this is a bug, never a person's edit.
     #[error("hosted-file-unexpected: {path} holds bytes other than its document's head")]

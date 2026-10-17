@@ -1,7 +1,7 @@
 import { type StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
 import { type PutBlobResult, type CollectUnreferencedBlobsResult } from "./types";
-import { BLOB_LOG_TEXT_CHUNK, blobLogPayloadChunks, currentBlobLogSequence, isCanonicalBlobSha, removeBlobLogReferences } from "./blobLogRoots";
+import { BLOB_LOG_TEXT_CHUNK, REFERENCES_BLOBS, blobLogPayloadChunks, currentBlobLogSequence, isCanonicalBlobSha, removeBlobLogReferences } from "./blobLogRoots";
 
 const DIRECT_SQL_INVENTORY_LIMIT = 16;
 
@@ -14,7 +14,7 @@ async function excludeLogReferencedBlobs(
   if (remaining.size <= DIRECT_SQL_INVENTORY_LIMIT) {
     // A few LIKE probes avoid copying a large raw payload into JavaScript.
     const reference = storage.db.prepare(`SELECT 1 FROM sync_relay_log
-      WHERE workspace_id = ? AND payload_json LIKE '%' || ? || '%' LIMIT 1`);
+      WHERE workspace_id = ? AND ${REFERENCES_BLOBS} AND payload_json LIKE '%' || ? || '%' LIMIT 1`);
     for (const sha of remaining) {
       if (reference.get(workspaceId, sha) !== undefined) remaining.delete(sha);
     }
@@ -139,7 +139,7 @@ export async function collectUnreferencedBlobs(
          AND NOT EXISTS (
            SELECT 1
            FROM sync_relay_log l
-           WHERE l.workspace_id = ?
+           WHERE l.workspace_id = ? AND l.${REFERENCES_BLOBS}
              AND l.payload_json LIKE '%' || ? || '%'
          )
          AND NOT EXISTS (

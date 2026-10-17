@@ -136,10 +136,11 @@ describe("FileInspector renders markdown through the shared component map", () =
     // The reader sees a document, never its source.
     expect(view.container.querySelector(".dohc-readable-text")?.textContent)
       .not.toContain("|");
-    // The shared map's own table wrapper: a wide table scrolls inside itself
-    // so the page never scrolls sideways. react-markdown's bare table has no
-    // wrapper at all, which is what makes this the probe for the map.
-    expect(pane.parentElement?.className).toContain("overflow-x-auto");
+    // The shared map's own table wrapper, the editor's: a wide table scrolls
+    // inside itself so the page never scrolls sideways. react-markdown's bare
+    // table has no wrapper at all, which is what makes this the probe for the
+    // map.
+    expect(pane.parentElement?.className).toBe("tableWrapper");
   });
 
   it("shows truncated markdown in the bounded read-only source viewer", async () => {
