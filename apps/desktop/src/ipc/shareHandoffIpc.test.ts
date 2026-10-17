@@ -1,54 +1,55 @@
 import { describe, expect, it, vi } from "vitest";
-import { registerShareHandoffIpcHandlers } from "./shareHandoffIpc";
-import { CHANNELS } from "./channels";
+import { createShareHandoffIpcHandlers } from "./shareHandoffIpc";
+import { shareHandoffOperations } from "./shareOperations";
+import { registerOperations } from "./operationTable";
 import type { ShareHandoffStatus } from "./bridgeContract";
 
 function harness() {
-  const handlers = new Map<string, (event: { trusted: boolean }, ...args: unknown[]) => unknown>();
+  const handlers = new Map<string, (event: { trusted: boolean }, payload: unknown) => Promise<unknown>>();
   const coordinator = {
     status: vi.fn<() => ShareHandoffStatus>(() => ({ status: "waiting-for-acceptance", statusId: "current", email: "member@example.test" })),
     accept: vi.fn(), retry: vi.fn(), dismiss: vi.fn(),
   };
-  registerShareHandoffIpcHandlers({
-    registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
+  registerOperations({
+    handle: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
     assertTrustedSender: (event: { trusted: boolean }) => { if (!event.trusted) throw new Error("untrusted"); },
-    shareHandoffRedemption: coordinator,
-  });
-  const invoke = (channel: string, trusted: boolean, ...args: unknown[]) => handlers.get(channel)!({ trusted }, ...args);
+    withActiveWorkspace: vi.fn(async () => { throw new Error("Unexpected workspace operation."); }),
+  }, shareHandoffOperations, createShareHandoffIpcHandlers({ shareHandoffRedemption: coordinator }));
+  const invoke = (channel: string, trusted: boolean, payload?: unknown) => handlers.get(channel)!({ trusted }, payload);
   return { handlers, coordinator, invoke };
 }
 
 describe("registered share handoff handlers", () => {
-  it("registers the original sequence and gates every action before parsing", () => {
+  it("registers the original sequence and gates every action before parsing", async () => {
     const h = harness();
     expect([...h.handlers.keys()]).toEqual([
-      CHANNELS.getShareHandoffStatus, CHANNELS.acceptShareHandoff,
-      CHANNELS.retryShareHandoff, CHANNELS.dismissShareHandoff,
+      shareHandoffOperations.getShareHandoffStatus.channel, shareHandoffOperations.acceptShareHandoff.channel,
+      shareHandoffOperations.retryShareHandoff.channel, shareHandoffOperations.dismissShareHandoff.channel,
     ]);
-    for (const channel of h.handlers.keys()) expect(() => h.invoke(channel, false, null)).toThrow("untrusted");
+    for (const channel of h.handlers.keys()) await expect(h.invoke(channel, false, null)).rejects.toThrow("untrusted");
     for (const method of Object.values(h.coordinator)) expect(method).not.toHaveBeenCalled();
   });
 
-  it("returns the coordinator status and passes only a validated status identity", () => {
+  it("returns the coordinator status and passes only a validated status identity", async () => {
     const h = harness();
-    expect(h.invoke(CHANNELS.getShareHandoffStatus, true)).toEqual(h.coordinator.status());
-    h.invoke(CHANNELS.acceptShareHandoff, true, { statusId: "current" });
-    h.invoke(CHANNELS.dismissShareHandoff, true, { statusId: "current" });
-    h.invoke(CHANNELS.retryShareHandoff, true);
+    expect(await h.invoke(shareHandoffOperations.getShareHandoffStatus.channel, true)).toEqual(h.coordinator.status());
+    await h.invoke(shareHandoffOperations.acceptShareHandoff.channel, true, { statusId: "current" });
+    await h.invoke(shareHandoffOperations.dismissShareHandoff.channel, true, { statusId: "current" });
+    await h.invoke(shareHandoffOperations.retryShareHandoff.channel, true);
     expect(h.coordinator.accept).toHaveBeenCalledWith("current");
     expect(h.coordinator.dismiss).toHaveBeenCalledWith("current");
     expect(h.coordinator.retry).toHaveBeenCalledOnce();
   });
 
-  it("rejects renderer-supplied links and extra arguments before reaching the coordinator", () => {
+  it("rejects malformed or missing payloads before reaching the coordinator", async () => {
     const h = harness();
-    for (const channel of [CHANNELS.getShareHandoffStatus, CHANNELS.retryShareHandoff]) {
-      expect(() => h.invoke(channel, true, "dohc://share/forged")).toThrow("do not accept arguments");
+    for (const channel of [shareHandoffOperations.getShareHandoffStatus.channel, shareHandoffOperations.retryShareHandoff.channel]) {
+      await expect(h.invoke(channel, true, "dohc://open?forged")).rejects.toThrow();
     }
-    for (const channel of [CHANNELS.acceptShareHandoff, CHANNELS.dismissShareHandoff]) {
-      expect(() => h.invoke(channel, true)).toThrow("requires one status identity");
-      expect(() => h.invoke(channel, true, { statusId: "current" }, "extra")).toThrow("requires one status identity");
-      expect(() => h.invoke(channel, true, { url: "dohc://share/forged" })).toThrow();
+    for (const channel of [shareHandoffOperations.acceptShareHandoff.channel, shareHandoffOperations.dismissShareHandoff.channel]) {
+      await expect(h.invoke(channel, true)).rejects.toThrow();
+      await expect(h.invoke(channel, true, { url: "dohc://open?forged" })).rejects.toThrow();
+      await expect(h.invoke(channel, true, { statusId: "" })).rejects.toThrow();
     }
     for (const method of Object.values(h.coordinator)) expect(method).not.toHaveBeenCalled();
   });

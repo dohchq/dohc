@@ -1,3 +1,4 @@
+import { shareHandoffOperations, shareMountOperations } from "./shareOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
@@ -5573,8 +5574,13 @@ export const CheckSharedViewAccessResult = z.object({
 });
 export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessResult>;
 
-// The handler owns its workspace operation so a stale check replies unverified.
+// Refresh and access checks own their workspace operations so stale checks can reply unverified.
 export const sharedViewAccessOperations = {
+  openSharedView: {
+    capabilityId: "share.view.open", channel: "desktop:open-shared-view",
+    scope: "device", guard: "trusted-sender",
+    payload: OpenSharedViewPayload, result: OpenSharedViewResult,
+  },
   refreshSharedView: {
     capabilityId: "share.view.refresh",
     scope: "workspace",
@@ -6955,6 +6961,8 @@ export interface DohcDesktopBridge
     OperationBridge<typeof workspaceFileOperations>,
     OperationBridge<typeof settingsOperations>,
     OperationBridge<typeof chatOperations>,
+    OperationBridge<typeof shareHandoffOperations>,
+    OperationBridge<typeof shareMountOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof serverAccountOperations>,
@@ -7079,10 +7087,6 @@ export interface DohcDesktopBridge
   cloudLoginPoll(): Promise<CloudLoginPollResult>;
   cloudStatus(payload?: CloudStatusPayload): Promise<CloudStatusResult>;
   cloudLogout(): Promise<void>;
-  getShareHandoffStatus(): Promise<ShareHandoffStatus>;
-  acceptShareHandoff(payload: AcceptShareHandoffPayload): Promise<void>;
-  retryShareHandoff(): Promise<void>;
-  dismissShareHandoff(payload: DismissShareHandoffPayload): Promise<void>;
   onShareHandoffStatus(
     listener: (status: ShareHandoffStatus) => void,
   ): () => void;
@@ -7159,8 +7163,6 @@ export interface DohcDesktopBridge
   ): Promise<ListJoinedSharedChannelsResult>;
   joinSharedChannel(payload: JoinSharedChannelPayload): Promise<JoinSharedChannelResult>;
   leaveSharedChannel(payload: LeaveSharedChannelPayload): Promise<void>;
-  // Relay shares: receive side — read-only shared views.
-  openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
   dismissShareSkips(payload: DismissShareSkipsPayload): Promise<void>;
   // Collection automations, for the ⚡ panel.
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
@@ -7220,13 +7222,6 @@ export interface DohcDesktopBridge
   withdrawShareChanges(
     payload: WithdrawShareChangesPayload,
   ): Promise<WithdrawShareChangesResult>;
-  // Share mounts: a received share materialized into a host workspace's
-  // shared-with-me/<label>/ as ordinary read-only files.
-  mountShare(payload: MountSharePayload): Promise<MountShareResult>;
-  refreshShareMounts(
-    payload: RefreshShareMountsPayload,
-  ): Promise<RefreshShareMountsResult>;
-  unmountShare(payload: UnmountSharePayload): Promise<UnmountShareResult>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
   // Engine history + linked Chats. Gated in main on the workspace's engine
   // capture.

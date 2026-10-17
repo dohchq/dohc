@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { CHANNELS } from "./channels";
-import { registerShareMountIpcHandlers } from "./shareMountIpc";
+import { shareMountOperations } from "./shareOperations";
+import { registerOperations } from "./operationTable";
+import { createShareMountIpcHandlers } from "./shareMountIpc";
 
 interface TestEvent {
   trusted: boolean;
@@ -52,7 +53,7 @@ function harness() {
     }),
   };
   const dependencies = {
-    registerHandler: (
+    handle: (
       channel: string,
       handler: (event: TestEvent, payload: unknown) => Promise<unknown>,
     ) => {
@@ -63,14 +64,16 @@ function harness() {
       trace.push("trust");
       if (!event.trusted) throw new Error("Untrusted renderer.");
     },
-    withWorkspaceOperation: async (
+    withActiveWorkspace: async <Result>(
       event: TestEvent,
       workspaceId: string,
+      inactiveMessage: string,
       work: (operation: {
         workspace: typeof workspace;
         assertCurrent(): void;
-      }) => Promise<unknown>,
+      }) => Promise<Result>,
     ) => {
+      expect(inactiveMessage).toBe("Share update stopped because this window changed workspaces.");
       trace.push(`operation:${workspaceId}`);
       const admittedGeneration = event.generation;
       const assertCurrent = () => {
@@ -88,13 +91,14 @@ function harness() {
       assertCurrent();
       return result;
     },
+  };
+  registerOperations(dependencies, shareMountOperations, createShareMountIpcHandlers({
     assertWritableWorkspace: () => {
       trace.push("write gate");
       if (!writable) throw new Error("This workspace is read-only.");
     },
     commands,
-  };
-  registerShareMountIpcHandlers(dependencies);
+  }));
   return {
     handlers,
     trace,
@@ -131,9 +135,9 @@ describe("share mount IPC registration", () => {
   it("registers exactly the three share mount commands", () => {
     const test = harness();
     expect([...test.handlers.keys()]).toEqual([
-      CHANNELS.mountShare,
-      CHANNELS.refreshShareMounts,
-      CHANNELS.unmountShare,
+      shareMountOperations.mountShare.channel,
+      shareMountOperations.refreshShareMounts.channel,
+      shareMountOperations.unmountShare.channel,
     ]);
   });
 
@@ -141,7 +145,7 @@ describe("share mount IPC registration", () => {
     const test = harness();
 
     await expect(
-      test.invoke(CHANNELS.mountShare, {
+      test.invoke(shareMountOperations.mountShare.channel, {
         workspaceId: workspace.workspaceId,
         shareCode: "dohc-share:test",
       }),
@@ -159,7 +163,7 @@ describe("share mount IPC registration", () => {
     });
 
     await expect(
-      test.invoke(CHANNELS.refreshShareMounts, {
+      test.invoke(shareMountOperations.refreshShareMounts.channel, {
         workspaceId: workspace.workspaceId,
       }),
     ).resolves.toEqual({ results: [] });
@@ -175,7 +179,7 @@ describe("share mount IPC registration", () => {
     });
 
     await expect(
-      test.invoke(CHANNELS.unmountShare, {
+      test.invoke(shareMountOperations.unmountShare.channel, {
         workspaceId: workspace.workspaceId,
         shareId,
       }),
@@ -195,11 +199,11 @@ describe("share mount IPC registration", () => {
 
   it.each([
     [
-      CHANNELS.mountShare,
+      shareMountOperations.mountShare.channel,
       { workspaceId: workspace.workspaceId, shareCode: "code" },
     ],
-    [CHANNELS.refreshShareMounts, { workspaceId: workspace.workspaceId }],
-    [CHANNELS.unmountShare, { workspaceId: workspace.workspaceId, shareId }],
+    [shareMountOperations.refreshShareMounts.channel, { workspaceId: workspace.workspaceId }],
+    [shareMountOperations.unmountShare.channel, { workspaceId: workspace.workspaceId, shareId }],
   ])("refuses %s when the renderer has another workspace active", async (channel, payload) => {
     const test = harness();
     test.setActiveWorkspace("workspace-2");
@@ -216,6 +220,17 @@ describe("share mount IPC registration", () => {
     expect(test.commands.unmount).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [shareMountOperations.mountShare.channel, { workspaceId: "workspace-2", shareCode: "code" }],
+    [shareMountOperations.refreshShareMounts.channel, { workspaceId: "workspace-2" }],
+    [shareMountOperations.unmountShare.channel, { workspaceId: "workspace-2", shareId }],
+  ])("rejects a foreign workspace payload for %s before its command", async (channel, payload) => {
+    const test = harness();
+    await expect(test.invoke(channel, payload)).rejects.toThrow("changed workspaces");
+    expect(test.trace).toEqual(["trust", "operation:workspace-2"]);
+    for (const command of Object.values(test.commands)) expect(command).not.toHaveBeenCalled();
+  });
+
   it("passes the exact operation workspace instead of the registry alias", async () => {
     const test = harness();
     const canonicalWorkspace = {
@@ -224,7 +239,7 @@ describe("share mount IPC registration", () => {
     };
     test.setPhysicalWorkspace(canonicalWorkspace);
 
-    await test.invoke(CHANNELS.refreshShareMounts, {
+    await test.invoke(shareMountOperations.refreshShareMounts.channel, {
       workspaceId: workspace.workspaceId,
     });
 
@@ -238,7 +253,7 @@ describe("share mount IPC registration", () => {
     const command = Promise.withResolvers<{ results: [] }>();
     const test = harness();
     test.commands.refresh.mockReturnValueOnce(command.promise);
-    const pending = test.invoke(CHANNELS.refreshShareMounts, {
+    const pending = test.invoke(shareMountOperations.refreshShareMounts.channel, {
       workspaceId: workspace.workspaceId,
     });
 
@@ -259,7 +274,7 @@ describe("share mount IPC registration", () => {
       effect();
       return { results: [] };
     });
-    const pending = test.invoke(CHANNELS.refreshShareMounts, {
+    const pending = test.invoke(shareMountOperations.refreshShareMounts.channel, {
       workspaceId: workspace.workspaceId,
     });
 
@@ -273,11 +288,11 @@ describe("share mount IPC registration", () => {
 
   it.each([
     [
-      CHANNELS.mountShare,
+      shareMountOperations.mountShare.channel,
       { workspaceId: workspace.workspaceId, shareCode: "code" },
     ],
-    [CHANNELS.refreshShareMounts, { workspaceId: workspace.workspaceId }],
-    [CHANNELS.unmountShare, { workspaceId: workspace.workspaceId, shareId }],
+    [shareMountOperations.refreshShareMounts.channel, { workspaceId: workspace.workspaceId }],
+    [shareMountOperations.unmountShare.channel, { workspaceId: workspace.workspaceId, shareId }],
   ])("gates %s before its command", async (channel, payload) => {
     const test = harness();
     test.setWritable(false);
@@ -295,22 +310,25 @@ describe("share mount IPC registration", () => {
     expect(test.commands.unmount).not.toHaveBeenCalled();
   });
 
-  it("rejects an untrusted sender before parsing the payload", async () => {
-    const test = harness();
-    await expect(
-      test.invoke(CHANNELS.mountShare, null, {
-        trusted: false,
-        activeWorkspaceId: workspace.workspaceId,
-        generation: 1,
-      }),
-    ).rejects.toThrow("Untrusted renderer.");
-    expect(test.trace).toEqual(["trust"]);
-  });
+  it.each(Object.values(shareMountOperations).map(row => row.channel))(
+    "rejects an untrusted sender before parsing %s", async channel => {
+      const test = harness();
+      await expect(
+        test.invoke(channel, null, {
+          trusted: false,
+          activeWorkspaceId: workspace.workspaceId,
+          generation: 1,
+        }),
+      ).rejects.toThrow("Untrusted renderer.");
+      expect(test.trace).toEqual(["trust"]);
+      for (const command of Object.values(test.commands)) expect(command).not.toHaveBeenCalled();
+    },
+  );
 
   it("rejects malformed payloads before workspace lookup", async () => {
     const test = harness();
     await expect(
-      test.invoke(CHANNELS.refreshShareMounts, { workspaceId: "" }),
+      test.invoke(shareMountOperations.refreshShareMounts.channel, { workspaceId: "" }),
     ).rejects.toThrow();
     expect(test.trace).toEqual(["trust"]);
   });
@@ -319,7 +337,7 @@ describe("share mount IPC registration", () => {
     const mount = harness();
     mount.commands.mount.mockResolvedValueOnce({} as never);
     await expect(
-      mount.invoke(CHANNELS.mountShare, {
+      mount.invoke(shareMountOperations.mountShare.channel, {
         workspaceId: workspace.workspaceId,
         shareCode: "code",
       }),
@@ -328,7 +346,7 @@ describe("share mount IPC registration", () => {
     const refresh = harness();
     refresh.commands.refresh.mockResolvedValueOnce({} as never);
     await expect(
-      refresh.invoke(CHANNELS.refreshShareMounts, {
+      refresh.invoke(shareMountOperations.refreshShareMounts.channel, {
         workspaceId: workspace.workspaceId,
       }),
     ).rejects.toThrow();
@@ -336,7 +354,7 @@ describe("share mount IPC registration", () => {
     const unmount = harness();
     unmount.commands.unmount.mockResolvedValueOnce({} as never);
     await expect(
-      unmount.invoke(CHANNELS.unmountShare, {
+      unmount.invoke(shareMountOperations.unmountShare.channel, {
         workspaceId: workspace.workspaceId,
         shareId,
       }),
