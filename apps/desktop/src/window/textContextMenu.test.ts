@@ -84,7 +84,7 @@ describe("text menu template", () => {
     });
   });
 
-  it("adds Look up and Speech on macOS, naming a shortened selection", () => {
+  it("follows the macOS text menu: Look up and Speech, no Undo or Redo, and Paste and Match Style", () => {
     const run = actions();
     const template = textMenuTemplate(params({
       ...editable,
@@ -95,8 +95,7 @@ describe("text menu template", () => {
     expect(shape(template)).toEqual([
       "the", "Add to dictionary", "-",
       "Look up “teh”", "-",
-      "role:undo", "role:redo", "-",
-      "role:cut", "role:copy", "role:paste", "role:selectAll", "-",
+      "role:cut", "role:copy", "role:paste", "role:pasteAndMatchStyle", "role:selectAll", "-",
       "Speech",
     ]);
     expect(template.at(-1)?.submenu).toEqual([{ role: "startSpeaking" }, { role: "stopSpeaking" }]);
@@ -110,6 +109,13 @@ describe("text menu template", () => {
     expect(long[0]?.label).toBe("Look up “a selection that runs we…”");
   });
 
+  it("offers Paste and Match Style on macOS only while Paste applies", () => {
+    const nothingToPaste = params({ isEditable: true, editFlags: { ...noFlags, canSelectAll: true } });
+    expect(shape(textMenuTemplate(nothingToPaste, "darwin", actions()))).toEqual([
+      "role:cut", "role:copy", "role:paste", "role:selectAll",
+    ]);
+  });
+
   it("offers Copy for a selection outside a field, and Look up only on macOS", () => {
     const selected = params({ selectionText: "plan", editFlags: { ...noFlags, canCopy: true } });
     expect(shape(textMenuTemplate(selected, "win32", actions()))).toEqual(["role:copy"]);
@@ -118,9 +124,15 @@ describe("text menu template", () => {
     ]);
   });
 
+  it("offers Copy for selected spaces outside a field, with nothing to look up or speak", () => {
+    const spaces = params({ selectionText: " \n\n ", editFlags: { ...noFlags, canCopy: true } });
+    expect(shape(textMenuTemplate(spaces, "win32", actions()))).toEqual(["role:copy"]);
+    expect(shape(textMenuTemplate(spaces, "darwin", actions()))).toEqual(["role:copy"]);
+  });
+
   it("opens no menu where there is nothing to edit or copy", () => {
     expect(textMenuTemplate(params(), "darwin", actions())).toEqual([]);
-    expect(textMenuTemplate(params({ selectionText: "   " }), "win32", actions())).toEqual([]);
+    expect(textMenuTemplate(params(), "win32", actions())).toEqual([]);
   });
 
   it("never puts a password field's selection in the menu", () => {
@@ -141,8 +153,11 @@ describe("text menu on a window", () => {
     buildFromTemplate.mockReturnValue({ popup });
   });
 
+  const mainFrame = { name: "main" };
+
   function windowWithContents() {
     const contents = Object.assign(new EventEmitter(), {
+      mainFrame,
       replaceMisspelling: vi.fn(),
       showDefinitionForSelection: vi.fn(),
       session: { addWordToSpellCheckerDictionary: vi.fn(() => true) },
@@ -151,8 +166,6 @@ describe("text menu on a window", () => {
     installTextContextMenu(window, "darwin");
     return { window, contents };
   }
-
-  const mainFrame = { parent: null };
 
   it("pops the menu over the window for a right-click in the app's own page", () => {
     const { window, contents } = windowWithContents();
@@ -170,10 +183,12 @@ describe("text menu on a window", () => {
     expect(contents.showDefinitionForSelection).toHaveBeenCalledOnce();
   });
 
-  it("leaves app and site preview frames, and empty targets, without a menu", () => {
+  it("leaves every other frame, a missing frame, and empty targets without a menu", () => {
     const { contents } = windowWithContents();
     const field = params(editable);
-    contents.emit("context-menu", {}, { ...field, frame: { parent: mainFrame } });
+    // A preview iframe has a parent; a fenced frame reports none. Neither is the page.
+    contents.emit("context-menu", {}, { ...field, frame: { name: "preview", parent: mainFrame } });
+    contents.emit("context-menu", {}, { ...field, frame: { name: "fenced", parent: null } });
     contents.emit("context-menu", {}, { ...field, frame: null });
     contents.emit("context-menu", {}, { ...params(), frame: mainFrame });
     expect(buildFromTemplate).not.toHaveBeenCalled();

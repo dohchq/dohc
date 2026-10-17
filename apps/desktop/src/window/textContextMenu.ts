@@ -30,7 +30,8 @@ function lookUpLabel(selection: string): string {
 }
 
 // The right-click menu for text: spelling first, then Look up on macOS, then
-// the edit roles Chromium says apply. Empty when the target is neither
+// the edit roles Chromium says apply. macOS text menus leave out Undo and
+// Redo and add Paste and Match Style. Empty when the target is neither
 // editable nor selected, so no menu opens.
 export function textMenuTemplate(
   params: TextMenuParams,
@@ -39,8 +40,9 @@ export function textMenuTemplate(
 ): MenuItemConstructorOptions[] {
   const mac = platform === "darwin";
   const flags = params.editFlags;
+  // Selected spaces still copy, but there is nothing to look up or speak.
   // A password never leaves its field, not even into a menu label.
-  const selection =
+  const words =
     params.formControlType === "input-password" ? "" : params.selectionText.trim();
   const misspelled = params.isEditable ? params.misspelledWord : "";
   const groups: MenuItemConstructorOptions[][] = [
@@ -53,24 +55,27 @@ export function textMenuTemplate(
           { label: "Add to dictionary", click: () => actions.addToDictionary(misspelled) },
         ]
       : [],
-    mac && selection ? [{ label: lookUpLabel(selection), click: () => actions.lookUp() }] : [],
+    mac && words ? [{ label: lookUpLabel(words), click: () => actions.lookUp() }] : [],
     ...(params.isEditable
       ? [
-          [
-            { role: "undo" as const, enabled: flags.canUndo },
-            { role: "redo" as const, enabled: flags.canRedo },
-          ],
+          mac
+            ? []
+            : [
+                { role: "undo" as const, enabled: flags.canUndo },
+                { role: "redo" as const, enabled: flags.canRedo },
+              ],
           [
             { role: "cut" as const, enabled: flags.canCut },
             { role: "copy" as const, enabled: flags.canCopy },
             { role: "paste" as const, enabled: flags.canPaste },
+            ...(mac && flags.canPaste ? [{ role: "pasteAndMatchStyle" as const }] : []),
             { role: "selectAll" as const, enabled: flags.canSelectAll },
           ],
         ]
-      : selection
+      : params.selectionText
         ? [[{ role: "copy" as const, enabled: flags.canCopy }]]
         : []),
-    mac && selection
+    mac && words
       ? [{ label: "Speech", submenu: [{ role: "startSpeaking" }, { role: "stopSpeaking" }] }]
       : [],
   ];
@@ -89,9 +94,9 @@ export function installTextContextMenu(
 ): void {
   const contents = window.webContents;
   contents.on("context-menu", (_event, params) => {
-    // A frame inside the page is an app or site preview. It does not get the
-    // workspace's menu; it keeps Electron's default, which is no menu.
-    if (params.frame?.parent !== null) return;
+    // Only the window's own page gets the menu. Any other frame, such as an
+    // app or site preview, keeps Electron's default, which is no menu.
+    if (!params.frame || params.frame !== contents.mainFrame) return;
     const template = textMenuTemplate(params, platform, {
       replaceMisspelling: (suggestion) => contents.replaceMisspelling(suggestion),
       addToDictionary: (word) => contents.session.addWordToSpellCheckerDictionary(word),
