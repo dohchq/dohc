@@ -1,0 +1,33 @@
+# Keeps accounts and sessions in an external Postgres instead of the bundled
+# one. Leaves out the bundled service and its volume, so nothing waits on them.
+# Every connection verifies the server certificate against the provider's CA.
+x-external-database: &external-database
+  DOHC_POSTGRES_HOST: ${DOHC_POSTGRES_HOST:?Set DOHC_POSTGRES_HOST}
+  DOHC_POSTGRES_PORT: ${DOHC_POSTGRES_PORT:?Set DOHC_POSTGRES_PORT}
+
+x-database-ca: &database-ca
+  type: bind
+  source: ${DOHC_POSTGRES_CA_FILE:?Set DOHC_POSTGRES_CA_FILE}
+  target: /etc/dohc/postgres-ca.pem
+  read_only: true
+  bind: {create_host_path: false}
+
+services:
+  postgres: !reset null
+  postgres-migrate:
+    environment: *external-database
+    depends_on: !reset {}
+    volumes: [*database-ca]
+  # A first start whose migrations fail leaves the relay volumes empty, so a retry with --first-start passes its check.
+  relay-initialize:
+    depends_on:
+      postgres-migrate: {condition: service_completed_successfully}
+  workspace-api:
+    environment: *external-database
+    volumes: [*database-ca]
+  sync-relay:
+    environment: *external-database
+    volumes: [*database-ca]
+
+volumes:
+  dohc_self_host_postgres: !reset null
