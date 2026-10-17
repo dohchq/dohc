@@ -211,13 +211,13 @@ describe("delete recovery failures", () => {
       expect(existsSync(join(f.root, "folder"))).toBe(false);
     } finally { faults.failRecord = false; }
   });
-  it.each([false, true])("a save failure after bytes moved preserves the completed delete (hand=%s)", async hand => {
+  it.each([false, true])("a save failure during system trash preserves the completed delete (hand=%s)", async hand => {
     const f = await fixture();
     const trash = f.options.trashItem;
     f.options.trashItem = async path => { faults.failRecord = true; await trash(path); };
     try {
       const result = await f.remove(hand);
-      expect(result).toMatchObject({ trashed: false, undo: { available: false } });
+      expect(result).toMatchObject({ trashed: false, undo: { available: !hand } });
       if (!hand) expect(result).toMatchObject({ ok: true, trashPath: expect.stringContaining(".dohc/trash/") });
       expect(f.recordDelete).toHaveBeenCalledWith("folder/tracked.txt");
       expect(existsSync(join(f.root, "folder"))).toBe(false);

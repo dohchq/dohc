@@ -135,12 +135,20 @@ export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPla
   const { operationId, record } = plan;
   try {
     if (!record) throw new Error("Recovery collection failed");
+    const wasStaged = record.staged !== undefined;
+    // Undo may have saved a receipt while system trash waited outside the lock.
+    if (trashed && wasStaged && (await readDeleteRecovery(root, operationId))?.engine) {
+      return { operationId, undo: { available: true } };
+    }
     record.staged = trashed || staged === undefined ? undefined : basename(staged);
     if (!plan.noUndo && trashed && record.paths.length) {
       const where = process.platform === "win32" ? "in the Recycle Bin" : "in the Trash";
       plan.noUndo = `Cannot undo the delete. ${record.paths.join(", ")} ${record.paths.length === 1 ? "is" : "are"} ${where}. Restore ${record.paths.length === 1 ? "it" : "them"} there.`;
     }
-    if (plan.noUndo) return { operationId, undo: { available: false, reason: plan.noUndo, paths: record.paths } };
+    if (plan.noUndo) {
+      if (wasStaged) await unlink(join(await trashDir(root), recordName(operationId))).catch(error => { if (code(error) !== "ENOENT") throw error; });
+      return { operationId, undo: { available: false, reason: plan.noUndo, paths: record.paths } };
+    }
     await save(root, record);
     schedulePrune(root);
     return { operationId, undo: { available: true } };

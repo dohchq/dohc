@@ -1,4 +1,4 @@
-import { undoWorkspaceHistoryOperation } from "./workspaceHistoryOperations";
+import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "./workspaceHistoryOperations";
 import { mkdir, readFile, rename, readdir, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { existsSync } from "node:fs";
@@ -7,6 +7,8 @@ import type { HistoryUndoResult } from "@dohc/workspace-contracts/engine";
 import { createTestScratch } from "./testTemp";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
+import { deferred } from "../testing/deferred";
+import { readDeleteRecovery } from "./workspaceDeleteRecovery";
 
 const faults = vi.hoisted(() => ({ beforeLink: undefined as undefined | ((to: string) => Promise<void>), failRecord: false }));
 vi.mock("node:fs/promises", async original => {
@@ -20,6 +22,7 @@ vi.mock("node:fs/promises", async original => {
   };
 });
 const person = { kind: "human", humanId: "local:test" } as const;
+const agent = { kind: "agent", agentId: "test-agent", onBehalfOf: "local:test" } as const;
 async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) {
   const root = await createTestScratch("delete-recovery-");
   const os = await createTestScratch("delete-recovery-os-");
@@ -30,10 +33,13 @@ async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) 
   const operation = { workspace: { workspaceId: "test", rootPath: root, attachmentId: Symbol(), readOnly: false, shareView: undefined as unknown }, state: {},
     signal: new AbortController().signal, assertCurrent: vi.fn() };
   const groups: string[] = [];
+  let afterCommit: ((id: string) => void) | undefined;
   const recordDisk = vi.fn(async () => tracked);
   const capture: PathChangeOptions["capture"] = { changePathsAs: async (_paths, authored, work) => {
     groups.push(authored.operationId);
-    return work({ policy: await readWorkspaceEnginePolicy(root), recordDisk, delete: vi.fn(async () => "moment") } as never);
+    const result = await work({ policy: await readWorkspaceEnginePolicy(root), recordDisk, delete: vi.fn(async () => "moment") } as never);
+    afterCommit?.(authored.operationId);
+    return result;
   } };
   const trashItem = vi.fn(async (path: string) => { if (!systemAccepts) throw new Error("OS refuses"); await rename(path, join(os, basename(path))); });
   const options = { capture, requestId: "caller-request", trashItem, markDeleted: vi.fn() };
@@ -52,9 +58,10 @@ async function fixture(tracked = ["folder/tracked.txt"], systemAccepts = false) 
     return committed;
   }) };
   const remove = async (hand = false) => hand ? deleteWorkspacePathByHand(operation, "folder", person, options)
-    : (await prepareDeleteWorkspacePathAs(operation, "folder", person, options))();
+    : (await prepareDeleteWorkspacePathAs(operation, "folder", agent, options))();
   const undo = (id: string) => undoWorkspaceHistoryOperation(operation, { operationId: id }, person, { agent: false, history });
   return { root, write, remove, undo, history, groups, operation, recordDisk,
+    options, afterCommit: (work: (id: string) => void) => { afterCommit = work; },
     interrupt: () => { interrupted = true; }, refuse: (message: string) => { refuse = message; },
     placeTracked: async () => { expect(placement).toBeDefined(); releasePlacement(); await placement; },
   };
@@ -66,6 +73,46 @@ function recovery(result: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>
 }
 
 describe("delete recovery", () => {
+  it.each(["read", "undo"] as const)("an agent delete saves recovery before %s queued at History commit", async action => {
+    const f = await fixture();
+    let queued: Promise<unknown> | undefined;
+    f.afterCommit(id => {
+      queued = action === "read" ? readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history) : f.undo(id);
+    });
+    const finish = await prepareDeleteWorkspacePathAs(f.operation, "folder", agent, f.options);
+    expect(queued).toBeDefined();
+    expect(await queued).toMatchObject(action === "read"
+      ? { ok: true, withoutHistory: ["folder/rowless.txt"] }
+      : { ok: true, restored: ["folder/rowless.txt"], remaining: [] });
+    expect(f.options.trashItem).not.toHaveBeenCalled();
+    expect(await finish()).toMatchObject({ ok: true, undo: { available: true } });
+  });
+
+  it.each([false, true])("keeps an Undo receipt when slow system trash finishes (accepts=%s)", async accepts => {
+    const f = await fixture(["folder/tracked.txt", "folder/rowless.txt"], accepts);
+    const started = deferred<void>(), release = deferred<void>();
+    const trash = f.options.trashItem.getMockImplementation()!;
+    f.options.trashItem.mockImplementationOnce(async path => {
+      started.resolve();
+      await release.promise;
+      await trash(path);
+    });
+    const pending = f.remove();
+    try {
+      await started.promise;
+      const id = f.groups[0]!;
+      expect(await f.undo(id)).toMatchObject({ ok: true });
+      const record = await readDeleteRecovery(f.root, id);
+      expect(record?.result).toBeDefined();
+      release.resolve();
+      expect(await pending).toMatchObject({ ok: true, trashed: accepts, undo: { available: true } });
+      expect(await readDeleteRecovery(f.root, id)).toEqual(record);
+    } finally {
+      release.resolve();
+      await pending;
+    }
+  });
+
   it.each([false, true])("restores tracked and rowless files after OS refusal (hand=%s)", async hand => {
     const f = await fixture();
     const id = recovery(await f.remove(hand));

@@ -482,7 +482,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
       let gone: string[] = [];
       // The capture settles, closes and checks this endpoint before the hold.
       const endpoint = (await admitPath(rootPath, path)).physical;
-      return await options.capture.changePathsAs<Changed<{ path: string; withoutHistory: string[]; recovery: DeleteRecoveryPlan }, DeleteFailure>>([endpoint],
+      const changed = await options.capture.changePathsAs<Changed<{ path: string; withoutHistory: string[]; recovery: DeleteRecoveryPlan }, DeleteFailure>>([endpoint],
         { operation: "delete", author, operationId },
         async engine => {
           // Admission runs here, with capture held, right before the disk changes.
@@ -535,12 +535,17 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
           return { done: { path: target.path, withoutHistory, recovery }, trash: staged };
         },
         () => gone);
+      if ("failed" in changed) return changed;
+      const recovery = await finishDeleteRecovery(rootPath, changed.done.recovery, false, changed.trash);
+      return { ...changed, recovery };
     });
     if ("failed" in changed) return async () => changed.failed;
     return async () => {
       const trashed = changed.trash !== undefined && await toSystemTrash(options, changed.trash);
       const { withoutHistory, recovery: plan, ...done } = changed.done;
-      const recovery = await finishDeleteRecovery(rootPath, plan, trashed, changed.trash);
+      // System trash can wait on the person. Only its recovery update holds the lock.
+      const recovery = trashed ? await withExclusiveWorkspaceOperation(rootPath,
+        () => finishDeleteRecovery(rootPath, plan, true)) : changed.recovery;
       return { ok: true, ...done, trashed, ...recovery,
         ...(trashed || changed.trash === undefined ? {} : { trashPath: workspaceTrashPath(changed.trash) }),
         ...(withoutHistory.length ? { withoutHistory } : {}) };
