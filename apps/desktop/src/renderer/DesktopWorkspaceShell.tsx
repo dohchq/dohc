@@ -7,7 +7,7 @@ import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
-import { matchShellShortcut } from "../shortcuts/shortcutRegistry";
+import { matchShellShortcut, matchShellShortcutChord } from "../shortcuts/shortcutRegistry";
 import { hasBlockingModal } from "./modalFocus";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
@@ -3866,12 +3866,13 @@ export function DesktopWorkspaceShell(props: {
     function onKeyDown(event: KeyboardEvent) {
       // A stopped workspace answers no workspace shortcut.
       if (storeUpdateRequiredRef.current) return;
-      const command = matchShellShortcut(event);
+      const blockingModal = hasBlockingModal();
+      const command = blockingModal ? matchShellShortcutChord(event) : matchShellShortcut(event);
       if (!command) return;
       // A modal owns the keyboard while it is visible. Native/main-owned
       // shortcuts such as Close Window and zoom never reach this listener,
       // so they continue to work over a modal.
-      if (hasBlockingModal()) {
+      if (blockingModal) {
         // Consume shell chords before macOS can route them through the menu.
         // Text inputs keep native undo; history restore does not own it here.
         if (command !== "history-restore-undo") event.preventDefault();

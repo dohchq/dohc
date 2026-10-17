@@ -144,13 +144,17 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     expect(screen.queryByTestId("quick-open")).toBeNull();
   });
 
-  it("runs an app-menu command over Settings while guarding shortcuts typed inside it", async () => {
+  it.each([
+    ["plain", {}],
+    ["repeated", { repeat: true }],
+    ["composing", { isComposing: true }],
+  ] as const)("runs an app-menu command over Settings while guarding %s shortcuts typed inside it", async (_name, extra) => {
     const bridge = await ready(platform);
     fireEvent(window, keyEvent(SHORTCUTS.settings.accelerators[0], platform));
     const dialog = await screen.findByTestId("settings-dialog");
 
     const binding = SHORTCUTS["toggle-sidebar"].accelerators[0];
-    const shortcut = keyEvent(binding, platform);
+    const shortcut = keyEvent(binding, platform, extra);
     fireEvent(dialog, shortcut);
     expect(shortcut.defaultPrevented).toBe(true);
     expect(screen.getByTestId("side-panel")).toBeTruthy();
@@ -166,12 +170,12 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     expect(screen.queryByTestId("side-panel")).toBeNull();
     expect(screen.getByTestId("settings-dialog")).toBe(dialog);
 
-    fireEvent(dialog, keyEvent(binding, platform));
+    fireEvent(dialog, keyEvent(binding, platform, extra));
     expect(screen.queryByTestId("side-panel")).toBeNull();
 
     const input = document.createElement("input");
     dialog.append(input);
-    const undo = keyEvent(SHORTCUTS["history-restore-undo"].accelerators[0], platform);
+    const undo = keyEvent(SHORTCUTS["history-restore-undo"].accelerators[0], platform, extra);
     fireEvent(input, undo);
     expect(undo.defaultPrevented).toBe(false);
   });

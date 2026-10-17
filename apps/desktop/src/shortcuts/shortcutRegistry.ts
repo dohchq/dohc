@@ -103,8 +103,14 @@ export function shortcutText(id: ShortcutId, platform: string | undefined): stri
 // The shell accepts either modifier on every platform, as it did before the
 // extraction. Editor keymaps still get the event first and own their chords.
 export function matchShellShortcut(event: KeyboardEvent): ShellShortcutId | null {
+  if (event.repeat || event.isComposing) return null;
+  return matchShellShortcutChord(event);
+}
+
+// Modal guards also consume held and composing chords before native menu fallback.
+export function matchShellShortcutChord(event: KeyboardEvent): ShellShortcutId | null {
   if (!(event.metaKey || event.ctrlKey) || (event.metaKey && event.ctrlKey)
-    || event.defaultPrevented || event.repeat || event.isComposing) return null;
+    || event.defaultPrevented) return null;
   for (const id of Object.keys(SHORTCUTS) as ShortcutId[]) {
     const row: ShortcutDefinition = SHORTCUTS[id];
     if (row.owner !== "shell" && row.owner !== "history-restore") continue;
