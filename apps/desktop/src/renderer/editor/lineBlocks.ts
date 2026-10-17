@@ -21,11 +21,9 @@
 //  - Some blocks RUN THROUGH a blank line, because the next line continues
 //    them: another item of the same list, content indented to that item's own
 //    content column, and the next chunk of an indented code block. A list's
-//    identity is its marker, its kind, and whether its items carry checkboxes
-//    — a checklist is a different node from a bullet list, and inverts this
-//    rule: a blank line splits one. Ordered delimiters share an identity, and
-//    ordered items accept any indented continuation. A bullet or task item
-//    still starts a new list.
+//    identity is its marker, its kind, and whether its items carry checkboxes.
+//    Ordered delimiters distinguish lists too. Every item continuation must
+//    reach that item's content column after a blank line.
 //  - A quote absorbs an unquoted line as a lazy continuation until something
 //    ends that. Inside it: a quoted blank or a quoted fence for any quote, and
 //    for a callout every quoted block start. On the unquoted line itself: a
@@ -72,8 +70,7 @@ type BlockKind =
 
 const HEADING_RE = /^[ \t]{0,3}#{1,6}(?:[ \t]|$)/;
 // A checkbox item. The editor renders these as a taskList, a different node
-// from a bulletList with the opposite blank-line rule: a blank line splits a
-// task list where it joins a bullet one. Bullet markers only — `1. [ ] a` is
+// from a bulletList. Both continue across blank lines. Bullet markers only: `1. [ ] a` is
 // an ordinary ordered list — and the box needs a space or the line end after
 // it, or `- [ ]a` is just text.
 const TASK_RE = /^[ \t]{0,3}[-+*][ \t]+\[[ xX]\](?:[ \t]|$)/;
@@ -102,7 +99,8 @@ const FENCE_RE = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/;
 const SETEXT_RE = /^[ \t]{0,3}(?:=+|-+)[ \t]*$/;
 // Where a list item's own content begins, which is the column a continuation
 // line has to reach. It is the active item's marker plus the spaces after it,
-// so `-    item` wants five columns where `- item` wants two.
+// so `-    item` wants five columns where `- item` wants two. More than four
+// padding columns leave one marker space and make the remaining padding content.
 const LIST_MARKER_RE = /^[ \t]{0,3}(?:[-+*]|\d{1,9}[.)])/;
 // Four COLUMNS with nothing open above is an indented code block, which runs
 // through its own blank lines and ends where the indentation stops. Columns,
@@ -274,7 +272,8 @@ function definitionEnd(lines: string[], start: number): number | null {
 }
 
 function listMarker(text: string): string {
-  if (ORDERED_RE.test(text)) return "ordered";
+  const ordered = ORDERED_RE.exec(text);
+  if (ordered) return ordered[1]!;
   return BULLET_RE.exec(text)?.[1] ?? "";
 }
 
@@ -296,15 +295,24 @@ export function leadingColumns(text: string): number {
   return columnAt(text, spaces.length);
 }
 
-/** The column a continuation line must reach to stay inside this list item.
- *  Measured against the tokenizer rather than derived: an ordered item takes
- *  any indent, while a bullet or task item wants its content column. */
-function continuationIndent(text: string): number {
+/** The column a continuation line must reach to stay inside this list item. */
+function continuationIndent(text: string): { indent: number; lazy: boolean; fence: Fence | null } {
   const match = LIST_MARKER_RE.exec(text);
-  if (!match) return 1;
-  if (ORDERED_RE.test(text)) return 1;
+  if (!match) return { indent: 1, lazy: false, fence: null };
   const spaces = /^[ \t]*/.exec(text.slice(match[0].length))?.[0] ?? "";
-  return columnAt(text, match[0].length + spaces.length);
+  const marker = columnAt(text, match[0].length);
+  const content = columnAt(text, match[0].length + spaces.length);
+  const body = text.slice(match[0].length).trim();
+  const indent = content - marker > 4 || !body
+    ? marker + 1
+    : content;
+  const fence = content - marker > 4 ? null : fenceOpener(body);
+  return {
+    indent,
+    lazy: !!body && content - marker < 4 &&
+      !body.startsWith("#") && !fence && !BREAK_RE.test(body),
+    fence,
+  };
 }
 
 function blockKind(text: string): BlockKind {
@@ -386,6 +394,7 @@ export function blockForLine(body: string, line: number): LineBlock {
   let openKind: BlockKind = "other";
   let openMarker = "";
   let openIndent = 1;
+  let previousEndsLazy = false;
   let quoteOpen = false;
   let quoteCallout = false;
   let quoteFence: Fence | null = null;
@@ -477,7 +486,7 @@ export function blockForLine(body: string, line: number): LineBlock {
     const marker = listMarker(text);
     const listOpen =
       openKind === "bullet" || openKind === "task" || openKind === "ordered";
-    const opener = fenceOpener(text);
+    let opener = fenceOpener(text);
     const mathClose = mathBlockEnd(lines, index);
     // A blank line does not end a block the next line continues: another item
     // of the same list, content indented into that item, or the next chunk of
@@ -486,9 +495,7 @@ export function blockForLine(body: string, line: number): LineBlock {
     const indent = leadingColumns(text);
     const resumes =
       (listOpen &&
-        // A TASK list is the exception: a blank line splits one, so a later
-        // item only resumes it by reaching the item's content column.
-        ((kind === openKind && kind !== "task" && marker === openMarker) ||
+        ((kind === openKind && marker === openMarker) ||
           indent >= openIndent)) ||
       (openKind === "code" && kind === "code");
     // Indented code ends where the indentation stops, blank line or not — the
@@ -518,11 +525,10 @@ export function blockForLine(body: string, line: number): LineBlock {
           kind === "table" ||
           (kind === "ordered" && INTERRUPTING_ORDERED_RE.test(text)))) ||
       // What ends an open LIST with no blank line: a list whose marker or kind
-      // has changed, and a quote under a bullet or task list. The ordered-list
-      // tokenizer keeps a quote inside its current item.
+      // has changed, or an unindented quote.
       (open &&
         listOpen &&
-        ((kind === "quote" && openKind !== "ordered") ||
+        (kind === "quote" ||
           ((kind === "bullet" || kind === "task" || kind === "ordered") &&
             (kind !== openKind || marker !== openMarker)))) ||
       // An unquoted line under a lazily-continuing quote. This is not the
@@ -537,9 +543,11 @@ export function blockForLine(body: string, line: number): LineBlock {
           HTML_BLOCK_RE.test(text) ||
           (kind === "ordered" &&
             (quoteCallout || INTERRUPTING_ORDERED_RE.test(text))))) ||
-      // Indented, but not far enough to reach the open item's content. Column
-      // zero would be a lazy continuation of it; this is neither.
-      (open && listOpen && indent > 0 && indent < openIndent);
+      // Ordinary item paragraphs accept underindented lazy continuation.
+      (open && listOpen && indent < openIndent &&
+        (previousEndsLazy ||
+          (indent <= Math.min(3, openIndent - 1) &&
+            (/^ *#/.test(text) || /^ *<(?:[a-z].*>|!--)/i.test(text)))));
     // A heading opens a block wherever one can open — but indented into a
     // list item it is that item's own heading, which is what `resumes` says.
     const opens = (kind === "heading" || interrupts || !open) && !resumes;
@@ -560,6 +568,11 @@ export function blockForLine(body: string, line: number): LineBlock {
         kind === "quote" && CALLOUT_RE.test(text.replace(QUOTE_PREFIX_RE, ""));
       quoteFence = null;
     }
+    previousEndsLazy = listOpen &&
+      (text.includes("\t") ? leadingColumns(text.replace(/\t/g, "    ")) : indent) >= openIndent + 4 ||
+      (listOpen && indent >= openIndent &&
+        indent - openIndent <= Math.min(3, openIndent - 1) &&
+        /^ *#/.test(text.slice(openIndent)));
     // The item at the top level of this list sets the continuation column, so
     // a later sibling with a wider marker moves it. A nested item does not:
     // it sits inside the open item's content, and the outer item still governs
@@ -572,7 +585,10 @@ export function blockForLine(body: string, line: number): LineBlock {
           marker === openMarker &&
           indent < openIndent))
     ) {
-      openIndent = continuationIndent(text);
+      const continuation = continuationIndent(text);
+      openIndent = continuation.indent;
+      previousEndsLazy = !continuation.lazy;
+      opener ??= continuation.fence;
     }
     // An ATX heading and a thematic break are one line each. The next line
     // opens its own block, blank line or not — `# Plan\nBody` is two nodes.

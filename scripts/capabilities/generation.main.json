@@ -2,16 +2,11 @@
   "sourceCommit": "a4be19d5bc2c3581aca2d4b2bfb66af8b06b9945",
   "trackedSourcesClean": true,
   "command": "pnpm --filter @dohc/cli exec tsx ../../scripts/capabilities/generate-main-inventories.ts <absolute-output-directory>",
-  "generatorSha256": "b3d26bb672eb15968564112e715a4a6a38f8223daeb63bbd44bf2fa6c283bf56",
+  "generatorSha256": "c26692574be58e051c01928c1823297375ffd8edb130fe2c8decbe5ffcc2eba0",
   "fixtureSha256": {
-    "packages/mcp/src/capabilityExposure.fixture.ts": "0ac947805db78ea5f47ee6f82f4010df24d4caee1a1cc309e5a0ee9d6ce27866",
     "services/share-web/src/remoteMcpInventory.fixture.ts": "d44d0c617df23e4819d13b8f16b58ac2623590358debf2426c40248f84686a80"
   },
   "files": {
-    "ipcExposure.main.json": "c1f52760b0241ad0ada01b849af0f8319d7c6d93d4a175d65e3b14f5061dd3c7",
-    "channelKeys.main.json": "93f8d0bf90567055fd10acaba6474844caade7f2db84c097133a9d5b908ca722",
-    "cliExposure.main.json": "627893f88fa7de0226119ee40d78285c184fbf6a6dbf06c4a9c4fea0451a32b8",
-    "toolsList.main.json": "c6e1e29bca5b4dc3cb42535ab4e27bba0a03a087b7958a60f3af17e9b3be7211",
     "remoteMcpTools.main.json": "1d00047355373cab5234876b0151f1c3fe6a524dd7a93fde0d21beffe4eeee2e"
   }
 }
