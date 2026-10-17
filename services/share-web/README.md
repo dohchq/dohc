@@ -332,7 +332,8 @@ Do not run multiple instances because they do not share viewer session state.
 
 The relay stores its database in `dohc_self_host_sync_relay`.
 The separate `dohc_self_host_relay_continuity` volume holds configuration, the writer lock and independent continuity.
-These paths belong to one physical host. Cross-host takeover and network filesystems are unsupported.
+Only one host uses these volumes at a time. Network filesystems and hosts that share the volumes are unsupported.
+To move a deployment to a new host, keep these volumes on an attached disk and follow [Move to a new host](../../docs/how-to/self-host-recovery.md#move-to-a-new-host).
 The deployment's initializer creates a fresh configuration only when its required storage is empty.
 Ordinary relay startup never initializes missing continuity.
 Preserve partial state if fresh initialization is interrupted; do not delete established volumes to retry setup.
