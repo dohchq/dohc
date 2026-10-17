@@ -755,6 +755,62 @@ describe("raw fileMove and fileDelete socket requests", () => {
     await f.authorities.close();
   });
 
+  it("saves recovery and restores a delete retired between the trash move and markDeleted", async () => {
+    const f = await setup();
+    await mkdir(join(f.root, "folder"));
+    await writeFile(join(f.root, "folder/tracked.txt"), "tracked original");
+    const rowless = Buffer.from([0xff, 0x00, 0xfe]);
+    await writeFile(join(f.root, "folder/rowless.bin"), rowless);
+    let drained: Promise<void> | undefined;
+    let attachmentId: symbol | undefined;
+    vi.mocked(f.capture.changePathsAs).mockImplementation(async (_paths, _authored, work) => work({
+      policy: await readWorkspaceEnginePolicy(f.root),
+      recordDisk: async () => ["folder/tracked.txt"],
+      delete: async () => {
+        // History records the delete after the folder has moved into the trash.
+        await expect(lstat(join(f.root, "folder"))).rejects.toMatchObject({ code: "ENOENT" });
+        attachmentId = f.authorities.currentBinding(f.workspace.workspaceId).attachmentId;
+        drained = f.authorities.invalidate(f.workspace.workspaceId);
+        return "delete-moment";
+      },
+      moveFile: async () => false, rename: async () => undefined, undoDelete: async () => undefined,
+    }));
+    const history = {
+      readHistoryPage: vi.fn(async () => ({ moments: [
+        { momentId: "delete-moment", operation: "delete", path: "folder/tracked.txt" },
+      ], protectedMoments: [], nextCursor: null })),
+      undoHistoryOperation: vi.fn(async (input: { operationId: string }) => {
+        await mkdir(join(f.root, "folder"), { recursive: true });
+        await writeFile(join(f.root, "folder/tracked.txt"), "tracked original");
+        return { operationId: input.operationId, versionId: "main", momentCount: 1,
+          compensationOperationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
+          deduped: false, materialized: true };
+      }),
+    };
+    f.dependencies.withEngineAdapter = async (_workspace, work) => work(history as unknown as VersionedLiveAdapter);
+    try {
+      // The retired request can still be refused by the authority's final check.
+      expect(await f.invoke("fileDelete", { path: "folder" })).toMatchObject({ ok: false });
+      await drained;
+      const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
+      await waitForDeleteRecovery(operationId);
+      const record = await readDeleteRecovery(f.root, operationId);
+      expect(record).toMatchObject({ tracked: true, paths: ["folder/rowless.bin"], staged: expect.any(String) });
+      expect(await readFile(join(f.root, ".dohc/trash", record!.staged!, "rowless.bin"))).toEqual(rowless);
+      expect(f.dependencies.markDeletedUnderPath).toHaveBeenCalledWith(attachmentId, "folder");
+      expect(f.dependencies.trashItem).toHaveBeenCalledOnce();
+      const reopened = await f.create().openCliWorkspace(f.workspace);
+      expect(await reopened.historyUndo!({ operationId }, { attribution: { actorKind: "agent", onBehalfOf: "person-local" } }))
+        .toMatchObject({ ok: true, tracked: { state: "restored", momentCount: 1 }, restored: ["folder/rowless.bin"], remaining: [] });
+      expect(history.undoHistoryOperation).toHaveBeenCalledOnce();
+      expect(await readFile(join(f.root, "folder/tracked.txt"), "utf8")).toBe("tracked original");
+      expect(await readFile(join(f.root, "folder/rowless.bin"))).toEqual(rowless);
+    } finally {
+      await drained;
+      await f.authorities.close();
+    }
+  });
+
   it.each(["delete", "overwrite"] as const)("a hung trash during %s holds neither file verbs nor workspace close", async change => {
     const f = await setup();
     const context = await f.create().openCliWorkspace(f.workspace);
