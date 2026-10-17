@@ -1,3 +1,5 @@
+import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
+import { mountRootFor } from "./workspaces/shareMounts";
 import { createHistoryCollectionRemote } from "./workspaces/historyCollectionRemote";
 import { forgetWorkspacePresentation } from "./workspaces/actorPresentation";
 import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
@@ -2910,7 +2912,18 @@ async function withEngineAdapter<T>(
   );
 }
 
-const resolveEngineFiles = createEngineFileResolver(withEngineAdapter);
+const resolveEngineFiles = createEngineFileResolver(withEngineAdapter, createReceivedFileReferenceScopes<EngineWorkspace>({
+  findWorkspace,
+  currentAttachment: workspaceId => workspaceAuthorities.currentBinding(workspaceId).attachmentId,
+  isCurrentAttachment: (workspaceId, attachment) => workspaceAuthorities.isCurrentAttachment(workspaceId, attachment),
+  warmCredentials: warmCredentialCache,
+  credentials: () => cachedCredentials,
+  credentialGeneration: () => credentialCacheGeneration,
+  mountWorkspace: (workspace, mount) => receivedShareEngine.workspaceFor({
+    engineWorkspaceId: mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
+    rootPath: mountRootFor(workspace.rootPath, mount.label),
+  }),
+}));
 
 // The human author every renderer-sent chat message is attributed to. Main
 // derives it — the renderer never supplies identity. At alpha the desktop's
@@ -4966,6 +4979,7 @@ function createShareMountCommandsFor(
       await updateWorkspaceShareMounts(workspaceId, update);
     },
     loadCredentials: () => loadAndCacheCurrentCredentials(),
+    currentCredentialGeneration: () => credentialCacheGeneration,
     fetchInfo: (relay, shareId) => fetchShareViewInfo({ relay, shareId }),
     listDirectory: (absolutePath) => readdir(absolutePath).catch(() => []),
     withWorkspaceOperation: (workspaceRoot, run) =>

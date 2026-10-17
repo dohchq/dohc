@@ -52,6 +52,19 @@ function retiringCaller() {
   };
 }
 
+it("never stores a received pin when credentials change during share metadata lookup", async () => {
+  const h = harness();
+  let generation = 1;
+  h.dependencies.currentCredentialGeneration = () => generation;
+  h.dependencies.fetchInfo = async () => {
+    generation += 1;
+    return { granterEmail: null, selector: SELECTOR, receivedIdentity: { receivedSource: "share-source:v1:" + "a".repeat(64), grantId: "grant", generation: 1 } };
+  };
+  await expect(h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent })).rejects.toThrow("The server session changed.");
+  expect(h.mounts).toEqual([]);
+  expect(h.events).not.toContain("lease:start");
+});
+
 const LIVE_OWNER_COMPLETE = Symbol("live owner complete");
 
 async function withLiveMountOwner<T>(
@@ -198,6 +211,7 @@ function harness() {
       events.push(`registry:${next.length}`);
       mounts = [...next];
     },
+    currentCredentialGeneration: () => 0,
     loadCredentials: async () => {
       events.push("credentials");
       return {
@@ -1120,4 +1134,41 @@ describe("share mount commands", () => {
     ).rejects.toThrow("No share matches that code");
     expect(h.events).toEqual(["credentials"]);
   });
+});
+
+it("reconciles a revoked mount even when missing-pin detail lookup returns 404", async () => {
+  const h = harness();
+  h.dependencies.loadCredentials = async () => ({ relayUrl: "https://relay.example", token: "token", userId: "recipient" });
+  h.mounts = [{ shareId: SHARE_ID, label: "alex", granterEmail: null, relayUrl: "https://relay.example", recipientUserId: "recipient", grantedSelector: SELECTOR }];
+  h.dependencies.fetchInfo = vi.fn(async () => { throw new ShareUnavailableError(); });
+  const markEnded = vi.fn(async () => h.dependencies.updateMounts(WORKSPACE.workspaceId, rows => rows.map(row => ({ ...row, ended: true }))));
+  const files = createShareViewFiles({
+    resolveTarget: () => preparedTarget(),
+    openStore: () => ({ ensureMainVersion: async () => ({ id: "main" }), listTextFileMetadata: async () => [] } as unknown as import("./shareViewFiles").ShareViewFilesStore),
+    resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+    pull: async () => { throw new ShareUnavailableError(); },
+    recordRefusals: async () => undefined, updateUnsavedPaths: async () => undefined,
+    markEnded, retireTarget: async () => undefined, assertProjectionRoot: async () => undefined,
+    createMount: async () => undefined, removeMount: async () => ({ folderLeft: false }),
+  });
+  h.dependencies.files = () => files;
+  h.dependencies.withWorkspaceOperation = (_root, run) => withExclusiveWorkspaceOperation(WORKSPACE.rootPath, (_changed, lease) => run(lease));
+  const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+  expect(markEnded).toHaveBeenCalledOnce();
+  expect((h.mounts[0] as ShareMountRecord).ended).toBe(true);
+  expect(result.results[0].status).toBe("ended");
+});
+
+it("recovers a missing received pin once without fetching detail on every refresh", async () => {
+  const h = harness();
+  h.dependencies.loadCredentials = vi.fn(async () => ({ relayUrl: "https://relay.example", token: "token", userId: "recipient" }));
+  h.mounts = [{ shareId: SHARE_ID, label: "alex", granterEmail: null, relayUrl: "https://relay.example", recipientUserId: "recipient", grantedSelector: SELECTOR }];
+  const pin = { receivedSource: "share-source:v1:" + "a".repeat(64), grantId: "grant", generation: 1 };
+  h.dependencies.fetchInfo = vi.fn(async () => ({ granterEmail: null, selector: SELECTOR, receivedIdentity: pin }));
+  await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+  expect((h.mounts[0] as ShareMountRecord).receivedIdentity).toEqual(pin);
+  await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
+  expect(h.dependencies.fetchInfo).toHaveBeenCalledOnce();
+  expect(h.dependencies.loadCredentials).toHaveBeenCalledOnce();
+  expect(h.files.reconcile).toHaveBeenCalledTimes(2);
 });

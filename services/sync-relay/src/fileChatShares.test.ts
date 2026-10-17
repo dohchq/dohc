@@ -1,7 +1,10 @@
+import { DiscussionActivityHub } from "./discussionActivity";
+import { createReceivedIdentity } from "./receivedIdentity";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import {
+  LINK_KEY,
   claimWorkspace as claim,
   closeTestStorages,
   createShare as mint,
@@ -174,7 +177,38 @@ async function seedWorkspace(h: SyncRelayHandler): Promise<OwnerLog> {
 }
 
 describe("chat over a file share", () => {
-  it("serves the in-selector thread as a path and leaks no sentinel from the outside one", async () => {
+  it("keeps received tokens on rows arriving during a held named-share read", async () => {
+    const storage = await testStorage();
+    const activity = new DiscussionActivityHub();
+    const h = testHandler(storage, { nowMs: () => 4242, discussionActivity: activity });
+    const log = await seedWorkspace(h);
+    const shareId = await createShare(h, "view");
+    const path = "/sync/shares/" + shareId + "/log?limit=500&since=";
+    const initial = await json(await h(request(RECIPIENT, path + "0")));
+    const controller = new AbortController();
+    const held = h(request(RECIPIENT, path + initial.nextCursor + "&hold=30000", { signal: controller.signal }));
+    try {
+      await expect.poll(() => activity.stats().waiters).toBe(1);
+      await log.append(log.threadCreate("new-thread", "object-in", "New thread"));
+      const response = await held;
+      expect(response.status).toBe(200);
+      const page = await json(response);
+      const token = createReceivedIdentity(LINK_KEY).object(["user", RECIPIENT], WORKSPACE, "object-in");
+      expect(page.ops).toEqual([
+        expect.objectContaining({ opKind: "chat.thread.create", payload: expect.objectContaining({
+          linkedObjectId: token, linkedPathHint: "docs/in.md",
+        }) }),
+      ]);
+      const immediate = await json(await h(request(RECIPIENT, path + initial.nextCursor)));
+      expect(page).toEqual(immediate);
+      expect(activity.stats().waiters).toBe(0);
+    } finally {
+      controller.abort();
+      await held;
+    }
+  });
+
+  it("serves the in-selector thread with a token and path hint and leaks no sentinel from the outside one", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await seedWorkspace(h);
@@ -207,7 +241,8 @@ describe("chat over a file share", () => {
       title: "About the shared file",
       createdAtMs: 100,
       linkedAtMs: 101,
-      linkedPath: "docs/in.md",
+      linkedObjectId: createReceivedIdentity(LINK_KEY).object(["user", RECIPIENT], WORKSPACE, "object-in"),
+      linkedPathHint: "docs/in.md",
     });
   });
 
@@ -248,7 +283,7 @@ describe("chat over a file share", () => {
     expect(
       served
         .filter((op) => op.opKind === "chat.thread.create")
-        .map((op) => op.payload.linkedPath),
+        .map((op) => op.payload.linkedPathHint),
     ).toEqual(["docs/in.md", "docs/arrived.md"]);
   });
 
@@ -815,7 +850,7 @@ describe("chat over a file share", () => {
     // Both threads are about docs/in.md before the rename.
     const before = chatOps(await readShareLog(h, shareId))
       .filter((op) => op.opKind === "chat.thread.create")
-      .map((op) => op.payload.linkedPath);
+      .map((op) => op.payload.linkedPathHint);
     expect(before).toEqual(["docs/in.md", "docs/in.md"]);
 
     // A rename that stays inside the shared folder.
@@ -823,7 +858,7 @@ describe("chat over a file share", () => {
 
     const after = chatOps(await readShareLog(h, shareId))
       .filter((op) => op.opKind === "chat.thread.create")
-      .map((op) => op.payload.linkedPath);
+      .map((op) => op.payload.linkedPathHint);
     expect(
       after,
       "a recipient's thread must follow its file inside the share, exactly as the granter's does",

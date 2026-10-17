@@ -130,7 +130,7 @@ export function createShareSummaries(
   ): Record<string, unknown> => {
     // Received summaries deliberately omit the workspace id: the recipient's
     // access is share-scoped, and the granter's workspace identity is not
-    // theirs to see.
+    // theirs to see. Only the detail route adds a recipient source handle.
     return {
       ...shareSummaryBase(row),
       granterUserId: row.share.granterUserId,

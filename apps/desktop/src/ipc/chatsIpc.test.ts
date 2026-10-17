@@ -4,7 +4,10 @@ import { createDesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore"
 import { createTestScratch } from "../workspaces/testTemp";
 import { StartChannelThreadResult, SendChatMessageResult, ListChatMessagesResult, ListChatThreadDecisionsResult } from "./bridgeContract";
 import { chatOperations } from "./bridgeContract";
-import { workspaceFileRef } from "../workspaces/resolveEngineFiles";
+import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
+import { createEngineFileResolver, workspaceFileRef } from "../workspaces/resolveEngineFiles";
+import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { describe, expect, it, vi } from "vitest";
 import type { ChatBookmark, ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
 import { CHANNELS } from "./channels";
@@ -198,6 +201,29 @@ function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatSt
     warmCredentialCache, chatRelayIdentityFor, scanChatDispatch, projectChatBookmarks, desktopChatBookmarks,
     signOutChatWrites: () => { chatCredentials = null; } };
 }
+
+it("received file chats use tokens after a rename, so clicking the listed path finds the same thread", async () => {
+  const h = fixture("view");
+  const objectId = "share-object:v1:" + "a".repeat(64);
+  h.workspace.shareView!.receivedIdentity = { receivedSource: "share-source:v1:" + "b".repeat(64), grantId: "grant", generation: 2 };
+  h.thread.linkedFile = { objectId, pathHint: "notes/a.md", linkedAtMs: 1 };
+  const engine = new VersionedLoopbackEngine();
+  engine.seedTextFile({ workspace: "workspace", path: "notes/renamed.md", text: "Shared", objectId });
+  const adapter = new VersionedLiveAdapter({ close() {}, sendRequest: request => engine.sendRequest(request) }, "workspace", { workspaceId: "workspace" });
+  const resolve = createEngineFileResolver(async (_workspace: { workspaceId: string; shareView?: unknown }, work) => work(adapter), async () => [{
+    workspace: h.workspace, pin: h.workspace.shareView!.receivedIdentity!,
+    selector: { paths: ["notes"], versionId: null, access: "view" as const }, assertCurrent() {},
+  }]);
+  h.resolveEngineFiles.mockImplementation(resolve);
+  await expect(h.invoke(CHANNELS.listChatChannels, { workspaceId: "workspace" })).resolves.toMatchObject({ fileThreads: [{ id: "thread", path: "notes/renamed.md" }] });
+  expect(h.resolveEngineFiles).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "workspace" }), workspaceFileRefs(h.workspace, objectId));
+  await expect(h.invoke(CHANNELS.listFileChats, { workspaceId: "workspace", path: "notes/renamed.md" })).resolves.toMatchObject({ fileObjectId: objectId, threads: [{ id: "thread" }] });
+  expect(h.storeMethods.listThreadsForFile).toHaveBeenCalledWith({ workspaceId: "workspace", objectId });
+  expect(h.requireEngineCapture).not.toHaveBeenCalled();
+  expect(h.storeMethods.ensureGeneralChannel).not.toHaveBeenCalled();
+  h.resolveEngineFiles.mockResolvedValue([{ status: "absent" }]);
+  await expect(h.invoke(CHANNELS.listChatChannels, { workspaceId: "workspace" })).resolves.toMatchObject({ fileThreads: [{ id: "thread", path: null }] });
+});
 
 const mutations = [
   { name: "create", channel: CHANNELS.createFileChat, payload: { workspaceId: "workspace", path: "notes/a.md", title: "Notes" }, method: "createThread" },
