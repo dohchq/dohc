@@ -15,7 +15,7 @@ import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./owne
 import type { WorkspaceRefTarget } from "@dohc/workspace-contracts/workspace-ref";
 import { DeleteRecovery, HistoryOperationId, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
 import { DatasetHistoryPage } from "@dohc/cli/dataset";
-import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import type { datasetOperations } from "./datasetOperations";
 import type {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
 import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
 import { SHARE_ACCESS_VALUES, shareAccessRank } from "@dohc/security-contract/share-selector";
@@ -6960,6 +6960,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof workspaceFileOperations>,
     OperationBridge<typeof settingsOperations>,
     OperationBridge<typeof chatOperations>,
+    OperationBridge<typeof datasetOperations>,
     OperationBridge<typeof shareHandoffOperations>,
     OperationBridge<typeof shareMountOperations>,
     OperationBridge<typeof shareProposalOperations>,
@@ -6992,7 +6993,6 @@ export interface DohcDesktopBridge
   resumeOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
   publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
   ownerAppResponses(payload:OwnerAppResponsesRequest):Promise<OwnerAppResponsesResult>;
-  dataset(payload: DatasetRequest): Promise<DatasetResult>;
   ownerRestore<Action extends OwnerRestoreAction>(payload: OwnerRestoreRequest & {action: Action}): Promise<OwnerRestoreResult<Action>>;
   // Constant, not a call: the titlebar lays out around macOS traffic lights
   // on darwin vs the window-controls overlay everywhere else.

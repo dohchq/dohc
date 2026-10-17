@@ -1,7 +1,7 @@
 // A PR that adds a channel or command edits the main inventory directly. Do not add a delta file.
 import { APP_PUBLICATION_CAPABILITIES, CLI_CAPABILITIES, cliRequestSchema, DATASET_CAPABILITIES } from "@dohc/cli/protocol";
 import { CLI_COMMANDS, parseCliArguments } from "@dohc/cli/args";
-import { DatasetRequest } from "@dohc/cli/dataset";
+import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { renderCliHelp } from "@dohc/cli/help";
 import { advertisedCapabilityTools as advertisedTools } from "@dohc/mcp/capability-exposure-fixture";
@@ -242,14 +242,22 @@ describe("capability identities and exposure", () => {
     expect(() => assertAdmission({ ...repro, scope: "workspace", handlerCheck: { check: "existingHandler.check", reason: "Existing lifetime check." } })).not.toThrow();
   });
 
-  it("can tag all dataset actions on one operation row without changing its payload", () => {
-    const row = {
-      capabilityIdsByAction: DATASET_CAPABILITIES, channel: "desktop:dataset", payload: DatasetRequest,
+  it("records the multiplexed dataset operation with its existing admission", () => {
+    const datasetRows = rows.filter(row => row.channel === "desktop:dataset");
+    expect(datasetRows).toHaveLength(1);
+    const row = datasetRows[0]!;
+    expect(row).toMatchObject({
+      capabilityIdsByAction: DATASET_CAPABILITIES, payload: DatasetRequest,
       guard: "trusted-sender", scope: "workspace",
-      handlerCheck: { check: "existingDatasetHandler.check", reason: "Test-only row for the B5 dataset map." },
-    } as const satisfies OperationDefinition;
-    expect(Object.keys(row.capabilityIdsByAction).sort()).toEqual(DatasetRequest.options.map(option => option.shape.action.value).sort());
-    expect(Object.values(row.capabilityIdsByAction)).toHaveLength(34);
+      handlerCheck: { check: "datasetHandler.withRendererWorkspaceOperation" },
+    });
+    expect(row).not.toHaveProperty("capabilityId");
+    expect(row).not.toHaveProperty("inactiveMessage");
+    expect(row.capabilityIdsByAction).toBe(DATASET_CAPABILITIES);
+    expect(row.payload).toBe(DatasetRequest);
+    expect(row.result).toBe(DatasetResult);
+    expect(Object.keys(row.capabilityIdsByAction!).sort()).toEqual(DatasetRequest.options.map(option => option.shape.action.value).sort());
+    expect(Object.values(row.capabilityIdsByAction!)).toHaveLength(34);
     assertAdmission(row);
   });
 
@@ -306,7 +314,12 @@ describe("capability identities and exposure", () => {
     const sorted = (values: readonly (readonly string[])[]) => values.map(value => value.join(":")).sort();
     const actualIpc = OPERATION_TABLES.flatMap(table => Object.entries<OperationDefinition>(table).flatMap(([name, row]) =>
       (row.capabilityId ? [row.capabilityId] : Object.values(row.capabilityIdsByAction)).map(id => [name, id])));
-    expect(sorted(actualIpc)).toEqual(sorted(entries.flatMap(([id, meta]) => meta.ipc.operations.map(name => [name, id]))));
+    // The multiplexed dataset door keeps its per-action tags in the CLI protocol.
+    const expectedIpc = [
+      ...entries.flatMap(([id, meta]) => meta.ipc.operations.map(name => [name, id])),
+      ...Object.values(DATASET_CAPABILITIES).map(id => ["dataset", id]),
+    ];
+    expect(sorted(actualIpc)).toEqual(sorted(expectedIpc));
     for (const row of rows) assertAdmission(row);
     const offeredTools = new Set<string>();
     for (const level of ["owner", "view", "comment", "edit"] as const) {

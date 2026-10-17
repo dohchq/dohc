@@ -64,6 +64,7 @@ import { openRemoteDatasetRecoveryExport } from "./workspaces/remoteDatasetRecov
 import { createOwnerDatasetCopyRegistry, datasetCopyOwnerKey } from "./workspaces/ownerDatasetCopyRegistry";
 import { createRemoteDatasetReplicaSource } from "./workspaces/remoteDatasetReplica";
 import { createDatasetHandler } from "./ipc/datasetIpc";
+import { datasetOperations } from "./ipc/datasetOperations";
 import { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import { createHash } from "node:crypto";
 import { createDatasetSources, type SourceCreationProgress } from "./workspaces/datasetSourceCreation";
@@ -6369,9 +6370,8 @@ function registerIpcHandlers(): void {
       });
     });
   });
-  handleIpc(CHANNELS.dataset, async (event, raw: unknown) => {
-    assertTrustedSender(event);
-    return DatasetResult.parse(await datasetHandler(event.sender, DatasetRequest.parse(raw)));
+  registerOperations(operationBoundary, datasetOperations, {
+    dataset: (request, { event }) => datasetHandler(event.sender, request),
   });
   const cliDataset = createDatasetHandler<string, DesktopRendererWorkspaceOperation["workspace"], WorkspaceAuthorityOperation<RegistryEntry, DesktopWorkspaceAuthorityState>>({
     ...datasetDependencies, withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),

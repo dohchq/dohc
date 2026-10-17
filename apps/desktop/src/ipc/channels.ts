@@ -166,7 +166,6 @@ export const CHANNELS = {
   resumeOwnerLiveDocument: "desktop:resume-owner-live-document",
   publishOwnerApp: "desktop:publish-owner-app",
   ownerAppResponses: "desktop:owner-app-responses",
-  dataset: "desktop:dataset",
   pollRelayShareDiscussionActivity:
     "desktop:poll-relay-share-discussion-activity",
   cancelRelayShareDiscussionActivity:

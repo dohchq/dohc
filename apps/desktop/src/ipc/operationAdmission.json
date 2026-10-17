@@ -1,4 +1,5 @@
 {
+  "desktop:dataset": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "datasetHandler.withRendererWorkspaceOperation" } },
   "desktop:get-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:reload-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:set-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
