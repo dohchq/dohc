@@ -130,7 +130,7 @@ describe("deleting the server account from Settings", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("does nothing on an old notice's Try again while a delete is pending", async () => {
+  it("runs nothing and keeps the row on an old notice's Try again while a delete is pending", async () => {
     const answer = deferred<DeleteResult>();
     const { bridge, disconnect } = deletionBridge(() => answer.promise);
     bridge.cloudLogout.mockRejectedValueOnce(new Error("dohc could not finish disconnecting."));
@@ -145,9 +145,15 @@ describe("deleting the server account from Settings", () => {
     fireEvent.click(screen.getByTestId("server-account-delete-confirm"));
     await waitFor(() => expect(bridge.deleteServerAccount).toHaveBeenCalledTimes(1));
 
-    fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
+    // Notices closes when a row's action runs, so each look opens it again.
+    const row = async () => {
+      fireEvent.click(screen.getByTestId("notice-center-toggle"));
+      return within(await screen.findByTestId("notice-center")).getByText("dohc could not finish disconnecting.").closest("li")!;
+    };
+    fireEvent.click(within(await row()).getByRole("button", { name: "Try again" }));
     await act(async () => {});
     expect(bridge.cloudLogout).toHaveBeenCalledTimes(1);
+    expect(within(await row()).getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(screen.queryByTestId("cloud-sync-panel")).toBeNull();
     expect(screen.getByTestId("server-account-delete")).toBeTruthy();
 
@@ -156,7 +162,7 @@ describe("deleting the server account from Settings", () => {
     expect((await screen.findAllByText(DELETED)).length).toBeGreaterThan(0);
   });
 
-  it.each([false, true])("does not retry a sync change during deletion review (synced: %s)", async synced => {
+  it.each([false, true])("keeps a sync change's notice, and does not retry it, during deletion review (synced: %s)", async synced => {
     const { bridge } = deletionBridge(async () => ({ ok: true, finished: true, email: "me@dohc.test", server, disconnectError: null }));
     const changeSync = vi.fn(async () => { throw new Error("dohc could not change this workspace's sync."); });
     Object.assign(bridge, { cloudEnableSync: changeSync, cloudStopSync: changeSync });
@@ -172,6 +178,7 @@ describe("deleting the server account from Settings", () => {
     await act(async () => {});
 
     expect(changeSync).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("workspace-shell-error-retry")).toBeTruthy();
     expect(bridge.cloudLogout).not.toHaveBeenCalled();
     expect(bridge.deleteServerAccount).not.toHaveBeenCalled();
     expect(screen.getByTestId("server-account-delete")).toBeTruthy();
