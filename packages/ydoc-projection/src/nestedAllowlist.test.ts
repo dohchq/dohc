@@ -82,6 +82,23 @@ const validate = createLiveMarkdownJournalValidator(policy)
 const document = { workspaceId: 'workspace', mainVersionId: 'main', objectId: 'object', lineageClaimId: 'lineage' }
 
 const inlineDesktopProbes = [
+  ["- ~~**done**~~ shipped\n  - notes\n","strike","**~~done~~** shipped"],
+  ["- ~~**a**~~\n  - child\n","strike","**~~a~~**"],
+  ["- ~~*a*~~\n  - child\n","strike","*~~a~~*"],
+  ["- ~~***a***~~\n  - child\n","strike","***~~a~~***"],
+  ["- **~~*a*~~**\n  - child\n","strike","***~~a~~***"],
+  ["- **~~a~~**\n  - child","strike","**~~a~~**"],
+  ["- *~~a~~*\n  - child","strike","*~~a~~*"],
+  ["- *a *b* c*\n  - child","italic","*a b c*"],
+  ["- **a **b** c**\n  - child","bold","**a b c**"],
+  ["- ****a****\n  - child","bold","**a**"],
+  ["- **a* b\n  - child","italic","\\**a* b"],
+  ["- ***a**\n  - child","bold","\\***a**"],
+  ["- 2*3*4\n  - child","italic","2*3*4"],
+  ["- **bold**\n  - child","bold","**bold**"],
+  ["- *italic*\n  - child","italic","*italic*"],
+  ["- ~~strike~~\n  - child","strike","~~strike~~"],
+  ["- `code`\n  - child","code","`code`"],
   ['- see https://example.com\n  - child\n', 'link', '[https://example.com](https://example.com)'],
   ['- www.example.com\n  - child\n', 'link', '[www.example.com](http://www.example.com)'],
   ['- mail a@b.co\n  - child\n', 'link', '[a@b.co](mailto:a@b.co)'],
@@ -125,27 +142,27 @@ it('holds inline constructs on both native builders and probes desktop nodes and
   }
 })
 
-it('accepts the positive inline alphabet and Tiptap spellings at their edges', () => {
-  for (const [source, mark] of [
-    ['- Café 中文 ١٢٣ . , ; : ! ? \' " ( ) - / *\n  - child', null],
-    ['- **bold**\n  - child', 'bold'],
-    ['- *italic*\n  - child', 'italic'],
-    ['- ~~strike~~\n  - child', 'strike'],
-    ['- `code`\n  - child', 'code'],
-    ['- `*plain* / : -`\n  - child', 'code'],
-    ['- a  \n  - child', null],
-  ] as const) {
+it('accepts plain prose and fenced code at the alphabet edges', () => {
+  for (const source of [
+    '- Café 中文 ١٢٣ . , ; : ! ? \' " ( ) - /\n  - child',
+    '- a  \n  - child',
+    '- parent\n\n  ```txt\n  [ < > & $ {{atom:example}}\n  ```\n  - child',
+  ]) {
     const row = cases.find(row => row.source === source)
     expect(row?.builders, source).toHaveLength(2)
     const doc = markdownToYDoc(source, { reading: 'source' })
-    try {
-      expect(yDocToMarkdown(doc), source).toBe(source)
-      if (mark) {
-        const body = yXmlFragmentToProseMirrorRootNode(doc.getXmlFragment('body'), getDohcProseMirrorSchema()).toJSON()
-        expect(JSON.stringify(body), source).toContain(`"type":"${mark}"`)
-      }
-    } finally { doc.destroy() }
+    try { expect(yDocToMarkdown(doc), source).toBe(row!.canonical) }
+    finally { doc.destroy() }
   }
+})
+
+it('holds lone carriage returns that desktop imports as line breaks', () => {
+  const source = '- a\rb\n  - child'
+  expect(cases.find(row => row.source === source)).toMatchObject({ held: true, builders: [] })
+  const doc = markdownToYDoc(source, { reading: 'source' })
+  try {
+    expect(yDocToMarkdown(doc)).toBe('- a\n  b\n  - child')
+  } finally { doc.destroy() }
 })
 
 it('compares production successor and relation seed trees and witnesses with desktop imports', () => {

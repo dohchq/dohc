@@ -190,17 +190,11 @@ fn held_sources() -> Vec<&'static str> {
     ].into_iter().chain(inline_proof_held_sources()).collect()
 }
 
-fn inline_accepted_sources() -> [&'static str; 14] {
+fn inline_accepted_sources() -> [&'static str; 8] {
     [
         "- plain text\n  - child",
-        "- Café 中文 ١٢٣ . , ; : ! ? ' \" ( ) - / *\n  - child",
-        "- **bold**\n  - child",
-        "- *italic*\n  - child",
-        "- ~~strike~~\n  - child",
-        "- `code`\n  - child",
-        "- `*plain* / : -`\n  - child",
+        "- Café 中文 ١٢٣ . , ; : ! ? ' \" ( ) - /\n  - child",
         "- a  \n  - child",
-        "- **bold** and *emphasis*\n  - ~~strike~~",
         "- parent\n\n  ```txt\n  [ < > & $ {{atom:example}}\n  ```\n  - child",
         "```txt\n[ < > & $ {{atom:example}}\n```\n\n- parent\n  - child",
         "- parent\n\n  ```c++\n  code\n  ```\n  - child",
@@ -267,9 +261,9 @@ fn generated_sources() -> Vec<String> {
         for level in 0..4 {
             for inline in [
                 "plain",
-                "**bold** and *emphasis*",
-                "`code` and literal",
-                "~~strike~~ and plain text",
+                "plain punctuation!",
+                "ordinary continuation",
+                "more plain text",
             ] {
                 let mut source = String::new();
                 for depth in 0..4 {
@@ -294,7 +288,7 @@ fn generated_sources() -> Vec<String> {
         [
             "- parent\n  - child\n  - next\n- sibling",
             "- parent\n\n  ```txt\n  literal\n  ```\n  - child",
-            "# Heading\n\n- parent\n  - child\n\n> **bold** and *emphasis*\n\n---",
+            "# Heading\n\n- parent\n  - child\n\n> plain prose\n\n---",
             "- parent\n  - child\n\n<!-- dohc:table row-heights=1:40 -->\n| h |\n| --- |\n| plain |",
         ]
         .map(str::to_owned),
@@ -490,7 +484,7 @@ fn nested1b_non_allowlisted_shapes() {
     }
 }
 
-fn inline_proof_held_sources() -> [&'static str; 54] {
+fn inline_proof_held_sources() -> [&'static str; 81] {
     [
         "- [label][ref]\n  - child\n\n[ref]: https://example.com",
         "- <https://example.com>\n  - child",
@@ -546,6 +540,33 @@ fn inline_proof_held_sources() -> [&'static str; 54] {
         "- unmatched `code\n  - child",
         "- `   `\n  - child",
         "- parent\n\n  ```c\\+\\+\n  code\n  ```\n  - child",
+        "- ~~**done**~~ shipped\n  - notes\n",
+        "- ~~**a**~~\n  - child\n",
+        "- ~~*a*~~\n  - child\n",
+        "- ~~***a***~~\n  - child\n",
+        "- **~~*a*~~**\n  - child\n",
+        "- **~~a~~**\n  - child",
+        "- *~~a~~*\n  - child",
+        "- *a *b* c*\n  - child",
+        "- **a **b** c**\n  - child",
+        "- ****a****\n  - child",
+        "- **a* b\n  - child",
+        "- ***a**\n  - child",
+        "- a\rb\n  - child",
+        "- 2*3*4\n  - child",
+        "- a * b\n  - child",
+        "- **bold**\n  - child",
+        "- *italic*\n  - child",
+        "- ~~strike~~\n  - child",
+        "- `code`\n  - child",
+        "- `*plain* / : -`\n  - child",
+        "- **bold** and *emphasis*\n  - ~~strike~~",
+        "- curly ’ quote\n  - child",
+        "- an — em dash\n  - child",
+        "- emoji 😀\n  - child",
+        "- parent\n  - child\n\nAn ’ apostrophe",
+        "- parent\n  - child\n\n# An — em dash",
+        "- parent\n  - child\n\n<!-- dohc:table row-heights=1:40 -->\n| h |\n| --- |\n| 😀 |",
     ]
 }
 
