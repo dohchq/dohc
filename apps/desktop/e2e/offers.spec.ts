@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { test, expect } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -72,16 +73,18 @@ test("@offers a pasted URL offers Link and Plain text, and Undo, from the keyboa
     await expect(page.getByTestId("markdown-source-toggle")).toBeVisible();
     const editor = page.getByTestId("markdown-editor");
     await expect(editor).toHaveAttribute("contenteditable", "true");
-    await desktop.app.evaluate(({ clipboard }, text) => clipboard.writeText(text), url);
 
     const link = editor.locator(`a[href="${url}"]`);
     const row = page.getByTestId("url-paste-offer");
     const pasteOnNewLine = async () => {
-      await editor.click();
-      await page.keyboard.press("Control+End");
-      await page.keyboard.press("Enter");
-      await page.keyboard.press("Control+V");
-      await expect(row).toBeVisible();
+      await holdSystemClipboard(test.info(), async (remainingMs) => {
+        await desktop!.app.evaluate(({ clipboard }, text) => clipboard.writeText(text), url);
+        await editor.click({ timeout: remainingMs() });
+        await page.keyboard.press("Control+End");
+        await page.keyboard.press("Enter");
+        await page.keyboard.press("Control+V");
+        await expect(row).toBeVisible({ timeout: remainingMs() });
+      });
     };
 
     // Plain text, then Undo.
