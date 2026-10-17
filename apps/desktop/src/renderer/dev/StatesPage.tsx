@@ -46,7 +46,7 @@ import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
 import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
-import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
+import { MENU_FRAME, MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { SkeletonRows } from "../ui/SkeletonRows";
@@ -63,7 +63,7 @@ import { neutralPresentation, relayPresentation } from "../workbench/actorPresen
 import { ThreadMessages } from "../workbench/ChatPosts";
 import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
 import { ComposerModeBar } from "../workbench/ChatsControls";
-import { MentionComposer } from "../workbench/MentionComposer";
+import { ComposerCatalogOptions, MentionComposer } from "../workbench/MentionComposer";
 import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddressed";
 import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
@@ -2546,7 +2546,71 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
       </Section>
+
+      {/* The catalog is a listbox the textarea controls, not a menu, so it
+          is drawn open here under its composer instead of being opened. */}
+      <Section part="composer-poll" title="Composer catalog and poll">
+        <Specimen label="/ in a new post: Poll active">
+          <ComposerCatalogSpecimen theme={theme} surface="post" />
+        </Specimen>
+        <Specimen label="/ in a group's chat">
+          <ComposerCatalogSpecimen theme={theme} surface="stream" />
+        </Specimen>
+        <Specimen label="a new post with a poll; the second choice repeats the first">
+          <div className="w-[560px]">
+            <MentionComposer testIdPrefix={`states-poll-post-${theme}`} composerId={`states-poll-post-${theme}`}
+              value={POLL_QUESTION} sending={false} surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA}
+              placeholder="What's happening in #general?" sendLabel="Start post" candidates={[]} fileCandidates={STATES_FILES}
+              onChange={noop} onSend={noop} poll={{ choices: ["Porto", "Porto ", "Lisbon"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="a narrow new post with a poll: Poll without its label">
+          <div className="w-[400px]">
+            <MentionComposer testIdPrefix={`states-poll-narrow-${theme}`} composerId={`states-poll-narrow-${theme}`}
+              value={POLL_QUESTION} sending={false} surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA}
+              placeholder="What's happening in #general?" sendLabel="Start post" candidates={[]} fileCandidates={STATES_FILES}
+              onChange={noop} onSend={noop} poll={{ choices: ["Lisbon", "Porto"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="a comment asking the agent, with a poll, replying to a message: the offer floats over the stack">
+          {/* A stream composer floats its offer above its top edge, into the
+              room the end of its conversation keeps, so it gets that room. */}
+          <div className="w-[400px] rounded-lg border border-line bg-panel pt-9">
+            <MentionComposer testIdPrefix={`states-poll-stream-${theme}`} composerId={`states-poll-stream-${theme}`}
+              value={`@agent ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
+              sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES} onChange={noop} onSend={noop}
+              agentOffer={agentOffer("runs")} onSetUpAgent={noop}
+              above={
+                <ComposerModeBar testId={`states-poll-stream-${theme}-replying-mode`} cancelTestId={`states-poll-stream-${theme}-replying-cancel`}
+                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+              }
+              poll={{ choices: ["Lisbon", "Porto", "Madeira"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+      </Section>
     </section>
+  );
+}
+
+const POLL_QUESTION = "Where should we hold the offsite?";
+const STATES_FILES = [{ path: "Plans/offsite.md", label: "offsite" }];
+
+function ComposerCatalogSpecimen(props: { theme: "light" | "dark"; surface: "post" | "stream" }) {
+  const id = `states-catalog-${props.surface}-${props.theme}`;
+  const composer = (
+    <MentionComposer testIdPrefix={id} composerId={id} value={`${POLL_QUESTION} /`} sending={false}
+      surface={props.surface} authorName="Ada" authorPresentation={SAMPLE_ADA}
+      placeholder="Message #general" sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES}
+      onChange={noop} onSend={noop} poll={null} onPollChange={noop} />
+  );
+  return (
+    <div className={`flex flex-col gap-1.5 pb-10 ${props.surface === "post" ? "w-[560px]" : "w-[400px]"}`}>
+      {props.surface === "post" ? composer : <div className="flex flex-col rounded-lg border border-line bg-panel">{composer}</div>}
+      <ul role="listbox" aria-label="Add to message" className={`${MENU_FRAME} w-64`}>
+        <ComposerCatalogOptions listboxId={`${id}-mentions`} testIdPrefix={id} rows={["poll", "mention", "file"]}
+          highlight={0} onPick={noop} onHover={() => noop} />
+      </ul>
+    </div>
   );
 }
 

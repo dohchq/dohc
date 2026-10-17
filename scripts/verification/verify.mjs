@@ -500,7 +500,7 @@ export async function verify(args) {
         // escalation before database cleanup, without a competing parent timer.
         try {
           await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
-            () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, changed: full ? null : report.files, repositoryTests,
+            () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, changed: full ? null : report.files, repositoryTests, full,
               beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled), stop: cancellation,
               runProofs: checkpoint => integrationProofs(env, checkpoint) }));
         } finally {

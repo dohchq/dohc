@@ -110,6 +110,7 @@ import {
   WORKBENCH_MENU_COMMANDS,
 } from "./channels";
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
+import type { settingsOperations } from "./settingsOperations";
 import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
@@ -2128,14 +2129,12 @@ export const SendChatMessagePayload = z.object({
   threadId: OPAQUE_ID,
   parentMessageId: OPAQUE_ID.optional(),
   body: CHAT_BODY,
+  needsDecision: z.boolean().optional(),
+  // A poll's choices. Implies needsDecision. The engine normalizes them.
+  options: z.array(z.string().max(200)).max(12).optional(),
   fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
 });
 export type SendChatMessagePayload = z.infer<typeof SendChatMessagePayload>;
-
-export const SendChatMessageResult = z.object({
-  message: ChatMessageRecord,
-});
-export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
 
 export const ChatDecisionRecord = z.object({
   threadId: OPAQUE_ID,
@@ -2148,6 +2147,14 @@ export const ChatDecisionRecord = z.object({
   chosenOption: z.string().min(1).max(200).optional(),
 });
 export type ChatDecisionRecord = z.infer<typeof ChatDecisionRecord>;
+
+export const SendChatMessageResult = z.object({
+  message: ChatMessageRecord,
+  // The question or poll the message asked, read back after the write.
+  // Absent when it asked none, or when that read failed.
+  decision: ChatDecisionRecord.optional(),
+});
+export type SendChatMessageResult = z.infer<typeof SendChatMessageResult>;
 
 export const ListChatThreadDecisionsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -2470,6 +2477,9 @@ export const StartChannelThreadPayload = z.object({
   workspaceId: WORKSPACE_ID,
   channelId: OPAQUE_ID,
   body: CHAT_BODY,
+  needsDecision: z.boolean().optional(),
+  // A poll's choices. Implies needsDecision. The engine normalizes them.
+  options: z.array(z.string().max(200)).max(12).optional(),
   lane: z.enum(["posts", "chat"]).optional(),
   fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
 });
@@ -2480,6 +2490,8 @@ export const StartChannelThreadResult = z.object({
   message: ChatMessageRecord,
   // Main derives this from the author identity used for the opening message.
   viewerAuthorId: OPAQUE_ID,
+  // As on SendChatMessageResult: the opening message's question or poll.
+  decision: ChatDecisionRecord.optional(),
 });
 export type StartChannelThreadResult = z.infer<typeof StartChannelThreadResult>;
 
@@ -6933,6 +6945,7 @@ export const serverAccountOperations = {
 
 export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceFileOperations>,
+    OperationBridge<typeof settingsOperations>,
     OperationBridge<typeof chatOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
@@ -7294,27 +7307,6 @@ export interface DohcDesktopBridge
   ): Promise<ChatDispatchStateForThreadResult>;
   runnerSelfTest(payload: RunnerSelfTestPayload): Promise<RunnerSelfTestResult>;
   detectAgentTools(payload: AgentRunPayload): Promise<AgentToolsResult>;
-  getUserSettings(): Promise<DesktopUserSettingsResult>;
-  setUserSettings(payload: SetUserSettingsPayload): Promise<DesktopUserSettingsResult>;
-  resetUserSettings(): Promise<DesktopUserSettingsResult>;
-  // Reads the settings file again, applies it, and answers what is in effect.
-  reloadUserSettings(): Promise<DesktopUserSettingsResult>;
-  setAppPinned(payload: SetAppPinnedPayload): Promise<DesktopUserSettingsResult>;
-  getUserSettingsFilePath(): Promise<string>;
-  // Opens the settings file in the system's editor, creating it first when
-  // there is none.
-  openUserSettingsFile(): Promise<void>;
-  // Opens this workspace's .dohc/settings.local.json in the system's editor.
-  openWorkspaceSettingsFile(payload: WorkspaceSettingsPayload): Promise<void>;
-  getWorkspaceSettings(
-    payload: WorkspaceSettingsPayload,
-  ): Promise<WorkspaceSettingsResult>;
-  setWorkspaceSettings(
-    payload: SetWorkspaceSettingsPayload,
-  ): Promise<WorkspaceSettingsResult>;
-  resetWorkspaceSettings(
-    payload: WorkspaceSettingsPayload,
-  ): Promise<WorkspaceSettingsResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   onUserSettingsChanged(
     listener: (result: DesktopUserSettingsResult) => void,
@@ -7322,11 +7314,6 @@ export interface DohcDesktopBridge
   stepWindowZoom(
     payload: StepWindowZoomPayload,
   ): Promise<DesktopUserSettingsResult>;
-  // Per-workspace workbench UI state (.dohc/ui-state.json), main-owned.
-  getWorkspaceUiState(
-    payload: WorkspaceIdPayload,
-  ): Promise<GetWorkspaceUiStateResult>;
-  setWorkspaceUiState(payload: SetWorkspaceUiStatePayload): Promise<void>;
   // Cached History names changed. Subscribers re-read with workspace/request guards.
   onHistoryNamesChanged(listener: (event: WorkspaceIdPayload) => void): () => void;
   // Live push: main signals the renderer when the active workspace's files

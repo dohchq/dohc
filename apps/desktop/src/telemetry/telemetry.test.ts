@@ -7,6 +7,7 @@ import { EngineDaemonUnavailableError } from "@dohc/workspace-engine-client/daem
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCodeLocations } from "../crashReports/crashReport";
 import type { Reporting } from "./reportingConfig";
+import { settingsOperations } from "../ipc/settingsOperations";
 import { CHANNELS } from "../ipc/channels";
 import { createTelemetry, privacyInEffect, rateLimitMs, REPORT_LIMITS, usageEventFor } from "./telemetry";
 
@@ -1031,7 +1032,7 @@ describe("usage events", () => {
   });
 
   it("counts nothing for any other request", () => {
-    expect(usageEventFor(CHANNELS.getUserSettings, {})).toBeNull();
+    expect(usageEventFor(settingsOperations.getUserSettings.channel, {})).toBeNull();
     expect(usageEventFor("toString", {})).toBeNull();
   });
 });

@@ -16,6 +16,7 @@ import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
 import { AGENT_OFFER_SPACE, useAgentOffer } from "./AgentOffer";
 import { DecisionStatus } from "./ChatPosts";
 import { ComposerNotice } from "./ChatsControls";
+import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import type { AgentSetupSummary } from "./ChatsView";
 
 type PaintedLane = {
@@ -56,6 +57,7 @@ export function ChatLane(props: {
   const reactions = useReactions();
   const [loading, setLoading] = useState(true);
   const [composer, setComposer] = useState("");
+  const [poll, setPoll] = useState<ComposerPollDraft | null>(null);
   const [sending, setSending] = useState(false);
   // The first message the reader had not seen when the lane opened.
   const [firstUnreadMessageId, setFirstUnreadMessageId] = useState<string | null>(null);
@@ -152,6 +154,7 @@ export function ChatLane(props: {
     setMessages([]);
     setDecisions([]);
     setComposer("");
+    setPoll(null);
     setSending(false);
     setFirstUnreadMessageId(null);
     setAtEnd(true);
@@ -200,6 +203,10 @@ export function ChatLane(props: {
   const send = useCallback(async () => {
     const body = composer.trim();
     if (body.length === 0 || sending || loading || props.locked) return;
+    const asked = openPollChoices(poll);
+    const options = asked ? pollChoicesToSend(asked) : null;
+    if (asked && !options) return;
+    const asks = options ? { needsDecision: true, options } : {};
     const current = token.current;
     setSending(true);
     try {
@@ -209,6 +216,7 @@ export function ChatLane(props: {
           workspaceId,
           threadId,
           body,
+          ...asks,
           ...(references.length > 0 ? { fileReferences: references } : {}),
         });
         if (current !== token.current) return;
@@ -221,6 +229,7 @@ export function ChatLane(props: {
           workspaceId,
           channelId,
           body,
+          ...asks,
           lane: "chat",
           ...(references.length > 0 ? { fileReferences: references } : {}),
         });
@@ -239,6 +248,7 @@ export function ChatLane(props: {
         setMessages([result.message]);
       }
       setComposer("");
+      setPoll(null);
       void load(true);
     } catch (error) {
       if (current !== token.current) return;
@@ -246,7 +256,7 @@ export function ChatLane(props: {
     } finally {
       if (current === token.current) setSending(false);
     }
-  }, [channelId, composer, load, loading, onError, props.locked, reactions, sending, threadId, workspaceId]);
+  }, [channelId, composer, load, loading, onError, poll, props.locked, reactions, sending, threadId, workspaceId]);
 
   const chooseOption = useCallback(async (decision: ChatDecisionRecord, option: string) => {
     if (!threadId || sending || loading || props.locked) return;
@@ -359,6 +369,8 @@ export function ChatLane(props: {
           fileCandidates={props.fileCandidates}
           loadFileHeadings={props.loadFileHeadings}
           onChange={setComposer}
+          poll={poll}
+          onPollChange={setPoll}
           onSend={() => void send()}
           onRosterPick={agentOffer.onRosterPick}
           rosterScope={agentOffer.scope}
