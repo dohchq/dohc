@@ -1,3 +1,4 @@
+import { relayShareOperations } from "../ipc/shareOperations";
 import { chatOperations } from "../ipc/chatOperations";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1019,8 +1020,8 @@ describe("usage events", () => {
   it("counts finished actions and carries nothing from them", () => {
     expect(usageEventFor(CHANNELS.createLocalWorkspace, { workspaceId: SECRET, rootPath: SECRET })).toEqual({ name: "workspace_created" });
     expect(usageEventFor(CHANNELS.openWorkspace, {})).toEqual({ name: "workspace_opened" });
-    expect(usageEventFor(CHANNELS.createRelayShare, { shareId: SECRET })).toEqual({ name: "share_created", method: "people" });
-    expect(usageEventFor(CHANNELS.createRelayShareLink, { url: SECRET })).toEqual({ name: "share_created", method: "link" });
+    expect(usageEventFor(relayShareOperations.createRelayShare.channel, { shareId: SECRET })).toEqual({ name: "share_created", method: "people" });
+    expect(usageEventFor(relayShareOperations.createRelayShareLink.channel, { url: SECRET })).toEqual({ name: "share_created", method: "link" });
     expect(usageEventFor(chatOperations.sendChatMessage.channel, { message: { body: SECRET } })).toEqual({ name: "chat_message_sent" });
   });
 

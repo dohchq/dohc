@@ -157,42 +157,20 @@ export const CHANNELS = {
   shareHandoffStatus: "desktop:share-handoff-status",
   cloudEnableSync: "desktop:cloud-enable-sync",
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
-  createRelayShare: "desktop:create-relay-share",
   listRelayShares: "desktop:list-relay-shares",
   getRelayReceivedShare: "desktop:get-relay-received-share",
   revokeRelayShare: "desktop:revoke-relay-share",
   undoRelayShare: "desktop:undo-relay-share",
-  createRelayShareLink: "desktop:create-relay-share-link",
-  addRelayShareLink: "desktop:add-relay-share-link",
-  listRelayShareLinks: "desktop:list-relay-share-links",
   ownerRestore: "desktop:owner-restore",
-  listOwnerLiveDocuments: "desktop:list-owner-live-documents",
-  listOwnerLiveRefusals: "desktop:list-owner-live-refusals",
-  retryOwnerLiveShare: "desktop:retry-owner-live-share",
   stopOwnerLiveDocument: "desktop:stop-owner-live-document",
   resumeOwnerLiveDocument: "desktop:resume-owner-live-document",
   publishOwnerApp: "desktop:publish-owner-app",
   ownerAppResponses: "desktop:owner-app-responses",
   dataset: "desktop:dataset",
-  retuneRelayShareLink: "desktop:retune-relay-share-link",
-  rotateRelayShareLink: "desktop:rotate-relay-share-link",
-  revokeRelayShareLink: "desktop:revoke-relay-share-link",
-  listRelayShareDiscussion: "desktop:list-relay-share-discussion",
   pollRelayShareDiscussionActivity:
     "desktop:poll-relay-share-discussion-activity",
   cancelRelayShareDiscussionActivity:
     "desktop:cancel-relay-share-discussion-activity",
-  appendRelayShareDiscussion: "desktop:append-relay-share-discussion",
-  deleteRelayShareDiscussionMessage:
-    "desktop:delete-relay-share-discussion-message",
-  blockRelayShareDiscussionPrincipal:
-    "desktop:block-relay-share-discussion-principal",
-  unblockRelayShareDiscussionPrincipal:
-    "desktop:unblock-relay-share-discussion-principal",
-  pauseRelayShareDiscussion: "desktop:pause-relay-share-discussion",
-  resumeRelayShareDiscussion: "desktop:resume-relay-share-discussion",
-  promoteRelayShareGrant: "desktop:promote-relay-share-grant",
-  revokeRelayShareGrant: "desktop:revoke-relay-share-grant",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",
   // The crash report changed; the renderer reads it again.
