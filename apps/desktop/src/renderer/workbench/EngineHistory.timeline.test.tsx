@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Fragment, type ReactNode } from "react";
 import type { EngineMomentRecord, TimelineEntry } from "../../ipc/bridgeContract";
@@ -49,10 +50,10 @@ function change(revision: number, recordedAtMs: number | null, datasetId = BUDGE
 }
 
 function view(props: Partial<Parameters<typeof EngineHistoryView>[0]> = {}) {
-  const calls = { open: vi.fn(), retry: vi.fn(), openCollection: vi.fn() };
+  const calls = { open: vi.fn(), retry: vi.fn(), openHistory: vi.fn() };
   // Budget's definition is loaded and labels its operation; Guests' is not.
   const collections: HistoryCollections = new Map([
-    [BUDGET, { name: "Budget", operationLabels: new Map([["addRow", "Add row"]]), open: calls.openCollection }],
+    [BUDGET, { name: "Budget", operationLabels: new Map([["addRow", "Add row"]]), openHistory: calls.openHistory }],
     [GUESTS, { name: "Guests" }],
   ]);
   render(
@@ -72,12 +73,25 @@ describe("History timeline rows", () => {
     expect(calls.open).toHaveBeenCalledWith("m-1", "notes/plan.md");
     expect(rows[1]!.textContent).toContain("Created version Draft");
     expect(rows[1]!.querySelector("button")).toBeNull();
-    const collection = screen.getByRole("button", { name: "Open Collection Budget" });
+    // A file's row opens its change, and so does a Collection's: its History.
+    const collection = screen.getByRole("button", { name: "Open Collection history for Budget" });
     expect(collection.textContent).toContain("Automation Stamp the date");
     fireEvent.click(collection);
-    expect(calls.openCollection).toHaveBeenCalledOnce();
-    // Collection changes carry no undo, so the timeline offers none.
+    expect(calls.openHistory).toHaveBeenCalledOnce();
+    // The Undo is in that History, so the timeline offers none.
     expect(screen.queryByRole("button", { name: /undo/i })).toBeNull();
+  });
+
+  it("opens a Collection's History from the keyboard", async () => {
+    const user = userEvent.setup();
+    const calls = view({ entries: [change(4, DAY - 2_000)] });
+    await user.tab();
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Open Collection history for Budget" }));
+    await user.keyboard("{Enter}");
+    expect(calls.openHistory).toHaveBeenCalledOnce();
+    await user.keyboard(" ");
+    expect(calls.openHistory).toHaveBeenCalledTimes(2);
   });
 
   // The operation's name is the definition's ID, not the person's words.
@@ -91,7 +105,7 @@ describe("History timeline rows", () => {
     // The title already names the Collection, so the meta line does not.
     expect(unlabelled!.querySelector("[id]")!.textContent).not.toContain("Guests");
     // The row's name says what it opens; the change describes it.
-    const button = screen.getByRole("button", { name: "Open Collection Budget" });
+    const button = screen.getByRole("button", { name: "Open Collection history for Budget" });
     const description = document.getElementById(button.getAttribute("aria-describedby")!);
     expect(description?.textContent).toContain("Budget");
     expect(description?.textContent).toContain("Stamp the date");
@@ -130,7 +144,7 @@ describe("History timeline rows", () => {
     expect(headings).toHaveLength(1);
     expect(headings[0]!.textContent).not.toBe("Date unknown");
     // A Collection this computer cannot open is a row, not a control.
-    expect(screen.queryByRole("button", { name: "Open Collection Guests" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Collection history for Guests" })).toBeNull();
   });
 
   it("gives a change with no date and no placement its own Date unknown heading", () => {

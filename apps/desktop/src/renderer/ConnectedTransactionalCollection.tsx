@@ -47,11 +47,15 @@ export interface ConnectedTransactionalCollectionProps {
   onLifecycleChanged?(): void;
   /** A success notice; the ⚡ panel's can carry an Undo. */
   onNotice?(message: string, undo?: () => void): void;
+  /** Asks the page to open its History, as a History timeline row does. */
+  historyRequested?: boolean;
+  /** The page took the ask; the asker clears it. */
+  onHistoryShown?(): void;
 }
 export function ConnectedTransactionalCollection(props: ConnectedTransactionalCollectionProps) {
   return <ScopedCollection key={`${props.workspaceId}:${props.datasetPath}:${props.tableId}`} {...props} />;
 }
-function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onSettled, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, owner = true }: ConnectedTransactionalCollectionProps) {
+function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onSettled, onFormCreated, onLifecycleChanged, onNotice, onOpenFile, onOpenScheduleSettings, historyRequested, onHistoryShown, owner = true }: ConnectedTransactionalCollectionProps) {
   const [dataset, setDataset] = useState<DatasetDescription | null>(null);
   const datasetId = dataset?.datasetId ?? "";
   const addressInput = <T extends { datasetId: string },>(input: T) => {
@@ -67,6 +71,12 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onSettle
   const [historyRestore, setHistoryRestore] = useState<DatasetMigrationPreparation | undefined>();
   const [transferringCsv, setTransferringCsv] = useState(false);
   const [viewingHistory, setViewingHistory] = useState(false);
+  // History shows once the Collection is read, where the page offers it.
+  useEffect(() => {
+    if (!historyRequested) return;
+    setViewingHistory(true);
+    onHistoryShown?.();
+  }, [historyRequested, onHistoryShown]);
   const [viewingPending, setViewingPending] = useState(false);
   const [editingFields, setEditingFields] = useState(false);
   const [customizing, setCustomizing] = useState(false);
