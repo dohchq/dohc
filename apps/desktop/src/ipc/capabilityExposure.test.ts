@@ -1,3 +1,4 @@
+// A PR that adds a channel or command edits the main inventory directly. Do not add a delta file.
 import { APP_PUBLICATION_CAPABILITIES, CLI_CAPABILITIES, cliRequestSchema, DATASET_CAPABILITIES } from "@dohc/cli/protocol";
 import { CLI_COMMANDS, parseCliArguments } from "@dohc/cli/args";
 import { DatasetRequest } from "@dohc/cli/dataset";
@@ -13,36 +14,10 @@ import { SetAppPinnedPayload } from "./bridgeContract";
 import type { OperationDefinition } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import mainIpc from "./ipcExposure.main.json";
-import clipboardIpc from "./ipcExposure.pr1639.json";
-import recipientRecordsIpc from "./ipcExposure.pr1688.json";
-import launchOpenIpc from "./ipcExposure.pr1701.json";
-import restartCaptureIpc from "./ipcExposure.pr1719.json";
-import earlyQuitIpc from "./ipcExposure.earlyQuit.json";
-import historyTimelineIpc from "./ipcExposure.historyTimeline.json";
-import historyNamesIpc from "./ipcExposure.pr1785.json";
-import liveDraftRecoveryIpc from "./ipcExposure.pr1747.json";
-import liveDraftListingIpc from "./ipcExposure.liveDraftListing.json";
-import stopAndRestoreIpc from "./ipcExposure.stopAndRestore.json";
-import reportsIpc from "./ipcExposure.reports.json";
-import saveRetryIpc from "./ipcExposure.saveRetry.json";
-import fileObservationIpc from "./ipcExposure.fileObservation.json";
-import usageRecordIpc from "./ipcExposure.usageRecord.json";
-import shareCopyCli from "./cliExposure.shareCopy.json";
-import localCollectionCli from "./cliExposure.localCollection.json";
 import mainCli from "./cliExposure.main.json";
 import pinnedCliCapabilities from "./cliCapabilities.pinned.json";
 import { CLI_DISPATCH_ARGUMENTS } from "./cliDispatchInputs.fixture";
-import publicationCli from "./cliExposure.pr1659.json";
-import commentsCli from "./cliExposure.pr1700.json";
-import fileChatsCli from "./cliExposure.pr2000.json";
-import accountDeletion from "./cliExposure.accountDeletion.json";
 import admission from "./operationAdmission.json";
-import accessExposure from "./accessExposure.delta.json";
-import shareCopyExposure from "./ipcExposure.shareCopy.json";
-import offersIpc from "./ipcExposure.offers.json";
-import sharedWriteFeedback from "./ipcExposure.sharedWriteFeedback.json";
-import systemMotionIpc from "./ipcExposure.systemMotion.json";
-import captureHoldsIpc from "./ipcExposure.captureHolds.json";
 
 const rows: OperationDefinition[] = OPERATION_TABLES.flatMap(table => Object.values(table));
 const publicVerbs = Object.entries(CLI_COMMANDS).flatMap(([group, command]) => Object.keys(command.verbs).map(verb => `${group} ${verb}`));
@@ -76,25 +51,9 @@ function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "s
   }
 }
 
-describe("B1 main inventories (a4be19d5b)", () => {
+describe("main inventories", () => {
   it("preserves every IPC wire name and the 26 enforced table guards", () => {
-    // Hand-reviewed #1639 removals and #1701, #1688, #1747, reports, save retry,
-    // capture recovery, History names, shared write feedback, Stop and restore,
-    // usage record, share copy, early-quit typing recovery, offer, system motion, and account
-    // deletion additions, separate from the hashed main baseline.
-    const expectedNames = [...mainIpc.names];
-    expectedNames.push("desktop:check-shared-view-access");
-    expectedNames.push("desktop:dismiss-share-capture-notice");
-    for (const name of clipboardIpc.nameRemovals) {
-      expect(expectedNames).toContain(name);
-      expectedNames.splice(expectedNames.indexOf(name), 1);
-    }
-    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions, ...liveDraftRecoveryIpc.nameAdditions, ...liveDraftListingIpc.nameAdditions, ...restartCaptureIpc.nameAdditions, ...historyNamesIpc.nameAdditions, ...historyTimelineIpc.nameAdditions, ...reportsIpc.nameAdditions, ...saveRetryIpc.nameAdditions, ...accessExposure.nameAdditions, ...sharedWriteFeedback.nameAdditions, ...fileObservationIpc.nameAdditions, ...stopAndRestoreIpc.nameAdditions, ...usageRecordIpc.nameAdditions, ...shareCopyExposure.nameAdditions, ...earlyQuitIpc.nameAdditions, ...offersIpc.nameAdditions, ...systemMotionIpc.nameAdditions, ...captureHoldsIpc.nameAdditions, ...accountDeletion.nameAdditions]) {
-      expect(expectedNames).not.toContain(name);
-      expectedNames.push(name);
-    }
-    expect([...Object.values(CHANNELS), ...rows.map(row => row.channel)].sort()).toEqual(expectedNames.sort());
-    // B5 retains these guards while adding rows to the hand-edited admission record.
+    expect([...Object.values(CHANNELS), ...rows.map(row => row.channel)].sort()).toEqual([...mainIpc.names].sort());
     const guards = Object.fromEntries(rows.map(row => [row.channel, row.guard]));
     expect(Object.fromEntries(Object.keys(mainIpc.guards).map(channel => [channel, guards[channel]]))).toEqual(mainIpc.guards);
   });
@@ -117,29 +76,18 @@ describe("B1 main inventories (a4be19d5b)", () => {
     expect(rows.filter(row => channels.includes(row.channel))).toHaveLength(13);
   });
   it("preserves socket verbs, public verbs, and all public help", () => {
-    expect(socketVerbs).toEqual([...mainCli.socketVerbs, ...accessExposure.socketVerbAdditions, ...shareCopyCli.socketVerbAdditions, ...accountDeletion.socketVerbAdditions].sort());
-    const expectedGroups = [...accessExposure.publicGroupAdditions, ...mainCli.publicGroups];
-    for (const { group, before } of shareCopyCli.publicGroupAdditions) {
-      expect(expectedGroups).not.toContain(group);
-      expect(expectedGroups).toContain(before);
-      expectedGroups.splice(expectedGroups.indexOf(before), 0, group);
-    }
-    expect(Object.keys(CLI_COMMANDS)).toEqual([...expectedGroups, ...accountDeletion.publicGroupAdditions]);
-    // Hand-reviewed #1659 additions, separate from the hashed main baseline.
-    const expectedPublicVerbs = [...accessExposure.publicVerbAdditions, ...mainCli.publicVerbs, ...accountDeletion.publicVerbAdditions];
-    for (const { verb, before } of [...publicationCli.publicVerbAdditions, ...commentsCli.publicVerbAdditions, ...fileChatsCli.publicVerbAdditions, ...shareCopyCli.publicVerbAdditions]) {
-      expect(expectedPublicVerbs).not.toContain(verb);
-      expect(expectedPublicVerbs).toContain(before);
-      expectedPublicVerbs.splice(expectedPublicVerbs.indexOf(before), 0, verb);
-    }
-    expect(publicVerbs).toEqual(expectedPublicVerbs);
+    expect(socketVerbs).toEqual(mainCli.socketVerbs);
+    expect(Object.keys(CLI_COMMANDS)).toEqual(mainCli.publicGroups);
+    expect(publicVerbs).toEqual(mainCli.publicVerbs);
     const help: Record<string, string> = { top: renderCliHelp({ help: [] }) };
     for (const [group, command] of Object.entries(CLI_COMMANDS)) {
       help[group] = renderCliHelp({ help: [group] });
       for (const verb of Object.keys(command.verbs)) help[`${group} ${verb}`] = renderCliHelp({ help: [group, verb] });
     }
-    // Hand-reviewed local Collection app help: local withdrawal and its unconfirmed result.
-    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help, ...commentsCli.help, ...accessExposure.help, ...shareCopyCli.help, ...fileChatsCli.help, ...localCollectionCli.help, ...accountDeletion.help });
+    const top = mainCli.help.top;
+    expect(top.commands.map(command => command.group)).toEqual(Object.keys(CLI_COMMANDS));
+    const expectedHelp = { ...mainCli.help, top: `${top.prefix}${top.commands.map(command => command.block).join("")}${top.suffix}` };
+    expect(help).toEqual(expectedHelp);
   });
   it("pins each row's guard, scope, and handler check to the hand-edited admission record", () => {
     expect(Object.fromEntries(rows.map(row => [row.channel, {
@@ -245,9 +193,9 @@ describe("capability identities and exposure", () => {
   });
 
   it("pins every internal-only socket verb in the main CLI inventory", () => {
-    const publicSocketVerbs = new Set([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions, ...fileChatsCli.publicSocketPromotions, ...accessExposure.socketVerbAdditions, ...shareCopyCli.socketVerbAdditions, ...accountDeletion.socketVerbAdditions]);
+    const publicSocketVerbs = new Set(mainCli.publicSocketVerbs);
     const internalVerbs = socketVerbs.filter(verb => !publicSocketVerbs.has(verb));
-    expect(internalVerbs).toEqual(mainCli.internalVerbs.filter(verb => ![...commentsCli.publicSocketPromotions, ...fileChatsCli.publicSocketPromotions].includes(verb)));
+    expect(internalVerbs).toEqual(mainCli.internalVerbs);
   });
 
   it("matches IPC and MCP exposure to their actual rows and advertised tools", async () => {
