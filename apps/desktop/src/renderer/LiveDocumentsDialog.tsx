@@ -9,7 +9,7 @@ import { useRequestSequence } from "./useRequestSequence";
 export type LiveDocumentRow = {
   path: string;
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage";
+  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
 };
@@ -141,6 +141,7 @@ function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "session-host-refused") return "Stopped by the server";
   if (row.reason === "session-host-diverged") return "Server copy doesn't match";
   if (row.reason === "live-document-without-lineage") return "Not started";
+  if (row.reason === "live-edit-unadmitted") return "Can't resume";
   switch (row.status) {
     case "ready":
       return "Live";
@@ -170,11 +171,11 @@ function canResume(row: LiveDocumentRow): boolean {
   return row.canResume;
 }
 
-// A Resume finishes a deferred Stop, but not one on a server copy that diverged.
+// A Resume finishes a deferred Stop, but not one on a server copy that diverged or misses an edit.
 function deferredStopNote(row: LiveDocumentRow, stop: NonNullable<LiveDocumentRow["deferredStop"]>): string {
   const one = stop.unsentEdits === 1;
   const unsent = stop.unsentEdits === 0 ? "" : `${stop.unsentEdits} unsent ${one ? "edit remains" : "edits remain"} on this computer. `;
-  const resume = row.reason === "session-host-diverged" ? ""
+  const resume = row.reason === "session-host-diverged" || row.reason === "live-edit-unadmitted" ? ""
     : stop.unsentEdits === 0 ? "Resume live editing to finish syncing. " : `Resume live editing to try sending ${one ? "it" : "them"}. `;
   return `${row.status === "ready" ? "Live editing resumed. " : "Live editing stopped. "}${unsent}${resume}${stop.editable ? "You can keep editing." : "Editing is paused."}`;
 }
@@ -483,6 +484,10 @@ export function LiveDocumentsDialog({
           <p className="mt-1 text-[13px] text-muted">
             Stopping live editing keeps the file and its history. Share permissions stay unchanged.
           </p>
+          {/* Said before any Stop runs: until #2103, a Resume can't continue a file edited while stopped. */}
+          <p data-testid="live-documents-stop-warning" className="mt-1 text-[13px] text-muted">
+            If you edit a file while its live editing is stopped, live editing can't resume for it.
+          </p>
         </div>
         <SecondaryButton
           size="compact"
@@ -554,6 +559,12 @@ export function LiveDocumentsDialog({
                 {row.reason === "live-document-without-lineage" ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
                     Live editing can't start until you open this document once in dohc. After you open it, resume live editing.
+                  </p>
+                ) : null}
+                {/* The server's copy misses that edit, so a Resume can't help. */}
+                {row.reason === "live-edit-unadmitted" ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    This file changed while live editing was off, so live editing can't resume for it. You can keep editing it in dohc.
                   </p>
                 ) : null}
                 {/* Resume and Stop can't help here, so the row offers neither. */}

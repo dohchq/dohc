@@ -50,8 +50,11 @@ export function parseServiceActivationConfig(value:unknown){
     idleUnloadMs:positive(row.idleUnloadMs),idleRetryMs:positive(row.idleRetryMs)});
 }
 export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceActivationConfig>>;
-/** Why a document waits for its owner: the engine refused it, or it has no Y.Doc lineage to activate. */
-export type ServiceActivationBlock="refused"|"without-lineage";
+/**
+ * Why a document waits for its owner: the engine refused it, its copy here misses an edit made while live
+ * editing was off, or it has no Y.Doc lineage to activate.
+ */
+export type ServiceActivationBlock="refused"|"live-edit-unadmitted"|"without-lineage";
 type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;
   binding:LiveObjectBinding;target:string;actor:{ownerUserId:string;shareId:string}};
 const fenced={kind:"pending" as const,reason:"Service binding is fenced or unavailable."};
@@ -78,7 +81,7 @@ export class ServiceActivationDriver {
   readonly #held=new Map<string,ServiceHostedHold["reason"]>();
   // Targets that cannot progress, with why. Each failed its one capture; passes skip it until `unblock` allows one more.
   // One without lineage also tries once more when the relay holds a Y.Doc update for its document newer than `update`, the latest before that capture's pull.
-  readonly #blocked=new Map<string,{reason:"refused"}|{reason:"without-lineage";update:number}>();
+  readonly #blocked=new Map<string,{reason:"refused"|"live-edit-unadmitted"}|{reason:"without-lineage";update:number}>();
   // Each target's document, once known, so a hold applies before the target has an owner, as after a restart.
   readonly #objects=new Map<string,string>();
   constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
@@ -138,7 +141,8 @@ export class ServiceActivationDriver {
   #refused(key:string,resuming:boolean,update:number,error:unknown){
     const diverged=resuming && error instanceof EngineRequestError && error.wireError?.code==="CONFLICT" && !isHostedDocumentUnready(error);
     if(isLiveDocumentWithoutLineage(error))this.#blocked.set(key,{reason:"without-lineage",update});
-    else if(diverged || this.#held.get(key)==="hosted-live-edit-unadmitted")this.#blocked.set(key,{reason:"refused"});
+    else if(this.#held.get(key)==="hosted-live-edit-unadmitted")this.#blocked.set(key,{reason:"live-edit-unadmitted"});
+    else if(diverged)this.#blocked.set(key,{reason:"refused"});
     else this.#blocked.delete(key);
   }
   // The relay sequence of the latest Y.Doc update for the target's document, or 0 while it has none.

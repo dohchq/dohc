@@ -58,6 +58,7 @@ function liveDeliveryLabel(
   // unnamed one is a connection dohc is still dialling.
   if (reason === "session-host-refused" || reason === "session-host-diverged") return "Live editing stopped";
   if (reason === "live-document-without-lineage") return "Live editing can't start";
+  if (reason === "live-edit-unadmitted") return "Live editing can't resume";
   return reason ? "Live editing paused" : "Live editing retrying";
 }
 

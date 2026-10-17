@@ -3429,7 +3429,7 @@ describe("sync status IPC contract", () => {
     const status = { state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
       historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 0, ownerLiveDelivery: "retrying" };
     const row = { path: "docs/a.md", status: "unavailable", canResume: true };
-    for (const reason of ["session-host-refused", "session-host-diverged", "live-document-without-lineage"] as const) {
+    for (const reason of ["session-host-refused", "session-host-diverged", "live-document-without-lineage", "live-edit-unadmitted"] as const) {
       expect(SyncStatusResult.parse({ ...status, ownerLiveDeliveryReason: reason }).ownerLiveDeliveryReason).toBe(reason);
       expect(OwnerLiveDocument.parse({ ...row, reason }).reason).toBe(reason);
     }

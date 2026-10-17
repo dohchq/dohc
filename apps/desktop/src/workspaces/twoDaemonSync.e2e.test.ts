@@ -637,6 +637,7 @@ it.skipIf(engine.missing).each([
   let capture: WorkspaceEngineCapture | undefined;
   let delivery: ReturnType<typeof startServerOwnerDelivery> | undefined;
   let peer: LiveDaemonCapture | undefined;
+  let releaseHostedPulls: (() => void) | undefined;
   const errors: string[] = [];
   let resyncSignals = 0;
   const recordError = (context: string, error: unknown) => {
@@ -648,10 +649,11 @@ it.skipIf(engine.missing).each([
   };
   const path = "tasks/pending.md", recordId = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
   try {
-    relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain,
-    editLinks: { engineExecutable: engine.require(), publicOrigin: proxy.origin, trustEnv },
-    linkBoundary: { linkKey: "native-adoption-link-key-".repeat(2), relayExchangeKey: "native-adoption-exchange-".repeat(2),
-      publicViewerOrigin: proxy.origin } });
+    const relayOptions = { dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain,
+      editLinks: { engineExecutable: engine.require(), publicOrigin: proxy.origin, trustEnv },
+      linkBoundary: { linkKey: "native-adoption-link-key-".repeat(2), relayExchangeKey: "native-adoption-exchange-".repeat(2),
+        publicViewerOrigin: proxy.origin } };
+    relayServer = await spawnSyncRelay(relayOptions);
     proxy.routeRelayTo(relayServer.baseUrl);
     const relayConnection = { baseUrl: proxy.origin, token: `test:${workspaceId}` };
     const profile = selfHostLiveProfile();
@@ -982,6 +984,16 @@ it.skipIf(engine.missing).each([
         }), sharesChanged: unexpected, reconcileReceivedShares: unexpected,
       });
       const stop = () => Promise.resolve(handlers.get(CHANNELS.stopOwnerLiveDocument)!({sender: {id: 1}}, {workspaceId, path}));
+      const resume = () => Promise.resolve(handlers.get(CHANNELS.resumeOwnerLiveDocument)!({sender: {id: 1}}, {workspaceId, path}));
+      // The session host either parks the stopped document before Resume, or
+      // pulls nothing between Stop and Resume and still holds it ready.
+      const hostReadyAtResume = name === "stale-binding quarantine";
+      if (hostReadyAtResume) {
+        const held = proxy.heldHostedPulls();
+        releaseHostedPulls = proxy.holdHostedPulls();
+        // Its next pull waits here, so any pull already on its way was answered before Stop.
+        await expect.poll(() => proxy.heldHostedPulls(), {timeout: 60_000}).toBeGreaterThan(held);
+      }
       if (offlineStop) {
         await expect(stop()).rejects.toThrow("Stop live editing is waiting.");
         const requested = await source.sessions.run(source.workspace, async ({workspace}) =>
@@ -1010,7 +1022,7 @@ it.skipIf(engine.missing).each([
       await expect.poll(async () => (await discovery()).length, {timeout: 60_000}).toBe(0);
       if (deferredResume) {
         expect((await readPending()).entries).toHaveLength(33);
-        await handlers.get(CHANNELS.resumeOwnerLiveDocument)!({sender:{id:1}},{workspaceId,path});
+        await resume();
         await expect.poll(async () => {
           await pass(AbortSignal.timeout(60_000));
           const db=new DatabaseSync(join(rootA,SECRET_FILE_STORE_RELATIVE_PATH),{readOnly:true});
@@ -1027,40 +1039,105 @@ it.skipIf(engine.missing).each([
       expect(await readFile(join(rootA, path), "utf8")).toContain(offlineStop ? "Name: Offline while stopping" : "Name: Quarantined edit");
       const releasedMoment = (await capture.listMoments({limit: 100})).moments.find(moment => moment.path === path);
       expect(releasedMoment?.authors).toContainEqual({kind: "human", humanId: "local-person"});
-      const ordinary = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
-      await expect(ordinary.applyDecidedLocalUpdate(doc => {
-        const scratch = new Y.Doc();
-        try {Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc)); const before = Y.encodeStateVector(scratch);
-          patchFrontmatter(scratch, new Map([["Name", "Local after stop"]])); return Y.encodeStateAsUpdate(scratch, before);
-        } finally {scratch.destroy();}
-      }, undefined, {actorOriginId: "local-person", attribution: {actorKind: "human"}, idempotencyKey: "after-stop"})).resolves.toBeDefined();
-      await ordinary.settleNow();await ordinary.close();
-      await pushUntilDrained(relay);
-      await peer.capture.runRelaySync(page => peer!.relay.pull(page));
-      expect(await readFile(join(rootB, path), "utf8")).toContain("Name: Local after stop");
-      await handlers.get(CHANNELS.resumeOwnerLiveDocument)!({sender: {id: 1}}, {workspaceId, path});
-      await expect.poll(async () => (await discovery()).length, {timeout: 120_000}).toBe(1);
-      expect(["empty", "acknowledged"]).toContain(await pass(AbortSignal.timeout(60_000)));
-      const restarted = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
-      await restarted.applyDecidedLocalUpdate(doc => {
-        const scratch = new Y.Doc();
-        try {Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));const before = Y.encodeStateVector(scratch);
-          patchFrontmatter(scratch, new Map([["Name", "Live again"]]));return Y.encodeStateAsUpdate(scratch, before);
-        } finally {scratch.destroy();}
-      }, undefined, {actorOriginId: "local-person", attribution: {actorKind: "human"}, idempotencyKey: "live-again"});
+      // The document's state in the session host's store.
+      const hostDocumentState = async () => {
+        const stores = join(relayRoot, "relay-deployment", "live-host");
+        const store = (await readdir(stores)).find(entry => /^[0-9a-f]{64}$/u.test(entry));
+        if (!store) return undefined;
+        const db = new DatabaseSync(join(stores, store, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
+        try {return (db.prepare("SELECT state FROM hosted_documents WHERE object_id=?").get(document.binding.objectId) as {state: string} | undefined)?.state;}
+        finally {db.close();}
+      };
+      if (!hostReadyAtResume) await expect.poll(hostDocumentState, {timeout: 120_000}).toBe("parked");
+      // An ordinary owner edit that reaches the peer through ordinary sync.
+      const editOrdinary = async (value: string, key: string) => {
+        const ordinary = await capture!.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
+        await expect(ordinary.applyDecidedLocalUpdate(doc => {
+          const scratch = new Y.Doc();
+          try {Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc)); const before = Y.encodeStateVector(scratch);
+            patchFrontmatter(scratch, new Map([["Name", value]])); return Y.encodeStateAsUpdate(scratch, before);
+          } finally {scratch.destroy();}
+        }, undefined, {actorOriginId: "local-person", attribution: {actorKind: "human"}, idempotencyKey: key})).resolves.toBeDefined();
+        await ordinary.settleNow();await ordinary.close();
+        expect(await readFile(join(rootA, path), "utf8")).toContain(`Name: ${value}`);
+        await expect.poll(async () => {
+          await pushUntilDrained(relay);
+          await peer!.capture.runRelaySync(page => peer!.relay.pull(page));
+          return readFile(join(rootB, path), "utf8");
+        }, {timeout: 120_000}).toContain(`Name: ${value}`);
+      };
+      await editOrdinary("Local after stop", "after-stop");
+      const liveRow = async () => {
+        const ready = (await discovery()).some(row => row.binding.currentPath === path);
+        const row = (discoveryPayload as {documents: Array<{path: string}>}).documents.find(row => row.path === path);
+        return {ready, row};
+      };
+      const unadmitted = {ready: false, row: {path, status: "unavailable", reason: "live-edit-unadmitted"}};
+      // The operator's reports that the host's copy misses the owner's edit.
+      const reports = () => relayServer!.diagnostics().stderr
+        .split(`Live editing of ${path} in workspace ${workspaceId} cannot resume: the document changed while live editing was off`).length - 1;
+      await resume();
+      if (releaseHostedPulls) {
+        // The host ran a pass after Resume without pulling, so its copy is ready but misses the edit.
+        const held = proxy.heldHostedPulls();
+        await expect.poll(() => proxy.heldHostedPulls(), {timeout: 60_000}).toBeGreaterThan(held);
+        expect(await hostDocumentState()).toBe("ready");
+        releaseHostedPulls(); releaseHostedPulls = undefined;
+      }
+      await expect.poll(liveRow, {timeout: 120_000}).toEqual(unadmitted);
+      expect(await hostDocumentState()).toBe("held");
+      await expect.poll(reports, {timeout: 60_000}).toBe(1);
+      // A Resume tries once more and blocks again. The copy is never ready.
+      await resume();
       await expect.poll(async () => {
-        await pass(AbortSignal.timeout(60_000));await capture!.flush();await pushUntilDrained(relay);
-        await peer!.capture.runRelaySync(page => peer!.relay.pull(page));return readFile(join(rootB, path), "utf8");
-      }, {timeout: 120_000}).toContain("Name: Live again");
-      await restarted.close({settle: false});
+        expect((await liveRow()).ready).toBe(false);
+        return reports();
+      }, {timeout: 120_000}).toBe(2);
+      expect(await liveRow()).toEqual(unadmitted);
+      // The owner keeps editing the file, and the peer gets each edit through ordinary sync.
+      await editOrdinary("Local while blocked", "while-blocked");
+      // A relay restart starts the session host from its store, which still holds the document.
+      await relayServer.stop();
+      relayServer = await spawnSyncRelay(relayOptions);
+      proxy.routeRelayTo(relayServer.baseUrl);
+      await expect.poll(async () => {
+        expect((await liveRow()).ready).toBe(false);
+        return reports();
+      }, {timeout: 120_000}).toBe(1);
+      expect(await liveRow()).toEqual(unadmitted);
+      expect(await hostDocumentState()).toBe("held");
+      await resume();
+      await expect.poll(async () => {
+        expect((await liveRow()).ready).toBe(false);
+        return reports();
+      }, {timeout: 120_000}).toBe(2);
+      expect(await liveRow()).toEqual(unadmitted);
+      // Another document of the workspace still starts live editing.
+      const other = "notes/other.md";
+      await adapter.writeTextFile({workspaceId, versionId: "main", path: other, text: "# Other\n",
+        publish: true, metadata: {origin: "api"}, author: {kind: "human", humanId: "local-person"}});
+      const otherSession = await capture.openYDocSession({path: other, contentKind: "richdoc", onRemoteUpdate: () => undefined});
+      await otherSession.settleNow(); await otherSession.close();
+      await pushUntilDrained(relay);
+      const otherShare = await fetch(`${proxy.origin}/sync/${workspaceId}/shares`, {method: "POST",
+        headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"},
+        body: JSON.stringify({recipientEmail: "native-recipient@dohc.test", paths: ["notes"], access: "edit"})});
+      expect(otherShare.status).toBe(200);
+      const otherEnrollment = await fetch(`${proxy.origin}/sync/${workspaceId}/live-host`, {method: "POST",
+        headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"},
+        body: JSON.stringify({shareId: (await otherShare.json() as {shareId: string}).shareId})});
+      expect([200, 202]).toContain(otherEnrollment.status);
+      await expect.poll(async () => (await discovery()).map(row => row.binding.currentPath), {timeout: 120_000}).toEqual([other]);
+      expect(await liveRow()).toEqual(unadmitted);
     }
     await session.close({settle: false});
   } finally {
+    releaseHostedPulls?.();
     await delivery?.stop(); await peer?.close();
     try {await capture?.stop().catch(() => undefined);} finally {await owner?.close(); await relayServer?.stop(); await proxy.close();
       setDefaultCACertificates(previousRoots); vi.unstubAllEnvs();}
   }
-}, 240_000);
+}, 420_000);
 
 it.skipIf(engine.missing).each([true, false])(
   "settles adoption of an already-open Collection record through the real relay (has id=%s)",

@@ -1332,7 +1332,7 @@ it("captures a document held for an unadmitted live edit once, then not again un
   expect(pushes()).toBeGreaterThan(pushed);
   expect(captures()).toBe(before + 1);
   expect(o.host.isDocumentReady(o.document)).toBe(false);
-  expect(o.host.blocked(o.sibling)).toBe("refused");
+  expect(o.host.blocked(o.sibling)).toBe("live-edit-unadmitted");
   await o.host.update({workspaces, documents: [o.sibling, o.other], ...stay});
   const visited = visits();
   await vi.waitFor(() => expect(visits()).toBeGreaterThan(visited + 2));

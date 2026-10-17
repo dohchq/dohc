@@ -253,6 +253,11 @@ describe("LiveDocumentsDialog", () => {
           reason: "session-host-diverged",
           canResume: false,
         }),
+        row("docs/edited.md", {
+          status: "unavailable",
+          reason: "live-edit-unadmitted",
+          canResume: false,
+        }),
         row("docs/stopped.md", { status: "retired", canResume: true }),
         row("docs/stopped-gone.md", { status: "retired" }),
       ]),
@@ -273,9 +278,17 @@ describe("LiveDocumentsDialog", () => {
       "Stopped by the server",
       "Not started",
       "Server copy doesn't match",
+      "Can't resume",
       "Stopped",
       "Stopped",
     ]);
+    // Only a document edited while live editing was off says why it can't
+    // resume, and that its file still takes edits. It offers no Resume.
+    const edited =
+      "This file changed while live editing was off, so live editing can't resume for it. You can keep editing it in dohc.";
+    expect(screen.getAllByText(edited)).toHaveLength(1);
+    expect(screen.getByTestId("live-document-row-docs/edited.md").textContent).toContain(edited);
+    expect(actions("docs/edited.md")).toEqual(["Stop live editing"]);
     // Only a document whose server copy diverged sends its owner to the server's operator.
     const operator =
       "The server's copy of this workspace no longer matches the synced one. Contact the server's operator.";
@@ -321,6 +334,18 @@ describe("LiveDocumentsDialog", () => {
         "Stopping live editing keeps the file and its history. Share permissions stay unchanged.",
       ),
     ).toBeTruthy();
+  });
+
+  // The warning is on screen before any Stop runs.
+  it("warns before a Stop that editing the stopped file keeps live editing from resuming", async () => {
+    const h = harness();
+    h.load.mockResolvedValue(page([row("docs/a.md")]));
+    render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+    await screen.findByRole("button", { name: "Stop live editing for docs/a.md" });
+    expect(screen.getByTestId("live-documents-stop-warning").textContent).toBe(
+      "If you edit a file while its live editing is stopped, live editing can't resume for it.",
+    );
+    expect(h.stop).not.toHaveBeenCalled();
   });
 
   it("loads the next stopped page and keeps the newest row for a repeated path", async () => {

@@ -195,6 +195,18 @@ describe("owner live document enrollment", () => {
       {path:"stopped.md",status:"retired",reason:"session-host-diverged",canResume:false},
     ],nextCursor:null});
   });
+  // Proves: a deferred Stop does not offer Resume on a document whose server
+  // copy misses an edit made while live editing was off.
+  it("offers no Resume for a deferred Stop on a document edited while live editing was off",async () => {
+    const h=harness();
+    h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"edited.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}}]);
+    h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
+      ? {ok:true,documents:[],nextCursor:null}
+      : {ok:true,documents:[{path:"edited.md",status:"unavailable",reason:"live-edit-unadmitted"}]});
+    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments,{workspaceId})).resolves.toEqual({documents:[
+      {path:"edited.md",status:"unavailable",reason:"live-edit-unadmitted",canResume:false,deferredStop:{unsentEdits:1,editable:true}},
+    ],nextCursor:null});
+  });
   const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
 
   it("lists bounded owner refusals without treating an empty candidate page as complete", async () => {
@@ -261,6 +273,7 @@ describe("owner live document enrollment", () => {
         {path: "refused.md", status: "unavailable", reason: "session-host-refused"},
         {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage"},
         {path: "diverged.md", status: "unavailable", reason: "session-host-diverged"},
+        {path: "edited.md", status: "unavailable", reason: "live-edit-unadmitted"},
       ]});
     await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
       documents: [
@@ -273,6 +286,8 @@ describe("owner live document enrollment", () => {
         {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage", canResume: true},
         // Only the server's operator can continue a diverged server copy.
         {path: "diverged.md", status: "unavailable", reason: "session-host-diverged", canResume: false},
+        // A Resume can't continue a server copy that misses an edit made while live editing was off.
+        {path: "edited.md", status: "unavailable", reason: "live-edit-unadmitted", canResume: false},
       ], nextCursor: "old.md",
     });
     expect(h.request.mock.calls.map((call) => call[1])).toEqual([

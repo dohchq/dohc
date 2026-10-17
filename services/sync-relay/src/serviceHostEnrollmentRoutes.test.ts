@@ -154,6 +154,21 @@ it("reports a document without live-editing history apart from other refusals", 
   expect(await documents()).toEqual([{path: binding.currentPath, status: "unavailable", reason: "session-host-refused"}]);
 });
 
+// Proves: a document whose host copy misses an edit made while live editing
+// was off reads as its own reason. A Resume still asks for one more attempt,
+// which blocks it again with the same reason.
+it("reports a document edited while live editing was off apart from other refusals", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const documents = async () => (await (await f.handle(f.request())).json()).documents;
+  const unadmitted = {path: binding.currentPath, status: "unavailable", reason: "live-edit-unadmitted"};
+  f.host.block(enrolled.objectId, "live-edit-unadmitted");
+  expect(await documents()).toEqual([unadmitted]);
+  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
+  expect(f.host.unblock).toHaveBeenCalledTimes(1);
+  f.host.block(enrolled.objectId, "live-edit-unadmitted");
+  expect(await documents()).toEqual([unadmitted]);
+});
+
 // Proves: a document whose hosted replica diverged reads as its own reason
 // ahead of a block, a Resume cannot change that, and the owner learns nothing
 // of the store. A workspace that changed identity still reads as changed.

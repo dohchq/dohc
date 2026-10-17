@@ -257,6 +257,16 @@ function liveDeliveryCopy(
       Icon: AlertTriangle,
     };
   }
+  // The server's copy misses an edit made while live editing was off, and
+  // nothing the owner does in dohc fixes that yet, so nothing offers a Resume.
+  if (reason === "live-edit-unadmitted") {
+    return {
+      title: "Live editing can't resume",
+      body: "A document in this workspace changed while live editing was off, so the server can't resume live editing for it. You can keep editing it in dohc. People you shared it with can't edit it live. Open Live documents to see which document.",
+      recovery: "live-documents",
+      Icon: AlertTriangle,
+    };
+  }
   if (reason === "restart-required") {
     return {
       title: "Live editing paused",

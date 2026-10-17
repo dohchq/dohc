@@ -815,6 +815,7 @@ describe("server owner peer lifecycle", () => {
     const refused = {path: "refused.md", status: "unavailable", reason: "session-host-refused"};
     const unopened = {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage"};
     const divergedRow = {path: "diverged.md", status: "unavailable", reason: "session-host-diverged"};
+    const edited = {path: "edited.md", status: "unavailable", reason: "live-edit-unadmitted"};
     const others = [{path: "changed.md", status: "unavailable", reason: "workspace-changed"}, {path: "moved.md", status: "unavailable", reason: "document-unavailable"}];
     const ready = {path: "a.md", status: "ready", document};
     // The server says the workspace diverged whenever any of its rows does, and after its owner stopped every one.
@@ -860,6 +861,13 @@ describe("server owner peer lifecycle", () => {
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
       rows = [ready, ...others]; diverged = false; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"));
+      // A document edited while live editing was off outranks a frozen one and
+      // the server's other reasons, but not a refusal a Resume can still help.
+      rows = [ready, ...others, edited]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-edit-unadmitted"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      rows = [...others, edited, refused]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
       // The owner stopped every document, and the server still reports its diverged copy.
       rows = []; diverged = true; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-diverged"));

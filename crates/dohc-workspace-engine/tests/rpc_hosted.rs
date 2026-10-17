@@ -236,6 +236,30 @@ impl HostedRelay {
         );
     }
 
+    /// An ordinary rich document Y.Doc `update` of `object_id` at `path` on
+    /// `lineage`, with its bytes on the relay. A base names its own lineage.
+    fn ydoc(
+        &mut self,
+        origin: &str,
+        seq: i64,
+        object_id: &str,
+        path: &str,
+        update: &[u8],
+        lineage: &str,
+    ) {
+        let sha256 = hex_sha256(update);
+        self.blobs.insert(sha256.clone(), update.to_vec());
+        let relay_seq = self.log.len() as i64 + 1;
+        self.log.push(json!({
+            "relaySeq": relay_seq, "workspaceId": WORKSPACE, "originId": origin,
+            "originSeq": seq, "opKind": "ydoc.update",
+            "payload": {"versionId": "main", "objectId": object_id, "path": path,
+                "contentKind": "richdoc", "updateBlobSha256": sha256,
+                "lineageClaimId": lineage, "isBaseState": sha256 == lineage},
+            "recordedAtMs": 1_000 + relay_seq,
+        }));
+    }
+
     fn write(
         &mut self,
         origin: &str,
@@ -3050,6 +3074,93 @@ async fn a_document_without_lineage_refuses_its_first_capture_only_once_ready() 
         host.capture("b.md", None).await,
         Err((ErrorCode::Conflict, "hosted-document-unready".to_owned()))
     );
+}
+
+/// The ready hold. Stop leaves `doc-b`'s live binding on the session host,
+/// which then refuses the owner's ordinary edit of its lineage, so its copy
+/// here misses that edit. The refusal holds it before the pass commits: the
+/// pass reports it held, registration and capture say it is not ready, and a
+/// restart keeps all of that. A refused edit of another lineage holds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unadmitted_owner_edit_holds_a_ready_document_across_a_restart() {
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.richdoc_append_paragraph("hosted b");
+    let base = ydoc.encode_full_state();
+    let lineage = hex_sha256(&base);
+    let mut relay = HostedRelay::default();
+    relay.log.push(json!({
+        "relaySeq": 1, "workspaceId": WORKSPACE, "originId": "owner", "originSeq": 0,
+        "opKind": "workspace.init", "payload": {}, "recordedAtMs": 1_001,
+    }));
+    relay.ydoc("owner", 1, "doc-b", "b.md", &base, &lineage);
+    relay.share("doc-b", "b.md");
+    let relay = FakeRelay::start(relay);
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut host = SessionHost::start(&scratch, &relay).await;
+    let workspace = json!({"workspaceId": WORKSPACE});
+    host.call(
+        "sync.createHostedReplica",
+        json!({"workspaceId": WORKSPACE, "replicationEpoch": "epoch-2", "streamIdentity": "stream-2"}),
+    )
+    .await
+    .expect("create");
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
+    let binding = json!({
+        "workspaceId": WORKSPACE, "mainVersionId": "main", "objectId": "doc-b",
+        "lineageClaimId": lineage, "currentPath": "b.md",
+        "selectorPaths": ["b.md"], "restoreFenceGeneration": 0,
+    });
+    host.register(&binding).await.expect("register");
+    let refused = |scratch: &ScratchDir| -> i64 {
+        Connection::open(engine_db_path(scratch).expect("db path"))
+            .expect("open db")
+            .query_row(
+                "SELECT COUNT(*) FROM replication_refused_ydoc_blobs",
+                [],
+                |row| row.get(0),
+            )
+            .expect("refusals")
+    };
+    let unready = || Err((ErrorCode::Conflict, "hosted-document-unready".to_owned()));
+
+    let elsewhere = dohc_engine_collab::Ydoc::wire().richdoc_append_paragraph("elsewhere");
+    relay
+        .relay()
+        .ydoc("owner", 2, "doc-b", "b.md", &elsewhere, &"f".repeat(64));
+    host.sync().await;
+    assert_eq!(refused(&scratch), 1);
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("ready"));
+
+    let edit = ydoc.richdoc_append_paragraph("edited while stopped");
+    relay
+        .relay()
+        .ydoc("owner", 3, "doc-b", "b.md", &edit, &lineage);
+    let pass = host
+        .call("sync.pullHosted", workspace.clone())
+        .await
+        .expect("pull");
+    let held = json!([{"objectId": "doc-b", "reason": "hosted-live-edit-unadmitted"}]);
+    assert_eq!(pass["held"], held);
+    assert_eq!(refused(&scratch), 2);
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("held"));
+    assert_eq!(
+        host.register(&binding)
+            .await
+            .map_err(|error| (error.code, error.message)),
+        unready()
+    );
+    assert_eq!(host.capture("b.md", None).await, unready());
+    host.stop().await;
+
+    let mut host = SessionHost::start(&scratch, &relay).await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("held"));
+    assert_eq!(host.capture("b.md", None).await, unready());
+    let again = host.call("sync.pullHosted", workspace).await.expect("pull");
+    assert_eq!(again["held"], held);
+    host.sync().await;
+    assert_eq!(document_state(&scratch, "doc-b").as_deref(), Some("held"));
+    assert_eq!(refused(&scratch), 2);
 }
 
 /// Part 5's held fence under the session host's real publication budget. The

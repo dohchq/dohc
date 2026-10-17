@@ -223,9 +223,12 @@ export async function startSelfHostedLiveHost(options: {
         refused.add(key);
         const store = `Its store is kept at ${join(root, storeName(row))}.`;
         // Until the session host can start a document's Y.Doc itself (#2069), a device must.
+        // Until a stopped document can resume from its owner's current file (#2103), one edited while stopped cannot.
         options.onError?.(new Error(block === "without-lineage"
           ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot start: the document has no live-editing history. Its owner must open it once in dohc on a desktop, then try again. ${store}`
-          : `Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. ${store}`));
+          : block === "live-edit-unadmitted"
+            ? `Live editing of ${row.path} in workspace ${row.workspaceId} cannot resume: the document changed while live editing was off, and the session host's copy is missing that edit. Its owner can keep editing it in dohc. ${store}`
+            : `Live editing of ${row.path} in workspace ${row.workspaceId} stopped until its owner tries again. ${store}`));
       }
       // A workspace with no documents detaches once its replica drained, then
       // releases its enrollments. Its store stays, so a document shared again
