@@ -1,18 +1,21 @@
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
+import { workspaceCreateOffers, type ShareViewWriteScope } from "../../workspaces/shareWriteGate";
 import { APP_VIEW_ID_PREFIX, appViewId, type AppViewId } from "../workbench/workbenchState";
 
 export interface CommandContext {
-  isShareView: boolean;
-  shareViewWritable: boolean;
+  // The share view this workspace is, or null for an ordinary workspace.
+  shareView: ShareViewWriteScope | null;
   activeDocumentKind: string | null;
   pinnedApps: readonly { root: string; label: string }[];
 }
 
 export const COMMAND_AVAILABILITY = {
   always: (_context: CommandContext) => true,
-  collectionWritable: (context: CommandContext) => !context.isShareView || context.shareViewWritable,
+  workspaceWritable: (context: CommandContext) => workspaceCreateOffers(context.shareView).write,
+  folderCreatable: (context: CommandContext) => workspaceCreateOffers(context.shareView).folder,
+  collectionCreatable: (context: CommandContext) => workspaceCreateOffers(context.shareView).collection,
   activeMarkdown: (context: CommandContext) => context.activeDocumentKind === "markdown",
-  localWorkspace: (context: CommandContext) => !context.isShareView,
+  localWorkspace: (context: CommandContext) => context.shareView === null,
   pinnedApp: (context: CommandContext, id: PinnedAppCommandId) =>
     context.pinnedApps.some((app) => pinnedAppCommandId(app.root) === id),
 };
@@ -24,13 +27,13 @@ interface StaticRow {
 }
 
 export const COMMAND_ROWS = {
-  "new-file": { label: "New file", availability: "always" },
-  "new-drawing": { label: "New drawing", availability: "always" },
-  "new-folder": { label: "New folder", availability: "always", capabilityId: "folder.create" },
-  "new-collection": { label: "New collection", availability: "collectionWritable" },
+  "new-file": { label: "New file", availability: "workspaceWritable" },
+  "new-drawing": { label: "New drawing", availability: "workspaceWritable" },
+  "new-folder": { label: "New folder", availability: "folderCreatable", capabilityId: "folder.create" },
+  "new-collection": { label: "New collection", availability: "collectionCreatable" },
   "quick-open": { label: "Go to", availability: "always" },
   "open-workspace": { label: "Open workspace folder…", availability: "always" },
-  "import-files": { label: "Import files", availability: "always" },
+  "import-files": { label: "Import files", availability: "workspaceWritable" },
   "export-workspace": { label: "Export workspace as zip", availability: "always" },
   "toggle-sidebar": { label: "Toggle sidebar", availability: "always" },
   "close-tab": { label: "Close tab", availability: "always" },
