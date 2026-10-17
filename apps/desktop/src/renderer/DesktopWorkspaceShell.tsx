@@ -3940,11 +3940,12 @@ export function DesktopWorkspaceShell(props: {
       event.preventDefault();
       if (command === "command-palette") setPaletteOpen((open) => !open);
       else if (command === "quick-open") setQuickOpenOpen((open) => !open);
-      else commandHandlers[command]();
+      else if (isCommandAvailable(command, commandContext)) commandHandlers[command]();
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
+    commandContext,
     commandHandlers,
     openSettings,
     reportShellError,
@@ -5685,7 +5686,7 @@ export function DesktopWorkspaceShell(props: {
             ) : (
               <EmptyEditorGroup
                 platform={bridge().platform}
-                onNewFile={() => setNewFileOpen(true)}
+                onNewFile={isCommandAvailable("new-file", commandContext) ? commandHandlers["new-file"] : undefined}
                 onOpenPalette={() => setPaletteOpen(true)}
                 onOpenQuickOpen={() => setQuickOpenOpen(true)}
               />
