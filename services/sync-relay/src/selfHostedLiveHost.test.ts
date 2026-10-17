@@ -538,12 +538,14 @@ it("reports a blocked document's store to the operator once per block", async ()
   f.block(binding.objectId);
   await vi.waitFor(() => {f.host.reconcile(); expect(f.onError.mock.calls).toEqual([[reported]]);}, {timeout: 10_000});
   expect(f.host.blocked(binding)).toBe("refused");
+  expect(f.host.stopped(binding)).toBe(true);
   await f.waitPasses();
   expect(f.onError).toHaveBeenCalledTimes(1);
   expect(f.updates.at(-1)!.documents.map(row => row.path)).toEqual(["docs/a.md"]);
   f.unblock(binding.objectId);
   await f.waitPasses();
   expect(f.host.blocked(binding)).toBeUndefined();
+  expect(f.host.stopped(binding)).toBe(false);
   f.block(binding.objectId);
   await vi.waitFor(() => {f.host.reconcile(); expect(f.onError.mock.calls).toEqual([[reported], [reported]]);}, {timeout: 10_000});
   // Resume, and its one more capture blocks again before the next reconciliation.
@@ -610,6 +612,7 @@ it("keeps a diverged store detached and reported after the relay restarts", asyn
   f.diverge();
   await vi.waitFor(() => {f.host.reconcile(); expect(existsSync(marker)).toBe(true);}, {timeout: 10_000});
   expect(f.host.diverged(f.enrollment()!)).toBe(true);
+  expect(f.host.stopped(binding)).toBe(true);
   await f.host.close();
   const onError = vi.fn();
   const restarted = await startSelfHostedLiveHost({trustedAccount: (accountId: string) => ({accountId, name: "Owner name"}), storage: f.storage, history: f.history,
@@ -674,6 +677,7 @@ it("attaches a diverged store again after a restart that came before its marker 
   await f.host.close();
   const restarted = await restart(f);
   expect(restarted.diverged(f.enrollment()!)).toBe(false);
+  expect(restarted.stopped(binding)).toBe(false);
   await vi.waitFor(() => expect(f.starts).toHaveLength(2), {timeout: 10_000});
   await vi.waitFor(() => expect(f.attachedAfter.at(-1)).toEqual([scope.workspaceId]), {timeout: 10_000});
 });

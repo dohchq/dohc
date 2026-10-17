@@ -29,6 +29,7 @@ import { parseNamedLiveConfig } from "./namedLiveConfig.js";
 import type { StorageContext } from "./storage/context.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
 import { liveEditors } from "./liveEditors.js";
+import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
 
 const exchangeKey = "test-exchange-key-".repeat(3), relayHost = "relay.example.test";
 const frames = { receive: { maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096 },
@@ -331,6 +332,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     },
   };
   const captureNative = vi.fn(async () => native);
+  const sessionHostBlocked = vi.fn((_document: {workspaceId: string; objectId: string}) => false);
   const actor = vi.fn(async (request: Request, workspaceId: string) => {
     if (owner || desktop) {
       const bearer = request.headers.get("authorization");
@@ -352,7 +354,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
       maxHttpResponseBytes: 4096, maxSocketBufferedBytes: 4096, connectTimeoutMs: 1000, sendTimeoutMs: 1000, drainPollMs: 10} }) : undefined;
   const routes = owner ? createOwnerLiveRoutes({storage: state.storage, resolveActor: actor, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey,
     frames, bounds, limits: routeLimits, validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input), captureNative, admission}) : createNamedLiveRoutes({ kind: link ? "link" : "named", desktopBearer: desktop, membership: memberships, storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
-    validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input), sessions: desktopAdmission ?? (link ? createLinkLiveBrowserResolver({storage: state.storage, linkKey: key}) : { resolve: application.resolveNamedBrowserSession }), tickets, captureNative, admission });
+    validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input), sessions: desktopAdmission ?? (link ? createLinkLiveBrowserResolver({storage: state.storage, linkKey: key}) : { resolve: application.resolveNamedBrowserSession }), tickets, captureNative, admission, sessionHostBlocked });
   const http = serveFetchHandler({ handler: request => new URL(request.url).pathname === "/sync/live/desktop-open" && desktopAdmission ? desktopAdmission.handle(request) : new URL(request.url).pathname === `/sync/live/${routeKind}-tickets` ? routes.handle(request) : application(request),
     maxBodyBytes: () => 16384, oversized: () => Response.json({}, { status: 404 }), failure: () => Response.json({}, { status: 500 }) });
   const upgrades: Promise<void>[] = [], sockets: WebSocket[] = [];
@@ -407,8 +409,24 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     const closed = new Promise<[number, string]>(resolve => ws.once("close", (code, reason) => resolve([code, reason.toString()])));
     return { ws, status, received, until, closed };
   }
-  return { ...state, frames, binding, post, discriminator, mint, connect, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission };
+  return { ...state, frames, binding, post, discriminator, mint, connect, currentScope, bearer, profile, memberships, tickets, captureNative, native, changes, invalidated, actor, application, routes, desktopAdmission, sessionHostBlocked };
 }
+
+it.each([false, true])("refuses a ticket for a document the session host blocked until the block lifts; link=%s", async link => {
+  const f = await fixture(limits, link);
+  const mint = vi.spyOn(f.tickets, "mint");
+  f.sessionHostBlocked.mockReturnValue(true);
+  const refused = await f.post(`/sync/live/${link ? "link" : "named"}-tickets`, {discriminator: f.discriminator, objectId: binding.objectId});
+  expect([refused.status, await refused.json()]).toEqual(link ? [503, linkRefusalBody("link_live_unavailable")] : [404, {ok: false, error: "not found"}]);
+  expect(f.sessionHostBlocked).toHaveBeenCalledWith({workspaceId: binding.workspaceId, objectId: binding.objectId});
+  expect(mint).not.toHaveBeenCalled();
+  if (link) {
+    const hidden = await f.post("/sync/live/link-tickets", {discriminator: f.discriminator, objectId: "hidden-object"});
+    expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+  }
+  f.sessionHostBlocked.mockReturnValue(false);
+  expect(await f.connect((await f.mint()).token).status).toBe(101);
+});
 
 it.each(["view", "comment"] as const)("names %s access only for an in-scope ticket target", async access => {
   const f = await fixture(limits, true);

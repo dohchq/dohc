@@ -623,6 +623,9 @@ const selfHost = selfHostedLive ? await startSelfHostedLiveHost({trustedAccount:
   relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, key: Buffer.from(linkKey!),
   onError: error => console.error("[sync-relay] self-host live service:", error)}) : undefined;
 const serviceHost = () => selfHost?.current() ?? configuredServiceHost;
+// Browsers are told live editing is unavailable while the self-hosted session host cannot continue the document.
+const sessionHostBlocked = selfHost ? (document: {workspaceId: string; objectId: string}) =>
+  storage.getLiveHostControl()?.configuredMode === "service" && selfHost.stopped(document) : undefined;
 if (selfHost && deployment) serviceEnrollment = createServiceHostEnrollmentRoutes({storage, history: deployment.history, host: selfHost, resolveActor: resolveAccountActor});
 ownerRestoreHost = () => {
   const mode = storage.getLiveHostControl()?.configuredMode;
@@ -649,13 +652,13 @@ if (namedLiveConfig) {
   namedLive = createNamedLiveRoutes({ kind: "named", storage, lookupUserDisplayName, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
     frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
-    sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative, membership, admission });
+    sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative, membership, admission, sessionHostBlocked });
   if (linkLiveEnabled && publicEditRelease) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
     linkLive = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
       frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
-      sessions: createLinkLiveBrowserResolver({storage, linkKey: linkKey!}), tickets, captureNative, membership, admission});
-    linkLiveHttp = createLinkLiveHttp({storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, linkKey: linkKey!});
+      sessions: createLinkLiveBrowserResolver({storage, linkKey: linkKey!}), tickets, captureNative, membership, admission, sessionHostBlocked});
+    linkLiveHttp = createLinkLiveHttp({storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, linkKey: linkKey!, sessionHostBlocked});
     server.once("close", linkLive.close); process.once("SIGINT", linkLive.close); process.once("SIGTERM", linkLive.close);
   }
   if (desktopEditorLimits) {
