@@ -380,6 +380,7 @@ fn prepared_push_missing_blob_at_append_fails_without_advancing_then_retries() {
         push_operation(),
         &LeaseRegistry::default(),
         &ClaimAnnouncer::default(),
+        &mut crate::actor::live_application::Registry::default(),
     );
     assert!(matches!(
         result,

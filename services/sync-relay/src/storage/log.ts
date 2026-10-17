@@ -9,7 +9,7 @@ import {
   type SyncRelayLogRow,
   type SqliteDb,
 } from "./types";
-import { SyncRelayConflictError, SyncRelayBlobMissingError } from "./errors";
+import { SyncRelayConflictError, logBlobsMissing } from "./errors";
 import { referencedBlobShas, versionIdFromVersionCreatePayload } from "./blobReferences";
 import {
   OBJECT_PATH_UPSERT_SQL,
@@ -23,6 +23,7 @@ import {
 import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 import {confirmLiveApplication} from "./liveApplicationAuthorship";
+import {REFUSED_OP_KIND} from "./relayAdmission";
 import { parseLiveAuthorSnapshot, type LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import { SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
 import { stableJsonStringify } from "../canonicalJson";
@@ -47,6 +48,7 @@ export function appendLogBatch(storage: StorageContext, input: {
     originId: string;
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
+    admit?: (ops: SyncRelayLogInput[]) => void;
   }): AppendLogBatchResult {
     return storage.tx(() => appendLogBatchInTransaction(storage, input));
   }
@@ -57,6 +59,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
   originId: string;
   ops: SyncRelayLogInput[];
   guard?: (context: AppendLogBatchGuardContext) => void;
+  admit?: (ops: SyncRelayLogInput[]) => void;
 }): AppendLogBatchResult {
       for (const op of input.ops) {
         if (!Number.isSafeInteger(op.recordedAtMs)) throw new Error("recordedAtMs must be an integer in the safe wire range");
@@ -131,6 +134,14 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
         }
       }
 
+      input.admit?.(newOps);
+      for (const op of newOps) {
+        // Only the relay writes a refusal, and only as one.
+        if ((op.opKind === REFUSED_OP_KIND) !== (op.relayAdmission === "refused")) {
+          throw new Error(`${REFUSED_OP_KIND} rows are written only by the relay`);
+        }
+      }
+
       let batchCoordinates: Map<number, SyncRelayLogInput> | undefined;
       for (const op of newOps) {
         commitHostedSettlement(storage, op, input.workspaceId, input.originId);
@@ -168,18 +179,14 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       }
       if (referencedShas.size > 0) {
         const missing = storage.missingBlobs(input.workspaceId, [...referencedShas]);
-        if (missing.length > 0) {
-          throw new SyncRelayBlobMissingError(
-            `log append references ${missing.length} blob(s) not stored on the relay ` +
-              `(first: ${missing[0]}); (re-)upload the blob(s) and retry`,
-          );
-        }
+        if (missing.length > 0) throw logBlobsMissing(missing);
       }
 
       const insertStmt = storage.db.prepare(
         `INSERT INTO sync_relay_log (
-          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, admitted_author_snapshot_json, settlement_admission_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, admitted_author_snapshot_json, settlement_admission_json,
+          relay_admission
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const objectPathStmt = storage.db.prepare(OBJECT_PATH_UPSERT_SQL);
       const objectMomentStmt = storage.db.prepare(OBJECT_MOMENT_INSERT_SQL);
@@ -195,9 +202,12 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           op.recordedAtMs,
           op.admittedAuthorSnapshot === undefined ? null : JSON.stringify(op.admittedAuthorSnapshot),
           op.settlementAdmission === undefined ? null : JSON.stringify(op.settlementAdmission),
+          op.relayAdmission ?? null,
         );
         inserted += 1;
-        if(op.settlementAdmission?.status === "refused")continue;
+        // A departed publication must move neither projection: either one
+        // alone would bring the document back where it no longer is.
+        if(op.settlementAdmission?.status === "refused" || op.relayAdmission !== undefined)continue;
         // Keep "where is this object now?" answerable by primary
         // key. The relay_seq this row just took IS the order the guard in the
         // upsert compares, so a later moment always wins and an out-of-order
@@ -281,7 +291,7 @@ export function fetchLogPage(storage: StorageContext, input: {
     let statement = logPageStatements.get(storage.db);
     if (!statement) {
       statement = storage.db.prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
          FROM sync_relay_log
          WHERE workspace_id = ? AND relay_seq > ?
          ORDER BY relay_seq
@@ -308,7 +318,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
       input.beforeRelaySeq === null
         ? storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
                FROM sync_relay_log
                WHERE workspace_id = ?
                ORDER BY relay_seq DESC
@@ -317,7 +327,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
             .all(input.workspaceId, input.limit)
         : storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
                FROM sync_relay_log
                WHERE workspace_id = ? AND relay_seq < ?
                ORDER BY relay_seq DESC
@@ -334,7 +344,7 @@ export function fetchLogCoordinate(storage: StorageContext, input: {
   }): SyncRelayLogRow | null {
     const row = storage.db
       .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json, settlement_admission_json, relay_admission
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
       )

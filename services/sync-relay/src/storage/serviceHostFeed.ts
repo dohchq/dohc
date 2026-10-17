@@ -22,9 +22,14 @@ export interface ServiceHostFeedScope {
   readonly workspaceId: string;
   readonly replicationEpoch: string;
   readonly streamIdentity: string;
-  /** Enrolled documents still at their enrolled path, object to path. The host may settle these. */
+  /** Enabled enrolled documents, object to enrolled path. The host may settle these at that path until their release. */
   readonly hosted: ReadonlyMap<string, string>;
-  /** The hosted documents an active Edit grant covers now. The host may read only these. */
+  /** The hosted documents no longer at their enrolled path. Their publications project nowhere. */
+  readonly departed: ReadonlySet<string>;
+  /**
+   * The hosted documents at their path that an active Edit grant covers now
+   * and that their owner has not paused or stopped. The host may read only these.
+   */
   readonly shared: ReadonlyMap<string, string>;
   /** Changes whenever `shared` or the workspace identity changes. */
   readonly token: string;
@@ -33,9 +38,19 @@ export interface ServiceHostFeedScope {
 /** Statement-level snapshots; safe both on the request path and inside a write guard. */
 export function readServiceHostFeedScope(storage: StorageContext, workspaceId: string): ServiceHostFeedScope | null {
   const enrollments = currentServiceHostEnrollments(storage, workspaceId);
-  if (!enrollments.length) return null;
-  // Current enrollments share the workspace's owner and identity.
-  const {ownerUserId, replicationEpoch, streamIdentity} = enrollments[0]!;
+  let ownerUserId: string, replicationEpoch: string, streamIdentity: string;
+  if (enrollments.length) {
+    // Current enrollments share the workspace's owner and identity.
+    ({ownerUserId, replicationEpoch, streamIdentity} = enrollments[0]!);
+  } else {
+    // A Stop can leave an undrained row with enabled=0. Keep the hosted
+    // credential alive so the host can observe the empty scope and retire it.
+    const workspace = storage.currentServiceHostWorkspace(workspaceId, true);
+    if (!workspace) return null;
+    ({ownerUserId, replicationEpoch, streamIdentity} = workspace);
+    const token = createHash("sha256").update(JSON.stringify(["dohc-hosted-scope-v1", workspace.workspaceId, replicationEpoch, streamIdentity, []])).digest("hex");
+    return Object.freeze({workspaceId: workspace.workspaceId, replicationEpoch, streamIdentity, hosted: new Map<string, string>(), departed: new Set<string>(), shared: new Map<string, string>(), token});
+  }
   const selectors = storage.db.prepare(`SELECT s.share_id,s.workspace_id,s.granter_user_id,s.selector_json,s.created_at_ms
     FROM sync_relay_shares s INDEXED BY idx_sync_relay_shares_service_candidates WHERE s.workspace_id=? AND s.granter_user_id=?
       AND EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active' AND g.access='edit')`)
@@ -45,14 +60,16 @@ export function readServiceHostFeedScope(storage: StorageContext, workspaceId: s
       const parsed = parseStoredAnyShareSelectorJson(share.selectorJson), selector = parsed && effectiveShareSelector(parsed, "edit");
       return selector && isLiveEditShareSelector(selector) && canonicalLiveSelector(share, selector) ? [selector] : [];
     });
-  const hosted = new Map<string, string>(), shared = new Map<string, string>();
+  const hosted = new Map<string, string>(), departed = new Set<string>(), shared = new Map<string, string>();
   for (const row of enrollments) {
-    if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) continue;
     hosted.set(row.objectId, row.path);
-    if (selectors.some(selector => pathVisibleThroughShare(selector, row.path))) shared.set(row.objectId, row.path);
+    if (storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path: row.path}) !== row.objectId) departed.add(row.objectId);
+    // A Pause cuts reads at once, like a revoked grant, while the enabled
+    // binding stays writable until the host releases it.
+    else if (row.ownerStop === null && selectors.some(selector => pathVisibleThroughShare(selector, row.path))) shared.set(row.objectId, row.path);
   }
   const token = createHash("sha256").update(JSON.stringify(["dohc-hosted-scope-v1", workspaceId, replicationEpoch, streamIdentity, [...shared]])).digest("hex");
-  return Object.freeze({workspaceId, replicationEpoch, streamIdentity, hosted, shared, token});
+  return Object.freeze({workspaceId, replicationEpoch, streamIdentity, hosted, departed, shared, token});
 }
 
 /** One document's rows after a relay sequence, in relay order. Callers still decide each row. */
