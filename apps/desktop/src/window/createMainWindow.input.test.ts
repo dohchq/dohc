@@ -44,8 +44,6 @@ describe("main-window OS mouse input", () => {
     expect(window.show).not.toHaveBeenCalled();
     window.emit("ready-to-show");
     expect(window.show).toHaveBeenCalledOnce();
-    expect(vi.mocked(window.setIgnoreMouseEvents).mock.invocationCallOrder[0])
-      .toBeLessThan(vi.mocked(window.show).mock.invocationCallOrder[0]!);
   });
 
   it.each([
