@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { CHANNELS } from "./channels";
+import type { shareProposalOperations } from "./shareOperations";
+import type { OperationHandlers } from "./operationTable";
 import {
-  ListShareProposalsPayload, ListShareProposalsResult,
-  ReadShareProposalChangesPayload, ReadShareProposalChangesResult,
-  ReadShareProposalFileContentPayload, ReadShareProposalFileContentResult,
-  SettleShareProposalPayload, SettleShareProposalResult,
-  SubmitShareChangesPayload, resolveSubmitShareChangesResult,
-  PushShareDirectWritesPayload, PushShareDirectWritesResult, MAX_DIRECT_WRITE_ROWS, type DirectWriteRow,
-  ListMyShareChangesPayload, ListMyShareChangesResult,
-  WithdrawShareChangesPayload, WithdrawShareChangesResult,
+  ListShareProposalsResult,
+  ReadShareProposalChangesResult,
+  ReadShareProposalFileContentResult,
+  SettleShareProposalResult,
+  resolveSubmitShareChangesResult,
+  PushShareDirectWritesResult, MAX_DIRECT_WRITE_ROWS, type DirectWriteRow,
+  ListMyShareChangesResult,
+  WithdrawShareChangesResult,
 } from "./bridgeContract";
 import {
   assertShareProposalGranter, requireShareViewMembership, requireShareViewProposalScope,
@@ -55,15 +56,9 @@ interface WorkspaceOperation {
   assertCurrent(): void;
 }
 
-export function registerShareProposalsIpcHandlers<
-  Sender,
-  Event extends { sender: Sender },
+export function createShareProposalsIpc<
   Operation extends WorkspaceOperation,
 >(dependencies: {
-  registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
-  assertTrustedSender(event: Event): void;
-  withRendererWorkspaceOperation<Result>(sender: Sender, workspaceId: string, inactiveMessage: string,
-    work: (operation: Operation) => Promise<Result>): Promise<Result>;
   /** Main's own operation on a workspace, whichever workspace its windows show. */
   withWorkspaceAuthority<Result>(workspaceId: string, work: (operation: WorkspaceOperation) => Promise<Result>): Promise<Result>;
   /**
@@ -87,9 +82,9 @@ export function registerShareProposalsIpcHandlers<
   shareViewFiles: Pick<ShareViewFiles, "reconcile">;
   receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "relayFor">;
   automationDefinitionsChanged?(workspaceId: string): void;
-}): { shareViewEdited(workspaceId: string): void; recordCreated(workspaceId: string): void } {
+}) {
+  type Handlers = OperationHandlers<typeof shareProposalOperations, unknown, Operation>;
   const {
-    registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
     warmCredentialCache, currentCredentials, currentCredentialGeneration, normalizeServerUrl,
     isRecordValue, readOwnedWorkspaceTextFor, activity, listShareProposals, readShareProposal,
     readShareProposalOp, settleShareProposal, listMyShareProposals, withdrawShareProposal,
@@ -131,9 +126,8 @@ export function registerShareProposalsIpcHandlers<
     );
   }
 
-  function withShareProposalGranterOperation<Result>(
-    sender: Sender,
-    workspaceId: string,
+  async function withShareProposalGranterOperation<Result>(
+    operation: Operation,
     work: (scope: {
       resolve(): ShareProposalGranterScope;
       assert(scope: ShareProposalGranterScope): void;
@@ -141,63 +135,56 @@ export function registerShareProposalsIpcHandlers<
       queueCloudSync(): void;
     }) => Promise<Result>,
   ): Promise<Result> {
-    return withRendererWorkspaceOperation(
-      sender,
-      workspaceId,
-      "Share changes stopped because this window changed workspaces.",
-      async (operation) => {
-        await warmCredentialCache();
-        operation.assertCurrent();
-        const resolve = (): ShareProposalGranterScope => {
-          operation.assertCurrent();
-          const workspace = operation.workspace;
-          assertShareProposalGranter(workspace.shareView);
-          const remote = workspace.remote;
-          if (!remote) throw new Error("Sync this workspace before sharing.");
-          const credentials = requireCredentials(currentCredentials());
-          if (!workspaceRemoteMatchesCredentials(remote, credentials)) {
-            if (
-              normalizeServerUrl(credentials.serverUrl) !==
-              normalizeServerUrl(remote.serverUrl)
-            ) {
-              throw new Error("Sign in to the cloud server this workspace uses.");
-            }
-            throw new Error("Sign in to the account that synced this workspace.");
-          }
-          if (!credentials.relayUrl) {
-            throw new Error(
-              "Reconnect your server to refresh its connection settings, then try again.",
-            );
-          }
-          return {
-            workspaceId: workspace.workspaceId,
-            attachmentId: workspace.attachmentId,
-            rootPath: workspace.rootPath,
-            relay: {
-              baseUrl: normalizeServerUrl(credentials.relayUrl),
-              token: credentials.token,
-              fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
-            },
-            credentialGeneration: currentCredentialGeneration(),
-          };
-        };
-        return await work({
-          resolve,
-          assert(scope) {
-            if (!sameShareProposalGranterScope(scope, resolve())) {
-              throw new Error(
-                "Share changes stopped because this workspace's cloud binding changed.",
-              );
-            }
-          },
-          readText: (path) => readOwnedWorkspaceTextFor(operation.workspace, path),
-          queueCloudSync: () => {
-            operation.assertCurrent();
-            activity.queueCloudSync(operation.workspace.workspaceId);
-          },
-        });
+    await warmCredentialCache();
+    operation.assertCurrent();
+    const resolve = (): ShareProposalGranterScope => {
+      operation.assertCurrent();
+      const workspace = operation.workspace;
+      assertShareProposalGranter(workspace.shareView);
+      const remote = workspace.remote;
+      if (!remote) throw new Error("Sync this workspace before sharing.");
+      const credentials = requireCredentials(currentCredentials());
+      if (!workspaceRemoteMatchesCredentials(remote, credentials)) {
+        if (
+          normalizeServerUrl(credentials.serverUrl) !==
+          normalizeServerUrl(remote.serverUrl)
+        ) {
+          throw new Error("Sign in to the cloud server this workspace uses.");
+        }
+        throw new Error("Sign in to the account that synced this workspace.");
+      }
+      if (!credentials.relayUrl) {
+        throw new Error(
+          "Reconnect your server to refresh its connection settings, then try again.",
+        );
+      }
+      return {
+        workspaceId: workspace.workspaceId,
+        attachmentId: workspace.attachmentId,
+        rootPath: workspace.rootPath,
+        relay: {
+          baseUrl: normalizeServerUrl(credentials.relayUrl),
+          token: credentials.token,
+          fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
+        },
+        credentialGeneration: currentCredentialGeneration(),
+      };
+    };
+    return await work({
+      resolve,
+      assert(scope) {
+        if (!sameShareProposalGranterScope(scope, resolve())) {
+          throw new Error(
+            "Share changes stopped because this workspace's cloud binding changed.",
+          );
+        }
       },
-    );
+      readText: (path) => readOwnedWorkspaceTextFor(operation.workspace, path),
+      queueCloudSync: () => {
+        operation.assertCurrent();
+        activity.queueCloudSync(operation.workspace.workspaceId);
+      },
+    });
   }
 
   // The RECIPIENT lane's scope. The pinned grant and the share id come from
@@ -220,8 +207,7 @@ export function registerShareProposalsIpcHandlers<
   }
 
   function withShareProposalRecipientOperation<Result>(
-    sender: Sender,
-    workspaceId: string,
+    operation: Operation,
     resolveScope: (shareView: unknown) => ShareViewProposalScope,
     work: (scope: {
       resolve(): ShareProposalRecipientScope;
@@ -229,12 +215,7 @@ export function registerShareProposalsIpcHandlers<
     }) => Promise<Result>,
   ): Promise<Result> {
     return withRecipientScope(
-      (inner) => withRendererWorkspaceOperation(
-        sender,
-        workspaceId,
-        "Share changes stopped because this window changed workspaces.",
-        inner,
-      ),
+      (inner) => inner(operation),
       resolveScope,
       work,
     );
@@ -358,12 +339,9 @@ export function registerShareProposalsIpcHandlers<
     });
   }
 
-  registerHandler(CHANNELS.listShareProposals, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListShareProposalsPayload.parse(payload);
+  const listShareProposalsHandler: Handlers["listShareProposals"] = async (_input, { operation }) => {
     return withShareProposalGranterOperation(
-      event.sender,
-      input.workspaceId,
+      operation,
       async (operation) => {
         const scope = operation.resolve();
         const proposals = await listShareProposals({
@@ -382,14 +360,11 @@ export function registerShareProposalsIpcHandlers<
         });
       },
     );
-  });
+  };
 
-  registerHandler(CHANNELS.readShareProposalChanges, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ReadShareProposalChangesPayload.parse(payload);
+  const readShareProposalChangesHandler: Handlers["readShareProposalChanges"] = async (input, { operation }) => {
     return withShareProposalGranterOperation(
-      event.sender,
-      input.workspaceId,
+      operation,
       async (operation) => {
         const scope = operation.resolve();
         const proposal = await readShareProposal({
@@ -410,14 +385,11 @@ export function registerShareProposalsIpcHandlers<
         });
       },
     );
-  });
+  };
 
-  registerHandler(CHANNELS.readShareProposalFileContent, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ReadShareProposalFileContentPayload.parse(payload);
+  const readShareProposalFileContentHandler: Handlers["readShareProposalFileContent"] = async (input, { operation }) => {
     return withShareProposalGranterOperation(
-      event.sender,
-      input.workspaceId,
+      operation,
       async (operation) => {
         const scope = operation.resolve();
         const op = await readShareProposalOp({
@@ -447,14 +419,11 @@ export function registerShareProposalsIpcHandlers<
         });
       },
     );
-  });
+  };
 
-  registerHandler(CHANNELS.settleShareProposal, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SettleShareProposalPayload.parse(payload);
+  const settleShareProposalHandler: Handlers["settleShareProposal"] = async (input, { operation }) => {
     return withShareProposalGranterOperation(
-      event.sender,
-      input.workspaceId,
+      operation,
       async (operation) => {
         const scope = operation.resolve();
         const settled = await settleShareProposal({
@@ -471,15 +440,12 @@ export function registerShareProposalsIpcHandlers<
         return SettleShareProposalResult.parse({ state: settled.state });
       },
     );
-  });
+  };
 
-  registerHandler(CHANNELS.submitShareChanges, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SubmitShareChangesPayload.parse(payload);
+  const submitShareChangesHandler: Handlers["submitShareChanges"] = async (input, { operation }) => {
     // Sending needs the edit level.
     return withShareProposalRecipientOperation(
-      event.sender,
-      input.workspaceId,
+      operation,
       requireShareViewProposalScope,
       async (operation) => {
         const beforeReconcile = operation.resolve();
@@ -530,7 +496,7 @@ export function registerShareProposalsIpcHandlers<
         return result;
       },
     );
-  });
+  };
 
   // Writes the share view's changes to a Collection's own files straight into
   // the owner's workspace (ADR 0013), as main's own operation, so a push goes
@@ -597,30 +563,18 @@ export function registerShareProposalsIpcHandlers<
 
   // A view pushes when it opens, so changes a closed view left go then. The
   // push runs in main's queue for the view.
-  registerHandler(CHANNELS.pushShareDirectWrites, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = PushShareDirectWritesPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Share changes stopped because this window changed workspaces.",
-      async (operation) => {
-        requireShareViewProposalScope(operation.workspace.shareView);
-        const workspaceId = operation.workspace.workspaceId;
-        await directWrites.pushNow(workspaceId);
-        operation.assertCurrent();
-      },
-    );
-  });
+  const pushShareDirectWritesHandler: Handlers["pushShareDirectWrites"] = async (_input, { operation }) => {
+    requireShareViewProposalScope(operation.workspace.shareView);
+    const workspaceId = operation.workspace.workspaceId;
+    await directWrites.pushNow(workspaceId);
+    operation.assertCurrent();
+  };
 
-  registerHandler(CHANNELS.listMyShareChanges, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListMyShareChangesPayload.parse(payload);
+  const listMyShareChangesHandler: Handlers["listMyShareChanges"] = async (input, { operation }) => {
     // SEEING what was already sent needs membership only: a downgrade must
     // not hide the changes it can no longer add to.
     return withShareProposalRecipientOperation(
-      event.sender,
-      input.workspaceId,
+      operation,
       requireShareViewMembership,
       async (operation) => {
         const scope = operation.resolve();
@@ -639,15 +593,12 @@ export function registerShareProposalsIpcHandlers<
         });
       },
     );
-  });
+  };
 
-  registerHandler(CHANNELS.withdrawShareChanges, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = WithdrawShareChangesPayload.parse(payload);
+  const withdrawShareChangesHandler: Handlers["withdrawShareChanges"] = async (input, { operation }) => {
     // Taking back needs membership only, for the same reason.
     return withShareProposalRecipientOperation(
-      event.sender,
-      input.workspaceId,
+      operation,
       requireShareViewMembership,
       async (operation) => {
         const scope = operation.resolve();
@@ -667,9 +618,21 @@ export function registerShareProposalsIpcHandlers<
         return WithdrawShareChangesResult.parse({ state: settled.state });
       },
     );
-  });
+  };
 
-  return { shareViewEdited: directWrites.edited, recordCreated: workspaceId => {
-    void directWrites.pushNow(workspaceId);
-  } };
+  return {
+    handlers: {
+      listShareProposals: listShareProposalsHandler,
+      readShareProposalChanges: readShareProposalChangesHandler,
+      readShareProposalFileContent: readShareProposalFileContentHandler,
+      settleShareProposal: settleShareProposalHandler,
+      submitShareChanges: submitShareChangesHandler,
+      pushShareDirectWrites: pushShareDirectWritesHandler,
+      listMyShareChanges: listMyShareChangesHandler,
+      withdrawShareChanges: withdrawShareChangesHandler,
+    },
+    shareViewEdited: directWrites.edited, recordCreated: (workspaceId: string) => {
+      void directWrites.pushNow(workspaceId);
+    },
+  };
 }

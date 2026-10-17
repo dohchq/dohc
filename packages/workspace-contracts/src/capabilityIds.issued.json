@@ -197,5 +197,19 @@
   "share.mount.add",
   "share.mounts.refresh",
   "share.mount.remove",
-  "share.view.open"
+  "share.view.open",
+  "share.proposals.list",
+  "share.proposal.read",
+  "share.proposal.file.read",
+  "share.proposal.settle",
+  "share.proposal.submit",
+  "share.direct.writes.push",
+  "share.proposals.sent.list",
+  "share.proposal.withdraw",
+  "group.share",
+  "group.joined.list",
+  "group.shares.list",
+  "group.join",
+  "group.leave",
+  "share.skips.dismiss"
 ]
