@@ -163,7 +163,8 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
   if (env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS !== undefined) {
     if (!namedLiveGatewayLimits) throw new Error("Named browser editing requires the named live gateway.");
     namedRecipientBrowserLimits = parseNamedLiveBrowserLimits(JSON.parse(env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS));
-    if (namedRecipientBrowserLimits.provider.frames.receive.maxFrameBytes > namedLiveGatewayLimits.maxFrameBytes) {
+    if (namedRecipientBrowserLimits.provider.frames.receive.maxFrameBytes > namedLiveGatewayLimits.maxFrameBytes ||
+      namedRecipientBrowserLimits.provider.frames.maxQueuedBytes > namedLiveGatewayLimits.maxPendingBytes) {
       throw new Error("Named browser frames exceed gateway capacity.");
     }
   }
@@ -176,8 +177,11 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== "editor,gateway,requests") throw new Error("Invalid link live limits.");
     const fields = value as Record<string, unknown>;
     linkLive = {publicOrigin, gateway: parseLiveGatewayLimits(fields.gateway), requests: parseNamedLiveBrowserClientLimits(fields.requests), editor: parseNamedLiveBrowserLimits(fields.editor)};
-    if (linkLive.editor.provider.frames.receive.maxFrameBytes > linkLive.gateway.maxFrameBytes) throw new Error("Link browser frames exceed gateway capacity.");
+    if (linkLive.editor.provider.frames.receive.maxFrameBytes > linkLive.gateway.maxFrameBytes ||
+      linkLive.editor.provider.frames.maxQueuedBytes > linkLive.gateway.maxPendingBytes) throw new Error("Link browser frames exceed gateway capacity.");
   }
+
+  if (namedLiveGatewayLimits && linkLive && namedLiveGatewayLimits.maxBufferedBytes !== linkLive.gateway.maxBufferedBytes) throw new TypeError("Live gateways must share one buffer budget.");
 
   const publicEditRelease = parsePublicEditRelease(env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? undefined : JSON.parse(env.DOHC_PUBLIC_EDIT_RELEASE));
   if (publicEditRelease && !linkLive) throw new Error("Public Edit release requires configured link live limits and relay exchange.");

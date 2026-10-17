@@ -1,3 +1,4 @@
+import {createLiveBufferBudget} from "@dohc/live-session-contract/live-connection";
 import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -14,13 +15,13 @@ const frames = { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxU
 const binding = { workspaceId: "workspace", mainVersionId: "main", objectId: "document", lineageClaimId: "lineage",
   currentPath: "document.md", selectorPaths: ["document.md"], restoreFenceGeneration: 0 };
 const stops: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const stop of stops.splice(0).reverse()) await stop(); });
+afterEach(async () => { for (const stop of stops.splice(0).reverse()) await stop(); vi.useRealTimers(); });
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: unknown) => void;
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-function fixture(result: "success" | "retry" | "refused" = "success", limitCredit = false) {
+function fixture(result: "success" | "retry" | "refused" = "success", limitCredit = false, reserveBytes?: (size: number) => () => void) {
   const provider = createNamedLiveProvider({ frames, maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4 });
   const doc = new Y.Doc();
   const content = new Y.XmlText(); content.insert(0, "base");
@@ -91,7 +92,7 @@ function fixture(result: "success" | "retry" | "refused" = "success", limitCredi
     pulse();
   }, close() { serverReady.promise.then(server => server.close()); } });
   clientReady.resolve(route);
-  const server = createNamedLiveFrameSession({ host, frames, transport: {
+  const server = createNamedLiveFrameSession({ host, frames, reserveBytes, transport: {
     async send(bytes) {
       const frame = decodeLiveFrame(bytes, frames.receive.maxFrameBytes); sent.push(frame);
       if (stall?.(frame)) { stalled = deferred(); pulse(); await stalled.promise; stalled = undefined; }
@@ -103,6 +104,7 @@ function fixture(result: "success" | "retry" | "refused" = "success", limitCredi
   stops.push(async () => { server.close(); provider.close(); await server.settled(); await route.settled(); doc.destroy(); provider.doc.destroy(); });
   return { provider, doc, route, server, submitted, sent, until, invalidated, syncClosed, hostClosed,
     metrics: () => ({ pulls, leased, releases, stalled: !!stalled }),
+    accept() { result = "success"; },
     edit(text: string) { const content = (provider.body.get(0) as Y.XmlElement).get(0) as Y.XmlText; content.insert(content.length, text); },
     peerEdit(text: string) { const vector = Y.encodeStateVector(doc); content.insert(content.length, text); pull.resolve({ journalCursor: ++cursor, updateBytes: Y.encodeStateAsUpdate(doc, vector) }); },
     stall(predicate: (frame: LiveFrame) => boolean) { stall = predicate; },
@@ -127,10 +129,23 @@ it("round-trips canonical V1 bytes and exact application ACK identity through th
   expect(f.submitted).toHaveLength(1);
 });
 
-it.each(["retry", "refused"] as const)("preserves the browser draft after a server %s", async result => {
-  const f = fixture(result); await f.until(() => f.provider.state().status === "live"); f.edit(" draft");
-  await f.until(() => f.provider.state().status === (result === "retry" ? "disconnected" : "quarantined"));
-  expect(f.provider.state()).toMatchObject({ pendingUpdates: 1, lastApplied: null });
+it("keeps a retry result live and acknowledges resubmission on the same session", async () => {
+  const f = fixture("retry"); await f.until(() => f.provider.state().status === "live");
+  vi.useFakeTimers(); f.edit(" draft");
+  await f.until(() => f.provider.state().reason === "application-pending");
+  expect(f.server.usage().closed).toBe(false); expect(f.hostClosed).not.toHaveBeenCalled();
+  expect(f.provider.state()).toMatchObject({status: "live", pendingUpdates: 1});
+  f.accept();
+  await vi.advanceTimersByTimeAsync(250);
+  await f.until(() => f.provider.state().pendingUpdates === 0);
+  expect(f.submitted).toHaveLength(2);
+  expect(f.submitted[1]).toEqual(f.submitted[0]);
+  expect(f.server.usage().closed).toBe(false);
+});
+it("closes a terminal refusal and retains the browser draft", async () => {
+  const f = fixture("refused"); await f.until(() => f.provider.state().status === "live"); f.edit(" draft");
+  await f.until(() => f.provider.state().status === "quarantined");
+  expect(f.provider.state()).toMatchObject({pendingUpdates: 1, lastApplied: null});
   expect(f.provider.body.toString()).toContain("draft"); await f.server.settled();
   expect(f.server.usage().closed).toBe(true); expect(f.hostClosed).toHaveBeenCalledTimes(1);
 });
@@ -166,4 +181,17 @@ it.each(["initial", "submit", "send"] as const)("releases pending %s work on sta
   expect(f.server.usage()).toMatchObject({ closed: true, pulling: false, submitting: false, opening: false });
   expect(f.metrics().leased).toBe(0); expect(f.hostClosed).toHaveBeenCalledTimes(1);
   if (stage === "submit") expect(f.provider.state().pendingUpdates).toBe(1);
+});
+
+it("holds shared sync output capacity until send completion and releases on close", async () => {
+  const budget = createLiveBufferBudget(65_536), f = fixture("success", false, budget.reserve);
+  f.stall(frame => frame.kind === "chunk");
+  await f.until(() => f.metrics().stalled);
+  const initial = f.sent.find(frame => frame.kind === "begin" && frame.purpose === "initial-sync");
+  expect(initial).toBeDefined();
+  if (initial?.kind !== "begin") throw new Error("Initial sync missing");
+  const chunk = f.sent.at(-1)!;
+  expect(budget.usage()).toBe(initial.totalBytes + encodeLiveFrame(chunk, frames.receive.maxFrameBytes).byteLength);
+  f.server.close(); await f.server.settled(); await f.route.settled();
+  expect(budget.usage()).toBe(0);
 });

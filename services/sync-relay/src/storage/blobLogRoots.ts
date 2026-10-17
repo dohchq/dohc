@@ -1,6 +1,9 @@
+import { REFUSED_OP_KIND } from "./relayAdmission";
 import type { SqliteDb } from "./types";
 
 export const BLOB_LOG_TEXT_CHUNK = 32_768;
+/** A refusal's digest names a payload the relay never stored, not a blob. */
+export const REFERENCES_BLOBS = `op_kind <> '${REFUSED_OP_KIND}'`;
 const PAGE_ROWS = 32;
 
 export function isCanonicalBlobSha(sha: string): boolean {
@@ -36,9 +39,9 @@ export function currentBlobLogSequence(db: SqliteDb, workspaceId: string): numbe
 export function* blobLogPayloadChunks(db: SqliteDb, workspaceId: string, throughSeq: number | null): Generator<string> {
   if (throughSeq === null) return;
   const firstPage = db.prepare(`SELECT relay_seq, substr(payload_json, 1, ?) AS payload
-    FROM sync_relay_log WHERE workspace_id = ? AND relay_seq <= ? ORDER BY relay_seq LIMIT ?`);
+    FROM sync_relay_log WHERE workspace_id = ? AND relay_seq <= ? AND ${REFERENCES_BLOBS} ORDER BY relay_seq LIMIT ?`);
   const nextPage = db.prepare(`SELECT relay_seq, substr(payload_json, 1, ?) AS payload
-    FROM sync_relay_log WHERE workspace_id = ? AND relay_seq > ? AND relay_seq <= ? ORDER BY relay_seq LIMIT ?`);
+    FROM sync_relay_log WHERE workspace_id = ? AND relay_seq > ? AND relay_seq <= ? AND ${REFERENCES_BLOBS} ORDER BY relay_seq LIMIT ?`);
   const continuation = db.prepare(`SELECT substr(payload_json, ?, ?) AS payload
     FROM sync_relay_log WHERE workspace_id = ? AND relay_seq = ?`);
   let afterSeq: number | null = null;

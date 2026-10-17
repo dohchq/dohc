@@ -741,6 +741,16 @@ impl Registry {
             .map(|entry| &mut entry.application)
             .ok_or(RuntimeError::ActorUnavailable)
     }
+
+    /// Release every registration of `object_ids` in `workspace_id`, whichever
+    /// owner holds it, in memory only. Their durable application state stays.
+    pub(super) fn release(&mut self, workspace_id: &str, object_ids: &[String]) {
+        if let Some(entry) = self.0.get_mut(workspace_id) {
+            for object_id in object_ids {
+                entry.application.release(object_id);
+            }
+        }
+    }
 }
 
 pub(super) enum Request {
