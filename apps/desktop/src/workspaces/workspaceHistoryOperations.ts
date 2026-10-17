@@ -144,6 +144,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
     writable(operation); operationId(input.operationId);
     const { rootPath, workspaceId } = operation.workspace;
     await waitForDeleteRecovery(input.operationId, operation.signal);
+    if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");
     writable(operation);
     return await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
       writable(operation);
@@ -163,5 +164,9 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
       if (!record) throw new Error(deleted ? missingDeleteRecoveryReason : unsupported);
       return undoDeleteRecovery(rootPath, record, author, options.history, workspaceId, () => writable(operation), markChanged);
     });
-  } catch (error) { return failure(error, "undo"); }
+  } catch (error) {
+    // Refuse through the authority wrapper before its final currentness check.
+    if (operation.signal.aborted) throw new Error("This workspace was closed. Open it again.");
+    return failure(error, "undo");
+  }
 }

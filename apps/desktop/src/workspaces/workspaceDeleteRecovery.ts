@@ -158,11 +158,11 @@ export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPla
     if (!plan.noUndo && trashed && record.paths.length) {
       const where = `in the ${systemTrash}`;
       plan.noUndo = `Cannot undo the delete. ${record.paths.join(", ")} ${record.paths.length === 1 ? "is" : "are"} ${where}. Restore ${record.paths.length === 1 ? "it" : "them"} there.`;
-    }
-    if (plan.noUndo) {
       record.noUndo = plan.noUndo;
       await save(root, record).catch(() => undefined);
       schedulePrune(root);
+    }
+    if (plan.noUndo) {
       return { operationId, undo: { available: false, reason: plan.noUndo, paths: record.paths } };
     }
     await save(root, record);

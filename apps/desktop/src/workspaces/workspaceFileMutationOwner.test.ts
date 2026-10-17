@@ -300,12 +300,12 @@ describe("WorkspaceFileMutationOwner", () => {
     const release = beginPendingDeleteRecovery(operationId);
     let result: unknown;
     const undo = test.owner.undoHistoryOperation(trustedEvent, { workspaceId: test.workspace.workspaceId, operationId })
-      .then(value => { result = value; });
+      .then(value => { result = value; }, error => { result = { ok: false, reason: error.message }; });
     try {
       await vi.waitFor(() => expect(test.rendererOperationCalls).toHaveBeenCalledOnce());
       expect(result).toBeUndefined();
       test.retirement.abort();
-      await vi.waitFor(() => expect(result).toEqual({ ok: false, reason: "File change stopped because this window changed workspaces." }));
+      await vi.waitFor(() => expect(result).toEqual({ ok: false, reason: "This workspace was closed. Open it again." }));
       expect(test.history.readHistoryPage).not.toHaveBeenCalled();
       expect(test.history.undoHistoryOperation).not.toHaveBeenCalled();
     } finally { release(); await undo; }

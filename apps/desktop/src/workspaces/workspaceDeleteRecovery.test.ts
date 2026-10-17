@@ -74,6 +74,18 @@ function recovery(result: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>
 }
 
 describe("delete recovery", () => {
+  it.each([false, true])("keeps History readable and the invalid-path Undo refusal (system accepts=%s)", async accepts => {
+    const f = await fixture(undefined, accepts);
+    await f.write("folder/.dohc", "untracked");
+    const result = await f.remove(true);
+    expect(result).toMatchObject({ undo: { available: false,
+      reason: "Cannot undo the delete. Invalid recovery path: folder/.dohc. Restore it from the trash." } });
+    expect(await readDeleteRecovery(f.root, result.operationId!)).toBeUndefined();
+    expect(await readWorkspaceHistoryOperation(f.operation, { operationId: result.operationId! }, f.history))
+      .toMatchObject({ ok: true, members: [{ operation: "delete", path: "folder/tracked.txt" }] });
+    expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+  });
+
   it.each(["read", "undo"] as const)("an agent delete saves recovery before %s queued at History commit", async action => {
     const f = await fixture();
     let queued: Promise<unknown> | undefined;

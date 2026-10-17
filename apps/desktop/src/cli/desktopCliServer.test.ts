@@ -778,7 +778,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
       }
       expect(await f.invoke("fileMove", { fromPath: "next.txt", toPath: "after.txt" })).toMatchObject({ ok: true });
       await f.authorities.close();
-      if (undo) expect(await undo).toMatchObject({ ok: false, reason: expect.stringContaining("retired workspace authority") });
+      if (undo) expect(await undo).toEqual({ ok: false, reason: "This workspace was closed. Open it again." });
     } finally {
       released.release();
       expect(await pending).toMatchObject({ ok: true });
