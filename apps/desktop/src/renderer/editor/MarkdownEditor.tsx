@@ -23,6 +23,7 @@ import {
   DohcMarkdownTable,
   DohcTaskItem,
   escapeHighlightMarkdown,
+  MarkdownListItem,
   MarkdownOrderedList,
   MarkdownTaskList,
 } from "@dohc/ydoc-projection/markdown-extensions";
@@ -268,6 +269,7 @@ const DROP_CURSOR_OPTIONS = { color: "var(--dohc-accent)", width: 2 };
 const LOCAL_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
   orderedList: false,
+  listItem: false,
   dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
@@ -275,6 +277,7 @@ const COLLAB_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
   undoRedo: false,
   orderedList: false,
+  listItem: false,
   dropcursor: DROP_CURSOR_OPTIONS,
   link: LINK_MARK_OPTIONS,
 });
@@ -315,6 +318,7 @@ const TABLE_EXTENSION = DohcMarkdownTable.configure({
   allowTableNodeSelection: true,
 });
 const STATIC_EDITOR_EXTENSIONS = [
+  MarkdownListItem,
   MarkdownOrderedList,
   MarkdownTaskList,
   DohcTaskItem,

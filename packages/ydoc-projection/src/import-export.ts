@@ -15,9 +15,12 @@ import {
   dohcMarkdownExtensions,
   escapeHighlightMarkdown,
   GFM_TABLE_CELL_BLOCK_SEPARATOR,
+  MarkdownListItem,
   MarkdownOrderedList,
+  DohcProjectedMarkdownLists,
   MarkdownParagraph,
   MarkdownTaskList,
+  markdownListParseState,
 } from './dohc-markdown-extensions.js'
 import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence, codeBlockFence } from './markdown-fence.js'
@@ -58,7 +61,8 @@ const PARSE_REFERENCE_RE = new RegExp(
 // until its tag spans are read, so only the serializer's `&lt;` and `&gt;`
 // open and close one.
 let parseReferences: ReadonlyMap<string, string> = new Map()
-let rawHtmlMarkup: { lt: string; gt: string } = { lt: '<', gt: '>' }
+let parseTabs: ReadonlyMap<string, string> = new Map()
+let rawHtmlMarkup = { lt: '<', gt: '>', used: false }
 
 // Raw HTML stays the text the file holds, references and all. Tiptap keeps it
 // as text where there is no DOM, as in the engine, but reads it through the DOM
@@ -307,7 +311,9 @@ function sourceText(source: string): string {
 // wrote, so it opens and closes no tag span. Tiptap reads `&lt;` and `&gt;`
 // as the only `<` and `>` left, and those are the ones that do.
 function fileAngles(text: string): string {
-  return text.replaceAll('<', rawHtmlMarkup.lt).replaceAll('>', rawHtmlMarkup.gt)
+  const replaced = text.replaceAll('<', rawHtmlMarkup.lt).replaceAll('>', rawHtmlMarkup.gt)
+  rawHtmlMarkup.used ||= replaced !== text
+  return replaced
 }
 
 // A token's source in a gathered HTML run. A gathered run keeps its whole
@@ -321,8 +327,9 @@ const extensions: AnyExtension[] = [
   MarkdownHtml,
   MarkdownDefinition,
   ...dohcMarkdownExtensions,
-  StarterKit.configure({ orderedList: false, paragraph: false }),
+  StarterKit.configure({ listItem: false, orderedList: false, paragraph: false }),
   MarkdownParagraph,
+  MarkdownListItem,
   MarkdownOrderedList,
   MarkdownTaskList,
   DohcTaskItem,
@@ -423,18 +430,35 @@ const markdownParser = new Marked({
   },
 })
 
+// Block lexing must protect content tabs from list indentation expansion, but
+// inline lexing must see whitespace when it decides emphasis boundaries.
+class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Lexer<ParserOutput, RendererOutput> {
+  inlineTokens(src: string, tokens: Token[] = []): Token[] {
+    return super.inlineTokens(parseTabs.size ? restoreParseSentinels(src, parseTabs) : src, tokens)
+  }
+}
+markdownParser.Lexer = ContentTabLexer
+
 const markdownManager = new MarkdownManager({
   marked: markdownParser as unknown as typeof marked,
   extensions,
   indentation: { style: 'space', size: 2 },
 })
+let projectedManager: MarkdownManager | undefined
+function projectedMarkdownManager(): MarkdownManager {
+  return projectedManager ??= new MarkdownManager({
+    marked: markdownParser as unknown as typeof marked,
+    extensions: extensions.map(extension => extension.name === 'dohcMarkdownLists' ? DohcProjectedMarkdownLists : extension),
+    indentation: { style: 'space', size: 2 },
+  })
+}
 const schema = getSchema(extensions)
 
 type DohcMeta = { schemaVersion: number; contentKind?: 'plain-text' }
 
 export function markdownToYDoc(
   markdown: string,
-  options: { clientID?: number } = {},
+  options: { clientID?: number; reading?: 'source' | 'projection' } = {},
 ): Y.Doc {
   const usesCrlf = markdown.includes('\r\n')
   const { meta, body, frontmatterSource } = parseFrontmatter(markdown, usesCrlf)
@@ -455,14 +479,117 @@ export function markdownToYDoc(
 
   const bodyFragment = getDohcYDocBodyFragment(doc)
   const tiptapJson = parseRichdocMarkdown(
-    usesCrlf ? body.replaceAll('\r\n', '\n') : body,
+    usesCrlf ? body.replaceAll('\r\n', '\n') : body, options.reading,
   )
   prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment)
 
   return doc
 }
 
-export function parseRichdocMarkdown(markdown: string): JSONContent {
+// Admission is independent of canonical serialization. Code bodies are opaque;
+// blank lines end lazy continuation, but not an indented continuation block.
+function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (text: string) => string): string {
+  // Flat items beginning with ordinary text cannot introduce child blocks.
+  if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?:\[[ xX]\] )?[A-Za-z][^\n\t]*(?:\n|$))+(?:\n[A-Za-z][^\n\t]*\n?)?$/u.test(markdown)) return markdown
+  const parents: Array<{ indent: number; column: number; content?: number }> = []
+  const lines = markdown.split('\n')
+  let changed = false
+  let blank = false
+  let open: { indent: number; column: number } | undefined
+  let fence = ''
+  let fenceInList = false
+  const protectTabs = (at: number, opaque = false) => {
+    if (!preserveContentTabs || !lines[at].includes('\t')) return
+    lines[at] = lines[at].replace(opaque ? /^([ \t]*)([^\n]*)$/u : /^([ \t]*(?:>[ \t]*)*(?:(?:[-+*][ \t]+(?:\[[ xX]\][ \t]+)?|[0-9]{1,9}[.)][ \t]+)(?:>[ \t]*)*)*)([^\n]*)$/u,
+      (_match, prefix: string, text: string) => prefix + preserveContentTabs(text))
+    changed = true
+  }
+  const refuse = () => { throw new Error('Markdown is not representable by the live document contract') }
+  for (let at = 0; at < lines.length; at += 1) {
+    let line = lines[at].replace(/\r$/u, '')
+    if (line.includes('\t')) line = line.replace(/^[ \t]*(?:(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)?/u, prefix => {
+      let column = 0
+      const continuation = parents.length > 0 && Array.from(prefix.match(/^[ \t]*/u)![0], character => character === '\t' ? 4 : 1).reduce((sum, width) => sum + width, 0) >= parents[0].column
+      return Array.from(prefix, character => {
+        const width = character === '\t' ? continuation ? 4 : 4 - column % 4 : 1
+        column += width
+        return character === '\t' ? ' '.repeat(width) : character
+      }).join('')
+    })
+    if (line && !' \t>_-+*0123456789`~#'.includes(line[0])) {
+      if (!fence) { if (open) { parents.pop(); open = undefined } if (blank) parents.length = 0; blank = false }
+      if (parents.length || fenceInList && fence) protectTabs(at)
+      continue
+    }
+    if (/^[ \t]*$/u.test(line)) { blank = true; continue }
+    let indent = /^ */u.exec(line)![0].length
+    let rest = line.slice(indent)
+    let quotes = 0
+    while (rest === '>' || rest.startsWith('> ')) { rest = rest.slice(2); quotes += 1 }
+    const quoteIndent = /^ */u.exec(rest)![0].length
+    indent += quoteIndent
+    rest = rest.slice(quoteIndent)
+    const run = /^(?:`{3,}|~{3,})/u.exec(rest)?.[0] ?? ''
+    if (fence) {
+      if (fenceInList) protectTabs(at, true)
+      if (run[0] === fence[0] && run.length >= fence.length && rest.slice(run.length).trim() === '') fence = ''
+      continue
+    }
+    const rule = indent <= 3 && /^(?:-(?:[ \t]*-){2,}|\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)
+    let marker = rule ? null : /^(?:[-+*]|[0-9]{1,9}[.)])(?: |$)/u.exec(rest)
+    if (marker && !marker[0].endsWith(' ') && at > 0 && !blank) marker = null
+    if (marker && indent >= 4 && indent >= (parents.at(-1)?.content ?? parents.at(-1)?.column ?? 0) + 4) marker = null
+    const emptyEnded = !!open && blank
+    if (emptyEnded && parents.some(parent => indent > parent.indent && indent < parent.column)) refuse()
+    if (open && (blank || (!marker && indent < open.column))) {
+      if (blank ? indent > open.indent && indent < open.column : rest.startsWith('\t')) refuse()
+      parents.pop()
+    }
+    open = undefined
+    if (marker) {
+      while (parents.length && indent <= parents.at(-1)!.indent) parents.pop()
+    } else if (blank || run || quotes || rule || /^#{1,6} /u.test(rest)) {
+      while (parents.length && indent < parents.at(-1)!.column) parents.pop()
+    }
+    const inList = parents.length > 0
+    if (quotes > 120) refuse()
+    if (run) { fence = run; fenceInList = inList; blank = false; continue }
+    if (!inList && rule) { blank = false; continue }
+    if ((inList || marker)
+      && /^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(rest)) refuse()
+    if (marker) {
+      const itemBody = rest.slice(marker[0].length)
+      let body = itemBody.replace(/^\[[ xX]\][ \t]+/u, '')
+      let emptyChild: { indent: number; column: number } | undefined
+      let quoted = false
+      let depth = quotes + (parents.length + 1) * 2
+      body = body.trimStart()
+      while (true) {
+        if (depth > 128) refuse()
+        if (body.startsWith('> ')) { body = body.slice(2); depth += 1; quoted = true; continue }
+        const child = /^(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)/u.exec(body)
+        if (!child) break
+        body = body.slice(child[0].length); depth += 2
+        if (!quoted && !body.trim()) emptyChild = { indent: indent + rest.length - body.length - child[0].length, column: indent + rest.length - body.length + (/\s$/u.test(child[0]) ? 0 : 1) }
+      }
+      if (/^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(body)) refuse()
+      const itemFence = /^(?:`{3,}|~{3,})/u.exec(body)?.[0] ?? ''
+      if (itemFence) { fence = itemFence; fenceInList = true }
+      if (parents.length && indent < parents.at(-1)!.column) refuse()
+      const column = indent + marker[0].trimEnd().length + 1
+      parents.push({ indent, column, content: column + (/^ {0,3}[^ ]/u.test(itemBody) ? /^ */u.exec(itemBody)![0].length : 0) })
+      if (itemBody.trim() === '') open = parents.at(-1)
+      if (emptyChild) { parents.push(emptyChild); open = emptyChild }
+      if (itemBody === '') { lines[at] = lines[at].trimEnd(); changed = true }
+    }
+    if (parents.length) protectTabs(at)
+    blank = false
+  }
+  if (fence.startsWith('~') && fenceInList) refuse()
+  return changed ? lines.join('\n') : markdown
+}
+
+export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'projection' = 'source'): JSONContent {
   const reservedSentinels = new Set(
     markdown.match(PARSE_SENTINEL_RE) ?? [],
   )
@@ -483,9 +610,22 @@ export function parseRichdocMarkdown(markdown: string): JSONContent {
     return sentinel
   }
 
+  // Canonical list indentation must not make Marked expand a content tab.
+  const projectionTabs = new Map<string, string>()
+  const preserveTabs = (text: string) => text.replace(/\t/gu, () => {
+    const sentinel = reserveSentinel()
+    projectionTabs.set(sentinel, '\t')
+    return sentinel
+  })
+  markdown = assertSupportedListMarkdown(markdown, reading === 'source' && markdown.includes('\t') ? preserveTabs : undefined)
+  if (reading === 'projection' && markdown.includes('\t')) {
+    markdown = preserveTabs(markdown)
+  }
+
   // A block escape reads as its character anywhere, as does a leading space or
   // tab. Any other reference reads so only inside a tag the text holds.
   const tagReferences = new Set<string>()
+  const itemWhitespaceEntities = new Set<string>()
   const prepared = markdown.replace(
     PARSE_REFERENCE_RE,
     (entity, code: string | undefined, offset: number, source: string) => {
@@ -493,21 +633,24 @@ export function parseRichdocMarkdown(markdown: string): JSONContent {
       const sentinel = sentinelFor(entity)
       const leading = (code === '9' || code === '32')
         && (offset === 0 || source[offset - 1] === '\n')
+      if ((code === '9' || code === '32') && source[offset - 1] === ' '
+        && /^ *$/u.test(source.slice(source.lastIndexOf('\n', offset - 1) + 1, offset))) itemWhitespaceEntities.add(sentinel)
       if (code && !BLOCK_ESCAPE_CODES.has(Number(code)) && !leading) {
         tagReferences.add(sentinel)
       }
       return sentinel
     },
   )
-  const markup = { lt: reserveSentinel(), gt: reserveSentinel() }
+  const markup = { lt: reserveSentinel(), gt: reserveSentinel(), used: false }
   const markupEntities = [[markup.lt, '<'], [markup.gt, '>']] as const
-  const encodedEntities = new Map([...entitySentinels, ...markupEntities])
+  const encodedEntities = new Map([...entitySentinels, ...markupEntities, ...projectionTabs])
   const tagEntities = new Map([
     ...Array.from(
       entitySentinels,
       ([sentinel, entity]) => [sentinel, decodeBlockEntity(entity)] as const,
     ),
     ...markupEntities,
+    ...projectionTabs,
   ])
   const decodedEntities = new Map(
     Array.from(tagEntities, ([sentinel, value]) => [
@@ -516,6 +659,7 @@ export function parseRichdocMarkdown(markdown: string): JSONContent {
     ] as const),
   )
   parseReferences = entitySentinels
+  parseTabs = projectionTabs
   rawHtmlMarkup = markup
   writtenLinks = {
     openers: writtenOpeners(prepared, entitySentinels),
@@ -525,14 +669,20 @@ export function parseRichdocMarkdown(markdown: string): JSONContent {
   }
   let parsed: JSONContent
   try {
-    parsed = markdownManager.parse(prepared)
+    // Include escaped and multiline labels, including definitions inside quotes.
+    markdownListParseState.references = markdown.includes(']:')
+    parsed = (reading === 'projection' ? projectedMarkdownManager() : markdownManager).parse(prepared)
   } finally {
     parseReferences = new Map()
-    rawHtmlMarkup = { lt: '<', gt: '>' }
+    parseTabs = new Map()
+    markdownListParseState.references = true
+    rawHtmlMarkup = { lt: '<', gt: '>', used: false }
     writtenLinks = { openers: new Set(), runs: new Map(), length: -1, sentinels: new WeakMap() }
   }
   return ensureListItemParagraphs(
-    restoreBlockEntityParseSentinels(parsed, { decodedEntities, encodedEntities, tagEntities }),
+    entitySentinels.size || markup.used || projectionTabs.size
+      ? restoreBlockEntityParseSentinels(parsed, { decodedEntities, encodedEntities, tagEntities, itemWhitespaceEntities })
+      : parsed,
   )
 }
 
@@ -540,12 +690,17 @@ export function parseRichdocMarkdown(markdown: string): JSONContent {
 // first block is a table straight through, and the Y.Doc conversion then
 // drops the item. An annotated table is the first block of an item whose
 // paragraph was empty, so give such an item its paragraph back.
-function ensureListItemParagraphs(node: JSONContent): JSONContent {
-  const content = node.content?.map(ensureListItemParagraphs)
+function ensureListItemParagraphs(node: JSONContent, depth = -1, quoteDepth = 0): JSONContent {
+  const quotes = quoteDepth + (node.type === 'blockquote' ? 1 : 0)
+  if (depth > 128 || quotes > 120) throw new Error('Markdown is not representable by the live document contract')
+  if (node.type === 'image' && node.attrs) node.attrs.src = sanitizeImageSrc(String(node.attrs.src ?? ''))
+  const content = node.content
   if (!content) return node
+  for (const child of content) ensureListItemParagraphs(child, depth + 1, quotes)
   const needsParagraph = (node.type === 'listItem' || node.type === 'taskItem')
     && content[0]?.type !== 'paragraph'
-  return { ...node, content: needsParagraph ? [{ type: 'paragraph' }, ...content] : content }
+  if (needsParagraph) content.unshift({ type: 'paragraph' })
+  return node
 }
 
 function markdownCharacterIsEscaped(source: string, index: number): boolean {
@@ -568,6 +723,7 @@ function decodeBlockEntity(entity: string): string {
 }
 
 type ParseReferences = {
+  itemWhitespaceEntities: ReadonlySet<string>
   // Each reference's spelling, for code, links, and literal attributes.
   encodedEntities: Map<string, string>
   // Each reference read where the text holds no tag.
@@ -584,9 +740,11 @@ function restoreBlockEntityParseSentinels(
   references: ParseReferences,
   insideCodeBlock = false,
   span?: TextSpan,
+  insideItem = false,
 ): JSONContent {
-  const { decodedEntities, encodedEntities, tagEntities } = references
-  const restored: JSONContent = { ...node }
+  const { decodedEntities, encodedEntities, tagEntities, itemWhitespaceEntities } = references
+  insideItem ||= node.type === 'listItem' || node.type === 'taskItem'
+  const restored = node
   const insideCode = insideCodeBlock
     || node.type === 'codeBlock'
     || node.marks?.some(mark => mark.type === 'code')
@@ -610,7 +768,7 @@ function restoreBlockEntityParseSentinels(
           const inTag = span !== undefined
             && span.from + at >= span.start
             && span.from + at < span.end
-          return (inTag ? tagEntities : decodedEntities).get(sentinel) ?? sentinel
+          return (inTag || (insideItem && itemWhitespaceEntities.has(sentinel) && (at === 0 || node.text![at - 1] === '\n')) ? tagEntities : decodedEntities).get(sentinel) ?? sentinel
         })
   }
   if (node.attrs) {
@@ -650,7 +808,7 @@ function restoreBlockEntityParseSentinels(
     restored.content = node.content.map((child, index) => {
       const childSpan = tag && { start: tag.start, end: tag.end, from }
       from += tag?.texts[index]?.length ?? 0
-      return restoreBlockEntityParseSentinels(child, references, insideCode, childSpan)
+      return restoreBlockEntityParseSentinels(child, references, insideCode, childSpan, insideItem)
     })
   }
   return restored
@@ -843,7 +1001,7 @@ export function serializeRichdocBody(root: JSONContent): string {
     )
   }
 
-  function visit(node: JSONContent, insideTableCell = false): JSONContent {
+  function visit(node: JSONContent, insideTableCell = false, parentType = ''): JSONContent {
     if (node.type === 'table' && node.content?.length) {
       return {
         ...node,
@@ -866,7 +1024,7 @@ export function serializeRichdocBody(root: JSONContent): string {
 
     let content = insideTableCell
       ? node.content?.flatMap(prepareTableCellBlock)
-      : node.content?.map(child => visit(child))
+      : node.content?.map(child => visit(child, false, node.type))
     if (content?.length) {
       const definition = node.type === 'paragraph' && isDefinitionParagraph(content)
       // A definition reads back as plain text, so an empty link in it is
@@ -885,6 +1043,9 @@ export function serializeRichdocBody(root: JSONContent): string {
           encodeBlockEscape,
           definition,
         )
+        if (parentType === 'doc' && content[0]?.text?.startsWith(' ')) {
+          content = [{ ...content[0], text: encodeLeadingWhitespace(' ') + content[0].text.slice(1) }, ...content.slice(1)]
+        }
       }
       content = renderInlineCodeRuns(
         content,
@@ -920,6 +1081,9 @@ export function serializeRichdocBody(root: JSONContent): string {
 
   const prepared = visit(root)
   let markdown = markdownManager.serialize(prepared)
+  if (prepared.content?.[0]?.type === 'horizontalRule') {
+    markdown = '***' + markdown.slice(3)
+  }
   markdown = restoreCharacterSentinels(
     markdown,
     new Map(Array.from(
