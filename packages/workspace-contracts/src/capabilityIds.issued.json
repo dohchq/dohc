@@ -174,5 +174,20 @@
   "agent.run.state.read",
   "workspace.sync.stop",
   "history.operation.read",
-  "history.operation.undo"
+  "history.operation.undo",
+  "chat.bookmarks.list",
+  "chat.bookmark.save",
+  "chat.bookmark.archive",
+  "chat.thread.revision.read",
+  "chat.decisions.list",
+  "chat.decision.resolve",
+  "chat.attachments.list",
+  "chat.navigation.list",
+  "chat.follows.list",
+  "chat.follow.set",
+  "chat.inbox.seen.mark",
+  "group.create",
+  "chat.thread.read.mark",
+  "chat.reactions.list",
+  "chat.reaction.set"
 ]

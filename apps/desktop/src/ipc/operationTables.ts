@@ -1,6 +1,6 @@
+import { chatOperations } from "./chatOperations";
 import {
   workspaceSyncOperations,
-  chatOperations,
   systemMotionOperations,
   serverAccountOperations,
   chatDispatchNoticeOperations,
