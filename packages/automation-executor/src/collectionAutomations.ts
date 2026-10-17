@@ -1624,6 +1624,8 @@ export class CollectionAutomations {
    */
   async close(): Promise<void> {
     if (this.state !== "open") {
+      // A close during an engine restart also cancels its reopen.
+      this.reopenAfterRestart = false;
       this.stopRuns();
       return;
     }

@@ -202,6 +202,32 @@ it.each(["listCollections", "releaseAutomationGroups"] as const)("resumes a busy
   }
 });
 
+it.each(["listCollections", "releaseAutomationGroups"] as const)("stays closed when closed during an engine restart after %s refuses", async (method) => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const store = createAutomationRunStore(await createTestScratch("dohc-open-busy-restart-close-"), testMetadataDir);
+  const errors = vi.fn();
+  const { executor, evaluator, engine } = emptyExecutor(store, { onError: errors });
+  const refused = vi.spyOn(engine, method).mockRejectedValueOnce(
+    new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined),
+  );
+  // Every open starts by reading subscriptions, so a reopen shows here first.
+  const opens = vi.spyOn(store, "readSubscriptions");
+  try {
+    await executor.open();
+    executor.pauseForEngineRestart();
+    await executor.close();
+    executor.resumeAfterEngineRestart();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(opens).toHaveBeenCalledOnce();
+    expect(refused).toHaveBeenCalledOnce();
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    await executor.dispose();
+    await evaluator.close();
+    vi.useRealTimers();
+  }
+});
+
 it.each(["close", "dispose"] as const)("waits for the current run history prune batch on %s without starting another", async (operation) => {
   const store = createAutomationRunStore(await createTestScratch(`dohc-${operation}-pruning-`), testMetadataDir);
   const entered = Promise.withResolvers<void>();
