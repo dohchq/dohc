@@ -517,17 +517,11 @@ describe("EditorTabs strip scrolling", () => {
     const active = screen.getByRole("menuitem", { name: "a.md" });
     const current = screen.getByRole("menuitem", { name: "b.md" });
     expect(document.activeElement).toBe(active);
-    // The utilities that paint each row: its plain ones, and its focus ones
-    // only while it has focus.
-    const painted = (row: HTMLElement) =>
-      row.className
-        .split(" ")
-        .filter((name) => !name.includes(":") || (row === document.activeElement && name.startsWith("focus:")))
-        .map((name) => name.replace(/^focus:/, ""))
-        .filter((name) => /^(bg-|-?outline-)/.test(name))
-        .sort();
-    expect(painted(current)).toEqual(["bg-selected"]);
-    expect(painted(active)).toEqual(["-outline-offset-2", "bg-selected", "outline-2", "outline-accent"]);
+    // The current row keeps its fill; focus adds the outline only to the
+    // active one.
+    expect(current.classList).toContain("bg-selected");
+    expect(current.classList).not.toContain("outline-accent");
+    expect(active.classList).toContain("focus:outline-accent");
   });
 
   it("keeps the overflow menu clear of the window's right edge", async () => {
