@@ -4142,6 +4142,17 @@ mod tests {
         ordinal: i64,
         author_json: Option<String>,
     ) -> BuiltConflictResolveV1 {
+        try_resolve_content_conflict(store, conflict_id, object_id, ordinal, author_json)
+            .expect("resolve content conflict")
+    }
+
+    fn try_resolve_content_conflict(
+        store: &mut EngineStore,
+        conflict_id: &str,
+        object_id: &str,
+        ordinal: i64,
+        author_json: Option<String>,
+    ) -> Result<BuiltConflictResolveV1, dohc_engine_domain::DomainError> {
         let input = ResolveTextConflict {
             workspace_id: "ws".to_owned(),
             conflict_id: conflict_id.to_owned(),
@@ -4159,28 +4170,26 @@ mod tests {
         };
         let prepare_input = input.clone();
         let built = RefCell::new(None);
-        let result = VersionedTextStore::new(store)
-            .resolve_text_conflict_with(
-                &input,
-                &NoFaults,
-                |tx, conflict, _| {
-                    let prepared =
-                        prepare_local_conflict_resolve_v1_in_tx(tx, &prepare_input, conflict)
-                            .map_err(sync_as_domain)?;
-                    prepared
-                        .ensure_no_live_ydoc_session(&crate::NoLiveLeases)
+        let result = VersionedTextStore::new(store).resolve_text_conflict_with(
+            &input,
+            &NoFaults,
+            |tx, conflict, _| {
+                let prepared =
+                    prepare_local_conflict_resolve_v1_in_tx(tx, &prepare_input, conflict)
                         .map_err(sync_as_domain)?;
-                    Ok(prepared)
-                },
-                |tx, result, prepared| {
-                    *built.borrow_mut() = Some(prepared.built.clone());
-                    commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
-                        .map_err(sync_as_domain)
-                },
-            )
-            .expect("resolve content conflict");
+                prepared
+                    .ensure_no_live_ydoc_session(&crate::NoLiveLeases)
+                    .map_err(sync_as_domain)?;
+                Ok(prepared)
+            },
+            |tx, result, prepared| {
+                *built.borrow_mut() = Some(prepared.built.clone());
+                commit_local_conflict_resolve_v1_in_tx(tx, &prepared, result)
+                    .map_err(sync_as_domain)
+            },
+        )?;
         assert_eq!(result.conflict.status, ConflictStatus::Resolved);
-        built.into_inner().expect("captured replicated carrier")
+        Ok(built.into_inner().expect("captured replicated carrier"))
     }
 
     fn copy_resolution_roots(
@@ -7638,14 +7647,37 @@ mod tests {
                 }
             ));
         }
-        for (source, expected) in [
-            ("- Run:\n\n      npm i foo", "- Run:\n\n  &#32;   npm i foo"),
-            ("Install:\n\n    npm i foo", "Install:\n\n&#32;   npm i foo"),
-            ("- \n\n  - b\n - c", "- \n\n- b\n- c"),
-            ("1.\n\n   - b\n  - c", "1. \n\n- b\n- c"),
+        for (source, expected, held) in [
+            (
+                "- Run:\n\n      npm i foo",
+                "- Run:\n\n  &#32;   npm i foo",
+                true,
+            ),
+            (
+                "Install:\n\n    npm i foo",
+                "Install:\n\n&#32;   npm i foo",
+                false,
+            ),
+            ("- \n\n  - b\n - c", "- \n\n- b\n- c", false),
+            ("1.\n\n   - b\n  - c", "1. \n\n- b\n- c", false),
         ] {
             let (_scratch, mut store, key) =
                 content_conflict_store("Other settled body", source, None, ContentKind::Richdoc);
+            if held {
+                assert!(matches!(
+                    try_resolve_content_conflict(
+                        &mut store,
+                        "document-conflict",
+                        "document-object",
+                        21,
+                        None
+                    ),
+                    Err(dohc_engine_domain::DomainError::InvalidInput {
+                        reason: "ydoc-resolution-not-representable"
+                    })
+                ));
+                continue;
+            }
             resolve_content_conflict(&mut store, "document-conflict", "document-object", 21);
             let loaded = dohc_engine_collab::load_persisted(&store, &key)
                 .unwrap()
@@ -7662,5 +7694,65 @@ mod tests {
                 source
             );
         }
+    }
+    #[test]
+    fn nested1b_claimed_successor_keeps_divergent_agent_body_and_conflict_open() {
+        let agent = "- agent\n  ---";
+        let (_scratch, mut store, key) =
+            content_conflict_store(agent, "- incoming\n  ---", None, ContentKind::Richdoc);
+        let before = dohc_engine_collab::read_marker(&store, &key)
+            .unwrap()
+            .unwrap();
+        let state = dohc_engine_collab::load_persisted(&store, &key)
+            .unwrap()
+            .unwrap()
+            .doc
+            .encode_full_state();
+        let result = try_resolve_content_conflict(
+            &mut store,
+            "document-conflict",
+            "document-object",
+            21,
+            None,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-resolution-not-representable"
+                })
+            ),
+            "{result:?}"
+        );
+        let after = dohc_engine_collab::read_marker(&store, &key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.lineage_claim_id, before.lineage_claim_id);
+        assert_eq!(
+            dohc_engine_collab::load_persisted(&store, &key)
+                .unwrap()
+                .unwrap()
+                .doc
+                .encode_full_state(),
+            state
+        );
+        assert_eq!(
+            VersionedTextStore::new(&mut store)
+                .read_text("ws", "main", "doc.md")
+                .unwrap()
+                .unwrap()
+                .text,
+            agent
+        );
+        let status: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT status FROM conflicts WHERE conflict_id='document-conflict'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "open");
     }
 }
