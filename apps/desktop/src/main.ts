@@ -85,6 +85,7 @@ import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
 import { registerShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
 import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChannelSync";
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
+import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { registerWorkspaceGraphIpcHandlers } from "./ipc/workspaceGraphIpc";
 import { registerNativeMenusIpcHandlers } from "./ipc/nativeMenusIpc";
@@ -317,11 +318,11 @@ import {
   type ShareViewIdentity,
 } from "./workspaces/registryStore";
 import {
-  readableShareLevel,
-  shareViewGranterEmail,
+  SHARE_VIEW_REOPEN_MESSAGE,
+  shareViewIdentityIsIntact,
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
-import { workspaceWriteRefusal } from "./workspaces/shareWriteGate";
+import { shareViewWriteScopeOf, workspaceWriteRefusal } from "./workspaces/shareWriteGate";
 import {
   workspaceSummariesFrom,
   workspaceSummaryFor,
@@ -666,32 +667,11 @@ function requireWorkspace(workspaceId: string) {
 // (file writes, agent runs, and the MCP config)
 // routes through it so a shared view can never be changed, only read. The
 // renderer also hides its edit affordances; this main-process layer is the
-// enforcement that cannot be skipped.
-function sharedViewOf(workspaceId: string): {
-  granterEmail: string | null;
-  // The level the PINNED grant names, or null when the grant cannot be read.
-  // Every caller that asks only "is this a share view?" reads the object's
-  // presence and never these two, so PRESENCE stays the answer to that
-  // question wherever it is asked.
-  access: ShareAccess | null;
-  ended: boolean;
-} | null {
+// enforcement that cannot be skipped. Every caller that asks only "is this a
+// share view?" reads the object's presence, never its level.
+function sharedViewOf(workspaceId: string): ReturnType<typeof shareViewWriteScopeOf> {
   const entry = findWorkspace(workspaceId);
-  if (!entry) return null;
-  // PRESENCE, not truthiness. A stored `shareView: null` is a share view
-  // whose marker lost its value, not a workspace that never had one, and
-  // `?? null` read the two as the same thing — which made someone else's
-  // files writable here. Only an absent field is an ordinary
-  // workspace; anything else stays refused, readable marker or not.
-  if (!shareViewIsPresent(entry.shareView)) return null;
-  const marker: Record<string, unknown> = isRecordValue(entry.shareView)
-    ? entry.shareView
-    : {};
-  return {
-    granterEmail: shareViewGranterEmail(entry.shareView),
-    access: readableShareLevel(marker.grantedSelector),
-    ended: marker.ended === true,
-  };
+  return entry ? shareViewWriteScopeOf(entry.shareView) : null;
 }
 
 // The workspace write boundary, over the rule in `shareWriteGate.ts`. It
@@ -771,7 +751,7 @@ async function localPersonOwns(workspaceId: string): Promise<boolean> {
   await warmCredentialCache();
   const entry = findWorkspace(workspaceId);
   if (!entry || shareViewIsPresent(entry.shareView)) return false;
-  return !entry.remote || cachedCredentials?.userId === entry.remote.ownerUserId;
+  return !entry.remote || workspaceRemoteMatchesCredentials(entry.remote, cachedCredentials);
 }
 
 // A Collection automation step started or stopped waiting for a current
@@ -1541,7 +1521,7 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
     snapshot: (workspaceId) => {
       const workspace = findWorkspace(workspaceId);
       return { roster: shareRosters.observation(workspaceId).listing, shareView: workspace?.shareView,
-        owner: !sender.isDestroyed() && !!workspace?.remote && !workspace.shareView && cachedCredentials?.userId === workspace.remote.ownerUserId,
+        owner: !sender.isDestroyed() && !!workspace?.remote && !workspace.shareView && workspaceRemoteMatchesCredentials(workspace.remote, cachedCredentials),
         context: rosterContext(workspaceId), inventory: workspace?.shareRoster?.version };
     },
     ready: workspaceId => {
@@ -1552,7 +1532,6 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
       if (!workspace?.remote || workspace.shareView) return null;
       await warmCredentialCache();
       const { credentials } = await remoteForWorkspace(workspace);
-      if (credentials.userId !== workspace.remote.ownerUserId) return null;
       return lookupHistoryAccounts(workspaceId, async path => {
         const response = await relayShareResponseWithCredentials(credentials, path, { method: "GET" });
         return { status: response.status, body: await response.json().catch(() => undefined) };
@@ -2094,12 +2073,11 @@ const {
 // share profile applies at all — a marker whose value was lost is still a
 // share view, and reading it as an ordinary workspace would hand out the full
 // write-capable server. Readability only decides how much the profile opens,
-// so a present marker with no readable grant falls to `view`, which registers
-// no write tools at all.
+// so a present marker with no readable grant or identity falls to `view`,
+// which registers no write tools at all.
 function mcpShareAccessOf(shareView: unknown): ShareAccess | null {
-  if (!shareViewIsPresent(shareView)) return null;
-  const grantedSelector = isRecordValue(shareView) ? shareView.grantedSelector : undefined;
-  return readableShareLevel(grantedSelector) ?? "view";
+  const scope = shareViewWriteScopeOf(shareView);
+  return scope === null ? null : scope.access ?? "view";
 }
 
 function isRecordValue(value: unknown): value is Record<string, unknown> {
@@ -2627,6 +2605,10 @@ const activity = {
   agentRunDepth: (workspaceId: string) =>
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.agentRunDepth(lease.state.activity),
+    ),
+  dispatchedAgentRun: (workspaceId: string) =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      lease.state.dispatchAgentRunId !== null,
     ),
   engineCaptureFor: (workspaceId: string, expectedRootPath?: string) => {
     if (!findWorkspace(workspaceId)) return null;
@@ -4731,13 +4713,14 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
     const credentials = cachedCredentials;
     if (marker?.ended) throw new SharedDocumentWaitingError({ state: "access-ended", message: "Your access to this share ended." });
     if (!credentials?.relayUrl) throw new SharedDocumentWaitingError({ state: "failed", message: "dohc could not connect. Check your connection." });
+    if (marker && !shareViewIdentityIsIntact(marker)) throw new SharedDocumentWaitingError({ state: "failed", message: SHARE_VIEW_REOPEN_MESSAGE });
     if (!marker || !marker.relayUrl || !relayUrlsMatch(marker.relayUrl, credentials.relayUrl) ||
       marker.grantedSelector?.access !== "edit" ||
       (marker.grantedSelector.versionId !== null && marker.grantedSelector.versionId !== "main")) {
       throw new SharedDocumentWaitingError({ state: "failed", message: "dohc could not open this document for editing. Check the share's Edit access." });
     }
-    const identity = (value: typeof marker | undefined) => JSON.stringify({shareId: value?.shareId, relayUrl: value?.relayUrl,
-      selector: value?.grantedSelector, ended: value?.ended === true});
+    const identity = (value: ShareViewIdentity | undefined) => JSON.stringify({shareId: value?.shareId,
+      recipientUserId: value?.recipientUserId, relayUrl: value?.relayUrl, selector: value?.grantedSelector, ended: value?.ended === true});
     const pinned = identity(marker);
     return createNamedDesktopLiveCapture({ shareId: marker.shareId, selector: marker.grantedSelector,
       accessEnded: () => findWorkspace(workspace.workspaceId)?.shareView?.ended === true,
@@ -5034,7 +5017,7 @@ function createShareViewFilesForOperation(
       await warmCredentialCache().catch(() => undefined);
       const credentials = cachedCredentials;
       if (target.kind === "standalone" && !target.recipientUserId) {
-        throw new Error("This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.");
+        throw new Error(SHARE_VIEW_REOPEN_MESSAGE);
       }
       if (!credentials?.relayUrl) {
         if (target.kind === "standalone") {
@@ -5778,8 +5761,7 @@ function afterRendererCrashLoop(): void {
 // The owner of the user settings file: every save, zoom step, reset, and
 // edit made in the file goes through it and takes effect there.
 const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-  registerHandler: handleIpc,
-  assertTrustedSender, stateDir,
+  stateDir,
   setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
   applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
@@ -6775,13 +6757,11 @@ function registerIpcHandlers(): void {
 
   agentRunsIpc.registerAgentRuns();
 
-  settingsIpc.registerSettingsIpcHandlers();
+  registerOperations(operationBoundary, settingsOperations, settingsIpc);
   // The settings file applies when saved. The watch lasts as long as main.
   settingsIpc.watchUserSettingsFile();
 
   windowIpc.registerWindowControls();
-
-  settingsIpc.registerWorkspaceUiStateIpcHandlers();
 
   registerOperations(operationBoundary, crashReportOperations, {
     readCrashReport: () => crashReports.read(),

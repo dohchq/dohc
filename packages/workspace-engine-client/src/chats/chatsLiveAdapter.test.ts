@@ -1327,17 +1327,21 @@ describe("ChatsLiveAdapter", () => {
 
 describe("loopback poll validation", () => {
   it.each([
-    ["non-string", [7]], ["empty", ["  "]], ["duplicate", [" a ", "a"]],
-    ["too many", Array.from({ length: 13 }, (_, index) => String(index))],
-    ["too long", ["x".repeat(201)]], ["UTF-16 too long", ["💥".repeat(101)]],
-    ["multiline", ["a\nb"]],
-  ])("rejects %s options before writing a message", async (_name, options) => {
+    { name: "non-string", options: [7], sentence: "invalid parameters" },
+    { name: "non-array", options: "a", sentence: "invalid parameters" },
+    { name: "empty", options: ["  "], sentence: "Each choice is one line of at most 200 characters." },
+    { name: "duplicate", options: [" a ", "a"], sentence: "Each choice appears once." },
+    { name: "too many", options: Array.from({ length: 13 }, (_, index) => String(index)), sentence: "A poll has at most twelve choices." },
+    { name: "too long", options: ["x".repeat(201)], sentence: "Each choice is one line of at most 200 characters." },
+    { name: "UTF-16 too long", options: ["💥".repeat(101)], sentence: "Each choice is one line of at most 200 characters." },
+    { name: "multiline", options: ["a\nb"], sentence: "Each choice is one line of at most 200 characters." },
+  ])("rejects $name options before writing a message", async ({ options, sentence }) => {
     const { adapter, loopback } = loopbackAdapter();
     loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
     const started = await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
     await expect(loopback.sendRequest({ id: 100, workspace: WORKSPACE, method: CHATS_METHOD.messageSend, params: {
       threadId: started.thread.id, messageId: "bad-poll", authorKind: "human", authorDisplayName: "Sam", body: "Choose", options,
-    } })).rejects.toThrow("invalid-poll-options");
+    } })).rejects.toThrow(sentence);
     expect(await adapter.listMessages({ workspaceId: "workspace", threadId: started.thread.id })).toHaveLength(1);
   });
 });
