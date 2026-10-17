@@ -738,7 +738,11 @@ test("desktop release stages the Rust engine and Collection compiler for the pac
     .trim().split(/\s+/);
   assert.equal(buildModule.parseTargetArgument(engineArgs), target);
   // The Apple silicon runner packages macOS x64 with the x64 Collection compiler.
-  assert.equal(releaseStep(build, "pnpm install").run, "pnpm install --frozen-lockfile --cpu=current --cpu=${{ matrix.arch }}");
+  const installs = build.steps.filter(step => /\bpnpm (install|i)\b/.test(step.run ?? ""));
+  assert.deepEqual(installs.map(step => step.run), ["pnpm install --frozen-lockfile --cpu=current --cpu=${{ matrix.arch }}"]);
+  // A later pnpm run or exec would otherwise reinstall without --cpu.
+  assert.equal(build.env.pnpm_config_verify_deps_before_run, "false");
+  for (const step of build.steps) assert.equal(step.env?.pnpm_config_verify_deps_before_run, undefined, `${step.name} keeps the install`);
   const stageCompiler = releaseStep(build, "stage-app-compiler.mjs");
   assert.equal(stageCompiler.run, "node apps/desktop/scripts/stage-app-compiler.mjs --arch=${{ matrix.arch }}");
   const order = step => build.steps.indexOf(step);

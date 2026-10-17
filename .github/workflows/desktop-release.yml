@@ -205,6 +205,10 @@ jobs:
     environment: desktop-release
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
+    # pnpm checks the install before each pnpm run or exec and reinstalls
+    # without the Install step's --cpu. No later step changes dependencies.
+    env:
+      pnpm_config_verify_deps_before_run: "false"
     strategy:
       fail-fast: false
       # Windows and WSL share the same PC for this selection.
