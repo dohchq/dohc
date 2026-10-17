@@ -238,5 +238,6 @@
   "share.revoke",
   "share.revoke.undo",
   "share.discussion.activity.wait",
-  "share.discussion.activity.cancel"
+  "share.discussion.activity.cancel",
+  "share.live.restore"
 ]

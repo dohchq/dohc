@@ -178,14 +178,12 @@ describe("main inventories", () => {
       expect(row).not.toHaveProperty("handlerCheck");
     }
   });
-  it("records the eight remaining relay operation rows with owner restore retained", () => {
-    const workspaceChannels = ["stop-owner-live-document", "resume-owner-live-document", "poll-relay-share-discussion-activity"]
+  it("records the nine remaining relay operation rows with their existing admission", () => {
+    const workspaceChannels = ["owner-restore", "stop-owner-live-document", "resume-owner-live-document", "poll-relay-share-discussion-activity"]
       .map(name => `desktop:${name}`);
     const deviceChannels = ["list-relay-shares", "get-relay-received-share", "revoke-relay-share", "undo-relay-share", "cancel-relay-share-discussion-activity"]
       .map(name => `desktop:${name}`);
     const channels = [...workspaceChannels, ...deviceChannels];
-    expect(CHANNELS.ownerRestore).toBe("desktop:owner-restore");
-    expect(rows.some(row => row.channel === CHANNELS.ownerRestore)).toBe(false);
     const migrated = rows.filter(row => channels.includes(row.channel));
     expect(migrated.map(row => row.channel).sort()).toEqual(channels.sort());
     for (const row of migrated) {

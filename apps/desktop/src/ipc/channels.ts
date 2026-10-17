@@ -157,7 +157,6 @@ export const CHANNELS = {
   shareHandoffStatus: "desktop:share-handoff-status",
   cloudEnableSync: "desktop:cloud-enable-sync",
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
-  ownerRestore: "desktop:owner-restore",
   publishOwnerApp: "desktop:publish-owner-app",
   ownerAppResponses: "desktop:owner-app-responses",
   dataset: "desktop:dataset",

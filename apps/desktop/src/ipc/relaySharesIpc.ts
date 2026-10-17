@@ -47,9 +47,8 @@ import {
   UnblockRelayShareDiscussionPrincipalResult,
 } from "./bridgeContract";
 import { z } from "zod";
-import { CHANNELS } from "./channels";
-import {OwnerRestoreRequest, OwnerRestoreActionResponse} from "./ownerRestoreContract";
-import { assertOriginalWorkspace, createOwnerRelayShareHandler, createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
+import {OwnerRestoreActionResponse} from "./ownerRestoreContract";
+import { assertOriginalWorkspace, createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { awaitCredentialGeneration, RelaySessionError } from "../mainChatIpcHandlers";
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -92,23 +91,12 @@ interface RelayShareRequest {
   ): Promise<{ kind: "success"; body: Result } | { kind: "missing"; removed: boolean }>;
 }
 
-export function registerRelaySharesIpcHandlers<
+export function createRelaySharesIpcHandlers<
   Sender extends { id: number },
   Event extends { sender: Sender },
   Workspace extends { workspaceId: string; shareView?: unknown },
   Operation extends { workspace: Workspace; assertCurrent(): void },
 >(dependencies: {
-  registerHandler(
-    channel: string,
-    handler: (event: Event, payload: unknown) => unknown,
-  ): void;
-  assertTrustedSender(event: Event): void;
-  withRendererWorkspaceOperation<Result>(
-    sender: Sender,
-    workspaceId: string,
-    inactiveMessage: string,
-    work: (operation: Operation) => Promise<Result>,
-  ): Promise<Result>;
   remoteForWorkspace(workspace: Workspace, options?: { allowPaused: boolean }): Promise<{
     credentials: CloudCredentials;
     credentialGeneration: number;
@@ -136,9 +124,6 @@ export function registerRelaySharesIpcHandlers<
 }): OperationHandlers<typeof relayShareOperations, Event, Operation> {
   type Handlers = OperationHandlers<typeof relayShareOperations, Event, Operation>;
   const {
-    registerHandler,
-    assertTrustedSender,
-    withRendererWorkspaceOperation,
     remoteForWorkspace,
     currentCredentialGeneration,
     currentCredentials,
@@ -150,16 +135,6 @@ export function registerRelaySharesIpcHandlers<
     sharesChanged,
     reconcileReceivedShares,
   } = dependencies;
-  const ownerRelayShareHandler = createOwnerRelayShareHandler<
-    Sender,
-    Workspace,
-    Operation,
-    CloudCredentials
-  >({
-    withWorkspaceOperation: withRendererWorkspaceOperation,
-    remoteForWorkspace,
-    credentialGeneration: currentCredentialGeneration,
-  });
   const ownerRelayShareOperation = createOwnerRelayShareOperation<Workspace, Operation, CloudCredentials>({
     remoteForWorkspace,
     credentialGeneration: currentCredentialGeneration,
@@ -262,10 +237,8 @@ export function registerRelaySharesIpcHandlers<
     });
   };
 
-  registerHandler(CHANNELS.ownerRestore, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = OwnerRestoreRequest.parse(payload);
-    return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
+  const ownerRestore: Handlers["ownerRestore"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
       const prefix = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-restores`;
       let path: string, body: unknown;
       if (input.action === "options") {
@@ -305,7 +278,7 @@ export function registerRelaySharesIpcHandlers<
           documentKey(result.result.binding) !== documentKey(result.status.document))) throw new Error("The restore review belongs to another file.");
       return result;
     }, assertOriginalWorkspace);
-  });
+  };
 
   // ---- Relay shares ----
 
@@ -1020,6 +993,7 @@ export function registerRelaySharesIpcHandlers<
   };
 
   return {
+    ownerRestore,
     listOwnerLiveDocuments,
     listOwnerLiveRefusals,
     retryOwnerLiveShare,

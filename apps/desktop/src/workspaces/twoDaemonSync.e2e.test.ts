@@ -56,7 +56,7 @@ import { readyOwnerDeliveryDocuments } from "./serverOwnerDelivery";
 import { startServerOwnerDelivery } from "./serverOwnerDelivery";
 import { relayShareOperations } from "../ipc/shareOperations";
 import { registerOperations } from "../ipc/operationTable";
-import {registerRelaySharesIpcHandlers} from "../ipc/relaySharesIpc";
+import {createRelaySharesIpcHandlers} from "../ipc/relaySharesIpc";
 import {createPresencePollRegistry} from "../collab/presencePollRegistry";
 import {reconcileOwnerLiveStops} from "./ownerLiveStop";
 
@@ -966,9 +966,7 @@ it.skipIf(engine.missing).each([
       const credentials = {serverUrl: proxy.origin, relayUrl: proxy.origin, userId: workspaceId, email: "owner@dohc.test", token: relayConnection.token};
       const unexpected = (): never => {throw new Error("Unexpected Stop dependency");};
       let offline = offlineStop;
-      const ownerHandlers = registerRelaySharesIpcHandlers({
-        registerHandler: (channel, handler) => {handlers.set(channel, handler);}, assertTrustedSender() {},
-        withRendererWorkspaceOperation: async (_sender, id, _message, work) => {expect(id).toBe(workspaceId);return work({workspace: source.workspace, assertCurrent() {}});},
+      const ownerHandlers = createRelaySharesIpcHandlers({
         remoteForWorkspace: async () => ({credentials, credentialGeneration: 1}), currentCredentialGeneration: () => 1,
         currentCredentials: () => credentials, warmCredentialCache: async () => {}, relayShareJson: unexpected,
         relayShareJsonWithCredentials: async <R,>(_credentials: unknown, endpoint: string, init?: RequestInit): Promise<R> => {

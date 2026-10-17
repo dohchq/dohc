@@ -1,9 +1,8 @@
 import { relayShareOperations } from "./shareOperations";
-import { CHANNELS } from "./channels";
 import { OwnerRestoreActionResponse } from "./ownerRestoreContract";
 import { registerOperations } from "./operationTable";
 import { describe, expect, it, vi } from "vitest";
-import { registerRelaySharesIpcHandlers } from "./relaySharesIpc";
+import { createRelaySharesIpcHandlers } from "./relaySharesIpc";
 import { createPresencePollRegistry } from "../collab/presencePollRegistry";
 import { createRendererWorkspaceOperationRunner } from "../window/rendererWorkspaceOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -21,7 +20,7 @@ type Operation = {
   workspace: Workspace;
   assertCurrent(): void;
 };
-type Dependencies = Parameters<typeof registerRelaySharesIpcHandlers<
+type Dependencies = Parameters<typeof createRelaySharesIpcHandlers<
   Sender, Event, Workspace, Operation
 >>[0];
 
@@ -89,13 +88,7 @@ function harness() {
   let enrolled=true;
   const localStops = vi.fn<Dependencies["listOwnerLiveStops"]>(async () => []);
   const ownerLiveStop=vi.fn<Dependencies["ownerLiveStop"]>(async (_workspace,action,path) => action==="clear" || action==="retired" ? undefined : ({state:action==="release" || !enrolled ? "released" : "requested",relayDatabaseNamespace:enrolled ? "relay" : "",retirementOwed:true,document:{mainVersionId:"main",objectId:"object",currentPath:path},binding:enrolled ? {workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0} : null}));
-  const ownerHandlers = registerRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>({
-    registerHandler: (channel, handler) => {
-      expect(handlers.has(channel)).toBe(false);
-      handlers.set(channel, handler);
-    },
-    assertTrustedSender: trusted,
-    withRendererWorkspaceOperation,
+  const ownerHandlers = createRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>({
     remoteForWorkspace: remote,
     currentCredentialGeneration: () => generation,
     currentCredentials: () => credentials,
@@ -372,44 +365,44 @@ describe("registered owner restore handler", () => {
 
   it("rejects untrusted senders and caller-supplied identity before any remote work", async () => {
     const h = harness();
-    await expect(h.invoke(CHANNELS.ownerRestore, statusInput, -1)).rejects.toThrow("untrusted sender");
+    await expect(h.invoke(relayShareOperations.ownerRestore.channel, statusInput, -1)).rejects.toThrow("untrusted sender");
     for (const input of [{...statusInput, ownerUserId: "owner"}, {...statusInput, credentials: h.credentials},
       {workspaceId, action: "begin", intent: {...intent, ownerUserId: "owner"}}]) {
-      await expect(h.invoke(CHANNELS.ownerRestore, input)).rejects.toThrow();
+      await expect(h.invoke(relayShareOperations.ownerRestore.channel, input)).rejects.toThrow();
     }
     expect(h.remote).not.toHaveBeenCalled(); expect(h.request).not.toHaveBeenCalled();
   });
 
-  it("keeps the fallback owner restore bound to the sender's original workspace", async () => {
+  it("keeps owner restore bound to the sender's original workspace", async () => {
     const h = harness();
-    await expect(h.invoke(CHANNELS.ownerRestore, {...statusInput, workspaceId: "other"}))
+    await expect(h.invoke(relayShareOperations.ownerRestore.channel, {...statusInput, workspaceId: "other"}))
       .rejects.toThrow("Sharing stopped because this window changed workspaces.");
     h.workspace.shareView = {};
-    await expect(h.invoke(CHANNELS.ownerRestore, statusInput)).rejects.toThrow("original workspace");
+    await expect(h.invoke(relayShareOperations.ownerRestore.channel, statusInput)).rejects.toThrow("original workspace");
     expect(h.remote).not.toHaveBeenCalled();
     expect(h.request).not.toHaveBeenCalled();
   });
 
   it("uses the original workspace and credential snapshot without forwarding owner identity", async () => {
     const h = harness(); h.request.mockResolvedValue(status);
-    await expect(h.invoke(CHANNELS.ownerRestore, {workspaceId, action: "begin", intent})).resolves.toEqual(status);
+    await expect(h.invoke(relayShareOperations.ownerRestore.channel, {workspaceId, action: "begin", intent})).resolves.toEqual(status);
     expect(h.request).toHaveBeenCalledWith(h.credentials, "/sync/workspace/live-restores",
       {method: "POST", body: JSON.stringify({intent})}, {retainRestoreConflict: true});
     h.workspace.shareView = {};
-    await expect(h.invoke(CHANNELS.ownerRestore, statusInput)).rejects.toThrow("original workspace");
+    await expect(h.invoke(relayShareOperations.ownerRestore.channel, statusInput)).rejects.toThrow("original workspace");
     expect(h.request).toHaveBeenCalledOnce();
   });
 
   it.each(["retireRenderer", "retirePhysical", "rotateCredentials"] as const)("rejects %s before request and before response parsing", async invalidate => {
     const loading = harness(), loaded = deferred<{credentials: CloudCredentials; credentialGeneration: number}>(), started = deferred();
     loading.remote.mockImplementation(() => {started.resolve(); return loaded.promise;});
-    const pending = loading.invoke(CHANNELS.ownerRestore, statusInput);
+    const pending = loading.invoke(relayShareOperations.ownerRestore.channel, statusInput);
     await started.promise; loading[invalidate](); loaded.resolve({credentials: loading.credentials, credentialGeneration: 1});
     await expect(pending).rejects.toThrow(); expect(loading.request).not.toHaveBeenCalled();
 
     const h = harness(), response = deferred<unknown>(), requested = deferred();
     h.request.mockImplementation(() => {requested.resolve(); return response.promise;});
-    const result = h.invoke(CHANNELS.ownerRestore, statusInput);
+    const result = h.invoke(relayShareOperations.ownerRestore.channel, statusInput);
     await requested.promise; h[invalidate]();
     const read = vi.fn(() => "restore"); response.resolve({...status, get operationId() {return read();}});
     await expect(result).rejects.toThrow(); expect(read).not.toHaveBeenCalled();
@@ -444,8 +437,9 @@ describe("registered owner restore handler", () => {
       for (const response of responses) {
         const h = harness();
         h.request.mockResolvedValue({...response, ignored: "stripped"});
-        await expect(h.invoke(CHANNELS.ownerRestore, inputs[action]))
-          .resolves.toEqual(OwnerRestoreActionResponse[action].parse(response));
+        const parsed = OwnerRestoreActionResponse[action].parse(response);
+        expect(relayShareOperations.ownerRestore.result.parse(parsed)).toEqual(parsed);
+        await expect(h.invoke(relayShareOperations.ownerRestore.channel, inputs[action])).resolves.toEqual(parsed);
       }
     }
   });
@@ -455,11 +449,11 @@ describe("registered owner restore handler", () => {
     for (const [action, kind] of [["prepare", "pending"], ["confirm", "review-required"]] as const) {
       const response = {status, result: {kind}}; h.request.mockResolvedValue(response);
       const input = {...statusInput, action, ...(action === "confirm" ? {proposalDigest: "b".repeat(64)} : {})};
-      await expect(h.invoke(CHANNELS.ownerRestore, input)).resolves.toEqual(response);
+      await expect(h.invoke(relayShareOperations.ownerRestore.channel, input)).resolves.toEqual(response);
       expect(h.request.mock.lastCall?.[3]).toEqual({retainRestoreConflict: true});
     }
     h.request.mockResolvedValue({status, result: {kind: "resumed"}});
-    await expect(h.invoke(CHANNELS.ownerRestore, {...statusInput, action: "confirm", proposalDigest: "b".repeat(64)})).rejects.toThrow();
+    await expect(h.invoke(relayShareOperations.ownerRestore.channel, {...statusInput, action: "confirm", proposalDigest: "b".repeat(64)})).rejects.toThrow();
   });
 
   it.each(["workspace", "operation", "top-operation", "top-document", "point", "path"])("rejects substituted %s coordinates", async substitution => {
@@ -478,7 +472,7 @@ describe("registered owner restore handler", () => {
       response = {document, path: "other.md", grants: [], points: [], authors: [], nextBeforeCursor: null, nextGrantCursor: null, pendingOperation: null};
     }
     h.request.mockResolvedValue(response);
-    await expect(h.invoke(CHANNELS.ownerRestore, input)).rejects.toThrow();
+    await expect(h.invoke(relayShareOperations.ownerRestore.channel, input)).rejects.toThrow();
   });
 });
 
@@ -523,7 +517,7 @@ describe("registered relay share handlers", () => {
   it("registers only this family and authenticates every channel before parsing or work", async () => {
     const h = harness();
     expect([...h.handlers.keys()]).toEqual([
-      CHANNELS.ownerRestore,
+      relayShareOperations.ownerRestore.channel,
       relayShareOperations.listOwnerLiveDocuments.channel,
       relayShareOperations.listOwnerLiveRefusals.channel,
       relayShareOperations.retryOwnerLiveShare.channel,
@@ -1007,6 +1001,7 @@ describe("registered discussion poll lifetime", () => {
 });
 
 const ownerInputs = {
+  ownerRestore: {workspaceId, action: "options", path: "notes.md"},
   listOwnerLiveDocuments: {workspaceId},
   listOwnerLiveRefusals: {workspaceId},
   retryOwnerLiveShare: {workspaceId, shareId: "share"},
@@ -1038,6 +1033,10 @@ const ownerInputs = {
 const ownerRows = Object.entries(relayShareOperations).map(([name, row]) => ({
   name, row, input: ownerInputs[name as keyof typeof ownerInputs],
 }));
+const workspaceRows = ownerRows.filter(
+  (entry): entry is typeof entry & {row: Extract<typeof entry.row, {guard: "active-workspace"}>} =>
+    entry.row.guard === "active-workspace",
+);
 
 describe("owner operation admission", () => {
   it.each(ownerRows.filter(({row}) => row.guard === "trusted-sender"))("runs $name without a workspace operation", async ({name, row, input}) => {
@@ -1051,17 +1050,17 @@ describe("owner operation admission", () => {
     expect(h.remote).not.toHaveBeenCalled();
   });
 
-  it.each(ownerRows.filter(({row}) => row.guard === "active-workspace"))("binds $name to the sender's workspace before remote access", async ({row, input}) => {
+  it.each(workspaceRows)("binds $name to the sender's workspace before remote access", async ({row, input}) => {
     const h = harness();
     await expect(h.invoke(row.channel, {...input, workspaceId: "another-workspace"})).rejects.toThrow(
-      "inactiveMessage" in row ? row.inactiveMessage : "unexpected device row",
+      row.inactiveMessage,
     );
     expect(h.remote).not.toHaveBeenCalled();
     expect(h.request).not.toHaveBeenCalled();
     expect(h.accountRequest).not.toHaveBeenCalled();
   });
 
-  it.each(ownerRows.filter(({row}) => row.guard === "active-workspace"))("preserves $name shared-view admission", async ({name, row, input}) => {
+  it.each(workspaceRows)("preserves $name shared-view admission", async ({name, row, input}) => {
     const h = harness();
     h.workspace.shareView = {};
     h.remote.mockRejectedValue(new Error("remote reached"));

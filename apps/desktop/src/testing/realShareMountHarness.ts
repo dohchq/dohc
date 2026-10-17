@@ -4,7 +4,7 @@ import { readdir } from "node:fs/promises";
 import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { LiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { createPresencePollRegistry } from "../collab/presencePollRegistry";
-import { registerRelaySharesIpcHandlers } from "../ipc/relaySharesIpc";
+import { createRelaySharesIpcHandlers } from "../ipc/relaySharesIpc";
 import { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { ShareMountRecord } from "../workspaces/registryStore";
 import {
@@ -120,10 +120,7 @@ export function createRealShareMountHarness(input: {
   });
   type Event = { sender: { id: number } };
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
-  const ownerHandlers = registerRelaySharesIpcHandlers({
-    registerHandler: (channel, handler) => { handlers.set(channel, handler); },
-    assertTrustedSender: () => undefined,
-    withRendererWorkspaceOperation: unexpected,
+  const ownerHandlers = createRelaySharesIpcHandlers({
     remoteForWorkspace: unexpected,
     currentCredentialGeneration: unexpected,
     currentCredentials: unexpected,
