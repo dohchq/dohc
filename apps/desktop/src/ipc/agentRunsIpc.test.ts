@@ -70,6 +70,7 @@ async function harness(shared = false, hooks: { disposeState?: () => void } = {}
   let nextRun = 0;
   const integration = createAgentIntegration({
     localPersonId: () => "person-local",
+    installId: () => "install-local",
     acquire: (id) => {
       const lease = authority.acquire(id);
       return {

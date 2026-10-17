@@ -32,15 +32,21 @@ function integer(value: unknown, minimum = 0): number {
   return value;
 }
 
+/** The relay a service replica reaches and the credential it presents there. */
+export function parseServiceRelayAttachment(value: unknown): ServiceOrdinaryReplicationConfig["relay"] {
+  const relay = fields(value, ["baseUrl", "bearerToken"]);
+  const baseUrl = text(relay.baseUrl);
+  let url: URL;
+  try { url = new URL(baseUrl); } catch { throw new Error("Invalid service relay URL."); }
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error("Invalid service relay URL.");
+  return Object.freeze({baseUrl, bearerToken: text(relay.bearerToken)});
+}
+
 /** Private operator inputs; the relay authenticates the supplied owner credential. */
 export function parseServiceOrdinaryReplicationConfig(value: unknown): ServiceOrdinaryReplicationConfig | undefined {
   if (value === undefined) return undefined;
   const row = fields(value, ["relay", "identity", "maxPagesPerPull"]);
-  const relay = fields(row.relay, ["baseUrl", "bearerToken"]);
-  const baseUrl = text(relay.baseUrl);
-  let url: URL;
-  try { url = new URL(baseUrl); } catch { throw new Error("Invalid ordinary relay URL."); }
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error("Invalid ordinary relay URL.");
+  const relay = parseServiceRelayAttachment(row.relay);
   const rawIdentity = record(row.identity);
   let identity: ServiceOrdinaryReplicationConfig["identity"];
   if (rawIdentity.kind === "claim") {
@@ -51,7 +57,7 @@ export function parseServiceOrdinaryReplicationConfig(value: unknown): ServiceOr
     identity = Object.freeze({kind: "join", replicationEpoch: text(rawIdentity.replicationEpoch), streamIdentity: text(rawIdentity.streamIdentity)});
   } else throw new Error("Invalid ordinary relay identity.");
   const maxPagesPerPull = integer(row.maxPagesPerPull, 1);
-  return Object.freeze({relay: Object.freeze({baseUrl, bearerToken: text(relay.bearerToken)}), identity, maxPagesPerPull});
+  return Object.freeze({relay, identity, maxPagesPerPull});
 }
 
 type OrdinaryRefusal = OrdinarySyncMethodResultMap["sync.pull"]["refusals"][number];

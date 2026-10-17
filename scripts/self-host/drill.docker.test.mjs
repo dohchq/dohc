@@ -62,14 +62,17 @@ test("a killed deployment's data disk starts in a fresh Compose project and refu
     // An unmounted disk leaves the folder missing. The volume mount fails and nothing is created.
     assert.notEqual(compose(first, ["run", "--rm", "--no-deps", "-T", "relay-initialize"], { allowFailure: true }).status, 0);
     assert.equal(existsSync(disk), false);
-    asRoot(`const fs=require('node:fs');for(const base of ['/scratch/disk/dohc','/scratch/empty'])for(const folder of ['sync-relay','continuity','host-data']){
+    asRoot(`const fs=require('node:fs');for(const base of ['/scratch/disk/dohc','/scratch/empty'])for(const folder of ['sync-relay','continuity','host-data','snapshots']){
       fs.mkdirSync(base+'/'+folder,{recursive:true});fs.chownSync(base+'/'+folder,1000,1000);}fs.mkdirSync('/scratch/old');`);
-    // A first start reads all three folders through Docker, and leftover host data alone refuses it.
+    // A first start reads all four folders through Docker, and leftover host data or snapshot state alone refuses it.
     const firstStart = target => relayDeploymentError(target.env, readSettings(target.env), args => docker(args, { allowFailure: true }), true);
     assert.equal(firstStart(first), "");
     asRoot("require('node:fs').writeFileSync('/scratch/disk/dohc/host-data/leftover','')");
     assert.match(firstStart(first), /\/disk\/dohc\/host-data already holds data\. A first start needs empty disk folders/);
     asRoot("require('node:fs').rmSync('/scratch/disk/dohc/host-data/leftover')");
+    asRoot("require('node:fs').writeFileSync('/scratch/disk/dohc/snapshots/notifications.json','{}')");
+    assert.match(firstStart(first), /\/disk\/dohc\/snapshots already holds data\. A first start needs empty disk folders/);
+    asRoot("require('node:fs').rmSync('/scratch/disk/dohc/snapshots/notifications.json')");
     // Move builds its own Compose arguments. Each call gets the project's extra files, such as the Postgres override.
     const mover = (target, start = () => assert.fail("move started the deployment")) => (command, args) => {
       if (command !== "docker") return start();
@@ -106,7 +109,7 @@ test("a killed deployment's data disk starts in a fresh Compose project and refu
     // With the accounts database present, move still refuses an empty folder and leaves it empty.
     const empty = await project("c", join(scratch, "empty"), ["-f", override]);
     assert.throws(() => runMove({ envFile: empty.env }, mover(empty), () => {}), /No relay deployment found/);
-    for (const folder of ["sync-relay", "continuity", "host-data"]) assert.deepEqual(readdirSync(join(scratch, "empty", folder)), []);
+    for (const folder of ["sync-relay", "continuity", "host-data", "snapshots"]) assert.deepEqual(readdirSync(join(scratch, "empty", folder)), []);
     // The relay check created this project's network, which uses the same subnet as the next project.
     compose(empty, ["down"]);
     const second = await project("b", disk, ["-f", override]);

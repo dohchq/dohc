@@ -1,4 +1,4 @@
-import { historyPageFields } from "../testing/historyPageFixture";
+import { historyPageFields, neutralHistoryPresentations } from "../testing/historyPageFixture";
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
@@ -4101,6 +4101,7 @@ describe("Collection automations", () => {
       person: () => undefined,
       automation: (automationId) => collectionAutomationAuthor(w.executor, automationId),
       named: () => "Named",
+      presentations: neutralHistoryPresentations,
     };
     const automator = { kind: "automation", automationId: "collection:Tasks#stamp", depth: 1 } as const;
     const agent = { kind: "agent", agentId: "writer", agentName: "Writer" } as const;

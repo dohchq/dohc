@@ -136,6 +136,26 @@ describe("PageIdentity", () => {
       expect(screen.queryByTestId("page-icon-add")).toBeNull();
     });
 
+    it("holds Add icon's box out of reach while an editable page opens", () => {
+      const view = render(
+        <PageIdentity body={"# Body\n"} onChange={() => {}} filenameStem="note" opening />,
+      );
+      expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(true);
+      expect(screen.queryByTestId("page-icon-add")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Add icon" })).toBeNull();
+      const held = view.container.querySelector("button[aria-hidden]") as HTMLButtonElement | null;
+      expect(held?.textContent, "`) : opening ? (` → `) : null}`. The opening row lacks Add icon's box and is shorter than the ready row, so the page moves when it opens.").toBe("Add icon");
+      expect(held?.classList.contains("invisible")).toBe(true);
+      expect(held?.disabled).toBe(true);
+      expect(held?.tabIndex).toBe(-1);
+
+      // A read-only page shows no Add icon once open either, so it holds none.
+      view.rerender(
+        <PageIdentity body={"# Body\n"} onChange={() => {}} filenameStem="note" readOnly opening />,
+      );
+      expect(view.container.querySelector("button[aria-hidden]")).toBeNull();
+    });
+
     it("moves focus into the picker when it opens", async () => {
       const user = userEvent.setup();
       render(<ControlledPageIdentity initialBody={"# Body\n"} stem="note" />);

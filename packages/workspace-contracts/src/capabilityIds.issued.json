@@ -170,5 +170,6 @@
   "file.image.pick",
   "file.external.open",
   "account.delete.preview",
-  "account.delete"
+  "account.delete",
+  "agent.run.state.read"
 ]

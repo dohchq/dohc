@@ -218,6 +218,26 @@ const V1_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
   FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
   FOREIGN KEY (share_id) REFERENCES sync_relay_shares(share_id)
 ) STRICT`;
+const V2_SQL = `CREATE TABLE ${SERVICE_HOST_ENROLLMENTS} (
+  workspace_id TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  owner_user_id TEXT NOT NULL,
+  share_id TEXT NOT NULL,
+  replication_epoch TEXT NOT NULL,
+  stream_identity TEXT NOT NULL,
+  owner_stop TEXT CHECK (owner_stop IN ('pause','retire')),
+  enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0,1) AND (retired=0 OR enabled=0)),
+  created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+  updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+  accounted_bytes INTEGER NOT NULL CHECK (accounted_bytes BETWEEN 1 AND 9007199254740991),
+  CHECK (enabled=1 OR retired=1 OR owner_stop='pause'),
+  PRIMARY KEY (workspace_id, object_id),
+  UNIQUE (workspace_id, path),
+  FOREIGN KEY (workspace_id) REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+  FOREIGN KEY (share_id) REFERENCES sync_relay_shares(share_id)
+) STRICT`;
 /** Rewrites the fixture's enrollments into the v1 layout, keeping each row's enabled and retired state. */
 function downgradeToV1(f: Awaited<ReturnType<typeof fixture>>, sql = V1_SQL, marker: string | null = "service-host-enrollments-v1") {
   f.raw.exec(`BEGIN;
@@ -229,9 +249,42 @@ function downgradeToV1(f: Awaited<ReturnType<typeof fixture>>, sql = V1_SQL, mar
     CREATE INDEX idx_sync_relay_service_host_enrollments_active ON ${SERVICE_HOST_ENROLLMENTS}(workspace_id,path) WHERE retired=0;
     CREATE INDEX idx_sync_relay_service_host_enrollments_retired ON ${SERVICE_HOST_ENROLLMENTS}(workspace_id,path) WHERE retired=1;
     DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v2';
+    DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v3';
     COMMIT;`);
   if (marker) f.raw.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,1)").run(marker);
 }
+
+function downgradeToV2(f: Awaited<ReturnType<typeof fixture>>) {
+  f.raw.exec(`BEGIN;
+    ALTER TABLE ${SERVICE_HOST_ENROLLMENTS} RENAME TO enrollments_v3;
+    ${V2_SQL};
+    INSERT INTO ${SERVICE_HOST_ENROLLMENTS}(workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes)
+      SELECT workspace_id,object_id,path,owner_user_id,share_id,replication_epoch,stream_identity,owner_stop,enabled,retired,created_at_ms,updated_at_ms,accounted_bytes FROM enrollments_v3;
+    DROP TABLE enrollments_v3;
+    CREATE INDEX idx_sync_relay_service_host_enrollments_active ON ${SERVICE_HOST_ENROLLMENTS}(workspace_id,path) WHERE retired=0;
+    CREATE INDEX idx_sync_relay_service_host_enrollments_retired ON ${SERVICE_HOST_ENROLLMENTS}(workspace_id,path) WHERE retired=1;
+    DELETE FROM sync_relay_migrations WHERE migration_id='service-host-enrollments-v3';
+    COMMIT;`);
+}
+
+it("migrates v2 enrollments with released rows already drained", async () => {
+  const f = await fixture(), enrolled = f.enroll();
+  f.seed(scope.workspaceId, "paused-object", "docs/paused.md", "paused-share");
+  f.seed(scope.workspaceId, "retired-object", "docs/retired.md", "retired-share");
+  f.enroll({path: "docs/paused.md", shareId: "paused-share"});
+  f.enroll({path: "docs/retired.md", shareId: "retired-share"});
+  f.storage.setServiceHostEnrollmentEnabled({...f.input, path: "docs/paused.md", enabled: false, nowMs: 20});
+  f.release("paused-object");
+  f.stop({path: "docs/retired.md"});
+  downgradeToV2(f);
+  const reopened = openSyncRelayStorage(f.path, f.config);
+  try {
+    expect(reopened.readServiceHostEnrollment(scope.workspaceId, enrolled.path)).toMatchObject({enabled: true, hostDrainedAtMs: null});
+    expect(reopened.readServiceHostEnrollment(scope.workspaceId, "docs/paused.md")).toMatchObject({enabled: false, retired: false, hostDrainedAtMs: 25});
+    expect(reopened.readServiceHostEnrollment(scope.workspaceId, "docs/retired.md")).toMatchObject({enabled: false, retired: true, hostDrainedAtMs: 25});
+    expect(f.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id=?").get("service-host-enrollments-v3")).toBeTruthy();
+  } finally {reopened.close();}
+});
 
 it("migrates v1 enrollments in place and keeps the enabled document hosted", async () => {
   const f = await fixture(), enabled = f.enroll();
@@ -249,9 +302,9 @@ it("migrates v1 enrollments in place and keeps the enabled document hosted", asy
     const reopened = openSyncRelayStorage(f.path, f.config);
     try {
       expect(f.raw.prepare(`SELECT path,enabled,retired,accounted_bytes FROM ${SERVICE_HOST_ENROLLMENTS} ORDER BY path`).all()).toEqual(before);
-      expect(reopened.listServiceHostEnrollments(scope.workspaceId).map(row => [row.path, row.enabled, row.ownerStop]))
-        .toEqual([["docs/a.md", true, null], ["docs/paused.md", false, "pause"]]);
-      expect(reopened.listRetiredServiceHostEnrollments(scope.workspaceId).documents.map(row => [row.path, row.ownerStop])).toEqual([["docs/retired.md", "retire"]]);
+      expect(reopened.listServiceHostEnrollments(scope.workspaceId).map(row => [row.path, row.enabled, row.ownerStop, row.hostDrainedAtMs]))
+        .toEqual([["docs/a.md", true, null, null], ["docs/paused.md", false, "pause", 25]]);
+      expect(reopened.listRetiredServiceHostEnrollments(scope.workspaceId).documents.map(row => [row.path, row.ownerStop, row.hostDrainedAtMs])).toEqual([["docs/retired.md", "retire", 25]]);
       // A retired v1 document stays out of a new Edit share's reach, as it did before.
       expect(reopened.hasKeptServiceHostEnrollment(scope.workspaceId, "docs/retired.md")).toBe(true);
       expect(serviceHostDocumentEnabled(reopened as StorageContext, binding)).toBe(true);
@@ -261,7 +314,7 @@ it("migrates v1 enrollments in place and keeps the enabled document hosted", asy
     } finally {reopened.close();}
   }
   expect(f.raw.prepare("SELECT migration_id FROM sync_relay_migrations WHERE migration_id LIKE 'service-host-enrollments-%' ORDER BY migration_id").all()
-    .map(row => row.migration_id)).toEqual(["service-host-enrollments-v1", "service-host-enrollments-v2"]);
+    .map(row => row.migration_id)).toEqual(["service-host-enrollments-v1", "service-host-enrollments-v2", "service-host-enrollments-v3"]);
 });
 
 it("refuses an enrollment table it does not recognize", async () => {
@@ -293,7 +346,7 @@ it("retirement frees capacity beyond 64 lifetime documents while preserving ever
   expect(() => f.setEnabled(true)).toThrow("capacity");
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(false);
   retire("docs/sixty-fifth.md");
-  expect(f.enroll()).toEqual({...first, updatedAtMs: 20});
+  expect(f.enroll()).toEqual({...first, updatedAtMs: 25});
   expect(serviceHostDocumentEnabled(f.storage as StorageContext, binding)).toBe(true);
   expect(f.storage.listServiceHostEnrollments()).toHaveLength(64);
 });
@@ -307,7 +360,7 @@ it("retired rows stay hidden until an explicit reactivation and still reject for
   // Stop fences acceptance immediately.
   expect(f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false, retire: true})).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
   expect(f.storage.listServiceHostEnrollments()).toHaveLength(0);
-  expect(f.release()).toBeNull();
+  expect(f.release()).toMatchObject({hostDrainedAtMs: 25});
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, first.path)).toMatchObject({shareId: first.shareId, retired: true, enabled: false});
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/absent.md")).toBeNull();
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
@@ -388,8 +441,8 @@ it("applies Pause after host release and fences Stop immediately", async () => {
   expect(f.setEnabled(true)).toMatchObject({enabled: true, ownerStop: null});
   expect(f.release()).toBeNull();
   f.setEnabled(false);
-  expect(f.release()).toMatchObject({...enrolled, enabled: false, retired: false, ownerStop: "pause", updatedAtMs: 25});
-  expect(f.release("stopped-object")).toBeNull();
+  expect(f.release()).toMatchObject({...enrolled, enabled: false, retired: false, ownerStop: "pause", hostDrainedAtMs: 25, updatedAtMs: 25});
+  expect(f.release("stopped-object")).toMatchObject({hostDrainedAtMs: 25});
   expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/stopped.md")).toMatchObject({enabled: false, retired: true, ownerStop: "retire"});
   // Revocation retires a paused document too, and it stays paused.
   f.raw.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=30 WHERE share_id=?").run(scope.shareId);

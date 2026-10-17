@@ -86,3 +86,6 @@ pub use watch::{
 // The cancellation primitive the actor loop consumes, re-exported so a caller
 // drives cancellation through one crate (mirrors `dohc-engine-runtime`).
 pub use tokio_util::sync::CancellationToken;
+
+#[cfg(unix)]
+pub mod retained;

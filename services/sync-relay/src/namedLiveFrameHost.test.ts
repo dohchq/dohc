@@ -1,3 +1,9 @@
+import {createLiveBufferBudget, LiveConnectionLimitError} from "@dohc/live-session-contract/live-connection";
+import * as Y from "yjs";
+import {markdownToYDoc} from "../../../packages/ydoc-projection/src/import-export";
+import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
+import {registered, cleanupLiveDeliveryFixtures, policy as journalPolicy} from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
+import {createLiveMarkdownJournalValidator} from "@dohc/ydoc-projection/live-journal-validation";
 import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
@@ -12,6 +18,7 @@ import { observeRelayWrites } from "./relayWriteChanges.js";
 import { queueLiveHostRequests } from "./liveHostRequests.js";
 import { createLiveMembershipRegistry } from "./liveMembership.js";
 import type { StorageContext } from "./storage/context.js";
+import type { CapacityLiveAdmissionValidator, OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 function deferred<T>() {
@@ -19,7 +26,7 @@ function deferred<T>() {
   return {promise: new Promise<T>(done => {resolve = done;}), resolve: (value: T) => resolve(value)};
 }
 const cleanup: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
+afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); vi.useRealTimers(); cleanupLiveDeliveryFixtures(); });
 const wireLimits = { maxFrameBytes: 1024 * 1024, maxBlobChunkBytes: 65536, maxStringBytes: 65536,
   maxCollectionLen: 1024, maxBatchLen: 64, maxJsonDepth: 32 };
 class Peer implements EngineClientConnection {
@@ -62,7 +69,7 @@ const position = { eventCount: 0, journalCursor: 0, evidenceDigest: "ab".repeat(
 const bytes = Uint8Array.of(0, 0);
 const ack = { deliveryId: "delivery", updateDigest: hash(bytes), journalCursor: 11, acceptingHostEpoch: host.hostEpoch,
   localYDocSequence: 3, applicationReplayed: true };
-async function setup(maxListeners = 4) {
+async function setup(maxListeners = 4, reserveBytes?: (size: number) => () => void) {
   const state = await fixture(); cleanup.push(() => state.close());
   const tickets = createLiveTickets({ storage: state.storage, audience, key, hostReports: { currentBinding: async () => report } });
   const minted = await tickets.mint({ objectId: binding.objectId }, scope);
@@ -90,7 +97,7 @@ async function setup(maxListeners = 4) {
   const native = { client, workspace: "trusted-native-handle", registrationId: 7, coordinate: host, binding: nativeBinding,
     invalidated: invalidated.signal, changes, deadlineMs: 5000, nextRequestId: () => ++requestId, drain };
   const bounds = { maxClientVectorBytes: 32, maxSyncOutputBytes: 1024, maxAppliedUpdateBytes: 1024, maxSubmissionBytes: 1024, maxAdmissionBytes: 4096 };
-  const capture = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(scope), storage: state.storage, validate, native, bounds });
+  const capture = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(scope), storage: state.storage, validate, native, bounds, reserveBytes, validationBudget: reserveBytes ? {reserve: () => () => {}, maxBytes: Number.MAX_SAFE_INTEGER, reserveBytes} : undefined });
   cleanup.push(async () => { capture.close(); });
   return { ...state, peer, client, changes, invalidated, drain, capture, validate, native, bounds };
 }
@@ -425,25 +432,17 @@ it("keeps desktop object subscriptions separate from live frame listener capacit
 });
 
 it("rechecks revocation after asynchronous validation and never commits its stale result", async () => {
-  const f = await setup(), commit = journal(f), waiting = deferred<void>();
+  const f = await setup(), commit = journal(f), waiting = deferred<void>(), entered = deferred<void>();
   const capture = captureNamedLiveFrameHost({ticket: f.capture.ticket, actor: liveBrowserActor(scope), storage: f.storage,
-    native: f.native, bounds: f.bounds, validate: async () => {await waiting.promise; return {kind: "refused", reason: "invalid-update", source: "candidate"};}});
+    native: f.native, bounds: f.bounds, validate: async () => {entered.resolve(); await waiting.promise; return {kind: "refused", reason: "invalid-update", source: "candidate"};}});
   cleanup.push(async () => capture.close());
   const submitting = capture.submit({deliveryId: "delivery", updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal);
+  await entered.promise;
   f.raw.prepare("UPDATE sync_relay_share_grants SET generation=generation+1 WHERE grant_id=?").run(scope.grantId);
   waiting.resolve(); await expect(submitting).rejects.toThrow("standing changed");
   expect(commit).not.toHaveBeenCalled();
 });
 
-it("returns transient worker saturation as retry before calling the journal commit", async () => {
-  const f = await setup(), commit = journal(f);
-  const capture = captureNamedLiveFrameHost({ticket: f.capture.ticket, actor: liveBrowserActor(scope), storage: f.storage,
-    native: f.native, bounds: f.bounds, validate: () => ({kind: "retry", reason: "admission-unavailable", waitForCapacity: async () => {}})});
-  cleanup.push(async () => capture.close());
-  expect(await capture.submit({deliveryId: "delivery", updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
-    .toEqual({result: "retry", reason: "admission-unavailable"});
-  expect(commit).not.toHaveBeenCalled();
-});
 
 it("terminally refuses an oversized submission before validation or journal admission", async () => {
   const f = await setup();
@@ -454,4 +453,203 @@ it("terminally refuses an oversized submission before validation or journal admi
     .toEqual({result: "refused", reason: "invalid-update"});
   expect(commit).not.toHaveBeenCalled();
   expect(f.validate).not.toHaveBeenCalled();
+});
+
+it("reserves journal work before reading journal bytes", async () => {
+  const budget = createLiveBufferBudget(12_288), f = await setup(4, budget.reserve);
+  const sync = await f.capture.openSync(Uint8Array.of(0), new AbortController().signal);
+  const cut = vi.spyOn(f.storage, "readLiveUpdateJournalCut"), release = budget.reserve(12_288);
+  await expect(f.capture.submit({deliveryId: "delivery", updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
+    .resolves.toEqual({result: "retry", reason: "admission-unavailable"});
+  expect(f.peer.requests).toHaveLength(1);
+  expect(cut).toHaveBeenCalledOnce();
+  release(); sync.close(); f.capture.close(); expect(budget.usage()).toBe(0);
+});
+
+it("charges the actual applied payload after a native read and releases it once with the lease", async () => {
+  const budget = createLiveBufferBudget(64), f = await setup(4, budget.reserve);
+  const signal = new AbortController().signal, sync = await f.capture.openSync(Uint8Array.of(0), signal);
+  const updateBytes = Buffer.alloc(31);
+  const read = vi.spyOn(f.native.client, "readNextLiveApplied").mockImplementation(async () => {
+    expect(budget.usage()).toBe(0);
+    return {position: {eventCount: 1, journalCursor: 11, evidenceDigest: "cd".repeat(32)}, ack, updateBytes};
+  });
+  const lease = await sync.nextApplied(signal);
+  expect(read).toHaveBeenCalledOnce(); expect(budget.usage()).toBe(updateBytes.length);
+  lease.release(); lease.release(); expect(budget.usage()).toBe(0);
+});
+
+it("keeps empty reads uncharged and releases a rejected cursor payload", async () => {
+  const budget = createLiveBufferBudget(64), f = await setup(4, budget.reserve), caller = new AbortController();
+  const sync = await f.capture.openSync(Uint8Array.of(0), caller.signal);
+  const read = vi.spyOn(f.native.client, "readNextLiveApplied").mockResolvedValue(null);
+  const pending = sync.nextApplied(caller.signal);
+  await vi.waitFor(() => expect(read).toHaveBeenCalledOnce()); expect(budget.usage()).toBe(0);
+  read.mockResolvedValue({position: {eventCount: 2, journalCursor: 11, evidenceDigest: "cd".repeat(32)}, ack, updateBytes: Buffer.alloc(31)});
+  f.changes.notify(binding);
+  await expect(pending).rejects.toThrow("Native applied cursor changed");
+  expect(budget.usage()).toBe(0);
+});
+
+it("refuses an applied payload only after reading its size without retaining budget", async () => {
+  const budget = createLiveBufferBudget(30), f = await setup(4, budget.reserve), signal = new AbortController().signal;
+  const sync = await f.capture.openSync(Uint8Array.of(0), signal);
+  const read = vi.spyOn(f.native.client, "readNextLiveApplied").mockResolvedValue({position: {eventCount: 1, journalCursor: 11,
+    evidenceDigest: "cd".repeat(32)}, ack, updateBytes: Buffer.alloc(31)});
+  await expect(sync.nextApplied(signal)).rejects.toThrowError(LiveConnectionLimitError);
+  expect(read).toHaveBeenCalledOnce(); expect(budget.usage()).toBe(0);
+});
+
+it("admits an edit to a 2 MiB checkpoint and retries a concurrent validation from the same person", async () => {
+  const MiB = 1024 * 1024, doc = markdownToYDoc("x".repeat(2 * MiB - 1024));
+  const baselineBytes = Y.encodeStateAsUpdate(doc); doc.destroy();
+  const checkpointPolicy = {...journalPolicy, maxDecodedPayloadByteVisits: 500_000_000};
+  const f = registered({deployment: true, baselineBytes, journalPolicy: checkpointPolicy}), peer = await setup(), admission = createLiveConnectionAdmission();
+  cleanup.push(async () => f.close());
+  for (let index = 0; index < Math.ceil(20 * MiB / baselineBytes.length); index++) {
+    const result = f.storage.commitLiveUpdateJournal(f.capture(baselineBytes, "checkpoint-" + index)).result;
+    if (result.kind !== "accepted") throw new Error(JSON.stringify({index, result}));
+  }
+  const document = f.input.evidence.document, cut = f.storage.readLiveUpdateJournalCut({document});
+  if (cut.kind !== "cut") throw new Error("Expected checkpoint cut");
+  expect(cut.cut.checkpoint.cursor).not.toBeNull(); expect(cut.cut.suffix).toEqual([]);
+  expect(cut.cut.checkpoint.bytes.length).toBeGreaterThan(1.9 * MiB);
+  expect(cut.cut.checkpoint.bytes.length).toBeLessThan(4 * MiB);
+  const current = f.storage.resolveCurrentLiveDocumentBinding({document, actor: f.actor});
+  if (current.kind !== "current") throw new Error("Expected current binding");
+  const buffers = admission.buffers(128 * MiB), key = JSON.stringify(["principal", "named", "owner"]);
+  const entered = deferred<void>(), resume = deferred<void>(), validateJournal = createLiveMarkdownJournalValidator(checkpointPolicy);
+  let firstValidation = true;
+  const validate = vi.fn(async ({retainStateUpdate: _retainStateUpdate, ...input}: Parameters<OwnerOutboxAdmission["validate"]>[0]) => {
+    entered.resolve();
+    if (firstValidation) { firstValidation = false; await resume.promise; }
+    return validateJournal(input);
+  });
+  const native = {...peer.native, coordinate: current.host, binding: current.binding,
+    client: {openLiveAppliedSync: peer.native.client.openLiveAppliedSync.bind(peer.native.client),
+      readNextLiveApplied: peer.native.client.readNextLiveApplied.bind(peer.native.client), readLiveApplicationAck: vi.fn(async (_request, identity: {deliveryId: string; updateDigest: string}) => {
+      const row = f.raw.prepare("SELECT journal_cursor FROM sync_relay_live_update_journal WHERE delivery_id=?").get(identity.deliveryId)!;
+      return {...identity, journalCursor: Number(row.journal_cursor), acceptingHostEpoch: current.host.hostEpoch,
+        localYDocSequence: 1, applicationReplayed: false};
+    })}};
+  const capture = () => {
+    const session = captureOwnerLiveFrameHost({authenticatedUserId: "owner", shareId: "share", storage: f.storage, native,
+      bounds: {...peer.bounds, maxAdmissionBytes: 20 * MiB}, validate,
+      reserveBytes: size => buffers.reserve(size, [[key, 12 * MiB]]),
+      validationBudget: {reserve: () => admission.reserve([[JSON.stringify(["validation", key]), 1]]), maxBytes: 128 * MiB, reserveBytes: buffers.reserve}});
+    cleanup.push(async () => session.close()); return session;
+  };
+  const first = capture(), second = capture(), updateBytes = f.update("title", "Edited after checkpoint");
+  const input = {deliveryId: "large-edit", updateDigest: hash(updateBytes), updateBytes}, signal = new AbortController().signal;
+  const submitting = first.submit(input, signal);
+  await Promise.race([entered.promise, submitting]);
+  expect(validate).toHaveBeenCalledOnce();
+  try {
+    expect(buffers.usage()).toBeGreaterThan(12 * MiB);
+    const retained = buffers.usage();
+    expect(await second.submit({...input, deliveryId: "concurrent-edit"}, signal)).toEqual({result: "retry", reason: "admission-unavailable"});
+    expect(buffers.usage()).toBe(retained); expect(validate).toHaveBeenCalledOnce();
+    expect(first.invalidated.aborted).toBe(false); expect(second.invalidated.aborted).toBe(false);
+  } finally {resume.resolve();}
+  expect(await submitting).toMatchObject({result: "success", ack: {deliveryId: "large-edit"}});
+  expect(buffers.usage()).toBe(0);
+  expect(await second.submit({...input, deliveryId: "next-edit"}, signal)).toMatchObject({result: "success"});
+  expect(validate).toHaveBeenCalledTimes(2); expect(buffers.usage()).toBe(0);
+}, 120_000);
+it("reads one cut when one slot frees for thirty waiting submissions", async () => {
+  const f = await setup(64);
+  journal(f);
+  const read = vi.mocked(f.storage.readLiveUpdateJournalCut);
+  let available = false;
+  const waiters = new Set<() => void>();
+  const waiting = deferred<void>();
+  const validate = Object.assign(vi.fn(() => {
+    if (!available) return {kind: "retry" as const, reason: "admission-unavailable" as const, waitForCapacity};
+    available = false;
+    return {kind: "refused" as const, reason: "invalid-update" as const, source: "candidate" as const};
+  }), {hasCapacity: () => available, waitForCapacity});
+  function waitForCapacity(signal?: AbortSignal) {
+    if (available) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const wake = () => { waiters.delete(wake); signal?.removeEventListener("abort", abort); resolve(); };
+      const abort = () => { waiters.delete(wake); reject(signal!.reason); };
+      waiters.add(wake); signal?.addEventListener("abort", abort, {once: true});
+      if (waiters.size === 30) waiting.resolve();
+    });
+  }
+  const caller = new AbortController();
+  const captures = Array.from({length: 30}, () => captureNamedLiveFrameHost({
+    ticket: f.capture.ticket, actor: liveBrowserActor(scope), storage: f.storage,
+    native: f.native, bounds: f.bounds, validate,
+  }));
+  cleanup.push(async () => { captures.forEach(capture => capture.close()); });
+  const outcomes = captures.map(capture => capture.submit({
+    deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes,
+  }, caller.signal));
+  const settled = Promise.allSettled(outcomes);
+  await waiting.promise;
+  expect(read).not.toHaveBeenCalled();
+  available = true;
+  for (const wake of [...waiters]) wake();
+  expect(await Promise.race(outcomes)).toEqual({result: "success", ack});
+  expect(read).toHaveBeenCalledOnce();
+  expect(validate).toHaveBeenCalledOnce();
+  caller.abort();
+  await settled;
+});
+
+it.each(["validator", "commit"])("releases validation bytes across repeated %s recaptures and reserves the person once", async mode => {
+  const f = await setup(), commit = journal(f), admission = createLiveConnectionAdmission(), budget = admission.buffers(12_288);
+  const read = vi.mocked(f.storage.readLiveUpdateJournalCut), cut = read({document: binding});
+  read.mockClear();
+  read.mockImplementation((_input, reserve) => { expect(budget.usage()).toBe(0); reserve!(1_024); return cut; });
+  const reserve = vi.fn(() => admission.reserve([["person-validation", 1]]));
+  const waitForCapacity = vi.fn(async () => {
+    expect(budget.usage()).toBe(0);
+    expect(admission.reserve([["person-validation", 1]])).toBeNull();
+  });
+  let validations = 0;
+  const validate: CapacityLiveAdmissionValidator = Object.assign(vi.fn(() => {
+    expect(budget.usage()).toBe(1_024 + 3 * bytes.length);
+    if (mode === "validator" && ++validations < 4) return {kind: "retry" as const, reason: "admission-unavailable" as const, waitForCapacity};
+    return {kind: "refused" as const, reason: "invalid-update" as const, source: "candidate" as const};
+  }), {waitForCapacity});
+  if (mode === "commit") for (let index = 0; index < 3; index++) commit.mockReturnValueOnce({result: {kind: "retry", reason: "admission-unavailable"}, admitted: null});
+  const capture = captureNamedLiveFrameHost({ticket: f.capture.ticket, actor: liveBrowserActor(scope), storage: f.storage,
+    native: f.native, bounds: f.bounds, validate, validationBudget: {reserve, maxBytes: 12_288, reserveBytes: budget.reserve}});
+  cleanup.push(async () => capture.close());
+  expect(await capture.submit({deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal)).toEqual({result: "success", ack});
+  expect(read).toHaveBeenCalledTimes(4); expect(validate).toHaveBeenCalledTimes(4);
+  expect(reserve).toHaveBeenCalledOnce(); expect(waitForCapacity).toHaveBeenCalledTimes(4);
+  expect(budget.usage()).toBe(0);
+  const released = admission.reserve([["person-validation", 1]]); expect(released).not.toBeNull(); released?.();
+});
+
+it.each(["refusal", "deadline", "cancellation"])("releases validation bytes and the person slot on %s", async mode => {
+  const f = await setup(), commit = journal(f), admission = createLiveConnectionAdmission(), budget = admission.buffers(12_288);
+  const read = vi.mocked(f.storage.readLiveUpdateJournalCut), cut = read({document: binding}), entered = deferred<void>();
+  read.mockImplementation((_input, reserve) => { reserve!(1_024); return cut; });
+  const reserve = vi.fn(() => admission.reserve([["person-validation", 1]]));
+  const validate: CapacityLiveAdmissionValidator = async (_input, signal) => {
+    entered.resolve();
+    if (mode !== "refusal") await new Promise<void>((_resolve, reject) => {
+      signal!.throwIfAborted(); signal!.addEventListener("abort", () => reject(signal!.reason), {once: true});
+    });
+    return {kind: "refused", reason: "invalid-update", source: "candidate"};
+  };
+  commit.mockReturnValue({result: {kind: "refused", reason: "invalid-update"}, admitted: null});
+  const capture = captureNamedLiveFrameHost({ticket: f.capture.ticket, actor: liveBrowserActor(scope), storage: f.storage,
+    native: {...f.native, deadlineMs: 50}, bounds: f.bounds, validate, validationBudget: {reserve, maxBytes: 12_288, reserveBytes: budget.reserve}});
+  cleanup.push(async () => capture.close());
+  vi.useFakeTimers();
+  const caller = new AbortController(), submitted = capture.submit({deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes}, caller.signal);
+  const outcome = mode === "cancellation" ? expect(submitted).rejects.toThrow("cancelled") : expect(submitted).resolves.toEqual(mode === "deadline"
+    ? {result: "retry", reason: "admission-unavailable"} : {result: "refused", reason: "invalid-update"});
+  await entered.promise;
+  if (mode === "deadline") await vi.advanceTimersByTimeAsync(50);
+  if (mode === "cancellation") caller.abort(new Error("cancelled"));
+  await outcome;
+  expect(budget.usage()).toBe(0); expect(reserve).toHaveBeenCalledOnce();
+  const released = admission.reserve([["person-validation", 1]]); expect(released).not.toBeNull(); released?.();
+  expect(vi.getTimerCount()).toBe(0);
 });

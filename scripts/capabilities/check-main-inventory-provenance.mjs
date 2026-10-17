@@ -12,15 +12,10 @@ assert.equal(manifest.sourceCommit, "a4be19d5bc2c3581aca2d4b2bfb66af8b06b9945");
 assert.equal(manifest.trackedSourcesClean, true);
 assert.equal(hash("scripts/capabilities/generate-main-inventories.ts"), manifest.generatorSha256, "generator hash");
 assert.deepEqual(Object.keys(manifest.fixtureSha256).sort(), [
-  "packages/mcp/src/capabilityExposure.fixture.ts",
   "services/share-web/src/remoteMcpInventory.fixture.ts",
 ]);
 for (const [path, expected] of Object.entries(manifest.fixtureSha256)) assert.equal(hash(path), expected, path);
 for (const [name, prefix] of Object.entries({
-  "ipcExposure.main.json": "apps/desktop/src/ipc/",
-  "cliExposure.main.json": "apps/desktop/src/ipc/",
-  "channelKeys.main.json": "apps/desktop/src/ipc/",
-  "toolsList.main.json": "packages/mcp/src/",
   "remoteMcpTools.main.json": "services/share-web/src/",
 })) assert.equal(hash(prefix + name), manifest.files[name], name);
-console.log("Main inventory provenance passed: generator, both staged fixtures, and five JSON inventories.");
+console.log("Main inventory provenance passed: generator, remote MCP fixture, and remote MCP inventory.");

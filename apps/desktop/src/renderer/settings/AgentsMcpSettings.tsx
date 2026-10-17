@@ -46,15 +46,6 @@ export function AgentsMcpSettings(props: {
   sharedView?: boolean;
   sessionRecorderOn: boolean | undefined;
   onRunnerChange: (runner: RunnerSettings) => Promise<void>;
-  onAgentActiveChange?: (update: {
-    active: boolean;
-    /**
-     * True only when this panel started or ended the run itself. An
-     * observation may be older than a refresh the shell already has in
-     * flight, so it must never supersede one.
-     */
-    mutated: boolean;
-  }) => void;
 }) {
   const {
     workspaceId,
@@ -65,7 +56,6 @@ export function AgentsMcpSettings(props: {
     sharedView,
     sessionRecorderOn,
     onRunnerChange,
-    onAgentActiveChange,
     onError,
   } = props;
   const [status, setStatus] = useState<AgentRunStatusResult | null>(null);
@@ -160,11 +150,8 @@ export function AgentsMcpSettings(props: {
           const latestRun = latestStatus.activeRun;
           if ((latestRun?.id ?? null) !== renderedRunId) {
             // The run changed under the rendered label, so this click only
-            // reports what the reread saw. Nothing was started or ended.
-            if (isCurrentRequest(version)) {
-              setRetry(null);
-              onAgentActiveChange?.({ active: latestRun !== null, mutated: false });
-            }
+            // shows what the reread saw. Nothing was started or ended.
+            if (isCurrentRequest(version)) setRetry(null);
             return;
           }
         }
@@ -177,11 +164,8 @@ export function AgentsMcpSettings(props: {
           }
           changed = true;
         }
-        const finalStatus = await refresh(version);
-        if (isCurrentRequest(version)) {
-          setRetry(null);
-          onAgentActiveChange?.({ active: finalStatus.activeRun !== null, mutated: !retrying });
-        }
+        await refresh(version);
+        if (isCurrentRequest(version)) setRetry(null);
       } catch (cause) {
         if (!retrying && !isCurrentRequest(version)) return;
         const askAgain = () => execute(true);
@@ -192,20 +176,13 @@ export function AgentsMcpSettings(props: {
             : "dohc could not stop this workspace's agent run. Try again.";
         onError?.(ipcErrorMessage(cause, fallback), cause, askAgain);
         if (!attempted) return;
-        // Reread live status alone: the config did not change. After a refusal
-        // it is only an observation, since a refusal does not say whether the
-        // run changed.
+        // Reread live status alone: the config did not change, and a refusal
+        // does not say whether the run changed.
         try {
           const observed = await bridge().getAgentRunStatus({ workspaceId });
-          if (!isCurrentRequest(version)) return;
-          setStatus(observed);
-          onAgentActiveChange?.({ active: observed.activeRun !== null, mutated: changed && !retrying });
+          if (isCurrentRequest(version)) setStatus(observed);
         } catch {
-          // The failure above is already this click's notice. A run that did
-          // change still needs the shell to reread it, so report an observation.
-          if (changed && isCurrentRequest(version)) {
-            onAgentActiveChange?.({ active: starting, mutated: false });
-          }
+          // The failure above is already this click's notice.
         }
       } finally {
         if (isCurrentRequest(version)) setBusy(false);
@@ -217,7 +194,7 @@ export function AgentsMcpSettings(props: {
       return inFlight;
     };
     await execute();
-  }, [workspaceId, refresh, isCurrentRequest, status?.activeRun?.id, onAgentActiveChange, onError]);
+  }, [workspaceId, refresh, isCurrentRequest, status?.activeRun?.id, onError]);
 
   return (
     <div className="flex flex-col">

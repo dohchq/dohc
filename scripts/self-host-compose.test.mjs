@@ -129,16 +129,67 @@ test('private mode selects the private-only gateway overlay and the real env fil
   assert.match(readFileSync('tools/self-host/compose.private.yml', 'utf8'), /127\.0\.0\.1/);
 });
 
-test('a data directory selects the data-disk overlay for relay, continuity and host data only', () => {
+test('hourly snapshots read the relay read-only, never mount continuity, and start only with off-site storage', () => {
+  const service = compose.services['relay-snapshot'];
+  assert.deepEqual(service.profiles, ['snapshots']);
+  assert.deepEqual(service.volumes, ['dohc_self_host_sync_relay:/data:ro', 'dohc_self_host_snapshots:/snapshots']);
+  assert.ok(!JSON.stringify(service).includes('continuity'));
+  assert.equal(service.read_only, true);
+  assert.equal(service.depends_on['sync-relay'].condition, 'service_healthy');
+  assert.ok(!Object.keys(compose.services['sync-relay'].environment).some(name => name.startsWith('DOHC_SNAPSHOT_')));
+  // Outbound only: its own network, shared with no service, so Postgres, workspace-api and the relay are unreachable.
+  assert.deepEqual(service.networks, ['snapshots']);
+  assert.deepEqual(compose.networks.snapshots, {});
+  for (const [name, other] of Object.entries(compose.services)) if (name !== 'relay-snapshot') assert.ok(!JSON.stringify(other.networks ?? []).includes('snapshots'), name);
+  for (const overlay of ['private', 'cloudflare', 'external-postgres', 'data-disk']) {
+    const text = readFileSync(`tools/self-host/compose.${overlay}.yml`, 'utf8');
+    assert.ok(!/relay-snapshot|networks:/.test(text), overlay);
+  }
+  assert.ok(!composeArgs('.env.self-host', settings(), 'up').includes('--profile'));
+  const enabled = composeArgs('.env.self-host', { ...settings(), DOHC_SNAPSHOT_S3_BUCKET: 'dohc-snapshots', DOHC_DATA_DIRECTORY: '/mnt/disk/dohc' }, 'up');
+  assert.ok(enabled.indexOf('tools/self-host/compose.data-disk.yml') < enabled.indexOf('--profile'));
+  assert.deepEqual(enabled.slice(enabled.indexOf('--profile'), enabled.indexOf('--profile') + 3), ['--profile', 'snapshots', 'up']);
+});
+
+// Compose interpolates every service, including those whose profile is off, so a required value here would stop every deployment.
+test('a deployment without snapshots starts without a snapshot key', () => {
+  const required = /\$\{DOHC_SNAPSHOT_[A-Z0-9_]*:\?/;
+  assert.ok(!required.test(composeText));
+  for (const file of ['compose.data-disk.yml', 'compose.private.yml', 'compose.external-postgres.yml', 'compose.cloudflare.yml']) {
+    assert.ok(!required.test(readFileSync(`tools/self-host/${file}`, 'utf8')), file);
+  }
+  assert.equal(compose.services['relay-snapshot'].environment.DOHC_SNAPSHOT_KEY, '${DOHC_SNAPSHOT_KEY:-}');
+  for (const key of [undefined, '']) assert.deepEqual(validateSettings({ ...settings(), DOHC_SNAPSHOT_KEY: key }), [], String(key));
+});
+
+test('bootstrap generates a snapshot key and settings refuse snapshot storage without a key or with partial settings', () => {
+  assert.match(settings().DOHC_SNAPSHOT_KEY, /^[A-Za-z0-9_-]{43}$/);
+  assert.ok(validateSettings({ ...settings(), DOHC_SNAPSHOT_KEY: 'change-me' }).some(error => error.includes('DOHC_SNAPSHOT_KEY')));
+  const storage = { DOHC_SNAPSHOT_S3_ENDPOINT: 'https://account.r2.cloudflarestorage.com', DOHC_SNAPSHOT_S3_BUCKET: 'dohc-snapshots',
+    DOHC_SNAPSHOT_S3_ACCESS_KEY_ID: 'id', DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: 'secret', DOHC_SNAPSHOT_ALERT_EMAIL: 'ops@team.invalid' };
+  assert.deepEqual(validateSettings({ ...settings(), ...storage }), []);
+  for (const key of [undefined, '']) {
+    assert.deepEqual(validateSettings({ ...settings(), ...storage, DOHC_SNAPSHOT_KEY: key }),
+      ['Set DOHC_SNAPSHOT_KEY to the key that bootstrap generated, or clear every DOHC_SNAPSHOT_S3_ value to turn off snapshot upload.'], String(key));
+  }
+  assert.deepEqual(validateSettings({ ...settings(), ...storage, DOHC_SNAPSHOT_HEARTBEAT_URL: 'https://heartbeat.invalid/ping' }), []);
+  assert.ok(validateSettings({ ...settings(), ...storage, DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: '' }).some(error => error.includes('DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY')));
+  assert.ok(validateSettings({ ...settings(), ...storage, DOHC_SNAPSHOT_ALERT_EMAIL: '' }).some(error => error.includes('DOHC_SNAPSHOT_ALERT_EMAIL')));
+  assert.ok(validateSettings({ ...settings(), ...storage, DOHC_SNAPSHOT_S3_ENDPOINT: 'http://storage.invalid' }).some(error => error.includes('HTTPS origin')));
+  assert.ok(validateSettings({ ...settings(), DOHC_SNAPSHOT_HEARTBEAT_URL: 'http://heartbeat.invalid' }).some(error => error.includes('HEARTBEAT')));
+});
+
+test('a data directory selects the data-disk overlay for relay, continuity, host data and snapshot staging only', () => {
   assert.ok(!composeArgs('.env.self-host', settings(), 'up').includes('tools/self-host/compose.data-disk.yml'));
   const args = composeArgs('.env.self-host', {...settings(), DOHC_SERVER_NETWORK_ACCESS: 'private', DOHC_DATA_DIRECTORY: '/mnt/disk/dohc'}, 'up');
   assert.ok(args.indexOf('tools/self-host/compose.private.yml') < args.indexOf('tools/self-host/compose.data-disk.yml'));
   assert.ok(args.indexOf('tools/self-host/compose.data-disk.yml') < args.indexOf('up'));
   const overlay = load(readFileSync('tools/self-host/compose.data-disk.yml', 'utf8'), { schema: YAML11_SCHEMA });
   assert.deepEqual(Object.keys(overlay), ['services', 'volumes']);
-  // The data-disk check runs in relay-initialize, so it must see host data too; it never writes it.
-  assert.deepEqual(overlay.services, {'relay-initialize': {volumes: ['dohc_self_host_host_data:/host-data:ro']}});
-  const folders = {dohc_self_host_sync_relay: 'sync-relay', dohc_self_host_relay_continuity: 'continuity', dohc_self_host_host_data: 'host-data'};
+  // The data-disk check runs in relay-initialize, so it must see host data and snapshot state too; it never writes them.
+  assert.deepEqual(overlay.services, {'relay-initialize': {volumes: ['dohc_self_host_host_data:/host-data:ro', 'dohc_self_host_snapshots:/snapshots:ro']}});
+  const folders = {dohc_self_host_sync_relay: 'sync-relay', dohc_self_host_relay_continuity: 'continuity', dohc_self_host_host_data: 'host-data',
+    dohc_self_host_snapshots: 'snapshots'};
   assert.deepEqual(Object.keys(overlay.volumes), Object.keys(folders));
   for (const [name, folder] of Object.entries(folders)) {
     assert.ok(Object.hasOwn(compose.volumes, name));
@@ -188,6 +239,7 @@ function relayCheck(files, unreadable = false) {
 test('only the first start of a data-disk deployment may initialize its relay', () => {
   const settings = {DOHC_DATA_DIRECTORY: '/mnt/disk/dohc'};
   const record = '/continuity/deployment.json', database = '/data/sync-relay.sqlite', hostData = '/host-data/automations/replica.db';
+  const snapshotState = '/snapshots/notifications.json';
   const result = (check, firstStart) => relayDeploymentError('.env.self-host', settings, args => {
     assert.ok(args.includes('tools/self-host/compose.data-disk.yml') && args.includes('relay-initialize'));
     return check;
@@ -196,8 +248,10 @@ test('only the first start of a data-disk deployment may initialize its relay', 
   // A later start accepts empty host data: documents rebuild from the relay (claims in progress do not, #2016).
   assert.equal(result(found, false), '');
   assert.equal(result(relayCheck([record, database, hostData]), false), '');
+  assert.equal(result(relayCheck([record, database, snapshotState]), false), '');
   assert.equal(result(empty, true), '');
-  for (const files of [[], [hostData]]) {
+  // Snapshot state is not relay data, so it never stands in for a deployment.
+  for (const files of [[], [hostData], [snapshotState], [hostData, snapshotState]]) {
     assert.match(result(relayCheck(files), false), /No relay deployment found in \/mnt\/disk\/dohc\. Mount the data disk there and try again\. Never recreate its folders/);
   }
   const refusals = [
@@ -205,12 +259,15 @@ test('only the first start of a data-disk deployment may initialize its relay', 
     [[record, database, hostData], '/mnt/disk/dohc/sync-relay, /mnt/disk/dohc/continuity, /mnt/disk/dohc/host-data already hold data'],
     [[record], '/mnt/disk/dohc/continuity already holds data'], [[database], '/mnt/disk/dohc/sync-relay already holds data'],
     [['/continuity/history/continuity.sqlite'], '/mnt/disk/dohc/continuity already holds data'],
+    [[database, snapshotState], '/mnt/disk/dohc/sync-relay, /mnt/disk/dohc/snapshots already hold data'],
   ];
   for (const [files, holding] of refusals) {
     assert.equal(result(relayCheck(files), true), `${holding}. A first start needs empty disk folders. Start without --first-start.`, files.join());
   }
   // Leftover host data alone still refuses a first start, which would otherwise run on another deployment's host state.
   assert.equal(result(relayCheck([hostData]), true), '/mnt/disk/dohc/host-data already holds data. A first start needs empty disk folders. ' +
+    'Check that DOHC_DATA_DIRECTORY names a new deployment folder.');
+  assert.equal(result(relayCheck([snapshotState]), true), '/mnt/disk/dohc/snapshots already holds data. A first start needs empty disk folders. ' +
     'Check that DOHC_DATA_DIRECTORY names a new deployment folder.');
   for (const files of [[record], [database]]) {
     assert.match(result(relayCheck(files), false), /The relay deployment in \/mnt\/disk\/dohc is missing its record or its database/, files.join());
