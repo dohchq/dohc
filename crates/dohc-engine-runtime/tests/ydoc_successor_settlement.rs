@@ -201,7 +201,7 @@ async fn successor_no_edit_runtime_settlement_preserves_exact_source() {
 }
 
 #[tokio::test]
-async fn successor_body_edit_loses_untouched_nested_list_source() {
+async fn successor_body_edit_canonicalizes_source_and_keeps_nested_list() {
     use std::sync::Arc;
 
     let incoming = "- parent\n  - child\n\nOriginal paragraph\n";
@@ -266,7 +266,7 @@ async fn successor_body_edit_loses_untouched_nested_list_source() {
         .expect("persist body edit");
     let edited = settle_document_successor(&actor, &scratch, &key, &claim, &sha, 24).await;
     supervisor.close(&db).unwrap();
-    let canonical = "- parent\n\n  \\- child\n\nOriginal paragraph\n\nAdded paragraph";
+    let canonical = "- parent\n  - child\n\nOriginal paragraph\n\nAdded paragraph";
     assert_eq!(edited.projection.content, canonical);
     assert_ne!(edited.moment_id, control.moment_id);
     assert!(edited.materialized);
