@@ -1,7 +1,7 @@
-import {mkdtemp, mkdir, readFile, readdir, rm, writeFile} from "node:fs/promises";
+import {mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile} from "node:fs/promises";
 import {existsSync} from "node:fs";
 import {createHash} from "node:crypto";
-import {basename, join} from "node:path";
+import {basename, dirname, join} from "node:path";
 import {tmpdir} from "node:os";
 import {afterEach, expect, it, vi} from "vitest";
 import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHostedLiveHost";
@@ -253,6 +253,19 @@ it("starts one empty daemon and attaches the first shared document's workspace t
   expect(first.workspaces[0]!.hostedReplication).toMatchObject({identity: {replicationEpoch: "epoch", streamIdentity: "stream"},
     relay: {baseUrl: "https://relay.test"}});
   expect(bearer(first.workspaces[0]!)).toMatch(/^dohc-service-v1\./);
+});
+
+// The service host refuses a configuration path that resolves elsewhere, and
+// macOS keeps its temporary folder behind a link.
+it.skipIf(process.platform === "win32")("writes the daemon's configuration in the real temporary folder when TMPDIR is a link", async () => {
+  const f = await fixture({empty: true});
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 10_000});
+  const real = await mkdtemp(join(tmpdir(), "dohc-self-host-temp-")), linked = `${real}-link`;
+  await symlink(real, linked);
+  cleanup.push(async () => {vi.unstubAllEnvs(); await rm(linked, {force: true}); await rm(real, {recursive: true, force: true});});
+  vi.stubEnv("TMPDIR", linked);
+  f.add(); await f.waitStarted(1);
+  expect(dirname(dirname(f.starts[0]!.configPath))).toBe(real);
 });
 
 it("adds and removes documents on the running daemon while the sibling stays hosted", async () => {
