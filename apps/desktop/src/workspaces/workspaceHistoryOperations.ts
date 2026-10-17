@@ -10,7 +10,7 @@ import { realRelativeInRoot } from "@dohc/workspace-core/realPath";
 import { withExclusiveWorkspaceOperation, withSharedWorkspaceOperation } from "./workspaceAssets";
 import { historyExcludesSubtree, historyPathAdmission, readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
-import { missingDeleteRecoveryReason, readDeleteRecovery, undoDeleteRecovery, type RecoveryRecord, type DeleteUndoResult } from "./workspaceDeleteRecovery";
+import { waitForDeleteRecovery, missingDeleteRecoveryReason, readDeleteRecovery, undoDeleteRecovery, type RecoveryRecord, type DeleteUndoResult } from "./workspaceDeleteRecovery";
 
 type Operation = { workspace: { workspaceId: string; rootPath: string; readOnly?: boolean; shareView?: unknown }; assertCurrent(): void };
 export type OperationHistory = Pick<VersionedLiveAdapter, "readHistoryPage" | "undoHistoryOperation">;
@@ -143,6 +143,7 @@ export async function undoWorkspaceHistoryOperation(operation: Operation, input:
   try {
     writable(operation); operationId(input.operationId);
     const { rootPath, workspaceId } = operation.workspace;
+    await waitForDeleteRecovery(input.operationId);
     return await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
       writable(operation);
       const record = await readDeleteRecovery(rootPath, input.operationId);

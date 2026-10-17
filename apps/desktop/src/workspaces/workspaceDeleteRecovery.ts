@@ -30,6 +30,17 @@ export type DeleteRecoveryPlan = { operationId: string; record?: RecoveryRecord;
 const code = (error: unknown) => error && typeof error === "object" && "code" in error ? error.code : undefined;
 const info = async (path: string) => lstat(path).catch(error => { if (code(error) === "ENOENT") return null; throw error; });
 const recordName = (id: string) => `delete-${createHash("sha256").update(id).digest("hex")}.json`;
+// Undo waits outside the workspace queue; reads can inspect the staged record.
+const pendingDeletes = new Map<string, Promise<void>>();
+export function beginPendingDeleteRecovery(operationId: string): () => void {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  pendingDeletes.set(operationId, promise);
+  return () => { pendingDeletes.delete(operationId); resolve(); };
+}
+export async function waitForDeleteRecovery(operationId: string): Promise<void> {
+  await pendingDeletes.get(operationId);
+}
+const systemTrash = process.platform === "win32" ? "Recycle Bin" : "Trash";
 const MAX_RECORD_AGE = 30 * 24 * 60 * 60 * 1_000;
 const invalidRecovery = "Cannot undo the delete. Its recovery record is invalid. Restore files from History or the trash.";
 export const missingDeleteRecoveryReason = "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash.";
@@ -131,22 +142,18 @@ export async function stageDeleteRecovery(operationId: string, staged: string, b
       ...(invalid ? { noUndo: `Cannot undo the delete. Invalid recovery path: ${invalid}. Restore it from the trash.` } : {}) };
   } catch { return { operationId }; }
 }
-export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPlan, trashed: boolean, staged?: string): Promise<DeleteRecovery> {
+export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPlan,
+  { trashed, staged, replaceStagedRecord = false }: { trashed: boolean; staged?: string; replaceStagedRecord?: boolean }): Promise<DeleteRecovery> {
   const { operationId, record } = plan;
   try {
     if (!record) throw new Error("Recovery collection failed");
-    const wasStaged = record.staged !== undefined;
-    // Undo may have saved a receipt while system trash waited outside the lock.
-    if (trashed && wasStaged && (await readDeleteRecovery(root, operationId))?.engine) {
-      return { operationId, undo: { available: true } };
-    }
     record.staged = trashed || staged === undefined ? undefined : basename(staged);
     if (!plan.noUndo && trashed && record.paths.length) {
-      const where = process.platform === "win32" ? "in the Recycle Bin" : "in the Trash";
+      const where = `in the ${systemTrash}`;
       plan.noUndo = `Cannot undo the delete. ${record.paths.join(", ")} ${record.paths.length === 1 ? "is" : "are"} ${where}. Restore ${record.paths.length === 1 ? "it" : "them"} there.`;
     }
     if (plan.noUndo) {
-      if (wasStaged) await unlink(join(await trashDir(root), recordName(operationId))).catch(error => { if (code(error) !== "ENOENT") throw error; });
+      if (replaceStagedRecord) await unlink(join(await trashDir(root), recordName(operationId))).catch(error => { if (code(error) !== "ENOENT") throw error; });
       return { operationId, undo: { available: false, reason: plan.noUndo, paths: record.paths } };
     }
     await save(root, record);
@@ -270,7 +277,7 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
       if (occupant && !(record.emptyFolders.includes(path) && occupant.isDirectory())) return { ok: false, reason: `Cannot undo the delete. ${path} now occupies the old path. Move it first.` };
       if (record.paths.includes(path)) {
         const source = await sourcePath(root, record, path).catch(error => { if (code(error) === "ENOENT") return undefined; throw error; });
-        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in the workspace trash, and History has no copy of it.` };
+        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in the workspace trash. Check the ${systemTrash}.` };
       }
     }
     assertCurrent();

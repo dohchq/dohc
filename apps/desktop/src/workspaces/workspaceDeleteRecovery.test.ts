@@ -9,6 +9,7 @@ import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
 import { deferred } from "../testing/deferred";
 import { readDeleteRecovery } from "./workspaceDeleteRecovery";
+import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 
 const faults = vi.hoisted(() => ({ beforeLink: undefined as undefined | ((to: string) => Promise<void>), failRecord: false }));
 vi.mock("node:fs/promises", async original => {
@@ -81,11 +82,12 @@ describe("delete recovery", () => {
     });
     const finish = await prepareDeleteWorkspacePathAs(f.operation, "folder", agent, f.options);
     expect(queued).toBeDefined();
+    expect(await readDeleteRecovery(f.root, f.groups[0]!)).toMatchObject({ paths: ["folder/rowless.txt"] });
+    expect(f.options.trashItem).not.toHaveBeenCalled();
+    expect(await finish()).toMatchObject({ ok: true, undo: { available: true } });
     expect(await queued).toMatchObject(action === "read"
       ? { ok: true, withoutHistory: ["folder/rowless.txt"] }
       : { ok: true, restored: ["folder/rowless.txt"], remaining: [] });
-    expect(f.options.trashItem).not.toHaveBeenCalled();
-    expect(await finish()).toMatchObject({ ok: true, undo: { available: true } });
   });
 
   it.each([false, true])("keeps an Undo receipt when slow system trash finishes (accepts=%s)", async accepts => {
@@ -101,15 +103,83 @@ describe("delete recovery", () => {
     try {
       await started.promise;
       const id = f.groups[0]!;
-      expect(await f.undo(id)).toMatchObject({ ok: true });
-      const record = await readDeleteRecovery(f.root, id);
-      expect(record?.result).toBeDefined();
+      const undo = f.undo(id);
+      expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history)).toMatchObject({ ok: true });
+      expect((await readDeleteRecovery(f.root, id))?.engine).toBeUndefined();
       release.resolve();
       expect(await pending).toMatchObject({ ok: true, trashed: accepts, undo: { available: true } });
+      const result = await undo;
+      expect(result).toMatchObject({ ok: true });
+      const record = await readDeleteRecovery(f.root, id);
+      expect(record?.result).toBeDefined();
+      expect(await f.undo(id)).toEqual(result);
       expect(await readDeleteRecovery(f.root, id)).toEqual(record);
     } finally {
       release.resolve();
       await pending;
+    }
+  });
+
+  it("finishes recovery without waiting for another workspace exclusive operation", async () => {
+    const f = await fixture(["folder/tracked.txt", "folder/rowless.txt"], true);
+    const trashStarted = deferred<void>(), releaseTrash = deferred<void>();
+    const exclusiveStarted = deferred<void>(), releaseExclusive = deferred<void>();
+    const trash = f.options.trashItem.getMockImplementation()!;
+    f.options.trashItem.mockImplementationOnce(async path => {
+      trashStarted.resolve();
+      await releaseTrash.promise;
+      await trash(path);
+    });
+    let finished = false;
+    const pending = f.remove().then(result => { finished = true; return result; });
+    let exclusive: Promise<void> | undefined;
+    try {
+      await trashStarted.promise;
+      exclusive = withExclusiveWorkspaceOperation(f.root, async () => {
+        exclusiveStarted.resolve();
+        await releaseExclusive.promise;
+      });
+      await exclusiveStarted.promise;
+      releaseTrash.resolve();
+      await expect.poll(() => finished).toBe(true);
+      expect(await pending).toMatchObject({ ok: true, trashed: true, undo: { available: true } });
+      expect((await readDeleteRecovery(f.root, f.groups[0]!))?.staged).toBeUndefined();
+    } finally {
+      releaseTrash.resolve();
+      releaseExclusive.resolve();
+      await exclusive;
+      await pending;
+    }
+  });
+
+  it("waits for an accepted system-trash move before undoing a rowless delete", async () => {
+    const f = await fixture(undefined, true);
+    const started = deferred<void>(), release = deferred<void>();
+    const trash = f.options.trashItem.getMockImplementation()!;
+    f.options.trashItem.mockImplementationOnce(async path => {
+      started.resolve();
+      await release.promise;
+      await trash(path);
+    });
+    const pending = f.remove();
+    let undo: ReturnType<typeof f.undo> | undefined;
+    try {
+      await started.promise;
+      const id = f.groups[0]!;
+      undo = f.undo(id);
+      // A shared read drains any Undo already admitted to the workspace queue.
+      expect(await readWorkspaceHistoryOperation(f.operation, { operationId: id }, f.history))
+        .toMatchObject({ ok: true, withoutHistory: ["folder/rowless.txt"] });
+      expect((await readDeleteRecovery(f.root, id))?.engine).toBeUndefined();
+      release.resolve();
+      expect(await pending).toMatchObject({ ok: true, trashed: true, undo: { available: false } });
+      expect(await undo).toMatchObject({ ok: false, reason: expect.stringContaining("Restore files from History or the trash") });
+      expect(existsSync(join(f.root, "folder"))).toBe(false);
+      expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await pending;
+      await undo;
     }
   });
 
