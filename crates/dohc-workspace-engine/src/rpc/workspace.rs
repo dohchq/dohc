@@ -12,6 +12,7 @@ use crate::rpc::error::map_runtime;
 use crate::rpc::error::workspace_unavailable;
 use crate::rpc::relay::RelayOpenParams;
 use crate::rpc::request::OperationCancellation;
+use crate::rpc::request::after_landing;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::request::validated_author;
@@ -41,6 +42,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub(super) const MAX_OPEN_HANDLES: usize = 64;
+
+/// How long a landed step waits for the capture gate before it leaves its
+/// Collections update to the next write, push, or commit.
+const OWED_COLLECTIONS_GATE_WAIT: Duration = Duration::from_secs(2);
 
 /// A `capture.hold`: the apply gate it holds, and when it ends unless the
 /// holder renews it first.
@@ -91,8 +96,8 @@ pub(crate) struct OpenWorkspace {
     /// under the pending-cursor lock. A commit that did not land restores its
     /// token only if no newer cursor of its kind was issued since.
     pub(super) cursors_issued: [std::sync::atomic::AtomicU64; 3],
-    /// A landed sync step changed what this workspace's Collections hold and
-    /// the update has not run yet. The next push or commit runs it.
+    /// A landed step changed what this workspace's Collections hold and the
+    /// update has not run yet. The next write, push, or commit runs it.
     pub(super) collections_owed: std::sync::atomic::AtomicBool,
 }
 
@@ -499,29 +504,56 @@ impl EngineService {
         open.reconciles_collections && open.is_local_owner()
     }
 
-    /// A change that can move the workspace's Collections committed. A
-    /// workspace with capture asks its driver, whose next pass reconciles
-    /// after it applies what it scanned. One that keeps its Collections itself
+    /// A change that can move the workspace's Collections landed. A workspace
+    /// with capture asks its driver, whose next pass reconciles after it
+    /// applies what it scanned. One that keeps its Collections itself
     /// reconciles now, under the gate a capture pass holds, and wakes the
     /// executors for committed claims. Workspaces that reconcile here have no
-    /// capture driver. A held lease fails the request so the caller retries.
-    pub(super) async fn collections_changed(
-        &self,
-        ctx: &RequestContext,
-        open: &OpenWorkspace,
-    ) -> Result<(), WireError> {
-        if !self.reconciles_collections_itself(open) {
+    /// capture driver. The request answers with what landed either way.
+    pub(super) async fn collections_changed(&self, ctx: &RequestContext, open: &OpenWorkspace) {
+        self.collections_landed(open);
+        self.settle_owed_collections(ctx, open).await;
+    }
+
+    /// A landed step changed what the Collections hold. A workspace that
+    /// keeps them itself owes the update until it runs; one with capture asks
+    /// its driver.
+    pub(super) fn collections_landed(&self, open: &OpenWorkspace) {
+        if self.reconciles_collections_itself(open) {
+            open.collections_owed.store(true, Ordering::SeqCst);
+        } else {
             open.request_collection_reconcile();
-            return Ok(());
         }
-        let cancellation = OperationCancellation::new(ctx);
-        let apply = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => return Err(cancellation.interruption("collection reconcile")),
-            guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+    }
+
+    /// Run an owed Collections update after a landed step, which answers with
+    /// what landed either way. A renewed `capture.hold` can keep the gate
+    /// forever, so the wait for it is bounded. An update that cannot run now
+    /// stays owed to the next write, push, or commit.
+    pub(super) async fn settle_owed_collections(&self, ctx: &RequestContext, open: &OpenWorkspace) {
+        if !open.collections_owed.load(Ordering::SeqCst) {
+            return;
+        }
+        let Ok(apply) = tokio::time::timeout(
+            OWED_COLLECTIONS_GATE_WAIT,
+            Arc::clone(&open.capture_apply_gate).lock_owned(),
+        )
+        .await
+        else {
+            return;
         };
-        self.reconcile_collections_under(apply, open, &cancellation)
+        // Another step took the update under the gate after this one landed.
+        if !open.collections_owed.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let cancellation = OperationCancellation::new(&after_landing(ctx));
+        if let Err(error) = self
+            .reconcile_collections_under(apply, open, &cancellation)
             .await
+        {
+            open.collections_owed.store(true, Ordering::SeqCst);
+            eprintln!("engine: Collections update deferred: {error:?}");
+        }
     }
 
     /// Reconcile a workspace that keeps its Collections itself, holding the
@@ -2536,7 +2568,7 @@ mod tests {
             )
             .await
             .unwrap();
-        service.collections_changed(&ctx, &open).await.unwrap();
+        service.collections_changed(&ctx, &open).await;
         // A pull deletes the target while automation retains the source's session lease.
         let observer = rusqlite::Connection::open(&open.db_path).unwrap();
         let count = || {
@@ -2573,24 +2605,19 @@ mod tests {
             )
             .await
             .unwrap();
-        let result = service.collections_changed(&ctx, &open).await;
+        service.collections_changed(&ctx, &open).await;
         assert_eq!(count(), 1, "the held source keeps its stale relation");
-        let error =
-            result.expect_err("a replica must leave the pull retryable until cleanup completes");
-        assert_eq!(error.code, ErrorCode::Overloaded);
-        assert_eq!(
-            error.retry,
-            dohc_engine_protocol::error::Retryability::AfterBackoff
+        assert!(
+            open.collections_owed.load(Ordering::SeqCst),
+            "a replica owes the cleanup until it completes"
         );
         drop(lease);
-        service
-            .collections_changed(&ctx, &open)
-            .await
-            .expect("retry after release");
+        service.settle_owed_collections(&ctx, &open).await;
+        assert!(!open.collections_owed.load(Ordering::SeqCst));
         assert_eq!(
             count(),
             0,
-            "the retry cleans the relation without another relay change"
+            "the next step cleans the relation without another relay change"
         );
         assert!(
             !std::fs::read_to_string(scratch.path().join("tasks/source.md"))

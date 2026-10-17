@@ -446,13 +446,13 @@ impl EngineService {
             &result.automation_claims,
         );
         // With capture, the pass that sees the file adopts a new record or
-        // reads a changed schema. Without it, that happens now. A replay of the
-        // same request reconciles too, so retrying a write whose reconcile
-        // failed heals it; an unkeyed retry waits for the next pull's.
+        // reads a changed schema. Without it, that happens now, or the next
+        // write, push, or commit runs it. A replay of the same request
+        // reconciles too.
         if self.reconciles_collections_itself(&open)
             && can_move_collections(&result.snapshot.path, !result.moment.before_present)
         {
-            self.collections_changed(ctx, &open).await?;
+            self.collections_changed(ctx, &open).await;
         }
         if open.projects_collections() && can_move_collections(&result.snapshot.path, true) {
             open.request_collection_reconcile();

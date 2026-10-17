@@ -662,12 +662,12 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
-            // Without capture nothing keeps a reconcile that failed, so a
-            // replay reconciles too.
+            // Without capture an owed update lasts only until the daemon
+            // stops, so a replay reconciles too.
             if matches!(&result.primary, ApplyDisposition::Applied(_))
                 || self.reconciles_collections_itself(&open)
             {
-                self.collections_changed(ctx, &open).await?;
+                self.collections_changed(ctx, &open).await;
             }
             return Ok(replicated_conflict_json(result));
         }
@@ -684,7 +684,7 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         if inserted || self.reconciles_collections_itself(&open) {
-            self.collections_changed(ctx, &open).await?;
+            self.collections_changed(ctx, &open).await;
         }
         Ok(json!({ "inserted": inserted }))
     }
@@ -720,12 +720,12 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
-            // Without capture nothing keeps a reconcile that failed, so a
-            // replay reconciles too.
+            // Without capture an owed update lasts only until the daemon
+            // stops, so a replay reconciles too.
             if matches!(&result.primary, ApplyDisposition::Applied(_))
                 || self.reconciles_collections_itself(&open)
             {
-                self.collections_changed(ctx, &open).await?;
+                self.collections_changed(ctx, &open).await;
             }
             return Ok(replicated_conflict_json(result));
         }
@@ -831,7 +831,7 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        self.collections_changed(ctx, &open).await?;
+        self.collections_changed(ctx, &open).await;
         let mut answer = resolve_answer_json(&result, false);
         // One frame carries the whole answer, and this one reports a mutation
         // that already committed: an over-frame answer loses the caller's

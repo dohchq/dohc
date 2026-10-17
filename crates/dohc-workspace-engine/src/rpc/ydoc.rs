@@ -1051,8 +1051,8 @@ impl EngineService {
         for facts in &state.record_facts {
             emit_record_events(&self.events, &open.workspace_id, facts);
         }
-        let (serial, lease, cancellation) = if state.seed_materialization_jobs.is_empty() {
-            (serial, lease, cancellation)
+        let (serial, lease, cancellation, ctx) = if state.seed_materialization_jobs.is_empty() {
+            (serial, lease, cancellation, ctx.clone())
         } else {
             let actor = open.actor.clone();
             let root = open.root.clone();
@@ -1076,12 +1076,10 @@ impl EngineService {
             if !materialization.materialized {
                 return Err(scene_seed_materialization_error(materialization));
             }
-            // The scene's assets landed, so the open runs to its answer.
-            (
-                serial,
-                lease,
-                OperationCancellation::new(&after_landing(ctx)),
-            )
+            // The scene's assets landed, so the open, its blob included, runs
+            // to its answer.
+            let ctx = after_landing(ctx);
+            (serial, lease, OperationCancellation::new(&ctx), ctx)
         };
         let sequence = self
             .next_session
@@ -3083,7 +3081,7 @@ mod tests {
                     id: 2,
                     method: "ydoc.open".into(),
                     workspace: Some(handle.clone()),
-                    deadline_ms: None,
+                    deadline_ms: Some(60_000),
                     idempotency_key: None,
                     progress: false,
                     params: json!({
@@ -3114,6 +3112,12 @@ mod tests {
             .expect("answered")
             .expect("an open whose assets landed answers with its session");
         assert_eq!(opened.response.result["contentKind"], json!("scene"));
+        let egress = opened.blob_egress.as_ref().expect("the session's blob");
+        assert!(
+            !egress.cancel.is_cancelled(),
+            "the blob is sent without the request's cancellation"
+        );
+        assert_eq!(egress.deadline, None, "or its deadline");
         let session = opened.response.result["sessionId"].clone();
         drop(opened);
         service

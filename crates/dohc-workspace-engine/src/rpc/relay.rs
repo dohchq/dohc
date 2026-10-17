@@ -4,7 +4,6 @@ use crate::lock;
 use crate::rpc::error::map_runtime;
 use crate::rpc::error::workspace_unavailable;
 use crate::rpc::request::OperationCancellation;
-use crate::rpc::request::after_landing;
 use crate::rpc::request::now_ms;
 use crate::rpc::request::parse;
 use crate::rpc::workspace::OpenWorkspace;
@@ -27,10 +26,6 @@ use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-
-/// How long a landed sync step waits for the capture gate before it leaves
-/// its Collections update to the next push or commit.
-const OWED_COLLECTIONS_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Clone)]
 pub(super) enum IssuedCursor {
@@ -728,47 +723,6 @@ impl EngineService {
         }
     }
 
-    /// A landed sync step changed what the Collections hold. A workspace that
-    /// keeps them itself owes the update until it runs; one with capture asks
-    /// its driver.
-    fn collections_landed(&self, open: &OpenWorkspace) {
-        if self.reconciles_collections_itself(open) {
-            open.collections_owed.store(true, Ordering::SeqCst);
-        } else {
-            open.request_collection_reconcile();
-        }
-    }
-
-    /// Run an owed Collections update after a landed step, which answers with
-    /// what landed either way. A renewed `capture.hold` can keep the gate
-    /// forever, so the wait for it is bounded. An update that cannot run now
-    /// stays owed to the next push or commit.
-    async fn settle_owed_collections(&self, ctx: &RequestContext, open: &OpenWorkspace) {
-        if !open.collections_owed.load(Ordering::SeqCst) {
-            return;
-        }
-        let Ok(apply) = tokio::time::timeout(
-            OWED_COLLECTIONS_GATE_WAIT,
-            Arc::clone(&open.capture_apply_gate).lock_owned(),
-        )
-        .await
-        else {
-            return;
-        };
-        // Another step took the update under the gate after this one landed.
-        if !open.collections_owed.swap(false, Ordering::SeqCst) {
-            return;
-        }
-        let cancellation = OperationCancellation::new(&after_landing(ctx));
-        if let Err(error) = self
-            .reconcile_collections_under(apply, open, &cancellation)
-            .await
-        {
-            open.collections_owed.store(true, Ordering::SeqCst);
-            eprintln!("engine: Collections update deferred after sync: {error:?}");
-        }
-    }
-
     async fn relay_execute(
         &self,
         ctx: &RequestContext,
@@ -827,9 +781,7 @@ impl EngineService {
         // A push can be what makes enrollment ready. The sweep inside it left
         // each open document to its session. Claim those now, then request a
         // fresh push budget for the newly queued bytes.
-        let (claimed, declined) = self
-            .originate_live_sessions(&after_landing(ctx), &open)
-            .await?;
+        let (claimed, declined) = self.originate_live_sessions(&open).await;
         if claimed > 0
             && let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { has_more, .. }) =
                 &mut outcome
@@ -855,22 +807,19 @@ impl EngineService {
     /// claim and its handover. Each editor is then told to resync, which is
     /// how its client learns the claim. Returns how many lineages were
     /// claimed, and any declined as too large to share.
+    ///
+    /// It follows a landed push or commit, which answers with what landed,
+    /// so it ignores the request's cancellation. A failure leaves the rest
+    /// unclaimed, and the next push or commit claims them, as it retries
+    /// enrollment.
     async fn originate_live_sessions(
         &self,
-        ctx: &RequestContext,
         open: &Arc<OpenWorkspace>,
-    ) -> Result<(usize, Vec<dohc_engine_sync::SharingDeclined>), WireError> {
+    ) -> (usize, Vec<dohc_engine_sync::SharingDeclined>) {
         if open.mode == super::workspace::WorkspaceOpenMode::Passive {
-            return Ok((0, Vec::new()));
+            return (0, Vec::new());
         }
-        let cancellation = OperationCancellation::new(ctx);
-        let serial = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("sync live origination (queued)"));
-            }
-            serial = Arc::clone(&open.session_ops).lock_owned() => serial,
-        };
+        let serial = Arc::clone(&open.session_ops).lock_owned().await;
         let handles: Vec<WorkspaceHandle> = lock(&self.handles)
             .iter()
             .filter(|(_, candidate)| Arc::ptr_eq(candidate, open))
@@ -887,45 +836,64 @@ impl EngineService {
             .map(|(session_id, session)| (session_id.clone(), session.key.clone()))
             .collect();
         if unclaimed.is_empty() {
-            return Ok((0, Vec::new()));
+            return (0, Vec::new());
         }
         let sessions = Arc::clone(&self.sessions);
         let events = self.events.clone();
         let actor = open.actor.clone();
-        let now = now_ms()?;
-        let token = cancellation.token();
+        let Ok(now) = now_ms() else {
+            eprintln!("engine: live origination deferred: system clock unavailable");
+            return (0, Vec::new());
+        };
         let task = tokio::spawn(async move {
             let _serial = serial;
             let mut claimed = 0;
             let mut declined = Vec::new();
-            for (session_id, key) in unclaimed {
-                let (claim, decline) = actor
-                    .ydoc_originate_live_lineage(key, now, token.clone())
-                    .await?;
-                declined.extend(decline);
-                let Some(claim) = claim else { continue };
-                let handed = match lock(&sessions).get_mut(&session_id) {
-                    Some(session) => {
-                        session
-                            .set_lineage_claim(Some(claim))
-                            .map_err(dohc_engine_runtime::RuntimeError::Collab)?;
-                        true
+            let originated = async {
+                for (session_id, key) in unclaimed {
+                    let (claim, decline) = actor
+                        .ydoc_originate_live_lineage(
+                            key,
+                            now,
+                            dohc_engine_runtime::CancellationToken::new(),
+                        )
+                        .await?;
+                    declined.extend(decline);
+                    let Some(claim) = claim else { continue };
+                    let handed = match lock(&sessions).get_mut(&session_id) {
+                        Some(session) => {
+                            session
+                                .set_lineage_claim(Some(claim))
+                                .map_err(dohc_engine_runtime::RuntimeError::Collab)?;
+                            true
+                        }
+                        None => false,
+                    };
+                    if handed {
+                        claimed += 1;
+                        events.emit(
+                            "ydoc.remoteUpdate",
+                            json!({ "sessionId": session_id, "resyncRequired": true }),
+                        );
                     }
-                    None => false,
-                };
-                if handed {
-                    claimed += 1;
-                    events.emit(
-                        "ydoc.remoteUpdate",
-                        json!({ "sessionId": session_id, "resyncRequired": true }),
-                    );
                 }
+                Ok::<_, dohc_engine_runtime::RuntimeError>(())
             }
-            Ok::<_, dohc_engine_runtime::RuntimeError>((claimed, declined))
+            .await;
+            (claimed, declined, originated)
         });
-        task.await
-            .map_err(|_| WireError::new(ErrorCode::Internal, "live origination task failed"))?
-            .map_err(map_runtime)
+        match task.await {
+            Ok((claimed, declined, originated)) => {
+                if let Err(error) = originated {
+                    eprintln!("engine: live origination deferred: {error}");
+                }
+                (claimed, declined)
+            }
+            Err(error) => {
+                eprintln!("engine: live origination task failed: {error}");
+                (0, Vec::new())
+            }
+        }
     }
 
     pub(super) async fn sync_pull(
@@ -1030,8 +998,7 @@ impl EngineService {
             result["pendingCursor"] = issued;
         } else if reconcile_at_commit {
             // Nothing to materialize or commit: the page's changes are in place.
-            self.collections_landed(&open);
-            self.settle_owed_collections(ctx, &open).await;
+            self.collections_changed(ctx, &open).await;
         }
         Ok(result)
     }
@@ -1235,9 +1202,7 @@ impl EngineService {
             self.collections_landed(&open);
         }
         // A cursor commit can be what makes enrollment ready, as a push can.
-        let (_, declined) = self
-            .originate_live_sessions(&after_landing(ctx), &open)
-            .await?;
+        let (_, declined) = self.originate_live_sessions(&open).await;
         if let RelayOperationOutcome::CursorCommitted { sharing_declined } = &mut outcome {
             sharing_declined.extend(declined);
         }
@@ -2546,6 +2511,245 @@ mod tests {
     #[tokio::test]
     async fn a_landed_commit_keeps_its_collections_update_when_a_lease_stops_it() {
         landed_commit_keeps_its_collections_update(true).await;
+    }
+
+    /// A write in a workspace that keeps its Collections itself is cancelled
+    /// after it landed, while the capture gate is held. It answers with the
+    /// write, and its Collections update runs once the gate frees.
+    #[tokio::test]
+    async fn a_write_cancelled_after_it_lands_answers_and_updates_its_collections() {
+        use dohc_engine_protocol::supervisor::{Supervisor, SupervisorConfig};
+        const SOURCE: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const TARGET: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let f = CursorFixture::new("write-cancelled-collections", true).await;
+        let ctx = RequestContext::unbounded();
+        f.open
+            .actor
+            .ensure_main_version(
+                f.workspace_id.into(),
+                1,
+                Arc::new(dohc_engine_storage::NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .expect("main");
+        let write = |id: u64, path: &str, text: &str| dohc_engine_protocol::wire::Request {
+            id,
+            method: "versionedText.write".into(),
+            workspace: Some(f.handle.clone()),
+            deadline_ms: Some(60_000),
+            idempotency_key: None,
+            progress: false,
+            params: json!({
+                "workspaceId": f.workspace_id, "versionId": "main", "path": path,
+                "text": text, "origin": "api", "publish": true,
+            }),
+        };
+        for (id, path, text) in [
+            (
+                1,
+                "tasks/collection.yaml",
+                "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n"
+                    .to_owned(),
+            ),
+            (
+                2,
+                "tasks/target.md",
+                format!("---\nid: {TARGET}\n---\n\nTarget\n"),
+            ),
+        ] {
+            f.service
+                .versioned_text_write(&ctx, write(id, path, &text))
+                .await
+                .expect("write");
+        }
+        let edges = || {
+            rusqlite::Connection::open_with_flags(
+                &f.open.db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("engine db")
+            .query_row(
+                "SELECT COUNT(*) FROM collection_relation_edges",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read edges")
+        };
+        assert_eq!(edges(), 0);
+        let supervisor = Supervisor::new(SupervisorConfig::default(), Arc::clone(&f.service));
+        let gate = f.open.capture_apply_gate.try_lock().expect("free gate");
+        let answer = supervisor
+            .try_submit(write(
+                3,
+                "tasks/source.md",
+                &format!("---\nid: {SOURCE}\nrelated: {TARGET}\n---\n\nSource\n"),
+            ))
+            .expect("admitted");
+        let source = f.open.root.join("tasks/source.md");
+        let waiting = std::time::Instant::now();
+        while !source.exists() {
+            assert!(
+                waiting.elapsed() < std::time::Duration::from_secs(10),
+                "the write never landed"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(supervisor.cancel(3));
+        // Let the cancellation reach the write's token before the gate frees.
+        tokio::task::yield_now().await;
+        drop(gate);
+        let written = answer
+            .await
+            .expect("answered")
+            .expect("a write that landed answers with it");
+        assert_eq!(
+            written.response.result["snapshot"]["path"],
+            json!("tasks/source.md")
+        );
+        assert!(!f.open.collections_owed.load(Ordering::SeqCst));
+        assert_eq!(edges(), 1, "the write's Collections update ran");
+        drop(supervisor);
+        f.close().await;
+    }
+
+    /// A commit lands, then claiming an open editor's lineage fails. The
+    /// commit answers committed; the session stays unclaimed for the next
+    /// push or commit.
+    #[tokio::test]
+    async fn a_landed_commit_answers_committed_when_origination_fails() {
+        let f = CursorFixture::new("origination-deferred", false).await;
+        let ctx = RequestContext::unbounded();
+        f.open
+            .actor
+            .ensure_main_version(
+                f.workspace_id.into(),
+                1,
+                Arc::new(dohc_engine_storage::NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .expect("main");
+        // A chat change gives the workspace its local sync identity, which a
+        // cursor commit needs once the workspace holds files.
+        f.service
+            .chats_channels_create(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({ "channelId": "identity", "name": "Identity", "kind": "channel", "nowMs": 1 }),
+            )
+            .await
+            .expect("local identity");
+        f.open
+            .actor
+            .versioned_text_write(
+                dohc_engine_domain::WriteText {
+                    workspace_id: f.workspace_id.into(),
+                    version_id: "main".into(),
+                    object_id: "notes".into(),
+                    path: "notes.md".into(),
+                    text: "Notes\n".into(),
+                    moment_id: "notes".into(),
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                },
+                Arc::new(dohc_engine_storage::NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .expect("notes");
+        std::fs::write(f.open.root.join("notes.md"), "Notes\n").expect("notes file");
+        let state = f
+            .open
+            .actor
+            .ydoc_open_state(
+                f.workspace_id.into(),
+                3,
+                false,
+                None,
+                "main".into(),
+                "notes.md".into(),
+                Some(dohc_engine_collab::ContentKind::Richdoc),
+                dohc_engine_runtime::CancellationToken::new(),
+            )
+            .await
+            .expect("notes state");
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&state.initial_update).expect("apply");
+        doc.rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, "Notes\n")
+            .expect("rewrite");
+        f.open
+            .actor
+            .ydoc_record_update(
+                state.key,
+                "notes.md".into(),
+                dohc_engine_collab::ContentKind::Richdoc,
+                state.regime,
+                doc.encode_full_state(),
+                None,
+                None,
+                state.lineage_claim_id,
+                true,
+                state.owner_seed_source,
+                None,
+                4,
+                Arc::new(dohc_engine_storage::NoFaults),
+                dohc_engine_runtime::CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("notes lineage");
+        let (opened, egress) = f
+            .service
+            .ydoc_open(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({ "versionId": "main", "path": "notes.md", "contentKind": "richdoc" }),
+                1,
+            )
+            .await
+            .expect("an editor opens the notes");
+        drop(egress);
+        assert_eq!(
+            opened["lineageClaimId"],
+            Value::Null,
+            "an unclaimed lineage"
+        );
+        // A marker the store cannot read fails the claim.
+        let export_lane = |lane: i64| {
+            let db = rusqlite::Connection::open(&f.open.db_path).expect("engine db");
+            db.pragma_update(None, "ignore_check_constraints", true)
+                .expect("pragma");
+            db.execute(
+                "UPDATE ydoc_docs SET file_export_lane=?1 WHERE workspace_id=?2 AND object_id='notes'",
+                rusqlite::params![lane, f.workspace_id],
+            )
+            .expect("set the export lane")
+        };
+        assert_eq!(export_lane(9), 1);
+        let token = f.issue(7);
+        let request = f.request(0, "sync.commitCursor", &token);
+        let committed = f
+            .service
+            .sync_commit_cursor(&ctx, request.workspace, request.params)
+            .await
+            .expect("a landed commit answers committed");
+        assert_eq!(committed["committed"], json!(true));
+        assert_eq!(f.stored_cursor().as_deref(), Some("7"));
+        assert_eq!(export_lane(0), 1);
+        f.service
+            .ydoc_evict(
+                &ctx,
+                Some(f.handle.clone()),
+                json!({ "sessionId": opened["sessionId"] }),
+            )
+            .await
+            .expect("evict the session");
+        f.close().await;
     }
 
     #[tokio::test]
