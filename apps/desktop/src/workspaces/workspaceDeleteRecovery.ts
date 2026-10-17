@@ -282,10 +282,12 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
     assertCurrent();
     const trashPath = `.dohc/trash/${record.staged}${path.slice(record.base.length)}`;
     let retryable = false;
+    let folder = empty;
     try {
       const target = await checkedTarget(root, path, record.base);
       const source = empty ? undefined : await sourcePath(root, record, path);
       const entry = source === undefined ? undefined : await lstat(source);
+      folder = empty || entry?.isDirectory() === true;
       retryable = true;
       if (empty || entry?.isDirectory()) {
         await mkdir(dirname(target), { recursive: true });
@@ -332,7 +334,7 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
       result.remaining.push({ path, reason: empty
         ? `dohc could not recreate ${path}. Check the old path, then create the folder there.`
         : code(error) === "EEXIST"
-        ? `${path} now occupies the old path. ${pendingCopy && !sourceMissing ? "Move it first. " : ""}${sourceMissing ? "Its trash copy is gone." : `The deleted file stays at ${trashPath}.`}`
+        ? `${path} now occupies the old path. ${pendingCopy && !sourceMissing ? "Move it first. " : ""}${sourceMissing ? "Its trash copy is gone." : `The deleted ${folder ? "folder" : "file"} stays at ${trashPath}.`}`
         : sourceMissing
         ? pendingCopy
           && await checkedTarget(root, path, record.base).then(info).then(entry => entry?.isFile()).catch(() => false)

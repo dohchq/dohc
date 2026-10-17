@@ -115,6 +115,19 @@ async function deleted(f: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe("delete recovery failures", () => {
+  it("names the deleted folder when a resumed restore finds a file at its path", async () => {
+    const f = await fixture(false, []);
+    const id = await deleted(f);
+    const record = (await readDeleteRecovery(f.root, id))!;
+    record.engine = { materialized: true, momentCount: 0 };
+    await writeFile(join(f.root, "folder"), "occupant");
+    const result = await undoDeleteRecovery(f.root, record, person, f.history, "test", () => undefined, () => undefined);
+    expect(result).toMatchObject({ ok: true, restored: [], remaining: [{ path: "folder", retry: false,
+      reason: `folder now occupies the old path. The deleted folder stays at .dohc/trash/${record.staged}.` }] });
+    expect(await readFile(join(f.root, "folder"), "utf8")).toBe("occupant");
+    expect(await readFile(join(f.root, ".dohc/trash", record.staged!, "rowless.txt"), "utf8")).toBe("not retained");
+    expect(await f.undo(id)).toEqual(result);
+  });
   it("reports a missing trash copy when a folder occupies an interrupted copy's path", async () => {
     const f = await fixture(); const id = await deleted(f);
     faults.copyOnly = true; faults.failCopy = "write";
@@ -656,9 +669,11 @@ it.each(["ipc", "cli", "mcp"] as const)("shows an occupied pending copy and retr
       if (door === "mcp") return undoOperation({ root: f.root, home: f.root, request: async () => f.undo(id) }, { operationId: id });
       return executeCli({ argv: ["history", "undo", id], cwd: f.root, request: async () => f.undo(id) });
     };
+    const recordBefore = (await readDeleteRecovery(f.root, id))!;
+    const reason = `folder/rowless.txt now occupies the old path. Move it first. The deleted file stays at .dohc/trash/${recordBefore.staged}/rowless.txt.`;
     const occupied = await call();
-    if (door === "cli") expect(occupied).toMatchObject({ exitCode: 1, stdout: expect.stringContaining("now occupies") });
-    else expect(occupied).toMatchObject({ ok: true, remaining: [{ retry: true, reason: expect.stringContaining("now occupies") }] });
+    if (door === "cli") expect(occupied).toMatchObject({ exitCode: 1, stdout: expect.stringContaining(reason) });
+    else expect(occupied).toMatchObject({ ok: true, remaining: [{ retry: true, reason }] });
     expect(await readFile(faults.copyTarget, "utf8")).toBe("occupant");
     await rename(faults.copyTarget, faults.copyTarget + ".occupant");
     const finished = await call();
