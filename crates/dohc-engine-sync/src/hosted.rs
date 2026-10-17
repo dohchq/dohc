@@ -14,9 +14,9 @@
 //! feed skips its rows, and nothing of it is retained, so a held document
 //! neither freezes the main cursor nor fills deferred work. A document is in
 //! scope while its row carries the replica's scope generation; one that left
-//! keeps its state until it retires.
+//! keeps its state until it parks, and keeps what its return needs after.
 
-mod retirement;
+mod park;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,11 +25,14 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{ReplicationEnvelope, SyncError};
 
-pub use retirement::{
+#[cfg(test)]
+pub(crate) use park::OCCUPANTS_READ;
+pub use park::{
     DepartedDocument, DepartedHead, RetiredFile, departed_hosted_documents,
-    forget_retired_hosted_file, hosted_document_retirable, retire_hosted_document,
-    retired_hosted_files,
+    departed_hosted_materialization, departed_hosted_object_ids, forget_retired_hosted_file,
+    hosted_document_parkable, park_hosted_document, retired_hosted_files,
 };
+pub(crate) use park::{Occupancy, unpark_returned, unparks_next};
 
 /// The origin prefix the relay reserves for a service host's writes.
 pub const SERVICE_HOST_ORIGIN_PREFIX: &str = "service-host:";
@@ -52,7 +55,7 @@ pub const HOSTED_REPLICA_NOT_PRISTINE: &str =
 pub(crate) const CONFLICT_PARENT_WITHHELD: &str = "hosted-conflict-parent-withheld";
 
 /// A moment or Y.Doc row whose path a document outside the scope, or the file
-/// a retired one left, still holds here. It waits until that path is free.
+/// a parked one left, still holds here. It waits until that path is free.
 pub(crate) const PATH_HELD_BY_DEPARTED: &str = "hosted-path-held-by-departed";
 
 /// A backfilled op whose path another document in the scope holds here
@@ -80,7 +83,8 @@ pub fn is_hosted_replica(store: &EngineStore, workspace_id: &str) -> Result<bool
 /// A hosted replica writes only what a session host does for a document it
 /// hosts: live `ydoc.update`, settlement `moment.append` and `live.audit.*`.
 /// The relay refuses anything else from a host, so it is refused here, before
-/// it commits a coordinate nothing could push.
+/// it commits a coordinate nothing could push. A parked document is no longer
+/// hosted.
 pub(crate) fn allocate_outbound_seq_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -103,7 +107,7 @@ pub(crate) fn allocate_outbound_seq_in_tx(
         Some(object_id) => tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM hosted_documents \
-                 WHERE workspace_id=?1 AND object_id=?2)",
+                 WHERE workspace_id=?1 AND object_id=?2 AND state<>'parked')",
                 params![workspace_id, object_id],
                 |row| row.get(0),
             )
@@ -141,6 +145,26 @@ fn document_named<'a>(op_kind: &str, payload: &'a serde_json::Value) -> Option<&
         _ => return None,
     }
     .as_str()
+}
+
+/// Record that a pass journaled `op`, a row of the document it names, which
+/// no committed pass has written the files of yet. Until a commit's read
+/// covers it, that document finishes its files before it parks, since once
+/// it leaves the scope no pass serves the row again ([`commit_hosted_cursor`]).
+pub(crate) fn record_unmaterialized_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    op: &ReplicationEnvelope,
+) -> Result<(), SyncError> {
+    let (Some(object_id), Some(relay_seq)) = (hosted_document(op), op.relay_seq) else {
+        return Ok(());
+    };
+    tx.execute(
+        "UPDATE hosted_documents SET unmaterialized_seq=MAX(COALESCE(unmaterialized_seq,0),?3) \
+         WHERE workspace_id=?1 AND object_id=?2 AND state<>'parked' AND ?3>0",
+        params![op.workspace_id, object_id, relay_seq],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
 }
 
 /// The longest refusal reason a hosted push response may carry.
@@ -330,8 +354,8 @@ pub(crate) fn forget_before(payload: &mut serde_json::Value) {
 
 /// Hold back a moment that would take `path` while a hosted document that
 /// left the scope still holds it here. That document may still settle work
-/// against its head there, so the path stays its own until it retires and
-/// its file is gone; the moment waits and applies after. An ordinary replica
+/// against its head there, so the path stays its own until it parks and its
+/// file is gone; the moment waits and applies after. An ordinary replica
 /// holds nothing back.
 pub(crate) fn wait_for_departed_occupant_in_tx(
     tx: &rusqlite::Transaction<'_>,
@@ -348,8 +372,10 @@ pub(crate) fn wait_for_departed_occupant_in_tx(
     Ok(())
 }
 
-/// Whether a hosted document that left the scope, or the file a retired one
-/// left, holds `path` here against `object_id`.
+/// Whether a hosted document that left the scope, or the file a parked one
+/// left, holds `path` here against `object_id`. A path held this way matches
+/// like a capture hold: in any case, and with everything beneath it. It also
+/// holds each folder above it, which a file at that path would collide with.
 fn held_by_departed(
     conn: &Connection,
     workspace_id: &str,
@@ -357,17 +383,29 @@ fn held_by_departed(
     object_id: &str,
     path: &str,
 ) -> Result<bool, SyncError> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM snapshots s \
-         JOIN hosted_documents d ON d.workspace_id=s.workspace_id AND d.object_id=s.object_id \
-         JOIN hosted_replicas h ON h.workspace_id=d.workspace_id \
-         WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3 AND s.object_id<>?4 \
-           AND d.scope_generation<>h.scope_generation) \
-         OR EXISTS(SELECT 1 FROM hosted_retired_files WHERE workspace_id=?1 AND path=?3)",
-        params![workspace_id, version_id, path, object_id],
-        |row| row.get(0),
-    )
-    .map_err(SyncError::corrupt)
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT s.path FROM snapshots s \
+             JOIN hosted_documents d ON d.workspace_id=s.workspace_id AND d.object_id=s.object_id \
+             JOIN hosted_replicas h ON h.workspace_id=d.workspace_id \
+             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id<>?3 \
+               AND d.scope_generation<>h.scope_generation \
+             UNION ALL SELECT path FROM hosted_retired_files WHERE workspace_id=?1",
+        )
+        .map_err(SyncError::corrupt)?;
+    let held = statement
+        .query_map(params![workspace_id, version_id, object_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(SyncError::corrupt)?;
+    for held in held {
+        let held = held.map_err(SyncError::corrupt)?;
+        use dohc_engine_storage::capture_file_holds::path_is_held;
+        if path_is_held(&held, path) || path_is_held(path, &held) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The path and version an op takes or writes through: a moment's after
@@ -384,7 +422,8 @@ fn claimed_path(op: &ReplicationEnvelope) -> Option<(&str, &str)> {
 
 /// Why a hosted replica holds `op` back before routing it, or `None`. A row
 /// its journal already holds is never held: the router skips it as applied.
-/// Otherwise an op of a document that is not ready waits while another
+/// Otherwise every op of a returning document waits while its heads are
+/// parked, an op of a document that is not ready waits while another
 /// document in the scope holds its path ([`backfill_path_held`]), and a Y.Doc
 /// row waits while a departed document or a retired file holds its path, as
 /// a moment does when it applies.
@@ -403,6 +442,15 @@ pub(crate) fn held_before_routing(
         .map_err(SyncError::corrupt)?;
     if journaled {
         return Ok(None);
+    }
+    if let Some(object_id) = hosted_document(op).filter(|id| unready.contains(*id))
+        && let Some(hold) =
+            park::parked_hold(&mut Occupancy::new(conn, &op.workspace_id), object_id)?
+    {
+        return Ok(Some(match hold {
+            HostedHold::PathHeld { .. } => BACKFILL_PATH_HELD,
+            _ => PATH_HELD_BY_DEPARTED,
+        }));
     }
     if backfill_path_held(conn, unready, op)?.is_some() {
         return Ok(Some(BACKFILL_PATH_HELD));
@@ -533,6 +581,10 @@ pub enum HostedHold {
         scope_path: String,
         head_path: Option<String>,
     },
+    /// Its history holds an ordinary edit of its live lineage that this
+    /// replica refused because its session never admitted it, so its content
+    /// here is incomplete. It cannot be edited live here.
+    LiveEditUnadmitted,
 }
 
 impl HostedHold {
@@ -543,13 +595,16 @@ impl HostedHold {
             Self::ConflictParentWithheld { .. } => CONFLICT_PARENT_WITHHELD,
             Self::WorkWaiting => "hosted-backfill-work-waiting",
             Self::ScopePathMismatch { .. } => SCOPE_PATH_MISMATCH,
+            Self::LiveEditUnadmitted => LIVE_EDIT_UNADMITTED,
         }
     }
 
     fn held_path(&self) -> Option<&str> {
         match self {
             Self::PathHeld { path, .. } => Some(path),
-            Self::ConflictParentWithheld { .. } | Self::WorkWaiting => None,
+            Self::ConflictParentWithheld { .. } | Self::WorkWaiting | Self::LiveEditUnadmitted => {
+                None
+            }
             Self::ScopePathMismatch { head_path, .. } => head_path.as_deref(),
         }
     }
@@ -559,19 +614,24 @@ impl HostedHold {
             Self::PathHeld { held_by, .. } => Some(held_by),
             Self::ConflictParentWithheld { .. }
             | Self::WorkWaiting
-            | Self::ScopePathMismatch { .. } => None,
+            | Self::ScopePathMismatch { .. }
+            | Self::LiveEditUnadmitted => None,
         }
     }
 
     fn held_conflict_id(&self) -> Option<&str> {
         match self {
             Self::ConflictParentWithheld { conflict_id } => Some(conflict_id),
-            Self::PathHeld { .. } | Self::WorkWaiting | Self::ScopePathMismatch { .. } => None,
+            Self::PathHeld { .. }
+            | Self::WorkWaiting
+            | Self::ScopePathMismatch { .. }
+            | Self::LiveEditUnadmitted => None,
         }
     }
 }
 
 const SCOPE_PATH_MISMATCH: &str = "hosted-scope-path-mismatch";
+const LIVE_EDIT_UNADMITTED: &str = "hosted-live-edit-unadmitted";
 
 /// A `hosted_documents` row's state, held reason, held path, held-by and
 /// held conflict columns, with `scope_path` its `path`.
@@ -601,6 +661,9 @@ fn decode_status(
                     scope_path: scope_path.to_owned(),
                     head_path,
                 })
+            }
+            ("held", Some(LIVE_EDIT_UNADMITTED), None, None, None) => {
+                HostedDocumentStatus::Held(HostedHold::LiveEditUnadmitted)
             }
             _ => {
                 return Err(crate::error::local_corruption(
@@ -688,7 +751,8 @@ pub fn read_hosted_replica(
 /// Its generation moves, so no pass fetched under the old scope can commit.
 /// A document still in scope keeps its progress; one that joins, or returns
 /// after leaving, backfills from the start, because the feed withheld its
-/// rows while it was out. A ready document the scope moves away from its
+/// rows while it was out, and a parked one's journal skips what it already
+/// applied. A ready document the scope moves away from its
 /// head is held until the row that takes it there applies; its own read
 /// picks up where the main feed is, which applied or retained everything of
 /// it before.
@@ -787,40 +851,53 @@ pub struct HostedRead {
     pub stopped: Option<HostedHold>,
     /// The read reached the end of its rows, and every row applied.
     pub complete: bool,
+    /// The read was complete and nothing held its document, so the pass
+    /// wrote its heads. Only such a read's commit makes it ready.
+    pub heads_written: bool,
 }
 
 impl HostedRead {
     /// What holds its document once this read commits, if anything.
     pub(crate) fn hold(
         &self,
-        conn: &Connection,
-        workspace_id: &str,
+        occupancy: &mut Occupancy<'_>,
         object_id: &str,
     ) -> Result<Option<HostedHold>, SyncError> {
         match &self.stopped {
             Some(hold) => Ok(Some(hold.clone())),
-            None if self.complete => completed_hold(conn, workspace_id, object_id),
+            None if self.complete => completed_hold(occupancy, object_id),
             None => Ok(None),
         }
     }
 }
 
-/// Commit a hosted pass's position. Answers `false`, committing nothing, when
-/// the scope moved since the pass fetched, since its page may hold rows the
-/// current scope withholds, or when another pass committed since it read the
-/// replica, since it read from a position and states that one replaced: its
-/// caller pulls again. Each document read is settled in the same transaction:
-/// held where its read stopped, ready once its read completes with nothing of
-/// it waiting in deferred work and its head at its scope's path, and still
-/// backfilling otherwise. So readiness never precedes its content. A held
-/// document releases the deferred work it still has to apply, and its read
-/// restarts before it.
+/// What a hosted pass's commit did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostedCommit {
+    /// `false` when the scope moved or another pass committed since the pass
+    /// read the replica; nothing committed.
+    pub committed: bool,
+    /// A document the pass found held is free now, but the pass wrote none
+    /// of its files, so it stays held for the next pass, which writes them.
+    pub has_more: bool,
+}
+
+/// Commit a hosted pass's position. Commits nothing when the scope moved since
+/// the pass fetched, since its page may hold rows the current scope
+/// withholds, or when another pass committed since it read the replica, since
+/// it read from a position and states that one replaced: its caller pulls
+/// again. Each document read is settled in the same transaction: held where
+/// its read stopped, ready once its read completes with nothing of it waiting
+/// in deferred work and its head at its scope's path, both when the pass read
+/// it and now, and still backfilling otherwise. So readiness never precedes
+/// its content, nor the pass that wrote its files. A held document releases
+/// the deferred work it still has to apply, and its read restarts before it.
 pub fn commit_hosted_cursor(
     store: &mut EngineStore,
     workspace_id: &str,
     cursor: &HostedCursor,
     faults: &dyn FaultInjector,
-) -> Result<TxnOutcome<bool>, SyncError> {
+) -> Result<TxnOutcome<HostedCommit>, SyncError> {
     crate::model::bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
     let positions = cursor
         .main_cursor
@@ -848,7 +925,10 @@ pub fn commit_hosted_cursor(
         // Only a scope change or a commit changes the scope's documents, so
         // the pass's reads still name documents in the states it read.
         if generation != cursor.scope_generation || commits != cursor.cursor_commits {
-            return Ok(false);
+            return Ok(HostedCommit {
+                committed: false,
+                has_more: false,
+            });
         }
         let commits = commits
             .checked_add(1)
@@ -859,8 +939,18 @@ pub fn commit_hosted_cursor(
             params![workspace_id, commits, cursor.main_cursor],
         )
         .map_err(SyncError::persist)?;
+        let mut occupancy = Occupancy::new(tx, workspace_id);
+        let mut has_more = false;
         for (object_id, read) in &cursor.reads {
-            let hold = read.hold(tx, workspace_id, object_id)?;
+            let hold = match read.hold(&mut occupancy, object_id)? {
+                // What held it when the pass read it is gone; the next pass
+                // writes its heads.
+                None if read.complete && !read.heads_written => {
+                    has_more = true;
+                    Some(HostedHold::WorkWaiting)
+                }
+                hold => hold,
+            };
             let state = match &hold {
                 Some(_) => "held",
                 None if read.complete => "ready",
@@ -907,20 +997,39 @@ pub fn commit_hosted_cursor(
             )
             .map_err(SyncError::persist)?;
         }
+        // A ready document's files are written through its read position:
+        // the pass that made it ready wrote its heads, and every committed
+        // pass since materialized what it read. One not ready keeps what
+        // it applied unwritten until then.
+        tx.execute(
+            "UPDATE hosted_documents SET unmaterialized_seq=NULL \
+             WHERE workspace_id=?1 AND scope_generation=?2 AND state='ready' \
+               AND unmaterialized_seq<=MAX(backfill_cursor, \
+                 (SELECT main_cursor FROM hosted_replicas WHERE workspace_id=?1))",
+            params![workspace_id, generation],
+        )
+        .map_err(SyncError::persist)?;
         if let Some(report_id) = &cursor.settlement_report_id {
             crate::cursor::release_settlement_report_in_tx(tx, workspace_id, report_id)?;
         }
-        Ok(true)
+        Ok(HostedCommit {
+            committed: true,
+            has_more,
+        })
     })
 }
 
 /// What holds a document whose read stopped at `op`, its first row that
 /// could not apply.
 pub(crate) fn stopped_hold(
-    conn: &Connection,
+    occupancy: &mut Occupancy<'_>,
     object_id: &str,
     op: &ReplicationEnvelope,
 ) -> Result<HostedHold, SyncError> {
+    if let Some(hold) = park::parked_hold(occupancy, object_id)? {
+        return Ok(hold);
+    }
+    let conn = occupancy.conn;
     let unready = BTreeSet::from([object_id.to_owned()]);
     if let Some(hold) = backfill_path_held(conn, &unready, op)? {
         return Ok(hold);
@@ -934,15 +1043,22 @@ pub(crate) fn stopped_hold(
 }
 
 /// What holds a document whose read reached the end of its rows from being
-/// ready: retained work of it still waiting, or a head away from the path
-/// its scope names. `None` once nothing does.
+/// ready: heads still parked, retained work of it still waiting, a live edit
+/// it refused, or a head away from the path its scope names. `None` once
+/// nothing does.
 fn completed_hold(
-    conn: &Connection,
-    workspace_id: &str,
+    occupancy: &mut Occupancy<'_>,
     object_id: &str,
 ) -> Result<Option<HostedHold>, SyncError> {
+    let (conn, workspace_id) = (occupancy.conn, occupancy.workspace_id);
+    if let Some(hold) = park::parked_hold(occupancy, object_id)? {
+        return Ok(Some(hold));
+    }
     if let Some(waiting) = crate::deferred::first_unapplied_hosted(conn, workspace_id, object_id)? {
-        return stopped_hold(conn, object_id, &waiting).map(Some);
+        return stopped_hold(occupancy, object_id, &waiting).map(Some);
+    }
+    if live_edit_unadmitted(conn, workspace_id, object_id)? {
+        return Ok(Some(HostedHold::LiveEditUnadmitted));
     }
     let scope_path: String = conn
         .query_row(
@@ -960,6 +1076,103 @@ fn completed_hold(
             },
         ),
     )
+}
+
+/// A write of each head `object_id` has, for the pass whose commit can make
+/// it ready: its read reached the end with nothing holding it. The files a
+/// document that is not ready left unwritten, after an interrupted pass or a
+/// return, come back from its heads, whichever pass or settlement wrote them.
+pub(crate) fn head_writes(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    conn.prepare_cached(HEADS_SQL)
+        .map_err(SyncError::corrupt)?
+        .query_map(params![workspace_id, object_id], |row| {
+            Ok(crate::MomentMaterializationChange {
+                version_id: row.get(0)?,
+                path: row.get(1)?,
+                operation: "write",
+                content_kind: if row.get::<_, String>(2)? == "binary" {
+                    "binary"
+                } else {
+                    "text"
+                },
+            })
+        })
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<_, _>>()
+        .map_err(SyncError::corrupt)
+}
+
+/// Each head of a document, by version, read through the version's key.
+/// `CROSS JOIN` keeps SQLite from reading every head of the workspace first.
+const HEADS_SQL: &str = "SELECT s.version_id,s.path,s.content_kind FROM versions v \
+     CROSS JOIN snapshots s ON s.workspace_id=v.workspace_id AND s.version_id=v.version_id \
+     WHERE v.workspace_id=?1 AND s.object_id=?2";
+
+/// Which of `stored`, the decisions journaled rows of `object_id`, a document
+/// that is not ready, recorded when they applied, its pass materializes
+/// again. Materializing a path brings its file to the head there. Its history
+/// since may have left those paths to another document or a retired file, so
+/// one stands only where nothing holds its path now ([`park::Occupancy`]).
+/// None stands at a path that collides with a parked head, which comes back
+/// with its own writes once nothing holds it, nor at a current head's own
+/// path: the pass that makes it ready writes that, and a document still held
+/// writes nothing. One at a current head's path in another case, or inside
+/// or above it, stands: its delete clears what is in the way of that head's
+/// write, and the materializer runs it first.
+pub(crate) fn redelivered_unready(
+    occupancy: &mut Occupancy<'_>,
+    object_id: &str,
+    stored: impl IntoIterator<Item = crate::MomentMaterializationChange>,
+) -> Result<Vec<crate::MomentMaterializationChange>, SyncError> {
+    use dohc_engine_storage::capture_file_holds::path_is_held;
+    let (conn, workspace_id) = (occupancy.conn, occupancy.workspace_id);
+    let parked = park::parked_paths(conn, workspace_id, object_id)?;
+    let heads = head_writes(conn, workspace_id, object_id)?;
+    let mut standing = Vec::new();
+    for change in stored {
+        let parked_at = parked.iter().any(|(version_id, path)| {
+            *version_id == change.version_id
+                && (path_is_held(path, &change.path) || path_is_held(&change.path, path))
+        });
+        let head_at = heads
+            .iter()
+            .any(|head| head.version_id == change.version_id && head.path == change.path);
+        if !parked_at
+            && !head_at
+            && occupancy
+                .hold(object_id, &change.version_id, &change.path)?
+                .is_none()
+        {
+            standing.push(change);
+        }
+    }
+    Ok(standing)
+}
+
+/// Whether this replica refused an ordinary `ydoc.update` of `object_id`'s
+/// current lineage because its live session never admitted it. The refusal
+/// keeps the row journaled, so no later read applies it.
+fn live_edit_unadmitted(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<bool, SyncError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replication_refused_ydoc_blobs r \
+         JOIN replication_log l USING (workspace_id,origin_id,origin_seq) \
+         JOIN ydoc_docs d ON d.workspace_id=l.workspace_id \
+           AND d.version_id=json_extract(l.payload_json,'$.versionId') \
+           AND d.object_id=json_extract(l.payload_json,'$.objectId') \
+           AND d.lineage_claim_id=json_extract(l.payload_json,'$.lineageClaimId') \
+         WHERE r.workspace_id=?1 AND d.object_id=?2)",
+        params![workspace_id, object_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 /// The path of `object_id`'s head in the version the root holds.

@@ -15,12 +15,14 @@ function marker(
     access?: ShareAccess | null;
     ended?: boolean;
     shareId?: string;
+    recipientUserId?: string;
     paths?: string[];
   } = {},
 ): Record<string, unknown> {
   const access = overrides.access === undefined ? "edit" : overrides.access;
   return {
     shareId: overrides.shareId ?? "share-1",
+    recipientUserId: overrides.recipientUserId ?? "recipient-1",
     granterEmail: "granter@example.com",
     relayUrl: "https://relay.example.com",
     ended: overrides.ended ?? false,
@@ -124,6 +126,14 @@ describe("requireShareViewProposalScope (the recipient lane)", () => {
     expect(() => requireShareViewProposalScope(marker({ shareId: "" }))).toThrow(
       SharedFileReadOnlyError,
     );
+  });
+
+  it("refuses a marker that lost its recipient, while membership still resolves", () => {
+    const damaged = marker({ recipientUserId: "" });
+    expect(() => requireShareViewProposalScope(damaged)).toThrow(
+      SharedFileReadOnlyError,
+    );
+    expect(requireShareViewMembership(damaged).shareId).toBe("share-1");
   });
 
   // The granter's own workspace. Its marker is absent, not null.

@@ -1,3 +1,8 @@
+import { summarize } from './summarize-packaged-benchmark.mjs';
+import { DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
+import { compareDocumentSize, documentCaseBlocked, documentExtensionTarget } from './document-size-summary.mjs';
+import { documentFixture, documentMatrix, runtimeEstimate, pairsForCase, documentControlFiles, DOCUMENT_CONTROL_OPENS } from './document-size-fixtures.mjs';
+import { measurePackagedDocument } from './packaged-document-size.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs, usage } from './packaged-benchmark-options.mjs';
 import { runSoakCycles } from './packaged-soak.mjs';
@@ -24,19 +29,29 @@ if (options.help) {
   console.log(usage);
   process.exit(0);
 }
+if (options.scenario === 'document-size' && options.documentMode === 'dry-run') {
+  await createEvidenceDirectory(options.output);
+  const plan = { diagnostic: true, status: 'dry-run', settings: options, matrix: documentMatrix(options), estimate: runtimeEstimate() };
+  await writeFile(join(options.output, 'document-size-plan.json'), JSON.stringify(plan, null, 2));
+  console.log(JSON.stringify(plan, null, 2));
+  process.exit(0);
+}
 if (process.platform !== 'win32') throw Error('The packaged release benchmark requires Windows');
 const root = resolve('.');
 const { output, binary, label, runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records, findCap, writeCap } = options;
 await createEvidenceDirectory(output);
 const json = (path, value) => writeFile(path, JSON.stringify(value, null, 2));
 const settings = { runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records,
-  ...(scenario === 'collection' ? { findCap, writeCap } : {}) };
+  ...(scenario === 'collection' ? { findCap, writeCap } : {}),
+  ...(scenario === 'document-size' ? { documentMiB: options.documentMiB, relaySessions: options.relaySessions, updatesPerSecond: options.updatesPerSecond, churnEdits: options.churnEdits, documentMode: options.documentMode, label: options.label } : {}) };
 const receipt = { label, binary, packageCommit: options.packageCommit, engineCommit: options.engineCommit,
   startedAt: new Date().toISOString(), platform: process.platform, node: process.version, settings, runs: [], status: 'setup' };
 const feedRequests = [];
 let feed, active, windowController, helperStartup, workload, goToFixture;
 const automationFailures = [];
 const cancellation = benchmarkCancellation();
+const documentDeadline = new AbortController();
+if(scenario==='document-size') cancellation.signal=AbortSignal.any([cancellation.signal,documentDeadline.signal]);
 try {
 await json(join(output, 'result.json'), receipt);
 const require = createRequire(join(root, 'apps/desktop/package.json'));
@@ -64,12 +79,31 @@ const automationsModule = join(dirname(fileURLToPath(import.meta.url)), 'package
 const datasetCliScript = join(dirname(fileURLToPath(import.meta.url)), 'dataset-cli.mjs');
 const processRunner = fileURLToPath(new URL('../../scripts/verification', import.meta.url));
 const processRunnerPaths = ['process.mjs', 'windows-job.ps1', 'windows-command.mjs'];
+if (scenario === 'document-size') {
+  const patch = execFileSync('git', ['-C', options.relayCheckout, 'diff', 'HEAD', '--', 'services/sync-relay/src', 'packages/ydoc-projection/src', 'packages/live-session-contract/src'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  await writeFile(join(output, 'relay-source.patch'), patch);
+  receipt.relayCheckout = options.relayCheckout;
+  receipt.relayCommit = execFileSync('git', ['-C', options.relayCheckout, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  receipt.relayPatchSha256 = createHash('sha256').update(patch).digest('hex');
+}
+// Candidate extensions and early stops decide 2 MiB against this baseline, as the comparator does.
+let documentBaseline = null;
+if (scenario === 'document-size' && options.baseline) {
+  const text = await readFile(join(options.baseline, 'result.json'));
+  documentBaseline = { ...(await summarize(JSON.parse(text))), resultSha256: createHash('sha256').update(text).digest('hex') };
+  if (documentBaseline.status !== 'complete' || documentBaseline.label !== 'baseline' || documentBaseline.settings?.scenario !== 'document-size' || documentBaseline.settings.documentMode !== options.documentMode)
+    throw Error('--baseline must name a complete document-size baseline receipt in the same mode');
+  receipt.documentBaseline = { directory: options.baseline, resultSha256: documentBaseline.resultSha256 };
+}
 Object.assign(receipt, {
   label, binary, binarySha256: await sha256(binary), asar, asarSha256: await sha256(asar),
   packageCommit: options.packageCommit,
   engineBinary, engineSha256: await sha256(engineBinary), engineCommit: options.engineCommit,
   packageDescription: 'Windows packaged release; check companion build and signature receipt for ownership and signing status.',
   harnessSha256: await sha256(fileURLToPath(import.meta.url)),
+  ...(scenario === 'document-size' ? { documentSizeHarnessSha256: await sha256Tree(root, ['tools/perf-profiling/document-size-fixtures.mjs', 'tools/perf-profiling/packaged-document-size.mjs', 'tools/perf-profiling/document-size-pool.mjs', 'tools/perf-profiling/document-size-worker.mjs', 'tools/perf-profiling/document-size-relay.mjs', 'tools/perf-profiling/document-size-native.mjs', 'tools/perf-profiling/document-size-sockets.mjs', 'tools/perf-profiling/document-size-runner.mjs', 'tools/perf-profiling/document-size-summary.mjs','tools/perf-profiling/document-size-generator.mjs','tools/perf-profiling/document-size-reservation.mjs','tools/perf-profiling/packaged-document-peer.mjs']),
+    relaySourceSha256: await sha256Tree(options.relayCheckout, ['services/sync-relay/src', 'packages/ydoc-projection/src', 'packages/live-session-contract/src']),
+    runtimeEstimate: runtimeEstimate() } : {}),
   samplerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-process-snapshot.ps1')),
   windowControllerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-window-state.ps1')),
   windowClientSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'window-controller.mjs')),
@@ -154,11 +188,12 @@ async function ready(page) {
   if (await state.jsonValue() === 'editing-refused') throw Error('Actual packaged app refused document editing: dohc could not open this document for editing.');
   await painted(page);
 }
-async function fixture(runDir) {
+async function fixture(runDir, documentCase) {
   const profile = join(runDir, 'profile');
   await mkdir(profile, { recursive: true });
   const workspaces = [];
   const fixtureHashes = [];
+  const sizeDocument = documentCase ? documentFixture(documentCase.mib, documentCase.shape) : null;
   for (let index = 0; index < 2; index++) {
     cancellation.signal.throwIfAborted();
     const workspace = { workspaceId: `perf4-package-${index}`, rootPath: join(runDir, `workspace-${index}`).replaceAll('\\', '/'), kind: 'personal', mode: 'local-first' };
@@ -166,6 +201,13 @@ async function fixture(runDir) {
     await json(join(workspace.rootPath, '.dohc/manifest.json'), { version: 1, workspaceId: workspace.workspaceId, kind: workspace.kind, mode: workspace.mode });
     await json(join(workspace.rootPath, '.dohc/ui-state.json'), { version: 3, activeView: 'explorer', sidebarVisible: true, sidebarWidth: 320, editorGroups: [{ id: 'primary', tabs: ['small.md'], activeTab: 'small.md', size: 1 }], activeEditorGroup: 'primary', aboutVisible: false, aboutWidth: 360 });
     const workspaceHash = createHash('sha256');
+    if (sizeDocument && index === 0) {
+      await mkdir(join(workspace.rootPath,'linked'),{recursive:true});
+      const controls=documentControlFiles();
+      for(let begin=0;begin<controls.length;begin+=32) await Promise.all(controls.slice(begin,begin+32).map(file=>{
+        workspaceHash.update(file.name+'\0'+file.text+'\0');return writeFile(join(workspace.rootPath,file.name),file.text);
+      }));
+    }
     for (const [name, paragraphs] of [['small', 100], ['large', 5000]]) {
       const content = `# Workspace ${index} ${name}\n\n${Array.from({ length: scenario === 'small-tab' ? 100 : paragraphs }, (_, n) => `Paragraph ${n}. Performance text.`).join('\n\n')}\n`;
       await writeFile(join(workspace.rootPath, `${name}.md`), content);
@@ -191,12 +233,16 @@ async function fixture(runDir) {
         return writeFile(join(workspace.rootPath, file.path), file.content);
       }));
     }
-    fixtureHashes.push({ workspaceId: workspace.workspaceId, files: scenario === 'go-to-mixed' ? 2 : fixtureFiles, collectionFiles: collection.length, digest: workspaceHash.digest('hex'), algorithm: 'SHA256 of name,NUL,UTF8-content,NUL in generation order; workspace metadata excluded' });
+    if (sizeDocument && index === 0) {
+      await writeFile(join(workspace.rootPath, 'document-size.md'), sizeDocument.text);
+      workspaceHash.update('document-size.md\0' + sizeDocument.text + '\0');
+    }
+    fixtureHashes.push({ workspaceId: workspace.workspaceId, files: scenario === 'go-to-mixed' ? 2 : fixtureFiles + (sizeDocument && index === 0 ? 502 : 0), collectionFiles: collection.length, digest: workspaceHash.digest('hex'), algorithm: 'SHA256 of name,NUL,UTF8-content,NUL in generation order; workspace metadata excluded' });
     workspaces.push(workspace);
   }
   await json(join(profile, 'dohc-workspaces.json'), { version: 1, workspaces });
   await json(join(runDir, 'fixture.json'), fixtureHashes);
-  return { profile, workspaces, fixtureHashes };
+  return { profile, workspaces, fixtureHashes, sizeDocument };
 }
 async function launch(runDir, fixture, phase) {
   const startupTarget = phase === 'fresh'
@@ -785,23 +831,106 @@ async function soak(instance, data, runDir) {
   return result;
 }
 
+// One cold open of each control per fresh launch, until each has its forty.
+async function documentControlOpens(page) {
+  receipt.documentControls ??= {legacyOpenMs:[],linksOpenMs:[]};
+  if(receipt.documentControls.legacyOpenMs.length>=DOCUMENT_CONTROL_OPENS) return;
+  for(const [name,key] of [['large.md','legacyOpenMs'],['links.md','linksOpenMs']]) {
+    receipt.documentControls[key].push((await openDoc(page,name)).openObservedMs);
+    await openDoc(page,'small.md');
+  }
+}
+
+// A stopped run can still choose a smaller passing size, which needs complete controls.
+async function finishDocumentControls(documentCase) {
+  let launches=0;
+  while((receipt.documentControls?.legacyOpenMs.length ?? 0)<DOCUMENT_CONTROL_OPENS) {
+    const runDir=join(output,'control-'+(++launches));await mkdir(runDir);
+    const instance=await launch(runDir,await fixture(runDir,documentCase),'fresh');
+    await documentControlOpens(instance.page);
+    await shutdown(runDir,instance);
+    await json(join(output,'result.json'),receipt);
+  }
+  return launches;
+}
+
+async function documentRelay(runDir, documentCase, deadline) {
+  const relayDir=join(runDir,'relay');await mkdir(relayDir);
+  const relaySettings={...documentCase,directory:relayDir,checkout:options.relayCheckout,engineBinary,
+    fullRelay:documentCase.shape==='formatted-retained',relaySessions:options.relaySessions,updates:options.documentMode==='pilot'?Math.max(3,keystrokes):240,
+    pilot:options.documentMode==='pilot',updatesPerSecond:options.updatesPerSecond,churnEdits:options.churnEdits,churn:true,timeoutMs:Math.max(1,deadline-performance.now())};
+  const settingsPath=join(relayDir,'settings.json');await json(settingsPath,relaySettings);
+  const relayRequire=createRequire(join(root,'services/sync-relay/package.json'));
+  await runOwnedCommand(process.execPath,['--import',relayRequire.resolve('tsx'),join(root,'tools/perf-profiling/document-size-runner.mjs'),'run',settingsPath],
+    {cwd:root,env,signal:cancellation.signal,timeoutMs:Math.max(1,deadline-performance.now()),log:join(relayDir,'runner.log')});
+  (receipt.documentRelays ??= {})[documentCase.key]=JSON.parse(await readFile(join(relayDir,'relay.json'),'utf8'));
+}
+
   await cancellation.run(() => (workload = (async () => {
   const helperStarted = performance.now();
   helperStartup = startWindowController({ signal: cancellation.signal, onSpawn(child) { receipt.windowHelper = { pid: child.pid }; } });
   windowController = await helperStartup;
   receipt.windowHelper = { pid: windowController.pid, prewarmMs: performance.now() - helperStarted };
   await json(join(output, 'result.json'), receipt);
-  for (let index = 0; index < runCount; index++) {
+  const documentCases = scenario === 'document-size' ? documentMatrix(options) : [null];
+  const tasks = documentCases.flatMap(item=>Array.from({length:item?pairsForCase(options,item):runCount},(_,n)=>({item,repetition:n+1})));
+  const deadline = performance.now()+6*60*60*1000;
+  let deadlineTimer;
+  if(scenario==='document-size') {deadlineTimer=setTimeout(()=>documentDeadline.abort(Error('Six-hour document-size deadline: incomplete evidence is inconclusive')),6*60*60*1000);deadlineTimer.unref();}
+  try {
+  for (let index = 0; index < tasks.length; index++) {
     cancellation.signal.throwIfAborted();
-    const runDir = join(output, `run-${index + 1}`);
-    const data = { index: index + 1 };
-    receipt.runs.push(data);
-    await mkdir(runDir, { recursive: true });
-    const f = await fixture(runDir);
+    if(scenario==='document-size' && performance.now()>=deadline)throw Error('Six-hour deadline reached; evidence is inconclusive');
+    const runDir = join(output, 'run-'+(index+1));
+    const data = { index:index+1 }; receipt.runs.push(data); await mkdir(runDir,{recursive:true});
+    const {item:documentCase,repetition}=tasks[index];
+    const pairStarted = performance.now();
+    const f = await fixture(runDir, documentCase);
     let fresh = await launch(runDir, f, 'fresh');
     data.freshStartup = fresh.startup;
     await json(join(output, 'result.json'), receipt);
     console.log(JSON.stringify({ label, run: index + 1, phase: 'fresh-ready', ms: fresh.startup.editablePaintObservedMs }));
+    if (scenario === 'document-size') {
+      const phase = async (instance, name, extra={}) => {
+        await filesListed(instance.page, fixtureFiles+2);
+        const row=await measurePackagedDocument({instance,fixture:f.sizeDocument,options,signal:cancellation.signal,snapshot,phase:name,proof:repetition<=3,...extra});
+        await openDoc(instance.page,'small.md');return row;
+      };
+      data.documentSize={...documentCase,repetition,phases:[]};
+      await documentControlOpens(fresh.page);
+      data.documentSize.phases.push(await phase(fresh,'fresh'));
+      if(repetition<=3 && data.documentSize.phases[0].status==='complete') {
+        for(const mode of ['peer','churn']) data.documentSize.phases.push(await phase(fresh,mode,{peerMode:mode,proof:false}));
+      }
+      await json(join(output,'result.json'),receipt);
+      await shutdown(runDir,fresh);
+      const restart=await launch(runDir,f,'restart');data.restartStartup=restart.startup;
+      data.documentSize.phases.push(await phase(restart,'restart'));
+      await shutdown(runDir,restart);
+      data.wallMs=performance.now()-pairStarted;
+      await json(join(output,'result.json'),receipt);
+      // A case ends after its planned pairs. One near-budget arm per size gets more pairs right away,
+      // decided as the comparator decides it, so larger sizes see a final 2 MiB control.
+      if(tasks[index+1]?.item?.key!==documentCase.key) {
+        const gateCandidate=options.documentMode==='gate' && label==='candidate';
+        const summary=await summarize(receipt);
+        const target=gateCandidate && !receipt.documentExtensions?.some(row=>row.mib===documentCase.mib)
+          ? documentExtensionTarget(summary.documentSize.cases[documentCase.key],(documentCase.mib===2?documentBaseline:summary).documentSize.cases['2/'+documentCase.shape]) : 0;
+        if(target>repetition) {
+          (receipt.documentExtensions ??= []).push({key:documentCase.key,mib:documentCase.mib,from:repetition,to:target});
+          tasks.splice(index+1,0,...Array.from({length:target-repetition},(_,n)=>({item:documentCase,repetition:repetition+n+1})));
+        } else {
+          if(label!=='baseline' || documentCase.mib===2) await documentRelay(runDir,documentCase,deadline);
+          // A failed case means no larger size can be chosen, so the rest of the run is skipped.
+          if(gateCandidate && documentCaseBlocked(compareDocumentSize(documentBaseline,await summarize(receipt),DEFAULT_MARGIN,{includeSoak:false}),documentCase.key)) {
+            receipt.documentStopped={key:documentCase.key,skippedPairs:tasks.length-index-1};
+            tasks.splice(index+1);
+            receipt.documentStopped.controlLaunches=await finishDocumentControls(documentCase);
+          }
+        }
+      }
+      await json(join(output,'result.json'),receipt);continue;
+    }
     if (scenario === 'startup') {
       await shutdown(runDir, fresh);
       const restart = await launch(runDir, f, 'restart');
@@ -970,6 +1099,23 @@ async function soak(instance, data, runDir) {
     await json(join(output, 'result.json'), receipt);
     console.log(JSON.stringify({ label, run: index + 1, phase: 'complete', restartMs: data.restartStartup.editablePaintObservedMs }));
   }
+  if(scenario==='document-size') {
+    const summary=await summarize(receipt), provisional=compareDocumentSize(documentBaseline ?? summary,summary,DEFAULT_MARGIN,{includeSoak:false});
+    receipt.provisionalDocumentDecision=provisional;
+    // Refusals above 2 MiB on the baseline never prevent its control soak. A pilot soaks its size once.
+    const eligible=label==='baseline'?2:options.documentMode==='pilot'?Math.max(...options.documentMiB):provisional.selectedMiB;
+    receipt.documentSoaks=[];
+    for(const mib of [...options.documentMiB].filter(n=>n<=eligible).reverse()) {
+      const runDir=join(output,'soak-'+mib);await mkdir(runDir);
+      const f=await fixture(runDir,{mib,shape:'formatted-retained'}),instance=await launch(runDir,f,'soak');
+      const row=await measurePackagedDocument({instance,fixture:f.sizeDocument,options,signal:cancellation.signal,snapshot,phase:'soak',soak:true,proof:false,peerMode:'churn'});
+      receipt.documentSoaks.push(row);await shutdown(runDir,instance);await json(join(output,'result.json'),receipt);
+      const value=(await summarize(receipt));
+      if(compareDocumentSize(documentBaseline ?? value,value,DEFAULT_MARGIN).selectedMiB===mib || label==='baseline' || options.documentMode==='pilot')break;
+      if(receipt.documentSoaks.length>=2) {receipt.documentSoakIncomplete=true;break;}
+    }
+  }
+  } finally {clearTimeout(deadlineTimer);}
   cancellation.signal.throwIfAborted();
   if (automationFailures.length) throw Error(`Collection automation cases failed: ${automationFailures.join('; ')}`);
   receipt.status = 'complete';

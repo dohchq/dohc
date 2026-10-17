@@ -13,9 +13,9 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { git, run } from "./process.mjs";
-import { acquireVerificationSlot, freeDiskGb, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
-import { attemptOutcome, lastNightlyPass, lineOrder, listRequests, monitorPort, nextRequest, orderOf, parseMove, pauseQueue, placeMove, placeSubmission, position, protocol, queueLanePurpose, queuePaths, readJson, readPause, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
-import { startMonitor } from "./queue-monitor.mjs";
+import { acquireVerificationSlot, freeDiskGb, maxVerificationLanes, resolveBuildBudget, verificationLanes } from "../../tools/rust-engine-program/build-slot.mjs";
+import { attemptOutcome, lastNightlyPass, lineOrder, listRequests, monitorPort, nextRequest, orderOf, ownerFor, ownerOf, parseMove, pauseQueue, placeMove, placeSubmission, position, protocol, queueLanePurpose, queuePaths, readJson, readPause, recordHistory, restartReason, retryDelayMs, serviceRuns, terminalStates, writeJson } from "./queue.mjs";
+import { startMonitor, threadDirectory } from "./queue-monitor.mjs";
 
 const verifierEntry = fileURLToPath(new URL("./verify.mjs", import.meta.url));
 const sha = /^[0-9a-f]{40}$/u;
@@ -46,7 +46,8 @@ export async function sweepContainers({ request, command = run } = {}) {
   };
   const ids = new Set(request ? await list([`label=dohc.verification=${request}`]) : []);
   if (!request) for (const status of ["exited", "dead"]) for (const id of await list(["name=dohc-verify-", `status=${status}`])) ids.add(id);
-  if (ids.size) await command("docker", ["rm", "--force", ...ids], { timeoutMs: 60_000, quietStdout: true });
+  // --volumes also removes each container's anonymous data volume, which would otherwise stay on the disk.
+  if (ids.size) await command("docker", ["rm", "--force", "--volumes", ...ids], { timeoutMs: 60_000, quietStdout: true });
   return ids.size;
 }
 
@@ -135,14 +136,14 @@ export async function runService({
   freeDisk = () => freeDiskGb(lane) ?? freeDiskGb(root), docker = dockerResponds,
   prepare = prepareLane, sweep = sweepContainers, holdLane = holdLegacyLane,
   worker = defaultWorker, retryDelay = retryDelayMs, cleanupRetryMs = 60_000, prepareLimitMs = 45 * 60_000, stop, log = defaultLog(root),
-  lanes = () => 1, monitor = null, bootedAt = Date.now() - uptime() * 1000,
+  lanes = () => 1, monitor = null, bootedAt = Date.now() - uptime() * 1000, threadOf = threadDirectory(),
 }) {
   const paths = queuePaths(root);
   for (const path of [paths.inbox, paths.keys, paths.requests, paths.control]) mkdirSync(path, { recursive: true });
   const instance = await holdInstance(root);
   if (!instance) { log("another service already serves this queue root"); return 0; }
   // The page only reads the queue's files, so it starts with the service and never holds up its loop.
-  const page = monitor === null ? null : startMonitor({ root, port: monitor, log });
+  const page = monitor === null ? null : startMonitor({ root, port: monitor, log, threadOf });
   const startedAt = new Date().toISOString();
   const previous = readJson(paths.service);
   // The previous service's last heartbeat says how long its interrupted runs had been awake.
@@ -150,7 +151,7 @@ export async function runService({
   // A computer restart since that heartbeat holds the line until someone resumes it, so no run starts
   // by itself after logon. A service restart within one boot, or a first start, holds nothing.
   if (previous?.heartbeatAt && bootedAt > Date.parse(previous.heartbeatAt)) {
-    await pauseQueue(root, { reason: "the computer restarted" });
+    await pauseQueue(root, { reason: restartReason });
     log("the computer restarted since the last heartbeat; no run starts until pnpm verify:queue resume");
   }
   const health = { diskFreeGb: null, diskOk: true, dockerOk: true, dockerCheckedAt: 0, pausedUntil: 0, environmentStreak: 0, reason: null };
@@ -158,7 +159,7 @@ export async function runService({
   const requestBudgetMs = 2 * timeLimitMs;
   // Attempts in flight, by request id. Each holds one of the lane checkouts.
   const running = new Map();
-  const checkouts = [lane, `${lane}-2`];
+  const checkouts = Array.from({ length: maxVerificationLanes }, (_, index) => index ? `${lane}-${index + 1}` : lane);
   let laneCount = 1;
   // The host's CPU and free memory at the last clock tick.
   const host = { cpuBusyPercent: null, freeMemGb: null };
@@ -182,7 +183,7 @@ export async function runService({
 
   const statusPath = id => join(paths.request(id), "status.json");
   const setStatus = (id, status) => writeJson(statusPath(id), { ...status, updatedAt: new Date().toISOString() });
-  const history = event => { try { appendFileSync(paths.history, JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n"); } catch { /* History informs estimates and records moves; losing a line must not stop the queue. A request keeps its last move in its status. */ } };
+  const history = event => recordHistory(root, event);
   const beat = () => writeJson(paths.service, {
     protocol, pid: process.pid, commit, startedAt, heartbeatAt: new Date().toISOString(), lanes: laneCount,
     // Read with the runs: once a heartbeat shows the pause, no run starts that it does not list.
@@ -284,22 +285,23 @@ export async function runService({
         place.supersede = place.supersede.filter(id => !running.has(id));
         place.sequence = requests.find(candidate => candidate.id === place.supersede[0])?.request.sequence ?? null;
       }
-      if (place.attach) { await answer({ id: place.attach }); return; }
-      // A newer commit takes the place of the request it replaces that is furthest ahead, and the record of any move that put it there.
+      if (place.attach) { await answer({ id: place.attach, owner: ownerOf(requests.find(candidate => candidate.id === place.attach).request) }); return; }
+      // A newer commit takes the place of the request it replaces that is furthest ahead, its owner, and the record of any move that put it there.
       const ahead = requests.filter(candidate => place.supersede.includes(candidate.id)).sort(lineOrder)[0];
       const order = place.sequence ?? ++sequence;
       const id = `${String(order).padStart(9, "0")}-${randomBytes(3).toString("hex")}`;
       // Pin both commits before accepting, so an accepted request can always be verified.
       git(["update-ref", `refs/verification-queue/${id}/head`, submission.head], repo);
       git(["update-ref", `refs/verification-queue/${id}/base`, submission.base], repo);
-      const { key: _key, protocol: _protocol, ...fields } = submission;
-      await writeJson(join(paths.request(id), "request.json"), { ...fields, id, sequence: order, acceptedAt: new Date().toISOString(), supersedes: place.supersede });
+      const { key: _key, protocol: _protocol, ownerName: _ownerName, ...fields } = submission;
+      const owner = ahead ? ownerOf(ahead.request) : ownerFor(submission, threadOf);
+      await writeJson(join(paths.request(id), "request.json"), { ...fields, owner, id, sequence: order, acceptedAt: new Date().toISOString(), supersedes: place.supersede });
       try {
         await setStatus(id, { state: "queued", attempts: [], order: ahead && orderOf(ahead), moved: ahead?.status.moved });
         for (const old of place.supersede) await setStatus(old, { ...requests.find(entry => entry.id === old).status, state: "superseded", supersededBy: id });
-        await answer({ id });
+        await answer({ id, owner });
       } catch (error) { error.acceptedId = id; throw error; }
-      history({ event: "accepted", id, head: submission.head, scope: submission.scope, supersedes: place.supersede });
+      history({ event: "accepted", id, head: submission.head, scope: submission.scope, supersedes: place.supersede, owner: owner.key });
     }
   }
 
@@ -373,7 +375,7 @@ export async function runService({
       mkdirSync(output, { recursive: true });
       await prepare({ lane: checkout, repo, head: entry.request.head, signal: current.abort.signal });
       current.phase = "waiting for the host lane";
-      lease = await holdLane({ entry, signal: current.abort.signal, lanes: laneCount });
+      lease = await holdLane({ entry, signal: current.abort.signal, lanes: () => laneCount });
       // Rust-only runs need no Docker, so a sweep failure must not stop them.
       await sweep({}).catch(error => log(`container sweep failed: ${error.message}`));
       current.phase = "verifying";
@@ -555,13 +557,14 @@ export async function runService({
         }
       }
       await checkHealth(requests);
-      // Fill free lanes in line order. A request started here still reads as queued in `requests`. A request whose
-      // containers are not yet removed waits, because they carry its id and their removal would stop its next run.
+      // Fill free lanes in run order. A request started here still reads as queued in `requests`, and counts as its
+      // owner's latest start, so two free lanes go to two owners. A request whose containers are not yet removed waits,
+      // because they carry its id and their removal would stop its next run; it holds no turn meanwhile.
       // A restart or a pause, even one requested during this tick, starts nothing new and waits for the runs in flight.
-      const started = new Set([...running.keys(), ...cleanupPending]);
+      const started = new Set(running.keys());
       // A lone run always starts; another one waits while free memory is low.
       while (running.size < laneCount && (running.size === 0 || freeMemory() >= memoryFloorGb) && health.pausedUntil <= now && !existsSync(restart) && !existsSync(paths.pause)) {
-        const entry = nextRequest(requests.filter(candidate => !started.has(candidate.id)), health, now);
+        const entry = nextRequest(requests, health, now, started, cleanupPending);
         if (!entry) break;
         started.add(entry.id);
         attempt(entry).catch(error => { log(`attempt bookkeeping failed: ${error.stack ?? error.message}`); fatal = error; });

@@ -93,6 +93,17 @@ struct FakeServer {
 
 impl FakeServer {
     fn start(handler: impl Fn(TestRequest) -> TestResponse + Send + Sync + 'static) -> Self {
+        Self::start_with_workers(handler, false)
+    }
+
+    fn concurrent(handler: impl Fn(TestRequest) -> TestResponse + Send + Sync + 'static) -> Self {
+        Self::start_with_workers(handler, true)
+    }
+
+    fn start_with_workers(
+        handler: impl Fn(TestRequest) -> TestResponse + Send + Sync + 'static,
+        concurrent: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake relay");
         listener
             .set_nonblocking(true)
@@ -102,6 +113,7 @@ impl FakeServer {
         let thread_stop = Arc::clone(&stop);
         let handler = Arc::new(handler);
         let thread = thread::spawn(move || {
+            let mut workers = Vec::new();
             while !thread_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
@@ -109,8 +121,16 @@ impl FakeServer {
                             continue;
                         }
                         if let Ok(request) = read_request(&mut stream) {
-                            let response = handler(request);
-                            let _ = write_response(&mut stream, response);
+                            let handler = Arc::clone(&handler);
+                            let serve = move || {
+                                let response = handler(request);
+                                let _ = write_response(&mut stream, response);
+                            };
+                            if concurrent {
+                                workers.push(thread::spawn(serve));
+                            } else {
+                                serve();
+                            }
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -118,6 +138,9 @@ impl FakeServer {
                     }
                     Err(_) => break,
                 }
+            }
+            for worker in workers {
+                worker.join().expect("join fake relay worker");
             }
         });
         Self {
@@ -237,6 +260,118 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn transport(server: &FakeServer) -> HttpRelayTransport {
     HttpRelayTransport::new_insecure_loopback_for_tests(&server.base_url, "test-token")
         .expect("HTTP relay transport")
+}
+
+fn batch_uploads() -> Vec<BlobUploadRequest> {
+    (0..4)
+        .map(|index| {
+            let bytes = format!("batch blob {index}").into_bytes();
+            BlobUploadRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                sha256: hex_sha256(&bytes),
+                bytes,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn upload_batch_joins_every_worker_after_a_failure() {
+    use std::sync::{Condvar, mpsc};
+    let (started, starts) = mpsc::channel();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let held = Arc::clone(&gate);
+    let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let completed = Arc::clone(&finished);
+    let server = FakeServer::concurrent(move |request| {
+        started.send(()).unwrap();
+        if request.body == b"batch blob 0" {
+            return TestResponse::json(403, json!({"ok": false}));
+        }
+        let (lock, ready) = &*held;
+        let (open, timeout) = ready
+            .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(5), |open| !*open)
+            .unwrap();
+        assert!(*open && !timeout.timed_out(), "worker was not released");
+        completed.fetch_add(1, Ordering::SeqCst);
+        TestResponse::json(200, json!({"ok": true}))
+    });
+    let transport = transport(&server);
+    let (sent, result) = mpsc::channel();
+    let upload = thread::spawn(move || sent.send(transport.upload_blobs(batch_uploads())).unwrap());
+    for _ in 0..4 {
+        starts
+            .recv_timeout(Duration::from_secs(5))
+            .expect("all workers start");
+    }
+    let early = result.try_recv();
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    upload.join().unwrap();
+    assert!(
+        matches!(early, Err(mpsc::TryRecvError::Empty)),
+        "batch returned while PUTs were held"
+    );
+    assert_eq!(result.recv().unwrap(), Err(RelayError::Forbidden));
+    assert_eq!(finished.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn upload_batch_returns_errors_in_request_order() {
+    use std::sync::{Condvar, mpsc};
+    let (sent, later) = mpsc::channel();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let held = Arc::clone(&gate);
+    let server = FakeServer::concurrent(move |request| {
+        if request.body == b"batch blob 0" {
+            let (open, timeout) = held
+                .1
+                .wait_timeout_while(held.0.lock().unwrap(), Duration::from_secs(5), |open| {
+                    !*open
+                })
+                .unwrap();
+            assert!(*open && !timeout.timed_out());
+            TestResponse::json(403, json!({"ok": false}))
+        } else {
+            sent.send(()).unwrap();
+            TestResponse::json(401, json!({"ok": false}))
+        }
+    });
+    let transport = transport(&server);
+    let upload = thread::spawn(move || transport.upload_blobs(batch_uploads()));
+    for _ in 0..3 {
+        later
+            .recv_timeout(Duration::from_secs(5))
+            .expect("later errors finish first");
+    }
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    assert_eq!(upload.join().unwrap(), Err(RelayError::Forbidden));
+}
+
+#[test]
+fn upload_batch_uses_the_hosted_blob_route() {
+    let routes = Arc::new(Mutex::new(BTreeSet::new()));
+    let seen = Arc::clone(&routes);
+    let server = FakeServer::concurrent(move |request| {
+        assert_eq!(request.method, "PUT");
+        assert_eq!(request.header("authorization"), Some("Bearer test-token"));
+        assert!(request.target.contains("replicationEpoch=epoch"));
+        assert!(request.target.contains("streamIdentity=stream"));
+        assert_eq!(
+            request.path(),
+            format!("/sync/ws/hosted/blobs/{}", hex_sha256(&request.body))
+        );
+        seen.lock().unwrap().insert(request.path().to_owned());
+        TestResponse::json(200, json!({"ok": true}))
+    });
+    transport(&server)
+        .hosted()
+        .upload_blobs(batch_uploads())
+        .unwrap();
+    assert_eq!(routes.lock().unwrap().len(), 4);
 }
 
 fn probe(transport: &HttpRelayTransport) -> Result<dohc_engine_sync::ProbeResponse, RelayError> {
@@ -448,6 +583,8 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
     expected_sha256s.sort();
     assert_eq!(state.have_sha256s, expected_sha256s);
     assert_eq!(state.blob_puts.len(), 2);
+    state.blob_puts.sort();
+    state.missing_sha256s.sort();
     assert_eq!(state.blob_puts, state.missing_sha256s);
     assert_eq!(state.auth_failures, 0);
 }
@@ -1068,7 +1205,7 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
             .is_none(),
         "redelivery must still leave the cursor pending"
     );
-    assert_eq!(
+    assert!(matches!(
         client
             .commit_pull_cursor(
                 &mut reopened,
@@ -1079,8 +1216,8 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
                 1_000
             )
             .expect("commit after materialization"),
-        TxnOutcome::Committed(Vec::new())
-    );
+        TxnOutcome::Committed(ref commit) if commit.sharing_declined.is_empty()
+    ));
     assert_eq!(
         read_relay_cursor(&reopened, "ws")
             .expect("cursor")

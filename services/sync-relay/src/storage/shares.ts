@@ -30,9 +30,10 @@ import {
   rowToShareRow,
   rowToShareWithGrantRow,
 } from "./rows";
-import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import { LINK_SESSION_RENEWAL_GRACE_MS } from "../linkSecurity";
+import { linkAccessLevels, parseStoredAnyShareSelectorJson } from "../shareFilter";
 import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, RECEIVED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
+import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
 
 function dependentGrantIdsMatch(
   dependents: readonly SyncRelayShareGrantRow[],
@@ -259,8 +260,10 @@ export function retuneShareGrant(storage: StorageContext, input: {
     return storage.tx(() => {
       input.guard();
       const grant = storage.getShareGrant(input.grantId);
-      const from = grant ? shareAccessRank(grant.access) : -1;
-      const to = shareAccessRank(input.access);
+      const share = grant && storage.getShare(grant.shareId);
+      const levels = linkAccessLevels(share ? parseStoredAnyShareSelectorJson(share.selectorJson) : null);
+      const from = grant ? levels.indexOf(grant.access) : -1;
+      const to = levels.indexOf(input.access);
       if (
         !grant ||
         grant.shareId !== input.shareId ||
@@ -324,8 +327,7 @@ export function retuneShareGrant(storage: StorageContext, input: {
       } else {
         nextShareDiscussionRevision(storage, grant.shareId);
         for (const dependent of dependents) {
-          const dependentRank = shareAccessRank(dependent.access);
-          if (dependentRank > to) {
+          if (levels.indexOf(dependent.access) > to) {
             storage.db
               .prepare(
                 `UPDATE sync_relay_share_grants
@@ -399,6 +401,7 @@ export function revokeShareGrantInTransaction(storage: StorageContext, input: Re
         AND NOT EXISTS (SELECT 1 FROM sync_relay_share_grants
           WHERE share_id = ? AND status = 'active' AND revoked_at_ms IS NULL)`)
         .run(grant.shareId, grant.shareId);
+      forgetReplicaCurrentViewCaches(storage,storage.getShare(input.shareId)!.workspaceId);
       return { ok: true, grant: storage.getShareGrant(grant.grantId)! };
   }
 
@@ -1060,7 +1063,7 @@ export function revokeShare(storage: StorageContext, shareId: string, revokedAtM
 
 export function revokeShareInTransaction(storage: StorageContext, shareId: string, revokedAtMs: number): boolean {
       const existing = storage.db
-        .prepare("SELECT 1 AS present FROM sync_relay_shares WHERE share_id = ?")
+        .prepare("SELECT workspace_id FROM sync_relay_shares WHERE share_id = ?")
         .get(shareId);
       if (existing === undefined) return false;
       storage.db.prepare("DELETE FROM sync_relay_share_labels WHERE share_id = ?").run(shareId);
@@ -1081,6 +1084,7 @@ export function revokeShareInTransaction(storage: StorageContext, shareId: strin
              )`,
         )
         .run(Math.trunc(revokedAtMs), shareId);
+      forgetReplicaCurrentViewCaches(storage,String(existing.workspace_id));
       storage.db.prepare(`UPDATE sync_relay_share_removals SET voided = 1
         WHERE share_id = ? AND (removed_grant_id IS NOT NULL OR ? > 0)`)
         .run(shareId, Number(revoked.changes ?? 0));

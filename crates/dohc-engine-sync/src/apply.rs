@@ -226,6 +226,49 @@ pub(crate) enum MutationOutcome<T> {
     RefusedRetainingMutation { reason: String },
 }
 
+/// Return whether the imported coordinate is already acknowledged with the
+/// same durable envelope. The caller still runs `apply_envelope_with_*` for a
+/// transactional skip, which refreshes refusal and audit state and detects a
+/// coordinate divergence without invoking the mutation path.
+pub(crate) fn is_acknowledged_envelope(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<bool, SyncError> {
+    store.read_with(|conn| {
+        let acked: i64 = conn
+            .query_row(
+                "SELECT COALESCE((SELECT acked_seq FROM replication_peers \
+                 WHERE workspace_id=?1 AND origin_id=?2), -1)",
+                params![envelope.workspace_id, envelope.origin_id],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)?;
+        if envelope.origin_seq > acked.saturating_add(1) {
+            return Ok(false);
+        }
+        let existing: Option<(String, String, i64)> = conn
+            .query_row(
+                "SELECT op_kind, payload_json, recorded_at_ms FROM replication_log \
+                 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+                params![
+                    envelope.workspace_id,
+                    envelope.origin_id,
+                    envelope.origin_seq
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        match existing {
+            Some(row) => {
+                let canonical_payload = crate::relay::canonical_json_bytes(&envelope.payload)?;
+                coordinate_matches(&row, envelope, &canonical_payload)
+            }
+            None => Ok(false),
+        }
+    })
+}
+
 /// Validate and atomically handle one imported coordinate. Ordinary
 /// mutation-level invalid input is rolled back to a savepoint, then journaled
 /// and acked as a refusal. `RefusedRetainingMutation` is the deliberate
@@ -384,7 +427,9 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         }
         crate::settlement_publication::refresh_in_tx(tx,envelope)?;
-        if !hosted {
+        if hosted {
+            crate::hosted::record_unmaterialized_in_tx(tx, envelope)?;
+        } else {
             ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         }
         if crashes(faults, FaultPoint::SyncBeforeApplyCommit) {

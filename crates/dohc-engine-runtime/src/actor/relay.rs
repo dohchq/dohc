@@ -22,6 +22,11 @@ use dohc_engine_sync_http::HttpRelayTransport;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(not(test))]
+use dohc_engine_storage::NoFaults as CursorFaults;
+#[cfg(test)]
+use relay_push_tests::cache_tests::CursorFaults;
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayConfiguration {
     pub base_url: String,
@@ -155,7 +160,7 @@ pub enum RelayOperation {
     },
     /// One pass of the hosted feed. Its cursor commits with
     /// `CommitHostedCursor` once its changed paths are materialized. A pass
-    /// that adopts a new scope, and every commit, then retire the documents
+    /// that adopts a new scope, and every commit, then park the documents
     /// that left the scope, as `root` holds them.
     PullHosted {
         workspace_id: String,
@@ -247,6 +252,7 @@ enum RelayIoRequest {
     RotateEpoch(EpochRequest),
     BlobsHave(BlobHaveRequest),
     UploadBlob(BlobUploadRequest),
+    UploadBlobs(Vec<BlobUploadRequest>),
     DownloadBlobs(BlobDownloadBatchRequest),
     UploadKeyEnvelope(KeyEnvelopeRequest),
     DownloadKeyEnvelope(KeyEnvelopeDownloadRequest),
@@ -320,40 +326,18 @@ impl DeferredRelayTransport {
                     RelayIoRequest::Push(_)
                         | RelayIoRequest::PushHosted(_)
                         | RelayIoRequest::ShareLogPush(_)
-                        | RelayIoRequest::UploadBlob(_)
                         | RelayIoRequest::DownloadBlobs(_)
                         | RelayIoRequest::UploadKeyEnvelope(_)
                         | RelayIoRequest::DownloadKeyEnvelope(_)
                         | RelayIoRequest::ShareBlob(_)
                         | RelayIoRequest::ShareProposalSubmit(_)
                 );
-            let uploaded = match &state.completed[index].0 {
-                RelayIoRequest::UploadBlob(upload) => Some((
-                    upload.workspace_id.clone(),
-                    upload.replication_epoch.clone(),
-                    upload.stream_identity.clone(),
-                    upload.sha256.clone(),
-                )),
-                _ => None,
-            };
             let projected = match &mut state.completed[index].1 {
                 Ok(response) => project(response).ok_or(RelayError::InvalidResponse),
                 Err(error) => Err(error.clone()),
             };
             if release && projected.is_ok() {
                 let _ = state.completed.swap_remove(index);
-                if let Some((workspace, epoch, stream, sha)) = uploaded {
-                    for (request, result) in &mut state.completed {
-                        if let RelayIoRequest::BlobsHave(have) = request
-                            && have.workspace_id == workspace
-                            && have.replication_epoch == epoch
-                            && have.stream_identity == stream
-                            && let Ok(RelayIoResponse::BlobsHave(response)) = result
-                        {
-                            response.missing.retain(|missing| missing != &sha);
-                        }
-                    }
-                }
             }
             return projected;
         }
@@ -377,6 +361,53 @@ impl DeferredRelayTransport {
     }
 
     fn complete(&self, request: RelayIoRequest, result: Result<RelayIoResponse, RelayError>) {
+        if let (RelayIoRequest::BlobsHave(have), Ok(RelayIoResponse::BlobsHave(response))) =
+            (&request, &result)
+        {
+            if let Ok(missing) = response.validated_missing(&have.sha256s) {
+                self.push_progress
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .confirm_blob_presence(
+                        &have.workspace_id,
+                        &have.replication_epoch,
+                        &have.stream_identity,
+                        have.sha256s
+                            .iter()
+                            .filter(|sha| !missing.contains(sha))
+                            .cloned(),
+                    );
+            }
+        }
+        let uploads = match (&request, &result) {
+            (RelayIoRequest::UploadBlob(upload), Ok(RelayIoResponse::UploadBlob)) => {
+                std::slice::from_ref(upload)
+            }
+            (RelayIoRequest::UploadBlobs(uploads), Ok(RelayIoResponse::UploadBlob)) => {
+                uploads.as_slice()
+            }
+            _ => &[],
+        };
+        if !uploads.is_empty() {
+            let mut progress = self
+                .push_progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let confirmed = uploads.iter().all(|upload| {
+                progress.confirm_blob_presence(
+                    &upload.workspace_id,
+                    &upload.replication_epoch,
+                    &upload.stream_identity,
+                    [upload.sha256.clone()],
+                )
+            });
+            debug_assert!(
+                confirmed,
+                "a successful upload belongs to the active push identity"
+            );
+            // The native continuation consumes presence, without retaining blob bytes.
+            return;
+        }
         let mut state = self
             .state
             .lock()
@@ -571,6 +602,15 @@ impl RelayTransport for DeferredRelayTransport {
         BlobsHave
     );
 
+    fn upload_blobs(&self, mut requests: Vec<BlobUploadRequest>) -> Result<(), RelayError> {
+        if requests.len() == 1 {
+            return self.upload_blob(requests.remove(0));
+        }
+        self.resolve(RelayIoRequest::UploadBlobs(requests), |response| {
+            matches!(response, RelayIoResponse::UploadBlob).then_some(())
+        })
+    }
+
     fn upload_blob(&self, request: BlobUploadRequest) -> Result<(), RelayError> {
         self.resolve(RelayIoRequest::UploadBlob(request), |response| {
             matches!(response, RelayIoResponse::UploadBlob).then_some(())
@@ -737,6 +777,7 @@ mod deferred_relay_tests {
                 operation.clone(),
                 &LeaseRegistry::default(),
                 &ClaimAnnouncer::default(),
+                &mut crate::actor::live_application::Registry::default(),
             )
         };
         assert!(matches!(run(&mut store, &mut cache),
@@ -800,6 +841,7 @@ mod deferred_relay_tests {
             operation.clone(),
             &LeaseRegistry::default(),
             &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
         );
         assert!(
             second_phase.is_ok(),
@@ -817,6 +859,7 @@ mod deferred_relay_tests {
             next_operation,
             &LeaseRegistry::default(),
             &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
         );
         assert!(matches!(next,
             Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING));
@@ -912,6 +955,7 @@ mod deferred_relay_tests {
                 operation.clone(),
                 &LeaseRegistry::default(),
                 &ClaimAnnouncer::default(),
+                &mut crate::actor::live_application::Registry::default(),
             ) {
                 Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete { .. })) => break,
                 Err(RuntimeError::Relay(RelayError::Local(reason)))
@@ -972,6 +1016,7 @@ mod deferred_relay_tests {
                                 },
                                 &LeaseRegistry::default(),
                                 &ClaimAnnouncer::default(),
+                                &mut crate::actor::live_application::Registry::default(),
                             ) {
                                 Ok(RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
                                     ..
@@ -1683,6 +1728,7 @@ pub enum RelayOperationOutcome {
     Sync(SyncPassOutcome),
     CursorCommitted {
         sharing_declined: Vec<dohc_engine_sync::SharingDeclined>,
+        writer_cache_changed: bool,
     },
     Probe(bool),
     Claimed,
@@ -1702,15 +1748,31 @@ pub enum RelayOperationOutcome {
     ShareProposalSubmitted(ShareProposalSubmitOutcome),
     DirectWritesPushed(DirectWritePushOutcome),
     HostedReplicaCreated,
-    HostedPass(HostedPassOutcome),
+    HostedPass {
+        pass: HostedPassOutcome,
+        /// Each document of the scope that is not ready after the pass. Its
+        /// live registrations were released before the pass replied.
+        unready: Vec<String>,
+        /// Each document that left the scope and is not gone from the
+        /// replica yet: its rows or its file remain.
+        departed: Vec<String>,
+    },
     HostedCursorCommitted {
-        /// `false` when the scope moved since the pass fetched; nothing
-        /// committed.
-        committed: bool,
-        /// Retirement after the commit: `Ok(true)` when a document that left
-        /// the scope retired, so work that waited for its path can apply and
-        /// the caller pulls again. Its failure leaves the commit standing.
+        /// Not committed when the scope moved since the pass fetched; and
+        /// whether a document it kept held waits for the next pass.
+        commit: dohc_engine_sync::HostedCommit,
+        /// Parking after the commit: `Ok(true)` when a document that left the
+        /// scope parked or its file's path came free, so work that waited for
+        /// its path can apply and the caller pulls again. Its failure leaves
+        /// the commit standing.
         retirement: Result<bool, RuntimeError>,
+        /// As for [`Self::HostedPass`], after the commit. A failure to read
+        /// them released nothing and leaves the commit standing; the next
+        /// pass releases them.
+        unready: Result<Vec<String>, RuntimeError>,
+        /// As for [`Self::HostedPass`], after the parking. A failure to
+        /// read them leaves the commit standing; the next pass reports them.
+        departed: Result<Vec<String>, RuntimeError>,
     },
 }
 
@@ -1897,9 +1959,10 @@ impl ActorHandle {
             let queued_reservation = reservation.clone();
             let queued_claims = self.claims.clone();
             let outcome = self
-                .run(move |store, cache| {
+                .run_with_registrations(move |store, cache, registrations| {
                     let _reservation = queued_reservation;
                     let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
+                    let is_pull = matches!(&queued_operation, RelayOperation::Pull { .. });
                     let outcome = if queued_token.is_cancelled() {
                         Err(RuntimeError::Cancelled)
                     } else {
@@ -1910,11 +1973,40 @@ impl ActorHandle {
                             queued_operation,
                             &queued_leases,
                             &queued_claims,
+                            registrations,
                         )
                     };
-                    // Push handles enrollment resets below. Every other
-                    // operation clears by default.
-                    if !is_push {
+                    // Push handles enrollment resets below. A pull that only
+                    // redelivers durable echoes leaves the writer cache valid;
+                    // applied or materialized work still invalidates it.
+                    let pull_changed = match &outcome {
+                        Ok(RelayOperationOutcome::Sync(
+                            SyncPassOutcome::Complete {
+                                applied,
+                                changed_paths,
+                                ..
+                            }
+                            | SyncPassOutcome::CrashedAfterApply {
+                                applied,
+                                changed_paths,
+                                ..
+                            },
+                        )) => *applied > 0 || !changed_paths.is_empty(),
+                        Err(RuntimeError::Relay(RelayError::Local(reason)))
+                            if reason == RELAY_IO_PENDING =>
+                        {
+                            false
+                        }
+                        _ => true,
+                    };
+                    let unchanged_commit = matches!(
+                        &outcome,
+                        Ok(RelayOperationOutcome::CursorCommitted {
+                            writer_cache_changed: false,
+                            ..
+                        })
+                    );
+                    if !is_push && !unchanged_commit && (!is_pull || pull_changed) {
                         cache.clear();
                     }
                     outcome
@@ -2212,6 +2304,9 @@ fn execute_blocking_http_request(
         RelayIoRequest::BlobsHave(request) => transport
             .blobs_have(request)
             .map(RelayIoResponse::BlobsHave),
+        RelayIoRequest::UploadBlobs(requests) => transport
+            .upload_blobs(requests)
+            .map(|()| RelayIoResponse::UploadBlob),
         RelayIoRequest::UploadBlob(request) => transport
             .upload_blob(request)
             .map(|()| RelayIoResponse::UploadBlob),
@@ -2256,9 +2351,10 @@ fn execute_relay_operation(
     operation: RelayOperation,
     leases: &LeaseRegistry,
     claims: &ClaimAnnouncer,
+    registrations: &mut super::live_application::Registry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
     let client = RelaySyncClient::new(transport);
-    let outcome = run_relay_operation(store, doc_cache, &client, operation, leases);
+    let outcome = run_relay_operation(store, doc_cache, &client, operation, leases, registrations);
     claims.announce(&client.take_automation_claims());
     outcome
 }
@@ -2269,6 +2365,7 @@ fn run_relay_operation(
     client: &RelaySyncClient<DeferredRelayTransport>,
     operation: RelayOperation,
     leases: &LeaseRegistry,
+    registrations: &mut super::live_application::Registry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
     let replicas = operation.replicas();
     if store.is_passive()
@@ -2336,13 +2433,14 @@ fn run_relay_operation(
             store,
             &workspace_id,
             &cursor,
-            &NoFaults,
+            &CursorFaults,
             leases,
             now_ms,
         )? {
-            TxnOutcome::Committed(sharing_declined) => {
-                Ok(RelayOperationOutcome::CursorCommitted { sharing_declined })
-            }
+            TxnOutcome::Committed(commit) => Ok(RelayOperationOutcome::CursorCommitted {
+                sharing_declined: commit.sharing_declined,
+                writer_cache_changed: commit.writer_cache_changed,
+            }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
         RelayOperation::Probe { workspace_id } => {
@@ -2562,6 +2660,7 @@ fn run_relay_operation(
         } => match client.commit_share_view_cursor(store, &workspace_id, &cursor, &NoFaults)? {
             TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted {
                 sharing_declined: Vec::new(),
+                writer_cache_changed: true,
             }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
@@ -2598,9 +2697,13 @@ fn run_relay_operation(
                 client.pull_hosted_workspace(store, doc_cache, &workspace_id, &NoFaults, leases)?;
             // A pass without a cursor adopted a new scope.
             if pass.pending_cursor.is_none() {
-                retire_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms)?;
+                park_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms)?;
             }
-            Ok(RelayOperationOutcome::HostedPass(pass))
+            Ok(RelayOperationOutcome::HostedPass {
+                pass,
+                unready: release_unready_hosted(store, registrations, &workspace_id)?,
+                departed: dohc_engine_sync::departed_hosted_object_ids(store, &workspace_id)?,
+            })
         }
         RelayOperation::CommitHostedCursor {
             workspace_id,
@@ -2608,31 +2711,61 @@ fn run_relay_operation(
             root,
             now_ms,
         } => match client.commit_hosted_cursor(store, &workspace_id, &cursor, &NoFaults)? {
-            TxnOutcome::Committed(committed) => Ok(RelayOperationOutcome::HostedCursorCommitted {
-                committed,
-                retirement: retire_departed_hosted(
-                    store,
-                    doc_cache,
-                    leases,
-                    &workspace_id,
-                    &root,
-                    now_ms,
-                ),
-            }),
+            TxnOutcome::Committed(commit) => {
+                let retirement =
+                    park_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms);
+                Ok(RelayOperationOutcome::HostedCursorCommitted {
+                    commit,
+                    retirement,
+                    unready: release_unready_hosted(store, registrations, &workspace_id),
+                    departed: dohc_engine_sync::departed_hosted_object_ids(store, &workspace_id)
+                        .map_err(RuntimeError::from),
+                })
+            }
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
     }
 }
 
-/// Retire each hosted document that left the scope once nothing of it is
-/// left to settle, deliver or push: no live session holds it, the unload
-/// checks pass, and its file holds its head or nothing. Each retires in its
-/// own transaction, which records its file as retired; the file goes after,
-/// and a file an earlier pass could not remove goes first. A file holding
-/// anything else is a bug in a service root nothing else writes to, so
-/// retirement stops and names it. Answers whether any document retired or
-/// any path came free.
-fn retire_departed_hosted(
+/// Release the live registrations of each document of the hosted scope that
+/// is not ready, held or backfilling again: none can be edited live until a
+/// later commit settles it ready. The release is in memory only, so its
+/// accepted work still pushes. A document that left the scope keeps its
+/// registrations until it drains.
+fn release_unready_hosted(
+    store: &EngineStore,
+    registrations: &mut super::live_application::Registry,
+    workspace_id: &str,
+) -> Result<Vec<String>, RuntimeError> {
+    let unready = dohc_engine_sync::read_hosted_replica(store, workspace_id)?
+        .map(|replica| {
+            replica
+                .documents
+                .into_iter()
+                .filter(|(_, document)| {
+                    document.status != dohc_engine_sync::HostedDocumentStatus::Ready
+                })
+                .map(|(object_id, _)| object_id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    registrations.release(workspace_id, &unready);
+    Ok(unready)
+}
+
+/// Park each hosted document that left the scope once nothing of it is left
+/// to settle, deliver or push: no live session holds it, the unload checks
+/// pass, and its file holds its head or nothing. Each parks in its own
+/// transaction, which records its file as retired; the file goes after, and
+/// a file an earlier pass could not remove goes first. A pass can stop after
+/// it applied a document's rows and before it wrote their files, and once it
+/// leaves the scope no pass serves those rows again, so such a document's
+/// files are first written as the pass that makes it ready writes them. A
+/// file holding anything else after that is a bug in a service root nothing
+/// else writes to, so its document stays departed, the others still park,
+/// and the pass names the first such file, or else the first such write that
+/// failed. Answers whether any document parked or any path came free.
+fn park_departed_hosted(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
     leases: &LeaseRegistry,
@@ -2643,7 +2776,9 @@ fn retire_departed_hosted(
     let active = dohc_engine_domain::VersionedTextStore::new(store)
         .get_active_version(workspace_id)?
         .version_id;
-    let mut retired = remove_retired_files(store, workspace_id, root)?;
+    let mut unexpected = None;
+    let mut unwritten = None;
+    let mut parked = remove_retired_files(store, workspace_id, root, &mut unexpected)?;
     'departed: for document in dohc_engine_sync::departed_hosted_documents(store, workspace_id)? {
         let versions = document
             .heads
@@ -2658,7 +2793,7 @@ fn retire_departed_hosted(
             })
             .collect::<Result<Vec<_>, _>>()?;
         if keys.iter().any(|key| leases.is_held(key))
-            || !dohc_engine_sync::hosted_document_retirable(
+            || !dohc_engine_sync::hosted_document_parkable(
                 store,
                 workspace_id,
                 &document.object_id,
@@ -2670,6 +2805,29 @@ fn retire_departed_hosted(
             if super::ydoc::ydoc_unload_pending(store, key, root, now_ms)?.is_some() {
                 continue 'departed;
             }
+        }
+        let finished = dohc_engine_sync::departed_hosted_materialization(
+            store,
+            workspace_id,
+            &document.object_id,
+            &active,
+        )
+        .map_err(RuntimeError::from)
+        .and_then(|page| match page {
+            Some(page) => super::versions::materialize_relay_page_on_store(
+                store,
+                workspace_id,
+                root,
+                page,
+                &(),
+                now_ms,
+                &CancellationToken::new(),
+            ),
+            None => Ok(()),
+        });
+        if let Err(error) = finished {
+            unwritten.get_or_insert(error);
+            continue;
         }
         let files = document
             .heads
@@ -2686,13 +2844,12 @@ fn retire_departed_hosted(
                 File::Absent => {}
                 File::Text { sha256 } | File::Binary { sha256 } if sha256 == head.sha256 => {}
                 _ => {
-                    return Err(RuntimeError::HostedFileUnexpected {
-                        path: head.path.clone(),
-                    });
+                    unexpected.get_or_insert_with(|| head.path.clone());
+                    continue 'departed;
                 }
             }
         }
-        match dohc_engine_sync::retire_hosted_document(
+        match dohc_engine_sync::park_hosted_document(
             store,
             workspace_id,
             &document.object_id,
@@ -2703,29 +2860,64 @@ fn retire_departed_hosted(
             TxnOutcome::Committed(false) => continue,
             TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
         }
-        retired = true;
+        parked = true;
         for key in &keys {
             doc_cache.remove(key);
             doc_cache.unpin(key);
         }
-        remove_retired_files(store, workspace_id, root)?;
+        remove_retired_files(store, workspace_id, root, &mut unexpected)?;
     }
-    Ok(retired)
+    match (unexpected, unwritten) {
+        (Some(path), _) => Err(RuntimeError::HostedFileUnexpected { path }),
+        (None, Some(error)) => Err(error),
+        (None, None) => Ok(parked),
+    }
 }
 
 /// Remove each retired file that still holds its document's head, and free
-/// its path. One that holds anything else stays on disk, its path is freed,
-/// and it is named. A removal that fails keeps the path held for the next
-/// pass. Answers whether any path came free.
+/// its path. One that holds anything else stays on disk with its path held,
+/// so its document stays departed; the first such path goes in `unexpected`
+/// for the pass to name. A removal that fails also keeps the path held for
+/// the next pass. The folders a removed file leaves empty go too, so a file
+/// can take their name; an empty one that cannot go keeps the path held, and
+/// with it each folder above, until a later pass removes it; that pass walks
+/// past the folders already gone. A folder that cannot be inspected also
+/// keeps the path held. Answers whether any path came free.
 fn remove_retired_files(
     store: &mut EngineStore,
     workspace_id: &str,
     root: &std::path::Path,
+    unexpected: &mut Option<String>,
 ) -> Result<bool, RuntimeError> {
-    let files = dohc_engine_sync::retired_hosted_files(store, workspace_id)?;
-    let freed = !files.is_empty();
-    for file in files {
-        let removed = dohc_engine_files::remove_file_holding(root, &file.path, &file.sha256)?;
+    let mut freed = false;
+    for file in dohc_engine_sync::retired_hosted_files(store, workspace_id)? {
+        if !dohc_engine_files::remove_file_holding(root, &file.path, &file.sha256)? {
+            unexpected.get_or_insert(file.path);
+            continue;
+        }
+        let mut stuck = false;
+        let mut parent = file.path.as_str();
+        while let Some((folder, _)) = parent.rsplit_once('/') {
+            let path = root.join(folder);
+            match left_folder(
+                dohc_engine_files::remove_empty_directory_target(root, folder),
+                || std::fs::symlink_metadata(&path).map(|m| m.is_dir()),
+                || Ok(std::fs::read_dir(&path)?.next().transpose()?.is_none()),
+            ) {
+                // An earlier pass removed it; an empty folder above may remain.
+                LeftFolder::Removed | LeftFolder::Gone => {}
+                LeftFolder::HasContent => break,
+                LeftFolder::Stuck => {
+                    stuck = true;
+                    break;
+                }
+            }
+            parent = folder;
+        }
+        if stuck {
+            continue;
+        }
+        freed = true;
         match dohc_engine_sync::forget_retired_hosted_file(
             store,
             workspace_id,
@@ -2735,11 +2927,103 @@ fn remove_retired_files(
             TxnOutcome::Committed(()) => {}
             TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
         }
-        if !removed {
-            return Err(RuntimeError::HostedFileUnexpected { path: file.path });
-        }
     }
     Ok(freed)
+}
+
+/// What became of a folder a removed retired file left.
+#[derive(Debug, PartialEq, Eq)]
+enum LeftFolder {
+    Removed,
+    Gone,
+    HasContent,
+    Stuck,
+}
+
+/// Fail closed: the path goes free only past a folder that is surely gone
+/// or surely holds something; any other answer keeps it held.
+fn left_folder<E>(
+    removed: Result<bool, E>,
+    is_dir: impl FnOnce() -> std::io::Result<bool>,
+    is_empty: impl FnOnce() -> std::io::Result<bool>,
+) -> LeftFolder {
+    match removed {
+        Ok(true) => return LeftFolder::Removed,
+        Ok(false) => {}
+        Err(_) => return LeftFolder::Stuck,
+    }
+    match is_dir() {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => LeftFolder::Gone,
+        Err(_) => LeftFolder::Stuck,
+        Ok(false) => LeftFolder::HasContent,
+        Ok(true) => match is_empty() {
+            Ok(false) => LeftFolder::HasContent,
+            Ok(true) | Err(_) => LeftFolder::Stuck,
+        },
+    }
+}
+
+#[cfg(test)]
+mod left_folder_tests {
+    use super::{LeftFolder, left_folder};
+    use std::io::{Error, ErrorKind, Result};
+
+    fn unreachable() -> Result<bool> {
+        panic!("inspected a folder whose answer was already known")
+    }
+
+    fn denied() -> Result<bool> {
+        Err(Error::from(ErrorKind::PermissionDenied))
+    }
+
+    #[test]
+    fn a_removed_folder_is_not_inspected() {
+        let removed = left_folder(Ok::<_, ()>(true), unreachable, unreachable);
+        assert_eq!(removed, LeftFolder::Removed);
+    }
+
+    #[test]
+    fn a_failed_removal_keeps_the_path_held() {
+        let stuck = left_folder(Err(()), unreachable, unreachable);
+        assert_eq!(stuck, LeftFolder::Stuck);
+    }
+
+    #[test]
+    fn only_a_missing_folder_counts_as_gone() {
+        let missing = || Err(Error::from(ErrorKind::NotFound));
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), missing, unreachable),
+            LeftFolder::Gone
+        );
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), denied, unreachable),
+            LeftFolder::Stuck
+        );
+    }
+
+    #[test]
+    fn a_folder_that_holds_something_lets_the_path_go() {
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), || Ok(true), || Ok(false)),
+            LeftFolder::HasContent
+        );
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), || Ok(false), unreachable),
+            LeftFolder::HasContent
+        );
+    }
+
+    #[test]
+    fn an_empty_or_unlisted_folder_keeps_the_path_held() {
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), || Ok(true), || Ok(true)),
+            LeftFolder::Stuck
+        );
+        assert_eq!(
+            left_folder(Ok::<_, ()>(false), || Ok(true), denied),
+            LeftFolder::Stuck
+        );
+    }
 }
 
 /// The level gate on share-view enrolment, read at the one place
@@ -2781,6 +3065,7 @@ mod share_view_identity_tests {
                     operation.clone(),
                     &LeaseRegistry::default(),
                     &ClaimAnnouncer::default(),
+                    &mut crate::actor::live_application::Registry::default(),
                 );
                 assert!(
                     matches!(result, Err(RuntimeError::Relay(RelayError::Local(reason))) if reason == RELAY_IO_PENDING)
@@ -2800,7 +3085,8 @@ mod share_view_identity_tests {
                     transport.clone(),
                     push.clone(),
                     &LeaseRegistry::default(),
-                    &ClaimAnnouncer::default()
+                    &ClaimAnnouncer::default(),
+                    &mut crate::actor::live_application::Registry::default()
                 ),
                 Err(RuntimeError::Relay(RelayError::IdentityRequired))
             ));
@@ -2811,6 +3097,7 @@ mod share_view_identity_tests {
                 operation.clone(),
                 &LeaseRegistry::default(),
                 &ClaimAnnouncer::default(),
+                &mut crate::actor::live_application::Registry::default(),
             );
             assert!(result.is_err());
             let request = transport.take_pending().unwrap();
@@ -2823,7 +3110,8 @@ mod share_view_identity_tests {
                     transport,
                     operation,
                     &LeaseRegistry::default(),
-                    &ClaimAnnouncer::default()
+                    &ClaimAnnouncer::default(),
+                    &mut crate::actor::live_application::Registry::default()
                 ),
                 Ok(RelayOperationOutcome::Claimed)
             ));
@@ -2856,6 +3144,7 @@ mod share_view_identity_tests {
             },
             &LeaseRegistry::default(),
             &ClaimAnnouncer::default(),
+            &mut crate::actor::live_application::Registry::default(),
         )
         .expect("recording runs");
         match outcome {
@@ -3128,6 +3417,7 @@ mod hosted_refusal_tests {
                 operation.clone(),
                 &LeaseRegistry::default(),
                 &ClaimAnnouncer::default(),
+                &mut crate::actor::live_application::Registry::default(),
             );
             assert!(
                 matches!(&refused, Err(RuntimeError::Relay(refusal))
@@ -3137,6 +3427,326 @@ mod hosted_refusal_tests {
             assert_eq!(transport.take_pending(), None, "{operation:?} sent nothing");
             assert_eq!(everything(&store), before, "{operation:?} wrote nothing");
         }
+    }
+
+    /// The switch-over plan: a retired file holding anything but its head was
+    /// forgotten before it was named, so its document left `departed` while
+    /// the file stayed. Its path stays held now: every pass names the file,
+    /// across a restart, until it holds its head again and goes.
+    #[test]
+    fn a_retired_file_holding_anything_else_keeps_its_document_departed() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                     VALUES ('ws','a.md','doc-b',?1)",
+                    [dohc_engine_storage::hex_sha256(b"hosted b")],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let file = root.path().join("a.md");
+        std::fs::write(&file, "not the head").unwrap();
+        let pass = |store: &mut EngineStore| {
+            park_departed_hosted(
+                store,
+                &mut WriterDocCache::new(),
+                &LeaseRegistry::default(),
+                "ws",
+                root.path(),
+                2_000,
+            )
+        };
+        let departed = |store: &EngineStore| {
+            dohc_engine_sync::departed_hosted_object_ids(store, "ws").unwrap()
+        };
+
+        for _ in 0..2 {
+            let refused = pass(&mut store);
+            assert!(
+                matches!(&refused, Err(RuntimeError::HostedFileUnexpected { path }) if path == "a.md"),
+                "{refused:?}"
+            );
+            assert_eq!(departed(&store), ["doc-b"]);
+        }
+        drop(store);
+        let mut store = EngineStore::open(&path, 3_000).unwrap();
+        let refused = pass(&mut store);
+        assert!(
+            matches!(&refused, Err(RuntimeError::HostedFileUnexpected { path }) if path == "a.md"),
+            "{refused:?}"
+        );
+        assert_eq!(departed(&store), ["doc-b"]);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "not the head");
+
+        std::fs::write(&file, "hosted b").unwrap();
+        assert!(pass(&mut store).unwrap(), "its path came free");
+        assert!(departed(&store).is_empty());
+        assert!(!file.exists());
+    }
+
+    /// The durability review: a stuck retired file returned before the
+    /// retired files after it and every departed document, so nothing else
+    /// in the workspace ever retired. The others still go or park; the stuck
+    /// one stays departed, and the pass still names it.
+    #[test]
+    fn a_stuck_retired_file_does_not_hold_back_other_departed_documents() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                     VALUES ('ws','a.md','doc-b',?1),('ws','z.md','doc-z',?2)",
+                    [
+                        dohc_engine_storage::hex_sha256(b"hosted b"),
+                        dohc_engine_storage::hex_sha256(b"hosted z"),
+                    ],
+                )
+                .and_then(|_| {
+                    tx.execute(
+                        "INSERT INTO hosted_documents \
+                         (workspace_id,object_id,path,state,scope_generation) \
+                         VALUES ('ws','doc-c','c.md','ready',1)",
+                        [],
+                    )
+                })
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        std::fs::write(root.path().join("a.md"), "not the head").unwrap();
+        std::fs::write(root.path().join("z.md"), "hosted z").unwrap();
+        assert_eq!(
+            dohc_engine_sync::departed_hosted_object_ids(&store, "ws").unwrap(),
+            ["doc-b", "doc-c", "doc-z"]
+        );
+
+        let refused = park_departed_hosted(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &LeaseRegistry::default(),
+            "ws",
+            root.path(),
+            2_000,
+        );
+        assert!(
+            matches!(&refused, Err(RuntimeError::HostedFileUnexpected { path }) if path == "a.md"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            dohc_engine_sync::departed_hosted_object_ids(&store, "ws").unwrap(),
+            ["doc-b"]
+        );
+        assert!(root.path().join("a.md").exists());
+        assert!(!root.path().join("z.md").exists());
+    }
+
+    /// The durability review: a retired `a.md/x/c.md` left the folder
+    /// `a.md`, which a file at `a.md` could never replace. The folders its
+    /// file leaves empty go with it, up to one that still holds something.
+    #[test]
+    fn a_retired_file_takes_the_folders_it_leaves_empty() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_retired_files (workspace_id,path,object_id,sha256) \
+                     VALUES ('ws','a.md/x/c.md','doc-c',?1),('ws','d/e/f.md','doc-f',?1)",
+                    [dohc_engine_storage::hex_sha256(b"hosted")],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        std::fs::create_dir_all(root.path().join("a.md/x")).unwrap();
+        std::fs::create_dir_all(root.path().join("d/e")).unwrap();
+        std::fs::write(root.path().join("a.md/x/c.md"), "hosted").unwrap();
+        std::fs::write(root.path().join("d/e/f.md"), "hosted").unwrap();
+        std::fs::write(root.path().join("d/keep.md"), "keep").unwrap();
+
+        assert!(
+            park_departed_hosted(
+                &mut store,
+                &mut WriterDocCache::new(),
+                &LeaseRegistry::default(),
+                "ws",
+                root.path(),
+                2_000,
+            )
+            .unwrap()
+        );
+        assert!(!root.path().join("a.md").exists());
+        assert!(!root.path().join("d/e").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("d/keep.md")).unwrap(),
+            "keep"
+        );
+        assert!(
+            dohc_engine_sync::retired_hosted_files(&store, "ws")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Sol's sixth park review: a finish that stops after writing a
+    /// document's file keeps only that document departed while the others
+    /// park, and after a restart the next pass parks it too.
+    #[test]
+    fn an_interrupted_finish_holds_back_only_its_document_until_a_restart() {
+        let scratch = ScratchDir::new().unwrap();
+        let root = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 0, &NoFaults)
+            .unwrap();
+        for (seq, object_id) in [(1, "doc-a"), (2, "doc-b")] {
+            dohc_engine_domain::VersionedTextStore::new(&mut store)
+                .write_text(
+                    &dohc_engine_domain::WriteText {
+                        workspace_id: "ws".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: object_id.to_owned(),
+                        path: format!("{object_id}.md"),
+                        text: format!("hosted {object_id}"),
+                        moment_id: format!("moment-{seq}"),
+                        metadata_origin: "sync".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 1_000 + seq,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        }
+        // Both applied rows no committed pass wrote, then left the scope.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO hosted_documents \
+                     (workspace_id,object_id,path,state,scope_generation,unmaterialized_seq) \
+                     VALUES ('ws','doc-a','doc-a.md','ready',1,1),\
+                     ('ws','doc-b','doc-b.md','ready',1,2)",
+                    [],
+                )
+                .map_err(dohc_engine_storage::StorageError::persist_public)
+            })
+            .unwrap();
+        let pass = |store: &mut EngineStore| {
+            park_departed_hosted(
+                store,
+                &mut WriterDocCache::new(),
+                &LeaseRegistry::default(),
+                "ws",
+                root.path(),
+                2_000,
+            )
+        };
+        let departed = |store: &EngineStore| {
+            dohc_engine_sync::departed_hosted_object_ids(store, "ws").unwrap()
+        };
+        let a = root.path().join("doc-a.md");
+
+        let faults = dohc_engine_testkit::ScriptedFaults::crash_at(
+            dohc_engine_storage::FaultPoint::MaterializeAfterRenameBeforeComplete,
+        );
+        let armed: Arc<dyn dohc_engine_storage::FaultInjector> = faults.clone();
+        super::super::versions::tests::RELAY_FAULTS.with(|relay| relay.replace(Some(armed)));
+        let interrupted = pass(&mut store);
+        super::super::versions::tests::RELAY_FAULTS.with(|relay| relay.take());
+        assert!(faults.fired());
+        assert!(
+            matches!(
+                interrupted,
+                Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs: 1 })
+            ),
+            "{interrupted:?}"
+        );
+        assert_eq!(departed(&store), ["doc-a"]);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "hosted doc-a");
+        assert!(!root.path().join("doc-b.md").exists());
+
+        drop(store);
+        let mut store = EngineStore::open(&path, 3_000).unwrap();
+        super::super::materialization::replay_pending_materializations(
+            &mut store,
+            root.path(),
+            super::super::materialization::MaterializationReplayScope {
+                holds: None,
+                workspace_id: "ws",
+                self_writes: None,
+                progress: None,
+                file_outcomes_settled: false,
+                released_hold_paths: None,
+            },
+            3_000,
+            &NoFaults,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(pass(&mut store).unwrap());
+        assert!(departed(&store).is_empty());
+        assert!(!a.exists());
     }
 }
 
