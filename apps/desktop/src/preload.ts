@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
+import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { devToolsGranted } from "./ipc/devToolsIpc";
 import {OwnerRestoreRequest, OwnerRestoreActionResponse, type OwnerRestoreAction, type OwnerRestoreResult} from "./ipc/ownerRestoreContract";
@@ -12,12 +13,9 @@ import type {
   DohcDesktopBridge,
   GetSitePreviewLogsPayload,
   ListSitesPayload,
-  SetUserSettingsPayload,
-  SetWorkspaceSettingsPayload,
   SitePackagePayload,
   StartSitePreviewPayload,
   StopSitePreviewPayload,
-  WorkspaceSettingsPayload,
   WorkspaceActivityEvent,
 } from "./ipc/bridgeContract";
 import {
@@ -121,6 +119,7 @@ const rendererDocumentId = crypto.randomUUID();
 
 const bridge: DohcDesktopBridge = {
   ...operationBridge(workspaceFileOperations, invoke),
+  ...operationBridge(settingsOperations, invoke),
   ...operationBridge(chatOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
@@ -565,32 +564,12 @@ const bridge: DohcDesktopBridge = {
   runnerSelfTest: (payload) =>
     ipcRenderer.invoke(CHANNELS.runnerSelfTest, payload),
   detectAgentTools: (payload) => ipcRenderer.invoke(CHANNELS.detectAgentTools, payload),
-  getUserSettings: () => ipcRenderer.invoke(CHANNELS.getUserSettings),
-  setUserSettings: (payload: SetUserSettingsPayload) =>
-    ipcRenderer.invoke(CHANNELS.setUserSettings, payload),
-  resetUserSettings: () => ipcRenderer.invoke(CHANNELS.resetUserSettings),
-  reloadUserSettings: () => ipcRenderer.invoke(CHANNELS.reloadUserSettings),
-  setAppPinned: (payload) => ipcRenderer.invoke(CHANNELS.setAppPinned, payload),
-  getUserSettingsFilePath: () => ipcRenderer.invoke(CHANNELS.getUserSettingsFilePath),
-  openUserSettingsFile: () => ipcRenderer.invoke(CHANNELS.openUserSettingsFile),
-  openWorkspaceSettingsFile: (payload: WorkspaceSettingsPayload) =>
-    ipcRenderer.invoke(CHANNELS.openWorkspaceSettingsFile, payload),
-  getWorkspaceSettings: (payload: WorkspaceSettingsPayload) =>
-    ipcRenderer.invoke(CHANNELS.getWorkspaceSettings, payload),
-  setWorkspaceSettings: (payload: SetWorkspaceSettingsPayload) =>
-    ipcRenderer.invoke(CHANNELS.setWorkspaceSettings, payload),
-  resetWorkspaceSettings: (payload: WorkspaceSettingsPayload) =>
-    ipcRenderer.invoke(CHANNELS.resetWorkspaceSettings, payload),
   setTitlebarTheme: (payload) =>
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
   onUserSettingsChanged: (listener) =>
     onEvent(CHANNELS.userSettingsChanged, DesktopUserSettingsResult, listener),
   stepWindowZoom: (payload) =>
     ipcRenderer.invoke(CHANNELS.stepWindowZoom, payload),
-  getWorkspaceUiState: (payload) =>
-    ipcRenderer.invoke(CHANNELS.getWorkspaceUiState, payload),
-  setWorkspaceUiState: (payload) =>
-    ipcRenderer.invoke(CHANNELS.setWorkspaceUiState, payload),
   onCaptureHolds: listener => onEvent(CHANNELS.captureHolds, CaptureHoldsEvent, listener),
   onWorkspaceActivity: (listener: (event: WorkspaceActivityEvent) => void) => {
     // Degrades to the payload-free global ping on a malformed payload; an

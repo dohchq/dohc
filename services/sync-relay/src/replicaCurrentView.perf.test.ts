@@ -20,7 +20,7 @@ import {openEngineYdocProviderSession} from "../../../packages/workspace-engine-
 const binary=requireEngineBinaryOrSkip();
 const deployments:SyncRelayStorage[]=[];
 afterEach(async()=>{for(const storage of deployments.splice(0))storage.close();await closeTestStorages();});
-const measurements=new WeakMap<SyncRelayStorage,{path:string;sidePath:string;reservations:number[]}>();
+const measurements=new WeakMap<SyncRelayStorage,{path:string;sidePath:string;confirmations:number[]}>();
 const hash=(text: string)=>createHash("sha256").update(text).digest("hex");
 
 it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("round4 measures distinct-file persistence and discussion writes",async()=>{
@@ -28,12 +28,12 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("round4 measures distinct-file
   const lease=createReplicaReadPrincipal(storage).issue("w","distinct");storage.bindReplicaCurrentView(lease);
   const texts=Array.from({length:20_000},(_,i)=>{const text=`document-${String(i).padStart(6,"0")}`;return {sha256:hash(text),text};});
   const files=texts.map((t,i)=>({versionId:"main",objectId:`o${i}`,path:`docs/${String(i).padStart(6,"0")}.md`,contentKind:"text" as const,sha256:t.sha256,byteLength:Buffer.byteLength(t.text),lineageClaimId:null,restoreGeneration:null}));
-  const measured=measurements.get(storage)!;measured.reservations.length=0;
+  const measured=measurements.get(storage)!;measured.confirmations.length=0;
   const start=performance.now();storage.storeReplicaCurrentView(lease,{workspaceId:"w",omitted:[],revision:1,logCursor:0,journalCursor:0,files,texts});
-  const freshMs=performance.now()-start,freshStamps=measured.reservations.length;
-  measured.reservations.length=0;const repeat=performance.now();
+  const freshMs=performance.now()-start,freshStamps=measured.confirmations.length;
+  measured.confirmations.length=0;const repeat=performance.now();
   storage.storeReplicaCurrentView(lease,{workspaceId:"w",omitted:[],revision:2,logCursor:0,journalCursor:0,files,texts});
-  const unchangedMs=performance.now()-repeat,unchangedStamps=measured.reservations.length;
+  const unchangedMs=performance.now()-repeat,unchangedStamps=measured.confirmations.length;
   const before:number[]=[];for(let i=0;i<21;i++){const t=performance.now();context.tx(()=>nextShareDiscussionRevision(context,"s"));before.push(performance.now()-t);}
   context.db.exec("BEGIN");
   try {
@@ -64,7 +64,7 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("round4 measures accepted disc
     for(let i=0;i<1000;i++){const id=i?`message-${i}`:"w";if(i){workspace.run(id);share.run(id,id);grant.run(id,id);}header.run(id);file.run(id,sha);blob.run(id,sha,Buffer.from(text));}
     context.db.exec("COMMIT");
   }catch(e){context.db.exec("ROLLBACK");throw e;}
-  const samples:number[]=[];measured.reservations.length=0;const cpu=process.cpuUsage();
+  const samples:number[]=[];measured.confirmations.length=0;const cpu=process.cpuUsage();
   const guard=()=>{expect(storage.workspaceIsOwnedBy("w","owner")).toBe(true);return "owner" as const;};
   for(let i=0;i<21;i++) {
     const started=performance.now();
@@ -74,7 +74,7 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("round4 measures accepted disc
   const used=process.cpuUsage(cpu);
   expect(context.db.prepare("SELECT count(*) AS n FROM sync_relay_share_discussion_messages").get()!.n).toBe(21);
   expect(context.db.prepare("SELECT count(*) AS n FROM sync_relay_replica_cuts").get()!.n).toBe(1000);
-  output("discussion-messages",{views:1000,messages:21,p50:quantile(samples,.5),p95:quantile(samples,.95),cpuMsPerMessage:(used.user+used.system)/1000/21,stampReservations:measured.reservations.length,samples});
+  output("discussion-messages",{views:1000,messages:21,p50:quantile(samples,.5),p95:quantile(samples,.95),cpuMsPerMessage:(used.user+used.system)/1000/21,stampConfirmations:measured.confirmations.length,samples});
 },120_000);
 const quantile=(values:number[],q:number)=>[...values].sort((a,b)=>a-b)[Math.floor((values.length-1)*q)]!;
 const output=(name:string,data:unknown)=>{console.log(name,JSON.stringify(data));if(process.env.DOHC_REPLICA_MEASURE_OUT)writeFileSync(`${process.env.DOHC_REPLICA_MEASURE_OUT}.${name}.json`,JSON.stringify(data));};
@@ -82,10 +82,10 @@ async function fixture() {
   const root=await tempRoot("configured-view-perf"),configPath=join(root,"deployment.json"),path=join(root,"volume","relay.sqlite");
   initializeRelayDeployment({configPath,relayPath:path,continuityDirectory:join(root,"continuity")});
   const {storage}=openRelayDeployment(configPath);deployments.push(storage);
-  const reservations:number[]=[],continuity=(storage as unknown as {owner:RelayWriteOwner}).owner.continuity!;
-  const reserve=continuity.reserve.bind(continuity);
-  continuity.reserve=previous=>{const start=performance.now();try{return reserve(previous);}finally{reservations.push(performance.now()-start);}};
-  measurements.set(storage,{path,sidePath:join(root,"continuity","continuity.sqlite"),reservations});
+  const confirmations:number[]=[],continuity=(storage as unknown as {owner:RelayWriteOwner}).owner.continuity!;
+  const confirm=continuity.confirm.bind(continuity);
+  continuity.confirm=(stamp,nonce,previousNonce)=>{const start=performance.now();try{confirm(stamp,nonce,previousNonce);}finally{confirmations.push(performance.now()-start);}};
+  measurements.set(storage,{path,sidePath:join(root,"continuity","continuity.sqlite"),confirmations});
   storage.claimWorkspace({workspaceId:"w",ownerUserId:"owner",createdAtMs:1});
   storage.claimWorkspaceIdentity({workspaceId:"w",replicationEpoch:"epoch",streamIdentity:"stream"});
   storage.createShare({share:{shareId:"s",workspaceId:"w",granterUserId:"owner",selectorJson:'{"paths":["docs"],"versionId":null}',createdAtMs:1},
@@ -180,7 +180,7 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("measures relay parse, stage c
     let transactionMs=0;
     const context=storage as unknown as StorageContext,transaction=context.replicaViewTx.bind(context);
     context.replicaViewTx=run=>{const started=performance.now();try{return transaction(run);}finally{transactionMs+=performance.now()-started;}};
-    measured.reservations.length=0;
+    measured.confirmations.length=0;
     const walBefore=statSync(wal).size,sideBefore=statSync(sideWal).size;
     try {for(let i=0;i<21;i++) {
       const text=String(i).padStart(8,"0")+"x".repeat(size-8),sha256=hash(text),wire=JSON.stringify({workspaceId:"w",revision:i,logCursor:0,journalCursor:0,moved:false,nextCursor:null,refusedFiles:[],
@@ -191,9 +191,9 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("measures relay parse, stage c
     }
     const written=statSync(wal).size-walBefore;const summarize=(field:keyof typeof samples[number])=>({p50:quantile(samples.map(s=>s[field]),.5),p95:quantile(samples.map(s=>s[field]),.95)});
     results.push({size,samples:21,parse:summarize("parse"),stage:summarize("stage"),stageChecks:summarize("stageChecks"),flip:summarize("flip"),logicalPerRevision:logical/21,walGrowthPerRevision:written/21,sideWalGrowthPerRevision:(statSync(sideWal).size-sideBefore)/21,
-      stampReservationsPerRevision:measured.reservations.length/21,stampMs:{p50:quantile(measured.reservations,.5),p95:quantile(measured.reservations,.95)},
-      stampReservationsPerHourAt30Seconds:measured.reservations.length/21*120,stampReservationsPerHourAt4Hz:measured.reservations.length/21*14400,
-      stampMsPerHourAt30Seconds:measured.reservations.reduce((a,b)=>a+b,0)/21*120,stampMsPerHourAt4Hz:measured.reservations.reduce((a,b)=>a+b,0)/21*14400,
+      stampConfirmationsPerRevision:measured.confirmations.length/21,stampMs:{p50:quantile(measured.confirmations,.5),p95:quantile(measured.confirmations,.95)},
+      stampConfirmationsPerHourAt30Seconds:measured.confirmations.length/21*120,stampConfirmationsPerHourAt4Hz:measured.confirmations.length/21*14400,
+      stampMsPerHourAt30Seconds:measured.confirmations.reduce((a,b)=>a+b,0)/21*120,stampMsPerHourAt4Hz:measured.confirmations.reduce((a,b)=>a+b,0)/21*14400,
       logicalPerHourAt30Seconds:size*120,logicalPerHourAt4Hz:size*14400,walPerHourAt30Seconds:written/21*120,walPerHourAt4Hz:written/21*14400});
     }finally{db.close();storage.close();deployments.splice(deployments.indexOf(storage),1);await closeTestStorages();}
   }output("relay-phases",results);
@@ -211,16 +211,16 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE!=="1")("measures main-cadence staging
     const supervisor=createReplicaSupervisor({storage,storeRoot:await tempRoot("cadence-view"),idleMs:120_000,
       startChild:async()=>({pull:async()=>{},close:async()=>{},currentView:async()=>latest})});
     try {
-      await supervisor.activate("w");measured.reservations.length=0;
+      await supervisor.activate("w");measured.confirmations.length=0;
       const wal=`${measured.path}-wal`,sideWal=`${measured.sidePath}-wal`,before=statSync(wal).size,sideBefore=statSync(sideWal).size;
       for(let revision=1;revision<=60;revision++) {latest=page(revision);await supervisor.activate("w");await vi.advanceTimersByTimeAsync(1000);}
       const written=statSync(wal).size-before,sideWritten=statSync(sideWal).size-sideBefore;
       const header=context.db.prepare("SELECT cut_seq FROM sync_relay_replica_cuts").get()!;
       expect(header.cut_seq).toBe(3);
-      results.push({size,simulatedSeconds:60,captures:60,persistences:2,reservations:measured.reservations.length,
+      results.push({size,simulatedSeconds:60,captures:60,persistences:2,confirmations:measured.confirmations.length,
         relayWalPerHour:written*60,sideWalPerHour:sideWritten*60,logicalStagingPerHour:size*(Number(header.cut_seq)-1)*60,
-        stampReservationsPerHour:measured.reservations.length*60,stampMsPerHour:measured.reservations.reduce((a,b)=>a+b,0)*60,
-        stampMs:{p50:quantile(measured.reservations,.5),p95:quantile(measured.reservations,.95)}});
+        stampConfirmationsPerHour:measured.confirmations.length*60,stampMsPerHour:measured.confirmations.reduce((a,b)=>a+b,0)*60,
+        stampMs:{p50:quantile(measured.confirmations,.5),p95:quantile(measured.confirmations,.95)}});
     } finally {await supervisor.close();vi.useRealTimers();storage.close();deployments.splice(deployments.indexOf(storage),1);await closeTestStorages();}
   }
   output("main-cadence",results);

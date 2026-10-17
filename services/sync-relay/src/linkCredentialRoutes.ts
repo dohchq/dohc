@@ -84,6 +84,11 @@ export function createLinkCredentialRoutes(
     return { capabilityHash, session };
   };
 
+  // A link serves the access its files carry: its own, or a Group folder's.
+  const servableFiles = ({ effectiveSelector }: AuthorizedShareAction<ShareSelector>) =>
+    isPublicLinkAccess(effectiveSelector.access, publicEditRelease) &&
+    (effectiveSelector.access !== "edit" || isLiveEditShareSelector(effectiveSelector));
+
   const linkExchangeResult = (
     authorized: AuthorizedShareAction<ShareSelector>,
     capabilityToken: string,
@@ -153,7 +158,7 @@ export function createLinkCredentialRoutes(
         if (
           !authorized.ok ||
           authorized.grant.generation !== found.credential.generation ||
-          (!isPublicLinkAccess(authorized.grant.access, publicEditRelease) || (authorized.grant.access === "edit" && !isLiveEditShareSelector(authorized.effectiveSelector)))
+          !servableFiles(authorized)
         ) {
           if (!linkExchangeRateLimiter.allow(ip, nowMs())) throw relayError("link_read_rate_limited");
           return refused();
@@ -237,7 +242,7 @@ export function createLinkCredentialRoutes(
     if (
       !authorized.ok ||
       authorized.grant.generation !== current.session.generation ||
-      (!isPublicLinkAccess(authorized.grant.access, publicEditRelease) || (authorized.grant.access === "edit" && !isLiveEditShareSelector(authorized.effectiveSelector)))
+      !servableFiles(authorized)
     ) {
       throw invalidLinkCapability();
     }
