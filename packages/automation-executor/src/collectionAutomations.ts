@@ -1586,7 +1586,7 @@ export class CollectionAutomations {
   pauseForEngineRestart(): void {
     if (this.state === "disposed" || this.state === "paused") return;
     this.generation += 1;
-    this.reopenAfterRestart = this.opened !== null;
+    this.reopenAfterRestart = this.opened !== null || this.busyOpenRetry;
     this.stopRuns();
     // Claims owed a release or settle keep it: the replacement engine still
     // holds them as running, and the first drain after it answers sends it.
@@ -1623,7 +1623,10 @@ export class CollectionAutomations {
    * later open starts again. Its schedules are unknown until then.
    */
   async close(): Promise<void> {
-    if (this.state !== "open") return;
+    if (this.state !== "open") {
+      this.stopRuns();
+      return;
+    }
     this.generation += 1;
     // Closed before the drain ends and claims are handed back, as dispose
     // does, so a settle paid below starts no drain and no expiry pass.

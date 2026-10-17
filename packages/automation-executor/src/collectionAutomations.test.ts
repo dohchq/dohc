@@ -147,19 +147,53 @@ it.each([false, true])("reports a non-retryable reconcile refusal through the op
   }
 });
 
-it.each(["close", "dispose"] as const)("cancels a busy reconcile retry on %s", async (operation) => {
+it.each([
+  ["close", "listCollections"], ["dispose", "listCollections"],
+  ["close", "releaseAutomationGroups"], ["dispose", "releaseAutomationGroups"],
+] as const)("cancels a busy open retry on %s after %s refuses", async (operation, method) => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const store = createAutomationRunStore(await createTestScratch("dohc-open-busy-stop-"), testMetadataDir);
   const errors = vi.fn();
   const { executor, evaluator, engine } = emptyExecutor(store, { onError: errors });
-  const release = vi.spyOn(engine, "releaseAutomationGroups").mockRejectedValueOnce(
+  const open = vi.spyOn(executor, "open");
+  const refused = vi.spyOn(engine, method).mockRejectedValueOnce(
     new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined),
   );
   try {
     await executor.open();
     await executor[operation]();
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(release).toHaveBeenCalledOnce();
+    expect(open).toHaveBeenCalledOnce();
+    expect(refused).toHaveBeenCalledOnce();
+    expect(executor.schedules()).toBeNull();
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    await executor.dispose();
+    await evaluator.close();
+    vi.useRealTimers();
+  }
+});
+
+it.each(["listCollections", "releaseAutomationGroups"] as const)("resumes a busy open after an engine restart when %s refuses", async (method) => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const store = createAutomationRunStore(await createTestScratch("dohc-open-busy-restart-"), testMetadataDir);
+  const errors = vi.fn();
+  const reconciled = Promise.withResolvers<void>();
+  const { executor, evaluator, engine } = emptyExecutor(store, {
+    onError: errors, onAutomationsChanged: () => reconciled.resolve(),
+  });
+  const refused = vi.spyOn(engine, method).mockRejectedValueOnce(
+    new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined),
+  );
+  try {
+    await executor.open();
+    executor.pauseForEngineRestart();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(refused).toHaveBeenCalledOnce();
+    executor.resumeAfterEngineRestart();
+    await expect.poll(() => refused.mock.calls.length).toBe(2);
+    await reconciled.promise;
+    expect(executor.schedules()).toEqual([]);
     expect(errors).not.toHaveBeenCalled();
   } finally {
     await executor.dispose();
