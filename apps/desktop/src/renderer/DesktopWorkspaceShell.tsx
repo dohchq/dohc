@@ -3873,9 +3873,9 @@ export function DesktopWorkspaceShell(props: {
       // shortcuts such as Close Window and zoom never reach this listener,
       // so they continue to work over a modal.
       if (blockingModal) {
-        // Consume shell chords before macOS can route them through the menu.
-        // Text inputs keep native undo; history restore does not own it here.
-        if (command !== "history-restore-undo") event.preventDefault();
+        // Consume Command chords before macOS can route them through the menu.
+        // Text inputs keep Control-key editing and native undo.
+        if (command !== "history-restore-undo" && event.metaKey) event.preventDefault();
         return;
       }
       if (command === "settings") {

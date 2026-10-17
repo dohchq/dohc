@@ -156,7 +156,7 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     const binding = SHORTCUTS["toggle-sidebar"].accelerators[0];
     const shortcut = keyEvent(binding, platform, extra);
     fireEvent(dialog, shortcut);
-    expect(shortcut.defaultPrevented).toBe(true);
+    expect(shortcut.defaultPrevented).toBe(platform === "darwin");
     expect(screen.getByTestId("side-panel")).toBeTruthy();
 
     const menu = buildMenuTemplate({
@@ -251,5 +251,37 @@ describe.each(["win32", "darwin"] as const)("%s shell shortcuts", (platform) => 
     } finally {
       Reflect.set(accelerators, "0", original);
     }
+  });
+});
+
+describe("macOS text editing inside a modal", () => {
+  it.each([
+    ["plain", {}],
+    ["repeated", { repeat: true }],
+    ["composing", { isComposing: true }],
+  ] as const)("preserves %s Control-key defaults without running shell commands", async (_name, extra) => {
+    await ready("darwin");
+    fireEvent(window, keyEvent(SHORTCUTS.settings.accelerators[0], "darwin"));
+    const dialog = await screen.findByTestId("settings-dialog");
+
+    for (const tag of ["input", "textarea"] as const) {
+      const input = document.createElement(tag);
+      dialog.append(input);
+      input.focus();
+      for (const key of ["a", "e", "k", "b", "f", "n", "p", "d", "h", "t"]) {
+        const event = new KeyboardEvent("keydown", {
+          key, ctrlKey: true, bubbles: true, cancelable: true, ...extra,
+        });
+        fireEvent(input, event);
+        expect(event.defaultPrevented, `Control+${key} in ${tag}`).toBe(false);
+      }
+    }
+
+    expect(screen.getByTestId("settings-dialog")).toBe(dialog);
+    expect(screen.getByTestId("side-panel")).toBeTruthy();
+    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+    expect(screen.queryByTestId("command-palette")).toBeNull();
+    expect(screen.queryByTestId("quick-open")).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
   });
 });
