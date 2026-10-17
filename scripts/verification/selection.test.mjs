@@ -46,7 +46,9 @@ test("a change to a file that the repository tests read selects all of them, and
     "apps/desktop/scripts/require-e2e-engine.mjs", "apps/desktop/scripts/build-workspace-engine.mjs", "apps/desktop/scripts/dev.mjs",
     "apps/desktop/electron-builder.yml", "apps/desktop/src/shutdownBudgets.ts", "apps/desktop/src/renderer/styles.css",
     "packages/app-backend-runtime/scripts/build.mjs", "apps/desktop/.gitignore", "crates/yrs-interop/scripts/rustPeer.ts",
-    "crates/dohc-engine-storage/src/migration.rs"]) {
+    "crates/dohc-engine-storage/src/migration.rs", "apps/desktop/src/renderer/workbench/quick-open-rank.ts",
+    "apps/desktop/src/renderer/path.ts", "packages/security-contract/src/visibilityPolicy.ts", "packages/workspace-contracts/src/kinds.ts",
+    "apps/desktop/tsconfig.json", "packages/security-contract/tsconfig.json", "packages/workspace-contracts/tsconfig.json"]) {
     assert.equal(selectsRepositoryTests([file], workflow), true, file);
   }
   for (const file of ["apps/desktop/src/main.ts", "apps/desktop/scripts/stage-app-compiler.mjs", "apps/site/src/index.ts",
@@ -57,7 +59,7 @@ test("a change to a file that the repository tests read selects all of them, and
   assert.equal(selectsRepositoryTests(["apps/desktop/src/main.ts", "scripts/check-brand.mjs"], workflow), true, "one tooling input selects them all");
 });
 
-test("canonical repository checks include every script contract except the Docker proof", () => {
+test("canonical repository checks include every script contract except the Docker proofs", () => {
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   // A tooling change runs test:repo instead of test:repo:tree, so test:repo must run every test the tree set runs.
   const tree = manifest.scripts["test:repo:tree"];
@@ -65,7 +67,7 @@ test("canonical repository checks include every script contract except the Docke
   for (const [path] of tree.matchAll(/[^\s]+\.test\.mjs/gu)) assert.ok(manifest.scripts["test:repo"].split(/\s+/u).includes(path), `test:repo omits ${path}`);
   const listed = new Set([...manifest.scripts["test:repo"].matchAll(/[^\s]+\.test\.mjs/gu),
     ...manifest.scripts["test:repo:source"].matchAll(/[^\s]+\.test\.mjs/gu)].map(([path]) => path));
-  const optIn = new Set(["scripts/self-host/recovery.docker.test.mjs"]);
+  const optIn = new Set(["scripts/self-host/recovery.docker.test.mjs", "scripts/self-host/drill.docker.test.mjs"]);
   const tracked = execFileSync("git", ["ls-files", "-z", "--", ":(glob)scripts/**/*.test.mjs", ":(glob)tools/**/*.test.mjs"],
     { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }).split("\0").filter(Boolean);
   assert.ok(tracked.includes("scripts/build-slot.test.mjs"));

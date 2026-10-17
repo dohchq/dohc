@@ -1294,7 +1294,7 @@ mod tests {
 
         assert!(matches!(
             crate::commit_relay_cursor(&mut store, "ws", &cursor, &NoFaults, &crate::NoLiveLeases, 1_000),
-            Ok(dohc_engine_storage::TxnOutcome::Committed(ref declines)) if declines.is_empty()
+            Ok(dohc_engine_storage::TxnOutcome::Committed(ref declines)) if declines.sharing_declined.is_empty()
         ));
         assert_eq!(
             local_ops(&store)
@@ -2488,6 +2488,64 @@ mod tests {
         seed_retained_artifact_named(store, "seed-object", "seed-moment", text, kind);
     }
 
+    fn seed_refused_richdoc_artifact(store: &mut EngineStore, source: &str, canonical: &str) {
+        write_text(
+            store,
+            "main",
+            "seed-object",
+            "seed-moment",
+            source,
+            "capture",
+            10,
+        );
+        let key = DocKey::new("ws", "main", "seed-object").expect("key");
+        let path = "seed-object.md";
+        let sha = dohc_engine_storage::hex_sha256(source.as_bytes());
+
+        let projector = Ydoc::wire();
+        assert!(
+            projector
+                .rewrite_content_to_markdown(ContentKind::Richdoc, source)
+                .is_err(),
+            "refused source unexpectedly accepted by the projector"
+        );
+        let reader = Ydoc::wire();
+        assert!(
+            reader
+                .rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
+                .is_err(),
+            "refused source unexpectedly accepted by the Rust fold reader"
+        );
+
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, canonical)
+            .expect("canonical seed");
+        doc.preserve_folded_markdown_source(source)
+            .expect("source witness");
+        assert_eq!(doc.preserved_markdown_source(canonical), None);
+        let seed = doc.encode_full_state();
+        dohc_engine_collab::record_local_update(
+            store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &seed,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some(path),
+                    content_kind: ContentKind::Richdoc,
+                    regime: Regime::LocalOnly,
+                }),
+                is_seed: true,
+                seed_source_sha256: Some(&sha),
+                ..Default::default()
+            },
+            &NoFaults,
+            11,
+            |_, _, _| Ok(()),
+        )
+        .expect("retain refused seed lineage");
+    }
+
     fn seed_retained_artifact_named(
         store: &mut EngineStore,
         object_id: &str,
@@ -2673,7 +2731,7 @@ mod tests {
         for failure in ["load", "kind", "projection", "journal"] {
             let (_scratch, _, mut store) = open_store();
             seed_main(&mut store);
-            seed_retained_artifact_as(&mut store, "- parent\n  - nested\n", ContentKind::Richdoc);
+            seed_refused_richdoc_artifact(&mut store, "- \n\n  - b\n - c", "- \n\n- b\n\n- c");
             enroll(&mut store).expect("originate unexportable seed base");
             let bad_bytes = if failure == "projection" {
                 Ydoc::wire().plaintext_insert(
@@ -2694,7 +2752,7 @@ mod tests {
                     tx.execute("UPDATE ydoc_docs SET content_kind='plaintext'", []).map_err(SyncError::persist)?;
                     // Preserve matching document coverage so the journal's
                     // stored-author validation is the failing boundary.
-                    let seed = Ydoc::wire().plaintext_insert(0, "- parent\n  - nested\n");
+                    let seed = Ydoc::wire().plaintext_insert(0, "- \n\n  - b\n - c");
                     let sha = dohc_engine_storage::put_binary_blob(tx, &seed).map_err(SyncError::Storage)?;
                     tx.execute("UPDATE ydoc_updates SET update_blob_sha256=?1", [sha]).map_err(SyncError::persist)?;
                 } else if failure == "kind" {
@@ -2795,7 +2853,7 @@ mod tests {
     fn failed_projection_retries_only_after_moment_or_document_head_changes() {
         let (_scratch, path, mut store) = open_store();
         seed_main(&mut store);
-        seed_retained_artifact_as(&mut store, "- parent\n  - nested\n", ContentKind::Richdoc);
+        seed_refused_richdoc_artifact(&mut store, "- \n\n  - b\n - c", "- \n\n- b\n\n- c");
         mark_head_settled(&mut store);
         enroll(&mut store).expect("enroll unprojectable seed");
         observe_export_attempts(&mut store);
@@ -2818,7 +2876,7 @@ mod tests {
             "main",
             "seed-object",
             "next-moment",
-            "- parent\n  - nested\n",
+            "- \n\n  - b\n - c",
             "ydoc",
             102,
         );
@@ -3399,8 +3457,12 @@ mod tests {
         for settled in [false, true] {
             let (_scratch, _, mut store) = open_store();
             seed_main(&mut store);
-            let source = "---\nid: rec\n---\n\n- parent\n  - nested\n";
-            seed_retained_artifact_as(&mut store, source, ContentKind::Richdoc);
+            let source = "---\nid: rec\n---\n\n- \n\n  - b\n - c";
+            seed_refused_richdoc_artifact(
+                &mut store,
+                source,
+                "---\nid: rec\n---\n\n- \n\n- b\n- c",
+            );
             let key = DocKey::new("ws", "main", "seed-object").expect("key");
             let doc = store
                 .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
@@ -4637,7 +4699,7 @@ mod tests {
         )
         .expect("commit relay cursor after the local append")
         {
-            dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
+            dohc_engine_storage::TxnOutcome::Committed(declines) => declines.sharing_declined,
             dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
         };
 
@@ -4687,7 +4749,7 @@ mod tests {
         )
         .expect("commit next relay cursor")
         {
-            dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
+            dohc_engine_storage::TxnOutcome::Committed(declines) => declines.sharing_declined,
             dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
         };
 

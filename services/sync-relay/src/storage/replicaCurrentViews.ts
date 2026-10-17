@@ -10,6 +10,16 @@ import {readReplicaStanding} from "./replicaReads";
 
 const STAGE_BYTES = 8 * 1024 * 1024;
 const incarnations = new WeakMap<StorageContext, Map<string, ReplicaReadLease>>();
+const readCaches = new WeakMap<StorageContext, Map<string, {key: string; view: ReplicaCurrentView}>>();
+const MAX_READ_CACHE_WORKSPACES = 4;
+const readStatements = new WeakMap<StorageContext, Map<string, ReturnType<StorageContext["db"]["prepare"]>>>();
+function statement(storage: StorageContext, sql: string) {
+  let statements = readStatements.get(storage);
+  if (!statements) readStatements.set(storage, statements = new Map());
+  let prepared = statements.get(sql);
+  if (!prepared) statements.set(sql, prepared = storage.db.prepare(sql));
+  return prepared;
+}
 export interface StagedCurrentView {readonly staged: true}
 const stagedViews = new WeakMap<StagedCurrentView, {storage: StorageContext; lease: ReplicaReadLease; view: ReplicaCurrentView}>();
 export class ReplicaCurrentViewRefused extends Error {
@@ -32,6 +42,7 @@ export function bindReplicaCurrentView(storage: StorageContext, lease: ReplicaRe
 export function releaseReplicaCurrentView(storage: StorageContext, lease: ReplicaReadLease) {
   const bindings = incarnations.get(storage);
   if (bindings?.get(lease.workspaceId)?.incarnation === lease.incarnation) bindings.delete(lease.workspaceId);
+  forgetReplicaCurrentViewStoredCache(storage,lease.workspaceId);
 }
 export function replicaCurrentViewSelectors(storage: StorageContext, workspace: string): ReplicaCurrentViewSelector[] {
   return storage.db.prepare(`SELECT DISTINCT s.selector_json FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
@@ -47,7 +58,7 @@ export function currentViewFileVisible(selectors: ReplicaCurrentViewSelector[], 
   return selectors.some(selector => file.versionId === targetVersionId(selector) && visibleSharePath(selector, file.path) === file.path);
 }
 function storedFiles(storage: StorageContext, workspace: string): ReplicaCurrentView["files"] {
-  return storage.db.prepare("SELECT * FROM sync_relay_replica_cut_files WHERE workspace_id=? ORDER BY version_id,path").all(workspace).map(row => ({
+  return statement(storage, "SELECT * FROM sync_relay_replica_cut_files WHERE workspace_id=? ORDER BY version_id,path").all(workspace).map(row => ({
     versionId: String(row.version_id), objectId: String(row.object_id), path: String(row.path), contentKind: row.content_kind as "text" | "binary", sha256: String(row.sha256), byteLength: Number(row.byte_length),
     lineageClaimId: row.lineage_claim_id === null ? null : String(row.lineage_claim_id), restoreGeneration: row.restore_generation === null ? null : Number(row.restore_generation)}));
 }
@@ -61,18 +72,22 @@ function currentViewPaths(files: ReplicaCurrentView["files"], omitted: ReplicaCu
   const currentFiles = files.filter(file => file.lineageClaimId === null || file.restoreGeneration === (fences.get(fileLineageKey(file)) ?? 1));
   return new Map([...currentFiles, ...omitted].map(file => [filePathKey(file), file.objectId]));
 }
-function carriedPathAvailable(file: ReplicaCurrentView["files"][number], currentPaths: Map<string, string>) {
-  const owner = currentPaths.get(filePathKey(file));
+function carriedPathAvailable(file: ReplicaCurrentView["files"][number], owner: string | undefined) {
   return owner === undefined || owner === file.objectId;
+}
+export function currentViewFileAtFence(file: ReplicaCurrentView["files"][number], generation: number,
+  previous: ReplicaCurrentView["files"][number] | undefined, reservedBy: string | undefined) {
+  if (file.lineageClaimId === null || file.restoreGeneration === generation) return file;
+  return previous && carriedPathAvailable(previous,reservedBy) ? previous : undefined;
 }
 export function currentViewFilesAtFences(storage: StorageContext, workspace: string, files: ReplicaCurrentView["files"], previous: ReplicaCurrentView["files"], omitted: ReplicaCurrentView["omitted"]) {
   const saved = new Map(previous.map(f => [fileLineageKey(f), f]));
   const fences = currentViewFences(storage, workspace);
   const currentPaths = currentViewPaths(files, omitted, fences);
   return files.flatMap(file => {
-    if (file.lineageClaimId === null || file.restoreGeneration === (fences.get(fileLineageKey(file)) ?? 1)) return [file];
     const old = saved.get(fileLineageKey(file));
-    return old && carriedPathAvailable(old, currentPaths) ? [old] : [];
+    const row = currentViewFileAtFence(file,fences.get(fileLineageKey(file)) ?? 1,old,old && currentPaths.get(filePathKey(old)));
+    return row ? [row] : [];
   });
 }
 function validateReplicaCurrentView(storage: StorageContext, lease: ReplicaReadLease, view: ReplicaCurrentView) {
@@ -97,7 +112,7 @@ function validateReplicaCurrentView(storage: StorageContext, lease: ReplicaReadL
       const generation = fences.get(fileLineageKey(file)) ?? 1;
       if (file.restoreGeneration! > generation) fail();
       if (file.restoreGeneration! < generation) {
-        if (!old || !currentViewFileVisible(selectors, old) || !carriedPathAvailable(old, currentPaths)) continue;
+        if (!old || !currentViewFileVisible(selectors, old) || !carriedPathAvailable(old, currentPaths.get(filePathKey(old)))) continue;
         file = old;
       }
     }
@@ -154,6 +169,8 @@ export function flipReplicaCurrentView(storage: StorageContext, lease: ReplicaRe
   try {
     if (!state || state.storage !== storage || state.lease !== lease) fail();
     stagedViews.delete(staged);
+    // Also invalidate when deletion/recreation repeats a cut sequence and header.
+    readCaches.get(storage)?.delete(lease.workspaceId);
     return storage.replicaViewTx(() => {
       const view = validateReplicaCurrentView(storage, lease, state.view);
       const chunks = storage.db.prepare("SELECT count(*) AS n,min(ordinal) AS first,max(ordinal) AS last,sum(length(bytes)) AS bytes FROM sync_relay_replica_cut_texts WHERE workspace_id=? AND sha256=?");
@@ -185,9 +202,43 @@ export function flipReplicaCurrentView(storage: StorageContext, lease: ReplicaRe
 }
 export function readReplicaCurrentView(storage: StorageContext, workspace: string): ReplicaCurrentView | null {
   const standing = readReplicaStanding(storage, workspace);
-  const header = storage.db.prepare("SELECT * FROM sync_relay_replica_cuts WHERE workspace_id=?").get(workspace);
-  if (!standing || !header || header.replication_epoch !== standing.replicationEpoch || header.stream_identity !== standing.streamIdentity) return null;
-  return {workspaceId: workspace, revision: Number(header.revision), logCursor: Number(header.log_cursor), journalCursor: Number(header.journal_cursor), files: storedFiles(storage, workspace), texts: [], omitted: JSON.parse(String(header.omitted_json))};
+  const header = statement(storage, "SELECT replication_epoch,stream_identity,incarnation,cut_seq,revision,log_cursor,journal_cursor FROM sync_relay_replica_cuts WHERE workspace_id=?").get(workspace);
+  let cache = readCaches.get(storage);
+  if (!cache) readCaches.set(storage, cache = new Map());
+  if (!standing || !header || header.replication_epoch !== standing.replicationEpoch || header.stream_identity !== standing.streamIdentity) {
+    forgetReplicaCurrentViewStoredCache(storage,workspace); return null;
+  }
+  // data_version detects flips/deletions by other connections, within this read snapshot.
+  const key = JSON.stringify([header, statement(storage, "PRAGMA data_version").get()]);
+  const saved = cache.get(workspace);
+  if (saved?.key === key) { cache.delete(workspace); cache.set(workspace,saved); return saved.view; }
+  const omitted = statement(storage,"SELECT omitted_json FROM sync_relay_replica_cuts WHERE workspace_id=?").get(workspace)!;
+  const view = {workspaceId: workspace, revision: Number(header.revision), logCursor: Number(header.log_cursor), journalCursor: Number(header.journal_cursor), files: storedFiles(storage, workspace), texts: [], omitted: JSON.parse(String(omitted.omitted_json))};
+  for (const file of [...view.files, ...view.omitted]) Object.freeze(file);
+  Object.freeze(view.files); Object.freeze(view.texts); Object.freeze(view.omitted); Object.freeze(view);
+  cache.delete(workspace); cache.set(workspace, {key, view});
+  while (cache.size > MAX_READ_CACHE_WORKSPACES) cache.delete(cache.keys().next().value!);
+  return view;
+}
+
+/** Drop a stored snapshot without changing the replica lease. */
+export function forgetReplicaCurrentViewStoredCache(storage: StorageContext, workspace: string) {
+  readCaches.get(storage)?.delete(workspace);
+}
+
+/** @internal Test-only cache accounting. */
+export function replicaCurrentViewStoredCacheSize(storage: StorageContext) {
+  return readCaches.get(storage)?.size ?? 0;
+}
+
+/** Internal only: the reader has authorized this exact row in the same read transaction. */
+export function readReplicaCurrentViewRowText(storage: StorageContext, workspace: string, file: ReplicaCurrentView["files"][number]): string | null {
+  const rows = statement(storage, `SELECT t.bytes FROM sync_relay_replica_cut_files f JOIN sync_relay_replica_cut_texts t
+    ON t.workspace_id=f.workspace_id AND t.sha256=f.sha256 AND t.ref_count>0
+    WHERE f.workspace_id=? AND f.version_id=? AND f.path=? AND f.sha256=? AND f.byte_length=? AND f.content_kind='text' ORDER BY t.ordinal`)
+    .all(workspace, file.versionId, file.path, file.sha256, file.byteLength);
+  const chunks = rows.map(row => {const b = row.bytes as Uint8Array; return Buffer.from(b.buffer,b.byteOffset,b.byteLength);});
+  return chunks.length ? (chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks)).toString("utf8") : null;
 }
 export function readReplicaCurrentViewText(storage: StorageContext, workspace: string, sha: string): string | null {
   if (!readReplicaStanding(storage, workspace)) return null;

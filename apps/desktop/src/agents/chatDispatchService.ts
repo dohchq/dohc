@@ -17,6 +17,7 @@ import type {
   LinkedChatStore,
 } from "@dohc/workspace-contracts/engine";
 import type { RunnerSettings } from "../settings/userSettings";
+import { UNNAMED_AGENT_ID } from "./activeAgentRun";
 import {
   AGENT_DISPATCH_RPC_DEADLINE_MS,
   type AgentDispatchRequestOptions,
@@ -747,7 +748,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     try {
       const identity = await options.identityFor(workspace);
       await options.setRunAttribution(workspace, {
-        agentId: "dohc-chat-runner",
+        agentId: UNNAMED_AGENT_ID,
         agentRunId: claim.run.runId,
         depth: claim.chainDepth,
       });
@@ -1459,7 +1460,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
           };
         }
         await options.setRunAttribution(workspace, {
-          agentId: "dohc-chat-runner-self-test",
+          agentId: UNNAMED_AGENT_ID,
           agentRunId: runId,
           depth: 0,
         });

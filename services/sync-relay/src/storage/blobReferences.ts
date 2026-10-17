@@ -19,7 +19,8 @@ export function versionIdFromVersionCreatePayload(payloadJson: string): string |
 // POST /log, so validating the same set neither rejects an honest push nor
 // lets a referencing op slip through unvalidated. Enumerated by op kind:
 //   - moment.append:      payloadBefore/After/before blob shas (both content
-//                         kinds ship as uploaded blobs).
+//                         kinds ship as uploaded blobs), and a settlement's
+//                         accepted state blob.
 //   - conflict.open: base/current/incoming state shas, but only for
 //                         binary states -- text conflict states carry their
 //                         bytes INLINE in the payload and are never uploaded,
@@ -60,6 +61,9 @@ export function referencedBlobShas(
     push(record.payloadBeforeBlobSha256);
     push(record.payloadAfterBlobSha256);
     push(record.beforeBlobSha256);
+    const reference = asRecord(record.settlementReference);
+    const settlement = reference ? asRecord(reference.record) : null;
+    if (settlement) push(settlement.acceptedStateBlobSha256);
   } else if (opKind === "conflict.open") {
     for (const key of ["base", "current", "incoming"] as const) {
       const state = asRecord(record[key]);
@@ -73,9 +77,6 @@ export function referencedBlobShas(
       const snapshot = asRecord(raw);
       if (snapshot) push(snapshot.blobSha256);
     }
-    const reference=asRecord(record.settlementReference);
-    const settlement=reference?asRecord(reference.record):null;
-    if(settlement)push(settlement.acceptedStateBlobSha256);
   } else if (opKind === "ydoc.update") {
     // A ydoc.update's Yjs bytes are content-addressed like any binary blob. The
     // relay stays content-agnostic (dumb log) but must count this reference so

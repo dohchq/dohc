@@ -448,6 +448,10 @@ fn map_domain(error: DomainError) -> WireError {
             code: "state-corrupt",
             ..
         } => (Internal, "state-corrupt"),
+        DomainError::Chat {
+            code: "invalid-poll-options",
+            reason,
+        } => (InvalidParams, reason),
         DomainError::Chat { code, .. } => (InvalidParams, code),
         DomainError::Crypto(error) => {
             let code = match error {
@@ -488,6 +492,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::UnsupportedContentKind { .. }
         | CollabError::MarkdownRewriteUnsupported { .. }
         | CollabError::MarkdownQuoteDepthExceeded
+        | CollabError::MarkdownNotRepresentable
         | CollabError::BaseAlreadyClaimed
         | CollabError::BaseStateDiverged
         | CollabError::BaseRelaySequencePending

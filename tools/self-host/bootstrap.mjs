@@ -61,6 +61,8 @@ function main() {
   if (positionals[0] === 'network') {
     const settings = readSettings(values['env-file']);
     console.log(settings.DOHC_SERVER_NETWORK_ACCESS === 'private' ? privateRouteInstructions(settings).join('\n') :
+      settings.DOHC_BEHIND_CLOUDFLARE === '1' ?
+        `Point Cloudflare DNS for ${settings.DOHC_PUBLIC_HOST} only to this host's IPv4 (A) record. Do not configure an origin AAAA record. Restrict inbound origin connections to Cloudflare's ranges using the provider's network firewall or Docker's DOCKER-USER chain. See docs/how-to/self-host.md for certificate setup requirements.` :
       `Point DNS for ${settings.DOHC_PUBLIC_HOST} to this host. Permit inbound TCP 80 and 443. Caddy obtains TLS certificates at startup.`);
     return;
   }
