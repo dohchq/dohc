@@ -193,6 +193,31 @@ describe("owner live document enrollment", () => {
     h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1") ? {ok:true,documents:[{path:"old.md",objectId:"object",status: "retired", acceptedCursor: 0}],nextCursor:null} : {ok:true,documents:[]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[{path:"old.md",status: "retired",canResume:true,deferredStop:{unsentEdits:65,editable:false}}],nextCursor:null});
   });
+  // Proves: a document stopped on a diverged server copy keeps the reason and
+  // offers no Resume, whether its Stop finished or waits on this computer.
+  it("offers no Resume for a document stopped on a diverged server copy, deferred or not",async () => {
+    const h=harness();
+    h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"deferred.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:2,editable:true}}]);
+    h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
+      ? {ok:true,documents:[{path:"deferred.md",status:"retired",reason:"session-host-diverged"},{path:"stopped.md",status:"retired",reason:"session-host-diverged"}],nextCursor:null}
+      : {ok:true,diverged:true,documents:[]});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[
+      {path:"deferred.md",status:"retired",reason:"session-host-diverged",canResume:false,deferredStop:{unsentEdits:2,editable:true}},
+      {path:"stopped.md",status:"retired",reason:"session-host-diverged",canResume:false},
+    ],nextCursor:null});
+  });
+  // Proves: a deferred Stop does not offer Resume on a document whose server
+  // copy misses an edit made while live editing was off.
+  it("offers no Resume for a deferred Stop on a document edited while live editing was off",async () => {
+    const h=harness();
+    h.localStops.mockResolvedValue([{state:"released",binding:null,document:{mainVersionId:"main",objectId:"object",currentPath:"edited.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:1,editable:true}}]);
+    h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1")
+      ? {ok:true,documents:[],nextCursor:null}
+      : {ok:true,documents:[{path:"edited.md",status:"unavailable",reason:"live-edit-unadmitted"}]});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[
+      {path:"edited.md",status:"unavailable",reason:"live-edit-unadmitted",canResume:false,deferredStop:{unsentEdits:1,editable:true}},
+    ],nextCursor:null});
+  });
   const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
 
   it("lists bounded owner refusals without treating an empty candidate page as complete", async () => {
@@ -255,6 +280,11 @@ describe("owner live document enrollment", () => {
         {path: "live.md", status: "ready", document: {shareId: "secret"}},
         {path: "paused.md", status: "paused"},
         {path: "moved.md", status: "paused", reason: "document-unavailable"},
+        {path: "changed.md", status: "unavailable", reason: "workspace-changed"},
+        {path: "refused.md", status: "unavailable", reason: "session-host-refused"},
+        {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage"},
+        {path: "diverged.md", status: "unavailable", reason: "session-host-diverged"},
+        {path: "edited.md", status: "unavailable", reason: "live-edit-unadmitted"},
       ]});
     await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
       documents: [
@@ -262,6 +292,13 @@ describe("owner live document enrollment", () => {
         {path: "live.md", status: "ready", canResume: false},
         {path: "paused.md", status: "paused", canResume: true},
         {path: "moved.md", status: "paused", reason: "document-unavailable", canResume: false},
+        {path: "changed.md", status: "unavailable", reason: "workspace-changed", canResume: false},
+        {path: "refused.md", status: "unavailable", reason: "session-host-refused", canResume: true},
+        {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage", canResume: true},
+        // Only the server's operator can continue a diverged server copy.
+        {path: "diverged.md", status: "unavailable", reason: "session-host-diverged", canResume: false},
+        // A Resume can't continue a server copy that misses an edit made while live editing was off.
+        {path: "edited.md", status: "unavailable", reason: "live-edit-unadmitted", canResume: false},
       ], nextCursor: "old.md",
     });
     expect(h.request.mock.calls.map((call) => call[1])).toEqual([

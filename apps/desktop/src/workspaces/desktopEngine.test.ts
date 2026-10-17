@@ -815,6 +815,84 @@ describe("server owner peer lifecycle", () => {
     } finally {await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
+  // Proves: a document the server refused names the workspace's reason over
+  // every other, including a frozen document that clears on its own, and
+  // stops naming it once the server no longer reports it. Only a document the
+  // server cannot start until its owner opens it outranks a refusal, and a
+  // diverged server copy, which only the server's operator can continue, outranks both.
+  it("reports a document the server refused ahead of every other reason but one it cannot start or whose server copy diverged", async () => {
+    const f = fixture(), credentials = new AbortController();
+    Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
+    const rootPath = await createTestScratch("dohc-server-owner-refused-");
+    f.rows.set("owner", {workspaceId: "owner", rootPath, kind: "personal", mode: "local-first"});
+    const document = {binding: {workspaceId: "owner", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1}, relayDatabaseNamespace: "namespace", shareId: "share"};
+    const refused = {path: "refused.md", status: "unavailable", reason: "session-host-refused"};
+    const unopened = {path: "unopened.md", status: "unavailable", reason: "live-document-without-lineage"};
+    const divergedRow = {path: "diverged.md", status: "unavailable", reason: "session-host-diverged"};
+    const edited = {path: "edited.md", status: "unavailable", reason: "live-edit-unadmitted"};
+    const others = [{path: "changed.md", status: "unavailable", reason: "workspace-changed"}, {path: "moved.md", status: "unavailable", reason: "document-unavailable"}];
+    const ready = {path: "a.md", status: "ready", document};
+    // The server says the workspace diverged whenever any of its rows does, and after its owner stopped every one.
+    let rows: unknown[] = others, diverged = false;
+    const config = {nativeConfigPath: "native-config", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
+      frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+        maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
+      attemptTimeoutMs: 30_000, retryDelayMs: 10_000};
+    f.dependencies.serverOwnerDelivery = {prepare: async () => config, workspaceIds: () => ["owner"], hasRefusals: () => undefined,
+      connect: async () => ({bearer: "token", accountId: "owner-account", relayUrl: "https://relay.test", signal: credentials.signal, assertCurrent() {},
+        retire: async () => 0, refusals: async () => {}, documents: async () => ({ok: true, diverged, documents: rows})})};
+    ownerDeliveryMock.pass.mockResolvedValue("frozen");
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("workspace-changed"));
+      // With no document to deliver.
+      rows = [...others, refused]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      // A frozen document outranks the server's other reasons, but not a refusal.
+      rows = [ready, ...others]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"));
+      rows = [ready, ...others, refused]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      // A document the server cannot start until its owner opens it goes first, with or without a frozen one.
+      rows = [...others, refused, unopened]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage"));
+      rows = [ready, refused]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
+      rows = [ready, ...others, unopened, refused]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      // A diverged server copy outranks all of them, with or without a frozen document.
+      // Each step changes the reason, so no step passes on the one before it.
+      rows = [...others, refused, unopened, divergedRow]; diverged = true; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-diverged"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      rows = [ready, unopened]; diverged = false; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage"));
+      rows = [ready, divergedRow, ...others, unopened, refused]; diverged = true; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-diverged"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      rows = [ready, ...others]; diverged = false; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("document-unavailable"));
+      // A document edited while live editing was off outranks a frozen one and
+      // the server's other reasons, but not a refusal a Resume can still help.
+      rows = [ready, ...others, edited]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-edit-unadmitted"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      rows = [...others, edited, refused]; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
+      // The owner stopped every document, and the server still reports its diverged copy.
+      rows = []; diverged = true; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-diverged"));
+      expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
+      // The server no longer reports it.
+      diverged = false; f.engine.retryOwnerDelivery("owner");
+      await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBeUndefined());
+    } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
+  });
+
   it.each(["credentials", "daemon", "workspace"])("discovers ready documents and holds the session until %s cancellation settles", async mode => {
     const f = fixture(), credentials = new AbortController(), entered = deferred(), settled = deferred();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));

@@ -9,7 +9,7 @@ import { useRequestSequence } from "./useRequestSequence";
 export type LiveDocumentRow = {
   path: string;
   status: "ready" | "preparing" | "paused" | "unavailable" | "retired";
-  reason?: "document-unavailable" | "workspace-changed";
+  reason?: "document-unavailable" | "workspace-changed" | "session-host-refused" | "session-host-diverged" | "live-document-without-lineage" | "live-edit-unadmitted";
   canResume: boolean;
   deferredStop?: {unsentEdits: number; editable: boolean};
 };
@@ -138,6 +138,10 @@ function mergeRows(
 function statusLabel(row: LiveDocumentRow): string {
   if (row.reason === "document-unavailable") return "File moved or removed";
   if (row.reason === "workspace-changed") return "Workspace changed";
+  if (row.reason === "session-host-refused") return "Stopped by the server";
+  if (row.reason === "session-host-diverged") return "Server copy doesn't match";
+  if (row.reason === "live-document-without-lineage") return "Not started";
+  if (row.reason === "live-edit-unadmitted") return "Can't resume";
   switch (row.status) {
     case "ready":
       return "Live";
@@ -158,12 +162,22 @@ function statusTone(row: LiveDocumentRow): string {
   return "text-muted";
 }
 
+// The server holds a diverged copy until its operator recovers it, so a Stop cannot finish.
 function canStop(row: LiveDocumentRow): boolean {
-  return row.status !== "retired" && !row.deferredStop;
+  return row.status !== "retired" && !row.deferredStop && row.reason !== "session-host-diverged";
 }
 
 function canResume(row: LiveDocumentRow): boolean {
   return row.canResume;
+}
+
+// A Resume finishes a deferred Stop, but not one on a server copy that diverged or misses an edit.
+function deferredStopNote(row: LiveDocumentRow, stop: NonNullable<LiveDocumentRow["deferredStop"]>): string {
+  const one = stop.unsentEdits === 1;
+  const unsent = stop.unsentEdits === 0 ? "" : `${stop.unsentEdits} unsent ${one ? "edit remains" : "edits remain"} on this computer. `;
+  const resume = row.reason === "session-host-diverged" || row.reason === "live-edit-unadmitted" ? ""
+    : stop.unsentEdits === 0 ? "Resume live editing to finish syncing. " : `Resume live editing to try sending ${one ? "it" : "them"}. `;
+  return `${row.status === "ready" ? "Live editing resumed. " : "Live editing stopped. "}${unsent}${resume}${stop.editable ? "You can keep editing." : "Editing is paused."}`;
 }
 
 function busyLabel(work: Work): string {
@@ -470,6 +484,10 @@ export function LiveDocumentsDialog({
           <p className="mt-1 text-[13px] text-muted">
             Stopping live editing keeps the file and its history. Share permissions stay unchanged.
           </p>
+          {/* Said before any Stop runs: until #2103, a Resume can't continue a file edited while stopped. */}
+          <p data-testid="live-documents-stop-warning" className="mt-1 text-[13px] text-muted">
+            If you edit a file while its live editing is stopped, live editing can't resume for it.
+          </p>
         </div>
         <SecondaryButton
           size="compact"
@@ -537,11 +555,27 @@ export function LiveDocumentsDialog({
                     Stop live editing
                   </SecondaryButton>
                 ) : null}
+                {/* A Resume alone fails again until dohc has opened the document once. */}
+                {row.reason === "live-document-without-lineage" ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    Live editing can't start until you open this document once in dohc. After you open it, resume live editing.
+                  </p>
+                ) : null}
+                {/* The server's copy misses that edit, so a Resume can't help. */}
+                {row.reason === "live-edit-unadmitted" ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    This file changed while live editing was off, so live editing can't resume for it. You can keep editing it in dohc.
+                  </p>
+                ) : null}
+                {/* Resume and Stop can't help here, so the row offers neither. */}
+                {row.reason === "session-host-diverged" ? (
+                  <p className="m-0 basis-full text-[12px] text-muted">
+                    The server's copy of this workspace no longer matches the synced one. Contact the server's operator.
+                  </p>
+                ) : null}
                 {row.deferredStop ? (
                   <p className="m-0 basis-full text-[12px] text-muted">
-                    {row.status==="ready" ? "Live editing resumed. " : "Live editing stopped. "}
-                    {row.deferredStop.unsentEdits===0 ? "Resume live editing to finish syncing. " : `${row.deferredStop.unsentEdits} unsent ${row.deferredStop.unsentEdits===1 ? "edit remains" : "edits remain"} on this computer. Resume live editing to try sending ${row.deferredStop.unsentEdits===1 ? "it" : "them"}. `}
-                    {row.deferredStop.editable ? "You can keep editing." : "Editing is paused."}
+                    {deferredStopNote(row, row.deferredStop)}
                   </p>
                 ) : null}
               </li>

@@ -60,7 +60,7 @@ export class ServiceHostedReplication {
   }, config: ServiceHostedReplicationConfig) {
     this.#config = parseServiceHostedReplicationConfig(config);
   }
-  /** Whether the replica's origin diverged from the relay's. Its store must be rebuilt. */
+  /** Whether the replica's origin diverged from the relay's. Its workspace stays detached, and its store is kept. */
   get diverged(): boolean { return this.#diverged; }
   /**
    * The documents that left the scope and are not gone from the replica, as

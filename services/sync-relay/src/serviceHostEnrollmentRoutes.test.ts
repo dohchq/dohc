@@ -7,19 +7,26 @@ import {createServiceHostReplication} from "./serviceHostReplication";
 import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./serviceHostCredential";
 import {relayError} from "./errors";
 import {SERVICE_HOST_ENROLLMENTS} from "./storage/serviceHostEnrollment";
+import type {ServiceActivationBlock} from "./serviceActivationDriver";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
 const key = new Uint8Array(32).fill(17), namespace = "service-route-test";
 const serviceReplication = (storage: Parameters<typeof authorizeServiceHostReplication>[0]) => createServiceHostReplication({storage, prefix: "dohc-service-v1.",
-  authorize: input => authorizeServiceHostReplication(storage, {key, namespace, ...input})});
+  hostedFeed: true, authorize: input => authorizeServiceHostReplication(storage, {key, namespace, ...input})});
 async function fixture() {
   const f = await ticketFixture(); cleanup.push(f.close);
   f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
   f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES (?,'owner',0,'moment.append','{}',1,1)").run(scope.workspaceId);
   f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(scope.workspaceId, binding.currentPath, "b".repeat(64));
   const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
-  const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false};
+  // The documents the session host blocked until their owner tries again.
+  const blocked = new Map<string, ServiceActivationBlock>();
+  const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false,
+    blocked: vi.fn((document: {objectId: string}) => blocked.get(document.objectId)),
+    unblock: vi.fn((document: {objectId: string}) => blocked.delete(document.objectId)),
+    diverged: vi.fn((_row: {workspaceId: string; replicationEpoch: string; streamIdentity: string}) => false),
+    block(objectId: string, why: ServiceActivationBlock = "refused") {blocked.set(objectId, why);}};
   let actor = {workspaceId: scope.workspaceId, userId: "owner-1"};
   const resolveActor = vi.fn(async () => actor);
   const handle = createServiceHostEnrollmentRoutes({storage: f.storage, history, host, resolveActor});
@@ -104,6 +111,101 @@ it("reports ready only with completed retained activation and the current native
   expect(await state()).toEqual({path: binding.currentPath, status: "ready", document: {binding, relayDatabaseNamespace: namespace, shareId: scope.shareId}});
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
   expect((await state()).status).toBe("paused");
+});
+
+// Proves: a document the session host blocked reads as refused until its
+// owner's Resume, which gives it exactly one more attempt. Enrolling its share
+// again is not a Resume, and a reading never clears the block.
+it("reports a document the session host refused until the owner resumes it", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const documents = async () => (await (await f.handle(f.request())).json()).documents;
+  const refused = {path: binding.currentPath, status: "unavailable", reason: "session-host-refused"};
+  f.host.ready.mockReturnValue(true);
+  f.host.block(enrolled.objectId);
+  expect(await documents()).toEqual([refused]);
+  expect(await documents()).toEqual([refused]);
+  expect((await f.handle(f.request("POST", {shareId: scope.shareId}))).status).toBe(202);
+  expect(await documents()).toEqual([refused]);
+  expect(f.host.unblock).not.toHaveBeenCalled();
+  const resumed = await f.handle(f.request("POST", {path: binding.currentPath}));
+  expect(resumed.status).toBe(202);
+  expect(await resumed.json()).toEqual({ok: true, path: binding.currentPath, status: "preparing"});
+  expect(f.host.unblock).toHaveBeenCalledTimes(1);
+  expect(f.host.unblock).toHaveBeenCalledWith(expect.objectContaining({workspaceId: scope.workspaceId, objectId: enrolled.objectId}));
+  expect(f.host.unblock.mock.invocationCallOrder[0]).toBeLessThan(f.host.reconcile.mock.invocationCallOrder.at(-1)!);
+  expect(await documents()).toEqual([{path: binding.currentPath, status: "preparing"}]);
+  // Its one attempt failed, so the host blocked it again.
+  f.host.block(enrolled.objectId);
+  expect(await documents()).toEqual([refused]);
+  expect(f.host.unblock).toHaveBeenCalledTimes(1);
+});
+
+// Proves: a document blocked for having no live-editing history reads as its
+// own reason, so its owner learns to open it before Resume, which still unblocks it.
+it("reports a document without live-editing history apart from other refusals", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const documents = async () => (await (await f.handle(f.request())).json()).documents;
+  f.host.block(enrolled.objectId, "without-lineage");
+  expect(await documents()).toEqual([{path: binding.currentPath, status: "unavailable", reason: "live-document-without-lineage"}]);
+  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
+  expect(f.host.unblock).toHaveBeenCalledTimes(1);
+  expect(await documents()).toEqual([{path: binding.currentPath, status: "preparing"}]);
+  f.host.block(enrolled.objectId, "refused");
+  expect(await documents()).toEqual([{path: binding.currentPath, status: "unavailable", reason: "session-host-refused"}]);
+});
+
+// Proves: a document whose host copy misses an edit made while live editing
+// was off reads as its own reason. A Resume still asks for one more attempt,
+// which blocks it again with the same reason.
+it("reports a document edited while live editing was off apart from other refusals", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const documents = async () => (await (await f.handle(f.request())).json()).documents;
+  const unadmitted = {path: binding.currentPath, status: "unavailable", reason: "live-edit-unadmitted"};
+  f.host.block(enrolled.objectId, "live-edit-unadmitted");
+  expect(await documents()).toEqual([unadmitted]);
+  expect((await f.handle(f.request("POST", {path: binding.currentPath}))).status).toBe(202);
+  expect(f.host.unblock).toHaveBeenCalledTimes(1);
+  f.host.block(enrolled.objectId, "live-edit-unadmitted");
+  expect(await documents()).toEqual([unadmitted]);
+});
+
+// Proves: a document whose hosted replica diverged reads as its own reason
+// ahead of a block, a Resume cannot change that, and the owner learns nothing
+// of the store. A workspace that changed identity still reads as changed.
+it("reports a document whose hosted replica diverged, and nothing about its store", async () => {
+  const f = await fixture(), enrolled = f.storage.enrollServiceHostDocument(f.input);
+  const diverged = {path: binding.currentPath, status: "unavailable", reason: "session-host-diverged"};
+  f.host.ready.mockReturnValue(true);
+  f.host.block(enrolled.objectId);
+  f.host.diverged.mockImplementation(row => row.workspaceId === scope.workspaceId && row.replicationEpoch === "epoch" && row.streamIdentity === "stream");
+  const response = await f.handle(f.request());
+  expect(await response.json()).toEqual({ok: true, diverged: true, documents: [diverged]});
+  const resumed = await f.handle(f.request("POST", {path: binding.currentPath}));
+  expect(resumed.status).toBe(202);
+  expect(await resumed.json()).toEqual({ok: true, ...diverged});
+  f.raw.prepare("UPDATE sync_relay_workspaces SET replication_epoch='rotated' WHERE workspace_id=?").run(scope.workspaceId);
+  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: false, documents: [{path: binding.currentPath, status: "unavailable", reason: "workspace-changed"}]});
+});
+
+// Proves: an owner's Pause or Stop records their intent but cannot hide a
+// diverged server copy. The paused and the retired document both keep the
+// reason, and the workspace still reads as diverged once no document is active.
+it("keeps a diverged document's reason after its owner pauses or stops it", async () => {
+  const f = await fixture(); f.seed("docs/b.md", "object-b");
+  f.storage.enrollServiceHostDocument(f.input); f.storage.enrollServiceHostDocument({...f.input, path: "docs/b.md"});
+  f.host.diverged.mockImplementation(row => row.workspaceId === scope.workspaceId && row.replicationEpoch === "epoch" && row.streamIdentity === "stream");
+  const reason = "session-host-diverged";
+  expect(await (await f.handle(f.request("DELETE", {path: binding.currentPath}))).json()).toEqual({ok: true, path: binding.currentPath, status: "unavailable", reason});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject({ownerStop: "pause"});
+  const stopped = await f.handle(f.request("DELETE", {path: "docs/b.md", retire: true, restoreFenceGeneration: 0}));
+  expect(await stopped.json()).toMatchObject({ok: true, path: "docs/b.md", status: "retired"});
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, "docs/b.md")).toMatchObject({ownerStop: "retire", retired: true});
+  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: true, documents: [{path: binding.currentPath, status: "unavailable", reason}]});
+  expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({ok: true, documents: [{path: "docs/b.md", status: "retired", reason}], nextCursor: null});
+  expect((await f.handle(f.request("DELETE", {path: binding.currentPath, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}))).status).toBe(200);
+  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: true, documents: []});
+  expect((await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).documents).toEqual([
+    {path: binding.currentPath, status: "retired", reason}, {path: "docs/b.md", status: "retired", reason}]);
 });
 
 it("lists automatic enrollment refusals without enrolling documents or exposing other workspaces", async () => {
@@ -248,10 +350,11 @@ it("rechecks ownership after an enrollment request body finishes", async () => {
 it("service replication refuses foreign workspaces and account administration", async () => {
   const f = await fixture(), bearer = deriveServiceHostBearer(f.storage.enrollServiceHostDocument(f.input), {key, namespace});
   const handler = serviceReplication(f.storage);
-  for (const path of ["/sync/workspaces", "/sync/foreign/bootstrap", `/sync/${scope.workspaceId}/epoch`, `/sync/${scope.workspaceId}/live-host`]) {
+  for (const path of ["/sync/workspaces", "/sync/foreign/hosted/bootstrap", `/sync/${scope.workspaceId}/epoch`, `/sync/${scope.workspaceId}/live-host`,
+    `/sync/${scope.workspaceId}/hosted/live-host`]) {
     expect((await handler(new Request(`https://relay.test${path}`, {method: "POST", headers: {authorization: `Bearer ${bearer}`}}))).status).toBe(404);
   }
-  const response = await handler(new Request(`https://relay.test/sync/${scope.workspaceId}/bootstrap`, {headers: {authorization: `Bearer ${bearer}`}}));
+  const response = await handler(new Request(`https://relay.test/sync/${scope.workspaceId}/hosted/bootstrap`, {headers: {authorization: `Bearer ${bearer}`}}));
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({replicationEpoch: "epoch", streamIdentity: "stream"});
 });
@@ -260,16 +363,16 @@ it.each(["blob", "log"] as const)("a service token revoked during the %s body ca
   const f = await fixture(), bearer = deriveServiceHostBearer(f.storage.enrollServiceHostDocument(f.input), {key, namespace});
   const handler = serviceReplication(f.storage);
   const bytes = new TextEncoder().encode("unpublished"), digest = createHash("sha256").update(bytes).digest("hex");
-  const pending = deferredBody(kind === "blob" ? "PUT" : "POST", `https://relay.test/sync/${scope.workspaceId}/${kind === "blob" ? `blobs/${digest}` : "log"}`,
+  const pending = deferredBody(kind === "blob" ? "PUT" : "POST", `https://relay.test/sync/${scope.workspaceId}/hosted/${kind === "blob" ? `blobs/${digest}` : "log"}`,
     {authorization: `Bearer ${bearer}`, "content-type": kind === "blob" ? "application/octet-stream" : "application/json"});
   const result = handler(pending.request); await pending.started;
   f.storage.setServiceHostEnrollmentEnabled({...f.input, enabled: false});
   f.release(binding.objectId);
-  pending.finish(kind === "blob" ? bytes : new TextEncoder().encode(JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: "service", ops: [
+  pending.finish(kind === "blob" ? bytes : new TextEncoder().encode(JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: "service-host:native", ops: [
     {originSeq: 0, opKind: "moment.append", recordedAtMs: 10, payload: {operation: "write"}}]})));
   expect((await result).status).toBe(404);
   expect(f.storage.getBlob(scope.workspaceId, digest)).toBeNull();
-  expect(f.storage.fetchLogCoordinate({workspaceId: scope.workspaceId, originId: "service", originSeq: 0})).toBeNull();
+  expect(f.storage.fetchLogCoordinate({workspaceId: scope.workspaceId, originId: "service-host:native", originSeq: 0})).toBeNull();
 });
 
 it("reports a renamed enrolled document as unavailable and retains its original enrollment", async () => {
@@ -287,12 +390,16 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   const bearer = deriveServiceHostBearer(first, {key, namespace});
   const stop = await f.handle(f.request("DELETE", {path: first.path, retire: true, restoreFenceGeneration: binding.restoreFenceGeneration}));
   expect(await stop.json()).toEqual({ok: true, path: first.path, objectId:first.objectId, status: "retired", acceptedCursor: 0});
-  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, documents: []});
+  expect(await (await f.handle(f.request())).json()).toEqual({ok: true, diverged: false, documents: []});
   discoverServiceHostDocuments(f.storage);
   expect(f.storage.listServiceHostEnrollments()).toEqual([]);
   expect(await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()).toEqual({ok: true, documents: [{path: first.path, status: "retired"}], nextCursor: null});
+  // Stopped but undrained: the host's credential still reads the empty scope, and its release ends it.
   const replication = serviceReplication(f.storage);
-  expect((await replication(new Request(`https://relay.test/sync/${scope.workspaceId}/bootstrap`, {headers: {authorization: `Bearer ${bearer}`}}))).status).toBe(404);
+  const bootstrap = () => replication(new Request(`https://relay.test/sync/${scope.workspaceId}/hosted/bootstrap`, {headers: {authorization: `Bearer ${bearer}`}}));
+  expect(await (await bootstrap()).json()).toMatchObject({hasContent: false});
+  f.release(first.objectId);
+  expect((await bootstrap()).status).toBe(404);
   expect((await f.handle(f.request("POST", {path: first.path}))).status).toBe(202);
   expect(f.storage.listServiceHostEnrollments()[0]).toMatchObject({objectId: first.objectId, shareId: first.shareId, retired: false, enabled: true});
   expect((await f.handle(f.request("POST", {path: "docs/missing.md"}))).status).toBe(404);

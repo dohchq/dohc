@@ -5424,6 +5424,138 @@ fn an_admitted_richdoc_echo_leaves_the_returning_document_ready() {
     richdoc_edit_made_while_parked(true);
 }
 
+/// A replica where `doc-b` is ready at `a.md` with a native live binding of
+/// its lineage, and never parks: as after Stop, before the replica pulled.
+fn ready_bound_b() -> (
+    ScratchDir,
+    std::path::PathBuf,
+    EngineStore,
+    RelaySyncClient<HostedFeed>,
+    dohc_engine_collab::Ydoc,
+    String,
+) {
+    let (scratch, path, mut store) = hosted_store();
+    let client = RelaySyncClient::new(HostedFeed::new());
+    let feed = client.transport();
+    feed.append(envelope("owner", 0, "workspace.init", json!({})));
+    let ydoc = dohc_engine_collab::Ydoc::wire();
+    ydoc.plaintext_insert(0, "hosted b");
+    let base = ydoc.encode_full_state();
+    let lineage = dohc_engine_storage::hex_sha256(&base);
+    peer_update(feed, "plaintext", 0, "doc-b", "a.md", base, &lineage);
+    feed.share("doc-b", "a.md");
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    accept_live_update(&mut store, "doc-b", &lineage, b"live update");
+    (scratch, path, store, client, ydoc, lineage)
+}
+
+/// The ready hold: an ordinary edit of `doc-b`'s current lineage that its
+/// session never admitted, as the owner's edit after Stop, reaches the
+/// replica while `doc-b` is ready. Its content here would miss the edit, so
+/// the refusal holds it in its own transaction: the pass reports it held,
+/// a reopened store still holds it before any commit, and every pass after
+/// reports it again. The refusal row stays.
+#[test]
+fn an_unadmitted_edit_of_the_current_lineage_holds_a_ready_document() {
+    let (_scratch, path, mut store, client, ydoc, lineage) = ready_bound_b();
+    let edit = ydoc.plaintext_insert(8, " and more");
+    peer_update(
+        client.transport(),
+        "plaintext",
+        1,
+        "doc-b",
+        "a.md",
+        edit,
+        &lineage,
+    );
+    let refused = pass(&client, &mut store, &NoFaults).unwrap();
+    assert_eq!(
+        refused.held,
+        BTreeMap::from([("doc-b".to_owned(), HostedHold::LiveEditUnadmitted)])
+    );
+    drop(store);
+
+    let mut store = EngineStore::open(&path, 3_000).unwrap();
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+    sync(&client, &mut store);
+    let again = pass(&client, &mut store, &NoFaults).unwrap();
+    assert_eq!(
+        again.held,
+        BTreeMap::from([("doc-b".to_owned(), HostedHold::LiveEditUnadmitted)])
+    );
+    assert!(commit(&client, &mut store, &again));
+    assert_eq!(hold(&store, "doc-b"), Some(HostedHold::LiveEditUnadmitted));
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM replication_refused_ydoc_blobs"
+        ),
+        1
+    );
+}
+
+/// The ready hold holds only a ready document of the current scope. One the
+/// scope holds for another reason keeps that reason, and one that left the
+/// scope keeps its state; each meets its refusals when a read of it
+/// completes.
+#[test]
+fn the_ready_hold_leaves_other_documents_as_they_are() {
+    // The coordinate of `doc-b`'s base, an update of its current lineage.
+    let hold_b = |store: &mut EngineStore| {
+        store
+            .write_with(&NoFaults, |tx| {
+                crate::hosted::hold_unadmitted_in_tx(tx, "ws", "peer", 0)
+            })
+            .unwrap();
+    };
+    let (_scratch, _path, mut store, client, _ydoc, _lineage) = ready_bound_b();
+    client.transport().share("doc-b", "moved.md");
+    sync(&client, &mut store);
+    let held = hold(&store, "doc-b");
+    assert!(matches!(held, Some(HostedHold::ScopePathMismatch { .. })));
+    hold_b(&mut store);
+    assert_eq!(hold(&store, "doc-b"), held);
+
+    // Its accepted work is unsettled, so it stays departed and ready.
+    let (_scratch, _path, mut store, client, _ydoc, _lineage) = ready_bound_b();
+    client.transport().unshare("doc-b");
+    sync_parking(&client, &mut store);
+    let state = "SELECT state='ready' FROM hosted_documents WHERE object_id='doc-b'";
+    assert_eq!(count(&store, state), 1);
+    hold_b(&mut store);
+    assert_eq!(count(&store, state), 1);
+}
+
+/// The ready hold is of the current lineage only: a refused edit of another
+/// lineage leaves `doc-b`'s content here whole, so it stays ready.
+#[test]
+fn an_unadmitted_edit_of_another_lineage_leaves_a_ready_document_ready() {
+    let (_scratch, _path, mut store, client, _ydoc, _lineage) = ready_bound_b();
+    let other = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "elsewhere");
+    peer_update(
+        client.transport(),
+        "plaintext",
+        1,
+        "doc-b",
+        "a.md",
+        other,
+        &"f".repeat(64),
+    );
+    let outcome = pass(&client, &mut store, &NoFaults).unwrap();
+    assert_eq!(outcome.held, BTreeMap::new());
+    assert!(commit(&client, &mut store, &outcome));
+    sync(&client, &mut store);
+    assert!(ready(&store, "doc-b"));
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM replication_refused_ydoc_blobs"
+        ),
+        1
+    );
+}
+
 /// Parking: the reply to the host's push of `doc-b`'s row is lost after the
 /// relay recorded it. `doc-b` cannot park while its row looks unpushed; the
 /// next push is acknowledged, `doc-b` parks, and its return skips the row as

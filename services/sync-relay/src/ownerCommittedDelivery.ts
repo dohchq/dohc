@@ -32,7 +32,7 @@ export class OwnerCommittedDelivery {
     bounds: { maxBytes: number; maxEvents: number };
     ownerAdmission: OwnerOutboxAdmission;
     restore?: LiveRestorePreparation;
-    publishOrdinary?(signal?: AbortSignal): Promise<unknown>;
+    publish?(signal?: AbortSignal): Promise<unknown>;
   }) {
     authorityInteger(connection.bounds.maxBytes,1); authorityInteger(connection.bounds.maxEvents,1); authorityInteger(connection.deadlineMs,1);
     this.#store = storage.createLiveCommittedDeliveryStore(history, connection.ownerAdmission.activation);

@@ -1614,6 +1614,7 @@ fn refuse_deferred_ydoc(
         crate::apply::persist_refusal(tx, &refusal)?;
         if refusal.reason.message() == LIVE_UNADMITTED_UPDATE {
             retain_refused_ydoc_blob(tx, &key.workspace_id, origin_id, origin_seq)?;
+            crate::hosted::hold_unadmitted_in_tx(tx, &key.workspace_id, origin_id, origin_seq)?;
         }
         tx.execute(
             "DELETE FROM ydoc_deferred_updates \

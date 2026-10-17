@@ -91,6 +91,25 @@ describe("LiveDocumentsDialog", () => {
     expect(stopped.textContent).not.toContain("1 unsent edits");
     expect(stopped.textContent).not.toContain("They are not in History");
   });
+  // Proves: a document stopped on a diverged server copy keeps the operator's
+  // explanation, and its deferred Stop keeps its facts without a Resume to try.
+  it.each([0, 2])("sends a document stopped on a diverged copy, with %s unsent edits, to the server's operator", async unsentEdits => {
+    const h=harness(), reason="session-host-diverged" as const;
+    h.load.mockResolvedValue(page([
+      row("deferred.md",{status:"retired",reason,deferredStop:{unsentEdits,editable:true}}),
+      row("stopped.md",{status:"retired",reason}),
+    ]));
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const deferred=await screen.findByTestId("live-document-row-deferred.md");
+    expect(deferred.textContent).toContain("The server's copy of this workspace no longer matches the synced one. Contact the server's operator.");
+    expect(deferred.textContent).toContain(unsentEdits===0 ? "Live editing stopped. You can keep editing." : "Live editing stopped. 2 unsent edits remain on this computer. You can keep editing.");
+    expect(deferred.textContent).not.toContain("Resume");
+    expect(screen.getByTestId("live-document-row-stopped.md").textContent).toContain("Contact the server's operator.");
+    for (const path of ["deferred.md","stopped.md"]) {
+      expect(screen.getByTestId(`live-document-row-${path}`).children[1]?.textContent).toBe("Server copy doesn't match");
+      expect(actions(path)).toEqual([]);
+    }
+  });
   it.each([true, false])("shows deferred unsent edits and truthful editability: %s", async editable => {
     const h=harness();
     h.load.mockResolvedValue(page([row("a.md", {status:"retired",canResume:true,deferredStop:{unsentEdits:65,editable}})]));
@@ -219,6 +238,26 @@ describe("LiveDocumentsDialog", () => {
           reason: "workspace-changed",
           canResume: false,
         }),
+        row("docs/refused.md", {
+          status: "unavailable",
+          reason: "session-host-refused",
+          canResume: true,
+        }),
+        row("docs/unopened.md", {
+          status: "unavailable",
+          reason: "live-document-without-lineage",
+          canResume: true,
+        }),
+        row("docs/diverged.md", {
+          status: "unavailable",
+          reason: "session-host-diverged",
+          canResume: false,
+        }),
+        row("docs/edited.md", {
+          status: "unavailable",
+          reason: "live-edit-unadmitted",
+          canResume: false,
+        }),
         row("docs/stopped.md", { status: "retired", canResume: true }),
         row("docs/stopped-gone.md", { status: "retired" }),
       ]),
@@ -236,9 +275,32 @@ describe("LiveDocumentsDialog", () => {
       "Paused",
       "File moved or removed",
       "Workspace changed",
+      "Stopped by the server",
+      "Not started",
+      "Server copy doesn't match",
+      "Can't resume",
       "Stopped",
       "Stopped",
     ]);
+    // Only a document edited while live editing was off says why it can't
+    // resume, and that its file still takes edits. It offers no Resume.
+    const edited =
+      "This file changed while live editing was off, so live editing can't resume for it. You can keep editing it in dohc.";
+    expect(screen.getAllByText(edited)).toHaveLength(1);
+    expect(screen.getByTestId("live-document-row-docs/edited.md").textContent).toContain(edited);
+    expect(actions("docs/edited.md")).toEqual(["Stop live editing"]);
+    // Only a document whose server copy diverged sends its owner to the server's operator.
+    const operator =
+      "The server's copy of this workspace no longer matches the synced one. Contact the server's operator.";
+    expect(screen.getAllByText(operator)).toHaveLength(1);
+    expect(screen.getByTestId("live-document-row-docs/diverged.md").textContent).toContain(operator);
+    // A Stop cannot finish on a diverged copy either.
+    expect(actions("docs/diverged.md")).toEqual([]);
+    // Only the document dohc has never opened says to open it before Resume.
+    const openFirst =
+      "Live editing can't start until you open this document once in dohc. After you open it, resume live editing.";
+    expect(screen.getAllByText(openFirst)).toHaveLength(1);
+    expect(screen.getByTestId("live-document-row-docs/unopened.md").textContent).toContain(openFirst);
 
     expect(actions("docs/live.md")).toEqual(["Stop live editing"]);
     expect(actions("docs/preparing.md")).toEqual(["Stop live editing"]);
@@ -249,6 +311,14 @@ describe("LiveDocumentsDialog", () => {
     expect(actions("docs/paused-locked.md")).toEqual(["Stop live editing"]);
     expect(actions("docs/moved.md")).toEqual(["Stop live editing"]);
     expect(actions("docs/elsewhere.md")).toEqual(["Stop live editing"]);
+    expect(actions("docs/refused.md")).toEqual([
+      "Resume live editing",
+      "Stop live editing",
+    ]);
+    expect(actions("docs/unopened.md")).toEqual([
+      "Resume live editing",
+      "Stop live editing",
+    ]);
     expect(actions("docs/stopped.md")).toEqual(["Resume live editing"]);
     expect(actions("docs/stopped-gone.md")).toEqual([]);
   });
@@ -264,6 +334,18 @@ describe("LiveDocumentsDialog", () => {
         "Stopping live editing keeps the file and its history. Share permissions stay unchanged.",
       ),
     ).toBeTruthy();
+  });
+
+  // The warning is on screen before any Stop runs.
+  it("warns before a Stop that editing the stopped file keeps live editing from resuming", async () => {
+    const h = harness();
+    h.load.mockResolvedValue(page([row("docs/a.md")]));
+    render(<LiveDocumentsDialog workspaceId="ws-1" {...h} />);
+    await screen.findByRole("button", { name: "Stop live editing for docs/a.md" });
+    expect(screen.getByTestId("live-documents-stop-warning").textContent).toBe(
+      "If you edit a file while its live editing is stopped, live editing can't resume for it.",
+    );
+    expect(h.stop).not.toHaveBeenCalled();
   });
 
   it("loads the next stopped page and keeps the newest row for a repeated path", async () => {

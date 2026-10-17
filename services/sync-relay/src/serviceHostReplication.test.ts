@@ -3,6 +3,7 @@ import nativeAuthoredSettlement from "./testing/fixtures/nativeAuthoredSettlemen
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
 import {authorizeServiceHostReplication, deriveServiceHostBearer} from "./serviceHostCredential";
 import {createServiceHostReplication} from "./serviceHostReplication";
+import {AUTOMATION_REPLICA_BEARER_PREFIX} from "./automationReplicaCredential";
 import {parseLogOp} from "./relayLogInputs";
 import {referencedBlobShas} from "./storage/blobReferences";
 
@@ -10,16 +11,15 @@ const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {for (const close of cleanup.splice(0).reverse()) await close();});
 const key = new Uint8Array(32).fill(17), namespace = "service-provenance-test";
 
+// Ordinary replication for a replica credential this server derived, as its automation replicas use.
 async function fixture() {
   const f = await ticketFixture(); cleanup.push(f.close);
   f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
   f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES (?,'owner',0,'moment.append','{}',1,1)").run(scope.workspaceId);
   f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(scope.workspaceId, binding.currentPath, "b".repeat(64));
-  const enrollment = f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId,
-    path: binding.currentPath, nowMs: 10, guard() {}});
-  const bearer = deriveServiceHostBearer(enrollment, {key, namespace});
-  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.",
-    authorize: input => authorizeServiceHostReplication(f.storage, {key, namespace, ...input})});
+  const bearer = `${AUTOMATION_REPLICA_BEARER_PREFIX}${"a".repeat(43)}`;
+  const handle = createServiceHostReplication({storage: f.storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
+    authorize: input => input.bearer === bearer && input.workspaceId === scope.workspaceId ? "owner-1" : null});
   const post = (ops: unknown[], originId = "native-service") => handle(new Request(`https://relay.test/sync/${scope.workspaceId}/log`, {
     method: "POST", headers: {authorization: `Bearer ${bearer}`, "content-type": "application/json"},
     body: JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId, ops}),
@@ -30,7 +30,29 @@ async function fixture() {
   return {...f, post, get};
 }
 
-it("answers a service host's held read at once and never reports a watch", async () => {
+// Proves: the session host's credential reaches its scoped feed only. Every
+// ordinary replication route answers as an absent one.
+it("gives the service host credential 404 on every ordinary replication route", async () => {
+  const f = await fixture();
+  const enrollment = f.storage.enrollServiceHostDocument({workspaceId: scope.workspaceId, ownerUserId: "owner-1", shareId: scope.shareId,
+    path: binding.currentPath, nowMs: 10, guard() {}});
+  const bearer = deriveServiceHostBearer(enrollment, {key, namespace});
+  const handle = createServiceHostReplication({storage: f.storage, prefix: "dohc-service-v1.", hostedFeed: true,
+    authorize: input => authorizeServiceHostReplication(f.storage, {key, namespace, ...input})});
+  const request = (method: string, suffix: string, body?: string) => handle(new Request(`https://relay.test/sync/${scope.workspaceId}/${suffix}`,
+    {method, headers: {authorization: `Bearer ${bearer}`, ...(body === undefined ? {} : {"content-type": "application/json"})}, body}));
+  const blob = "a".repeat(64);
+  for (const [method, suffix, body] of [["GET", "bootstrap"], ["GET", "log?replicationEpoch=epoch&streamIdentity=stream&since=0"],
+    ["POST", "log", JSON.stringify({replicationEpoch: "epoch", streamIdentity: "stream", originId: "service", ops: []})], ["GET", "log/owner/0"],
+    ["GET", `blobs/${blob}`], ["PUT", `blobs/${blob}`, "x"], ["POST", "blobs/have", JSON.stringify({sha256s: [blob]})]] as const) {
+    expect((await request(method, suffix, body)).status, `${method} ${suffix}`).toBe(404);
+  }
+  const hosted = await request("GET", "hosted/bootstrap");
+  expect(hosted.status).toBe(200);
+  expect(await hosted.json()).toMatchObject({replicationEpoch: "epoch", streamIdentity: "stream"});
+});
+
+it("answers a replica's held read at once and never reports a watch", async () => {
   const f = await fixture();
   const plain = await f.get("/log?replicationEpoch=epoch&streamIdentity=stream&since=1&hold=30000");
   const reported = await f.get("/log?replicationEpoch=epoch&streamIdentity=stream&since=1&hold=30000&watched=1");
@@ -90,7 +112,7 @@ it("refuses unproved mixed service authors without stalling the next coordinate"
   expect(await retry.json()).toMatchObject({currentMaxOriginSeq: 2});
 });
 
-it("keeps chat validation and origin reservations on the trusted service route", async () => {
+it("keeps chat validation and origin reservations on the trusted replica route", async () => {
   const f = await fixture();
   for (const origin of ["relay:share-member:grant", "relay:collection-create:grant", "relay:collection-file:grant"]) {
     const response = await f.post([], origin);
