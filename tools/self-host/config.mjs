@@ -64,6 +64,16 @@ export function validateSettings(settings) {
   if (settings.DOHC_SERVER_NETWORK_ACCESS === 'private' && !/^https:\/\/[^/]+\.ts\.net(?::[0-9]+)?$/.test(settings.DOHC_PUBLIC_ORIGIN ?? '')) {
     errors.push('Private mode requires your Tailscale HTTPS hostname ending in .ts.net.');
   }
+  // Only snapshots use the key, so a deployment without them may leave it empty.
+  if (settings.DOHC_SNAPSHOT_KEY && !/^[A-Za-z0-9_-]{43}$/.test(settings.DOHC_SNAPSHOT_KEY)) errors.push('Set DOHC_SNAPSHOT_KEY to the key that bootstrap generated.');
+  const storage = ['DOHC_SNAPSHOT_S3_ENDPOINT', 'DOHC_SNAPSHOT_S3_BUCKET', 'DOHC_SNAPSHOT_S3_ACCESS_KEY_ID', 'DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY'];
+  if (storage.some(name => settings[name])) {
+    if (!settings.DOHC_SNAPSHOT_KEY) errors.push('Set DOHC_SNAPSHOT_KEY to the key that bootstrap generated, or clear every DOHC_SNAPSHOT_S3_ value to turn off snapshot upload.');
+    for (const name of storage) if (!settings[name]) errors.push(`Set ${name}, or clear every DOHC_SNAPSHOT_S3_ value to turn off snapshot upload.`);
+    if (!/^https:\/\/[^/]+$/.test(settings.DOHC_SNAPSHOT_S3_ENDPOINT ?? '')) errors.push('Set DOHC_SNAPSHOT_S3_ENDPOINT to the storage service\'s HTTPS origin.');
+    if (!/^[^\s@,]+@[^\s@,]+$/.test(settings.DOHC_SNAPSHOT_ALERT_EMAIL ?? '')) errors.push('Set DOHC_SNAPSHOT_ALERT_EMAIL to the operator address for snapshot failures.');
+  }
+  if (settings.DOHC_SNAPSHOT_HEARTBEAT_URL && !settings.DOHC_SNAPSHOT_HEARTBEAT_URL.startsWith('https://')) errors.push('Set DOHC_SNAPSHOT_HEARTBEAT_URL to an HTTPS URL or leave it empty.');
   if (Boolean(settings.DOHC_SMTP_USER) !== Boolean(settings.DOHC_SMTP_PASSWORD)) errors.push('Set both DOHC_SMTP_USER and DOHC_SMTP_PASSWORD.');
   if (!['true', 'false'].includes(settings.DOHC_SMTP_SECURE)) errors.push('Set DOHC_SMTP_SECURE to true or false.');
   if (!/^\d+$/.test(settings.DOHC_SMTP_PORT ?? '') || Number(settings.DOHC_SMTP_PORT) < 1 || Number(settings.DOHC_SMTP_PORT) > 65535) errors.push('Set DOHC_SMTP_PORT to a valid port.');
@@ -85,12 +95,14 @@ export function composeArgs(envFile, settings, ...args) {
     ...(settings.DOHC_SERVER_NETWORK_ACCESS === 'private' ? ['-f', 'tools/self-host/compose.private.yml'] : []),
     ...(settings.DOHC_DATA_DIRECTORY ? ['-f', 'tools/self-host/compose.data-disk.yml'] : []),
     ...(settings.DOHC_POSTGRES_HOST ? ['-f', 'tools/self-host/compose.external-postgres.yml'] : []),
-    ...(settings.DOHC_BEHIND_CLOUDFLARE === '1' ? ['-f', 'tools/self-host/compose.cloudflare.yml'] : []), ...args];
+    ...(settings.DOHC_BEHIND_CLOUDFLARE === '1' ? ['-f', 'tools/self-host/compose.cloudflare.yml'] : []),
+    // Hourly snapshots run only when off-site storage is configured.
+    ...(settings.DOHC_SNAPSHOT_S3_BUCKET ? ['--profile', 'snapshots'] : []), ...args];
 }
 
 // Reads through relay-initialize's volumes, so it checks the folders Docker mounts. It prints whether the deployment's
 // record and database exist and which disk folders hold data. Any other result means the check failed.
-const diskFolders = { '/data': 'sync-relay', '/continuity': 'continuity', '/host-data': 'host-data' };
+const diskFolders = { '/data': 'sync-relay', '/continuity': 'continuity', '/host-data': 'host-data', '/snapshots': 'snapshots' };
 export const relayDeploymentCheck = "const fs=require('node:fs');const exists=path=>fs.statSync(path,{throwIfNoEntry:false})!==undefined;" +
   "const missing=['/continuity/deployment.json','/data/sync-relay.sqlite'].filter(path=>!exists(path));" +
   "if(missing.length)console.error('Missing '+missing.join(', '));" +
@@ -124,9 +136,9 @@ export function dataDiskVolumeErrors(config, docker) {
 }
 
 /**
- * A first start needs empty relay storage: with a data disk, all three disk folders. Every later start needs the relay deployment.
- * An empty host-data starts: documents rebuild from the relay, but claims in progress are lost (#2016).
- * Without a data disk, relay-initialize reads the image's empty /host-data, so only the relay's own volumes count.
+ * A first start needs empty relay storage: with a data disk, all four disk folders. Every later start needs the relay deployment.
+ * An empty host-data starts: documents rebuild from the relay, but claims in progress are lost (#2016). Snapshot state is never relay data.
+ * Without a data disk, relay-initialize reads the image's empty /host-data and /snapshots, so only the relay's own volumes count.
  */
 export function relayDeploymentError(envFile, settings, docker, firstStart) {
   const { status, stdout } = docker(composeArgs(envFile, settings, 'run', '--rm', '--no-deps', '-T',
@@ -139,7 +151,7 @@ export function relayDeploymentError(envFile, settings, docker, firstStart) {
     return directory ? `Could not check the data disk in ${directory}. Check that the disk is mounted there and Docker is running, then try again.`
       : "Could not check the relay's Docker volumes. Check that Docker is running, then try again.";
   }
-  const relayData = result.holding.some(folder => folder !== 'host-data');
+  const relayData = result.holding.some(folder => folder === 'sync-relay' || folder === 'continuity');
   if (firstStart) {
     if (!result.holding.length) return '';
     if (!directory) return "The relay's Docker volumes already hold relay data. Start without --first-start.";

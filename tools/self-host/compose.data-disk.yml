@@ -1,11 +1,11 @@
-# Keeps relay, continuity and host data in folders on one attached disk.
-# They stay named volumes so archive can find them. A missing folder fails the
-# volume mount instead of starting a fresh deployment, because Docker does not
-# create the device folder of a bound volume.
+# Keeps relay, continuity, host data and snapshot staging in folders on one
+# attached disk. They stay named volumes so archive can find them. A missing
+# folder fails the volume mount instead of starting a fresh deployment, because
+# Docker does not create the device folder of a bound volume.
 services:
-  # The data-disk check runs in this service and reads all three folders.
+  # The data-disk check runs in this service and reads all four folders.
   relay-initialize:
-    volumes: [dohc_self_host_host_data:/host-data:ro]
+    volumes: [dohc_self_host_host_data:/host-data:ro, dohc_self_host_snapshots:/snapshots:ro]
 volumes:
   dohc_self_host_sync_relay:
     driver: local
@@ -16,3 +16,7 @@ volumes:
   dohc_self_host_host_data:
     driver: local
     driver_opts: {type: none, o: bind, device: '${DOHC_DATA_DIRECTORY:?Set DOHC_DATA_DIRECTORY}/host-data'}
+  # Snapshot staging holds about twice the relay's size, which a small boot disk may not have.
+  dohc_self_host_snapshots:
+    driver: local
+    driver_opts: {type: none, o: bind, device: '${DOHC_DATA_DIRECTORY:?Set DOHC_DATA_DIRECTORY}/snapshots'}

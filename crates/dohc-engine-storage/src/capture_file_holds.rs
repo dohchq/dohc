@@ -115,20 +115,25 @@ impl EngineStore {
                     row.get::<_, String>(0)
                 })
                 .map_err(StorageError::corrupt_public)?;
-            let path = path.to_lowercase();
             for held in rows {
-                let held = held.map_err(StorageError::corrupt_public)?.to_lowercase();
-                if path == held
-                    || path
-                        .strip_prefix(&held)
-                        .is_some_and(|tail| tail.starts_with('/'))
-                {
+                if path_is_held(&held.map_err(StorageError::corrupt_public)?, path) {
                     return Ok(true);
                 }
             }
             Ok(false)
         })
     }
+}
+
+/// Whether a hold on `held` covers `path`: the same path in any case, or a
+/// path beneath it. Case aliases deliberately over-hold distinct paths on
+/// case-sensitive volumes.
+pub fn path_is_held(held: &str, path: &str) -> bool {
+    let (held, path) = (held.to_lowercase(), path.to_lowercase());
+    path == held
+        || path
+            .strip_prefix(&held)
+            .is_some_and(|tail| tail.starts_with('/'))
 }
 
 /// Release only holds whose source alias has left the held object.

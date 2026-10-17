@@ -1,3 +1,4 @@
+import {LIVE_CONNECTION_LIMIT_CLOSE_CODE, liveConnectionLimitMessage} from "@dohc/live-session-contract/live-connection";
 import type {IncomingMessage} from "node:http";
 import {WebSocket} from "ws";
 import {readBoundedJson} from "@dohc/service-http";
@@ -125,7 +126,7 @@ export function createLinkLiveClient(options: {relayUrl: string; publicOrigin: s
         socket = new WebSocket(url, ["dohc-live-v1", `dohc-live-ticket.${ticketToken}`], {...receive, followRedirects: false, handshakeTimeout: limits.timeoutMs,
           headers: {origin: options.publicOrigin, authorization: `Bearer ${material.capabilityToken}`, "x-dohc-link-profile-secret": material.profileSecret,
             "x-dohc-relay-exchange-key": options.exchangeKey}});
-        socket.on("error", stop); socket.once("close", () => {invalidated.abort(); signal.removeEventListener("abort", stop); finish(null);});
+        socket.on("error", stop); socket.once("close", (code, reason) => {if (code !== LIVE_CONNECTION_LIMIT_CLOSE_CODE || !liveConnectionLimitMessage(reason.toString())) invalidated.abort(); signal.removeEventListener("abort", stop); finish(null);});
         socket.once("unexpected-response", (_request, response) => {response.destroy(); stop();});
         signal.addEventListener("abort", stop, {once: true}); if (signal.aborted) {stop(); return;}
         socket.once("open", () => {socket!.pause(); if (signal.aborted || socket!.protocol !== "dohc-live-v1" || socket!.extensions) {stop(); return;}
