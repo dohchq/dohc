@@ -29,6 +29,22 @@ export function compareAppVersions(left: string, right: string): number | null {
   return 0;
 }
 
+/**
+ * The version of the app at `appPath`: null only when nothing is there, and
+ * "" when it cannot be read, such as when the path cannot be checked.
+ */
+export async function installedAppVersion(
+  appPath: string,
+  deps: { lstat(path: string): Promise<unknown>; readVersion(appPath: string): Promise<string> },
+): Promise<string | null> {
+  try {
+    await deps.lstat(appPath);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : "";
+  }
+  return deps.readVersion(appPath).then((version) => version.trim(), () => "");
+}
+
 /** Why dohc must not replace the dohc in Applications, or null when it may. */
 export function moveRefusal(runningVersion: string, installed: string | null): string | null {
   if (installed === null) return null;

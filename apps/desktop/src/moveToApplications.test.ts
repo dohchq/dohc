@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { compareAppVersions, guardedMoveToApplications, offerMoveToApplications } from "./moveToApplications";
+import { compareAppVersions, guardedMoveToApplications, installedAppVersion, offerMoveToApplications } from "./moveToApplications";
 
 function harness(overrides: {
   inApplications?: boolean;
@@ -29,6 +29,30 @@ describe("compareAppVersions", () => {
     expect(compareAppVersions("0.1.1-nightly.20261018.1.1", "0.1.1-nightly.20261017.12.1")).toBeGreaterThan(0);
     expect(compareAppVersions("1.0.0", "1.0.0")).toBe(0);
     expect(compareAppVersions("1.0.0", "")).toBeNull();
+  });
+});
+
+describe("installedAppVersion", () => {
+  const app = "/Applications/dohc.app";
+  const failing = (code: string) => async () => { throw Object.assign(new Error(code), { code }); };
+
+  it("says nothing is installed only when the path does not exist", async () => {
+    const readVersion = vi.fn(async () => "0.1.0\n");
+    await expect(installedAppVersion(app, { lstat: failing("ENOENT"), readVersion })).resolves.toBeNull();
+    expect(readVersion).not.toHaveBeenCalled();
+    await expect(installedAppVersion(app, { lstat: async () => ({}), readVersion })).resolves.toBe("0.1.0");
+  });
+
+  it("calls a copy unreadable when its path cannot be checked or its version read, so no move replaces it", async () => {
+    const readVersion = vi.fn(async () => "0.1.0");
+    for (const code of ["EACCES", "EIO"]) {
+      const installed = await installedAppVersion(app, { lstat: failing(code), readVersion });
+      expect(installed).toBe("");
+      await expect(guardedMoveToApplications({ runningVersion: "0.2.0", installedVersion: async () => installed, move: vi.fn() }))
+        .rejects.toThrow("dohc cannot read the version of the dohc already in Applications.");
+    }
+    expect(readVersion).not.toHaveBeenCalled();
+    await expect(installedAppVersion(app, { lstat: async () => ({}), readVersion: failing("EPERM") })).resolves.toBe("");
   });
 });
 

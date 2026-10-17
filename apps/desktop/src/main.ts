@@ -527,7 +527,7 @@ import {
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import { adoptLoginShellPath } from "./process/loginShellPath";
-import { guardedMoveToApplications, offerMoveToApplications } from "./moveToApplications";
+import { guardedMoveToApplications, installedAppVersion, offerMoveToApplications } from "./moveToApplications";
 import { installCrashCapture } from "./crashReports/crashCapture";
 import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
 import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
@@ -5442,13 +5442,14 @@ function runningBundlePath(): string {
 
 // The version of the dohc of this bundle's name in Applications: null when
 // there is none, and "" when it cannot be read.
-async function installedDohcVersion(): Promise<string | null> {
-  const installed = join("/Applications", basename(runningBundlePath()));
-  if (!(await lstat(installed).then(() => true, () => false))) return null;
-  return new Promise((done) => {
-    execFile("/usr/bin/plutil", [
-      "-extract", "CFBundleShortVersionString", "raw", "-o", "-", join(installed, "Contents", "Info.plist"),
-    ], { encoding: "utf8", timeout: 2_000 }, (error, stdout) => done(error ? "" : stdout.trim()));
+function installedDohcVersion(): Promise<string | null> {
+  return installedAppVersion(join("/Applications", basename(runningBundlePath())), {
+    lstat,
+    readVersion: (installed) => new Promise((done, fail) => {
+      execFile("/usr/bin/plutil", [
+        "-extract", "CFBundleShortVersionString", "raw", "-o", "-", join(installed, "Contents", "Info.plist"),
+      ], { encoding: "utf8", timeout: 2_000 }, (error, stdout) => (error ? fail(error) : done(stdout)));
+    }),
   });
 }
 
