@@ -5802,6 +5802,11 @@ export const SetTitlebarThemePayload = z.object({
 });
 export type SetTitlebarThemePayload = z.infer<typeof SetTitlebarThemePayload>;
 
+// Main sends a window's full-screen state to its renderer on every load and
+// every change. macOS hides the traffic lights in full screen.
+export const WindowFullScreenEvent = z.object({ fullScreen: z.boolean() });
+export type WindowFullScreenEvent = z.infer<typeof WindowFullScreenEvent>;
+
 // One zoom mutation, owned by main: it persists appearance.zoomLevel before
 // applying it to the windows, and answers with the settings now on disk so
 // the caller can paint the level in effect. The menu accelerators call the
@@ -7170,6 +7175,7 @@ export interface DohcDesktopBridge
   runnerSelfTest(payload: RunnerSelfTestPayload): Promise<RunnerSelfTestResult>;
   detectAgentTools(payload: AgentRunPayload): Promise<AgentToolsResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
+  onWindowFullScreen(listener: (event: WindowFullScreenEvent) => void): () => void;
   onUserSettingsChanged(
     listener: (result: DesktopUserSettingsResult) => void,
   ): () => void;

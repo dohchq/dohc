@@ -307,3 +307,12 @@ it("keeps document caret labels at AA for every hue and neutral in both themes",
     }
   }
 });
+
+// macOS draws its own scrollbars, which follow the "Show scroll bars"
+// setting. A ::-webkit-scrollbar rule replaces them wherever it reaches, so
+// the global scrollbar rules leave macOS out.
+it("styles scrollbars everywhere but macOS", () => {
+  const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+  expect(css.match(/^::-webkit-scrollbar.*$/gm)).toBeNull();
+  expect(css).toContain(':root:not([data-platform="darwin"]) ::-webkit-scrollbar {');
+});

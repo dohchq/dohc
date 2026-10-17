@@ -6,15 +6,19 @@ import { RecoveryCloseGuard } from "./RecoveryCloseGuard";
 import { restoreOrphanedDrafts } from "./orphanedDrafts";
 import { initTheme } from "./theme";
 import { initReducedMotion } from "./reducedMotion";
+import { initWindowFullScreen } from "./windowFullScreen";
 import "@fontsource-variable/inter";
 import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 import "katex/dist/katex.min.css";
 import "./styles.css";
 
+// styles.css scopes platform chrome (scrollbars, cursors) by this attribute.
+if (window.dohcDesktop) document.documentElement.dataset.platform = window.dohcDesktop.platform;
 initTheme();
 const stopReducedMotion = initReducedMotion();
 window.addEventListener("pagehide", stopReducedMotion, { once: true });
+initWindowFullScreen();
 installGlobalErrorReporters();
 // Before the root renders: the set-aside recoveries the last app run
 // left behind go back into the store, so the first paint already carries their
