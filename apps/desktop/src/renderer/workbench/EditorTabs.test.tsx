@@ -509,6 +509,43 @@ describe("EditorTabs strip scrolling", () => {
 
     expect(screen.queryByTestId("tabs-overflow-menu")).toBeNull();
   });
+
+  it("marks the overflow menu's active row apart from the current tab's row", async () => {
+    const user = userEvent.setup();
+    renderTabs("b.md");
+    await user.click(screen.getByTestId("tabs-overflow"));
+    const active = screen.getByRole("menuitem", { name: "a.md" });
+    const current = screen.getByRole("menuitem", { name: "b.md" });
+    expect(document.activeElement).toBe(active);
+    // The utilities that paint each row: its plain ones, and its focus ones
+    // only while it has focus.
+    const painted = (row: HTMLElement) =>
+      row.className
+        .split(" ")
+        .filter((name) => !name.includes(":") || (row === document.activeElement && name.startsWith("focus:")))
+        .map((name) => name.replace(/^focus:/, ""))
+        .filter((name) => /^(bg-|-?outline-)/.test(name))
+        .sort();
+    expect(painted(current)).toEqual(["bg-selected"]);
+    expect(painted(active)).toEqual(["-outline-offset-2", "bg-selected", "outline-2", "outline-accent"]);
+  });
+
+  it("keeps the overflow menu clear of the window's right edge", async () => {
+    const user = userEvent.setup();
+    renderTabs("a.md");
+    const trigger = screen.getByTestId("tabs-overflow");
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(
+      { top: 40, bottom: 68, left: 992, right: 1020, width: 28, height: 28, x: 992, y: 40, toJSON: () => ({}) },
+    );
+    vi.stubGlobal("innerWidth", 1024);
+    try {
+      await user.click(trigger);
+      expect(screen.getByTestId("tabs-overflow-menu").style.left).toBe(`${1024 - 12 - 240}px`);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
 });
 
 describe("EditorTabs pointer drag", () => {

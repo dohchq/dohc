@@ -64,8 +64,10 @@ export type MenuTriggerProps = {
 };
 
 const MENU_WIDTH_PX = 144;
-// Between the trigger and the list, and between the list and the window's edge.
+// Between the trigger and the list.
 const GAP_PX = 4;
+// Between the list and the window's edge, as toasts and the editor's menus keep.
+const EDGE_PX = 12;
 
 type Place = { left: number; maxHeight: number; top?: number; bottom?: number; above: boolean };
 
@@ -179,11 +181,12 @@ export function moveInMenu(
   return null;
 }
 
-// The Menu part's own rows take DOM focus, so focus carries the fill, and
-// the accent :focus-visible outline marks the row for the keyboard. The list
-// scrolls, so the outline sits inside the row, where the scroller cannot clip
-// it on a row scrolled to an edge.
-const ROW = `${MENU_ROW} focus:bg-selected focus-visible:-outline-offset-2`;
+// The Menu part's own rows take DOM focus, so focus is the active row: the
+// fill and the accent outline, whether the keyboard or the pointer moved it,
+// as MENU_ACTIVE_OPTION draws it. The fill alone would match the current
+// row's. The list scrolls, so the outline sits inside the row, where the
+// scroller cannot clip it on a row scrolled to an edge.
+const ROW = `${MENU_ROW} focus:bg-selected focus:outline-2 focus:outline-accent focus:-outline-offset-2`;
 // Hover paints only after the pointer moves, so a menu opened from the
 // keyboard under a still pointer shows one active row.
 const ROW_TONE = {
@@ -263,9 +266,9 @@ export function Menu(props: {
     const box = trigger.current?.getBoundingClientRect();
     const height = list.current?.offsetHeight ?? 0;
     if (box) {
-      const left = Math.max(GAP_PX, box.right - width);
-      const below = window.innerHeight - box.bottom - 2 * GAP_PX;
-      const above = box.top - 2 * GAP_PX;
+      const left = Math.max(EDGE_PX, Math.min(box.right, window.innerWidth - EDGE_PX) - width);
+      const below = window.innerHeight - box.bottom - GAP_PX - EDGE_PX;
+      const above = box.top - GAP_PX - EDGE_PX;
       setPlace(
         height > below && above > below
           ? { left, bottom: window.innerHeight - box.top + GAP_PX, maxHeight: above, above: true }
