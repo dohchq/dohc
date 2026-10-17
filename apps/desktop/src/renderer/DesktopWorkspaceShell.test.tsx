@@ -192,6 +192,16 @@ describe("global letter shortcut ownership", () => {
     expect(await screen.findByRole("textbox", { name: "File name" })).toBeTruthy();
   });
 
+  it("leaves New file closed when its shortcut is typed in a View share view", async () => {
+    renderShell(makeBridge(Promise.resolve(STORED_STATE)), SHARE_VIEW);
+    await screen.findByTestId("side-panel");
+
+    const event = dispatchShortcut("n");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
+  });
+
   it("routes uppercase K to the command palette", async () => {
     renderShell(makeBridge(Promise.resolve(STORED_STATE)));
     await screen.findByTestId("side-panel");
@@ -634,6 +644,22 @@ describe("collection folders", () => {
       expect(await within(palette).findByText(label)).toBeTruthy();
     }
     expect(within(palette).queryByText("New folder")).toBeNull();
+  });
+
+  it.each<[string, Workspace, boolean]>([
+    ["a local workspace", WORKSPACE, true],
+    ["a View share view", SHARE_VIEW, false],
+    ["a Comment share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "comment" } }, false],
+    ["an Edit share view", { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } }, true],
+  ])("offers New file from the empty editor of %s only where the palette does", async (_name, workspace, offered) => {
+    renderShell(makeBridge(Promise.resolve(storedStateWithTabs([]))), workspace);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    const pane = within(screen.getByTestId("editor-group-primary"));
+
+    expect(pane.getByText(offered ? "Select a file, or create one" : "Select a file")).toBeTruthy();
+    expect(pane.queryByRole("button", { name: /· new file$/ }) !== null).toBe(offered);
+    expect(pane.getByRole("button", { name: /· commands$/ })).toBeTruthy();
+    expect(pane.getByRole("button", { name: /· go to$/ })).toBeTruthy();
   });
 });
 
