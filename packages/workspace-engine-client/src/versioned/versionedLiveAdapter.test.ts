@@ -2100,6 +2100,21 @@ describe("listTextFileMetadata under a folder", () => {
     expect(files.map(file => file.path)).toEqual(["app/a.html", "app/b/c.css", "app/d.js"]);
     expect(requests.map(request => request.afterPath)).toEqual(["app/", "app/b/c.css"]);
   });
+  it("reads one bounded page from the folder or a cursor and reports whether the folder continues", async () => {
+    const paths = ["app.txt", "app/a.html", "app/b/c.css", "app/d.js", "app0/x.js"].sort();
+    const requests: Array<Record<string, unknown>> = [];
+    const adapter = new VersionedLiveAdapter({ close() {}, async sendRequest(request: Request): Promise<Response> {
+      const params = request.params as Record<string, unknown>;
+      requests.push(params);
+      const rest = paths.filter(path => path > String(params.afterPath ?? "")), files = rest.slice(0, Number(params.limit)).map(row);
+      return { id: request.id, result: { files, nextAfterPath: rest.length > files.length ? files.at(-1)!.path : null } };
+    } }, WORKSPACE, { workspaceId: WORKSPACE });
+    const first = await adapter.listTextFilePage({ workspaceId: WORKSPACE, versionId: "main", under: "app", limit: 2 });
+    expect([first.files.map(file => file.path), first.more]).toEqual([["app/a.html", "app/b/c.css"], true]);
+    const last = await adapter.listTextFilePage({ workspaceId: WORKSPACE, versionId: "main", under: "app", afterPath: "app/b/c.css", limit: 2 });
+    expect([last.files.map(file => file.path), last.more]).toEqual([["app/d.js"], false]);
+    expect(requests).toEqual([{ versionId: "main", limit: 2, afterPath: "app/" }, { versionId: "main", limit: 2, afterPath: "app/b/c.css" }]);
+  });
 });
 
 

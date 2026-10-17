@@ -22,7 +22,7 @@ const row: ListRelayShareLinksResult["links"][number] = {
   revokedAtMs: null, lastUsedAtMs: null, urlIssuedAtMs: 1, dependents: [], selector: { paths: ["trip"], versionId: null }, access: "view",
 };
 const page: ListRelayShareLinksResult = { supportedLinkAccess: ["view", "comment"], links: [row], independentGrants: [] };
-const localRow = { publicationId: "d".repeat(64), authorityRevision: 1, appRoot: "trip", sourceRevision: "b".repeat(64), datasetCapability, active: true };
+const localRow = { publicationId: "d".repeat(64), authorityRevision: 1, appRoot: "trip", sourceRevision: "b".repeat(64), datasetCapability, approved: true, active: true };
 async function answer(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult> {
   if (request.action === "list") return { kind: "listed", publications: [], nextCursor: null };
   if (request.action === "listLocal") return { kind: "localListed", publications: [] };
@@ -143,7 +143,7 @@ describe("owner app publication", () => {
 
   it("keeps the empty state on review when this device has only an inactive approval", async () => {
     api.publishOwnerApp.mockImplementation(async request => request.action === "listLocal"
-      ? { kind: "localListed", publications: [{ ...localRow, active: false }] } : answer(request));
+      ? { kind: "localListed", publications: [{ ...localRow, approved: false, active: false }] } : answer(request));
     render(<OwnerAppEntry workspaceId="ws-trip" appRoot="trip" reload={0} />);
     expect(await screen.findByRole("button", { name: "Review and open app" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Open in browser" })).toBeNull();
@@ -672,7 +672,7 @@ describe("owner app publication", () => {
     api.publishOwnerApp.mockImplementation(async request => {
       if (request.action !== "listLocal") return answer(request);
       if (++attempts === 1) throw new Error("Local apps are unavailable. Restart dohc and try again.");
-      return { kind: "localListed", publications: [{ ...localRow, active: false }] };
+      return { kind: "localListed", publications: [{ ...localRow, approved: false, active: false }] };
     });
     render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
     await open();
@@ -682,7 +682,92 @@ describe("owner app publication", () => {
     await screen.findByText(/Inactive on this device/);
     expect(screen.getByText("Its data is not active here. If you moved it to a share link, open that publication.")).toBeTruthy();
     expect(screen.queryByRole("region", { name: "App data" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove approval" })).toBeNull();
     expect(api.publishOwnerApp.mock.calls.filter(([input]) => input.action === "list")).toHaveLength(1);
+  });
+
+  it("removes an approval whose Collection is no longer active here", async () => {
+    api.publishOwnerApp.mockImplementation(async request => request.action === "listLocal"
+      ? { kind: "localListed", publications: [{ ...localRow, active: false }] }
+      : request.action === "withdraw" ? { kind: "withdrawn", publicationId: localRow.publicationId, authorityRevision: 2 } : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    const remove = await screen.findByRole("button", { name: "Remove approval" });
+    // The Dataset still exists here, so the text about a move to a share link would be false.
+    expect(screen.getByText(/Inactive on this device/)).toBeTruthy();
+    expect(screen.queryByText(/Its data is not active here/)).toBeNull();
+    await userEvent.setup().click(remove);
+    await screen.findByText("App approval removed. Prepare the app again to restore access.");
+    expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "withdraw", workspaceId: "ws-trip", publicationId: localRow.publicationId, expectedAuthorityRevision: 1 });
+    expect(screen.queryByRole("button", { name: /^Open in browser/ })).toBeNull();
+  });
+
+  it("words one unconfirmed response in the singular in the removal notice", async () => {
+    const reportError = vi.fn<(fallback: string, error: unknown, retry: (() => void) | null) => void>();
+    const row = { publicationId: localRow.publicationId, authorityRevision: 1, appRoot: "trip", sourceRevision: localRow.sourceRevision, approved: true, active: true, collectionCapability: approvedCollection, pendingCreates: 0 };
+    api.publishOwnerApp.mockImplementation(async request => request.action === "listLocal" ? { kind: "localListed", publications: [row] }
+      : request.action === "withdraw" ? { kind: "withdrawalUnconfirmed", publicationId: row.publicationId, authorityRevision: 2, unresolvedCreates: 1 } : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" reportError={reportError} />);
+    await open();
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Remove approval" }));
+    await waitFor(() => expect(reportError).toHaveBeenCalledWith("dohc removed this app's approval but has not confirmed whether 1 response was saved.", undefined, expect.any(Function)));
+  });
+
+  it("keeps an unconfirmed local withdrawal distinct from success and retries at its ending revision after reload", async () => {
+    const reportError = vi.fn<(fallback: string, error: unknown, retry: (() => void) | null) => void>();
+    const row = { publicationId: localRow.publicationId, authorityRevision: 1, appRoot: "trip", sourceRevision: localRow.sourceRevision, approved: true, active: true, collectionCapability: approvedCollection, pendingCreates: 0 };
+    let ended = false;
+    api.publishOwnerApp.mockImplementation(async request => {
+      if (request.action === "listLocal") return { kind: "localListed", publications: [ended ? { ...row, authorityRevision: 2, approved: false, active: false, pendingCreates: 1 } : row] };
+      if (request.action === "withdraw") { ended = true; return request.expectedAuthorityRevision === 1
+        ? { kind: "withdrawalUnconfirmed", publicationId: row.publicationId, authorityRevision: 2, unresolvedCreates: 2 }
+        : { kind: "withdrawn", publicationId: row.publicationId, authorityRevision: 2 }; }
+      return answer(request);
+    });
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" reportError={reportError} />);
+    await open();
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Remove approval" }));
+    await waitFor(() => expect(reportError).toHaveBeenCalledTimes(1));
+    expect(reportError).toHaveBeenCalledWith("dohc removed this app's approval but has not confirmed whether 2 responses were saved.", undefined, expect.any(Function));
+    expect(screen.queryByText("App approval removed. Prepare the app again to restore access.")).toBeNull();
+    // One response settled meanwhile. A Collection row says nothing about Dataset moves.
+    expect(await screen.findByText("1 response not yet confirmed")).toBeTruthy();
+    expect(screen.queryByText(/Its data is not active here/)).toBeNull();
+    // Both the error's Try again and the reloaded row retry at the revision the withdrawal ended at.
+    const withdrawals = () => api.publishOwnerApp.mock.calls.map(([input]) => input).filter(input => input.action === "withdraw");
+    await act(async () => reportError.mock.calls[0]![2]!());
+    await screen.findByText("App approval removed. Prepare the app again to restore access.");
+    expect(withdrawals().at(-1)).toEqual({ action: "withdraw", workspaceId: "ws-trip", publicationId: row.publicationId, expectedAuthorityRevision: 2 });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(withdrawals()).toHaveLength(3));
+    expect(withdrawals().at(-1)).toEqual({ action: "withdraw", workspaceId: "ws-trip", publicationId: row.publicationId, expectedAuthorityRevision: 2 });
+  });
+
+  it("states shared response visibility only for link approvals of a document Collection", async () => {
+    const sentence = "People with this share can read every response file and all its fields.";
+    const local = { publicationId: localRow.publicationId, authorityRevision: 1, appRoot: "trip", sourceRevision: localRow.sourceRevision, approved: true, active: true, collectionCapability: approvedCollection, pendingCreates: 0 };
+    api.publishOwnerApp.mockImplementation(async request => request.action === "listLocal" ? { kind: "localListed", publications: [local] }
+      : request.action === "prepareLocal" ? { ...prepared, capabilities: [approvedCollection], local: true } : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    expect(await screen.findByText("Approved Collection access")).toBeTruthy();
+    expect(screen.getByText("trip/responses")).toBeTruthy();
+    expect(screen.queryByText(sentence)).toBeNull();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare for this device" }));
+    await screen.findByRole("heading", { name: "Review app for this device" });
+    expect(screen.getByTestId("app-publication-capability").textContent).toContain("Fields shown in the app: destination");
+    expect(screen.queryByText(sentence)).toBeNull();
+    cleanup();
+    api.publishOwnerApp.mockImplementation(async request => request.action === "prepare" ? { ...prepared, capabilities: [approvedCollection] }
+      : request.action === "list" ? { kind: "listed", publications: [{ publicationId: "c".repeat(64), authorityRevision: 1, shareId: row.shareId, grantId: row.grantId, appRoot: "trip", sourceRevision: prepared.sourceRevision, active: true, datasetCapability: null, collectionCapability: approvedCollection, linkCurrent: true, manifestUnavailable: false }], nextCursor: null }
+      : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    expect(await screen.findByText(sentence)).toBeTruthy();
+    await userEvent.setup().selectOptions(screen.getByLabelText("Publication share link"), "grant-trip");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare app" }));
+    await screen.findByRole("heading", { name: "Review app publication" });
+    expect(screen.getByTestId("app-publication-capability").textContent).toContain(sentence);
   });
 
   it("opens an active local approval in the browser once per click through the loopback address", async () => {

@@ -767,10 +767,10 @@ export function createWorkspaceActivity(
   }
 
   // The agent run holding the slot, as a local app's invocation is
-  // attributed to it: its chain depth, or null with no run.
-  function agentRun(state: WorkspaceActivityState): { depth: number } | null {
+  // attributed to it, or null with no run.
+  function agentRun(state: WorkspaceActivityState): ActiveAgentRun | null {
     const run = state.entry?.agentRun;
-    return run ? { depth: run.depth } : null;
+    return run ? { ...run } : null;
   }
 
   // Registers engine-originated disk writes (restore flows, future engine

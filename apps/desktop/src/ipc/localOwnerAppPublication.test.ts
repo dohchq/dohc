@@ -16,7 +16,10 @@ function harness() {
   const workspace = { workspaceId: "w" };
   const operation = { workspace, signal: controller.signal, scope: "session-1", assertCurrent: vi.fn() };
   const activate = vi.fn(async () => ({ publicationId: hash, authorityRevision: 1, capability, active: true, revision: 1 }));
-  const local = { approvedArtifacts: vi.fn(), apps: { activate, has: () => true, list: vi.fn(() => [{ publicationId: hash, authorityRevision: 1, appRoot: "app", sourceRevision: hash, datasetCapability: capability, active: true }]) } } as unknown as Pick<LocalDatasetHost, "approvedArtifacts" | "apps">;
+  const has = vi.fn((_publicationId: string) => true);
+  const withdraw = vi.fn(async (publicationId: string, expected: number): Promise<{ kind: "withdrawn" | "withdrawalUnconfirmed"; publicationId: string; authorityRevision: number; unresolvedCreates?: number }> =>
+    ({ kind: "withdrawn", publicationId, authorityRevision: expected + 1 }));
+  const local = { approvedArtifacts: vi.fn(), apps: { activate, has, withdraw, list: vi.fn(() => [{ publicationId: hash, authorityRevision: 1, appRoot: "app", sourceRevision: hash, datasetCapability: capability, approved: true, active: true }]) } } as unknown as Pick<LocalDatasetHost, "approvedArtifacts" | "apps">;
   const datasetForWorkspace = vi.fn(async () => local);
   const launchLocalDataset = vi.fn(async () => "http://127.0.0.1:43211/bootstrap#handoff");
   const handler = createLocalOwnerAppPublicationHandler({ datasetForWorkspace, launchLocalDataset,
@@ -27,7 +30,7 @@ function harness() {
     if (result?.kind !== "prepared") throw new Error("Expected preparation.");
     return result;
   };
-  return { controller, operation, activate, datasetForWorkspace, launchLocalDataset, handler, prepare };
+  return { controller, operation, activate, has, withdraw, datasetForWorkspace, launchLocalDataset, handler, prepare };
 }
 afterEach(() => vi.clearAllMocks());
 describe("local app publication review", () => {
@@ -62,7 +65,7 @@ describe("local app publication review", () => {
   it("lists local apps without share identities and allows cancellation", async () => {
     const h = harness();
     expect(await h.handler({ action: "listLocal", workspaceId: "w", appRoot: "app" }, "caller", h.operation)).toEqual({ kind: "localListed", publications: [{ publicationId: hash,
-      authorityRevision: 1, appRoot: "app", sourceRevision: hash, datasetCapability: capability, active: true }] });
+      authorityRevision: 1, appRoot: "app", sourceRevision: hash, datasetCapability: capability, approved: true, active: true }] });
     const review = await h.prepare();
     expect(await h.handler({ action: "cancel", workspaceId: "w", approvalId: review.approvalId }, "caller", h.operation)).toEqual({ kind: "cancelled" });
     expect(h.activate).not.toHaveBeenCalled();
@@ -77,5 +80,24 @@ describe("local app publication review", () => {
     h.launchLocalDataset.mockImplementationOnce(async () => { h.controller.abort(); return "http://127.0.0.1:43211/bootstrap#handoff"; });
     await expect(h.handler(request, "caller", h.operation)).rejects.toThrow();
   });
-
+  it("prepares and approves a document Collection app on this device", async () => {
+    const h = harness();
+    const collection = { kind: "collection-create" as const, collectionPath: "app/responses", schemaSha256: hash, allowedFields: ["destination"], requiredFields: ["destination"], readFields: [] };
+    vi.mocked(prepareLocalAppPublication).mockResolvedValue({ candidate: { ...candidate, capabilities: [collection] }, files: [] });
+    const review = await h.prepare();
+    expect(review).toMatchObject({ local: true, capabilities: [collection] });
+    await h.handler({ action: "approve", workspaceId: "w", approvalId: review.approvalId, candidateDigest: review.candidateDigest }, "caller", h.operation);
+    expect(h.activate).toHaveBeenCalledWith({ candidate: { ...candidate, capabilities: [collection] }, files: [] }, h.controller.signal, null);
+  });
+  it("keeps an unconfirmed local withdrawal distinct and revokes only local apps here", async () => {
+    const h = harness();
+    const request = { workspaceId: "w", publicationId: hash, expectedAuthorityRevision: 3 };
+    expect(await h.handler({ action: "revokeCollection", ...request }, "caller", h.operation)).toEqual({ kind: "collectionRevoked", publicationId: hash, authorityRevision: 4 });
+    h.withdraw.mockResolvedValue({ kind: "withdrawalUnconfirmed", publicationId: hash, authorityRevision: 4, unresolvedCreates: 2 });
+    for (const action of ["withdraw", "revokeCollection"] as const)
+      expect(await h.handler({ action, ...request }, "caller", h.operation)).toEqual({ kind: "withdrawalUnconfirmed", publicationId: hash, authorityRevision: 4, unresolvedCreates: 2 });
+    h.has.mockReturnValue(false);
+    for (const action of ["withdraw", "revokeCollection"] as const) expect(await h.handler({ action, ...request }, "caller", h.operation)).toBeNull();
+    expect(h.withdraw).toHaveBeenCalledTimes(3);
+  });
 });

@@ -22,7 +22,12 @@ const OwnerAppDatasetCapability = z.unknown().transform((value, context) => {
   try { return parseAppDatasetCapability(value); }
   catch { context.addIssue({ code: "custom", message: "Invalid dataset capability." }); return z.NEVER; }
 });
-const localPublication = { publicationId: hash, authorityRevision: z.number().int().positive(), appRoot: z.string().min(1).max(1024), sourceRevision: hash, active: z.boolean() };
+// approved: this device's authority still names the app. active: it can run now. pendingCreates: responses not yet confirmed saved or refused.
+const localPublication = { publicationId: hash, authorityRevision: z.number().int().positive(), appRoot: z.string().min(1).max(1024), sourceRevision: hash, approved: z.boolean(), active: z.boolean() };
+const LocalPublication = z.union([
+  z.object({ ...localPublication, datasetCapability: OwnerAppDatasetCapability }).strict(),
+  z.object({ ...localPublication, collectionCapability: OwnerAppCollectionCapability, pendingCreates: z.number().int().nonnegative().max(1000) }).strict(),
+]);
 const publication = { operatorTakedown: z.object({ actor: z.literal("operator"), disabledAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), reason: z.string().min(1).max(1024) }).strict().optional(), approvalProvenance: z.object({ agent: PublicationAgent.nullable(), selector: z.unknown(), access, committedCandidateDigest: hash, sourceRevision: hash, capabilities: z.array(OwnerAppCapability).max(1) }).strict().optional(), publicationId: hash, authorityRevision: z.number().int().positive(), shareId: id, grantId: id, active: z.boolean(), linkCurrent: z.boolean(), collectionCapability: z.union([OwnerAppCollectionCapability, z.literal("unavailable")]).nullable(), datasetCapability: z.union([OwnerAppDatasetCapability, z.literal("unavailable")]).nullable() };
 const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
   z.object({ ...publication, manifestUnavailable: z.literal(false), appRoot: z.string().min(1).max(1024), sourceRevision: hash }).strict(),
@@ -46,7 +51,7 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("linkCreated"), ...linkFacts, url: z.string().url().max(4096) }).strict(),
   z.object({ kind: z.literal("urlUnavailable"), ...linkFacts }).strict(),
   z.object({ kind: z.literal("localLaunched"), publicationId: hash, url: z.string().url().max(4096) }).strict(),
-  z.object({ kind: z.literal("localListed"), publications: z.array(z.object({ ...localPublication, datasetCapability: OwnerAppDatasetCapability }).strict()).max(64) }).strict(),
+  z.object({ kind: z.literal("localListed"), publications: z.array(LocalPublication).max(64) }).strict(),
   z.object({ kind: z.literal("listed"), publications: z.array(OwnerAppPublicationListRow).max(25), nextCursor: hash.nullable() }).strict(),
   z.object({ kind: z.literal("prepared"), approvalId: z.string().uuid(), candidateDigest: hash,
     appRoot: z.string().min(1).max(1024), versionId: id, sourceRevision: hash,
@@ -56,6 +61,8 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cancelled") }).strict(),
   z.object({ kind: z.literal("published"), publicationId: z.string().regex(/^[a-f0-9]{64}$/), authorityRevision: z.number().int().positive(), local: z.literal(true).optional(), appQuery: z.string().max(256).optional(), access: access.optional(), bearerWarning: z.string().max(512).optional() }).strict(),
   z.object({ kind: z.literal("withdrawn"), publicationId: hash, authorityRevision: z.number().int().positive() }).strict(),
+  // Authority ended, but responses admitted earlier may still be saved. Withdraw again at this revision to confirm.
+  z.object({ kind: z.literal("withdrawalUnconfirmed"), publicationId: hash, authorityRevision: z.number().int().positive(), unresolvedCreates: z.number().int().positive().max(1000) }).strict(),
   z.object({ kind: z.literal("collectionRevoked"), publicationId: hash, authorityRevision: z.number().int().positive() }).strict(),
 ]);
 export type OwnerAppPublicationResult = z.infer<typeof OwnerAppPublicationResult>;

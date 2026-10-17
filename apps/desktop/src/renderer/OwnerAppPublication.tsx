@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Upload, X } from "lucide-react";
 import type { AppDatasetCapability } from "@dohc/security-contract/dataset";
+import type { AppCollectionCapability } from "@dohc/security-contract/app-publication";
 import type { RelayShareLinkRow } from "../ipc/bridgeContract";
 import { OwnerAppPublicationResult, type OwnerAppPublicationRequest } from "../ipc/ownerAppPublicationContract";
 import { bridge } from "./bridge";
@@ -67,6 +68,23 @@ function DatasetApproval({ capability, workspaceId, reportError }: { capability:
       <p className="break-all font-mono">Revision {capability.revision}</p>
       <p className="break-all font-mono">{capability.revisionSha256}</p>
     </details>
+  </div>;
+}
+
+const responses = (count: number) => `${count} ${count === 1 ? "response" : "responses"}`;
+const unconfirmedResponses = (count: number) => `${responses(count)} not yet confirmed`;
+const unconfirmedRemoval = (count: number) => `dohc removed this app's approval but has not confirmed whether ${responses(count)} ${count === 1 ? "was" : "were"} saved.`;
+
+/** Local response files are not shared, so only a link's approval says who else can read them. */
+function CollectionApproval({ capability, local }: { capability: AppCollectionCapability; local: boolean }) {
+  return <div data-testid="app-publication-capability" className="space-y-2">
+    <p className="m-0">Create records only in <span className="break-all font-mono">{capability.collectionPath}</span>.</p>
+    <dl className="m-0 space-y-1 text-[12px]"><div><dt className="inline font-medium text-ink">Fields it can create: </dt><dd className="m-0 inline break-words font-mono">{capability.allowedFields.join(", ")}</dd></div>
+      <div><dt className="inline font-medium text-ink">Required fields: </dt><dd className="m-0 inline break-words font-mono">{capability.requiredFields.join(", ") || "None"}</dd></div>
+      <div><dt className="inline font-medium text-ink">Fields shown in the app: </dt><dd className="m-0 inline break-words font-mono">{capability.readFields.join(", ") || "None"}</dd></div></dl>
+    {local ? null : <p className="m-0 text-[12px]">People with this share can read every response file and all its fields.</p>}
+    <p className="m-0 text-[12px]">The app cannot change or delete existing records.</p>
+    <details className="text-[12px]"><summary className="cursor-pointer">Collection schema revision</summary><p className="break-all font-mono">{capability.schemaSha256}</p></details>
   </div>;
 }
 
@@ -409,6 +427,13 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
     try {
       const result = await api.publishOwnerApp({ action: "withdraw", workspaceId: props.workspaceId, publicationId: publication.publicationId, expectedAuthorityRevision: publication.authorityRevision });
       if (!alive.current || mine !== request.current) return;
+      if (local && result.kind === "withdrawalUnconfirmed" && result.publicationId === publication.publicationId) {
+        // Access ended. Trying again at the ending revision confirms responses the app sent before it.
+        localChanged();
+        reportError(unconfirmedRemoval(result.unresolvedCreates), undefined,
+          () => { if (alive.current) void withdraw({ ...publication, authorityRevision: result.authorityRevision }, true); });
+        return;
+      }
       if (result.kind !== "withdrawn") throw new Error("dohc could not confirm that this publication ended. Try again.");
       if (local) localChanged(); else setPublicationsReload(value => value + 1);
       setNotice(local ? "App approval removed. Prepare the app again to restore access." : "App unpublished. The share link still works for its other shared content.");
@@ -475,15 +500,8 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
           </ul>
         </div>
         <div className="space-y-2 text-[13px] text-muted"><h3 className="m-0 text-[13px] font-medium text-ink">Workspace data access</h3>
-          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "dataset" ? <DatasetApproval reportError={reportError} workspaceId={props.workspaceId} key={capability.datasetId} capability={!prepared.local && !reactivating ? { ...capability, ...(linkReads.length ? { linkReads } : {}) } : capability} /> : <div key={capability.collectionPath} data-testid="app-publication-capability" className="space-y-2">
-            <p className="m-0">Create records only in <span className="break-all font-mono">{capability.collectionPath}</span>.</p>
-            <dl className="m-0 space-y-1 text-[12px]"><div><dt className="inline font-medium text-ink">Fields it can create: </dt><dd className="m-0 inline break-words font-mono">{capability.allowedFields.join(", ")}</dd></div>
-              <div><dt className="inline font-medium text-ink">Required fields: </dt><dd className="m-0 inline break-words font-mono">{capability.requiredFields.join(", ") || "None"}</dd></div>
-              <div><dt className="inline font-medium text-ink">Fields shown in the app: </dt><dd className="m-0 inline break-words font-mono">{capability.readFields.join(", ") || "None"}</dd></div></dl>
-            <p className="m-0 text-[12px]">People with this share can read every response file and all its fields.</p>
-            <p className="m-0 text-[12px]">The app cannot change or delete existing records.</p>
-            <details className="text-[12px]"><summary className="cursor-pointer">Collection schema revision</summary><p className="break-all font-mono">{capability.schemaSha256}</p></details>
-          </div>)}
+          {prepared.capabilities.length === 0 ? <p className="m-0">None</p> : prepared.capabilities.map(capability => capability.kind === "dataset" ? <DatasetApproval reportError={reportError} workspaceId={props.workspaceId} key={capability.datasetId} capability={!prepared.local && !reactivating ? { ...capability, ...(linkReads.length ? { linkReads } : {}) } : capability} /> :
+            <CollectionApproval key={capability.collectionPath} capability={capability} local={prepared.local === true} />)}
           {!prepared.local && !reactivating ? prepared.capabilities.filter(capability => capability.kind === "dataset" && capability.operations.some(operation => operation.access === "helper" && operation.fields !== undefined)).map(capability => capability.kind === "dataset" ? <fieldset key={capability.datasetId} disabled={!!busy} className="space-y-2 border-0 p-0">
             <legend className="text-[13px] font-medium text-ink">Allow people with the link to read</legend>
             {capability.operations.filter(operation => operation.access === "helper" && operation.fields !== undefined).map(operation => <label key={operation.operationId} className="block text-[13px] text-ink">
@@ -516,11 +534,16 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
                 {localPublications.map(publication => <li key={publication.publicationId} className="flex items-start justify-between gap-3">
                   <div className="min-w-0 text-[12px] text-muted">
                     <p className="m-0">{publication.active ? "Approved on this device" : "Inactive on this device"} · <span className="font-mono" title={publication.sourceRevision}>Source {publication.sourceRevision.slice(0, 12)}</span></p>
-                    {publication.active ? null : <p className="m-0 text-warning">Its data is not active here. If you moved it to a share link, open that publication.</p>}
-                    <details className="mt-1"><summary className="cursor-pointer">Approved Collection access</summary><DatasetApproval reportError={reportError} workspaceId={props.workspaceId} capability={publication.datasetCapability} /></details>
+                    {/* Only a withdrawn Dataset approval can mean its data moved to a share link. */}
+                    {"datasetCapability" in publication && !publication.approved ? <p className="m-0 text-warning">Its data is not active here. If you moved it to a share link, open that publication.</p> : null}
+                    {"pendingCreates" in publication && publication.pendingCreates > 0 && !publication.approved ? <p className="m-0 text-warning">{unconfirmedResponses(publication.pendingCreates)}</p> : null}
+                    <details className="mt-1"><summary className="cursor-pointer">Approved Collection access</summary>{"datasetCapability" in publication
+                      ? <DatasetApproval reportError={reportError} workspaceId={props.workspaceId} capability={publication.datasetCapability} />
+                      : <CollectionApproval capability={publication.collectionCapability} local />}</details>
                   </div>
-                  {publication.active ? <div className="flex shrink-0 flex-col gap-2"><SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Open in browser ${publication.publicationId}`} onClick={() => void launch(publication)}>{busy === "launch" && busyPublicationId === publication.publicationId ? "Opening…" : "Open in browser"}</SecondaryButton>
-                    <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void withdraw(publication, true)}>Remove approval</SecondaryButton></div> : null}
+                  {publication.approved || ("pendingCreates" in publication && publication.pendingCreates > 0) ? <div className="flex shrink-0 flex-col gap-2">
+                    {publication.active ? <SecondaryButton disabled={!!busy || responsesBusy} aria-label={`Open in browser ${publication.publicationId}`} onClick={() => void launch(publication)}>{busy === "launch" && busyPublicationId === publication.publicationId ? "Opening…" : "Open in browser"}</SecondaryButton> : null}
+                    <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void withdraw(publication, true)}>{publication.approved ? "Remove approval" : "Try again"}</SecondaryButton></div> : null}
                 </li>)}
               </ul>}
         </div>

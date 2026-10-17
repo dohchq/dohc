@@ -1247,13 +1247,13 @@ List an app's publications on this computer.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "localListed", publications: { publicationId, authorityRevision, appRoot, sourceRevision, active, datasetCapability }[] }`.
+Returns `{ kind: "localListed", publications: ({ publicationId, authorityRevision, appRoot, sourceRevision, approved, active, datasetCapability } | { publicationId, authorityRevision, appRoot, sourceRevision, approved, active, collectionCapability, pendingCreates })[] }`.
 
 #### `dohc app prepareLocal`
 
 Prepare an app to open on this computer.
 
-Review the source and the dataset operations it asks for, then approve.
+Review the source and the Collection access it asks for, then approve.
 
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
@@ -1323,25 +1323,25 @@ Returns `{ kind: "cancelled" }`.
 
 Stop a shared publication.
 
-Set `publicationId` to `publications[].publicationId` from `list`. Set `expectedAuthorityRevision` to `publications[].authorityRevision` from `list`.
+Set `publicationId` to `publications[].publicationId` from `list`. Set `expectedAuthorityRevision` to `publications[].authorityRevision` from `list`. For an app approved on this computer, take publicationId and authorityRevision from listLocal. withdrawalUnconfirmed means access ended, but responses the app sent earlier are not yet confirmed saved or refused. Withdraw again with the returned authorityRevision to confirm.
 
 - `workspaceId`: `string`. Required.
 - `publicationId`: `SHA-256 hex`. Required.
 - `expectedAuthorityRevision`: `integer`. Required.
 
-Returns `{ kind: "withdrawn", publicationId, authorityRevision }`.
+Returns `{ kind: "withdrawn", publicationId, authorityRevision }` or `{ kind: "withdrawalUnconfirmed", publicationId, authorityRevision, unresolvedCreates }`.
 
 #### `dohc app revokeCollection`
 
 Remove a shared publication's Collection access.
 
-Set `publicationId` to `publications[].publicationId` from `list`. Set `expectedAuthorityRevision` to `publications[].authorityRevision` from `list`.
+Set `publicationId` to `publications[].publicationId` from `list`. Set `expectedAuthorityRevision` to `publications[].authorityRevision` from `list`. For an app approved on this computer, this ends its approval, as withdraw does.
 
 - `workspaceId`: `string`. Required.
 - `publicationId`: `SHA-256 hex`. Required.
 - `expectedAuthorityRevision`: `integer`. Required.
 
-Returns `{ kind: "collectionRevoked", publicationId, authorityRevision }`.
+Returns `{ kind: "collectionRevoked", publicationId, authorityRevision }` or `{ kind: "withdrawalUnconfirmed", publicationId, authorityRevision, unresolvedCreates }`.
 
 #### `dohc app reviewReactivation`
 
