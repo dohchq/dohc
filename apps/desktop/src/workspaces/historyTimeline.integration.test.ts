@@ -14,6 +14,7 @@ import { sharedViewHistory } from "./sharedViewHistory";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import { createTestScratch } from "./testTemp";
 import { deferred } from "../testing/deferred";
+import { neutralHistoryPresentations } from "../testing/historyPageFixture";
 import { HISTORY_MAX_SOURCES, HISTORY_CURSOR_BYTES, TimelineCursor, ListHistoryResult, type ListHistoryPayload, type TimelineEntry } from "../ipc/bridgeContract";
 import { RELAY_FETCH_TIMEOUT_MS } from "./sharedChannels";
 import { createHistoryTimeline, HISTORY_REMOTE_DEADLINE_MS, type TimelineReads } from "./historyTimeline";
@@ -69,7 +70,7 @@ async function fixture() {
       sourceCount: Number(db.prepare("SELECT count(*) AS count FROM dohc_dataset_catalog WHERE workspace_id=?").get("workspace")?.count) };
   };
   const reads: TimelineReads = { scope: "test", signal: signal.signal, assertCurrent() {}, engine: sharedViewHistory(store, "workspace"), local,
-    remote: async () => { throw new Error("unexpected remote"); }, names: { agent: () => undefined, person: () => undefined, automation: () => null, named: a => a.userId } };
+    remote: async () => { throw new Error("unexpected remote"); }, names: { agent: () => undefined, person: () => undefined, automation: () => null, named: a => a.userId, presentations: neutralHistoryPresentations } };
   const list = createHistoryTimeline();
   const page = async (input: Partial<ListHistoryPayload> = {}) => {
     const result = ListHistoryResult.parse(await list({ workspaceId: "workspace", ...input }, reads));

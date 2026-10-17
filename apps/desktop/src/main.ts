@@ -5892,8 +5892,9 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
+    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, readSyncHistory, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
+    localInstallationId, warmCredentialCache, currentCredentials: () => cachedCredentials,
     historyCollections: async operation => {
       const { workspace } = operation;
       const local = await localDatasetHostFor(workspace, operation.signal);
@@ -5920,7 +5921,7 @@ function registerIpcHandlers(): void {
         }),
       };
     },
-    recordHistoryPersonName: (workspaceId, userId, sender) => {
+    recordHistoryPersonName:(workspaceId, userId, sender) => {
       const workspace = findWorkspace(workspaceId);
       if (!recordHistoryPersonIsNamed(userId, workspace?.remote?.ownerUserId ?? localUserId())) return null;
       return historyLabelsFor(sender).person(workspaceId, userId);
