@@ -1392,6 +1392,17 @@ function Pane(props: { theme: "light" | "dark" }) {
         <ColorControl label="Accent" value="#6b7230" onChange={noop} />
       </Section>
 
+      <Section part="native-controls" title="Native controls">
+        <Specimen label="checkboxes and radios in the theme's colors, checked ones in the accent (Explorer's archived toggle)">
+          <div className="flex flex-col">
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" defaultChecked={false} />Archived collections</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="checkbox" defaultChecked />Archived collections</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="radio" name={`native-radio-${theme}`} defaultChecked={false} />Off</label>
+            <label className="flex h-7 items-center gap-2 px-2 text-[11px] text-muted"><input type="radio" name={`native-radio-${theme}`} defaultChecked />On</label>
+          </div>
+        </Specimen>
+      </Section>
+
       <Section part="list-rows" title="List rows">
         <ul role="tree" aria-label="Rows" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
           <Row name="rest" folder />
