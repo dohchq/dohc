@@ -300,7 +300,8 @@ fn refusals_json(refusals: Vec<dohc_engine_sync::ReplicationRefusal>) -> Vec<Val
 }
 
 /// A hosted pass, without its cursor: the caller issues that as a token.
-fn hosted_pass_json(pass: HostedPassOutcome) -> Value {
+/// `departed` names each document that left the scope and is not gone yet.
+fn hosted_pass_json(pass: HostedPassOutcome, departed: Vec<String>) -> Value {
     let held = pass
         .held
         .iter()
@@ -317,6 +318,7 @@ fn hosted_pass_json(pass: HostedPassOutcome) -> Value {
         "refusals": refusals_json(pass.refusals),
         "sharingDeclined": sharing_declined_json(pass.sharing_declined),
         "held": held,
+        "departed": departed,
         "pendingCursor": null,
     })
 }
@@ -333,7 +335,7 @@ fn hosted_hold_json(object_id: &str, hold: &dohc_engine_sync::HostedHold) -> Val
         HostedHold::ConflictParentWithheld { conflict_id } => {
             held["conflictId"] = json!(conflict_id);
         }
-        HostedHold::WorkWaiting => {}
+        HostedHold::WorkWaiting | HostedHold::LiveEditUnadmitted => {}
         HostedHold::ScopePathMismatch {
             scope_path,
             head_path,
@@ -512,18 +514,30 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             "morePending": outcome.more_pending,
         }),
         RelayOperationOutcome::HostedReplicaCreated => json!({ "hosted": true }),
-        RelayOperationOutcome::HostedPass(pass) => hosted_pass_json(pass),
+        RelayOperationOutcome::HostedPass { pass, departed, .. } => {
+            hosted_pass_json(pass, departed)
+        }
         // A pass fetched under a scope that has since moved commits nothing.
-        // A commit that retired a departed document has more to pull: work
-        // that waited for its path. A retirement that failed is reported as
-        // the error it would have been, beside the commit that stands.
+        // A commit that kept a document held for the pass that writes its
+        // files has more to pull, as does one that parked a departed
+        // document: work that waited for its path. Parking that failed is
+        // reported as the error it would have been, beside the commit that
+        // stands. A commit that could not read what it left unready, or what
+        // departed documents remain, has more to pull, whose pass releases or
+        // reports them, or says why it cannot. `departed` is null when unread.
         RelayOperationOutcome::HostedCursorCommitted {
-            committed,
+            commit,
             retirement,
+            unready,
+            departed,
         } => json!({
-            "committed": committed,
-            "hasMore": matches!(retirement, Ok(true)),
+            "committed": commit.committed,
+            "hasMore": commit.has_more
+                || matches!(retirement, Ok(true))
+                || unready.is_err()
+                || departed.is_err(),
             "retirement": retirement.err().map(map_runtime),
+            "departed": departed.ok(),
             "sharingDeclined": [],
         }),
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({
@@ -1096,6 +1110,7 @@ impl EngineService {
         let (issued, reconcile_collections) =
             self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
         let share_view = matches!(&issued, IssuedCursor::ShareView(_));
+        let hosted = matches!(&issued, IssuedCursor::Hosted(_));
         let operation = match issued {
             IssuedCursor::Relay(cursor) => RelayOperation::CommitCursor {
                 workspace_id: open.workspace_id.clone(),
@@ -1113,15 +1128,18 @@ impl EngineService {
                 now_ms: now_ms()?,
             },
         };
+        // A hosted replica takes no part in enrollment.
+        if hosted {
+            let outcome = self
+                .hosted_execute(ctx, &open, configuration, operation, "sync.commitCursor")
+                .await?;
+            return relay_outcome_json(outcome);
+        }
         let mut outcome = self
             .relay_execute(ctx, &open, configuration, operation, "sync.commitCursor")
             .await?;
         if share_view && reconcile_collections {
             open.request_collection_reconcile();
-        }
-        // A hosted replica takes no part in enrollment.
-        if matches!(outcome, RelayOperationOutcome::HostedCursorCommitted { .. }) {
-            return relay_outcome_json(outcome);
         }
         // A cursor commit can be what makes enrollment ready, as a push can.
         let (_, declined) = self.originate_live_sessions(ctx, &open).await?;
@@ -1346,7 +1364,7 @@ impl EngineService {
     /// Otherwise materialize its `pendingCursor` with
     /// `sync.materializePendingCursor`, then commit it with
     /// `sync.commitCursor`, and pull again while the pass or the commit
-    /// answers `hasMore`. Adopting a scope and committing also retire the
+    /// answers `hasMore`. Adopting a scope and committing also park the
     /// documents that left the scope.
     pub(super) async fn sync_pull_hosted(
         &self,
@@ -1358,7 +1376,7 @@ impl EngineService {
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
-            .relay_execute(
+            .hosted_execute(
                 ctx,
                 &open,
                 configuration,
@@ -1370,7 +1388,10 @@ impl EngineService {
                 "sync.pullHosted",
             )
             .await?;
-        let RelayOperationOutcome::HostedPass(mut pass) = outcome else {
+        let RelayOperationOutcome::HostedPass {
+            mut pass, departed, ..
+        } = outcome
+        else {
             return Err(WireError::new(
                 ErrorCode::Internal,
                 "unexpected hosted pass outcome",
@@ -1384,7 +1405,7 @@ impl EngineService {
         }
         let pending = pass.pending_cursor.take();
         let materialization_paths = pass.changed_paths.clone();
-        let mut result = hosted_pass_json(pass);
+        let mut result = hosted_pass_json(pass, departed);
         if let Some(cursor) = pending {
             let issued = self.issue_pending_cursor(
                 bound_handle,
@@ -2086,6 +2107,73 @@ mod tests {
         assert_eq!(value["refusals"][0]["originSeq"], 4);
         assert_eq!(value["refusals"][0]["code"], "share-boundary-violation");
     }
+
+    #[test]
+    fn a_hosted_commit_that_could_not_read_its_unready_documents_stands_and_pulls_again() {
+        let value = relay_outcome_json(RelayOperationOutcome::HostedCursorCommitted {
+            commit: COMMITTED,
+            retirement: Ok(false),
+            unready: Err(dohc_engine_runtime::RuntimeError::ActorUnavailable),
+            departed: Ok(vec!["doc-b".to_owned()]),
+        })
+        .expect("commit JSON");
+        assert_eq!(
+            (
+                &value["committed"],
+                &value["hasMore"],
+                &value["retirement"],
+                &value["departed"]
+            ),
+            (&json!(true), &json!(true), &Value::Null, &json!(["doc-b"]))
+        );
+    }
+
+    /// Slice 3: a commit that could not read its departed documents does not
+    /// answer an empty list, which would let the host release them.
+    #[test]
+    fn a_hosted_commit_that_could_not_read_its_departed_documents_says_so_and_pulls_again() {
+        let value = relay_outcome_json(RelayOperationOutcome::HostedCursorCommitted {
+            commit: COMMITTED,
+            retirement: Ok(false),
+            unready: Ok(Vec::new()),
+            departed: Err(dohc_engine_runtime::RuntimeError::ActorUnavailable),
+        })
+        .expect("commit JSON");
+        assert_eq!(
+            (
+                &value["committed"],
+                &value["hasMore"],
+                &value["retirement"],
+                &value["departed"]
+            ),
+            (&json!(true), &json!(true), &Value::Null, &Value::Null)
+        );
+    }
+
+    /// Opus's park review: a commit that kept a document held for the pass
+    /// that writes its files said nothing, so nothing pulled again for it.
+    #[test]
+    fn a_hosted_commit_that_kept_a_document_held_for_its_files_pulls_again() {
+        let answer = |has_more| {
+            relay_outcome_json(RelayOperationOutcome::HostedCursorCommitted {
+                commit: dohc_engine_sync::HostedCommit {
+                    committed: true,
+                    has_more,
+                },
+                retirement: Ok(false),
+                unready: Ok(Vec::new()),
+                departed: Ok(Vec::new()),
+            })
+            .expect("commit JSON")["hasMore"]
+                .clone()
+        };
+        assert_eq!((answer(true), answer(false)), (json!(true), json!(false)));
+    }
+
+    const COMMITTED: dohc_engine_sync::HostedCommit = dohc_engine_sync::HostedCommit {
+        committed: true,
+        has_more: false,
+    };
 
     #[test]
     fn direct_push_outcome_json_states_each_write_and_how_it_ended() {
