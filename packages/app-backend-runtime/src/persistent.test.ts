@@ -404,8 +404,10 @@ describe("persistent dataset worker",()=>{
 
   it("opens a dataset above the old snapshot cap within its separate reservation",async()=>{
     await fixture(async({root,open})=>{
-      const worker=await open({schemaSql:schemaSql+"INSERT INTO items VALUES(1,hex(zeroblob(9*1024*1024)));"});
-      expect((await worker.prepare({...operation(),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT length(value) AS bytes FROM items')}}"})).result).toEqual([{bytes:18*1024*1024}]);
+      // 18 MiB in 16 KiB records. The worker runs schema SQL twice under its 64 MiB SQLite heap
+      // limit, which Electron enforces and official Node ignores; one 18 MiB value would exceed it.
+      const worker=await open({schemaSql:schemaSql+"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1152) INSERT INTO items SELECT i,hex(zeroblob(8*1024)) FROM n;"});
+      expect((await worker.prepare({...operation(),readOnly:true,source:"globalThis.operations={run(ctx){return ctx.db.query('SELECT sum(length(value)) AS bytes FROM items')}}"})).result).toEqual([{bytes:18*1024*1024}]);
       const checkpointPath=join(root,"large.sqlite");
       await worker.snapshot(checkpointPath);
       await expect(open({checkpointPath,databaseBytes:16*1024*1024})).rejects.toMatchObject({code:"invalid_checkpoint"});
