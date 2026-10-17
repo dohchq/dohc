@@ -296,9 +296,9 @@ export function leadingColumns(text: string): number {
 }
 
 /** The column a continuation line must reach to stay inside this list item. */
-function continuationIndent(text: string): { indent: number; lazy: boolean } {
+function continuationIndent(text: string): { indent: number; lazy: boolean; fence: Fence | null } {
   const match = LIST_MARKER_RE.exec(text);
-  if (!match) return { indent: 1, lazy: false };
+  if (!match) return { indent: 1, lazy: false, fence: null };
   const spaces = /^[ \t]*/.exec(text.slice(match[0].length))?.[0] ?? "";
   const marker = columnAt(text, match[0].length);
   const content = columnAt(text, match[0].length + spaces.length);
@@ -306,7 +306,13 @@ function continuationIndent(text: string): { indent: number; lazy: boolean } {
   const indent = content - marker > 4 || !body
     ? marker + 1
     : content;
-  return { indent, lazy: !!body && content - marker < 4 };
+  const fence = fenceOpener(body);
+  return {
+    indent,
+    lazy: !!body && content - marker < 4 &&
+      !HEADING_RE.test(body) && !fence && !BREAK_RE.test(body),
+    fence,
+  };
 }
 
 function blockKind(text: string): BlockKind {
@@ -481,7 +487,7 @@ export function blockForLine(body: string, line: number): LineBlock {
     const marker = listMarker(text);
     const listOpen =
       openKind === "bullet" || openKind === "task" || openKind === "ordered";
-    const opener = fenceOpener(text);
+    let opener = fenceOpener(text);
     const mathClose = mathBlockEnd(lines, index);
     // A blank line does not end a block the next line continues: another item
     // of the same list, content indented into that item, or the next chunk of
@@ -575,8 +581,10 @@ export function blockForLine(body: string, line: number): LineBlock {
       const continuation = continuationIndent(text);
       openIndent = continuation.indent;
       lazyAllowed = continuation.lazy;
+      opener ??= continuation.fence;
     }
-    previousDeep = listOpen && leadingColumns(text.replace(/\t/g, "    ")) >= openIndent + 4;
+    previousDeep = listOpen &&
+      (text.includes("\t") ? leadingColumns(text.replace(/\t/g, "    ")) : indent) >= openIndent + 4;
     // An ATX heading and a thematic break are one line each. The next line
     // opens its own block, blank line or not — `# Plan\nBody` is two nodes.
     open = kind !== "heading" && kind !== "break";

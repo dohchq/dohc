@@ -660,8 +660,6 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
   )
   parseReferences = entitySentinels
   parseTabs = projectionTabs
-  // Include escaped and multiline labels, including definitions inside quotes.
-  markdownListParseState.references = markdown.includes(']:')
   rawHtmlMarkup = markup
   writtenLinks = {
     openers: writtenOpeners(prepared, entitySentinels),
@@ -671,6 +669,8 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
   }
   let parsed: JSONContent
   try {
+    // Include escaped and multiline labels, including definitions inside quotes.
+    markdownListParseState.references = markdown.includes(']:')
     parsed = (reading === 'projection' ? projectedMarkdownManager() : markdownManager).parse(prepared)
   } finally {
     parseReferences = new Map()

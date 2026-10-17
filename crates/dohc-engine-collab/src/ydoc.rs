@@ -3661,18 +3661,16 @@ fn marked_list_continues(lines: &[&str], at: usize, first: ListMarker<'_>) -> bo
         .iter()
         .find(|line| !blank_line(line))
         .is_some_and(|line| {
-            !thematic_break(line)
-                && list_marker(line, MarkdownReading::ProjectedSource).is_some_and(|next| {
-                    next.indent == first.indent
-                        && match (first.kind, next.kind) {
-                            (ListKind::Ordered(a), ListKind::Ordered(b)) => a == b,
-                            (
-                                ListKind::Bullet(a) | ListKind::Task(a),
-                                ListKind::Bullet(b) | ListKind::Task(b),
-                            ) => a == b,
-                            _ => false,
-                        }
-                })
+            list_marker(line, MarkdownReading::ProjectedSource).is_some_and(|next| {
+                match (first.kind, next.kind) {
+                    (ListKind::Ordered(a), ListKind::Ordered(b)) => a == b,
+                    (
+                        ListKind::Bullet(a) | ListKind::Task(a),
+                        ListKind::Bullet(b) | ListKind::Task(b),
+                    ) => a == b,
+                    _ => false,
+                }
+            })
         })
 }
 
@@ -3730,14 +3728,24 @@ fn parse_list<'src>(
         });
     }
     while let Some(marker) = next_marker.take() {
-        if marker.indent != first.indent || marker.kind != first.kind {
+        if marker.kind != first.kind {
             break;
         }
+        let after_marker = &lines[at][marker.indent..]
+            .trim_start_matches(|character: char| character.is_ascii_digit())[1..];
+        let mut previous_ends_lazy = after_marker
+            .bytes()
+            .take_while(|byte| *byte == b' ')
+            .count()
+            >= 4
+            || matches!(
+                block_start(after_marker, false, false),
+                Some("heading" | "fence" | "rule")
+            );
         at += 1;
         let mut continued = Vec::new();
         // The checkbox is content after the bullet marker, not part of its width.
         let content_indent = marker.indent + marker.width;
-        let mut previous_deep = marker.text.bytes().take_while(|byte| *byte == b' ').count() >= 4;
         while let Some(line) = lines.get(at) {
             if let Some(next) =
                 list_marker(line, reading).filter(|next| next.indent < content_indent)
@@ -3785,41 +3793,51 @@ fn parse_list<'src>(
                 }) {
                     continued.resize(continued.len() + next - at, "");
                     at = next;
-                    previous_deep = false;
+                    previous_ends_lazy = false;
                     continue;
                 }
                 if let Some(next) = next {
                     let indent = lines[next].bytes().take_while(|byte| *byte == b' ').count();
                     *refused |= indent > marker.indent
                         && indent < content_indent
-                        && continued
-                            .iter()
-                            .rposition(|line| !blank_line(line))
-                            .map_or_else(
-                                || empty_list_child(marker.text, MarkdownReading::ProjectedSource),
-                                |at| {
-                                    empty_list_child(
-                                        continued[at],
-                                        if at > 0 && blank_line(continued[at - 1]) {
-                                            MarkdownReading::ProjectedSource
-                                        } else {
-                                            MarkdownReading::Source
-                                        },
-                                    )
-                                },
-                            );
+                        && (list_marker(lines[next], reading).is_some()
+                            || continued
+                                .iter()
+                                .rposition(|line| !blank_line(line))
+                                .map_or_else(
+                                    || {
+                                        empty_list_child(
+                                            marker.text,
+                                            MarkdownReading::ProjectedSource,
+                                        )
+                                    },
+                                    |at| {
+                                        empty_list_child(
+                                            continued[at],
+                                            if at > 0 && blank_line(continued[at - 1]) {
+                                                MarkdownReading::ProjectedSource
+                                            } else {
+                                                MarkdownReading::Source
+                                            },
+                                        )
+                                    },
+                                ));
                 }
                 break;
             }
             let indent = line.bytes().take_while(|byte| *byte == b' ').count();
             if indent >= content_indent {
                 continued.push(&line[content_indent..]);
-            } else if !previous_deep && block_start(line, false, false).is_none() {
+            } else if !previous_ends_lazy && block_start(line, false, false).is_none() {
                 continued.push(line);
             } else {
                 break;
             }
-            previous_deep = indent >= content_indent + 4;
+            previous_ends_lazy = indent >= content_indent + 4
+                || matches!(
+                    block_start(continued.last().unwrap(), false, false),
+                    Some("heading" | "fence" | "rule")
+                );
             at += 1;
         }
         let item = if continued.is_empty() && !structural_item_start(marker.text) {
@@ -3869,7 +3887,11 @@ fn parse_list<'src>(
     if !marked_list_continues(lines, at, first) {
         if let Some(last) = items.last_mut() {
             if let Some(blocks) = &mut last.blocks {
-                if let Some(MdBlock::Paragraph(text)) = blocks.last_mut() {
+                let mut tail = blocks.last_mut();
+                while let Some(MdBlock::Quote(inner)) = tail {
+                    tail = inner.last_mut();
+                }
+                if let Some(MdBlock::Paragraph(text)) = tail {
                     text.truncate(trim_list_item_end(text).len());
                 }
             } else {

@@ -3404,7 +3404,7 @@ mod tests {
             seed_refused_richdoc_artifact(
                 &mut store,
                 source,
-                "---\nid: rec\n---\n\n- \n\n- b\n\n- c",
+                "---\nid: rec\n---\n\n- \n\n- b\n- c",
             );
             let key = DocKey::new("ws", "main", "seed-object").expect("key");
             let doc = store

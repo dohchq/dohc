@@ -774,3 +774,79 @@ fn nested_contract_r24_block_paragraph_whitespace() {
         }
     }
 }
+
+#[test]
+fn nested_contract_r25_boundaries_in_every_reading() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../../../tools/rust-engine-program/nested-markdown-contract.json"
+    ))
+    .unwrap();
+    let mut failures = Vec::new();
+    for case in corpus["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|case| case["name"].as_str().unwrap().starts_with("r25-"))
+    {
+        for reading in [
+            MarkdownReading::Source,
+            MarkdownReading::Projection,
+            MarkdownReading::ProjectedSource,
+            MarkdownReading::Successor,
+        ] {
+            let result = std::panic::catch_unwind(|| {
+                let doc = Ydoc::wire();
+                let result = doc.rewrite_content_to_markdown_as(
+                    ContentKind::Richdoc,
+                    case["source"].as_str().unwrap(),
+                    reading,
+                );
+                if case["refuse"] == true {
+                    assert!(result.is_err());
+                    return;
+                }
+                result.unwrap();
+                assert_eq!(
+                    doc.project_richdoc().unwrap(),
+                    case["canonical"].as_str().unwrap()
+                );
+            });
+            if result.is_err() {
+                failures.push(format!("{}: {reading:?}", case["name"]));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn nested_contract_r25_multiline_heading_reread_stabilizes() {
+    let source = "- a\n  b\n  -\n\n x";
+    for reading in [
+        MarkdownReading::Source,
+        MarkdownReading::Projection,
+        MarkdownReading::ProjectedSource,
+        MarkdownReading::Successor,
+    ] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+            .unwrap();
+        let first = doc.project_richdoc().unwrap();
+        assert_eq!(first, "- \n  ## a\n  b\n\n&#32;x");
+        doc.rewrite_content_to_markdown_as(
+            ContentKind::Richdoc,
+            &first,
+            MarkdownReading::ProjectedSource,
+        )
+        .unwrap();
+        let second = doc.project_richdoc().unwrap();
+        assert_eq!(second, "- \n  ## a\n\n  b\n\n&#32;x");
+        doc.rewrite_content_to_markdown_as(
+            ContentKind::Richdoc,
+            &second,
+            MarkdownReading::ProjectedSource,
+        )
+        .unwrap();
+        assert_eq!(doc.project_richdoc().unwrap(), second);
+    }
+}

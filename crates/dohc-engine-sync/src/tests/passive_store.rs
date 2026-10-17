@@ -208,7 +208,7 @@ fn passive_store_concurrent_delayed_and_source() {
         (
             "nested-list-witness.md",
             "---\nid: rec\n---\n\n- \n\n  - b\n - c",
-            Some("---\nid: rec\n---\n\n- \n\n- b\n\n- c"),
+            Some("---\nid: rec\n---\n\n- \n\n- b\n- c"),
             None,
         ),
     ] {

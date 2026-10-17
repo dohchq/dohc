@@ -722,14 +722,15 @@
       "sourceCanonical": "- \n- b\n- c",
       "productionFoldRefuse": true
     },
-    { "name": "empty-ordered-blank-child-marker", "source": "1.\n\n   - b\n  - c",
-      "canonical": "1. \n\n- b\n\n- c",
+    {
+      "name": "empty-ordered-blank-child-marker",
+      "source": "1.\n\n   - b\n  - c",
+      "canonical": "1. \n\n- b\n- c",
       "foldRefuse": true,
       "note": "CommonMark 0.31.2: <ol> <li></li> </ol> <ul> <li>b</li> <li>c</li> </ul>",
       "projected": true,
-      "rustBase64": "AQ+TrefTqqb0BgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAk63n06qm9AYBBXN0YXJ0AX0BBwCTrefTqqb0BgEDCGxpc3RJdGVtBwCTrefTqqb0BgMDCXBhcmFncmFwaIeTrefTqqb0BgEDCmJ1bGxldExpc3QHAJOt59OqpvQGBQMIbGlzdEl0ZW0HAJOt59OqpvQGBgMJcGFyYWdyYXBoBwCTrefTqqb0BgcGBACTrefTqqb0BggBYoeTrefTqqb0BgUDCmJ1bGxldExpc3QHAJOt59OqpvQGCgMIbGlzdEl0ZW0HAJOt59OqpvQGCwMJcGFyYWdyYXBoBwCTrefTqqb0BgwGBACTrefTqqb0Bg0BYwA=",
-      "sourceCanonical": "1. \n\n- b\n- c",
-      "productionFoldRefuse": true
+      "productionFoldRefuse": true,
+      "rustBase64": "AQ7G1uK787akBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAxtbiu/O2pAQBBXN0YXJ0AX0BBwDG1uK787akBAEDCGxpc3RJdGVtBwDG1uK787akBAMDCXBhcmFncmFwaIfG1uK787akBAEDCmJ1bGxldExpc3QHAMbW4rvztqQEBQMIbGlzdEl0ZW0HAMbW4rvztqQEBgMJcGFyYWdyYXBoBwDG1uK787akBAcGBADG1uK787akBAgBYofG1uK787akBAYDCGxpc3RJdGVtBwDG1uK787akBAoDCXBhcmFncmFwaAcAxtbiu/O2pAQLBgQAxtbiu/O2pAQMAWMA"
     },
     { "name": "inline-empty-bullet-underindent", "source": "- - \n\n   x",
       "foldRefuse": true,
@@ -1516,7 +1517,8 @@
       "canonical": "- a\n  - b\n\n  - \n\n&#32;x",
       "projectedCanonical": "- a\n  - b\n  - \n\n&#32;x",
       "sourceCanonical": "- a\n  - b\n  - \n\n&#32;x",
-      "rustBase64": "ARGrmN2QhODVBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCrmN2QhODVBgEDCGxpc3RJdGVtBwCrmN2QhODVBgIDCXBhcmFncmFwaAcAq5jdkITg1QYDBgQAq5jdkITg1QYEAWGHq5jdkITg1QYDAwpidWxsZXRMaXN0BwCrmN2QhODVBgYDCGxpc3RJdGVtBwCrmN2QhODVBgcDCXBhcmFncmFwaAcAq5jdkITg1QYIBgQAq5jdkITg1QYJAWKHq5jdkITg1QYGAwpidWxsZXRMaXN0BwCrmN2QhODVBgsDCGxpc3RJdGVtBwCrmN2QhODVBgwDCXBhcmFncmFwaIermN2QhODVBgEDCXBhcmFncmFwaAcAq5jdkITg1QYOBgQAq5jdkITg1QYPAiB4AA=="
+      "rustBase64": "ARGrmN2QhODVBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCrmN2QhODVBgEDCGxpc3RJdGVtBwCrmN2QhODVBgIDCXBhcmFncmFwaAcAq5jdkITg1QYDBgQAq5jdkITg1QYEAWGHq5jdkITg1QYDAwpidWxsZXRMaXN0BwCrmN2QhODVBgYDCGxpc3RJdGVtBwCrmN2QhODVBgcDCXBhcmFncmFwaAcAq5jdkITg1QYIBgQAq5jdkITg1QYJAWKHq5jdkITg1QYGAwpidWxsZXRMaXN0BwCrmN2QhODVBgsDCGxpc3RJdGVtBwCrmN2QhODVBgwDCXBhcmFncmFwaIermN2QhODVBgEDCXBhcmFncmFwaAcAq5jdkITg1QYOBgQAq5jdkITg1QYPAiB4AA==",
+      "foldRefuse": true
     },
     {
       "name": "r24-parent-spaces",
@@ -1614,6 +1616,167 @@
       "canonical": "- A\n- a\n  b",
       "projectedCanonical": "- A\n- a\n  b",
       "rustBase64": "AQqrgZbVhu/7CAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCrgZbVhu/7CAEDCGxpc3RJdGVtBwCrgZbVhu/7CAIDCXBhcmFncmFwaAcAq4GW1Ybv+wgDBgQAq4GW1Ybv+wgEAUGHq4GW1Ybv+wgCAwhsaXN0SXRlbQcAq4GW1Ybv+wgGAwlwYXJhZ3JhcGgHAKuBltWG7/sIBwYEAKuBltWG7/sICARhCmIJAA=="
+    },
+    {
+      "name": "r25-quote-bullet",
+      "source": "- a\n  > q  \n\nAfter",
+      "canonical": "- a\n  > q\n\nAfter",
+      "projectedCanonical": "- a\n  > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ3a89CxkrQlACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHANrz0LGStCUBAwhsaXN0SXRlbQcA2vPQsZK0JQIDCXBhcmFncmFwaAcA2vPQsZK0JQMGBADa89CxkrQlBAFhh9rz0LGStCUDAwpibG9ja3F1b3RlBwDa89CxkrQlBgMJcGFyYWdyYXBoBwDa89CxkrQlBwYEANrz0LGStCUIAXGH2vPQsZK0JQEDCXBhcmFncmFwaAcA2vPQsZK0JQoGBADa89CxkrQlCwVBZnRlcgA="
+    },
+    {
+      "name": "r25-quote-ordered",
+      "source": "1. a\n   > q  \n\nAfter",
+      "canonical": "1. a\n   > q\n\nAfter",
+      "projectedCanonical": "1. a\n   > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ7j0/uNtf2BAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA49P7jbX9gQIBBXN0YXJ0AX0BBwDj0/uNtf2BAgEDCGxpc3RJdGVtBwDj0/uNtf2BAgMDCXBhcmFncmFwaAcA49P7jbX9gQIEBgQA49P7jbX9gQIFAWGH49P7jbX9gQIEAwpibG9ja3F1b3RlBwDj0/uNtf2BAgcDCXBhcmFncmFwaAcA49P7jbX9gQIIBgQA49P7jbX9gQIJAXGH49P7jbX9gQIBAwlwYXJhZ3JhcGgHAOPT+421/YECCwYEAOPT+421/YECDAVBZnRlcgA="
+    },
+    {
+      "name": "r25-quote-task",
+      "source": "- [ ] a\n  > q  \n\nAfter",
+      "canonical": "- [ ] a\n  > q\n\nAfter",
+      "projectedCanonical": "- [ ] a\n  > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ6Wz9OW+LHmCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAls/Tlvix5goBAwh0YXNrSXRlbSgAls/Tlvix5goCB2NoZWNrZWQBeQcAls/Tlvix5goCAwlwYXJhZ3JhcGgHAJbP05b4seYKBAYEAJbP05b4seYKBQFhh5bP05b4seYKBAMKYmxvY2txdW90ZQcAls/Tlvix5goHAwlwYXJhZ3JhcGgHAJbP05b4seYKCAYEAJbP05b4seYKCQFxh5bP05b4seYKAQMJcGFyYWdyYXBoBwCWz9OW+LHmCgsGBACWz9OW+LHmCgwFQWZ0ZXIA"
+    },
+    {
+      "name": "r25-quote-nested",
+      "source": "- a\n  - b\n    > q  \n\nAfter",
+      "canonical": "- a\n  - b\n    > q\n\nAfter",
+      "projectedCanonical": "- a\n  - b\n    > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "ARLCjqaI8Z6+AwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDCjqaI8Z6+AwEDCGxpc3RJdGVtBwDCjqaI8Z6+AwIDCXBhcmFncmFwaAcAwo6miPGevgMDBgQAwo6miPGevgMEAWGHwo6miPGevgMDAwpidWxsZXRMaXN0BwDCjqaI8Z6+AwYDCGxpc3RJdGVtBwDCjqaI8Z6+AwcDCXBhcmFncmFwaAcAwo6miPGevgMIBgQAwo6miPGevgMJAWKHwo6miPGevgMIAwpibG9ja3F1b3RlBwDCjqaI8Z6+AwsDCXBhcmFncmFwaAcAwo6miPGevgMMBgQAwo6miPGevgMNAXGHwo6miPGevgMBAwlwYXJhZ3JhcGgHAMKOpojxnr4DDwYEAMKOpojxnr4DEAVBZnRlcgA="
+    },
+    {
+      "name": "r25-quote-recursive",
+      "source": "- a\n  > > q  \n\nAfter",
+      "canonical": "- a\n  > > q\n\nAfter",
+      "projectedCanonical": "- a\n  > > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ67vIiaxoiVCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC7vIiaxoiVCgEDCGxpc3RJdGVtBwC7vIiaxoiVCgIDCXBhcmFncmFwaAcAu7yImsaIlQoDBgQAu7yImsaIlQoEAWGHu7yImsaIlQoDAwpibG9ja3F1b3RlBwC7vIiaxoiVCgYDCmJsb2NrcXVvdGUHALu8iJrGiJUKBwMJcGFyYWdyYXBoBwC7vIiaxoiVCggGBAC7vIiaxoiVCgkBcYe7vIiaxoiVCgEDCXBhcmFncmFwaAcAu7yImsaIlQoLBgQAu7yImsaIlQoMBUFmdGVyAA=="
+    },
+    {
+      "name": "r25-quote-nonfinal",
+      "source": "- a\n  > q  \n- b",
+      "canonical": "- a\n  > q  \n- b",
+      "projectedCanonical": "- a\n  > q  \n- b",
+      "foldRefuse": true,
+      "rustBase64": "AQ6Wi5mPu/rrAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCWi5mPu/rrAgEDCGxpc3RJdGVtBwCWi5mPu/rrAgIDCXBhcmFncmFwaAcAlouZj7v66wIDBgQAlouZj7v66wIEAWGHlouZj7v66wIDAwpibG9ja3F1b3RlBwCWi5mPu/rrAgYDCXBhcmFncmFwaAcAlouZj7v66wIHBgQAlouZj7v66wIIA3EgIIeWi5mPu/rrAgIDCGxpc3RJdGVtBwCWi5mPu/rrAgwDCXBhcmFncmFwaAcAlouZj7v66wINBgQAlouZj7v66wIOAWIA"
+    },
+    {
+      "name": "r25-dedent-bullet",
+      "source": " - A  \n- B",
+      "canonical": "- A  \n- B",
+      "projectedCanonical": "- A  \n- B",
+      "rustBase64": "AQqL2Puqp4+KDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCL2Puqp4+KDwEDCGxpc3RJdGVtBwCL2Puqp4+KDwIDCXBhcmFncmFwaAcAi9j7qqePig8DBgQAi9j7qqePig8EA0EgIIeL2Puqp4+KDwIDCGxpc3RJdGVtBwCL2Puqp4+KDwgDCXBhcmFncmFwaAcAi9j7qqePig8JBgQAi9j7qqePig8KAUIA"
+    },
+    {
+      "name": "r25-dedent-ordered",
+      "source": "  1. A\n1. B",
+      "canonical": "1. A\n2. B",
+      "projectedCanonical": "1. A\n2. B",
+      "rustBase64": "AQvghfHz+PiZCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA4IXx8/j4mQgBBXN0YXJ0AX0BBwDghfHz+PiZCAEDCGxpc3RJdGVtBwDghfHz+PiZCAMDCXBhcmFncmFwaAcA4IXx8/j4mQgEBgQA4IXx8/j4mQgFAUGH4IXx8/j4mQgDAwhsaXN0SXRlbQcA4IXx8/j4mQgHAwlwYXJhZ3JhcGgHAOCF8fP4+JkICAYEAOCF8fP4+JkICQFCAA=="
+    },
+    {
+      "name": "r25-dedent-nested",
+      "source": "- a\n   - b  \n  - c",
+      "canonical": "- a\n  - b  \n  - c",
+      "projectedCanonical": "- a\n  - b  \n  - c",
+      "foldRefuse": true,
+      "rustBase64": "AQ+Rjbnw36niCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCRjbnw36niCwEDCGxpc3RJdGVtBwCRjbnw36niCwIDCXBhcmFncmFwaAcAkY258N+p4gsDBgQAkY258N+p4gsEAWGHkY258N+p4gsDAwpidWxsZXRMaXN0BwCRjbnw36niCwYDCGxpc3RJdGVtBwCRjbnw36niCwcDCXBhcmFncmFwaAcAkY258N+p4gsIBgQAkY258N+p4gsJA2IgIIeRjbnw36niCwcDCGxpc3RJdGVtBwCRjbnw36niCw0DCXBhcmFncmFwaAcAkY258N+p4gsOBgQAkY258N+p4gsPAWMA"
+    },
+    {
+      "name": "r25-dedent-task",
+      "source": " - A  \n- [ ] B",
+      "canonical": "- A  \n\n- [ ] B",
+      "projectedCanonical": "- A  \n\n- [ ] B",
+      "rustBase64": "AQzEw8PHwcvVCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDEw8PHwcvVCAEDCGxpc3RJdGVtBwDEw8PHwcvVCAIDCXBhcmFncmFwaAcAxMPDx8HL1QgDBgQAxMPDx8HL1QgEA0EgIIfEw8PHwcvVCAEDCHRhc2tMaXN0BwDEw8PHwcvVCAgDCHRhc2tJdGVtKADEw8PHwcvVCAkHY2hlY2tlZAF5BwDEw8PHwcvVCAkDCXBhcmFncmFwaAcAxMPDx8HL1QgLBgQAxMPDx8HL1QgMAUIA"
+    },
+    {
+      "name": "r25-indent-blank-task",
+      "source": "- A  \n\n - [ ] B",
+      "refuse": true
+    },
+    {
+      "name": "r25-deep-marker-bullet",
+      "source": "-    a\nlazy\n\nAfter",
+      "canonical": "- a\n\nlazy\n\nAfter",
+      "projectedCanonical": "- a\n\nlazy\n\nAfter",
+      "rustBase64": "AQzwo6G5ppy2BQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDwo6G5ppy2BQEDCGxpc3RJdGVtBwDwo6G5ppy2BQIDCXBhcmFncmFwaAcA8KOhuaactgUDBgQA8KOhuaactgUEAWGH8KOhuaactgUBAwlwYXJhZ3JhcGgHAPCjobmmnLYFBgYEAPCjobmmnLYFBwRsYXp5h/CjobmmnLYFBgMJcGFyYWdyYXBoBwDwo6G5ppy2BQwGBADwo6G5ppy2BQ0FQWZ0ZXIA"
+    },
+    {
+      "name": "r25-deep-marker-ordered",
+      "source": "1.    a\nlazy\n\nAfter",
+      "canonical": "1. a\n\nlazy\n\nAfter",
+      "projectedCanonical": "1. a\n\nlazy\n\nAfter",
+      "rustBase64": "AQ2JnMy+2MWaCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAiZzMvtjFmgsBBXN0YXJ0AX0BBwCJnMy+2MWaCwEDCGxpc3RJdGVtBwCJnMy+2MWaCwMDCXBhcmFncmFwaAcAiZzMvtjFmgsEBgQAiZzMvtjFmgsFAWGHiZzMvtjFmgsBAwlwYXJhZ3JhcGgHAImczL7YxZoLBwYEAImczL7YxZoLCARsYXp5h4mczL7YxZoLBwMJcGFyYWdyYXBoBwCJnMy+2MWaCw0GBACJnMy+2MWaCw4FQWZ0ZXIA"
+    },
+    {
+      "name": "r25-heading-marker",
+      "source": "- # h\nlazy\n\nAfter",
+      "canonical": "- \n  # h\n\nlazy\n\nAfter",
+      "projectedCanonical": "- \n  # h\n\nlazy\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ7bkrrSlca8DgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDbkrrSlca8DgEDCGxpc3RJdGVtBwDbkrrSlca8DgIDCXBhcmFncmFwaIfbkrrSlca8DgMDB2hlYWRpbmcoANuSutKVxrwOBAVsZXZlbAF9AQcA25K60pXGvA4EBgQA25K60pXGvA4GAWiH25K60pXGvA4BAwlwYXJhZ3JhcGgHANuSutKVxrwOCAYEANuSutKVxrwOCQRsYXp5h9uSutKVxrwOCAMJcGFyYWdyYXBoBwDbkrrSlca8Dg4GBADbkrrSlca8Dg8FQWZ0ZXIA"
+    },
+    {
+      "name": "r25-heading-continuation",
+      "source": "- a\n  # h\nlazy\n\nAfter",
+      "canonical": "- a\n  # h\n\nlazy\n\nAfter",
+      "projectedCanonical": "- a\n  # h\n\nlazy\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "ARC3oJ6q6K/kAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC3oJ6q6K/kAgEDCGxpc3RJdGVtBwC3oJ6q6K/kAgIDCXBhcmFncmFwaAcAt6Cequiv5AIDBgQAt6Cequiv5AIEAWGHt6Cequiv5AIDAwdoZWFkaW5nKAC3oJ6q6K/kAgYFbGV2ZWwBfQEHALegnqror+QCBgYEALegnqror+QCCAFoh7egnqror+QCAQMJcGFyYWdyYXBoBwC3oJ6q6K/kAgoGBAC3oJ6q6K/kAgsEbGF6eYe3oJ6q6K/kAgoDCXBhcmFncmFwaAcAt6Cequiv5AIQBgQAt6Cequiv5AIRBUFmdGVyAA=="
+    },
+    {
+      "name": "r25-fence-marker",
+      "source": "- ```\n  x\n  ```\nlazy\n\nAfter",
+      "canonical": "- \n  ```\n  x\n  ```\n\nlazy\n\nAfter",
+      "projectedCanonical": "- \n  ```\n  x\n  ```\n\nlazy\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ3f993o/tLdCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDf993o/tLdCQEDCGxpc3RJdGVtBwDf993o/tLdCQIDCXBhcmFncmFwaIff993o/tLdCQMDCWNvZGVCbG9jawcA3/fd6P7S3QkEBgQA3/fd6P7S3QkFAXiH3/fd6P7S3QkBAwlwYXJhZ3JhcGgHAN/33ej+0t0JBwYEAN/33ej+0t0JCARsYXp5h9/33ej+0t0JBwMJcGFyYWdyYXBoBwDf993o/tLdCQ0GBADf993o/tLdCQ4FQWZ0ZXIA"
+    },
+    {
+      "name": "r25-fence-continuation",
+      "source": "- a\n  ```\n  x\n  ```\nlazy\n\nAfter",
+      "canonical": "- a\n  ```\n  x\n  ```\n\nlazy\n\nAfter",
+      "projectedCanonical": "- a\n  ```\n  x\n  ```\n\nlazy\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ/Rnum5uZ2hBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDRnum5uZ2hBgEDCGxpc3RJdGVtBwDRnum5uZ2hBgIDCXBhcmFncmFwaAcA0Z7pubmdoQYDBgQA0Z7pubmdoQYEAWGH0Z7pubmdoQYDAwljb2RlQmxvY2sHANGe6bm5naEGBgYEANGe6bm5naEGBwF4h9Ge6bm5naEGAQMJcGFyYWdyYXBoBwDRnum5uZ2hBgkGBADRnum5uZ2hBgoEbGF6eYfRnum5uZ2hBgkDCXBhcmFncmFwaAcA0Z7pubmdoQYPBgQA0Z7pubmdoQYQBUFmdGVyAA=="
+    },
+    {
+      "name": "r25-rule-marker",
+      "source": "- ---\nlazy\n\nAfter",
+      "canonical": "***\n\nlazy\n\nAfter",
+      "projectedCanonical": "***\n\nlazy\n\nAfter",
+      "rustBase64": "AQih/76djcLtBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeh/76djcLtBgEDCXBhcmFncmFwaAcAof++nY3C7QYCBgQAof++nY3C7QYDBGxhenmHof++nY3C7QYCAwlwYXJhZ3JhcGgHAKH/vp2Nwu0GCAYEAKH/vp2Nwu0GCQVBZnRlcgA="
+    },
+    {
+      "name": "r25-rule-continuation",
+      "source": "- a\n  - - -\nlazy\n\nAfter",
+      "canonical": "- a\n\n  ---\n\nlazy\n\nAfter",
+      "projectedCanonical": "- a\n\n  ---\n\nlazy\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ2Tw+zG24HfCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCTw+zG24HfCgEDCGxpc3RJdGVtBwCTw+zG24HfCgIDCXBhcmFncmFwaAcAk8PsxtuB3woDBgQAk8PsxtuB3woEAWGHk8PsxtuB3woDAw5ob3Jpem9udGFsUnVsZYeTw+zG24HfCgEDCXBhcmFncmFwaAcAk8PsxtuB3woHBgQAk8PsxtuB3woIBGxhenmHk8PsxtuB3woHAwlwYXJhZ3JhcGgHAJPD7Mbbgd8KDQYEAJPD7Mbbgd8KDgVBZnRlcgA="
+    },
+    {
+      "name": "r25-bare-reread",
+      "source": "- a\n  b\n  -\n\n x",
+      "canonical": "- \n  ## a\n  b\n\n&#32;x",
+      "projectedCanonical": "- \n  ## a\n  b\n\n&#32;x",
+      "rereadCanonical": "- \n  ## a\n\n  b\n\n&#32;x",
+      "nativeRereadCanonical": "- \n  ## a\n\n  b\n\n&#32;x",
+      "foldRefuse": true,
+      "rustBase64": "AQuvhLvZw9zmDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCvhLvZw9zmDwEDCGxpc3RJdGVtBwCvhLvZw9zmDwIDCXBhcmFncmFwaIevhLvZw9zmDwMDB2hlYWRpbmcoAK+Eu9nD3OYPBAVsZXZlbAF9AgcAr4S72cPc5g8EBgQAr4S72cPc5g8GA2EKYoevhLvZw9zmDwEDCXBhcmFncmFwaAcAr4S72cPc5g8KBgQAr4S72cPc5g8LAiB4AA=="
+    },
+    {
+      "name": "r25-bare-empty-parent",
+      "source": "-\n  -\n\n x",
+      "canonical": "- \n  - \n\n&#32;x",
+      "projectedCanonical": "- \n  - \n\n&#32;x",
+      "foldRefuse": true,
+      "rustBase64": "AQq8iOvfocSZBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC8iOvfocSZBwEDCGxpc3RJdGVtBwC8iOvfocSZBwIDCXBhcmFncmFwaIe8iOvfocSZBwMDCmJ1bGxldExpc3QHALyI69+hxJkHBAMIbGlzdEl0ZW0HALyI69+hxJkHBQMJcGFyYWdyYXBoh7yI69+hxJkHAQMJcGFyYWdyYXBoBwC8iOvfocSZBwcGBAC8iOvfocSZBwgCIHgA"
     }
   ],
   "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."

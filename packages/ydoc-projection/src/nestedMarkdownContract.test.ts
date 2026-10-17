@@ -9,7 +9,7 @@ import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValid
 import { markdownToYDoc, yDocToMarkdown, serializeRichdocBody, parseRichdocMarkdown } from './import-export.js'
 
 const corpus = JSON.parse(readFileSync(new URL('../../../tools/rust-engine-program/nested-markdown-contract.json', import.meta.url), 'utf8')) as {
-  cases: Array<{ name: string; source: string; canonical?: string; sourceCanonical?: string; witnessSeed?: boolean; foldRefuse?: boolean; refuse?: boolean; projected?: boolean; rustBase64?: string }>
+  cases: Array<{ name: string; source: string; canonical?: string; rereadCanonical?: string; sourceCanonical?: string; witnessSeed?: boolean; foldRefuse?: boolean; refuse?: boolean; projected?: boolean; rustBase64?: string }>
 }
 it.each(corpus.cases)('shares the nested Markdown contract for $name', item => {
   if (item.refuse) {
@@ -71,7 +71,7 @@ it.each(['Mr. Smith arrived.', 'Dr. Jones', 'St. Louis', 'I. Overview', 'Intro\n
 it('fix1 refuses inline nesting before marked can overflow its stack', () => {
   expect(() => markdownToYDoc('- '.repeat(5000) + 'x')).toThrow(/not representable/)
 })
-it.each(corpus.cases.filter(item => !item.refuse))('fix1 accepts its canonical output for $name unchanged', item => {
+it.each(corpus.cases.filter(item => !item.refuse && !item.rereadCanonical))('fix1 accepts its canonical output for $name unchanged', item => {
   const doc = markdownToYDoc(item.canonical!, { reading: 'projection' })
   try { expect(yDocToMarkdown(doc)).toBe(item.canonical) } finally { doc.destroy() }
 })
@@ -158,4 +158,19 @@ it.each(corpus.cases.filter(item => item.name.startsWith('r24-')))('keeps Marked
   const doc = markdownToYDoc(item.source, { reading: 'projection' })
   try { expect(yDocToMarkdown(doc)).toBe((item as typeof item & { projectedCanonical: string }).projectedCanonical) }
   finally { doc.destroy() }
+})
+
+it.each(corpus.cases.filter(item => item.name.startsWith('r25-')))('keeps round 25 boundaries for $name in projected reading', item => {
+  if (item.refuse) { expect(() => markdownToYDoc(item.source, { reading: 'projection' })).toThrow(/not representable/); return }
+  const doc = markdownToYDoc(item.source, { reading: 'projection' })
+  try { expect(yDocToMarkdown(doc)).toBe((item as typeof item & { projectedCanonical: string }).projectedCanonical) }
+  finally { doc.destroy() }
+})
+
+it.each(corpus.cases.filter(item => item.rereadCanonical))('pins the one-time multiline-heading reread for $name', item => {
+  for (const reading of ['source', 'projection'] as const) {
+    const second = serializeRichdocBody(parseRichdocMarkdown(item.canonical!, reading))
+    expect(second).toBe(item.rereadCanonical)
+    expect(serializeRichdocBody(parseRichdocMarkdown(second, reading))).toBe(second)
+  }
 })

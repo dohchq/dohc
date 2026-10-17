@@ -7641,8 +7641,8 @@ mod tests {
         for (source, expected) in [
             ("- Run:\n\n      npm i foo", "- Run:\n\n  &#32;   npm i foo"),
             ("Install:\n\n    npm i foo", "Install:\n\n&#32;   npm i foo"),
-            ("- \n\n  - b\n - c", "- \n\n- b\n\n- c"),
-            ("1.\n\n   - b\n  - c", "1. \n\n- b\n\n- c"),
+            ("- \n\n  - b\n - c", "- \n\n- b\n- c"),
+            ("1.\n\n   - b\n  - c", "1. \n\n- b\n- c"),
         ] {
             let (_scratch, mut store, key) =
                 content_conflict_store("Other settled body", source, None, ContentKind::Richdoc);
