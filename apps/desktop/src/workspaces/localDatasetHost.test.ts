@@ -744,3 +744,14 @@ it("keeps History read errors and recovers the read transaction", async () => {
   await expect(host.historyHeads({ limit: 0 })).rejects.toMatchObject({ code: "invalid", message: "Invalid Collection history page." });
   await expect(host.historyHeads({ limit: 1 })).resolves.toMatchObject({ sourceCount: 1 });
 });
+
+it("reports a worker startup failure for one page and succeeds on the next request", async () => {
+  const { host, workspaceRoot } = await open(); await activate(host);
+  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  try {
+    db.prepare("UPDATE local_dataset_identity SET workspace_id=? WHERE singleton=1").run("another-workspace");
+    await expect(host.historyHeads()).rejects.toThrow("This Collection store belongs to another workspace.");
+    db.prepare("UPDATE local_dataset_identity SET workspace_id=? WHERE singleton=1").run("w");
+    await expect(host.historyHeads()).resolves.toMatchObject({ sourceCount: 1, pages: [{ datasetId: id(1) }] });
+  } finally { db.close(); }
+});

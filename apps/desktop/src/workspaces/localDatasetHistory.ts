@@ -1,4 +1,4 @@
-import { historyActivitySql, historyStatement, readDatasetHistoryHeads } from "@dohc/app-backend-runtime/dataset-host";
+import { historyActivitySql, historyStatement, readDatasetHistoryHeads } from "@dohc/app-backend-runtime/dataset-history";
 import type { JournalDb } from "@dohc/app-backend-runtime/journal";
 
 export interface LocalDatasetHistoryInput {

@@ -1,6 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
-import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-host";
+import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
 import { readLocalDatasetHistory, type LocalDatasetHistoryInput } from "./localDatasetHistory.ts";
 
 const port = parentPort;
@@ -24,4 +24,3 @@ port.on("message", (input: LocalDatasetHistoryInput) => {
       ...(error instanceof DatasetHostError ? { code: error.code } : {}) } });
   }
 });
-port.on("close", () => db.close());

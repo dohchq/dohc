@@ -1,5 +1,5 @@
 import { Worker } from "node:worker_threads";
-import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-host";
+import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
 import type { LocalDatasetHistoryInput, readLocalDatasetHistory } from "./localDatasetHistory";
 
 type Result = ReturnType<typeof readLocalDatasetHistory>;
@@ -8,25 +8,25 @@ type Answer = { result: Result; error?: never } | { result?: never; error: { mes
 /** One read-only connection per workspace, opened on the first History request. */
 export function createLocalDatasetHistoryReader(path: string, workspaceId: string) {
   let worker: Worker | undefined;
-  let failure: Error | undefined;
   let closed = false;
   let serial: Promise<unknown> = Promise.resolve();
   let closing: Promise<void> | undefined;
 
   function send(input: LocalDatasetHistoryInput): Promise<Result> {
     if (closed) return Promise.reject(new Error("This Collection session ended. Reopen the workspace."));
-    if (failure) return Promise.reject(failure);
     if (!worker) {
-      worker = new Worker(new URL(import.meta.url.endsWith(".ts")
+      const started = new Worker(new URL(import.meta.url.endsWith(".ts")
         ? "localDatasetHistoryThread.ts" : "collection-history-worker.js", import.meta.url), { workerData: { path, workspaceId } });
-      worker.on("error", error => { failure = error; });
-      worker.on("exit", () => { failure ??= new Error("Collection history is unavailable."); });
+      worker = started;
+      const discard = () => { if (worker === started) worker = undefined; };
+      started.on("error", discard);
+      started.on("exit", discard);
     }
     const current = worker;
     return new Promise((resolve, reject) => {
       const cleanup = () => { current.off("message", message); current.off("error", failed); current.off("exit", exited); current.unref(); };
       const failed = (error: Error) => { cleanup(); reject(error); };
-      const exited = () => failed(failure ?? new Error("Collection history is unavailable."));
+      const exited = () => failed(new Error("Collection history is unavailable."));
       const message = (answer: Answer) => {
         cleanup();
         if (answer.error) reject(answer.error.code ? new DatasetHostError(answer.error.code, answer.error.message) : new Error(answer.error.message));
