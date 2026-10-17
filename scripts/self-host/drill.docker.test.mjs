@@ -52,7 +52,7 @@ test("a killed deployment's data disk starts in a fresh Compose project and refu
   const continuity = () => JSON.parse(asRoot(`const {DatabaseSync}=require('node:sqlite');const fs=require('node:fs');
     const config=JSON.parse(fs.readFileSync('/scratch/disk/dohc/continuity/deployment.json','utf8'));
     const db=new DatabaseSync('/scratch/disk/dohc/continuity/history/continuity.sqlite',{readOnly:true});
-    try{console.log(JSON.stringify({namespace:config.namespace,stamp:db.prepare('SELECT expected_stamp FROM continuity').get().expected_stamp}));}finally{db.close();}`));
+    try{console.log(JSON.stringify({namespace:config.namespace,stamp:db.prepare('SELECT confirmed_stamp FROM continuity').get().confirmed_stamp}));}finally{db.close();}`));
   try {
     await mkdir(drill);
     const { buildRelayFixture } = await import("../../services/sync-relay/scripts/build.mjs");
