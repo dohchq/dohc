@@ -616,7 +616,7 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   }
 });
 
-test("desktop release stages the Rust engine built for the packaged architecture", async () => {
+test("desktop release stages the Rust engine and Collection compiler for the packaged architecture", async () => {
   const root = await mkdtemp(join(tmpdir(), "dohc-engine-cross-build-"));
   const scriptDir = join(root, "apps/desktop/scripts");
   await mkdir(scriptDir, { recursive: true });
@@ -737,6 +737,13 @@ test("desktop release stages the Rust engine built for the packaged architecture
     .replace('"${{ matrix.target }}"', target)
     .trim().split(/\s+/);
   assert.equal(buildModule.parseTargetArgument(engineArgs), target);
+  // The Apple silicon runner packages macOS x64 with the x64 Collection compiler.
+  assert.equal(releaseStep(build, "pnpm install").run, "pnpm install --frozen-lockfile --cpu=current --cpu=${{ matrix.arch }}");
+  const stageCompiler = releaseStep(build, "stage-app-compiler.mjs");
+  assert.equal(stageCompiler.run, "node apps/desktop/scripts/stage-app-compiler.mjs --arch=${{ matrix.arch }}");
+  const order = step => build.steps.indexOf(step);
+  assert.ok(order(releaseStep(build, "pnpm build:desktop")) < order(stageCompiler), "target staging replaces the build's runner staging");
+  assert.ok(order(stageCompiler) < order(releaseStep(build, "electron-builder")), "packaging checks the target's compiler");
 });
 
 test("desktop release workflow uploads only distributable release assets", () => {

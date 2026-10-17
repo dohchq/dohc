@@ -38,8 +38,8 @@ Review and approve the change, then reopen **Create form** and select the new ac
 The new action preserves existing custom source and records. Existing apps require review for the changed executable revision.
 Creating the action does not publish an app or add the action to existing app grants.
 
-Creating and compiling Collection actions currently requires the Windows x64 desktop build.
-The relay's Node runtime portability does not establish desktop creation support on other platforms.
+The desktop compiles Collection actions on Windows x64, macOS, and Linux.
+Opening or publishing an app that uses them currently requires the Windows x64 desktop build.
 
 For custom rules, copy [the fundraiser example](../../examples/fundraiser/README.md) into the workspace.
 Review its synthetic event details and payment instructions before using it.
