@@ -26,7 +26,6 @@ import {
   systemMotionOperations,
   serverAccountOperations,
   SitePreviewReplacedEvent,
-  OwnerLiveDocumentActionPayload,
   DesktopUserSettingsResult,
   ShareDirectWritesPushedEvent,
   shareDirectWriteDeliveryOperations,
@@ -238,17 +237,6 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.cloudEnableSync, payload),
   cloudJoinWorkspace: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),
-  stopOwnerLiveDocument: async payload => {
-    await ipcRenderer.invoke(CHANNELS.stopOwnerLiveDocument, OwnerLiveDocumentActionPayload.parse(payload));
-  },
-  resumeOwnerLiveDocument: async payload => {
-    await ipcRenderer.invoke(CHANNELS.resumeOwnerLiveDocument, OwnerLiveDocumentActionPayload.parse(payload));
-  },
-  listRelayShares: () => ipcRenderer.invoke(CHANNELS.listRelayShares),
-  getRelayReceivedShare: (payload) =>
-    ipcRenderer.invoke(CHANNELS.getRelayReceivedShare, payload),
-  revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
-  undoRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.undoRelayShare, payload),
   ownerRestore: async <Action extends OwnerRestoreAction>(payload: OwnerRestoreRequest & {action: Action}) => {
     const request = OwnerRestoreRequest.parse(payload);
     return OwnerRestoreActionResponse[request.action].parse(await ipcRenderer.invoke(CHANNELS.ownerRestore, request)) as OwnerRestoreResult<Action>;
@@ -257,10 +245,6 @@ const bridge: DohcDesktopBridge = {
     await ipcRenderer.invoke(CHANNELS.publishOwnerApp, OwnerAppPublicationRequest.parse(payload))),
   dataset: async (payload: DatasetRequest) => DatasetResult.parse(await ipcRenderer.invoke(CHANNELS.dataset, DatasetRequest.parse(payload))),
   ownerAppResponses:async(payload:OwnerAppResponsesRequest)=>OwnerAppResponsesResult.parse(await ipcRenderer.invoke(CHANNELS.ownerAppResponses,OwnerAppResponsesRequest.parse(payload))),
-  pollRelayShareDiscussionActivity: (payload) =>
-    ipcRenderer.invoke(CHANNELS.pollRelayShareDiscussionActivity, payload),
-  cancelRelayShareDiscussionActivity: (payload) =>
-    ipcRenderer.invoke(CHANNELS.cancelRelayShareDiscussionActivity, payload),
   ...operationBridge(sharedViewAccessOperations, invoke),
   listCollectionAutomations: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),

@@ -230,5 +230,13 @@
   "share.discussion.pause",
   "share.discussion.resume",
   "share.grant.promote",
-  "share.grant.revoke"
+  "share.grant.revoke",
+  "share.live.document.stop",
+  "share.live.document.resume",
+  "share.list",
+  "share.received.read",
+  "share.revoke",
+  "share.revoke.undo",
+  "share.discussion.activity.wait",
+  "share.discussion.activity.cancel"
 ]

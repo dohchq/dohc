@@ -54,8 +54,9 @@ import { selfHostLiveProfile } from "../../../../services/sync-relay/src/selfHos
 import { runNativeOwnerDeliveryPass } from "./nativeOwnerDelivery";
 import { readyOwnerDeliveryDocuments } from "./serverOwnerDelivery";
 import { startServerOwnerDelivery } from "./serverOwnerDelivery";
+import { relayShareOperations } from "../ipc/shareOperations";
+import { registerOperations } from "../ipc/operationTable";
 import {registerRelaySharesIpcHandlers} from "../ipc/relaySharesIpc";
-import {CHANNELS} from "../ipc/channels";
 import {createPresencePollRegistry} from "../collab/presencePollRegistry";
 import {reconcileOwnerLiveStops} from "./ownerLiveStop";
 
@@ -965,7 +966,7 @@ it.skipIf(engine.missing).each([
       const credentials = {serverUrl: proxy.origin, relayUrl: proxy.origin, userId: workspaceId, email: "owner@dohc.test", token: relayConnection.token};
       const unexpected = (): never => {throw new Error("Unexpected Stop dependency");};
       let offline = offlineStop;
-      registerRelaySharesIpcHandlers({
+      const ownerHandlers = registerRelaySharesIpcHandlers({
         registerHandler: (channel, handler) => {handlers.set(channel, handler);}, assertTrustedSender() {},
         withRendererWorkspaceOperation: async (_sender, id, _message, work) => {expect(id).toBe(workspaceId);return work({workspace: source.workspace, assertCurrent() {}});},
         remoteForWorkspace: async () => ({credentials, credentialGeneration: 1}), currentCredentialGeneration: () => 1,
@@ -983,8 +984,16 @@ it.skipIf(engine.missing).each([
           return action === "request" ? client.ownerYDocStopRequest(request, stopPath) : client.ownerYDocRelease(request, binding as import("@dohc/live-session-contract").LiveObjectBinding, acceptedCursor!);
         }), sharesChanged: unexpected, reconcileReceivedShares: unexpected,
       });
-      const stop = () => Promise.resolve(handlers.get(CHANNELS.stopOwnerLiveDocument)!({sender: {id: 1}}, {workspaceId, path}));
-      const resume = () => Promise.resolve(handlers.get(CHANNELS.resumeOwnerLiveDocument)!({sender: {id: 1}}, {workspaceId, path}));
+      registerOperations({
+        handle: (channel, handler) => {handlers.set(channel, handler);},
+        assertTrustedSender() {},
+        withActiveWorkspace: async (_event: {sender: {id: number}}, id, _message, work) => {
+          expect(id).toBe(workspaceId);
+          return work({workspace: source.workspace, assertCurrent() {}});
+        },
+      }, relayShareOperations, ownerHandlers);
+      const stop = () => Promise.resolve(handlers.get(relayShareOperations.stopOwnerLiveDocument.channel)!({sender: {id: 1}}, {workspaceId, path}));
+      const resume = () => Promise.resolve(handlers.get(relayShareOperations.resumeOwnerLiveDocument.channel)!({sender: {id: 1}}, {workspaceId, path}));
       // The session host either parks the stopped document before Resume, or
       // pulls nothing between Stop and Resume and still holds it ready.
       const hostReadyAtResume = name === "stale-binding quarantine";

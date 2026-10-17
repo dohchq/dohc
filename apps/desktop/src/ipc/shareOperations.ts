@@ -19,6 +19,11 @@ import {
   DismissShareSkipsPayload,
   ListOwnerLiveDocumentsPayload, OwnerLiveDocumentsResult,
   ListOwnerLiveRefusalsPayload, OwnerLiveRefusalsResult,
+  OwnerLiveDocumentActionPayload,
+  ListRelaySharesResult, GetRelayReceivedSharePayload, GetRelayReceivedShareResult,
+  RevokeRelaySharePayload, RevokeRelayShareResult, UndoRelaySharePayload, UndoRelayShareResult,
+  PollRelayShareDiscussionActivityPayload, PollRelayShareDiscussionActivityResult,
+  CancelRelayShareDiscussionActivityPayload,
   RetryOwnerLiveSharePayload,
   CreateRelaySharePayload, CreateRelayShareResult,
   CreateRelayShareLinkPayload, CreateRelayShareLinkResult,
@@ -192,11 +197,43 @@ export const relayShareOperations = {
     inactiveMessage: "Sharing stopped because this window changed workspaces.",
     payload: RetryOwnerLiveSharePayload,
   },
+  stopOwnerLiveDocument: {
+    capabilityId: "share.live.document.stop", channel: "desktop:stop-owner-live-document",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Live editing stopped because this window changed workspaces.",
+    payload: OwnerLiveDocumentActionPayload,
+  },
+  resumeOwnerLiveDocument: {
+    capabilityId: "share.live.document.resume", channel: "desktop:resume-owner-live-document",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Live editing stopped because this window changed workspaces.",
+    payload: OwnerLiveDocumentActionPayload,
+  },
   createRelayShare: {
     capabilityId: "share.create", channel: "desktop:create-relay-share",
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "Sharing stopped because this window changed workspaces.",
     payload: CreateRelaySharePayload, result: CreateRelayShareResult,
+  },
+  listRelayShares: {
+    capabilityId: "share.list", channel: "desktop:list-relay-shares",
+    scope: "device", guard: "trusted-sender",
+    payload: z.void(), result: ListRelaySharesResult,
+  },
+  getRelayReceivedShare: {
+    capabilityId: "share.received.read", channel: "desktop:get-relay-received-share",
+    scope: "device", guard: "trusted-sender",
+    payload: GetRelayReceivedSharePayload, result: GetRelayReceivedShareResult,
+  },
+  revokeRelayShare: {
+    capabilityId: "share.revoke", channel: "desktop:revoke-relay-share",
+    scope: "device", guard: "trusted-sender",
+    payload: RevokeRelaySharePayload, result: RevokeRelayShareResult,
+  },
+  undoRelayShare: {
+    capabilityId: "share.revoke.undo", channel: "desktop:undo-relay-share",
+    scope: "device", guard: "trusted-sender",
+    payload: UndoRelaySharePayload, result: UndoRelayShareResult,
   },
   createRelayShareLink: {
     capabilityId: "share.link.create", channel: "desktop:create-relay-share-link",
@@ -239,6 +276,17 @@ export const relayShareOperations = {
     scope: "workspace", guard: "active-workspace",
     inactiveMessage: "Sharing stopped because this window changed workspaces.",
     payload: ListRelayShareDiscussionPayload, result: ListRelayShareDiscussionResult,
+  },
+  pollRelayShareDiscussionActivity: {
+    capabilityId: "share.discussion.activity.wait", channel: "desktop:poll-relay-share-discussion-activity",
+    scope: "workspace", guard: "active-workspace",
+    inactiveMessage: "Sharing stopped because this window changed workspaces.",
+    payload: PollRelayShareDiscussionActivityPayload, result: PollRelayShareDiscussionActivityResult,
+  },
+  cancelRelayShareDiscussionActivity: {
+    capabilityId: "share.discussion.activity.cancel", channel: "desktop:cancel-relay-share-discussion-activity",
+    scope: "device", guard: "trusted-sender",
+    payload: CancelRelayShareDiscussionActivityPayload,
   },
   appendRelayShareDiscussion: {
     capabilityId: "share.discussion.post", channel: "desktop:append-relay-share-discussion",

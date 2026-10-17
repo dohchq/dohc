@@ -157,20 +157,10 @@ export const CHANNELS = {
   shareHandoffStatus: "desktop:share-handoff-status",
   cloudEnableSync: "desktop:cloud-enable-sync",
   cloudJoinWorkspace: "desktop:cloud-join-workspace",
-  listRelayShares: "desktop:list-relay-shares",
-  getRelayReceivedShare: "desktop:get-relay-received-share",
-  revokeRelayShare: "desktop:revoke-relay-share",
-  undoRelayShare: "desktop:undo-relay-share",
   ownerRestore: "desktop:owner-restore",
-  stopOwnerLiveDocument: "desktop:stop-owner-live-document",
-  resumeOwnerLiveDocument: "desktop:resume-owner-live-document",
   publishOwnerApp: "desktop:publish-owner-app",
   ownerAppResponses: "desktop:owner-app-responses",
   dataset: "desktop:dataset",
-  pollRelayShareDiscussionActivity:
-    "desktop:poll-relay-share-discussion-activity",
-  cancelRelayShareDiscussionActivity:
-    "desktop:cancel-relay-share-discussion-activity",
   // An automation claim failed or a retry queued one: run history reads again.
   automationRunsChanged: "desktop:automation-runs-changed",
   // The crash report changed; the renderer reads it again.
