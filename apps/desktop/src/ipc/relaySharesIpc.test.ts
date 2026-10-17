@@ -58,9 +58,11 @@ function harness() {
         workspace: Workspace; state: object; signal: AbortSignal; assertCurrent(): void;
       }) => Result | Promise<Result>,
     ) => {
-
+      const attached = requestedWorkspaceId === workspaceId
+        ? workspace
+        : { ...workspace, workspaceId: requestedWorkspaceId, attachmentId: Symbol("other") };
       return work({
-        workspace: requestedWorkspaceId === workspaceId ? workspace : { ...workspace, workspaceId: requestedWorkspaceId, attachmentId: Symbol("other") }, state: {}, signal: new AbortController().signal,
+        workspace: attached, state: {}, signal: new AbortController().signal,
         assertCurrent() {
           if (!physicalCurrent) throw new Error("physical workspace retired");
         },
