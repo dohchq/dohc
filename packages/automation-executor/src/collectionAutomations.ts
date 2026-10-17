@@ -193,8 +193,7 @@ const GROUP_MESSAGES_NEED_SYNC = "Turn on sync so Group messages start this auto
 const DEADLINE_GRACE_MS = 30_000;
 // Runs that time out this many times in a row switch their automation off.
 export const TIMEOUTS_BEFORE_SWITCH_OFF = 3;
-// A claim the evaluator had no room for runs again after this long, if
-// nothing else wakes the drain first.
+// Busy claims and opens try again after this long, unless another wake retries first.
 const BUSY_RETRY_MS = 2_000;
 // Run history expires at open, then at most this often, after a run settles.
 const HISTORY_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
@@ -1214,6 +1213,7 @@ export class CollectionAutomations {
   /** A run finished or failed in this drain; the drain tells the windows once, as it ends. */
   private runsFinished = false;
   private busyTimer: ReturnType<typeof setTimeout> | null = null;
+  private busyOpenRetry = false;
   // When run history last expired, or null before the first time.
   private historyPrunedAtMs: number | null = null;
   // The expiry pass in progress; a later pass starts after it.
@@ -1296,7 +1296,8 @@ export class CollectionAutomations {
       (error: unknown) => {
         // A later open tries again.
         if (current()) this.opened = null;
-        this.options.onError("open Collection automations", error);
+        if (current() && isEngineStoreBusyRefusal(error)) this.scheduleBusyRetry(true);
+        else this.options.onError("open Collection automations", error);
       },
     );
     return this.opened;
@@ -3884,6 +3885,7 @@ export class CollectionAutomations {
     this.runAbort = new AbortController();
     if (this.busyTimer) clearTimeout(this.busyTimer);
     this.busyTimer = null;
+    this.busyOpenRetry = false;
     if (this.historyTimer) clearTimeout(this.historyTimer);
     this.historyTimer = null;
     // The next open expires run history again, and keeps doing so hourly.
@@ -5444,10 +5446,15 @@ export class CollectionAutomations {
     };
   }
 
-  private scheduleBusyRetry(): void {
+  private scheduleBusyRetry(reopen = false): void {
+    this.busyOpenRetry ||= reopen;
     if (this.busyTimer) return;
     this.busyTimer = setTimeout(() => {
       this.busyTimer = null;
+      if (this.busyOpenRetry) {
+        this.busyOpenRetry = false;
+        void this.open();
+      }
       this.clearWaits("busy");
     }, BUSY_RETRY_MS);
     this.busyTimer.unref?.();

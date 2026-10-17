@@ -87,8 +87,86 @@ function emptyExecutor(store: CollectionAutomationsOptions["store"], overrides: 
     onSwitchedOff: () => undefined, onHoldsChanged: () => undefined, onAutomationsChanged: () => undefined,
     onError: vi.fn(), ...overrides,
   });
-  return { executor, evaluator };
+  return { executor, evaluator, engine };
 }
+
+it("retries a busy reconcile during background open without rejecting or reporting a failure", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const store = createAutomationRunStore(await createTestScratch("dohc-open-busy-"), testMetadataDir);
+  const errors = vi.fn((_where: string, error: unknown) => { throw error; });
+  const reconciled = Promise.withResolvers<void>();
+  const { executor, evaluator, engine } = emptyExecutor(store, {
+    onError: errors, onAutomationsChanged: () => reconciled.resolve(),
+  });
+  const busy = new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined);
+  const release = vi.spyOn(engine, "releaseAutomationGroups").mockRejectedValueOnce(busy);
+  const opened = Promise.withResolvers<void>();
+  // The relay starts open in the background and forwards rejections to its error reporter.
+  void executor.open().then(() => opened.resolve(), (error: unknown) => { opened.resolve(); throw error; });
+  try {
+    await opened.promise;
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(errors).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(release).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await reconciled.promise;
+    await executor.idle();
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    await executor.dispose();
+    await evaluator.close();
+    vi.useRealTimers();
+  }
+});
+
+it.each([false, true])("reports a non-retryable reconcile refusal through the open error path (after busy: %s)", async (afterBusy) => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const store = createAutomationRunStore(await createTestScratch("dohc-open-refused-"), testMetadataDir);
+  const reported = Promise.withResolvers<void>();
+  const errors = vi.fn(() => reported.resolve());
+  const { executor, evaluator, engine } = emptyExecutor(store, { onError: errors });
+  const refusal = new DaemonRefusalError({ code: "INVALID_PARAMS", message: "invalid-input", retry: "no" }, undefined);
+  const release = vi.spyOn(engine, "releaseAutomationGroups");
+  if (afterBusy) release.mockRejectedValueOnce(new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined));
+  release.mockRejectedValueOnce(refusal);
+  try {
+    await executor.open();
+    if (afterBusy) {
+      expect(errors).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await reported.promise;
+    }
+    expect(errors).toHaveBeenCalledExactlyOnceWith("open Collection automations", refusal);
+  } finally {
+    await executor.dispose();
+    await evaluator.close();
+    vi.useRealTimers();
+  }
+});
+
+it.each(["close", "dispose"] as const)("cancels a busy reconcile retry on %s", async (operation) => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const store = createAutomationRunStore(await createTestScratch("dohc-open-busy-stop-"), testMetadataDir);
+  const errors = vi.fn();
+  const { executor, evaluator, engine } = emptyExecutor(store, { onError: errors });
+  const release = vi.spyOn(engine, "releaseAutomationGroups").mockRejectedValueOnce(
+    new DaemonRefusalError({ code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" }, undefined),
+  );
+  try {
+    await executor.open();
+    await executor[operation]();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(release).toHaveBeenCalledOnce();
+    expect(errors).not.toHaveBeenCalled();
+  } finally {
+    await executor.dispose();
+    await evaluator.close();
+    vi.useRealTimers();
+  }
+});
 
 it.each(["close", "dispose"] as const)("waits for the current run history prune batch on %s without starting another", async (operation) => {
   const store = createAutomationRunStore(await createTestScratch(`dohc-${operation}-pruning-`), testMetadataDir);
