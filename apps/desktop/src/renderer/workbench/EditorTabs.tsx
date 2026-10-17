@@ -1,4 +1,6 @@
 import { parseTab, TAB_KINDS } from "./workbenchState";
+import { TabGlyph, tabMark, type TabMark } from "./tabGlyph";
+import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { editorTabTestId } from "../../testPins";
 import { focusSurface, useFocusSurface } from "../ui/focusReturn";
 import { Menu } from "../ui/Menu";
@@ -22,6 +24,9 @@ function tabTitle(path: string, label?: string): string {
   const tab = parseTab(path);
   return TAB_KINDS[tab.kind].tooltip(tab, label);
 }
+
+// The drawing's tab glyph is 14px.
+const TAB_GLYPH_SIZE = 14;
 
 // The active tab and the editor body below it share one surface. The tab's
 // bottom outer corners curve out into the strip's hairline (the joins) and
@@ -141,6 +146,8 @@ const Tab = memo(function Tab(props: {
   /** The tab's display name when the path alone cannot supply it. A string,
    * not a lookup: this component is memoized on its props. */
   label?: string;
+  glyph: TabMark["glyph"];
+  icon: string | undefined;
   active: boolean;
   dirty: boolean;
   onActivate: (groupId: string, path: string) => void;
@@ -214,7 +221,12 @@ const Tab = memo(function Tab(props: {
           className="h-1.5 w-1.5 shrink-0 rounded-full bg-ink"
         />
       ) : null}
-      <span className="max-w-44 truncate">{name}</span>
+      {/* The drawing's 8px from glyph to name; the glyph is muted on the
+          active tab and subtle on the rest. */}
+      <span className="flex items-center gap-2">
+        <TabGlyph glyph={props.glyph} icon={props.icon} size={TAB_GLYPH_SIZE} className={props.active ? "text-muted" : "text-subtle"} />
+        <span className="max-w-44 truncate">{name}</span>
+      </span>
       <button
         type="button"
         aria-label={`Close ${name}`}
@@ -677,6 +689,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   /** Display names the tab path cannot supply, keyed by path: moment paths
    * from history records. */
   tabLabels?: ReadonlyMap<string, string>;
+  /** The listing by path: a file tab's header-checked kind and page emoji. */
+  files?: ReadonlyMap<string, WorkspaceFileEntry>;
   // Paths with a set-aside draft. Unlike `activeTabDirty`, this is
   // knowable for every tab — the store outlives the keyed inspectors — so an
   // inactive tab keeps its marker.
@@ -923,6 +937,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
             groupId={props.groupId}
             path={tab.path}
             label={props.tabLabels?.get(tab.path)}
+            {...tabMark(tab.path, props.files)}
             active={tab.path === props.activeTab}
             dirty={
               (tab.path === props.activeTab && props.activeTabDirty) ||
@@ -1090,6 +1105,15 @@ export const EditorTabs = memo(function EditorTabs(props: {
             id: tab.path,
             label: fileName(tab.path, props.tabLabels?.get(tab.path)),
             title: tab.path,
+            // Ink on the current row's selected fill and subtle elsewhere,
+            // as Explorer's open editors tone the same glyph.
+            icon: (
+              <TabGlyph
+                {...tabMark(tab.path, props.files)}
+                size={TAB_GLYPH_SIZE}
+                className={tab.path === props.activeTab ? "text-ink" : "text-subtle"}
+              />
+            ),
             current: tab.path === props.activeTab,
             onSelect: () => props.onActivate(props.groupId, tab.path),
           }))}

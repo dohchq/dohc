@@ -1429,16 +1429,18 @@ export class ChatsLoopbackEngine implements EngineTransport {
     atMs: number,
   ): ChatMessage {
     const options = params.options;
-    if (options !== undefined && !Array.isArray(options)) throw new Error("invalid-poll-options");
+    // The daemon refuses options of the wrong type while it parses the request.
+    if (options !== undefined && !Array.isArray(options)) throw new Error("invalid parameters");
     const pollOptions: string[] = [];
     if (Array.isArray(options)) {
-      if (options.length > 12) throw new Error("invalid-poll-options");
+      if (options.length > 12) throw new Error("A poll has at most twelve choices.");
       for (const raw of options) {
-        if (typeof raw !== "string") throw new Error("invalid-poll-options");
+        if (typeof raw !== "string") throw new Error("invalid parameters");
         const option = raw.trim();
-        if (!option || option.length > 200 || /[\r\n]/u.test(option) || pollOptions.includes(option)) {
-          throw new Error("invalid-poll-options");
+        if (!option || option.length > 200 || /[\r\n]/u.test(option)) {
+          throw new Error("Each choice is one line of at most 200 characters.");
         }
+        if (pollOptions.includes(option)) throw new Error("Each choice appears once.");
         pollOptions.push(option);
       }
     }
