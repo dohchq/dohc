@@ -74,31 +74,32 @@ async function save(root: string, record: RecoveryRecord): Promise<void> {
     await rename(temp, path);
   } finally { await unlink(temp).catch(() => undefined); }
 }
-export async function readDeleteRecovery(root: string, id: string): Promise<RecoveryRecord | undefined> {
+export async function readDeleteRecovery(root: string, id: string, action: "read" | "undo" = "undo"): Promise<RecoveryRecord | undefined> {
+  const refusal = (detail: string) => new Error(`Cannot ${action === "read" ? "read this operation" : "undo the delete"}. ${detail}`);
   const metadata = await resolveWorkspaceMetadataDir(root, { create: false });
   if (!metadata) return undefined;
   const dir = join(metadata, "trash");
   const folder = await info(dir);
   if (!folder) return undefined;
-  if (!folder.isDirectory() || folder.isSymbolicLink() || !isInside(await realpath(root), await realpath(dir))) throw new Error("Cannot undo the delete. The workspace trash must be a real folder inside this workspace.");
+  if (!folder.isDirectory() || folder.isSymbolicLink() || !isInside(await realpath(root), await realpath(dir))) throw refusal("The workspace trash must be a real folder inside this workspace.");
   const path = join(dir, recordName(id));
   const entry = await info(path);
   if (!entry) return undefined;
   if (Date.now() - entry.mtimeMs > MAX_RECORD_AGE) return undefined;
-  if (entry.isSymbolicLink()) throw new Error("Cannot undo the delete. Its recovery record is a link.");
-  if (!entry.isFile()) throw new Error(invalidRecovery);
+  if (entry.isSymbolicLink()) throw refusal("Its recovery record is a link.");
+  if (!entry.isFile()) throw refusal("Its recovery record is invalid. Restore files from History or the trash.");
   const body = await readFile(path, "utf8");
   let record: RecoveryRecord;
   try { record = Record.parse(JSON.parse(body)); }
-  catch { throw new Error(invalidRecovery); }
-  if (record.operationId !== id || record.staged !== undefined && basename(record.staged) !== record.staged) throw new Error(invalidRecovery);
+  catch { throw refusal("Its recovery record is invalid. Restore files from History or the trash."); }
+  if (record.operationId !== id) throw refusal("Its recovery record is invalid. Restore files from History or the trash.");
   const paths = [record.base, ...record.paths, ...record.emptyFolders, ...(record.copies?.map(copy => copy.path) ?? []),
     ...[record.progress, record.result].flatMap(result => [...(result?.restored ?? []), ...(result?.remaining.map(item => item.path) ?? [])])];
-  if (paths.some(path => /^[a-z]:/iu.test(path) || !validPath(path, record.base))) {
-    throw new Error("Cannot undo the delete. Its recovery paths are invalid.");
+  if (paths.some(path => !validPath(path, record.base))) {
+    throw refusal("Its recovery paths are invalid.");
   }
-  if (record.staged !== undefined && (!validPath(record.staged, record.staged) || record.staged.includes("/") || record.staged.includes("\\"))) {
-    throw new Error(invalidRecovery);
+  if (record.staged !== undefined && (!validPath(record.staged, record.staged) || record.staged.includes("/"))) {
+    throw refusal("Its recovery record is invalid. Restore files from History or the trash.");
   }
   return record;
 }
@@ -325,12 +326,14 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
       // An interrupted copy stays journaled and keeps its source until a later Undo succeeds.
       const sourceMissing = !empty && await sourcePath(root, record, path)
         .then(async source => !await info(source)).catch(sourceError => code(sourceError) === "ENOENT");
+      const pendingCopy = record.copies?.some(copy => copy.path === path) ?? false;
+      if (sourceMissing && record.copies) record.copies = record.copies.filter(copy => copy.path !== path);
       result.remaining.push({ path, reason: empty
         ? `dohc could not recreate ${path}. Check the old path, then create the folder there.`
         : code(error) === "EEXIST"
-        ? `${path} now occupies the old path. Move it first. The deleted file stays at ${trashPath}.`
+        ? `${path} now occupies the old path. ${pendingCopy ? "Move it first. " : ""}The deleted file stays at ${trashPath}.`
         : sourceMissing
-        ? record.copies?.some(copy => copy.path === path)
+        ? pendingCopy
           && await checkedTarget(root, path, record.base).then(info).then(entry => entry?.isFile()).catch(() => false)
           ? `${path} may be incomplete. Its trash copy is gone.`
           : `dohc could not put ${path} back. Its trash copy is gone.`

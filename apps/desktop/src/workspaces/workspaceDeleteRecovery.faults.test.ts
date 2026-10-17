@@ -299,11 +299,12 @@ describe("delete recovery placement and receipts", () => {
         expect(result).toEqual({ ok: false, reason: "Cannot undo the delete. folder/rowless.txt now leads somewhere else." });
         return;
       }
-      expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt",
+      expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt", retry: change !== "source",
         reason: change === "source"
           ? "folder/rowless.txt may be incomplete. Its trash copy is gone."
           : `dohc could not put folder/rowless.txt back. It stays at .dohc/trash/${staged}/rowless.txt.`,
       }] });
+      if (change === "source") expect(await f.undo(id)).toEqual(result);
       expect(existsSync(faults.copyTarget)).toBe(change === "source");
       if (change !== "source") expect(await readFile(join(trash, staged, "rowless.txt"), "utf8")).toBe("not retained");
     } finally { faults.copyOnly = false; faults.failCopy = ""; faults.failPlace = false; }
@@ -470,7 +471,7 @@ describe("delete recovery placement and receipts", () => {
       const trash = join(f.root, ".dohc/trash");
       const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
       expect(result).toMatchObject({ restored: [], remaining: [{ path: "folder/rowless.txt",
-        reason: `folder/rowless.txt now occupies the old path. Move it first. The deleted file stays at .dohc/trash/${staged}/rowless.txt.` }] });
+        retry: false, reason: `folder/rowless.txt now occupies the old path. The deleted file stays at .dohc/trash/${staged}/rowless.txt.` }] });
       expect(await readFile(join(trash, staged, "rowless.txt"), "utf8")).toBe("not retained");
     } finally { faults.copyOnly = false; faults.beforePublish = undefined; }
   });

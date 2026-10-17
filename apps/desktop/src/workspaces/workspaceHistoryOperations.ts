@@ -7,8 +7,8 @@ import { HistoryOperationId, type HistoryOperationReadResult } from "@dohc/works
 import type { z } from "zod";
 import { validateUserMaterializePath, validateUserWritePath } from "@dohc/workspace-core";
 import { realRelativeInRoot } from "@dohc/workspace-core/realPath";
-import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
-import { historyPathAdmission, readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
+import { withExclusiveWorkspaceOperation, withSharedWorkspaceOperation } from "./workspaceAssets";
+import { historyExcludesSubtree, historyPathAdmission, readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import { missingDeleteRecoveryReason, readDeleteRecovery, undoDeleteRecovery, type RecoveryRecord, type DeleteUndoResult } from "./workspaceDeleteRecovery";
 
@@ -32,7 +32,7 @@ function writable(operation: Operation): void {
 }
 const absent = (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT";
 const failure = (error: unknown, action: "read" | "undo") => ({ ok: false as const, reason: error instanceof Error && !["SyntaxError", "TypeError", "ZodError", "ParseError", "RangeError"].includes(error.name) && !("syscall" in error) ? error.message : `dohc could not ${action} this operation. Check the workspace, then try again.` });
-async function agentFloor(rootPath: string): Promise<Floor> {
+async function agentFloor(rootPath: string, walkLiveDirectories = true): Promise<Floor> {
   const policy = await readWorkspaceEnginePolicy(rootPath);
   if (policy.errors.length) throw new Error("dohc could not read the workspace file policy. Fix the reported policy errors.");
   const allowed = historyPathAdmission(policy);
@@ -71,7 +71,8 @@ async function agentFloor(rootPath: string): Promise<Floor> {
     if (current && !current.isFile() && !current.isDirectory()) { parent = posix.dirname(path); throw reject(); }
     checked.add(path);
     if (!current) missing.add(path);
-    if (current?.isDirectory()) {
+    if (current?.isDirectory() && !walkLiveDirectories && historyExcludesSubtree(policy, path)) throw reject();
+    if (walkLiveDirectories && current?.isDirectory()) {
       const names = await readdir(target.resolvedAbsolute).catch(() => {
         throw new Error("dohc could not read " + location() + ". Check its permissions, then try again.");
       });
@@ -122,10 +123,10 @@ export async function readWorkspaceHistoryOperation(operation: Operation, input:
     writable(operation); operationId(input.operationId);
     const { rootPath, workspaceId } = operation.workspace;
     const cursor = input.cursor === undefined ? undefined : decodeCursor(input.cursor, workspaceId, input.operationId);
-    return await withExclusiveWorkspaceOperation(rootPath, async () => {
+    return await withSharedWorkspaceOperation(rootPath, async () => {
       writable(operation);
-      const floor = await agentFloor(rootPath);
-      const record = await readDeleteRecovery(rootPath, input.operationId);
+      const record = cursor ? undefined : await readDeleteRecovery(rootPath, input.operationId, "read");
+      const floor = await agentFloor(rootPath, !record?.result);
       if (record) await recoveryFloor(record, record.staged ? join(rootPath, ".dohc", "trash", record.staged) : undefined, floor);
       const result = await history.readHistoryPage({ workspaceId, operationId: input.operationId, limit: 50, ...(cursor ? { cursor } : {}) });
       for (const member of result.moments) { await floor(member.path); if (member.beforePath) await floor(member.beforePath); }
@@ -145,17 +146,18 @@ export async function undoWorkspaceHistoryOperation(operation: Operation, input:
     return await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
       writable(operation);
       const record = await readDeleteRecovery(rootPath, input.operationId);
-      const floor = options.agent ? await agentFloor(rootPath) : personFloor(rootPath);
-      if (record) await recoveryFloor(record, record.staged ? join(rootPath, ".dohc", "trash", record.staged) : undefined, floor);
+      const floor = options.agent ? await agentFloor(rootPath, !record?.result) : record ? personFloor(rootPath) : undefined;
+      if (record && floor) await recoveryFloor(record, record.staged ? join(rootPath, ".dohc", "trash", record.staged) : undefined, floor);
       let cursor: HistoryCursor | undefined, deleted = false;
       if (!record || record.tracked) do {
         const result = await options.history.readHistoryPage({ workspaceId, operationId: input.operationId, limit: 50, ...(cursor ? { cursor } : {}) });
         for (const member of result.moments) {
-          await floor(member.path); if (member.beforePath) await floor(member.beforePath);
+          if (floor) { await floor(member.path); if (member.beforePath) await floor(member.beforePath); }
           deleted ||= member.operation === "delete";
+          if (!floor && deleted) break;
         }
         cursor = result.nextCursor ?? undefined;
-      } while (cursor);
+      } while (cursor && (floor || !deleted));
       if (!record) throw new Error(deleted ? missingDeleteRecoveryReason : unsupported);
       return undoDeleteRecovery(rootPath, record, author, options.history, workspaceId, () => writable(operation), markChanged);
     });
