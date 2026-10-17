@@ -1,5 +1,5 @@
 import { errorMessage } from "./workspaceError.ts";
-import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -61,8 +61,10 @@ let processRunId: string | undefined;
 function nativeTmpdir(): string {
   // In WSL, os.tmpdir() can inherit Windows TEMP/TMP and land under /mnt/c,
   // where watcher and SQLite behavior can differ from native Linux temp.
-  // Windows keeps using the platform temp dir.
-  return process.platform !== "win32" && existsSync("/tmp") ? "/tmp" : tmpdir();
+  // Windows keeps using the platform temp dir. macOS /tmp is a link into
+  // /private, and code that canonicalizes a path must see the path it was given.
+  if (process.platform === "win32") return tmpdir();
+  return realpathSync(existsSync("/tmp") ? "/tmp" : tmpdir());
 }
 
 export function testScratchRunRoot(): string {
