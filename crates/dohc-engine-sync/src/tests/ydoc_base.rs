@@ -2265,6 +2265,17 @@ fn assert_peer_fold_from(
     settled: Option<&str>,
     reserved: bool,
 ) {
+    assert_peer_fold_with_base(initial, chosen, refuses, settled, reserved, None);
+}
+
+fn assert_peer_fold_with_base(
+    initial: &str,
+    chosen: &str,
+    refuses: bool,
+    settled: Option<&str>,
+    reserved: bool,
+    desktop_base: Option<&[u8]>,
+) {
     use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
     const PATH: &str = "tasks/record.md";
     let (_origin_dir, _origin_path, mut origin) = open_store();
@@ -2294,9 +2305,15 @@ fn assert_peer_fold_from(
             .unwrap();
     }
     let source = Ydoc::wire();
-    source
-        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, initial)
-        .unwrap();
+    if let Some(base) = desktop_base {
+        source.apply(base).unwrap();
+    } else {
+        source
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, initial)
+            .unwrap();
+    }
+    let initial_body = source.canonical_content()["body"].clone();
+    let initial_projection = source.project(ContentKind::Richdoc).unwrap().content;
     let base = source.encode_full_state();
     let claim = dohc_engine_storage::hex_sha256(&base);
     dohc_engine_collab::claim_base(
@@ -2320,6 +2337,28 @@ fn assert_peer_fold_from(
             .map_err(SyncError::persist)
         })
         .unwrap();
+    if desktop_base.is_some() {
+        dohc_engine_collab::claim_base(
+            &mut peer,
+            &key,
+            ContentKind::Richdoc,
+            &base,
+            &NoFaults,
+            1500,
+        )
+        .unwrap();
+        peer.write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE ydoc_docs SET last_settled_sha=?1 WHERE object_id=?2",
+                params![
+                    dohc_engine_storage::hex_sha256(initial.as_bytes()),
+                    key.object_id
+                ],
+            )
+            .map_err(SyncError::persist)
+        })
+        .unwrap();
+    }
     let base_sha = peer.put_binary_blob(&base).unwrap();
     let base_op = envelope(
         "fold-origin",
@@ -2453,7 +2492,7 @@ fn assert_peer_fold_from(
             "the originated base must survive without replacement or a delta"
         );
     } else {
-        folded.unwrap();
+        folded.unwrap_or_else(|error| panic!("fold {initial:?} -> {chosen:?}: {error:?}"));
         let delta = origin
             .read_with(|conn| {
                 let sha: String = conn
@@ -2512,10 +2551,20 @@ fn assert_peer_fold_from(
         let projection = store
             .read_with(|conn| {
                 let doc = dohc_engine_collab::load_doc_in(conn, &key).unwrap();
+                if desktop_base.is_some() {
+                    assert_eq!(doc.canonical_content()["body"], initial_body);
+                }
                 crate::ydoc_apply::project_ydoc_with_store(conn, &key, &doc, ContentKind::Richdoc)
             })
             .unwrap();
-        assert_eq!(projection.content, expected);
+        assert_eq!(
+            projection.content,
+            if refuses && desktop_base.is_some() {
+                &initial_projection
+            } else {
+                expected
+            }
+        );
         let conflicts: i64 = store
             .read_with(|conn| {
                 conn.query_row(
@@ -7080,8 +7129,54 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
     );
 }
 
+fn assert_desktop_frontmatter_fold(index: usize, refuses: bool) {
+    use base64::Engine;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../../tools/rust-engine-program/nested1b-desktop-folds.json"
+    ))
+    .unwrap();
+    {
+        let row = &rows[index];
+        let initial = row["source"].as_str().unwrap();
+        let base = base64::engine::general_purpose::STANDARD
+            .decode(row["desktopBase64"].as_str().unwrap())
+            .unwrap();
+        assert_peer_fold_with_base(
+            initial,
+            &initial.replace("todo", "done"),
+            refuses,
+            None,
+            false,
+            Some(&base),
+        );
+    }
+}
+
 #[test]
-fn nested1b_frontmatter_only_unsupported_body_holds() {
-    let initial = "---\nstatus: todo\n---\n- a\n  ---";
-    assert_peer_fold(initial, &initial.replace("todo", "done"), true);
+fn nested1b_desktop_frontmatter_link() {
+    assert_desktop_frontmatter_fold(0, false);
+}
+#[test]
+fn nested1b_desktop_frontmatter_angle() {
+    assert_desktop_frontmatter_fold(1, false);
+}
+#[test]
+fn nested1b_desktop_frontmatter_entity() {
+    assert_desktop_frontmatter_fold(2, false);
+}
+#[test]
+fn nested1b_desktop_frontmatter_quote() {
+    assert_desktop_frontmatter_fold(3, false);
+}
+#[test]
+fn nested1b_desktop_frontmatter_table() {
+    assert_desktop_frontmatter_fold(4, false);
+}
+#[test]
+fn nested1b_desktop_frontmatter_heading() {
+    assert_desktop_frontmatter_fold(5, false);
+}
+#[test]
+fn nested1b_desktop_frontmatter_setext_holds() {
+    assert_desktop_frontmatter_fold(6, true);
 }

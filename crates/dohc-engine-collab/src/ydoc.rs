@@ -1280,9 +1280,6 @@ impl Ydoc {
     /// The caller checks the settled body and proves this source against the
     /// retained XML before journaling the returned update.
     pub fn replace_frontmatter_for_fold(&self, markdown: &str) -> Result<Vec<u8>, CollabError> {
-        if !outside_markdown_is_allowlisted(markdown) {
-            return Err(CollabError::MarkdownNotRepresentable);
-        }
         let (frontmatter, _, _) = split_markdown_frontmatter(markdown);
         self.stage_source_preserving_edit_bounded(markdown, None, false, |staged| {
             let map = staged.doc.get_or_insert_map(ROOT_FRONTMATTER);
@@ -2883,18 +2880,39 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
 // existing permissive proof, except for the desktop's quote depth limit.
 fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
     fn inline(text: &str) -> bool {
-        // Ordered checkboxes remain ordinary text. Other brackets can start
-        // links or references the native reader keeps as escaped text.
-        let text = ["[ ] ", "[x] ", "[X] "]
-            .into_iter()
-            .find_map(|prefix| text.strip_prefix(prefix))
-            .unwrap_or(text);
-        !text.contains('[')
-            && !text.contains('<')
-            && !text.split('&').skip(1).any(|part| {
-                part.split_once(';')
-                    .is_some_and(|(name, _)| decoded_reference(name).is_some())
-            })
+        let spans = inline_code_spans(text);
+        if spans.iter().any(|span| text[span.clone()].contains('<')) {
+            return false;
+        }
+        // The strict proof accepts escaped nonempty destination links as text;
+        // the desktop gives them link marks instead.
+        let bytes = text.as_bytes();
+        let last_close = bytes.iter().rposition(|byte| *byte == b')');
+        let mut open = Vec::new();
+        let mut at = 0;
+        let mut spans = spans.into_iter().peekable();
+        while at < bytes.len() {
+            if spans.peek().is_some_and(|span| span.start == at) {
+                at = spans.next().unwrap().end;
+                continue;
+            }
+            match bytes[at] {
+                b'\\' => {
+                    at += 2;
+                    continue;
+                }
+                b'[' => open.push(at),
+                b']' if open.pop().is_some_and(|start| start + 1 < at)
+                    && bytes.get(at + 1) == Some(&b'(')
+                    && last_close.is_some_and(|close| close >= at + 2) =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+        true
     }
     fn tree(blocks: &[MdBlock<'_>], in_item: bool) -> bool {
         blocks.iter().all(|block| match block {
@@ -2990,7 +3008,7 @@ fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
     }
 
     // The source parser retains some blocks as text. Line shapes close
-    // those block-start gaps after the tree and inline checks.
+    // those block-start gaps after the tree checks.
     fn list_lines(lines: &[&str]) -> bool {
         let mut stack: Vec<(usize, usize)> = Vec::new();
         let mut fence: Option<usize> = None;
@@ -3066,7 +3084,8 @@ fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
                     return false;
                 }
                 fence = Some(column);
-            } else if html_block(text.trim_start_matches(' '))
+            } else if (indent - column <= 3 && text.trim().bytes().all(|byte| byte == b'-'))
+                || html_block(text.trim_start_matches(' '))
                 || block_start(text, false, false) == Some("setext")
                 || matches!(
                     block_start(text, true, true),

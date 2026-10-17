@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { expect, it } from 'vitest'
 import * as Y from 'yjs'
@@ -10,6 +10,37 @@ import { createLiveMarkdownJournalValidator } from './liveDocumentValidation.js'
 interface Body { type: string; tag?: string; attrs?: Record<string, unknown>; children?: Body[]; delta?: Array<{ insert: string; attributes?: Record<string, unknown> }> }
 interface Case { source: string; canonical: string; body: Body; builders: Array<{ nativeBase64: string; witness: Array<string | null> }> }
 const cases = JSON.parse(readFileSync(new URL('../../../tools/rust-engine-program/nested1b-allowlist-witnesses.json', import.meta.url), 'utf8')) as Case[]
+
+const desktopFoldSources = [
+  '- [link](https://example.com)\n  - child',
+  '- a < b\n  - child',
+  '- &amp;\n  - child',
+  '- parent\n\n  > quote\n\n  - child',
+  '- parent\n\n  | h |\n  | --- |\n  | v |\n\n  - child',
+  '- parent\n\n  # heading\n\n  - child',
+  '- a\n  ---',
+].map(body => `---\nstatus: todo\n---\n${body}`)
+it('replays desktop seeds used by native frontmatter-only folds', () => {
+  const path = new URL('../../../tools/rust-engine-program/nested1b-desktop-folds.json', import.meta.url)
+  if (process.env.DOHC_EXPORT_DESKTOP_FOLDS) {
+    writeFileSync(path, JSON.stringify(desktopFoldSources.map(source => {
+      const doc = markdownToYDoc(source, { reading: 'source' })
+      try { return { source, desktopBase64: Buffer.from(Y.encodeStateAsUpdate(doc)).toString('base64') } }
+      finally { doc.destroy() }
+    })))
+  }
+  const rows = JSON.parse(readFileSync(path, 'utf8')) as Array<{ source: string; desktopBase64: string }>
+  expect(rows.map(row => row.source)).toEqual(desktopFoldSources)
+  for (const row of rows) {
+    const imported = markdownToYDoc(row.source, { reading: 'source' })
+    const replay = new Y.Doc()
+    try {
+      Y.applyUpdate(replay, Buffer.from(row.desktopBase64, 'base64'))
+      expect(fromXml(replay.getXmlFragment('body'))).toEqual(fromXml(imported.getXmlFragment('body')))
+      expect(yDocToMarkdown(replay)).toBe(yDocToMarkdown(imported))
+    } finally { imported.destroy(); replay.destroy() }
+  }
+})
 
 // Compare both production builders with a fresh desktop import. Defaults
 // and empty text nodes have no semantic effect, but child order does.
