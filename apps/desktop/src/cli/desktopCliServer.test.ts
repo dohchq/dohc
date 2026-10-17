@@ -789,7 +789,7 @@ describe("raw fileMove and fileDelete socket requests", () => {
     };
     f.dependencies.withEngineAdapter = async (_workspace, work) => work(history as unknown as VersionedLiveAdapter);
     try {
-      // The retired request can still be refused by the authority's final check.
+      // The authority's final check refuses the retired request.
       expect(await f.invoke("fileDelete", { path: "folder" })).toMatchObject({ ok: false });
       await drained;
       const { operationId } = vi.mocked(f.capture.changePathsAs).mock.calls[0]![1];
