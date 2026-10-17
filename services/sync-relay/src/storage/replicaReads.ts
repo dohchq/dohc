@@ -1,9 +1,12 @@
 import type { StorageContext } from "./context";
 import { currentShareGrantSql } from "./currentShareGrant";
 
+const standingStatements = new WeakMap<StorageContext, ReturnType<StorageContext["db"]["prepare"]>>();
 export function readReplicaStanding(storage: StorageContext, workspaceId: string, shareGrantBindings?: string) {
   storage.captureStanding();
-  const row = storage.db.prepare(`SELECT w.owner_user_id, w.replication_epoch, w.stream_identity, w.epoch_log_floor,
+  let statement = standingStatements.get(storage);
+  if (!statement) {
+    statement = storage.db.prepare(`SELECT w.owner_user_id, w.replication_epoch, w.stream_identity, w.epoch_log_floor,
     COALESCE((SELECT MAX(relay_seq) FROM sync_relay_log WHERE workspace_id=w.workspace_id),0) AS log_seq,
     COALESCE((SELECT MAX(journal_cursor) FROM sync_relay_live_update_journal WHERE workspace_id=w.workspace_id),0) AS journal_cursor,
     json_group_array(json_array(g.grant_id,g.generation)) AS share_grants
@@ -12,7 +15,10 @@ export function readReplicaStanding(storage: StorageContext, workspaceId: string
     WHERE w.workspace_id=? AND ${currentShareGrantSql("g", "s")}
       AND (? IS NULL OR EXISTS (SELECT 1 FROM json_each(?) binding
         WHERE json_extract(binding.value,'$[0]')=g.grant_id AND json_extract(binding.value,'$[1]')=g.generation))
-    GROUP BY w.workspace_id`).get(workspaceId, shareGrantBindings ?? null, shareGrantBindings ?? null);
+    GROUP BY w.workspace_id`);
+    standingStatements.set(storage,statement);
+  }
+  const row = statement.get(workspaceId, shareGrantBindings ?? null, shareGrantBindings ?? null);
   if (!row || typeof row.owner_user_id !== "string" || typeof row.replication_epoch !== "string" ||
       typeof row.stream_identity !== "string") return null;
   return { workspaceId, ownerUserId: row.owner_user_id, replicationEpoch: row.replication_epoch,

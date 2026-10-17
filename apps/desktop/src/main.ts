@@ -86,6 +86,7 @@ import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
 import { registerShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
 import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChannelSync";
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
+import { settingsOperations } from "./ipc/settingsOperations";
 import { workspaceFileOperations } from "./ipc/workspaceFileOperations";
 import { registerWorkspaceGraphIpcHandlers } from "./ipc/workspaceGraphIpc";
 import { registerNativeMenusIpcHandlers } from "./ipc/nativeMenusIpc";
@@ -751,7 +752,7 @@ async function localPersonOwns(workspaceId: string): Promise<boolean> {
   await warmCredentialCache();
   const entry = findWorkspace(workspaceId);
   if (!entry || shareViewIsPresent(entry.shareView)) return false;
-  return !entry.remote || cachedCredentials?.userId === entry.remote.ownerUserId;
+  return !entry.remote || workspaceRemoteMatchesCredentials(entry.remote, cachedCredentials);
 }
 
 // A Collection automation step started or stopped waiting for a current
@@ -1521,7 +1522,7 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
     snapshot: (workspaceId) => {
       const workspace = findWorkspace(workspaceId);
       return { roster: shareRosters.observation(workspaceId).listing, shareView: workspace?.shareView,
-        owner: !sender.isDestroyed() && !!workspace?.remote && !workspace.shareView && cachedCredentials?.userId === workspace.remote.ownerUserId,
+        owner: !sender.isDestroyed() && !!workspace?.remote && !workspace.shareView && workspaceRemoteMatchesCredentials(workspace.remote, cachedCredentials),
         context: rosterContext(workspaceId), inventory: workspace?.shareRoster?.version };
     },
     ready: workspaceId => {
@@ -1532,7 +1533,6 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
       if (!workspace?.remote || workspace.shareView) return null;
       await warmCredentialCache();
       const { credentials } = await remoteForWorkspace(workspace);
-      if (credentials.userId !== workspace.remote.ownerUserId) return null;
       return lookupHistoryAccounts(workspaceId, async path => {
         const response = await relayShareResponseWithCredentials(credentials, path, { method: "GET" });
         return { status: response.status, body: await response.json().catch(() => undefined) };
@@ -5786,8 +5786,7 @@ function afterRendererCrashLoop(): void {
 // The owner of the user settings file: every save, zoom step, reset, and
 // edit made in the file goes through it and takes effect there.
 const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
-  registerHandler: handleIpc,
-  assertTrustedSender, stateDir,
+  stateDir,
   setCachedPreferredName: (preferredName, agentName) => { cachedPreferredName = preferredName; cachedAgentName = agentName; },
   applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
@@ -6783,13 +6782,11 @@ function registerIpcHandlers(): void {
 
   agentRunsIpc.registerAgentRuns();
 
-  settingsIpc.registerSettingsIpcHandlers();
+  registerOperations(operationBoundary, settingsOperations, settingsIpc);
   // The settings file applies when saved. The watch lasts as long as main.
   settingsIpc.watchUserSettingsFile();
 
   windowIpc.registerWindowControls();
-
-  settingsIpc.registerWorkspaceUiStateIpcHandlers();
 
   registerOperations(operationBoundary, crashReportOperations, {
     readCrashReport: () => crashReports.read(),
