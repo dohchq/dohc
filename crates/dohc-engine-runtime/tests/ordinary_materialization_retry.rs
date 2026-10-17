@@ -2,7 +2,7 @@ use dohc_engine_domain::{DeleteTextFile, RenameTextFile, VersionedTextStore, Wri
 use dohc_engine_runtime::{CancellationToken, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
 use dohc_engine_sync::MomentMaterializationChange;
-use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use dohc_engine_testkit::{ScratchDir, engine_db_path, try_make_dir_alias};
 use std::sync::Arc;
 
 fn write(text: &str, moment: &str, now_ms: i64) -> WriteText {
@@ -213,6 +213,110 @@ async fn materialize_pages(
             .is_empty()
     );
     scratch
+}
+
+/// A delete means no tracked file at its path. A folder there already holds
+/// none, even named before the files inside it. On a desktop replica the
+/// folders a delete leaves empty stay, since the person may have made them,
+/// unless the page writes a file at their name. A stopped page may have
+/// removed the folders below that name already: the write still clears it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_at_a_folder_is_done_and_its_folder_gives_way_only_to_a_write() {
+    const GONE: [&str; 3] = ["x.md/child.md", "d/a/b.md", "w.md/sub/child.md"];
+    let scratch = materialize_page(
+        |domain| {
+            for (step, path) in (1..).zip(GONE) {
+                let object = format!("o-{step}");
+                let (written, deleted) = (format!("w{step}"), format!("d{step}"));
+                domain
+                    .write_text(&write_at(path, &object, "left", &written, step), &NoFaults)
+                    .unwrap();
+                domain
+                    .delete_text_file(&delete_at(path, &deleted, step), &NoFaults)
+                    .unwrap();
+            }
+            domain
+                .write_text(&write_at("w.md", "o-w", "file w", "w4", 4), &NoFaults)
+                .unwrap();
+        },
+        |root| {
+            for path in &GONE[..2] {
+                std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+                std::fs::write(root.join(path), "left").unwrap();
+            }
+            std::fs::create_dir(root.join("w.md")).unwrap();
+        },
+        vec![
+            change("x.md", "delete"),
+            change("x.md/child.md", "delete"),
+            change("d/a/b.md", "delete"),
+            change("w.md/sub/child.md", "delete"),
+            change("w.md", "write"),
+        ],
+    )
+    .await;
+    let root = scratch.path();
+    assert!(!root.join("x.md/child.md").exists());
+    assert!(!root.join("d/a/b.md").exists());
+    for kept in ["x.md", "d/a"] {
+        assert!(root.join(kept).is_dir(), "{kept}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("w.md")).unwrap(),
+        "file w"
+    );
+}
+
+/// A link to a folder at a path with no head is not a folder of the
+/// workspace: the page refuses it rather than counting the delete as done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_at_a_link_to_a_folder_is_refused() {
+    let scratch = ScratchDir::new().unwrap();
+    let elsewhere = ScratchDir::new().unwrap();
+    std::fs::write(elsewhere.path().join("outside.md"), "outside").unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    {
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        let mut domain = VersionedTextStore::new(&mut store);
+        domain
+            .ensure_main_version("workspace", "main", 0, &NoFaults)
+            .unwrap();
+        domain
+            .write_text(&write_at("x.md", "o-x", "x", "m1", 1), &NoFaults)
+            .unwrap();
+        domain
+            .delete_text_file(&delete_at("x.md", "m2", 2), &NoFaults)
+            .unwrap();
+        domain
+            .set_active_version("workspace", "main", &NoFaults)
+            .unwrap();
+    }
+    assert!(
+        try_make_dir_alias(elsewhere.path(), &scratch.path().join("x.md")).unwrap(),
+        "host must create the folder link; this regression cannot skip"
+    );
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    let refused = actor
+        .materialize_relay_page(
+            "workspace".into(),
+            scratch.path().to_path_buf(),
+            vec![change("x.md", "delete")],
+            Arc::new(()),
+            4,
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.path().join("outside.md")).unwrap(),
+        "outside"
+    );
+    supervisor.close(&db).unwrap();
+    #[cfg(windows)]
+    std::fs::remove_dir(scratch.path().join("x.md")).unwrap();
+    #[cfg(not(windows))]
+    std::fs::remove_file(scratch.path().join("x.md")).unwrap();
 }
 
 /// One page turns the file `notes` into a directory holding `work.md`.
@@ -579,9 +683,10 @@ async fn directory_replacement_retries_after_the_delete_batch() {
     );
 }
 
-async fn case_only_rename_matches_sequential_replay(text: &str, write_first: bool) {
-    // Main probes and materializes each entry before moving to the next.
-    // Single-entry pages reproduce that order without a second implementation.
+/// A case-only rename's page keeps the renamed file in either order: on a
+/// disk that ignores case the delete of the old name runs first, so it never
+/// removes the file the write named.
+async fn case_only_rename_keeps_its_file(text: &str, write_first: bool) {
     for (source, destination) in [("FILE.md", "file.md"), ("file.md", "FILE.md")] {
         let mut page = vec![change(source, "delete"), change(destination, "write")];
         if write_first {
@@ -614,58 +719,97 @@ async fn case_only_rename_matches_sequential_replay(text: &str, write_first: boo
                 .unwrap();
         };
         let disk = |root: &std::path::Path| std::fs::write(root.join(source), "old").unwrap();
-        let sequential = materialize_pages(
-            seed,
-            disk,
-            page.iter().cloned().map(|change| vec![change]).collect(),
-        )
-        .await;
-        let batched = materialize_page(seed, disk, page).await;
-        let files = |root: &std::path::Path| {
-            let mut files: Vec<_> = std::fs::read_dir(root)
-                .unwrap()
-                .map(Result::unwrap)
-                .filter(|entry| entry.file_type().unwrap().is_file())
-                .map(|entry| (entry.file_name(), std::fs::read(entry.path()).unwrap()))
-                .collect();
-            files.sort();
-            files
-        };
+        let scratch = materialize_page(seed, disk, page).await;
         assert_eq!(
-            files(batched.path()),
-            files(sequential.path()),
+            files(scratch.path()),
+            vec![(
+                std::ffi::OsString::from(destination),
+                text.as_bytes().to_vec()
+            )],
             "{source} -> {destination}, write_first={write_first}"
         );
-        if !write_first {
-            assert_eq!(
-                files(batched.path()),
-                vec![(
-                    std::ffi::OsString::from(destination),
-                    text.as_bytes().to_vec()
-                )]
-            );
-        }
     }
+}
+
+/// The files directly in `root`, with their bytes.
+fn files(root: &std::path::Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
+    let mut files: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_type().unwrap().is_file())
+        .map(|entry| (entry.file_name(), std::fs::read(entry.path()).unwrap()))
+        .collect();
+    files.sort();
+    files
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn case_only_rename_equal_bytes_delete_first() {
-    case_only_rename_matches_sequential_replay("old", false).await;
+    case_only_rename_keeps_its_file("old", false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn case_only_rename_equal_bytes_write_first() {
-    case_only_rename_matches_sequential_replay("old", true).await;
+    case_only_rename_keeps_its_file("old", true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn case_only_rename_changed_bytes_delete_first() {
-    case_only_rename_matches_sequential_replay("new", false).await;
+    case_only_rename_keeps_its_file("new", false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn case_only_rename_changed_bytes_write_first() {
-    case_only_rename_matches_sequential_replay("new", true).await;
+    case_only_rename_keeps_its_file("new", true).await;
+}
+
+/// Sol's review of the park branch, on a desktop replica: `p.md` was
+/// materialized, a pull renamed it to `P.md`, and the person renamed it
+/// back before the pull's page materialized. The page's `p.md` is labelled
+/// a delete and `P.md` a write, but the head is at `p.md`: what runs is a
+/// write of `p.md` and a delete of `P.md`. On a disk that ignores case that
+/// delete ran last and removed the file, while the store kept `p.md`. Each
+/// path's own operation orders the page, so the file stays in either order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rename_back_keeps_its_file_whatever_the_page_calls_its_paths() {
+    let rename = |from: &str, to: &str, moment: &str, now_ms| RenameTextFile {
+        workspace_id: "workspace".into(),
+        version_id: "main".into(),
+        from_path: from.into(),
+        to_path: to.into(),
+        moment_id: moment.into(),
+        request_id: None,
+        metadata_origin: "sync".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms,
+    };
+    for page in [
+        vec![change("p.md", "delete"), change("P.md", "write")],
+        vec![change("P.md", "write"), change("p.md", "delete")],
+    ] {
+        let scratch = materialize_page(
+            |domain| {
+                domain
+                    .write_text(&write_at("p.md", "o-p", "text", "m1", 1), &NoFaults)
+                    .unwrap();
+                domain
+                    .rename_text_file(&rename("p.md", "P.md", "m2", 2), &NoFaults)
+                    .unwrap();
+                domain
+                    .rename_text_file(&rename("P.md", "p.md", "m3", 3), &NoFaults)
+                    .unwrap();
+            },
+            |root| std::fs::write(root.join("p.md"), "text").unwrap(),
+            page,
+        )
+        .await;
+        assert_eq!(
+            files(scratch.path()),
+            vec![(std::ffi::OsString::from("p.md"), b"text".to_vec())]
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

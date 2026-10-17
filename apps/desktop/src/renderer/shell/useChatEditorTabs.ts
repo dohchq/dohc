@@ -25,6 +25,8 @@ const EMPTY_DRAFTS: ChatsDrafts = {
   dmDraft: "",
   replyTarget: null,
   resolveTargetMessageId: null,
+  poll: null,
+  newThreadPoll: null,
 };
 
 // Inactive editors unmount. Keep only their navigation and unsent input here;
@@ -120,7 +122,11 @@ export function useChatEditorTabs(input: {
         }
         // A thread in this tab belongs to this channel, whose new post the
         // person may have started before opening the thread.
-        entry.drafts = entry.drafts && { ...EMPTY_DRAFTS, newThreadBody: entry.drafts.newThreadBody };
+        entry.drafts = entry.drafts && {
+          ...EMPTY_DRAFTS,
+          newThreadBody: entry.drafts.newThreadBody,
+          newThreadPoll: entry.drafts.newThreadPoll,
+        };
       }
       const typed = entry.drafts?.newThreadBody.trim() ? `${entry.drafts.newThreadBody}\n\n` : "";
       entry.drafts = { ...(entry.drafts ?? EMPTY_DRAFTS), newThreadBody: `${typed}${prefill}` };

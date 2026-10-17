@@ -45,6 +45,30 @@ const engineCodes = [
 
 describe("error words", () => {
   it.each([
+    "Each choice is one line of at most 200 characters.",
+    "Each choice appears once.",
+  ])("keeps the engine poll sentence across IPC: %s", sentence => {
+    const received = acrossIpc(refusal("INVALID_PARAMS", sentence));
+    expect(readError(received)).toEqual({
+      words: sentence,
+      mapped: false,
+      cause: `DaemonRefusalError [INVALID_PARAMS]: ${sentence}`,
+    });
+  });
+
+  it.each(["A new poll rule.", "A poll has at most twelve choices."])(
+    "uses the caller's words for an unknown poll sentence: %s", sentence => {
+      const received = acrossIpc(refusal("INVALID_PARAMS", sentence));
+      expect(readError(received)).toEqual({
+        words: null,
+        mapped: false,
+        cause: `DaemonRefusalError [INVALID_PARAMS]: ${sentence}`,
+      });
+      expect(withErrorWords("Could not send that message.", received)).toBe("Could not send that message.");
+    },
+  );
+
+  it.each([
     new RelayUnauthorizedError(),
     new SharedFileReadOnlyError(),
     new ShareUnavailableError(),

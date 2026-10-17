@@ -920,6 +920,27 @@ impl RelayTransport for HttpRelayTransport {
         Ok(())
     }
 
+    fn upload_blobs(&self, mut requests: Vec<BlobUploadRequest>) -> Result<(), RelayError> {
+        if requests.is_empty() || requests.len() > dohc_engine_sync::MAX_BLOB_UPLOAD_BATCH {
+            return Err(RelayError::InvalidResponse);
+        }
+        if requests.len() == 1 {
+            return self.upload_blob(requests.remove(0));
+        }
+        std::thread::scope(|scope| {
+            let jobs = requests
+                .into_iter()
+                .map(|request| scope.spawn(move || self.upload_blob(request)))
+                .collect::<Vec<_>>();
+            // Join every owned PUT before returning an error or allowing append.
+            let results = jobs
+                .into_iter()
+                .map(|job| job.join().unwrap_or(Err(RelayError::InvalidResponse)))
+                .collect::<Vec<_>>();
+            results.into_iter().collect()
+        })
+    }
+
     fn download_blobs(
         &self,
         req: BlobDownloadBatchRequest,

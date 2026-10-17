@@ -1053,7 +1053,7 @@ mod chat;
 mod file_export_lane;
 mod hosted_replica;
 mod outbound_authors;
-mod owner_publication;
+pub(crate) mod owner_publication;
 mod recover;
 mod relay_pull;
 mod relay_pull_bench;
