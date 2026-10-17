@@ -55,10 +55,11 @@ let feed, active, windowController, helperStartup, workload, goToFixture, presen
 const automationFailures = [];
 const cancellation = benchmarkCancellation();
 const documentDeadline = new AbortController();
+if (scenario === 'document-size') cancellation.signal = AbortSignal.any([cancellation.signal, documentDeadline.signal]);
 
 try {
 if (scenario === 'presence') profilingSlot = acquireProfilingSlot(process.env, { metadata: { purpose: 'packaged presence typing', checkout: root } });
-const benchmarkSignal = AbortSignal.any([cancellation.signal, ...(profilingSlot ? [profilingSlot.signal] : []), ...(scenario === 'document-size' ? [documentDeadline.signal] : [])]);
+const benchmarkSignal = AbortSignal.any([cancellation.signal, ...(profilingSlot ? [profilingSlot.signal] : [])]);
 await json(join(output, 'result.json'), receipt);
 const require = createRequire(join(root, 'apps/desktop/package.json'));
 const exec = promisify(execFile);
