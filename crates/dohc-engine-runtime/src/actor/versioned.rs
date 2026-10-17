@@ -3540,14 +3540,42 @@ mod doc_cache_reset_tests {
         if exported {
             bootstrap_checked_delete(&mut store);
             seed_legacy_checked_delete_export(&mut store);
+            versioned_text_rename_on_store(
+                &mut store,
+                &RenameTextFile {
+                    workspace_id: "workspace".into(),
+                    version_id: "main".into(),
+                    from_path: "record.md".into(),
+                    to_path: "renamed.md".into(),
+                    moment_id: "later-rename".into(),
+                    metadata_origin: "api".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 6,
+                    request_id: None,
+                },
+                &root,
+                &(),
+                &NoFaults,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+            std::fs::rename(root.join("record.md"), root.join("renamed.md")).unwrap();
         }
-        let outside = format!("{} held outside edit\n", "> ".repeat(121));
-        std::fs::write(root.join("record.md"), &outside).unwrap();
+        let path = if exported { "renamed.md" } else { "record.md" };
+        // Matching bytes let legacy recovery settle unless the current path's hold parks it.
+        let outside = if exported {
+            "recipient text\n".to_owned()
+        } else {
+            format!("{} held outside edit\n", "> ".repeat(121))
+        };
+        std::fs::write(root.join(path), &outside).unwrap();
         let hold = dohc_engine_storage::capture_file_holds::CaptureFileHold {
             workspace_id: "workspace".into(),
             source_version_id: "main".into(),
             object_id: "document".into(),
-            path: "record.md".into(),
+            path: path.into(),
             observed_sha256: hex_sha256(outside.as_bytes()),
             observed_size: outside.len() as u64,
             reason: dohc_engine_storage::capture_file_holds::NOT_REPRESENTABLE.into(),
@@ -3569,14 +3597,11 @@ mod doc_cache_reset_tests {
                 .status,
             JobStatus::Pending
         );
-        assert_eq!(
-            std::fs::read_to_string(root.join("record.md")).unwrap(),
-            outside
-        );
+        assert_eq!(std::fs::read_to_string(root.join(path)).unwrap(), outside);
         assert_eq!(
             store
                 .read_with(|conn| {
-                    dohc_engine_storage::capture_file_holds::hold_in(conn, "workspace", "record.md")
+                    dohc_engine_storage::capture_file_holds::hold_in(conn, "workspace", path)
                 })
                 .unwrap(),
             Some(hold)
