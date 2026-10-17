@@ -2176,6 +2176,30 @@ it.each(["quit", "renderer retirement"] as const)("%s releases a refused settle 
     } finally { recovered.destroy(); await reopened.close(); }
   } finally { editor.destroy(); }
 });
+it("keeps a permanent quit eviction failure cached for later callers", async () => {
+  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
+  closeRefusal = wireRefusal("ydoc-unsettled-close");
+  const send = ydoc.sendRequest.bind(ydoc);
+  vi.spyOn(ydoc, "sendRequest").mockImplementation(async request => {
+    if (request.method === YDOC_METHOD.evict) throw wireRefusal("permanent eviction failure");
+    return send(request);
+  });
+  capture.beginShutdown();
+  sessions.beginShutdown();
+  await expect(session.close({ shuttingDown: true })).rejects.toThrow("ydoc-unsettled-close");
+  expect(captureErrors).toContain(`ydoc evict of ${PATH}`);
+  expect(methodCount(YDOC_METHOD.evict)).toBe(1);
+  expect(daemon.leases.size).toBe(1);
+  const closes = methodCount(YDOC_METHOD.close);
+  const settles = methodCount(YDOC_METHOD.settle);
+  await expect(session.close({ shuttingDown: true })).rejects.toThrow("ydoc-unsettled-close");
+  await expect(capture.settleAndCloseAllLiveSessions()).rejects.toThrow("ydoc-unsettled-close");
+  expect(methodCount(YDOC_METHOD.close)).toBe(closes);
+  expect(methodCount(YDOC_METHOD.settle)).toBe(settles);
+  expect(methodCount(YDOC_METHOD.evict)).toBe(1);
+  expect(daemon.leases.size).toBe(1);
+});
+
 it("retries only eviction after a transient quit release failure", async () => {
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
   const editor = mirrorEditor(session);
@@ -2493,15 +2517,21 @@ it("an interactive sweep makes its own close attempt after a renderer refusal", 
   const rendererClose = session.close({ settle: false, settleOnRefusal: false });
   const rendererRefused = expect(rendererClose).rejects.toThrow("ydoc-unsettled-close");
   await entered.promise;
+  const joiningWriters = vi.spyOn(Promise, "all");
   const sweep = capture.settleAndCloseAllLiveSessions();
   const swept = expect(sweep).resolves.toBeUndefined();
   try {
-    await new Promise<void>(resolve => setImmediate(resolve));
+    // closeEntry joins its record-writer Set before queueing the provider close.
+    await expect.poll(() => joiningWriters.mock.calls.some(([values]) => values instanceof Set)).toBe(true);
     release.resolve();
     await rendererRefused;
     await swept;
     expect(daemon.leases.size).toBe(0);
-  } finally { release.resolve(); await Promise.allSettled([rendererClose, sweep]); }
+  } finally {
+    joiningWriters.mockRestore();
+    release.resolve();
+    await Promise.allSettled([rendererClose, sweep]);
+  }
 });
 
 it("successful eviction stays closed when checkpoint retirement fails", async () => {
