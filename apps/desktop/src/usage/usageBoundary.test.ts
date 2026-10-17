@@ -104,6 +104,7 @@ describe("usage import boundary", () => {
     expect(main).not.toContain("rendererUsage.dispatch");
     expect(main).toContain("if (usageLoad) clearImmediate(usageLoad);");
     expect(main).toContain("recordSuccess: invocation => usageStore?.recordSuccess(invocation),");
+    expect(main.match(/onUsageSuccess:.*$/gm)).toEqual(["onUsageSuccess: invocation => { usageStore?.recordSuccess(invocation); },"]);
     // Privacy has no counting observer or agent transport registration.
     const usage = readFileSync(join(root, "apps/desktop/src/usage/rendererUsage.ts"), "utf8");
     expect(usage).not.toMatch(/usage\.(read|query|copy)/);
