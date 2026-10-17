@@ -348,7 +348,7 @@ describe("Menu", () => {
       const menu = screen.getByRole("menu");
       expect(menu.style.bottom).toBe("34px");
       expect(menu.style.top).toBe("");
-      expect(menu.style.maxHeight).toBe("562px");
+      expect(menu.style.maxHeight).toBe("554px");
       expect(menu.style.getPropertyValue("--dohc-menu-from")).toBe("4px");
       expect(menu.className).toContain("dohc-menu-in");
     } finally {

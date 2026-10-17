@@ -1604,10 +1604,12 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="menu-overflow" title="Overflow menu">
-        <Specimen label="current; long name: keyboard-active; rest">
+        {/* Focus without focus-visible, as a pointer leaves it: the active
+            row still shows apart from the current one. */}
+        <Specimen label="current; long name: active from the pointer; rest">
           <div
             className="flex h-56 w-72 items-start justify-end"
-            data-force-state="focus focus-visible"
+            data-force-state="focus"
             data-force-target="[role=menuitem]:nth-child(2)"
           >
             <MenuSpecimen
