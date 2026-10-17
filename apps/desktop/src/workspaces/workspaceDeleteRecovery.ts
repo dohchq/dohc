@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { addAbortListener } from "node:events";
 import { createReadStream } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
@@ -18,7 +19,7 @@ const UndoResult = HistoryOperationUndoResult.options[1].extend({
 });
 export type DeleteUndoResult = z.infer<typeof HistoryOperationUndoResult>;
 const Record = z.object({
-  operationId: z.string(), staged: z.string().optional(), base: z.string(), paths: z.array(z.string()),
+  operationId: z.string(), staged: z.string().optional(), noUndo: z.string().optional(), base: z.string(), paths: z.array(z.string()),
   emptyFolders: z.array(z.string()), tracked: z.boolean(),
   copies: z.array(z.object({
     path: z.string(), dev: z.number(), ino: z.number(), birthtimeMs: z.number(), size: z.number(),
@@ -37,8 +38,14 @@ export function beginPendingDeleteRecovery(operationId: string): () => void {
   pendingDeletes.set(operationId, promise);
   return () => { pendingDeletes.delete(operationId); resolve(); };
 }
-export async function waitForDeleteRecovery(operationId: string): Promise<void> {
-  await pendingDeletes.get(operationId);
+export async function waitForDeleteRecovery(operationId: string, signal?: AbortSignal): Promise<void> {
+  const pending = pendingDeletes.get(operationId);
+  if (!pending || signal?.aborted) return;
+  if (!signal) { await pending; return; }
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const retirement = addAbortListener(signal, () => resolve());
+  try { await Promise.race([pending, promise]); }
+  finally { retirement[Symbol.dispose](); }
 }
 const systemTrash = process.platform === "win32" ? "Recycle Bin" : "Trash";
 const MAX_RECORD_AGE = 30 * 24 * 60 * 60 * 1_000;
@@ -143,7 +150,7 @@ export async function stageDeleteRecovery(operationId: string, staged: string, b
   } catch { return { operationId }; }
 }
 export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPlan,
-  { trashed, staged, replaceStagedRecord = false }: { trashed: boolean; staged?: string; replaceStagedRecord?: boolean }): Promise<DeleteRecovery> {
+  { trashed, staged }: { trashed: boolean; staged?: string }): Promise<DeleteRecovery> {
   const { operationId, record } = plan;
   try {
     if (!record) throw new Error("Recovery collection failed");
@@ -153,7 +160,9 @@ export async function finishDeleteRecovery(root: string, plan: DeleteRecoveryPla
       plan.noUndo = `Cannot undo the delete. ${record.paths.join(", ")} ${record.paths.length === 1 ? "is" : "are"} ${where}. Restore ${record.paths.length === 1 ? "it" : "them"} there.`;
     }
     if (plan.noUndo) {
-      if (replaceStagedRecord) await unlink(join(await trashDir(root), recordName(operationId))).catch(() => undefined);
+      record.noUndo = plan.noUndo;
+      await save(root, record).catch(() => undefined);
+      schedulePrune(root);
       return { operationId, undo: { available: false, reason: plan.noUndo, paths: record.paths } };
     }
     await save(root, record);
@@ -256,6 +265,7 @@ export async function undoDeleteRecovery(root: string, record: RecoveryRecord, a
   history: Pick<HistoryOperationsStore, "undoHistoryOperation">, workspaceId: string,
   assertCurrent: () => void, markChanged: () => void): Promise<DeleteUndoResult> {
   assertCurrent();
+  if (record.noUndo) return { ok: false, reason: record.noUndo };
   const expose = (result: z.infer<typeof UndoResult>): DeleteUndoResult => ({ ...result,
     remaining: result.remaining.map(item => ({ ...item, retry: record.copies?.some(copy => copy.path === item.path) ?? false })) });
   const engineUndo = () => history.undoHistoryOperation({ workspaceId, operationId: record.operationId,

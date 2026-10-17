@@ -173,7 +173,11 @@ describe("delete recovery", () => {
       expect((await readDeleteRecovery(f.root, id))?.engine).toBeUndefined();
       release.resolve();
       expect(await pending).toMatchObject({ ok: true, trashed: true, undo: { available: false } });
-      expect(await undo).toMatchObject({ ok: false, reason: expect.stringContaining("Restore files from History or the trash") });
+      const reason = `Cannot undo the delete. folder/rowless.txt is in the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}. Restore it there.`;
+      expect(await undo).toEqual({ ok: false, reason });
+      expect(await readDeleteRecovery(f.root, id)).toMatchObject({ noUndo: reason });
+      expect((await readDeleteRecovery(f.root, id))?.staged).toBeUndefined();
+      expect(await f.undo(id)).toEqual({ ok: false, reason });
       expect(existsSync(join(f.root, "folder"))).toBe(false);
       expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
     } finally {
@@ -199,7 +203,7 @@ describe("delete recovery", () => {
     const where = process.platform === "win32" ? "in the Recycle Bin" : "in the Trash";
     expect(result).toMatchObject({ undo: { available: false, paths: ["folder/rowless.txt"],
       reason: `Cannot undo the delete. folder/rowless.txt is ${where}. Restore it there.` } });
-    expect(await f.undo(result.operationId!)).toMatchObject({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
+    expect(await f.undo(result.operationId!)).toEqual({ ok: false, reason: `Cannot undo the delete. folder/rowless.txt is ${where}. Restore it there.` });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
   it("offers Undo for tracked-only files even after OS trash accepts", async () => {

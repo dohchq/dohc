@@ -12,7 +12,7 @@ import { undoOperation } from "@dohc/mcp/tools";
 import { createWorkspaceFileMutationOwner } from "./workspaceFileMutationOwner";
 import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
 
-const faults = vi.hoisted(() => ({ removeAfterStat: "", openError: "", opened: [] as string[], reads: [] as string[], recordSaves: 0, failRecord: false, failUnlinkRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false, beforePublish: undefined as undefined | ((target: string) => Promise<void>), copyTemps: [] as string[], copyTarget: "", sourceLimit: false, failRemove: false, beforeResume: undefined as undefined | (() => Promise<void>), modeCalls: [] as string[] }));
+const faults = vi.hoisted(() => ({ removeAfterStat: "", openError: "", opened: [] as string[], reads: [] as string[], recordSaves: 0, failRecord: false, copyOnly: false, failFlush: false, failCopy: "", readOnly: false, failPlace: false, pruneAttempts: 0, blockedPrune: "", visited: [] as string[], flushed: [] as string[], copyModes: [] as number[], exposed: false, beforePublish: undefined as undefined | ((target: string) => Promise<void>), copyTemps: [] as string[], copyTarget: "", sourceLimit: false, failRemove: false, beforeResume: undefined as undefined | (() => Promise<void>), modeCalls: [] as string[] }));
 vi.mock("node:fs/promises", async original => {
   const actual = await original<typeof import("node:fs/promises")>();
   return { ...actual,
@@ -28,7 +28,6 @@ vi.mock("node:fs/promises", async original => {
     },
     lstat: async (path: string) => { const entry = await actual.lstat(path); if (String(path) === faults.removeAfterStat) await actual.rm(path); faults.visited.push(String(path)); return entry; },
     unlink: async (path: string) => {
-      if (faults.failUnlinkRecord && path.endsWith(".json")) { faults.failUnlinkRecord = false; throw new Error("recovery unlink refused"); }
       if (String(path) === faults.blockedPrune) { faults.pruneAttempts++; throw Object.assign(new Error("record held open"), { code: "EPERM" }); }
       return actual.unlink(path);
     },
@@ -235,15 +234,15 @@ describe("delete recovery failures", () => {
       }
     } finally { faults.failRecord = false; }
   });
-  it("points to system trash when the final record unlink fails after an accepted move", async () => {
+  it("points to system trash when the final record save fails after an accepted move", async () => {
     const f = await fixture(true, []);
     const trash = f.options.trashItem;
-    f.options.trashItem = async path => { await trash(path); faults.failUnlinkRecord = true; };
+    f.options.trashItem = async path => { await trash(path); faults.failRecord = true; };
     try {
       const result = await f.remove();
       expect(result).toMatchObject({ ok: true, trashed: true, undo: { available: false,
         reason: `Cannot undo the delete. folder is in the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}. Restore it there.` } });
-      expect(faults.failUnlinkRecord).toBe(false);
+      expect(faults.failRecord).toBe(false);
       const record = await readDeleteRecovery(f.root, result.operationId!);
       expect(record?.staged).toBeDefined();
       expect(existsSync(join(f.root, ".dohc/trash", record!.staged!))).toBe(false);
@@ -251,7 +250,7 @@ describe("delete recovery failures", () => {
       expect(await f.undo(result.operationId!)).toEqual({ ok: false,
         reason: `Cannot undo the delete. folder is no longer in the workspace trash, and History has no copy of it. Check the ${process.platform === "win32" ? "Recycle Bin" : "Trash"}.` });
       expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
-    } finally { faults.failUnlinkRecord = false; }
+    } finally { faults.failRecord = false; }
   });
   it("a healthy OS trash does not require healthy workspace trash", async () => {
     const f = await fixture(true);
@@ -688,7 +687,7 @@ it.each(["ipc", "cli", "mcp"] as const)("shows an occupied pending copy and retr
     faults.failCopy = ""; await rm(faults.copyTarget); await writeFile(faults.copyTarget, "occupant");
     const owner = createWorkspaceFileMutationOwner({
       historyFor: () => f.history, assertTrustedSender: () => undefined,
-      withRendererWorkspaceOperation: async (_event, _id, work) => work({ workspace: f.operation.workspace,
+      withRendererWorkspaceOperation: async (_event, _id, work) => work({ workspace: f.operation.workspace, signal: f.operation.signal,
         authorityId: f.operation.workspace.attachmentId, capture: null,
         yDocSessions: { withDocumentUnowned: async (_id, _path, work) => work(), markDeletedUnderPath: () => undefined }, assertCurrent: () => undefined }),
       shareViewFiles: { change: async () => { throw new Error("No share writes"); } }, trashItem: async () => undefined,

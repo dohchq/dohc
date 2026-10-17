@@ -48,7 +48,7 @@ it.skipIf(engine.missing)("undoes a folder delete through the real engine and re
       new VersionedLiveAdapter(binding.client, binding.workspace, { workspaceId: workspace.workspaceId }));
     const owner = createWorkspaceFileMutationOwner({
       historyFor: () => history, assertTrustedSender: () => undefined,
-      withRendererWorkspaceOperation: async (_event, _id, work) => work({ workspace: operation.workspace, authorityId: workspace.attachmentId, capture,
+      withRendererWorkspaceOperation: async (_event, _id, work) => work({ workspace: operation.workspace, signal: operation.signal, authorityId: workspace.attachmentId, capture,
         yDocSessions: { withDocumentUnowned: async (_id, _path, work) => work(), markDeletedUnderPath: () => undefined }, assertCurrent: operation.assertCurrent }),
       shareViewFiles: { change: async () => { throw new Error("No shares"); } },
       trashItem: async () => { throw new Error("OS trash refuses"); }, localPerson: async () => person, notifyRenderer: () => undefined, shareViewEdited: () => undefined, logError: () => undefined,

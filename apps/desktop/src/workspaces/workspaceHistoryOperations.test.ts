@@ -25,7 +25,7 @@ async function fixture(trackedPaths = ["folder/tracked.txt"]) {
   await mkdir(join(rootPath, ".dohc"));
   await write("folder/tracked.txt");
   await write("folder/assets/plain.txt");
-  const operation = { workspace: { workspaceId: "owner", rootPath, shareView: undefined as unknown, readOnly: false }, assertCurrent: vi.fn() };
+  const operation = { workspace: { workspaceId: "owner", rootPath, shareView: undefined as unknown, readOnly: false }, signal: new AbortController().signal, assertCurrent: vi.fn() };
   const capture: PathChangeOptions["capture"] = { changePathsAs: async (_paths, _authored, work) => work({
     policy: await readWorkspaceEnginePolicy(rootPath), recordDisk: async () => trackedPaths, delete: vi.fn(async () => "delete-moment"),
   } as never) };

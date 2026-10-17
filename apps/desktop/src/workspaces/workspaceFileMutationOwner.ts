@@ -98,6 +98,7 @@ export interface WorkspaceFileMutationAuthority<
 > {
   readonly authorityId: symbol;
   readonly workspace: Readonly<Workspace>;
+  readonly signal: AbortSignal;
   readonly capture: MutationCapture | null;
   readonly yDocSessions: WorkspaceFileMutationYDocPort;
   assertCurrent(): void;
@@ -205,6 +206,7 @@ export function createWorkspaceFileMutationOwner<
   type MutationWork<Payload, Result> = (input: {
     input: Payload;
     workspace: Readonly<Workspace>;
+    signal: AbortSignal;
     receivedShare: boolean;
     authorityId: symbol;
     capture: MutationCapture | null;
@@ -224,6 +226,7 @@ export function createWorkspaceFileMutationOwner<
         await work({
           input,
           workspace: authority.workspace,
+          signal: authority.signal,
           receivedShare: shareViewIsPresent(authority.workspace.shareView),
           authorityId: authority.authorityId,
           capture: authority.capture,
@@ -396,8 +399,8 @@ export function createWorkspaceFileMutationOwner<
     undoHistoryOperation: async (event, payload) => {
       const request = admitMutation(event, payload, UndoHistoryOperationPayload.parse);
       const person = await dependencies.localPerson();
-      return runAdmittedMutation(event, request, ({ input, workspace, assertCurrent }) =>
-        undoWorkspaceHistoryOperation({ workspace, assertCurrent }, input, person, { history: dependencies.historyFor(workspace), agent: false }));
+      return runAdmittedMutation(event, request, ({ input, workspace, signal, assertCurrent }) =>
+        undoWorkspaceHistoryOperation({ workspace, signal, assertCurrent }, input, person, { history: dependencies.historyFor(workspace), agent: false }));
     },
 
     deletePath: async (event, payload) => {

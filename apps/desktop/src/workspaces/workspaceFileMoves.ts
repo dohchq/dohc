@@ -546,7 +546,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
         const trashed = changed.trash !== undefined && await toSystemTrash(options, changed.trash);
         const { withoutHistory, recovery: plan, ...done } = changed.done;
         // Only this delete writes the record until releaseRecovery admits Undo.
-        const recovery = trashed ? await finishDeleteRecovery(rootPath, plan, { trashed: true, replaceStagedRecord: true }) : changed.recovery;
+        const recovery = trashed ? await finishDeleteRecovery(rootPath, plan, { trashed: true }) : changed.recovery;
         return { ok: true, ...done, trashed, ...recovery,
           ...(trashed || changed.trash === undefined ? {} : { trashPath: workspaceTrashPath(changed.trash) }),
           ...(withoutHistory.length ? { withoutHistory } : {}) };

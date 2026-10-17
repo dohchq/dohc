@@ -5245,6 +5245,7 @@ const workspaceFileMutations = createWorkspaceFileMutationOwner({
         return await work({
           authorityId: workspace.attachmentId,
           workspace,
+          signal: operation.signal,
           capture: activity.engineCaptureFor(workspaceId, workspace.rootPath),
           yDocSessions: engineYDocSessionIpc.fileMutationPort(),
           assertCurrent: () => operation.assertCurrent(),

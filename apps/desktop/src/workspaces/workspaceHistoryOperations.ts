@@ -138,12 +138,13 @@ export async function readWorkspaceHistoryOperation(operation: Operation, input:
     });
   } catch (error) { return failure(error, "read"); }
 }
-export async function undoWorkspaceHistoryOperation(operation: Operation, input: { operationId: string }, author: MomentWriteAuthor,
+export async function undoWorkspaceHistoryOperation(operation: Operation & { signal: AbortSignal }, input: { operationId: string }, author: MomentWriteAuthor,
   options: { history: OperationHistory; agent: boolean }): Promise<DeleteUndoResult> {
   try {
     writable(operation); operationId(input.operationId);
     const { rootPath, workspaceId } = operation.workspace;
-    await waitForDeleteRecovery(input.operationId);
+    await waitForDeleteRecovery(input.operationId, operation.signal);
+    writable(operation);
     return await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
       writable(operation);
       const record = await readDeleteRecovery(rootPath, input.operationId);
