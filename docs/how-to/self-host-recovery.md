@@ -49,8 +49,9 @@ The marker keeps the store detached after a restart.
 Recovery is not automatic yet.
 The store and every live edit in it stay unchanged.
 Preserve the volume in a private archive before you change anything.
-If you delete the marker, the next relay start attaches the store again.
-If the store still diverges, the server detaches it again and writes a new marker.
+Keep the marker.
+Without it the next relay start attaches the store again, and people can make live edits before the server notices the copy still diverges.
+Those edits stay only in the store, and no tool recovers them yet.
 
 ## Save a relay snapshot
 
