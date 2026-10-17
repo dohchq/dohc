@@ -6,6 +6,7 @@ import { namedAccountCookie } from "./namedAccountCookie";
 export function createNamedAppMaterialResolver(options: {
   relayUrl: string; publicOrigin: string; exchangeKey: string;
   fetchRelay(request: Request): Promise<Response>;
+  resolveAccount?(cookie: string, signal: AbortSignal): Promise<string | null>;
 }) {
   const origin = new URL(options.publicOrigin), relay = new URL(options.relayUrl);
   if (origin.origin !== options.publicOrigin || origin.protocol !== "https:" || options.exchangeKey.length < 32) {
@@ -16,10 +17,12 @@ export function createNamedAppMaterialResolver(options: {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(workspaceId) || workspaceId.includes("\n") || publicationId.length !== 64 || !/^[a-f0-9]{64}$/.test(publicationId)) return { ok: false, status: 404 };
     const accountCookie = namedAccountCookie(cookie, options.publicOrigin);
     if (!accountCookie) return { ok: false, status: 401 };
+    const userId = await options.resolveAccount?.(accountCookie, signal);
+    if (options.resolveAccount && !userId) return {ok: false, status: 401};
     const prefix = `/sync/link/app-publications/${publicationId}`;
     const target = `/sync/${workspaceId}/app-publications/${publicationId}/backend`;
     return {
-      ok: true, kind: "named", admissionKey: createHash("sha256").update(accountCookie).digest("hex"), setCookie: null,
+      ok: true, kind: "named", ...(userId ? {userId} : {}), admissionKey: createHash("sha256").update(accountCookie).digest("hex"), setCookie: null,
       async fetchRelay(request: Request): Promise<Response> {
         request.signal.throwIfAborted();
         const url = new URL(request.url);

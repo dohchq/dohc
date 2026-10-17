@@ -647,6 +647,7 @@ export interface SyncRelayStorage {
   recordAutomationServerTaken(input: { workspaceId: string; generation: number }): void;
   recordAutomationServerProgress(input: { workspaceId: string; throughMs: number }): void;
   joinAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
+  replaceLostAutomationReplica(input: { workspaceId: string; incarnation: number; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }): import("./automationWorkspaces").AutomationWorkspace | null;
   listAutomationWorkspaces(): import("./automationWorkspaces").AutomationWorkspace[];
   forgetAutomationWorkspace(input: { workspaceId: string; incarnation: number }): void;
@@ -704,6 +705,7 @@ export interface SyncRelayStorage {
   readReplicaLiveJournal(input: ReplicaLiveJournalRead): Promise<ReplicaLiveJournalPage>;
 
   close(): void;
+  invalidate(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult;
   automationRecordWriteAllowed(input: {workspaceId: string; ownerUserId: string; currentPath: string;
     declaration: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;

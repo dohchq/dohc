@@ -24,6 +24,22 @@ import { rowToLogRow } from "./rows";
 import { notifyDesktopReadiness } from "../desktopReadinessChanges";
 import {confirmLiveApplication} from "./liveApplicationAuthorship";
 import {REFUSED_OP_KIND} from "./relayAdmission";
+import { parseLiveAuthorSnapshot, type LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
+import { SHARE_MEMBER_ORIGIN_PREFIX } from "../relayLogInputs";
+import { stableJsonStringify } from "../canonicalJson";
+
+function withAdmittedChatName(op: SyncRelayLogInput, snapshot: LiveAuthorSnapshot): SyncRelayLogInput {
+  const human = snapshot.find(author => author.kind === "human");
+  if (!human) throw new Error("named chat admission requires an account author");
+  const payload = JSON.parse(op.payloadJson) as Record<string, unknown>;
+  if (op.opKind === "chat.reaction.set" || payload.authorKind === "human") {
+    payload.authorDisplayName = human.humanName;
+    delete payload.authorOwnerDisplayName;
+  } else {
+    payload.authorOwnerDisplayName = human.humanName;
+  }
+  return {...op, payloadJson: stableJsonStringify(payload), admittedAuthorSnapshot: snapshot};
+}
 
 const logPageStatements = new WeakMap<SqliteDb, ReturnType<SqliteDb["prepare"]>>();
 
@@ -66,7 +82,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
          WHERE workspace_id = ? AND origin_id = ?`,
       );
       const existingStmt = storage.db.prepare(
-        `SELECT op_kind, payload_json, recorded_at_ms, settlement_admission_json
+        `SELECT op_kind, payload_json, recorded_at_ms, settlement_admission_json, admitted_author_snapshot_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
       );
@@ -76,13 +92,21 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
       let currentMax = Number(
         maxStmt.get(input.workspaceId, input.originId)?.max_seq ?? -1,
       );
-      for (const op of input.ops) {
+      for (const inputOp of input.ops) {
+        const admittedChat = input.originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX) &&
+          (inputOp.opKind === "chat.message.append" || inputOp.opKind === "chat.reaction.set") &&
+          inputOp.admittedAuthorSnapshot !== undefined;
+        let op = admittedChat ? withAdmittedChatName(inputOp, inputOp.admittedAuthorSnapshot!) : inputOp;
         if (op.originSeq <= currentMax) {
           const existing = existingStmt.get(
             input.workspaceId,
             input.originId,
             op.originSeq,
           );
+          // Account names belong to the first admission, even after a rename.
+          if (admittedChat && existing?.admitted_author_snapshot_json != null) {
+            op = withAdmittedChatName(inputOp, parseLiveAuthorSnapshot(JSON.parse(String(existing.admitted_author_snapshot_json))));
+          }
           if (
             existing &&
             existing.op_kind === op.opKind &&

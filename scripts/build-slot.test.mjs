@@ -519,25 +519,26 @@ test("inherited compiler and test settings cannot exceed a lane's budget", () =>
   assert.throws(() => capBuildParallelism({}, 0), /positive integer/);
 });
 
-test("the lane count is one unless the slot root's setting says two", async t => {
+test("the lane count is one unless the slot root's setting says otherwise, up to four", async t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
   const env = {DOHC_BUILD_SLOT_ROOT: root};
   assert.equal(verificationLanes(env), 1);
-  for (const setting of ["0", "3", "two"]) {
+  for (const setting of ["0", "5", "12", "two"]) {
     writeFileSync(join(root, "verification-lanes"), setting);
-    assert.throws(() => verificationLanes(env), /must contain 1 or 2/);
+    assert.throws(() => verificationLanes(env), /must contain a lane count from 1 to 4/);
   }
+  writeFileSync(join(root, "verification-lanes"), "4");
+  assert.equal(verificationLanes(env), 4);
   assert.throws(() => verificationLanes({...env, DOHC_VERIFICATION_SLOT_ROOT: root, DOHC_VERIFICATION_TRIAL: "1"}), /isolated/);
-  writeFileSync(join(root, "verification-lanes"), "2\n");
-  assert.equal(verificationLanes(env), 2);
-  const first = await verifierLane(env);
-  const second = await verifierLane(env);
+  writeFileSync(join(root, "verification-lanes"), "3\n");
+  assert.equal(verificationLanes(env), 3);
+  const lanes = [await verifierLane(env), await verifierLane(env), await verifierLane(env)];
   try {
-    assert.notEqual(first.name, second.name);
-    assert.equal(first.dir, join(root, first.name));
-    await assert.rejects(verifierLane(env, {waitMs: 0}), /all 2 slots are held/);
-  } finally { first.release(); second.release(); }
+    assert.equal(new Set(lanes.map(lane => lane.name)).size, 3);
+    assert.equal(lanes[0].dir, join(root, lanes[0].name));
+    await assert.rejects(verifierLane(env, {waitMs: 0}), /all 3 slots are held/);
+  } finally { for (const lane of lanes) lane.release(); }
   // An isolated trial root has its own setting.
   const trial = join(root, "trial");
   mkdirSync(trial);
@@ -571,6 +572,46 @@ test("an older verifier waiting for slot 1 does not hold back a free second lane
     const second = await verifierLane(env, {waitMs: 5000});
     try { assert.equal(second.name, "verification-slot-2"); } finally { second.release(); }
   } finally { first.release(); }
+});
+
+test("a lowered lane count admits nothing until the runs in flight fall under it, even for a run already waiting", async t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const env = {DOHC_BUILD_SLOT_ROOT: root};
+  const setting = count => writeFileSync(join(root, "verification-lanes"), String(count));
+  setting(3);
+  const [first, second, third] = [await verifierLane(env), await verifierLane(env), await verifierLane(env)];
+  first.release();
+  second.release();
+  // Slot 3 still runs, so a count of 1 is already met even though slots 1 and 2 are free.
+  setting(1);
+  await assert.rejects(verifierLane(env, {waitMs: 0}), /no verification slot freed/);
+  setting(2);
+  const fourth = await verifierLane(env, {waitMs: 0});
+  // A run that started waiting under 2 stops admitting once the count drops to 1.
+  const waiting = verifierLane(env, {waitMs: 3000});
+  setting(1);
+  fourth.release();
+  await assert.rejects(waiting, /no verification slot freed/);
+  third.release();
+  const last = await verifierLane(env, {waitMs: 3000});
+  last.release();
+});
+
+test("a caller that tracks the lane count, such as the queue service, also stops admitting when it drops", async t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const env = {DOHC_BUILD_SLOT_ROOT: root};
+  let count = 2;
+  const lanes = () => count;
+  const [first, second] = [await verifierLane(env, {lanes}), await verifierLane(env, {lanes})];
+  const waiting = verifierLane(env, {lanes, waitMs: 3000});
+  count = 1;
+  second.release();
+  await assert.rejects(waiting, /no verification slot freed/);
+  first.release();
+  const next = await verifierLane(env, {lanes, waitMs: 3000});
+  next.release();
 });
 
 test("queue status retains claim identity and estimates only from completed lane history", async t => {
@@ -610,10 +651,10 @@ test("status CLI reads absent queues without creating or acquiring anything", t 
   assert.equal(existsSync(absent), false);
 });
 
-test("status CLI reports invalid configuration and preserves an existing second lane", t => {
+test("status CLI reports invalid configuration and shows a lane held above the setting", t => {
   const root = slotRoot();
   t.after(() => rmSync(root, {recursive: true, force: true}));
-  const second = join(root, "verification-slot-2");
+  const second = join(root, "verification-slot-3");
   mkdirSync(second);
   const owner = JSON.stringify({pid: process.pid, start: new Date().toISOString()});
   writeFileSync(join(second, "owner.json"), owner);
@@ -624,7 +665,7 @@ test("status CLI reports invalid configuration and preserves an existing second 
   const status = JSON.parse(result.stdout);
   assert.equal(status.verificationSlots, null);
   assert.match(status.verificationConfigurationError, /isolated/);
-  assert.equal(status.lanes.find(lane => lane.kind === "verification-slot").owners[0].name, "verification-slot-2");
+  assert.equal(status.lanes.find(lane => lane.kind === "verification-slot").owners[0].name, "verification-slot-3");
   assert.equal(readFileSync(join(second, "owner.json"), "utf8"), owner);
   assert.equal(existsSync(join(root, "verification-slot-1")), false);
   assert.equal(existsSync(join(root, "verification-slot-queue")), false);

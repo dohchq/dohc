@@ -3671,7 +3671,7 @@ async fn oversized_close_decline_survives_prune_and_restart() {
         )
         .unwrap()
         {
-            dohc_engine_storage::TxnOutcome::Committed(value) => value,
+            dohc_engine_storage::TxnOutcome::Committed(value) => value.sharing_declined,
             other => panic!("{other:?}"),
         };
         assert_eq!(
@@ -3694,7 +3694,7 @@ async fn oversized_close_decline_survives_prune_and_restart() {
     )
     .unwrap()
     {
-        dohc_engine_storage::TxnOutcome::Committed(value) => value,
+        dohc_engine_storage::TxnOutcome::Committed(value) => value.sharing_declined,
         other => panic!("{other:?}"),
     };
     VersionedTextStore::new(&mut store)
@@ -3808,7 +3808,7 @@ async fn oversized_close_decline_survives_prune_and_restart() {
     let mut store = EngineStore::open(&db, 900).unwrap();
     assert!(matches!(
         commit_relay_cursor(&mut store, WS, &cursor, &NoFaults, &NoLiveLeases, 910).unwrap(),
-        dohc_engine_storage::TxnOutcome::Committed(declines) if declines.is_empty()
+        dohc_engine_storage::TxnOutcome::Committed(declines) if declines.sharing_declined.is_empty()
     ));
     assert!(
         dohc_engine_collab::read_marker(&store, &key)
@@ -3858,7 +3858,7 @@ async fn oversized_declined_editor_settlements_export_only_latest_after_enrolmen
     assert!(matches!(
         commit_relay_cursor(&mut store, WS, &cursor, &NoFaults, &NoLiveLeases, 120)
             .expect("enroll"),
-        dohc_engine_storage::TxnOutcome::Committed(declines) if declines.is_empty()
+        dohc_engine_storage::TxnOutcome::Committed(declines) if declines.sharing_declined.is_empty()
     ));
     assert!(
         read_local_ops(&store)
@@ -4005,7 +4005,7 @@ async fn oversized_declined_editor_settlements_export_only_latest_after_enrolmen
             match commit_relay_cursor(&mut store, WS, &cursor, &NoFaults, &NoLiveLeases, now)
                 .expect("post-enrollment cursor pass without a live lease")
             {
-                dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
+                dohc_engine_storage::TxnOutcome::Committed(declines) => declines.sharing_declined,
                 other => panic!("{other:?}"),
             };
         assert_eq!(declines.len(), 1);

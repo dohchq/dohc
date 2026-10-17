@@ -7,6 +7,7 @@ import {
   type EnforceWorkspaceIdentityResult,
 } from "./types";
 import { type StorageContext } from "./context";
+import { accountIsFenced, workspaceIsDeleted } from "./accountDeletion";
 import { SyncRelayQuotaExceededError } from "./errors";
 
 function workspaceIdentityFromRow(
@@ -26,6 +27,7 @@ export function claimWorkspace(storage: StorageContext, input: {
     ownerUserId: string;
     createdAtMs: number;
   }): "created" | "owned" | "not-owner" {
+    if (accountIsFenced(storage, input.ownerUserId) || workspaceIsDeleted(storage, input.workspaceId)) return "not-owner";
     return storage.tx(() => {
       const existing = storage.db
         .prepare(

@@ -404,6 +404,7 @@ async function applyOwnedShareViewChange(
     schedulingRootPath: scope.rootPath,
     rootPath: scope.rootPath,
     shareId: SHARE_ID,
+    recipientUserId: "recipient-a",
     granterEmail: "granter@example.com",
     grantedSelector: { paths: [], versionId: "main", access: "edit" },
     ended: false,

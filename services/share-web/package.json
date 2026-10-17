@@ -41,9 +41,9 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@dohc/workspace-auth": "workspace:*",
     "@dohc/app-backend-runtime": "workspace:*",
     "@dohc/sync-relay": "workspace:*",
-    "@dohc/workspace-auth": "workspace:*",
     "@modelcontextprotocol/client": "2.0.0",
     "@peculiar/x509": "^2.1.0",
     "@playwright/test": "^1.62.1",
