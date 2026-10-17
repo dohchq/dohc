@@ -447,9 +447,9 @@ impl EngineService {
         );
         // With capture, the pass that sees the file adopts a new record or
         // reads a changed schema. Without it, that happens now, or the next
-        // write, push, or terminal page's commit runs it. A replay of the
-        // same request reconciles too, and any write runs an update still
-        // owed.
+        // text write, push, or terminal page's commit runs it. A replay of
+        // the same request reconciles too, and any text write runs an update
+        // still owed unless a pull is between pages.
         if self.reconciles_collections_itself(&open) {
             if can_move_collections(&result.snapshot.path, !result.moment.before_present) {
                 self.collections_landed(&open);

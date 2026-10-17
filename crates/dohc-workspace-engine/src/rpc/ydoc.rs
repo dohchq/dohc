@@ -1115,7 +1115,6 @@ impl EngineService {
                 i64::try_from(initial_update.len())
                     .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?,
                 budget_until,
-                "ydoc.open",
             )
             .await?;
         let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
@@ -1904,25 +1903,17 @@ impl EngineService {
         }
         // The resync committed the document's pulled edits, so it runs to its
         // answer, its blob included. If the blob cannot have its egress budget
-        // by the deadline, the session is released: its editor opens again
-        // and shows the edits.
+        // by the deadline, the resync answers OVERLOADED and keeps the
+        // session: the edits are stored, so the next resync delivers them.
         let initial_update = state.initial_update;
-        let Ok(byte_permit) = self
+        let byte_permit = self
             .blob_egress_budget
             .reserve_landed(
                 i64::try_from(initial_update.len())
                     .map_err(|_| WireError::new(ErrorCode::Internal, "state-corrupt"))?,
                 landed_wait_until(ctx),
-                "ydoc.resync",
             )
-            .await
-        else {
-            lock(&self.sessions).remove(&params.session_id);
-            return Err(WireError::new(
-                ErrorCode::InvalidParams,
-                "ydoc-session-not-found",
-            ));
-        };
+            .await?;
         let initial_update_sha256 = dohc_engine_storage::hex_sha256(&initial_update);
         let result = serde_json::to_value(YdocResyncResult {
             owner_draft,
@@ -3426,8 +3417,9 @@ mod tests {
     }
 
     /// An open or resync committed the document's pulled edit, and its blob
-    /// cannot have egress budget in time. The open answers OVERLOADED; the
-    /// resync releases its session. Either way, the next open shows the edit.
+    /// cannot have egress budget in time. Both answer OVERLOADED. The open
+    /// keeps no session, so the next open shows the edit; the resync keeps its
+    /// session, so the editor's next resync shows it.
     async fn full_budget_after_the_pulled_edit_commits(editor: bool) {
         let parked = ParkedEdit::new(
             if editor {
@@ -3444,22 +3436,24 @@ mod tests {
             .expect("task")
             .expect_err("the blob has no budget");
         drop(held);
-        if let Some(session) = &parked.session {
-            assert_eq!(refused.message, "ydoc-session-not-found");
-            assert!(
-                parked
-                    .service
-                    .ydoc_session(Some(&parked.handle), session)
-                    .is_err(),
-                "the resync released its session"
-            );
-        } else {
-            assert_eq!(refused.code, ErrorCode::Overloaded);
-        }
-        let (_, egress) = parked
-            .open_document(&RequestContext::unbounded())
-            .await
-            .expect("the document opens again");
+        assert_eq!(refused.code, ErrorCode::Overloaded);
+        assert_eq!(refused.message, "blob-egress-capacity");
+        let (_, egress) = match &parked.session {
+            Some(session) => parked
+                .service
+                .ydoc_resync(
+                    &RequestContext::unbounded(),
+                    Some(parked.handle.clone()),
+                    json!({ "sessionId": session }),
+                    3,
+                )
+                .await
+                .expect("the editor's session survives and resyncs"),
+            None => parked
+                .open_document(&RequestContext::unbounded())
+                .await
+                .expect("the document opens again"),
+        };
         shows_the_pulled_edit(&egress);
         parked.close().await;
     }
@@ -3470,7 +3464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_resync_without_egress_budget_releases_its_session() {
+    async fn a_resync_without_egress_budget_keeps_its_session() {
         full_budget_after_the_pulled_edit_commits(true).await;
     }
 

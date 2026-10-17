@@ -44,7 +44,7 @@ use std::time::Duration;
 pub(super) const MAX_OPEN_HANDLES: usize = 64;
 
 /// How long a landed step waits for the capture gate before it leaves its
-/// Collections update to the next write, push, or terminal page's commit.
+/// Collections update to the next text write, push, or terminal page's commit.
 const OWED_COLLECTIONS_GATE_WAIT: Duration = Duration::from_secs(2);
 
 /// A `capture.hold`: the apply gate it holds, and when it ends unless the
@@ -97,9 +97,12 @@ pub(crate) struct OpenWorkspace {
     /// token only if no newer cursor of its kind was issued since.
     pub(super) cursors_issued: [std::sync::atomic::AtomicU64; 3],
     /// A landed step changed what this workspace's Collections hold and the
-    /// update has not run yet. The next write, push, or terminal page's
+    /// update has not run yet. The next text write, push, or terminal page's
     /// commit runs it.
     pub(super) collections_owed: std::sync::atomic::AtomicBool,
+    /// A pull applied a page and its terminal page has not committed, so
+    /// the Collections may hold half a pull. Owed work waits for that commit.
+    pub(super) pull_between_pages: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +157,7 @@ impl OpenWorkspace {
             session_ops: Arc::clone(&self.session_ops),
             cursors_issued: Default::default(),
             collections_owed: Default::default(),
+            pull_between_pages: Default::default(),
         }
     }
 
@@ -530,11 +534,15 @@ impl EngineService {
     /// Run an owed Collections update after a landed step, which answers with
     /// what landed either way. A renewed `capture.hold` can keep the gate
     /// forever, so the wait for it is bounded. An update that cannot run now
-    /// stays owed to the next write, push, or terminal page's commit. The
+    /// stays owed to the next text write, push, or terminal page's commit. The
     /// update reconciles the whole workspace, so whichever step runs it
-    /// repairs every change still owed.
+    /// repairs every change still owed. While a pull is between pages it
+    /// stays owed: dangling-link cleanup would remove a relation whose target
+    /// a later page brings back.
     pub(super) async fn settle_owed_collections(&self, ctx: &RequestContext, open: &OpenWorkspace) {
-        if !open.collections_owed.load(Ordering::SeqCst) {
+        if !open.collections_owed.load(Ordering::SeqCst)
+            || open.pull_between_pages.load(Ordering::SeqCst)
+        {
             return;
         }
         let Ok(apply) = tokio::time::timeout(
@@ -545,8 +553,11 @@ impl EngineService {
         else {
             return;
         };
-        // Another step took the update under the gate after this one landed.
-        if !open.collections_owed.swap(false, Ordering::SeqCst) {
+        // Another step took the update under the gate after this one landed,
+        // or a pull reached a page meanwhile.
+        if open.pull_between_pages.load(Ordering::SeqCst)
+            || !open.collections_owed.swap(false, Ordering::SeqCst)
+        {
             return;
         }
         let cancellation = OperationCancellation::new(&after_landing(ctx));
@@ -1232,11 +1243,8 @@ impl EngineService {
                 capture_holds: CaptureHolds::default(),
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
                 cursors_issued: Default::default(),
-                // An update owed when the daemon stopped is not recorded, so
-                // the first step after open runs one.
-                collections_owed: std::sync::atomic::AtomicBool::new(
-                    params.reconcile_collections && requested_mode == WorkspaceOpenMode::Full,
-                ),
+                collections_owed: Default::default(),
+                pull_between_pages: Default::default(),
             }),
         );
         open_guard.disarm();

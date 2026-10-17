@@ -945,6 +945,18 @@ impl EngineService {
         if terminal && !reconcile_at_commit && !passive {
             open.request_collection_reconcile();
         }
+        // An earlier page is in place before its commit.
+        if !terminal
+            && self.reconciles_collections_itself(&open)
+            && matches!(
+                &outcome,
+                RelayOperationOutcome::Sync(
+                    SyncPassOutcome::Complete { .. } | SyncPassOutcome::CrashedAfterApply { .. }
+                )
+            )
+        {
+            open.pull_between_pages.store(true, Ordering::SeqCst);
+        }
         // Post-commit: every applied envelope's record changes are durable,
         // even on a crash after apply (the cursor retries; the durable layer
         // dedupes, so a replay derives no second fact set).
@@ -1007,6 +1019,7 @@ impl EngineService {
             result["pendingCursor"] = issued;
         } else if reconcile_at_commit {
             // Nothing to materialize or commit: the page's changes are in place.
+            open.pull_between_pages.store(false, Ordering::SeqCst);
             self.collections_changed(ctx, &open).await;
         }
         Ok(result)
@@ -1203,6 +1216,12 @@ impl EngineService {
         }
         if share_view && reconcile_collections {
             open.request_collection_reconcile();
+        }
+        // A relay page's cursor carries whether its page was terminal in a
+        // workspace that keeps its Collections itself.
+        if !share_view && self.reconciles_collections_itself(&open) {
+            open.pull_between_pages
+                .store(!reconcile_collections, Ordering::SeqCst);
         }
         // Only a terminal page's commit may reconcile: an earlier page can
         // hold a relation whose target is on a later one.
@@ -2635,8 +2654,9 @@ mod tests {
 
     /// An earlier terminal commit left cleanup owed when a two-page pull
     /// moves a relation's target: page one removes it from its old path, and
-    /// page two supplies it at its new one. Page one's commit leaves the debt
-    /// alone, so page two's commit pays it with the relation intact.
+    /// page two supplies it at its new one. Page one's commit, and a write
+    /// between the pages, leave the debt alone, so page two's commit pays it
+    /// with the relation intact.
     #[tokio::test]
     async fn owed_collections_work_waits_for_the_terminal_page() {
         let f = CursorFixture::new("owed-partial-pull", true).await;
@@ -2655,6 +2675,11 @@ mod tests {
         f.pulled_removal("tasks/target.md").await;
         f.commit(8, false).await.expect("page one");
         assert!(f.owed(), "a partial pull leaves the debt owed");
+        f.write("notes.txt", "Notes\n")
+            .await
+            .expect("a write between pages");
+        assert!(f.owed(), "a write between pages leaves the debt owed");
+        assert_eq!(f.edges(), 1, "and the relation intact");
         f.pulled("moved", "tasks/moved.md", &record(TARGET, None))
             .await;
         f.commit(9, true).await.expect("page two");
@@ -2701,10 +2726,11 @@ mod tests {
     }
 
     /// The daemon stopped with an update owed: the pulled records are in the
-    /// store, and their Collections never reconciled. After it opens again,
-    /// the replica's first step runs the update.
+    /// store, and their Collections never reconciled. The pull may have
+    /// stopped between pages, so a write after the restart leaves the
+    /// Collections alone, and the next terminal page's commit reconciles them.
     #[tokio::test]
-    async fn an_owed_update_survives_a_restart() {
+    async fn a_restart_leaves_an_owed_update_to_the_next_terminal_commit() {
         let f = CursorFixture::new("owed-restart", true).await;
         f.prepare().await;
         f.pulled("schema", "tasks/collection.yaml", RELATION_SCHEMA)
@@ -2714,14 +2740,11 @@ mod tests {
         f.pulled("source", "tasks/source.md", &record(SOURCE, Some(TARGET)))
             .await;
         let f = f.restart().await;
-        assert!(
-            f.owed(),
-            "an update may have been owed when the daemon stopped"
-        );
-        assert_eq!(f.edges(), 0);
+        assert!(!f.owed(), "a workspace opens with nothing owed");
         f.write("notes.txt", "Notes\n").await.expect("the write");
-        assert!(!f.owed());
-        assert_eq!(f.edges(), 1, "the first step after open runs the update");
+        assert_eq!(f.edges(), 0, "a write after the restart does not reconcile");
+        f.commit(7, true).await.expect("the terminal page");
+        assert_eq!(f.edges(), 1, "the terminal commit reconciles");
         f.close().await;
     }
 

@@ -255,8 +255,9 @@ const FLUSH_UNAVAILABLE: capture_driver::FlushOutcome = capture_driver::FlushOut
 /// Hand a flush to the driver and answer with its passes. A flush can sit
 /// behind a full flush queue, so a cancelled caller stops waiting for a
 /// place. A flush with `landed` follows a landed step: it ignores the
-/// cancellation and stops waiting at `landed`, answering `unsettled`. Once
-/// the driver holds the flush it runs its passes regardless, so the request
+/// cancellation and stops waiting for a place or for the passes at `landed`,
+/// answering `unsettled`; a queued flush still runs. Otherwise, once the
+/// driver holds the flush it runs its passes regardless, so the request
 /// answers with their outcome.
 async fn flush_through(
     sender: &tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<capture_driver::FlushOutcome>>,
@@ -285,7 +286,14 @@ async fn flush_through(
     if sent.is_err() {
         return Ok(FLUSH_UNAVAILABLE);
     }
-    Ok(reply_rx.await.unwrap_or(FLUSH_UNAVAILABLE))
+    let replied = match landed {
+        Some(until) => match tokio::time::timeout_at(until, reply_rx).await {
+            Ok(replied) => replied,
+            Err(_) => return Ok(unsettled),
+        },
+        None => reply_rx.await,
+    };
+    Ok(replied.unwrap_or(FLUSH_UNAVAILABLE))
 }
 
 impl EngineService {
@@ -855,6 +863,46 @@ mod tests {
         .expect("a landed flush answers");
         assert!(!outcome.settled && outcome.running && !outcome.degraded);
         assert_eq!(tokio::time::Instant::now(), bound);
+    }
+
+    /// A flush that follows a landed step enters the queue, and the driver
+    /// does not answer it before the bound. The request answers that capture
+    /// has not settled, and the queued flush stays for the driver to run.
+    #[tokio::test(start_paused = true)]
+    async fn a_landed_flush_stops_waiting_for_its_reply_at_its_bound() {
+        let (sender, mut queue) = tokio::sync::mpsc::channel(1);
+        let unsettled = capture_driver::FlushOutcome {
+            settled: false,
+            running: true,
+            degraded: false,
+        };
+        let bound = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            super::flush_through(
+                &sender,
+                &RequestContext::unbounded(),
+                "capture.retryHeld",
+                Some(bound),
+                unsettled,
+            ),
+        )
+        .await
+        .expect("the wait ends at its bound")
+        .expect("a landed flush answers");
+        assert!(!outcome.settled && outcome.running && !outcome.degraded);
+        assert_eq!(tokio::time::Instant::now(), bound);
+        let queued = queue.try_recv().expect("the flush stays queued");
+        // The driver finishes it later; the answer has nowhere to go.
+        assert!(
+            queued
+                .send(capture_driver::FlushOutcome {
+                    settled: true,
+                    running: true,
+                    degraded: false,
+                })
+                .is_err()
+        );
     }
 
     /// The retry is cancelled while it waits for the actor, so it commits
