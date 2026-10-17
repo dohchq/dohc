@@ -1241,6 +1241,13 @@ export class YDocOpenRacedError extends Error {
   }
 }
 
+export class YDocSessionClosedError extends Error {
+  constructor(path: string, cause?: unknown) {
+    super(`Y.Doc session for ${path} is closed.`, cause === undefined ? {} : { cause });
+    this.name = "YDocSessionClosedError";
+  }
+}
+
 // The open refused, and its session was not released. The daemon reinserts a
 // refused close's entry with its lease held (ydoc_close_inner), so it may
 // still own this document — which makes every refusal that describes the disk
@@ -1721,6 +1728,7 @@ export function createWorkspaceEngineCapture(
   let observationDrainUnavailable = false;
   let observationResync: Promise<void> = Promise.resolve();
   let stopped = false;
+  let shuttingDown = false;
   let ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2294,8 +2302,10 @@ export function createWorkspaceEngineCapture(
       if (checkpointTimer !== null) { clearTimeout(checkpointTimer); checkpointTimer = null; }
       if(checkpointBase && checkpointContentKind === "scene" && !checkpointTypingIsDurable()) {const error=new DrawingCheckpointUnavailable(); options.onTypingCheckpointFailure?.(input.path,error); return Promise.reject(error);}
       const snapshot = checkpointSnapshot();
-      if (!snapshot) return checkpointWriter.wait();
-      return checkpointWriter.flush(checkpointTypingIsDurable() ? null : snapshot);
+      const flushing = snapshot || (lastCheckpoint && checkpointTypingIsDurable())
+        ? checkpointWriter.flush(checkpointTypingIsDurable() ? null : snapshot)
+        : checkpointWriter.wait();
+      return flushing.then(() => { if (closed) unregisterCheckpoint(); });
     };
     const checkpointUnresolved = (): void => {
       if (!options.writeTypingCheckpoint) return;
@@ -3033,10 +3043,7 @@ export function createWorkspaceEngineCapture(
       );
 
     const closedError = (cause?: unknown): Error =>
-      new Error(
-        `Y.Doc session for ${input.path} is closed.`,
-        cause === undefined ? {} : { cause },
-      );
+      new YDocSessionClosedError(input.path, cause);
 
     const executeWithReconnect = async <T>(
       operation: (session: EngineYdocProviderSession) => Promise<T>,
@@ -3301,6 +3308,7 @@ export function createWorkspaceEngineCapture(
         );
       },
       applyLocalUpdate(update, onArmed, applyOptions) {
+        if (closed) throw closedError();
         if (pendingRecords.size + queuedUpdateCount >= YDOC_PENDING_MAX_RECORDS ||
             pendingUpdateBytes + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
           const record: PendingRecord = {
@@ -3382,8 +3390,18 @@ export function createWorkspaceEngineCapture(
             await releaseObligation.evict();
             releaseObligation = null;
           }
+          let checkpointFlushed = false;
+          try {
+            await flushCheckpoint();
+            checkpointFlushed = true;
+          } catch (error) {
+            // The lease is released. Keep checkpoint recovery registered for
+            // the final flush without reporting a failed eviction.
+            onError("Typing checkpoint", error);
+          }
           closed = true;
-          unregisterCheckpoint();
+          if (checkpointFlushed) unregisterCheckpoint();
+          await checkpointWriter.idle();
           recordedDoc.destroy();
           current = null;
           clearDeadYDocSession(deadSessionToken);
@@ -5091,12 +5109,33 @@ export function createWorkspaceEngineCapture(
             });
           }, delay);
         };
-        // The close was refused and an evict discharged it instead. Only the
-        // absent-head refusals below read it, and what it tells them is that
-        // the lineage holds content: the daemon refuses a prune-close for no
-        // other reason.
+        // The close was refused and eviction released the lease. The absent-head
+        // checks below must not treat that release as a successful settlement.
         let dischargedByEvict = false;
-        const closeEntry = async (
+        let closeInFlight: Promise<void> | null = null;
+        let quitClose: Promise<void> | null = null;
+        let quitEvictionFailure: { closeError: unknown; evictError: unknown } | null = null;
+        const closeEntry = (opts?: WorkspaceEngineYDocCloseOptions): Promise<void> => {
+          if (shuttingDown && quitClose) return quitClose;
+          const closing = shuttingDown && closeInFlight ? closeInFlight : attemptCloseEntry(opts);
+          closeInFlight = closing;
+          if (shuttingDown) quitClose = closing;
+          const completed = (): void => {
+            // Also retain a renderer close that quit overtook while it waited.
+            if (shuttingDown) quitClose ??= closing;
+            if (closeInFlight === closing) closeInFlight = null;
+          };
+          void closing.then(completed, () => {
+            completed();
+            // Later quit callers may retry the handover, never the close.
+            if (shuttingDown && quitClose === closing && quitEvictionFailure &&
+                isTransientEngineCause(quitEvictionFailure.evictError)) {
+              quitClose = null;
+            }
+          });
+          return closing;
+        };
+        const attemptCloseEntry = async (
           opts?: WorkspaceEngineYDocCloseOptions,
         ): Promise<void> => {
           await observationResync;
@@ -5121,48 +5160,9 @@ export function createWorkspaceEngineCapture(
               ? { ...opts, settle: false, settleOnRefusal: false }
               : opts;
           try {
+            if (shuttingDown && quitEvictionFailure) throw quitEvictionFailure.closeError;
             await session.close(effective);
           } catch (error) {
-            // THE ORPHAN'S THIRD EXIT. It may not settle — the rule
-            // above — and its prune-close refuses while no artifact holds its
-            // CRDT's bytes. On a policy-excluded path, or a file over the
-            // MAX_TEXT_BYTES capture limit, no capture will ever mint that artifact,
-            // so the refused close's reinserted lease answered every later
-            // open with `ydoc-session-busy` until the daemon restarted.
-            //
-            // An evict writes nothing and discards nothing: the daemon lets go
-            // of the session and keeps the lineage, so the next open
-            // resurrects this document's edits.
-            //
-            // An orphan, OR a write this session already cancelled for good:
-            // a suppressed close-retry forces the same
-            // `settleOnRefusal: false` an orphan's release uses, and can meet
-            // the same dirty-session refusal — but `writeCancelled` means no
-            // caller is ever getting a materialized write from this session
-            // again, so leaving it to strand the lease busy until restart is
-            // strictly worse than discharging it the orphan's way. A session
-            // someone still holds with an open write is converged by its
-            // holder instead. And only a TERMINAL refusal either way: a busy
-            // store or a spent budget is waited out by the ladders that
-            // already exist.
-            if (
-              (liveEntry.orphaned || writeCancelled) &&
-              isYdocUnsettledCloseRefusal(error)
-            ) {
-              try {
-                await session.evict();
-                dischargedByEvict = true;
-                if (liveYDocSessions.get(input.path) === liveEntry) {
-                  liveYDocSessions.delete(input.path);
-                }
-                return;
-              } catch (evictError) {
-                // The daemon kept the session, so the retain below is still
-                // the honest outcome. Report the eviction failure, because it
-                // is the reason this path stays reserved.
-                onError(`ydoc evict of ${input.path}`, evictError);
-              }
-            }
             if (error instanceof YdocReleasedWithSettleFailureError) {
               // A transient settle failure under a succeeded release is the
               // replicated shape: this error is the last time anyone hears
@@ -5241,13 +5241,34 @@ export function createWorkspaceEngineCapture(
               }
               throw error;
             }
+            // A quit cannot wait for another settle attempt. Orphans and
+            // cancelled writes also cannot settle. Eviction journals pending
+            // text or preserves a recovered draft before releasing the lease.
+            // Interactive close/switch failures keep their guard for retry.
+            if (shuttingDown ||
+                ((liveEntry.orphaned || writeCancelled) && isYdocUnsettledCloseRefusal(error))) {
+              try {
+                await session.evict();
+                quitEvictionFailure = null;
+                dischargedByEvict = true;
+                if (liveYDocSessions.get(input.path) === liveEntry) {
+                  liveYDocSessions.delete(input.path);
+                }
+                return;
+              } catch (evictError) {
+                // Keep the close refusal as the caller's error, and report the
+                // failed release separately. The guard below remains reserved.
+                onError(`ydoc evict of ${input.path}`, evictError);
+                if (shuttingDown) quitEvictionFailure = { closeError: error, evictError };
+              }
+            }
             // The reservation may still be held and the on-disk state is
             // indeterminate — retain a failing-close guard so a retry/force-close
             // can complete the teardown, and DO NOT swallow (data-integrity
             // teardown).
             if (liveYDocSessions.get(input.path) === liveEntry) {
               liveEntry.status = "failing-close";
-              scheduleTransientCloseRetry(error, opts);
+              scheduleTransientCloseRetry(quitEvictionFailure?.evictError ?? error, opts);
             }
             throw error;
           }
@@ -5917,6 +5938,7 @@ export function createWorkspaceEngineCapture(
     },
 
     beginShutdown() {
+      shuttingDown = true;
       ydocOpenAbort.abort();
       captureWaitAbort.abort();
     },

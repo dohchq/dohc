@@ -1223,7 +1223,8 @@ describe("WorkspaceFileMutationOwner", () => {
     expect(markDeleted).toHaveBeenCalledOnce();
     await expect(access(join(test.rootPath, "notes"))).rejects.toThrow();
     const trashEntries = await readdir(join(test.rootPath, ".dohc/trash"));
-    expect(trashEntries).toHaveLength(1);
+    expect(trashEntries.filter(name => name.startsWith("delete-"))).toHaveLength(1);
+    expect(trashEntries.filter(name => !name.startsWith("delete-"))).toHaveLength(1);
   });
 
   it("credits a hand delete to the person who asked while it waits for its workspace", async () => {

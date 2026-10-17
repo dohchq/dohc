@@ -1,5 +1,22 @@
 import { expect, it } from "vitest";
-import { visibleSharePath } from "./shareSelector";
+import { prepareSharePath, visibleSharePath } from "./shareSelector";
+
+it("prepared paths preserve validation and recheck each selector", () => {
+  const prepared = prepareSharePath("Trip/Plans/day.md")!;
+  expect(Object.isFrozen(prepared)).toBe(true);
+  expect(visibleSharePath({paths:["Trip"],versionId:null},prepared)).toBe("Trip/Plans/day.md");
+  expect(visibleSharePath({paths:["Budget"],versionId:null},prepared)).toBeNull();
+  for (const path of [".dohc/private", "Trip/.git/config", "Trip/../secret", "Trip/node_modules/a", "Trip/NODE_M~1/a"]) {
+    expect(prepareSharePath(path)).toBeNull();
+  }
+});
+
+it("rejects a forged prepared-path object", () => {
+  const prepared = prepareSharePath("Trip/a.md")!;
+  const forged = Reflect.construct(prepared.constructor, ["Trip/../Secret.md"]);
+  expect(forged).toBeInstanceOf(prepared.constructor);
+  expect(visibleSharePath({paths:["Trip"],versionId:null},forged as never)).toBeNull();
+});
 
 it("matches exact paths and slash ancestors, including overlapping scopes", () => {
   const scope = { paths: ["Trip", "Trip/Plans"], versionId: null };

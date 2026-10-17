@@ -2201,6 +2201,9 @@ fn file_folds_converge_through_the_peer_projection_path() {
         "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: todo\n---\n- parent\n  - nested\n";
     assert_peer_fold(initial, &initial.replace("todo", "done"), false);
     assert_peer_fold(initial, &initial.replace("nested", "changed nested"), true);
+    let spelled =
+        "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nstatus: todo\n---\n* parent\n\n    * nested\n";
+    assert_peer_fold(spelled, &spelled.replace("todo", "done"), false);
 }
 
 fn assert_peer_fold(initial: &str, chosen: &str, refuses: bool) {
