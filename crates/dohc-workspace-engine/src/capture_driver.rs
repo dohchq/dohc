@@ -62,6 +62,12 @@ pub const EARLY_IMPORT_MIN_ADDED_FILES: usize = 1_000;
 #[cfg_attr(any(test, feature = "harness"), derive(Default))]
 pub struct CaptureApplyProbe {
     #[cfg(test)]
+    reconcile_refused: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    capture_batch_wait: Option<Arc<dyn Fn(std::time::Duration) + Send + Sync>>,
+    #[cfg(test)]
+    collection_committed: Option<dohc_engine_runtime::actor::CollectionCommitListener>,
+    #[cfg(test)]
     pub(crate) observation_root: Option<PathBuf>,
     #[cfg(feature = "harness")]
     inner: Arc<CaptureApplyProbeInner>,
@@ -77,6 +83,20 @@ pub struct CaptureApplyProbe {
     open_budget_reached: Arc<tokio::sync::Notify>,
     #[cfg(any(test, feature = "harness"))]
     open_budget_release: Arc<tokio::sync::Notify>,
+}
+
+impl CaptureApplyProbe {
+    fn reconcile_refused(&self) {
+        #[cfg(test)]
+        self.reconcile_refused.notify_one();
+    }
+
+    fn collection_committed(&self, _step: &CollectionReconciliation) {
+        #[cfg(test)]
+        if let Some(listener) = &self.collection_committed {
+            listener(_step);
+        }
+    }
 }
 
 #[cfg(any(test, feature = "harness"))]
@@ -116,6 +136,9 @@ impl CaptureApplyProbe {
 
 #[cfg(feature = "harness")]
 struct CaptureApplyProbeInner {
+    initial_settled_armed: std::sync::atomic::AtomicBool,
+    initial_settled_entered: tokio::sync::Semaphore,
+    initial_settled_release: tokio::sync::Semaphore,
     armed: std::sync::atomic::AtomicBool,
     apply_blocked: std::sync::atomic::AtomicBool,
     entered: tokio::sync::Semaphore,
@@ -150,6 +173,9 @@ struct CaptureApplyProbeInner {
 impl Default for CaptureApplyProbeInner {
     fn default() -> Self {
         Self {
+            initial_settled_armed: std::sync::atomic::AtomicBool::new(false),
+            initial_settled_entered: tokio::sync::Semaphore::new(0),
+            initial_settled_release: tokio::sync::Semaphore::new(0),
             armed: std::sync::atomic::AtomicBool::new(false),
             apply_blocked: std::sync::atomic::AtomicBool::new(false),
             entered: tokio::sync::Semaphore::new(0),
@@ -184,6 +210,42 @@ impl Default for CaptureApplyProbeInner {
 
 #[cfg(feature = "harness")]
 impl CaptureApplyProbe {
+    pub fn pause_at_initial_settled(&self) {
+        self.inner
+            .initial_settled_armed
+            .store(true, Ordering::Release);
+    }
+
+    pub async fn wait_at_initial_settled(&self) {
+        self.inner
+            .initial_settled_entered
+            .acquire()
+            .await
+            .unwrap()
+            .forget();
+    }
+
+    pub fn release_initial_settled(&self) {
+        self.inner.initial_settled_release.add_permits(1);
+    }
+
+    async fn pause_after_initial_settled_if_armed(&self, cancel: &CancellationToken) {
+        if self
+            .inner
+            .initial_settled_armed
+            .swap(false, Ordering::AcqRel)
+        {
+            self.inner.initial_settled_entered.add_permits(1);
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {},
+                permit = self.inner.initial_settled_release.acquire() => {
+                    permit.unwrap().forget();
+                },
+            }
+        }
+    }
+
     pub fn pause_next_apply(&self) {
         self.inner.apply_blocked.store(true, Ordering::Release);
         self.inner.armed.store(true, Ordering::Release);
@@ -1060,6 +1122,7 @@ impl CaptureDriver {
             events,
             apply_probe,
         } = params;
+        let initial_links_hold = actor.hold_link_drain();
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
         let author_json = Arc::new(Mutex::new(initial_author_json));
@@ -1085,6 +1148,7 @@ impl CaptureDriver {
             let mut env = RealEnv {
                 observation,
                 root,
+                initial_links_hold: Some(initial_links_hold),
                 actor,
                 lease_releases_seen: leases.release_generation(&workspace_id),
                 workspace_id,
@@ -1618,6 +1682,8 @@ enum TickIo {
     /// Reconciled and applied one plan; `clean` is false when the apply
     /// reported failures or the scan itself was degraded.
     Applied { clean: bool },
+    /// The collection reconcile used its total busy-retry budget.
+    CollectionBusyExhausted,
     /// The files actor died under us.
     ActorLost,
     /// The reconcile failed while the layer stayed up.
@@ -1898,6 +1964,10 @@ async fn drive_loop<E: DriverEnv>(
                             clean: all_clean && !fresh_disruption,
                         });
                     }
+                    TickIo::CollectionBusyExhausted => {
+                        outcome = Some(TickObservation::Healthy { clean: false });
+                        break;
+                    }
                     TickIo::ActorLost => {
                         outcome = Some(TickObservation::ActorLost);
                         break;
@@ -1977,13 +2047,14 @@ fn answer_flush(
 
 /// The real filesystem-backed environment.
 struct RealEnv {
+    initial_links_hold: Option<dohc_engine_runtime::actor::LinkDrainHold>,
     observation: Arc<crate::file_observation::FileObservation>,
     root: PathBuf,
     actor: ActorHandle,
     workspace_id: String,
     leases: LeaseRegistry,
-    /// The lease release count at the last check. A capture deferred to a
-    /// live session is offered again once this moves.
+    /// The lease release count at the last check. Deferred and quarantined
+    /// paths are offered again once this moves.
     lease_releases_seen: u64,
     status: Arc<DriverStatus>,
     author_json: Arc<Mutex<Option<String>>>,
@@ -2075,15 +2146,29 @@ impl DriverEnv for RealEnv {
     }
 
     async fn start_layer(&mut self, cancel: &CancellationToken) -> Result<FilesLayer, ()> {
+        #[cfg(feature = "harness")]
+        let mut fence_phase =
+            dohc_engine_storage::capture_phase::Phase::new("fenced_capture", None, 0, false);
         let initial_start = matches!(
             self.status.snapshot().phase,
             CapturePhase::Starting | CapturePhase::Importing
         );
         let _apply_guard = tokio::select! {
             biased;
-            () = cancel.cancelled() => return Err(()),
+            () = cancel.cancelled() => {
+                self.status.mark_initial_degraded();
+                self.initial_links_hold.take();
+                return Err(());
+            },
             guard = self.apply_gate.lock() => guard,
         };
+        let _links_hold = self.actor.hold_link_drain();
+        #[cfg(feature = "harness")]
+        let actor_before = self
+            .actor
+            .capture_phase_totals_for_harness()
+            .await
+            .map_err(|_| ())?;
         // REHYDRATE the scan manifest from the domain's captured state:
         // against an empty baseline a file deleted while the daemon was down
         // could never emit a Retire and its stale head would stay readable
@@ -2098,6 +2183,9 @@ impl DriverEnv for RealEnv {
         // would swallow the edit (the seed reflects old policy while the
         // layer claims to be current).
         let fingerprint_before_seed = policy_fingerprint(&self.root);
+        #[cfg(feature = "harness")]
+        let mut manifest_phase =
+            dohc_engine_storage::capture_phase::Phase::new("manifest_seed", None, 0, false);
         let (seed, seed_loaded) =
             match manifest_seed(&self.root, &self.actor, &self.workspace_id, None).await {
                 Ok(seed) => (seed, true),
@@ -2108,8 +2196,16 @@ impl DriverEnv for RealEnv {
                     (ManifestSeed::Existing(None), false)
                 }
             };
+        #[cfg(feature = "harness")]
+        {
+            manifest_phase.finish(if seed_loaded { "loaded" } else { "failed" });
+            drop(manifest_phase);
+        }
         let workspace_missing = seed.is_workspace_missing();
         let refresh_epoch = self.refresh_epoch.load(Ordering::Acquire);
+        #[cfg(feature = "harness")]
+        let mut scan_phase =
+            dohc_engine_storage::capture_phase::Phase::new("initial_scan", None, 0, false);
         let (fresh, initial) = FilesLayer::start_with_fingerprint(
             &self.root,
             cancel,
@@ -2120,8 +2216,19 @@ impl DriverEnv for RealEnv {
             &self.observation,
         )
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| {
+            self.status.mark_initial_degraded();
+            self.initial_links_hold.take();
+        })?;
 
+        #[cfg(feature = "harness")]
+        {
+            scan_phase.finish("completed");
+            drop(scan_phase);
+            if let ReconcileRun::Completed(plan) = &initial.run {
+                fence_phase.field("files", plan.ops.len() as u64);
+            }
+        }
         // EARLY-OPEN PROOF. The binding watcher is attached before the
         // initial capture plan is prepared. Re-read every mutable prerequisite after
         // the scan, then publish Importing in one atomic transition before the
@@ -2160,6 +2267,11 @@ impl DriverEnv for RealEnv {
         // daemon restart, and a rehydrated manifest may make this plan empty.
         self.status.request_collection_reconcile();
         let provenance = reconcile_provenance();
+        #[cfg(feature = "harness")]
+        fence_phase.field(
+            "correlation",
+            serde_json::json!(provenance.correlation_id.as_deref()),
+        );
         let (mut settled, initial_settle_timed_out) = {
             let initial_cancel = cancel.child_token();
             let initial_settle = async {
@@ -2169,7 +2281,8 @@ impl DriverEnv for RealEnv {
                     initial,
                     &initial_cancel,
                 )
-                .await;
+                .await
+                .clean;
                 // The open barrier must not release on a failed baseline: a
                 // caller whose first write lands before the retry could have
                 // it overwritten by the retry's capture of stale closed-period
@@ -2179,10 +2292,23 @@ impl DriverEnv for RealEnv {
                 let mut attempts = 0;
                 while !settled && attempts < BASELINE_SETTLE_ATTEMPTS {
                     attempts += 1;
+                    #[cfg(feature = "harness")]
+                    let mut rescan_phase = dohc_engine_storage::capture_phase::Phase::new(
+                        "baseline_500ms_rescan",
+                        provenance.correlation_id.as_deref(),
+                        0,
+                        false,
+                    );
                     tokio::select! {
                         biased;
                         () = initial_cancel.cancelled() => break,
                         () = tokio::time::sleep(DRIVE_INTERVAL) => {}
+                    }
+                    #[cfg(feature = "harness")]
+                    {
+                        rescan_phase.field("attempt", attempts as u64);
+                        rescan_phase.finish("waited");
+                        drop(rescan_phase);
                     }
                     settled = match reconcile_if_dirty_bound(
                         &self.root,
@@ -2199,6 +2325,7 @@ impl DriverEnv for RealEnv {
                                 &initial_cancel,
                             )
                             .await
+                            .clean
                         }
                         Err(_) => false,
                     };
@@ -2239,16 +2366,32 @@ impl DriverEnv for RealEnv {
             && self.refresh_epoch.load(Ordering::Acquire) == refresh_epoch
             && !fresh.watcher.is_unavailable()
             && fresh.watcher.disruption_count() == 0;
+        #[cfg(feature = "harness")]
+        {
+            let actor_after = self
+                .actor
+                .capture_phase_totals_for_harness()
+                .await
+                .map_err(|_| ())?;
+            fence_phase.field("totals", actor_after.delta(&actor_before));
+            fence_phase.field("initial_ready", initial_ready);
+            fence_phase.finish(if initial_ready { "settled" } else { "degraded" });
+        }
         if initial_ready {
             self.status.mark_initial_ready();
         } else {
             self.status.mark_initial_degraded();
         }
+        self.initial_links_hold.take();
         if initial_start && !initial_settle_timed_out {
             self.events.emit(
                 CAPTURE_INITIAL_SETTLED_EVENT,
                 serde_json::json!({ "workspaceId": self.workspace_id }),
             );
+        }
+        #[cfg(feature = "harness")]
+        if let Some(probe) = &self.apply_probe {
+            probe.pause_after_initial_settled_if_armed(cancel).await;
         }
         // Unsafe starts release only here, after the bounded settle attempt.
         // An early import already sent this edge; watch::Sender coalesces it.
@@ -2271,11 +2414,12 @@ impl DriverEnv for RealEnv {
             () = cancel.cancelled() => return TickIo::Cancelled,
             guard = self.apply_gate.lock() => guard,
         };
+        let _links_hold = self.actor.hold_link_drain();
         if self.refresh_due(layer) {
             return TickIo::RefreshRequired;
         }
         let files = layer.files.handle();
-        offer_deferred_after_release(
+        offer_unrecorded_after_release(
             &self.leases,
             &self.workspace_id,
             &mut self.lease_releases_seen,
@@ -2313,7 +2457,11 @@ impl DriverEnv for RealEnv {
                     ..
                 },
             ) => {
-                if !apply_run(self.apply_context(), layer, run, cancel).await {
+                let applied = apply_run(self.apply_context(), layer, run, cancel).await;
+                if applied.collection_busy_exhausted {
+                    return TickIo::CollectionBusyExhausted;
+                }
+                if !applied.clean {
                     return TickIo::Applied { clean: false };
                 }
                 if self.status.degraded() {
@@ -2330,7 +2478,11 @@ impl DriverEnv for RealEnv {
                 }
             }
             Ok(run) => {
-                let clean = apply_run(self.apply_context(), layer, run, cancel).await;
+                let applied = apply_run(self.apply_context(), layer, run, cancel).await;
+                if applied.collection_busy_exhausted {
+                    return TickIo::CollectionBusyExhausted;
+                }
+                let clean = applied.clean;
                 // A clean-looking tick with a NON-EMPTY quarantine is not
                 // health: the controller parks persistently failing paths on
                 // its own degraded-rescan backoff and stops self-forcing
@@ -2385,6 +2537,7 @@ pub(crate) async fn reconcile_full_for_switch(
     events: EngineEvents,
     token: CancellationToken,
 ) -> Result<bool, SwitchReconcileError> {
+    let _links_hold = actor.hold_link_drain();
     if token.is_cancelled() {
         return Err(SwitchReconcileError::Cancelled);
     }
@@ -2458,7 +2611,8 @@ pub(crate) async fn reconcile_full_for_switch(
                 RootBoundRun { captured_root, run },
                 &token,
             )
-            .await;
+            .await
+            .clean;
             // A new file an editor still holds is not recorded yet, so the
             // switch would leave it behind.
             let deferred = match handle.stats().await {
@@ -2544,9 +2698,9 @@ struct CaptureThreadOutcome {
     plan: ReconcilePlan,
     result: CaptureApplyResult,
     policy_held: bool,
-    collections: Option<Result<CollectionReconciliation, RuntimeError>>,
+    collections: Option<Result<bool, CollectionReconcileFailure>>,
     collection_release_generation: u64,
-    /// Automation claims the captures and the reconciliation committed.
+    /// Automation claims the ordinary file captures committed.
     automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
     pending_placement_paths: Vec<CapturePlacementPath>,
 }
@@ -2595,6 +2749,38 @@ fn moment_recorded_payload(
     })
 }
 
+#[derive(Clone, Copy)]
+struct ApplyOutcome {
+    clean: bool,
+    collection_busy_exhausted: bool,
+}
+
+impl ApplyOutcome {
+    const CLEAN: Self = Self {
+        clean: true,
+        collection_busy_exhausted: false,
+    };
+    const FAILED: Self = Self {
+        clean: false,
+        collection_busy_exhausted: false,
+    };
+}
+
+#[derive(Clone, Copy)]
+enum CollectionReconcileFailure {
+    Failed,
+    BusyBudgetExhausted,
+}
+
+impl CollectionReconcileFailure {
+    fn apply_outcome(self) -> ApplyOutcome {
+        ApplyOutcome {
+            clean: false,
+            collection_busy_exhausted: matches!(self, Self::BusyBudgetExhausted),
+        }
+    }
+}
+
 /// Apply one reconcile run through the capture sink and acknowledge it.
 ///
 /// INVARIANT: a prepared plan is always acknowledged — the controller's
@@ -2608,7 +2794,7 @@ async fn apply_run(
     layer: &FilesLayer,
     run: RootBoundRun,
     cancel: &CancellationToken,
-) -> bool {
+) -> ApplyOutcome {
     apply_bound_run_with_handle(context, &layer.files.handle(), run, cancel).await
 }
 
@@ -2617,7 +2803,8 @@ async fn apply_bound_run_with_handle(
     files: &FilesHandle,
     run: RootBoundRun,
     cancel: &CancellationToken,
-) -> bool {
+) -> ApplyOutcome {
+    let _links_hold = context.actor.hold_link_drain();
     let ApplyRunContext {
         root,
         actor,
@@ -2640,7 +2827,7 @@ async fn apply_bound_run_with_handle(
             (plan, requested)
         }
         ReconcileRun::Converged => {
-            let adopted_paths = if status.take_collection_reconcile_request() {
+            if status.take_collection_reconcile_request() {
                 // Read before the attempt so a release racing it still wakes a retry.
                 let release_generation = leases.release_generation(workspace_id);
                 let result = match actor.active_version_id(workspace_id.to_owned()).await {
@@ -2653,13 +2840,17 @@ async fn apply_bound_run_with_handle(
                         let collection_self_writes = self_writes.clone();
                         let collection_author_json = author_json.clone();
                         let collection_provenance = provenance.clone();
+                        let collection_cancel = cancel.clone();
+                        let collection_events = events.clone();
+                        let collection_probe = apply_probe.clone();
                         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
                         let thread = std::thread::Builder::new()
                             .name("dohc-capture-collection-reconcile".to_owned())
                             .spawn(move || {
                                 let sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                                    cancel: collection_cancel.clone(),
                                     actor: collection_actor,
-                                    workspace_id: collection_workspace,
+                                    workspace_id: collection_workspace.clone(),
                                     version_id,
                                     shadow_root: collection_root,
                                     captured_root: Ok(collection_captured_root),
@@ -2669,44 +2860,42 @@ async fn apply_bound_run_with_handle(
                                     self_writes: collection_self_writes,
                                     provenance: collection_provenance,
                                 });
-                                let reconciled = sink.reconcile_collections();
-                                let _ = done_tx.send(
-                                    reconciled.map(|paths| (paths, sink.take_automation_claims())),
+                                let reconciled = reconcile_collections_after_backfill(
+                                    &sink,
+                                    &collection_cancel,
+                                    &collection_events,
+                                    &collection_workspace,
+                                    collection_probe.as_ref(),
                                 );
+                                let _ = done_tx.send(reconciled);
                             });
                         match thread {
                             Ok(joiner) => {
-                                let outcome =
-                                    done_rx.await.unwrap_or(Err(RuntimeError::ActorUnavailable));
+                                let outcome = done_rx
+                                    .await
+                                    .unwrap_or(Err(CollectionReconcileFailure::Failed));
                                 let _ = tokio::task::spawn_blocking(move || joiner.join()).await;
                                 outcome
                             }
-                            Err(_) => Err(RuntimeError::ActorUnavailable),
+                            Err(_) => Err(CollectionReconcileFailure::Failed),
                         }
                     }
                     Err(RuntimeError::Domain(
                         dohc_engine_domain::DomainError::WorkspaceNotFound,
-                    )) => Ok((CollectionReconciliation::default(), Vec::new())),
-                    Err(error) => Err(error),
+                    )) => Ok(false),
+                    Err(_) => Err(CollectionReconcileFailure::Failed),
                 };
                 match result {
-                    Ok((reconciliation, claims)) => {
-                        status.record_collection_reconciliation(
-                            reconciliation.lease_held,
-                            release_generation,
-                        );
-                        crate::events::emit_automation_claimed(&events, workspace_id, &claims);
-                        reconciliation.changed_paths
+                    Ok(lease_held) => {
+                        status.record_collection_reconciliation(lease_held, release_generation);
                     }
-                    Err(_) => {
+                    Err(failure) => {
                         status.request_collection_reconcile();
                         status.mark_degraded();
-                        return false;
+                        return failure.apply_outcome();
                     }
                 }
-            } else {
-                Vec::new()
-            };
+            }
             return match repair_and_materialize_ydoc_recoveries(
                 root,
                 actor,
@@ -2721,32 +2910,22 @@ async fn apply_bound_run_with_handle(
             )
             .await
             {
-                Ok(mut recovered_paths) => {
-                    recovered_paths.extend(adopted_paths);
+                Ok(recovered_paths) => {
                     if !recovered_paths.is_empty() {
                         events.emit(
                             CAPTURE_MOMENT_RECORDED_EVENT,
                             moment_recorded_payload(workspace_id, &recovered_paths, &[]),
                         );
                     }
-                    true
+                    ApplyOutcome::CLEAN
                 }
                 Err(_) => {
-                    // The reconcile above already committed these adoptions.
-                    // An unrelated repair failure must not drop their event —
-                    // the renderer would stay stale on committed state.
-                    if !adopted_paths.is_empty() {
-                        events.emit(
-                            CAPTURE_MOMENT_RECORDED_EVENT,
-                            moment_recorded_payload(workspace_id, &adopted_paths, &[]),
-                        );
-                    }
                     status.mark_degraded();
-                    false
+                    ApplyOutcome::FAILED
                 }
             };
         }
-        ReconcileRun::Cancelled => return true,
+        ReconcileRun::Cancelled => return ApplyOutcome::CLEAN,
     };
     if apply_probe
         .as_ref()
@@ -2757,7 +2936,7 @@ async fn apply_bound_run_with_handle(
         }
         status.mark_degraded();
         ack_all_failed(files, plan, status).await;
-        return false;
+        return ApplyOutcome::FAILED;
     }
     // The active version, precisely: only a genuinely uninitialized
     // workspace falls back to "main" (bootstrapped by ensure_main_version).
@@ -2775,7 +2954,7 @@ async fn apply_bound_run_with_handle(
             }
             status.mark_degraded();
             ack_all_failed(files, plan, status).await;
-            return false;
+            return ApplyOutcome::FAILED;
         }
     };
     let apply_actor = actor.clone();
@@ -2795,6 +2974,7 @@ async fn apply_bound_run_with_handle(
     let apply_plan = plan.clone();
     let apply_author_json = author_json.clone();
     let apply_cancel = cancel.clone();
+    let apply_events = events.clone();
     let apply_captured_root = Arc::clone(&captured_root);
     // The retained-over-cap loop below retires through its own sink; it must
     // carry the same pass provenance or its deletes split the reconcile/fence
@@ -2810,7 +2990,10 @@ async fn apply_bound_run_with_handle(
             // A fresh sink per run: the policy snapshot and (lazily loaded)
             // secret key are re-read per reconcile task, matching the TS
             // one-policy-snapshot-per-task rule.
+            #[cfg(feature = "harness")]
+            let apply_correlation = apply_provenance.correlation_id.clone();
             let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                cancel: apply_cancel.clone(),
                 actor: apply_actor,
                 workspace_id: apply_workspace.clone(),
                 version_id,
@@ -2822,8 +3005,32 @@ async fn apply_bound_run_with_handle(
                 self_writes: apply_self_writes,
                 provenance: apply_provenance,
             });
+            #[cfg(test)]
+            if let Some(wait) = apply_probe
+                .as_ref()
+                .and_then(|probe| probe.capture_batch_wait.clone())
+            {
+                sink.set_batch_wait_for_test(move |duration| wait(duration));
+            }
+            #[cfg(feature = "harness")]
+            let mut apply_phase = dohc_engine_storage::capture_phase::Phase::new(
+                "capture_apply_pass",
+                apply_correlation.as_deref(),
+                apply_plan.ops.len(),
+                true,
+            );
             let result =
                 apply_reconcile_plan_cancellable(&apply_plan, &mut sink, &NoFaults, &apply_cancel);
+            #[cfg(feature = "harness")]
+            {
+                apply_phase.field("failed_receipts", result.failed_applies.len() as u64);
+                apply_phase.finish(if result.degraded {
+                    "degraded"
+                } else {
+                    "completed"
+                });
+                drop(apply_phase);
+            }
             let mut collection_release_generation = 0;
             let collections =
                 if result.failed_applies.is_empty() && !result.degraded && result.completed() {
@@ -2838,10 +3045,16 @@ async fn apply_bound_run_with_handle(
                         Ok(true) => {
                             collection_release_generation =
                                 apply_leases.release_generation(&apply_workspace);
-                            Some(sink.reconcile_collections())
+                            Some(reconcile_collections_after_backfill(
+                                &sink,
+                                &apply_cancel,
+                                &apply_events,
+                                &apply_workspace,
+                                apply_probe.as_ref(),
+                            ))
                         }
                         Ok(false) => None,
-                        Err(error) => Some(Err(error)),
+                        Err(_) => Some(Err(CollectionReconcileFailure::Failed)),
                     }
                 } else {
                     None
@@ -2880,24 +3093,23 @@ async fn apply_bound_run_with_handle(
         }
         status.mark_degraded();
         ack_all_failed(files, plan, status).await;
-        return false;
+        return ApplyOutcome::FAILED;
     };
     // Claims are committed whatever else this pass decides: wake the
     // executors now.
     crate::events::emit_automation_claimed(&events, workspace_id, &automation_claims);
-    let collection_paths = match collection_result {
-        Some(Ok(reconciliation)) => {
-            status.record_collection_reconciliation(
-                reconciliation.lease_held,
-                collection_release_generation,
-            );
-            reconciliation.changed_paths
+    let collection_busy_exhausted = matches!(
+        collection_result,
+        Some(Err(CollectionReconcileFailure::BusyBudgetExhausted))
+    );
+    match collection_result {
+        Some(Ok(lease_held)) => {
+            status.record_collection_reconciliation(lease_held, collection_release_generation);
         }
         Some(Err(_)) => {
             status.request_collection_reconcile();
             result.degraded = true;
             status.mark_degraded();
-            Vec::new()
         }
         None => {
             if collection_reconcile_requested {
@@ -2905,9 +3117,8 @@ async fn apply_bound_run_with_handle(
                 // has not reached collection reconciliation yet.
                 status.request_collection_reconcile();
             }
-            Vec::new()
         }
-    };
+    }
     // OVER-CAP + narrowed: a path in the scanner's retained-over-cap set
     // never appears in the diff (CAL-3 keeps it last-known-good, never
     // Retire), so a policy narrow could never reach it through an op. Retire
@@ -2950,6 +3161,7 @@ async fn apply_bound_run_with_handle(
             let retire_author_json = author_json.clone();
             let retire_pass_provenance = retire_provenance.clone();
             let retire_captured_root = Arc::clone(&captured_root);
+            let retire_cancel = cancel.clone();
             // A dedicated plain thread, same as the apply above: the sink's
             // blocking actor calls assert they run outside any tokio runtime
             // context, and spawn_blocking threads carry the runtime handle.
@@ -2958,6 +3170,7 @@ async fn apply_bound_run_with_handle(
                 .name("dohc-capture-overcap-retire".to_owned())
                 .spawn(move || {
                     let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                        cancel: retire_cancel,
                         actor: retire_actor,
                         workspace_id: retire_workspace,
                         version_id: retire_version,
@@ -3065,22 +3278,88 @@ async fn apply_bound_run_with_handle(
     // retained loop above (which reports its retires via not_owned_paths).
     // Gating on applied_paths alone left the renderer permanently stale for
     // exactly those moments.
-    if !result.applied_paths.is_empty()
-        || !result.not_owned_paths.is_empty()
-        || !collection_paths.is_empty()
-    {
-        let mut recorded_paths = result.applied_paths.clone();
-        recorded_paths.extend(collection_paths);
+    if !result.applied_paths.is_empty() || !result.not_owned_paths.is_empty() {
         events.emit(
             CAPTURE_MOMENT_RECORDED_EVENT,
-            moment_recorded_payload(workspace_id, &recorded_paths, &result.not_owned_paths),
+            moment_recorded_payload(workspace_id, &result.applied_paths, &result.not_owned_paths),
         );
     }
     if result.completed() && files.acknowledge_capture(plan, result).await.is_err() {
         status.mark_degraded();
-        return false;
+        return ApplyOutcome {
+            clean: false,
+            collection_busy_exhausted,
+        };
     }
-    clean
+    ApplyOutcome {
+        clean,
+        collection_busy_exhausted,
+    }
+}
+
+const COLLECTION_BUSY_RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn reconcile_collections_after_backfill(
+    sink: &StoreCaptureSink,
+    cancel: &CancellationToken,
+    events: &EngineEvents,
+    workspace_id: &str,
+    probe: Option<&CaptureApplyProbe>,
+) -> Result<bool, CollectionReconcileFailure> {
+    let deadline = std::time::Instant::now() + COLLECTION_BUSY_RETRY_LIMIT;
+    let mut delay = std::time::Duration::from_millis(20);
+    loop {
+        if cancel.is_cancelled() {
+            return Err(CollectionReconcileFailure::Failed);
+        }
+        let committed = Arc::new(std::sync::Mutex::new(CollectionReconciliation::default()));
+        let collected = Arc::clone(&committed);
+        let commit_probe = probe.cloned();
+        let listener: dohc_engine_runtime::actor::CollectionCommitListener =
+            Arc::new(move |step| {
+                let mut collected = collected.lock().expect("collection commit buffer");
+                collected
+                    .changed_paths
+                    .extend(step.changed_paths.iter().cloned());
+                collected
+                    .automation_claims
+                    .extend(step.automation_claims.iter().cloned());
+                drop(collected);
+                if let Some(probe) = &commit_probe {
+                    probe.collection_committed(step);
+                }
+            });
+        let result = sink.reconcile_collections_observed(Some(listener));
+        // A refusal rolls back only its own step. Announce the committed prefix
+        // once per pass before retrying, even when the retry budget has expired.
+        let committed = committed.lock().expect("collection commit buffer");
+        crate::events::emit_automation_claimed(events, workspace_id, &committed.automation_claims);
+        if !committed.changed_paths.is_empty() {
+            events.emit(
+                CAPTURE_MOMENT_RECORDED_EVENT,
+                moment_recorded_payload(workspace_id, &committed.changed_paths, &[]),
+            );
+        }
+        drop(committed);
+        match result {
+            Err(error) if crate::rpc::error::store_busy(&error) => {
+                if let Some(probe) = probe {
+                    probe.reconcile_refused();
+                }
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(CollectionReconcileFailure::BusyBudgetExhausted);
+                }
+                std::thread::sleep(delay.min(remaining));
+                if std::time::Instant::now() >= deadline {
+                    return Err(CollectionReconcileFailure::BusyBudgetExhausted);
+                }
+                delay = (delay * 2).min(std::time::Duration::from_millis(200));
+            }
+            Ok(reconciliation) => return Ok(reconciliation.lease_held),
+            Err(_) => return Err(CollectionReconcileFailure::Failed),
+        }
+    }
 }
 
 async fn repair_and_materialize_ydoc_recoveries(
@@ -3142,13 +3421,12 @@ async fn materialize_ydoc_recoveries(
         .collect())
 }
 
-/// A path deferred to a live document session is not in the manifest yet, so
-/// the next full scan offers it again. That scan must happen once the session
-/// lets go, even when nothing on disk changes: a new file closed without an
-/// edit is otherwise never captured. Asks for it when a lease on this
-/// workspace was released since the last check and the last run deferred
-/// something.
-async fn offer_deferred_after_release(
+/// Re-offer unrecorded paths when a document session releases its lease.
+/// Empty new files are deferred; outside writes to held new files are
+/// quarantined after repeated refusals. Both need a rescan even when nothing
+/// on disk changes after the session ends. The release must wake quarantined
+/// paths itself: once the WAL is reused in place, nothing else will.
+async fn offer_unrecorded_after_release(
     leases: &LeaseRegistry,
     workspace_id: &str,
     releases_seen: &mut u64,
@@ -3159,7 +3437,7 @@ async fn offer_deferred_after_release(
         return;
     }
     *releases_seen = releases;
-    if matches!(files.stats().await, Ok(stats) if stats.deferred > 0) {
+    if matches!(files.stats().await, Ok(stats) if stats.deferred > 0 || stats.quarantined > 0) {
         files.request_rescan();
     }
 }
@@ -3189,6 +3467,9 @@ mod root_bound_run_tests;
 
 #[cfg(test)]
 mod collection_reconcile_scheduling_tests;
+
+#[cfg(test)]
+mod capture_batch_retry_tests;
 
 #[cfg(test)]
 mod live_session_deferral_tests;

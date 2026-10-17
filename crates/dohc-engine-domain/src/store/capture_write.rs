@@ -1633,6 +1633,8 @@ fn write_normalized_text_in_tx(
         )
         .map_err(DomainError::sql_persist)?;
     }
+    #[cfg(feature = "fault-injection")]
+    let blob_phase = dohc_engine_storage::capture_phase::Measure::new("blob_SQL");
     let blob_inserted = tx
         .execute(
             "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
@@ -1640,7 +1642,12 @@ fn write_normalized_text_in_tx(
         )
         .map_err(DomainError::sql_persist)?
         != 0;
+    #[cfg(feature = "fault-injection")]
+    drop(blob_phase);
     if bind_alias {
+        #[cfg(feature = "fault-injection")]
+        let _alias_phase =
+            dohc_engine_storage::capture_phase::Measure::new("alias_SQL_including_triggers");
         tx.execute(
             "INSERT OR IGNORE INTO path_aliases (workspace_id, version_id, path, object_id) \
              VALUES (?1, ?2, ?3, ?4)",
@@ -1653,6 +1660,8 @@ fn write_normalized_text_in_tx(
         )
         .map_err(DomainError::sql_persist)?;
     }
+    #[cfg(feature = "fault-injection")]
+    let moment_phase = dohc_engine_storage::capture_phase::Measure::new("moment_SQL");
     tx.execute(
         "INSERT INTO moments \
          (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
@@ -1688,8 +1697,13 @@ fn write_normalized_text_in_tx(
         ],
     )
     .map_err(DomainError::sql_persist)?;
+    #[cfg(feature = "fault-injection")]
+    drop(moment_phase);
     crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
-    tx.execute(
+    #[cfg(feature = "fault-injection")]
+    let snapshot_phase =
+        dohc_engine_storage::capture_phase::Measure::new("snapshot_SQL_including_triggers");
+    tx.prepare_cached(
         "INSERT INTO snapshots \
          (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
            latest_moment_id, metadata_origin, metadata_summary, \
@@ -1703,20 +1717,23 @@ fn write_normalized_text_in_tx(
            metadata_correlation_id = excluded.metadata_correlation_id, \
            content_kind = excluded.content_kind, \
            binary_sha256 = excluded.binary_sha256",
-        params![
-            input.workspace_id,
-            input.version_id,
-            object_id,
-            input.path.as_ref(),
-            blob,
-            input.now_ms,
-            input.moment_id,
-            input.metadata_origin,
-            input.metadata_summary,
-            input.metadata_correlation_id,
-        ],
     )
+    .map_err(DomainError::sql_persist)?
+    .execute(params![
+        input.workspace_id,
+        input.version_id,
+        object_id,
+        input.path.as_ref(),
+        blob,
+        input.now_ms,
+        input.moment_id,
+        input.metadata_origin,
+        input.metadata_summary,
+        input.metadata_correlation_id,
+    ])
     .map_err(DomainError::sql_persist)?;
+    #[cfg(feature = "fault-injection")]
+    drop(snapshot_phase);
     record_request(
         tx,
         input.request_id,
@@ -1965,11 +1982,15 @@ fn resolve_capture_object(
                 reserved_moment_order = Some(next_order);
                 disambiguated_object_id
             };
-            tx.execute(
+            #[cfg(feature = "fault-injection")]
+            let _alias_phase =
+                dohc_engine_storage::capture_phase::Measure::new("alias_SQL_including_triggers");
+            tx.prepare_cached(
                 "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
                  VALUES (?1, ?2, ?3, ?4)",
-                params![workspace_id, version_id, path, object_id],
             )
+            .map_err(DomainError::sql_persist)?
+            .execute(params![workspace_id, version_id, path, object_id])
             .map_err(DomainError::sql_persist)?;
             object_id
         }

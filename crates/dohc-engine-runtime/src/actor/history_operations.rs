@@ -1196,10 +1196,12 @@ mod tests {
             .read_with(|conn| conn.commit_hook(None::<fn() -> bool>))
             .unwrap();
         assert!(result.unwrap().materialized);
+        // Unix also durably retains each displaced original before completing the batch.
+        let retention_commits = if cfg!(unix) { 8 } else { 0 };
         assert_eq!(
             commits.load(Ordering::Relaxed),
-            2,
-            "one inverse commit and one completion commit"
+            2 + retention_commits,
+            "one inverse commit, one completion commit, and per-file retention commits"
         );
     }
 

@@ -28,7 +28,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 store
-                    .read_with(|conn| {
+                    .mutate_with_connection(|conn| {
                         search_workspace_page(
                             conn,
                             &root_dir,
@@ -84,7 +84,7 @@ impl ActorHandle {
                 Err(RuntimeError::Cancelled)
             } else {
                 store
-                    .read_with(|conn| {
+                    .mutate_with_connection(|conn| {
                         ensure_search_index_for_version(
                             conn,
                             &root_dir,

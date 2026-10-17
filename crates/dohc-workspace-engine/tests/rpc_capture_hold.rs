@@ -5,7 +5,7 @@ mod common;
 
 use common::*;
 use dohc_engine_protocol::{
-    transport::{EngineTransport, InProcessTransport, RequestContext},
+    transport::{InProcessTransport, RequestContext},
     wire::WorkspaceHandle,
 };
 use dohc_engine_testkit::ScratchDir;
@@ -21,13 +21,13 @@ async fn open(scratch: &ScratchDir) -> (InProcessTransport<EngineService>, Works
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let params =
         json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID });
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(1, "workspace.open", None, params),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(1, "workspace.open", None, params),
+    )
+    .await
+    .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     let params = json!({ "workspaceId": WORKSPACE_ID });
     call(&transport, &handle, 2, "versions.ensureMain", params).await;

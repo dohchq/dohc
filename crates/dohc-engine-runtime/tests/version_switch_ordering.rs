@@ -768,26 +768,53 @@ async fn write_secret(
     key: dohc_engine_crypto::SecretDataKey,
     disk_intent: SecretDiskIntent,
 ) {
-    actor
-        .write_secret_file(
-            SecretWrite {
-                workspace_id: WORKSPACE.to_owned(),
-                version_id: version_id.to_owned(),
-                path: ".env".to_owned(),
-                text: text.to_owned(),
-                moment_id: moment_id.to_owned(),
-                metadata_origin: "api".to_owned(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                now_ms,
-                disk_intent,
-            },
-            key,
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("write secret");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut delay = std::time::Duration::from_millis(5);
+    loop {
+        let result = actor
+            .write_secret_file(
+                SecretWrite {
+                    workspace_id: WORKSPACE.to_owned(),
+                    version_id: version_id.to_owned(),
+                    path: ".env".to_owned(),
+                    text: text.to_owned(),
+                    moment_id: moment_id.to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms,
+                    disk_intent,
+                },
+                key.clone(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await;
+        match result {
+            Ok(_) => return,
+            Err(dohc_engine_runtime::RuntimeError::Storage(
+                dohc_engine_storage::StorageError::FileLocked,
+            ))
+            | Err(dohc_engine_runtime::RuntimeError::Domain(
+                dohc_engine_domain::DomainError::Storage(
+                    dohc_engine_storage::StorageError::FileLocked,
+                ),
+            )) => {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "secret fixture stayed busy until its deadline"
+                );
+                tokio::time::sleep(delay.min(remaining)).await;
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "secret fixture stayed busy until its deadline"
+                );
+                delay = (delay * 2).min(std::time::Duration::from_millis(200));
+            }
+            Err(error) => panic!("secret fixture failed: {error:?}"),
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
