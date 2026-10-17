@@ -39,6 +39,8 @@ mod journal;
 mod live_application;
 mod materialization;
 mod relay;
+#[cfg(unix)]
+mod retained;
 mod search;
 mod secrets;
 mod versioned;
@@ -192,6 +194,10 @@ pub struct WorkspaceActor {
     close_permit: Option<OwnedPermit<Command>>,
     state: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
+    #[cfg(unix)]
+    retention: Option<retained::Worker>,
+    #[cfg(unix)]
+    retention_root: retained::Root,
     claims: ClaimAnnouncer,
     current_views: Arc<std::sync::Mutex<dohc_engine_sync::replica_cut::CurrentViewCache>>,
 }
@@ -331,18 +337,33 @@ impl WorkspaceActor {
             .map_err(RuntimeError::ThreadSpawn)?;
 
         match startup_rx.recv() {
-            Ok(Ok(store_freshly_created)) => Ok(WorkspaceActor {
-                identity,
-                generation,
-                mode,
-                store_freshly_created,
-                tx,
-                close_permit,
-                state,
-                worker: Some(worker),
-                claims: ClaimAnnouncer::default(),
-                current_views: Arc::default(),
-            }),
+            Ok(Ok(store_freshly_created)) => {
+                #[allow(unused_mut)]
+                let mut actor = WorkspaceActor {
+                    identity,
+                    generation,
+                    mode,
+                    store_freshly_created,
+                    tx,
+                    close_permit,
+                    state,
+                    worker: Some(worker),
+                    #[cfg(unix)]
+                    retention: None,
+                    #[cfg(unix)]
+                    retention_root: retained::Root::default(),
+                    claims: ClaimAnnouncer::default(),
+                    current_views: Arc::default(),
+                };
+                #[cfg(unix)]
+                if matches!(mode, ActorOpenMode::ReadWrite) {
+                    actor.retention = Some(retained::Worker::spawn(
+                        actor.handle(),
+                        actor.retention_root.clone(),
+                    )?);
+                }
+                Ok(actor)
+            }
             Ok(Err(storage_err)) => {
                 let _ = worker.join();
                 Err(RuntimeError::Storage(storage_err))
@@ -361,6 +382,8 @@ impl WorkspaceActor {
             tx: self.tx.clone(),
             state: Arc::clone(&self.state),
             claims: self.claims.clone(),
+            #[cfg(unix)]
+            retained_root: self.retention_root.clone(),
             current_views: Arc::clone(&self.current_views),
         }
     }
@@ -408,6 +431,12 @@ impl WorkspaceActor {
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
+        #[cfg(unix)]
+        if let Some(retention) = &mut self.retention {
+            retention.stop();
+            // Finish an in-flight changed read while the writer can still commit it.
+            retention.join();
+        }
         match self.close_permit.take() {
             // Reserved slot: instant, fair, FIFO-respecting delivery.
             Some(permit) => {
@@ -439,6 +468,8 @@ impl Drop for WorkspaceActor {
 /// current view projection cache.
 #[derive(Clone)]
 pub struct ActorHandle {
+    #[cfg(unix)]
+    retained_root: retained::Root,
     identity: EngineDbIdentity,
     tx: mpsc::Sender<Command>,
     state: Arc<AtomicU8>,
@@ -591,17 +622,17 @@ impl ActorHandle {
         root: std::path::PathBuf,
     ) -> Result<Vec<(String, String)>, RuntimeError> {
         self.run(move |store, _| {
-            Ok(store
-                .list_kept_displacements(&workspace_id)?
-                .into_iter()
-                .map(|row| {
-                    (
-                        row.target_path,
-                        format!(".dohc/engine/displaced/{}", row.displaced_name),
-                    )
-                })
-                .filter(|(_, path)| std::fs::symlink_metadata(root.join(path)).is_ok())
-                .collect())
+            let mut files = Vec::new();
+            for row in store.list_kept_displacements(&workspace_id)? {
+                let dir = store
+                    .staging_location(&row.job_id)?
+                    .unwrap_or_else(|| ".dohc/engine/displaced".into());
+                let path = format!("{dir}/{}", row.displaced_name);
+                if std::fs::symlink_metadata(root.join(&path)).is_ok() {
+                    files.push((row.target_path, path));
+                }
+            }
+            Ok(files)
         })
         .await
     }

@@ -136,6 +136,9 @@ const REQUIRED_TABLES: &[&str] = &[
     "binary_blobs",
     "materialization_jobs",
     "materialization_displacements",
+    "materialization_retained",
+    "materialization_displacement_reads",
+    "materialization_staging_locations",
     // R08 secret-backed-file tables.
     "secret_files",
     "secret_fork_bases",
