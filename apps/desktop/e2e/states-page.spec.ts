@@ -74,6 +74,7 @@ const PARTS = [
   "data-grid",
   "tab-strip-overflow",
   "tab-glyphs",
+  "composer-poll",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and
