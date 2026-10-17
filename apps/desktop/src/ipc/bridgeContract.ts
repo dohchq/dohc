@@ -114,7 +114,7 @@ import {
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
 import type { chatOperations } from "./chatOperations";
 import type { settingsOperations } from "./settingsOperations";
-import type { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations } from "./shareOperations";
+import type { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./shareOperations";
 import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
@@ -6964,6 +6964,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof shareMountOperations>,
     OperationBridge<typeof shareProposalOperations>,
     OperationBridge<typeof sharedChannelOperations>,
+    OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
     OperationBridge<typeof serverAccountOperations>,
@@ -6987,9 +6988,6 @@ export interface DohcDesktopBridge
     OperationBridge<typeof liveDraftRecoveryOperations>,
     OperationBridge<typeof stopAndRestoreRecoveryOperations>,
     OperationBridge<typeof engineYDocSaveOperations> {
-  listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
-  listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
-  retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
   stopOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
   resumeOwnerLiveDocument(payload: OwnerLiveDocumentActionPayload): Promise<void>;
   publishOwnerApp(payload: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
@@ -7096,7 +7094,6 @@ export interface DohcDesktopBridge
     payload: CloudJoinWorkspacePayload,
   ): Promise<CloudJoinWorkspaceResult>;
   // Relay shares: grant side.
-  createRelayShare(payload: CreateRelaySharePayload): Promise<CreateRelayShareResult>;
   listRelayShares(): Promise<ListRelaySharesResult>;
   getRelayReceivedShare(
     payload: GetRelayReceivedSharePayload,
@@ -7104,57 +7101,12 @@ export interface DohcDesktopBridge
   revokeRelayShare(payload: RevokeRelaySharePayload): Promise<RevokeRelayShareResult>;
   // Puts back what a removal ended, using its receipt. Owner only.
   undoRelayShare(payload: UndoRelaySharePayload): Promise<UndoRelayShareResult>;
-  createRelayShareLink(
-    payload: CreateRelayShareLinkPayload,
-  ): Promise<CreateRelayShareLinkResult>;
-  addRelayShareLink(
-    payload: AddRelayShareLinkPayload,
-  ): Promise<AddRelayShareLinkResult>;
-  listRelayShareLinks(
-    payload: ListRelayShareLinksPayload,
-  ): Promise<ListRelayShareLinksResult>;
-  rotateRelayShareLink(
-    payload: RotateRelayShareLinkPayload,
-  ): Promise<RotateRelayShareLinkResult>;
-  retuneRelayShareLink(
-    payload: RetuneRelayShareLinkPayload,
-  ): Promise<RetuneRelayShareLinkResult>;
-  revokeRelayShareLink(
-    payload: RevokeRelayShareLinkPayload,
-  ): Promise<RevokeRelayShareLinkResult>;
-  listRelayShareDiscussion(
-    payload: ListRelayShareDiscussionPayload,
-  ): Promise<ListRelayShareDiscussionResult>;
   pollRelayShareDiscussionActivity(
     payload: PollRelayShareDiscussionActivityPayload,
   ): Promise<PollRelayShareDiscussionActivityResult>;
   cancelRelayShareDiscussionActivity(
     payload: CancelRelayShareDiscussionActivityPayload,
   ): Promise<void>;
-  appendRelayShareDiscussion(
-    payload: AppendRelayShareDiscussionPayload,
-  ): Promise<AppendRelayShareDiscussionResult>;
-  deleteRelayShareDiscussionMessage(
-    payload: DeleteRelayShareDiscussionMessagePayload,
-  ): Promise<DeleteRelayShareDiscussionMessageResult>;
-  blockRelayShareDiscussionPrincipal(
-    payload: BlockRelayShareDiscussionPrincipalPayload,
-  ): Promise<BlockRelayShareDiscussionPrincipalResult>;
-  unblockRelayShareDiscussionPrincipal(
-    payload: UnblockRelayShareDiscussionPrincipalPayload,
-  ): Promise<UnblockRelayShareDiscussionPrincipalResult>;
-  pauseRelayShareDiscussion(
-    payload: PauseRelayShareDiscussionPayload,
-  ): Promise<PauseRelayShareDiscussionResult>;
-  resumeRelayShareDiscussion(
-    payload: ResumeRelayShareDiscussionPayload,
-  ): Promise<ResumeRelayShareDiscussionResult>;
-  promoteRelayShareGrant(
-    payload: PromoteRelayShareGrantPayload,
-  ): Promise<PromoteRelayShareGrantResult>;
-  revokeRelayShareGrant(
-    payload: RevokeRelayShareGrantPayload,
-  ): Promise<RevokeRelayShareGrantResult>;
   // Collection automations, for the ⚡ panel.
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
   switchCollectionAutomation(payload: SwitchCollectionAutomationPayload): Promise<SwitchCollectionAutomationResult>;

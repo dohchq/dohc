@@ -1,3 +1,5 @@
+import { relayShareOperations } from "./shareOperations";
+import { registerOperations } from "./operationTable";
 import { describe, expect, it, vi } from "vitest";
 import { registerRelaySharesIpcHandlers } from "./relaySharesIpc";
 import { CHANNELS } from "./channels";
@@ -56,9 +58,9 @@ function harness() {
         workspace: Workspace; state: object; signal: AbortSignal; assertCurrent(): void;
       }) => Result | Promise<Result>,
     ) => {
-      expect(requestedWorkspaceId).toBe(workspaceId);
+
       return work({
-        workspace, state: {}, signal: new AbortController().signal,
+        workspace: requestedWorkspaceId === workspaceId ? workspace : { ...workspace, workspaceId: requestedWorkspaceId, attachmentId: Symbol("other") }, state: {}, signal: new AbortController().signal,
         assertCurrent() {
           if (!physicalCurrent) throw new Error("physical workspace retired");
         },
@@ -83,7 +85,7 @@ function harness() {
   let enrolled=true;
   const localStops = vi.fn<Dependencies["listOwnerLiveStops"]>(async () => []);
   const ownerLiveStop=vi.fn<Dependencies["ownerLiveStop"]>(async (_workspace,action,path) => action==="clear" || action==="retired" ? undefined : ({state:action==="release" || !enrolled ? "released" : "requested",relayDatabaseNamespace:enrolled ? "relay" : "",retirementOwed:true,document:{mainVersionId:"main",objectId:"object",currentPath:path},binding:enrolled ? {workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0} : null}));
-  registerRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>({
+  const ownerHandlers = registerRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>({
     registerHandler: (channel, handler) => {
       expect(handlers.has(channel)).toBe(false);
       handlers.set(channel, handler);
@@ -103,6 +105,15 @@ function harness() {
     sharesChanged,
     reconcileReceivedShares,
   });
+  registerOperations<typeof relayShareOperations, Event, Operation>({
+    handle: (channel, handler) => {
+      expect(handlers.has(channel)).toBe(false);
+      handlers.set(channel, handler);
+    },
+    assertTrustedSender: trusted,
+    withActiveWorkspace: (event, requestedWorkspaceId, message, work) =>
+      withRendererWorkspaceOperation(event.sender, requestedWorkspaceId, message, work),
+  }, relayShareOperations, ownerHandlers);
   const invoke = async (channel: string, payload?: unknown, senderId = 1) => {
     const handler = handlers.get(channel);
     if (!handler) throw new Error(`missing handler: ${channel}`);
@@ -130,7 +141,7 @@ describe("named browser invitations", () => {
   it.each([undefined, "https://share.example.test/s/edit/exact-grant"])("preserves the grant and optional server URL %s", async browserInvitationUrl => {
     const h = harness();
     h.request.mockResolvedValue({shareId: "share", grantId: "exact-grant", ...(browserInvitationUrl ? {browserInvitationUrl} : {})});
-    const result = await h.invoke(CHANNELS.createRelayShare, {workspaceId, paths: ["docs"], recipientEmail: "friend@dohc.test", access: "edit"});
+    const result = await h.invoke(relayShareOperations.createRelayShare.channel, {workspaceId, paths: ["docs"], recipientEmail: "friend@dohc.test", access: "edit"});
     expect(result).toEqual({shareId: "share", grantId: "exact-grant", browserInvitationUrl,
       shareCode: buildShareCode({shareId: "share", relayUrl: h.credentials.relayUrl!}), recipientEmail: "friend@dohc.test"});
     expect(h.request.mock.lastCall?.[2]?.body).toBe(JSON.stringify({recipientEmail: "friend@dohc.test", access: "edit", paths: ["docs"]}));
@@ -153,7 +164,7 @@ describe("owner live document enrollment", () => {
     h.request.mockImplementation(async (_credentials,path,init) => init?.method==="POST" ? {ok:true,path:"live.md",status:"ready"} : path.includes("retired=1") ? {ok:true,documents:[],nextCursor:null} : {ok:true,documents:[{path:"live.md",status:"ready"}]});
     h.ownerLiveStop.mockRejectedValueOnce(new Error("local clear failed"));
     await expect(h.invoke(CHANNELS.resumeOwnerLiveDocument,{workspaceId,path:"live.md"})).rejects.toThrow("local clear failed");
-    const listed=await h.invoke(CHANNELS.listOwnerLiveDocuments,{workspaceId});
+    const listed=await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId});
     expect(listed).toMatchObject({documents:[{path:"live.md",status:"ready",canResume:true,deferredStop:saved.deferred}]});
     h.ownerLiveStop.mockImplementationOnce(async (_workspace,action) => {
       expect(action).toBe("clear");h.localStops.mockResolvedValue([]);return undefined;
@@ -161,7 +172,7 @@ describe("owner live document enrollment", () => {
     await h.invoke(CHANNELS.resumeOwnerLiveDocument,{workspaceId,path:"live.md"});
     expect(h.request.mock.calls.filter(([, ,init])=>init?.method==="POST")).toHaveLength(2);
     expect(h.ownerLiveStop).toHaveBeenLastCalledWith(h.workspace,"clear","live.md");
-    expect(await h.invoke(CHANNELS.listOwnerLiveDocuments,{workspaceId})).toEqual({documents:[{path:"live.md",status:"ready",canResume:false}],nextCursor:null});
+    expect(await h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).toEqual({documents:[{path:"live.md",status:"ready",canResume:false}],nextCursor:null});
   });
   it("keeps the local Stop until Resume's POST succeeds", async () => {
     const h=harness(),posting=deferred<unknown>();
@@ -180,29 +191,29 @@ describe("owner live document enrollment", () => {
     const h=harness();
     h.localStops.mockResolvedValue([{state:"released",binding:{workspaceId,mainVersionId:"main",objectId:"object",lineageClaimId:"a".repeat(64),currentPath:"old.md",selectorPaths:["old.md"],restoreFenceGeneration:0},document:{mainVersionId:"main",objectId:"object",currentPath:"old.md"},retirementOwed:false,relayDatabaseNamespace:"relay",deferred:{unsentEdits:65,editable:false}}]);
     h.request.mockImplementation(async (_credentials,path)=>path.includes("retired=1") ? {ok:true,documents:[{path:"old.md",objectId:"object",status: "retired", acceptedCursor: 0}],nextCursor:null} : {ok:true,documents:[]});
-    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments,{workspaceId})).resolves.toEqual({documents:[{path:"old.md",status: "retired",canResume:true,deferredStop:{unsentEdits:65,editable:false}}],nextCursor:null});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel,{workspaceId})).resolves.toEqual({documents:[{path:"old.md",status: "retired",canResume:true,deferredStop:{unsentEdits:65,editable:false}}],nextCursor:null});
   });
   const refusal = {shareId: "share", paths: ["docs"], code: "live_document_limit", message: "This server reached its live document limit."};
 
   it("lists bounded owner refusals without treating an empty candidate page as complete", async () => {
     const h = harness();
     h.request.mockResolvedValue({ok: true, refusals: [refusal], nextCursor: "other-share"});
-    await expect(h.invoke(CHANNELS.listOwnerLiveRefusals, {workspaceId, after: "prior/share"})).resolves.toEqual({refusals: [refusal], nextCursor: "other-share"});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveRefusals.channel, {workspaceId, after: "prior/share"})).resolves.toEqual({refusals: [refusal], nextCursor: "other-share"});
     expect(h.request).toHaveBeenCalledWith(h.credentials, "/sync/workspace/live-host?refusals=1&after=prior%2Fshare");
     h.request.mockResolvedValue({ok: true, refusals: [], nextCursor: "next-share"});
-    await expect(h.invoke(CHANNELS.listOwnerLiveRefusals, {workspaceId})).resolves.toEqual({refusals: [], nextCursor: "next-share"});
+    await expect(h.invoke(relayShareOperations.listOwnerLiveRefusals.channel, {workspaceId})).resolves.toEqual({refusals: [], nextCursor: "next-share"});
   });
 
   it("retries enrollment using only the share identity and owner session", async () => {
     const h = harness(); h.request.mockResolvedValue({ok: true, documents: [{path: "docs/live.md", status: "preparing"}]});
-    await expect(h.invoke(CHANNELS.retryOwnerLiveShare, {workspaceId, shareId: "share"})).resolves.toBeUndefined();
+    await expect(h.invoke(relayShareOperations.retryOwnerLiveShare.channel, {workspaceId, shareId: "share"})).resolves.toBeUndefined();
     expect(h.request).toHaveBeenCalledWith(h.credentials, "/sync/workspace/live-host", {method: "POST", body: JSON.stringify({shareId: "share", retry: true})});
     h.request.mockResolvedValue({ok: true, documents: [{path: "docs/live.md", status: "unavailable"}]});
-    await expect(h.invoke(CHANNELS.retryOwnerLiveShare, {workspaceId, shareId: "share"})).rejects.toThrow("could not start");
+    await expect(h.invoke(relayShareOperations.retryOwnerLiveShare.channel, {workspaceId, shareId: "share"})).rejects.toThrow("could not start");
   });
 
-  it.each([CHANNELS.listOwnerLiveRefusals, CHANNELS.retryOwnerLiveShare])("rejects untrusted or shared-view %s before loading credentials", async channel => {
-    const h = harness(), input = channel === CHANNELS.listOwnerLiveRefusals ? {workspaceId} : {workspaceId, shareId: "share"};
+  it.each([relayShareOperations.listOwnerLiveRefusals.channel, relayShareOperations.retryOwnerLiveShare.channel])("rejects untrusted or shared-view %s before loading credentials", async channel => {
+    const h = harness(), input = channel === relayShareOperations.listOwnerLiveRefusals.channel ? {workspaceId} : {workspaceId, shareId: "share"};
     await expect(h.invoke(channel, input, -1)).rejects.toThrow("untrusted sender");
     await expect(h.invoke(channel, {...input, credentials: h.credentials})).rejects.toThrow();
     h.workspace.shareView = {};
@@ -211,10 +222,10 @@ describe("owner live document enrollment", () => {
   });
 
   it.each(["retireRenderer", "retirePhysical", "rotateCredentials"] as const)("discards refusal and retry responses after %s", async invalidate => {
-    for (const channel of [CHANNELS.listOwnerLiveRefusals, CHANNELS.retryOwnerLiveShare]) {
+    for (const channel of [relayShareOperations.listOwnerLiveRefusals.channel, relayShareOperations.retryOwnerLiveShare.channel]) {
       const h = harness(), response = deferred<unknown>(), started = deferred();
       h.request.mockImplementation(() => {started.resolve(); return response.promise;});
-      const input = channel === CHANNELS.listOwnerLiveRefusals ? {workspaceId} : {workspaceId, shareId: "share"};
+      const input = channel === relayShareOperations.listOwnerLiveRefusals.channel ? {workspaceId} : {workspaceId, shareId: "share"};
       const pending = h.invoke(channel, input);
       await started.promise; h[invalidate]();
       const read = vi.fn(() => true);
@@ -232,7 +243,7 @@ describe("owner live document enrollment", () => {
       {ok: true, refusals: [{...refusal, token: "server-secret"}], nextCursor: null},
     ]) {
       h.request.mockResolvedValue(result);
-      await expect(h.invoke(CHANNELS.listOwnerLiveRefusals, {workspaceId, after: "same"})).rejects.toThrow();
+      await expect(h.invoke(relayShareOperations.listOwnerLiveRefusals.channel, {workspaceId, after: "same"})).rejects.toThrow();
     }
   });
 
@@ -245,7 +256,7 @@ describe("owner live document enrollment", () => {
         {path: "paused.md", status: "paused"},
         {path: "moved.md", status: "paused", reason: "document-unavailable"},
       ]});
-    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, retiredAfter: "older.md"})).resolves.toEqual({
       documents: [
         {path: "old.md", status: "retired", canResume: true},
         {path: "live.md", status: "ready", canResume: false},
@@ -277,17 +288,17 @@ describe("owner live document enrollment", () => {
 
   it("rejects renderer identity, unsafe paths, and unavailable resumes", async () => {
     const h = harness();
-    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId, credentials: h.credentials})).rejects.toThrow();
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, credentials: h.credentials})).rejects.toThrow();
     await expect(h.invoke(CHANNELS.stopOwnerLiveDocument, {workspaceId, path: "../secret"})).rejects.toThrow();
     h.request.mockResolvedValue({ok: true, path: "live.md", status: "unavailable"});
     await expect(h.invoke(CHANNELS.resumeOwnerLiveDocument, {workspaceId, path: "live.md"})).rejects.toThrow("could not resume");
     expect(h.request.mock.calls.at(-1)?.[0]).toBe(h.credentials);
   });
 
-  it.each([CHANNELS.listOwnerLiveDocuments, CHANNELS.stopOwnerLiveDocument, CHANNELS.resumeOwnerLiveDocument])(
+  it.each([relayShareOperations.listOwnerLiveDocuments.channel, CHANNELS.stopOwnerLiveDocument, CHANNELS.resumeOwnerLiveDocument])(
     "refuses a shared view before loading credentials for %s", async channel => {
       const h = harness(); h.workspace.shareView = {};
-      const input = channel === CHANNELS.listOwnerLiveDocuments ? {workspaceId} : {workspaceId, path: "live.md"};
+      const input = channel === relayShareOperations.listOwnerLiveDocuments.channel ? {workspaceId} : {workspaceId, path: "live.md"};
       await expect(h.invoke(channel, input)).rejects.toThrow("original workspace");
       expect(h.remote).not.toHaveBeenCalled(); expect(h.request).not.toHaveBeenCalled();
     });
@@ -302,9 +313,9 @@ describe("owner live document enrollment", () => {
     h.request.mockImplementation(async (_credentials, path) => path.includes("retired=1")
       ? {ok: true, documents: [{path: "old.md", objectId:"object", status: "retired", acceptedCursor: 0}], nextCursor: "old.md"}
       : {ok: true, documents: []});
-    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId, retiredAfter: "old.md"})).rejects.toThrow("list changed");
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId, retiredAfter: "old.md"})).rejects.toThrow("list changed");
     h.request.mockResolvedValue({ok: true, documents: [{path: "../outside", status: "ready"}]});
-    await expect(h.invoke(CHANNELS.listOwnerLiveDocuments, {workspaceId})).rejects.toThrow();
+    await expect(h.invoke(relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId})).rejects.toThrow();
   });
 });
 
@@ -392,7 +403,7 @@ describe("registered relay share handlers", () => {
   ])("reports the relay's actual credential transition for %s", async (access, response, expected) => {
     const h = harness();
     h.request.mockResolvedValue({kind: "success", body: response});
-    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {
+    await expect(h.invoke(relayShareOperations.retuneRelayShareLink.channel, {
       workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [], access,
     })).resolves.toEqual(expected);
   });
@@ -406,7 +417,7 @@ describe("registered relay share handlers", () => {
   ])("rejects a malformed or mismatched retune response %j", async response => {
     const h = harness();
     h.request.mockResolvedValue({kind: "success", body: response});
-    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {
+    await expect(h.invoke(relayShareOperations.retuneRelayShareLink.channel, {
       workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [], access: "comment",
     })).rejects.toThrow("sharing failed (500)");
   });
@@ -415,27 +426,19 @@ describe("registered relay share handlers", () => {
     const h = harness();
     h.request.mockResolvedValue({kind: "success", body: {ok: true, access: "view", url: "https://relay.example/new"}});
     const payload = {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []};
-    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {...payload, access: "view"})).rejects.toThrow();
+    await expect(h.invoke(relayShareOperations.retuneRelayShareLink.channel, {...payload, access: "view"})).rejects.toThrow();
     h.request.mockClear();
-    await expect(h.invoke(CHANNELS.retuneRelayShareLink, {...payload, access: "owner"})).rejects.toThrow();
+    await expect(h.invoke(relayShareOperations.retuneRelayShareLink.channel, {...payload, access: "owner"})).rejects.toThrow();
     expect(h.request).not.toHaveBeenCalled();
   });
 
   it("registers only this family and authenticates every channel before parsing or work", async () => {
     const h = harness();
     expect([...h.handlers.keys()]).toEqual([
-      CHANNELS.listOwnerLiveDocuments, CHANNELS.listOwnerLiveRefusals, CHANNELS.retryOwnerLiveShare,
-      CHANNELS.stopOwnerLiveDocument, CHANNELS.resumeOwnerLiveDocument,
-      CHANNELS.ownerRestore,
-      CHANNELS.createRelayShare, CHANNELS.listRelayShares, CHANNELS.getRelayReceivedShare,
-      CHANNELS.revokeRelayShare, CHANNELS.undoRelayShare, CHANNELS.createRelayShareLink, CHANNELS.addRelayShareLink,
-      CHANNELS.listRelayShareLinks, CHANNELS.retuneRelayShareLink, CHANNELS.rotateRelayShareLink,
-      CHANNELS.revokeRelayShareLink, CHANNELS.listRelayShareDiscussion,
+      CHANNELS.stopOwnerLiveDocument, CHANNELS.resumeOwnerLiveDocument, CHANNELS.ownerRestore,
+      CHANNELS.listRelayShares, CHANNELS.getRelayReceivedShare, CHANNELS.revokeRelayShare, CHANNELS.undoRelayShare,
       CHANNELS.pollRelayShareDiscussionActivity, CHANNELS.cancelRelayShareDiscussionActivity,
-      CHANNELS.appendRelayShareDiscussion, CHANNELS.deleteRelayShareDiscussionMessage,
-      CHANNELS.blockRelayShareDiscussionPrincipal, CHANNELS.unblockRelayShareDiscussionPrincipal,
-      CHANNELS.pauseRelayShareDiscussion, CHANNELS.resumeRelayShareDiscussion,
-      CHANNELS.promoteRelayShareGrant, CHANNELS.revokeRelayShareGrant,
+      ...Object.values(relayShareOperations).map(row => row.channel),
     ]);
     for (const channel of h.handlers.keys()) {
       await expect(h.invoke(channel, null, -1)).rejects.toThrow("untrusted sender");
@@ -453,7 +456,7 @@ describe("registered relay share handlers", () => {
       const loading = deferred<{ credentials: CloudCredentials; credentialGeneration: number }>();
       const started = deferred();
       h.remote.mockImplementation(() => { started.resolve(); return loading.promise; });
-      const result = h.invoke(CHANNELS.createRelayShareLink, linkInput);
+      const result = h.invoke(relayShareOperations.createRelayShareLink.channel, linkInput);
       await started.promise;
       h[invalidate]();
       loading.resolve({ credentials: h.credentials, credentialGeneration: 1 });
@@ -463,15 +466,15 @@ describe("registered relay share handlers", () => {
   );
 
   it.each([
-    [CHANNELS.listOwnerLiveDocuments, {workspaceId}],
+    [relayShareOperations.listOwnerLiveDocuments.channel, {workspaceId}],
     [CHANNELS.stopOwnerLiveDocument, {workspaceId, path: "live.md"}],
     [CHANNELS.resumeOwnerLiveDocument, {workspaceId, path: "live.md"}],
-    [CHANNELS.createRelayShareLink, linkInput],
-    [CHANNELS.promoteRelayShareGrant, {
+    [relayShareOperations.createRelayShareLink.channel, linkInput],
+    [relayShareOperations.promoteRelayShareGrant.channel, {
       workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent",
       expectedParentGeneration: 2,
     }],
-    [CHANNELS.pauseRelayShareDiscussion, { workspaceId, shareId: "share" }],
+    [relayShareOperations.pauseRelayShareDiscussion.channel, { workspaceId, shareId: "share" }],
   ] as const)("checks currentness after the relay resolves for %s", async (channel, payload) => {
     for (const invalidate of ["retireRenderer", "retirePhysical", "rotateCredentials"] as const) {
       const h = harness();
@@ -485,13 +488,13 @@ describe("registered relay share handlers", () => {
       response.resolve({ get ok() { return readResult(); } });
       await expect(result).rejects.toThrow();
       expect(readResult).not.toHaveBeenCalled();
-      expect(h.request).toHaveBeenCalledTimes(channel === CHANNELS.listOwnerLiveDocuments ? 2 : 1);
+      expect(h.request).toHaveBeenCalledTimes(channel === relayShareOperations.listOwnerLiveDocuments.channel ? 2 : 1);
     }
   });
 
   it("creates a link using the authorized workspace and credential snapshot", async () => {
     const h = harness();
-    await expect(h.invoke(CHANNELS.createRelayShareLink, linkInput)).resolves.toEqual({
+    await expect(h.invoke(relayShareOperations.createRelayShareLink.channel, linkInput)).resolves.toEqual({
       shareId: "share", grantId: "grant", url: linkResult.url,
     });
     expect(h.request).toHaveBeenCalledWith(h.credentials, "/sync/workspace/shares/links", {
@@ -502,11 +505,11 @@ describe("registered relay share handlers", () => {
   it("rejects a shared view and unauthorized remote before relay mutation", async () => {
     const h = harness();
     h.workspace.shareView = {};
-    await expect(h.invoke(CHANNELS.createRelayShareLink, linkInput)).rejects.toThrow("original workspace");
+    await expect(h.invoke(relayShareOperations.createRelayShareLink.channel, linkInput)).rejects.toThrow("original workspace");
     expect(h.remote).not.toHaveBeenCalled();
     h.workspace.shareView = undefined;
     h.remote.mockRejectedValue(new Error("wrong account"));
-    await expect(h.invoke(CHANNELS.createRelayShareLink, linkInput)).rejects.toThrow("wrong account");
+    await expect(h.invoke(relayShareOperations.createRelayShareLink.channel, linkInput)).rejects.toThrow("wrong account");
     expect(h.request).not.toHaveBeenCalled();
   });
 
@@ -514,7 +517,7 @@ describe("registered relay share handlers", () => {
     "preserves relay refusal: %s", async (reason) => {
       const h = harness();
       h.request.mockRejectedValue(new Error(reason));
-      await expect(h.invoke(CHANNELS.promoteRelayShareGrant, {
+      await expect(h.invoke(relayShareOperations.promoteRelayShareGrant.channel, {
         workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent",
         expectedParentGeneration: 2,
       })).rejects.toThrow(reason);
@@ -533,7 +536,7 @@ describe("registered relay share handlers", () => {
       kind: "dependents-changed", status: 409,
       body: { ok: false, code: "dependents_changed", dependents: [] },
     });
-    await expect(h.invoke(CHANNELS.rotateRelayShareLink, {
+    await expect(h.invoke(relayShareOperations.rotateRelayShareLink.channel, {
       workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [],
     })).resolves.toEqual({ outcome: "dependents-changed", dependents: [] });
     expect(h.request.mock.calls[0]?.[3]).toEqual({ retainDependentSetConflict: true });
@@ -542,11 +545,11 @@ describe("registered relay share handlers", () => {
   it("requires the declared moderation transition in the relay response", async () => {
     const h = harness();
     h.request.mockResolvedValue({ ok: true, linkCommentsPaused: false });
-    await expect(h.invoke(CHANNELS.pauseRelayShareDiscussion, {
+    await expect(h.invoke(relayShareOperations.pauseRelayShareDiscussion.channel, {
       workspaceId, shareId: "share",
     })).rejects.toThrow("sharing failed (500)");
     h.request.mockResolvedValue({ ok: true, linkCommentsPaused: true });
-    await expect(h.invoke(CHANNELS.pauseRelayShareDiscussion, {
+    await expect(h.invoke(relayShareOperations.pauseRelayShareDiscussion.channel, {
       workspaceId, shareId: "share",
     })).resolves.toEqual({ linkCommentsPaused: true });
   });
@@ -555,9 +558,9 @@ describe("registered relay share handlers", () => {
 const undo = {undoId: "undo-1", expiresAtMs: 600_000};
 
 it.each([
-  [CHANNELS.revokeRelayShareGrant, { workspaceId, shareId: "share", grantId: "grant" },
+  [relayShareOperations.revokeRelayShareGrant.channel, { workspaceId, shareId: "share", grantId: "grant" },
     { ok: true, grantId: "grant", access: "edit", generation: 2, parentGrantId: null, status: "revoked", revokedAtMs: 5, undo }],
-  [CHANNELS.revokeRelayShareLink, { workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [] },
+  [relayShareOperations.revokeRelayShareLink.channel, { workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [] },
     { kind: "success", body: { ok: true, undo } }],
 ] as const)("allows paused owner control for %s without enabling content sync", async (channel, payload, result) => {
   const h = harness();
@@ -568,7 +571,7 @@ it.each([
   h.request.mockResolvedValue(result);
   await h.invoke(channel, payload);
   expect(h.remote).toHaveBeenCalledWith(h.workspace, { allowPaused: true });
-  await expect(h.invoke(CHANNELS.createRelayShareLink, linkInput)).rejects.toThrow("Sync this workspace");
+  await expect(h.invoke(relayShareOperations.createRelayShareLink.channel, linkInput)).rejects.toThrow("Sync this workspace");
   h.remote.mockRejectedValueOnce(new Error("wrong account"));
   await expect(h.invoke(channel, payload)).rejects.toThrow("wrong account");
   expect(h.request).toHaveBeenCalledOnce();
@@ -579,14 +582,14 @@ describe("share roster refresh", () => {
   const linkPayload = {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []};
 
   it.each([
-    [CHANNELS.createRelayShare, {workspaceId, paths: ["Trip"], recipientEmail: "ana@dohc.test", access: "edit"},
+    [relayShareOperations.createRelayShare.channel, {workspaceId, paths: ["Trip"], recipientEmail: "ana@dohc.test", access: "edit"},
       {shareId: "share", grantId: "grant"}],
-    [CHANNELS.promoteRelayShareGrant, {workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent", expectedParentGeneration: 2},
+    [relayShareOperations.promoteRelayShareGrant.channel, {workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent", expectedParentGeneration: 2},
       {ok: true, ...grantBody, status: "active", revokedAtMs: null}],
-    [CHANNELS.revokeRelayShareGrant, {workspaceId, shareId: "share", grantId: "grant"},
+    [relayShareOperations.revokeRelayShareGrant.channel, {workspaceId, shareId: "share", grantId: "grant"},
       {ok: true, ...grantBody, status: "revoked", revokedAtMs: 5, undo}],
-    [CHANNELS.revokeRelayShareLink, linkPayload, {kind: "success", body: {ok: true, undo}}],
-    [CHANNELS.retuneRelayShareLink, {...linkPayload, access: "view"}, {kind: "success", body: {ok: true, access: "view"}}],
+    [relayShareOperations.revokeRelayShareLink.channel, linkPayload, {kind: "success", body: {ok: true, undo}}],
+    [relayShareOperations.retuneRelayShareLink.channel, {...linkPayload, access: "view"}, {kind: "success", body: {ok: true, access: "view"}}],
   ] as const)("refreshes after %s even when the window moved on while the relay answered", async (channel, payload, body) => {
     for (const invalidate of ["retireRenderer", "retirePhysical", "rotateCredentials"] as const) {
       const h = harness();
@@ -605,7 +608,7 @@ describe("share roster refresh", () => {
   it("does not refresh when the relay refuses a share", async () => {
     const h = harness();
     h.request.mockRejectedValue(new Error("recipient not found"));
-    await expect(h.invoke(CHANNELS.createRelayShare, {workspaceId, paths: ["Trip"], recipientEmail: "ana@dohc.test", access: "edit"}))
+    await expect(h.invoke(relayShareOperations.createRelayShare.channel, {workspaceId, paths: ["Trip"], recipientEmail: "ana@dohc.test", access: "edit"}))
       .rejects.toThrow("recipient not found");
     expect(h.sharesChanged).not.toHaveBeenCalled();
   });
@@ -622,16 +625,16 @@ describe("share roster refresh", () => {
   it("refreshes after a link ends or changes level, because its dependents follow it", async () => {
     const h = harness();
     h.request.mockResolvedValue({kind: "success", body: {ok: true, undo}});
-    await h.invoke(CHANNELS.revokeRelayShareLink, linkPayload);
+    await h.invoke(relayShareOperations.revokeRelayShareLink.channel, linkPayload);
     h.request.mockResolvedValue({kind: "success", body: {ok: true, access: "view"}});
-    await h.invoke(CHANNELS.retuneRelayShareLink, {...linkPayload, access: "view"});
+    await h.invoke(relayShareOperations.retuneRelayShareLink.channel, {...linkPayload, access: "view"});
     expect(h.sharesChanged.mock.calls).toEqual([[workspaceId], [workspaceId]]);
   });
 
   it("does not refresh for a new link, which has no dependents yet", async () => {
     const h = harness();
     h.request.mockResolvedValue(linkResult);
-    await h.invoke(CHANNELS.createRelayShareLink, linkInput);
+    await h.invoke(relayShareOperations.createRelayShareLink.channel, linkInput);
     expect(h.sharesChanged).not.toHaveBeenCalled();
   });
 });
@@ -864,5 +867,66 @@ describe("registered discussion poll lifetime", () => {
     await expect(result).rejects.toThrow("aborted");
     expect(h.request).not.toHaveBeenCalled();
     expect(h.polls.activeCount()).toBe(0);
+  });
+});
+
+const ownerInputs = {
+  listOwnerLiveDocuments: {workspaceId},
+  listOwnerLiveRefusals: {workspaceId},
+  retryOwnerLiveShare: {workspaceId, shareId: "share"},
+  createRelayShare: {workspaceId, paths: ["docs"], recipientEmail: "friend@dohc.test", access: "edit"},
+  createRelayShareLink: linkInput,
+  addRelayShareLink: {workspaceId, shareId: "share", access: "view"},
+  listRelayShareLinks: {workspaceId},
+  retuneRelayShareLink: {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [], access: "view"},
+  rotateRelayShareLink: {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []},
+  revokeRelayShareLink: {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []},
+  listRelayShareDiscussion: {workspaceId, shareId: "share", direction: "newest-first"},
+  appendRelayShareDiscussion: {workspaceId, shareId: "share", body: "Hello", idempotencyKey: "54df38bc-6863-46a7-964a-820d81e833aa"},
+  deleteRelayShareDiscussionMessage: {workspaceId, shareId: "share", messageId: "message"},
+  blockRelayShareDiscussionPrincipal: {workspaceId, shareId: "share", principalId: "principal"},
+  unblockRelayShareDiscussionPrincipal: {workspaceId, shareId: "share", principalId: "principal"},
+  pauseRelayShareDiscussion: {workspaceId, shareId: "share"},
+  resumeRelayShareDiscussion: {workspaceId, shareId: "share"},
+  promoteRelayShareGrant: {workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent", expectedParentGeneration: 2},
+  revokeRelayShareGrant: {workspaceId, shareId: "share", grantId: "grant"},
+} satisfies Record<keyof typeof relayShareOperations, unknown>;
+const ownerRows = Object.entries(relayShareOperations).map(([name, row]) => ({
+  name, row, input: ownerInputs[name as keyof typeof ownerInputs],
+}));
+
+describe("owner operation admission", () => {
+  it.each(ownerRows)("binds $name to the sender's workspace before remote access", async ({row, input}) => {
+    const h = harness();
+    await expect(h.invoke(row.channel, {...input, workspaceId: "another-workspace"})).rejects.toThrow(
+      "Sharing stopped because this window changed workspaces.",
+    );
+    expect(h.remote).not.toHaveBeenCalled();
+    expect(h.request).not.toHaveBeenCalled();
+    expect(h.accountRequest).not.toHaveBeenCalled();
+  });
+
+  it.each(ownerRows)("preserves $name shared-view admission", async ({name, row, input}) => {
+    const h = harness();
+    h.workspace.shareView = {};
+    h.remote.mockRejectedValue(new Error("remote reached"));
+    const permitsSharedView = name === "listRelayShareLinks" || name === "rotateRelayShareLink";
+    await expect(h.invoke(row.channel, input)).rejects.toThrow(permitsSharedView ? "remote reached" : "original workspace");
+    expect(h.remote).toHaveBeenCalledTimes(permitsSharedView ? 1 : 0);
+    expect(h.request).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{}, "Pick a file, folder, or version to share."],
+    [{paths: ["shared-with-me/friend/docs"]}, "This came to you through a share — copy it into your own files to share it onward."],
+  ] as const)("keeps create-share input refusals after workspace binding: %j", async (selection, message) => {
+    const h = harness();
+    const input = {workspaceId, recipientEmail: "friend@dohc.test", access: "edit", ...selection};
+    await expect(h.invoke(relayShareOperations.createRelayShare.channel, input)).rejects.toThrow(message);
+    await expect(h.invoke(relayShareOperations.createRelayShare.channel, {...input, workspaceId: "another-workspace"})).rejects.toThrow(
+      "Sharing stopped because this window changed workspaces.",
+    );
+    expect(h.remote).not.toHaveBeenCalled();
+    expect(h.request).not.toHaveBeenCalled();
   });
 });

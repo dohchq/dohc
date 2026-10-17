@@ -1,8 +1,9 @@
+import { relayShareOperations } from "../ipc/shareOperations";
+import { registerOperations } from "../ipc/operationTable";
 import { readdir } from "node:fs/promises";
 import type { SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import type { LiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { createPresencePollRegistry } from "../collab/presencePollRegistry";
-import { CHANNELS } from "../ipc/channels";
 import { registerRelaySharesIpcHandlers } from "../ipc/relaySharesIpc";
 import { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { ShareMountRecord } from "../workspaces/registryStore";
@@ -119,7 +120,7 @@ export function createRealShareMountHarness(input: {
   });
   type Event = { sender: { id: number } };
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
-  registerRelaySharesIpcHandlers({
+  const ownerHandlers = registerRelaySharesIpcHandlers({
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: unexpected,
@@ -136,6 +137,14 @@ export function createRealShareMountHarness(input: {
     sharesChanged: unexpected,
     reconcileReceivedShares: unexpected,
   });
+  registerOperations({
+    handle: (channel, handler) => { handlers.set(channel, handler); },
+    assertTrustedSender: () => undefined,
+    withActiveWorkspace: async (_event: Event, workspaceId, message, work) => {
+      if (workspaceId !== workspace.workspaceId) throw new Error(message);
+      return work({workspace, assertCurrent});
+    },
+  }, relayShareOperations, ownerHandlers);
   return {
     workspace,
     mount: (shareCode: string) => commands.mount({ workspace, shareCode, assertCurrent }),
@@ -146,7 +155,7 @@ export function createRealShareMountHarness(input: {
       expectedContentHash: "0".repeat(64),
     }),
     reshare: async (path: string) => {
-      const handler = handlers.get(CHANNELS.createRelayShare);
+      const handler = handlers.get(relayShareOperations.createRelayShare.channel);
       if (!handler) throw new Error("Missing create-share handler");
       return handler({ sender: { id: 1 } }, {
         workspaceId: workspace.workspaceId, recipientEmail: "third-party@dohc.test",

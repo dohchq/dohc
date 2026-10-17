@@ -1,4 +1,4 @@
-import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations } from "./ipc/shareOperations";
+import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./ipc/shareOperations";
 import { createOperationHistory } from "./workspaces/workspaceHistoryOperations";
 import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
 import { mountRootFor } from "./workspaces/shareMounts";
@@ -6105,7 +6105,7 @@ function registerIpcHandlers(): void {
     openWorkspaceActivity, completeWorkspaceJoinBootstrap, desktopMarks,
   });
 
-  registerRelaySharesIpcHandlers<
+  const relayShareHandlers = registerRelaySharesIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,
     DesktopRendererWorkspaceOperation["workspace"],
@@ -6146,6 +6146,7 @@ function registerIpcHandlers(): void {
     sharesChanged: (workspaceId) => { receivedShareAcquisition.invalidate(); invalidateHistoryLabels(workspaceId); shareRosters.sharesChanged(workspaceId); },
     reconcileReceivedShares,
   });
+  registerOperations(operationBoundary, relayShareOperations, relayShareHandlers);
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
   const ownerPublicationDependencies = {

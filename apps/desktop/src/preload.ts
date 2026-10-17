@@ -1,4 +1,4 @@
-import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations } from "./ipc/shareOperations";
+import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./ipc/shareOperations";
 import { chatOperations } from "./ipc/chatOperations";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
@@ -26,11 +26,6 @@ import {
   systemMotionOperations,
   serverAccountOperations,
   SitePreviewReplacedEvent,
-  ListOwnerLiveDocumentsPayload,
-  ListOwnerLiveRefusalsPayload,
-  OwnerLiveRefusalsResult,
-  RetryOwnerLiveSharePayload,
-  OwnerLiveDocumentsResult,
   OwnerLiveDocumentActionPayload,
   DesktopUserSettingsResult,
   ShareDirectWritesPushedEvent,
@@ -128,6 +123,7 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(shareMountOperations, invoke),
   ...operationBridge(shareProposalOperations, invoke),
   ...operationBridge(sharedChannelOperations, invoke),
+  ...operationBridge(relayShareOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
   ...operationBridge(historyOperations, invoke),
@@ -242,14 +238,6 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.cloudEnableSync, payload),
   cloudJoinWorkspace: (payload) =>
     ipcRenderer.invoke(CHANNELS.cloudJoinWorkspace, payload),
-  createRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.createRelayShare, payload),
-  listOwnerLiveDocuments: async payload => OwnerLiveDocumentsResult.parse(await ipcRenderer.invoke(
-    CHANNELS.listOwnerLiveDocuments, ListOwnerLiveDocumentsPayload.parse(payload))),
-  listOwnerLiveRefusals: async payload => OwnerLiveRefusalsResult.parse(await ipcRenderer.invoke(
-    CHANNELS.listOwnerLiveRefusals, ListOwnerLiveRefusalsPayload.parse(payload))),
-  retryOwnerLiveShare: async payload => {
-    await ipcRenderer.invoke(CHANNELS.retryOwnerLiveShare, RetryOwnerLiveSharePayload.parse(payload));
-  },
   stopOwnerLiveDocument: async payload => {
     await ipcRenderer.invoke(CHANNELS.stopOwnerLiveDocument, OwnerLiveDocumentActionPayload.parse(payload));
   },
@@ -261,48 +249,18 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.getRelayReceivedShare, payload),
   revokeRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.revokeRelayShare, payload),
   undoRelayShare: (payload) => ipcRenderer.invoke(CHANNELS.undoRelayShare, payload),
-  createRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createRelayShareLink, payload),
-  addRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.addRelayShareLink, payload),
-  listRelayShareLinks: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listRelayShareLinks, payload),
   ownerRestore: async <Action extends OwnerRestoreAction>(payload: OwnerRestoreRequest & {action: Action}) => {
     const request = OwnerRestoreRequest.parse(payload);
     return OwnerRestoreActionResponse[request.action].parse(await ipcRenderer.invoke(CHANNELS.ownerRestore, request)) as OwnerRestoreResult<Action>;
   },
-  retuneRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.retuneRelayShareLink, payload),
   publishOwnerApp: async (payload: OwnerAppPublicationRequest) => OwnerAppPublicationResult.parse(
     await ipcRenderer.invoke(CHANNELS.publishOwnerApp, OwnerAppPublicationRequest.parse(payload))),
   dataset: async (payload: DatasetRequest) => DatasetResult.parse(await ipcRenderer.invoke(CHANNELS.dataset, DatasetRequest.parse(payload))),
   ownerAppResponses:async(payload:OwnerAppResponsesRequest)=>OwnerAppResponsesResult.parse(await ipcRenderer.invoke(CHANNELS.ownerAppResponses,OwnerAppResponsesRequest.parse(payload))),
-  rotateRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.rotateRelayShareLink, payload),
-  revokeRelayShareLink: (payload) =>
-    ipcRenderer.invoke(CHANNELS.revokeRelayShareLink, payload),
-  listRelayShareDiscussion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listRelayShareDiscussion, payload),
   pollRelayShareDiscussionActivity: (payload) =>
     ipcRenderer.invoke(CHANNELS.pollRelayShareDiscussionActivity, payload),
   cancelRelayShareDiscussionActivity: (payload) =>
     ipcRenderer.invoke(CHANNELS.cancelRelayShareDiscussionActivity, payload),
-  appendRelayShareDiscussion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.appendRelayShareDiscussion, payload),
-  deleteRelayShareDiscussionMessage: (payload) =>
-    ipcRenderer.invoke(CHANNELS.deleteRelayShareDiscussionMessage, payload),
-  blockRelayShareDiscussionPrincipal: (payload) =>
-    ipcRenderer.invoke(CHANNELS.blockRelayShareDiscussionPrincipal, payload),
-  unblockRelayShareDiscussionPrincipal: (payload) =>
-    ipcRenderer.invoke(CHANNELS.unblockRelayShareDiscussionPrincipal, payload),
-  pauseRelayShareDiscussion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.pauseRelayShareDiscussion, payload),
-  resumeRelayShareDiscussion: (payload) =>
-    ipcRenderer.invoke(CHANNELS.resumeRelayShareDiscussion, payload),
-  promoteRelayShareGrant: (payload) =>
-    ipcRenderer.invoke(CHANNELS.promoteRelayShareGrant, payload),
-  revokeRelayShareGrant: (payload) =>
-    ipcRenderer.invoke(CHANNELS.revokeRelayShareGrant, payload),
   ...operationBridge(sharedViewAccessOperations, invoke),
   listCollectionAutomations: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),

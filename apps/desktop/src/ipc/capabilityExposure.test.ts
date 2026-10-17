@@ -146,6 +146,38 @@ describe("main inventories", () => {
       expect(row).not.toHaveProperty("handlerCheck");
     }
   });
+  it("records the 19 owner relay operations with their existing admission", () => {
+    const channels = [
+      "desktop:list-owner-live-documents",
+      "desktop:list-owner-live-refusals",
+      "desktop:retry-owner-live-share",
+      "desktop:create-relay-share",
+      "desktop:create-relay-share-link",
+      "desktop:add-relay-share-link",
+      "desktop:list-relay-share-links",
+      "desktop:retune-relay-share-link",
+      "desktop:rotate-relay-share-link",
+      "desktop:revoke-relay-share-link",
+      "desktop:list-relay-share-discussion",
+      "desktop:append-relay-share-discussion",
+      "desktop:delete-relay-share-discussion-message",
+      "desktop:block-relay-share-discussion-principal",
+      "desktop:unblock-relay-share-discussion-principal",
+      "desktop:pause-relay-share-discussion",
+      "desktop:resume-relay-share-discussion",
+      "desktop:promote-relay-share-grant",
+      "desktop:revoke-relay-share-grant"
+    ];
+    const ownerRows = rows.filter(row => channels.includes(row.channel));
+    expect(ownerRows.map(row => row.channel)).toEqual(channels);
+    for (const row of ownerRows) {
+      expect(row, row.channel).toMatchObject({
+        guard: "active-workspace", scope: "workspace",
+        inactiveMessage: "Sharing stopped because this window changed workspaces.",
+      });
+      expect(row).not.toHaveProperty("handlerCheck");
+    }
+  });
   it("preserves socket verbs, public verbs, and all public help", () => {
     expect(socketVerbs).toEqual(mainCli.socketVerbs);
     expect(Object.keys(CLI_COMMANDS)).toEqual(mainCli.publicGroups);

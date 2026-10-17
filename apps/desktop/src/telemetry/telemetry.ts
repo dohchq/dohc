@@ -1,3 +1,4 @@
+import { relayShareOperations } from "../ipc/shareOperations";
 import { chatOperations } from "../ipc/chatOperations";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -27,8 +28,8 @@ export type UsageEvent =
 const USAGE_EVENTS: Readonly<Record<string, (result: unknown) => UsageEvent | null>> = {
   [CHANNELS.createLocalWorkspace]: () => ({ name: "workspace_created" }),
   [CHANNELS.openWorkspace]: () => ({ name: "workspace_opened" }),
-  [CHANNELS.createRelayShare]: () => ({ name: "share_created", method: "people" }),
-  [CHANNELS.createRelayShareLink]: () => ({ name: "share_created", method: "link" }),
+  [relayShareOperations.createRelayShare.channel]: () => ({ name: "share_created", method: "people" }),
+  [relayShareOperations.createRelayShareLink.channel]: () => ({ name: "share_created", method: "link" }),
   // Publishing asks first: only an approved publication counts.
   [CHANNELS.publishOwnerApp]: (result) => {
     const outcome = result as { kind?: unknown; local?: unknown } | null;

@@ -1,14 +1,12 @@
+import type { relayShareOperations } from "./shareOperations";
+import type { OperationHandlers } from "./operationTable";
 import {withOwnerLiveStopTransition, type OwnerLiveStop} from "../workspaces/ownerLiveStop";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {
-  ListOwnerLiveDocumentsPayload,
-  ListOwnerLiveRefusalsPayload,
   OwnerLiveRefusalsResult,
-  RetryOwnerLiveSharePayload,
   OwnerLiveDocument,
   OwnerLiveDocumentsResult,
   OwnerLiveDocumentActionPayload,
-  CreateRelaySharePayload,
   CreateRelayShareResult,
   GetRelayReceivedSharePayload,
   GetRelayReceivedShareResult,
@@ -20,26 +18,17 @@ import {
   RelayShareUndoResponse,
   UndoRelaySharePayload,
   UndoRelayShareResult,
-  AddRelayShareLinkPayload,
   AddRelayShareLinkResult,
-  AppendRelayShareDiscussionPayload,
   AppendRelayShareDiscussionResult,
-  BlockRelayShareDiscussionPrincipalPayload,
   BlockRelayShareDiscussionPrincipalResult,
   CancelRelayShareDiscussionActivityPayload,
-  CreateRelayShareLinkPayload,
   CreateRelayShareLinkResult,
-  DeleteRelayShareDiscussionMessagePayload,
   DeleteRelayShareDiscussionMessageResult,
-  ListRelayShareDiscussionPayload,
   ListRelayShareDiscussionResult,
-  ListRelayShareLinksPayload,
   ListRelayShareLinksResult,
-  PauseRelayShareDiscussionPayload,
   PauseRelayShareDiscussionResult,
   PollRelayShareDiscussionActivityPayload,
   PollRelayShareDiscussionActivityResult,
-  PromoteRelayShareGrantPayload,
   PromoteRelayShareGrantResult,
   RelayShareDiscussionAppendResponse,
   RelayShareDiscussionActivityResponse,
@@ -56,23 +45,17 @@ import {
   RelayShareLinkRotateResponse,
   RelayShareLinkRetuneNarrowResponse,
   RelayShareLinkRetuneWidenResponse,
-  RetuneRelayShareLinkPayload,
   RetuneRelayShareLinkResult,
-  ResumeRelayShareDiscussionPayload,
   ResumeRelayShareDiscussionResult,
-  RotateRelayShareLinkPayload,
   RotateRelayShareLinkResult,
-  RevokeRelayShareGrantPayload,
   RevokeRelayShareGrantResult,
-  RevokeRelayShareLinkPayload,
   RevokeRelayShareLinkResult,
-  UnblockRelayShareDiscussionPrincipalPayload,
   UnblockRelayShareDiscussionPrincipalResult,
 } from "./bridgeContract";
 import { z } from "zod";
 import { CHANNELS } from "./channels";
 import {OwnerRestoreRequest, OwnerRestoreActionResponse} from "./ownerRestoreContract";
-import { assertOriginalWorkspace, createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
+import { assertOriginalWorkspace, createOwnerRelayShareHandler, createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { awaitCredentialGeneration, RelaySessionError } from "../mainChatIpcHandlers";
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -156,7 +139,8 @@ export function registerRelaySharesIpcHandlers<
   // An authenticated account listing, applied to this machine's received
   // shares so a share the owner restored resumes.
   reconcileReceivedShares(listing: unknown): Promise<void>;
-}): void {
+}): OperationHandlers<typeof relayShareOperations, Event, Operation> {
+  type Handlers = OperationHandlers<typeof relayShareOperations, Event, Operation>;
   const {
     registerHandler,
     assertTrustedSender,
@@ -182,6 +166,10 @@ export function registerRelaySharesIpcHandlers<
     remoteForWorkspace,
     credentialGeneration: currentCredentialGeneration,
   });
+  const ownerRelayShareOperation = createOwnerRelayShareOperation<Workspace, Operation, CloudCredentials>({
+    remoteForWorkspace,
+    credentialGeneration: currentCredentialGeneration,
+  });
   // A relay call that can change who holds a grant on the workspace. The
   // share roster refreshes as soon as the relay answers, before any check
   // that this window is still current, because the change happened anyway.
@@ -191,10 +179,8 @@ export function registerRelaySharesIpcHandlers<
       sharesChanged(workspaceId);
       return result;
     };
-  registerHandler(CHANNELS.listOwnerLiveDocuments, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListOwnerLiveDocumentsPayload.parse(payload);
-    return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
+  const listOwnerLiveDocuments: Handlers["listOwnerLiveDocuments"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
       const path = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`;
       const after = input.retiredAfter === undefined ? "" : `&after=${encodeURIComponent(input.retiredAfter)}`;
       const [active, retired] = await session.run(() => Promise.all([
@@ -220,12 +206,10 @@ export function registerRelaySharesIpcHandlers<
       }
       return OwnerLiveDocumentsResult.parse({documents: [...documents.values()], nextCursor: stopped.nextCursor});
     }, assertOriginalWorkspace);
-  });
+  };
 
-  registerHandler(CHANNELS.listOwnerLiveRefusals, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListOwnerLiveRefusalsPayload.parse(payload);
-    return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
+  const listOwnerLiveRefusals: Handlers["listOwnerLiveRefusals"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
       const after = input.after === undefined ? "" : `&after=${encodeURIComponent(input.after)}`;
       const result = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials,
         `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host?refusals=1${after}`));
@@ -235,12 +219,10 @@ export function registerRelaySharesIpcHandlers<
       }
       return OwnerLiveRefusalsResult.parse({refusals: response.refusals, nextCursor: response.nextCursor});
     }, assertOriginalWorkspace);
-  });
+  };
 
-  registerHandler(CHANNELS.retryOwnerLiveShare, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RetryOwnerLiveSharePayload.parse(payload);
-    return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
+  const retryOwnerLiveShare: Handlers["retryOwnerLiveShare"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(operation, async (operation, credentials, session) => {
       const result = await session.run(() => relayShareJsonWithCredentials<unknown>(credentials,
         `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/live-host`, {
           method: "POST", body: JSON.stringify({shareId: input.shareId, retry: true}),
@@ -250,7 +232,7 @@ export function registerRelaySharesIpcHandlers<
         throw new Error("Some documents could not start live editing. Refresh the list and try again.");
       }
     }, assertOriginalWorkspace);
-  });
+  };
 
   for (const [channel, stop] of [[CHANNELS.stopOwnerLiveDocument, true], [CHANNELS.resumeOwnerLiveDocument, false]] as const) {
     registerHandler(channel, async (event, payload) => {
@@ -336,9 +318,7 @@ export function registerRelaySharesIpcHandlers<
   // Grant side: create a share on the SYNC RELAY for a synced workspace.
   // Selector validation (secret refusal, traversal, caps) is server-side —
   // the relay is the security boundary; this handler only adds product copy.
-  registerHandler(CHANNELS.createRelayShare, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = CreateRelaySharePayload.parse(payload);
+  const createRelayShare: Handlers["createRelayShare"] = async (input, { operation }) => {
     if (!input.paths?.length && !input.versionId) {
       throw new Error("Pick a file, folder, or version to share.");
     }
@@ -350,9 +330,8 @@ export function registerRelaySharesIpcHandlers<
         "This came to you through a share — copy it into your own files to share it onward.",
       );
     }
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         const workspace = operation.workspace;
         const created = await session.run(changingGrants(workspace.workspaceId, () =>
@@ -384,7 +363,7 @@ export function registerRelaySharesIpcHandlers<
       },
       assertOriginalWorkspace,
     );
-  });
+  };
 
   registerHandler(CHANNELS.listRelayShares, async (event) => {
     assertTrustedSender(event);
@@ -495,12 +474,9 @@ export function registerRelaySharesIpcHandlers<
     return UndoRelayShareResult.parse({ shareId: parsed.data.shareId });
   });
 
-  registerHandler(CHANNELS.createRelayShareLink, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = CreateRelayShareLinkPayload.parse(payload);
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+  const createRelayShareLink: Handlers["createRelayShareLink"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         const relayResult = await session.run(() =>
           relayShareJsonWithCredentials<unknown>(
@@ -524,14 +500,11 @@ export function registerRelaySharesIpcHandlers<
       },
       assertOriginalWorkspace,
     );
-  });
+  };
 
-  registerHandler(CHANNELS.addRelayShareLink, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AddRelayShareLinkPayload.parse(payload);
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+  const addRelayShareLink: Handlers["addRelayShareLink"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         const relayResult = await session.run(() =>
           relayShareJsonWithCredentials<unknown>(
@@ -551,14 +524,11 @@ export function registerRelaySharesIpcHandlers<
       },
       assertOriginalWorkspace,
     );
-  });
+  };
 
-  registerHandler(CHANNELS.listRelayShareLinks, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListRelayShareLinksPayload.parse(payload);
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+  const listRelayShareLinks: Handlers["listRelayShareLinks"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         const relayResult = await session.run(() => {
           const path = `/sync/${encodeURIComponent(operation.workspace.workspaceId)}/shares/links`;
@@ -579,14 +549,11 @@ export function registerRelaySharesIpcHandlers<
         return ListRelayShareLinksResult.parse(parsed.data);
       },
     );
-  });
+  };
 
-  registerHandler(CHANNELS.retuneRelayShareLink, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RetuneRelayShareLinkPayload.parse(payload);
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+  const retuneRelayShareLink: Handlers["retuneRelayShareLink"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         // A new level applies to the link's dependents too.
         const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
@@ -638,14 +605,11 @@ export function registerRelaySharesIpcHandlers<
       },
       assertOriginalWorkspace,
     );
-  });
+  };
 
-  registerHandler(CHANNELS.rotateRelayShareLink, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RotateRelayShareLinkPayload.parse(payload);
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+  const rotateRelayShareLink: Handlers["rotateRelayShareLink"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         const relayResult = await session.run(() =>
           relayShareJsonWithCredentials<unknown>(
@@ -683,14 +647,11 @@ export function registerRelaySharesIpcHandlers<
         });
       },
     );
-  });
+  };
 
-  registerHandler(CHANNELS.revokeRelayShareLink, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RevokeRelayShareLinkPayload.parse(payload);
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+  const revokeRelayShareLink: Handlers["revokeRelayShareLink"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         // Ending a link ends its dependents.
         const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
@@ -729,14 +690,11 @@ export function registerRelaySharesIpcHandlers<
       assertOriginalWorkspace,
       { allowPaused: true },
     );
-  });
+  };
 
-  registerHandler(CHANNELS.listRelayShareDiscussion, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListRelayShareDiscussionPayload.parse(payload);
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+  const listRelayShareDiscussion: Handlers["listRelayShareDiscussion"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         const relayResult = await session.run(() => {
           const path = `/sync/shares/${encodeURIComponent(input.shareId)}/discussion`;
@@ -758,7 +716,7 @@ export function registerRelaySharesIpcHandlers<
       },
       assertOriginalWorkspace,
     );
-  });
+  };
 
   registerHandler(
     CHANNELS.pollRelayShareDiscussionActivity,
@@ -842,12 +800,9 @@ export function registerRelaySharesIpcHandlers<
     },
   );
 
-  registerHandler(CHANNELS.appendRelayShareDiscussion, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AppendRelayShareDiscussionPayload.parse(payload);
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+  const appendRelayShareDiscussion: Handlers["appendRelayShareDiscussion"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         const relayResult = await session.run(() =>
           relayShareJsonWithCredentials<unknown>(
@@ -873,123 +828,102 @@ export function registerRelaySharesIpcHandlers<
       },
       assertOriginalWorkspace,
     );
-  });
+  };
 
-  registerHandler(
-    CHANNELS.deleteRelayShareDiscussionMessage,
-    async (event, payload) => {
-      assertTrustedSender(event);
-      const input = DeleteRelayShareDiscussionMessagePayload.parse(payload);
-      return ownerRelayShareHandler(
-        event.sender,
-        input.workspaceId,
-        async (operation, credentials, session) => {
-          const relayResult = await session.run(() =>
-            relayShareJsonWithCredentials<unknown>(
-              credentials,
-              `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
-              {
-                method: "POST",
-                body: JSON.stringify({
-                  workspaceId: operation.workspace.workspaceId,
-                  action: "delete",
-                  messageId: input.messageId,
-                }),
-              },
-            ),
-          );
-          const parsed =
-            RelayShareDiscussionDeleteResponse.safeParse(relayResult);
-          if (!parsed.success) {
-            throw new Error(relayShareErrorCopy(500, null));
-          }
-          return DeleteRelayShareDiscussionMessageResult.parse({
-            message: parsed.data.message,
-          });
-        },
-        assertOriginalWorkspace,
-      );
-    },
-  );
+  const deleteRelayShareDiscussionMessage: Handlers["deleteRelayShareDiscussionMessage"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const relayResult = await session.run(() =>
+          relayShareJsonWithCredentials<unknown>(
+            credentials,
+            `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                workspaceId: operation.workspace.workspaceId,
+                action: "delete",
+                messageId: input.messageId,
+              }),
+            },
+          ),
+        );
+        const parsed =
+          RelayShareDiscussionDeleteResponse.safeParse(relayResult);
+        if (!parsed.success) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return DeleteRelayShareDiscussionMessageResult.parse({
+          message: parsed.data.message,
+        });
+      },
+      assertOriginalWorkspace,
+    );
+  };
 
-  registerHandler(
-    CHANNELS.blockRelayShareDiscussionPrincipal,
-    async (event, payload) => {
-      assertTrustedSender(event);
-      const input = BlockRelayShareDiscussionPrincipalPayload.parse(payload);
-      return ownerRelayShareHandler(
-        event.sender,
-        input.workspaceId,
-        async (operation, credentials, session) => {
-          const relayResult = await session.run(() =>
-            relayShareJsonWithCredentials<unknown>(
-              credentials,
-              `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
-              {
-                method: "POST",
-                body: JSON.stringify({
-                  workspaceId: operation.workspace.workspaceId,
-                  action: "block",
-                  principalId: input.principalId,
-                }),
-              },
-            ),
-          );
-          const parsed = RelayShareDiscussionBlockResponse.safeParse(relayResult);
-          if (!parsed.success || !parsed.data.blocked) {
-            throw new Error(relayShareErrorCopy(500, null));
-          }
-          return BlockRelayShareDiscussionPrincipalResult.parse({
-            blocked: true,
-          });
-        },
-        assertOriginalWorkspace,
-      );
-    },
-  );
+  const blockRelayShareDiscussionPrincipal: Handlers["blockRelayShareDiscussionPrincipal"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const relayResult = await session.run(() =>
+          relayShareJsonWithCredentials<unknown>(
+            credentials,
+            `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                workspaceId: operation.workspace.workspaceId,
+                action: "block",
+                principalId: input.principalId,
+              }),
+            },
+          ),
+        );
+        const parsed = RelayShareDiscussionBlockResponse.safeParse(relayResult);
+        if (!parsed.success || !parsed.data.blocked) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return BlockRelayShareDiscussionPrincipalResult.parse({
+          blocked: true,
+        });
+      },
+      assertOriginalWorkspace,
+    );
+  };
 
-  registerHandler(
-    CHANNELS.unblockRelayShareDiscussionPrincipal,
-    async (event, payload) => {
-      assertTrustedSender(event);
-      const input = UnblockRelayShareDiscussionPrincipalPayload.parse(payload);
-      return ownerRelayShareHandler(
-        event.sender,
-        input.workspaceId,
-        async (operation, credentials, session) => {
-          const relayResult = await session.run(() =>
-            relayShareJsonWithCredentials<unknown>(
-              credentials,
-              `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
-              {
-                method: "POST",
-                body: JSON.stringify({
-                  workspaceId: operation.workspace.workspaceId,
-                  action: "unblock",
-                  principalId: input.principalId,
-                }),
-              },
-            ),
-          );
-          const parsed = RelayShareDiscussionBlockResponse.safeParse(relayResult);
-          if (!parsed.success || parsed.data.blocked) {
-            throw new Error(relayShareErrorCopy(500, null));
-          }
-          return UnblockRelayShareDiscussionPrincipalResult.parse({
-            blocked: false,
-          });
-        },
-        assertOriginalWorkspace,
-      );
-    },
-  );
+  const unblockRelayShareDiscussionPrincipal: Handlers["unblockRelayShareDiscussionPrincipal"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
+      async (operation, credentials, session) => {
+        const relayResult = await session.run(() =>
+          relayShareJsonWithCredentials<unknown>(
+            credentials,
+            `/sync/shares/${encodeURIComponent(input.shareId)}/discussion/moderation`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                workspaceId: operation.workspace.workspaceId,
+                action: "unblock",
+                principalId: input.principalId,
+              }),
+            },
+          ),
+        );
+        const parsed = RelayShareDiscussionBlockResponse.safeParse(relayResult);
+        if (!parsed.success || parsed.data.blocked) {
+          throw new Error(relayShareErrorCopy(500, null));
+        }
+        return UnblockRelayShareDiscussionPrincipalResult.parse({
+          blocked: false,
+        });
+      },
+      assertOriginalWorkspace,
+    );
+  };
 
-  registerHandler(CHANNELS.pauseRelayShareDiscussion, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = PauseRelayShareDiscussionPayload.parse(payload);
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+  const pauseRelayShareDiscussion: Handlers["pauseRelayShareDiscussion"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         const relayResult = await session.run(() =>
           relayShareJsonWithCredentials<unknown>(
@@ -1014,14 +948,11 @@ export function registerRelaySharesIpcHandlers<
       },
       assertOriginalWorkspace,
     );
-  });
+  };
 
-  registerHandler(CHANNELS.resumeRelayShareDiscussion, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ResumeRelayShareDiscussionPayload.parse(payload);
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+  const resumeRelayShareDiscussion: Handlers["resumeRelayShareDiscussion"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         const relayResult = await session.run(() =>
           relayShareJsonWithCredentials<unknown>(
@@ -1046,14 +977,11 @@ export function registerRelaySharesIpcHandlers<
       },
       assertOriginalWorkspace,
     );
-  });
+  };
 
-  registerHandler(CHANNELS.promoteRelayShareGrant, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = PromoteRelayShareGrantPayload.parse(payload);
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+  const promoteRelayShareGrant: Handlers["promoteRelayShareGrant"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
           relayShareJsonWithCredentials<unknown>(
@@ -1084,14 +1012,11 @@ export function registerRelaySharesIpcHandlers<
       },
       assertOriginalWorkspace,
     );
-  });
+  };
 
-  registerHandler(CHANNELS.revokeRelayShareGrant, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RevokeRelayShareGrantPayload.parse(payload);
-    return ownerRelayShareHandler(
-      event.sender,
-      input.workspaceId,
+  const revokeRelayShareGrant: Handlers["revokeRelayShareGrant"] = async (input, { operation }) => {
+    return ownerRelayShareOperation(
+      operation,
       async (operation, credentials, session) => {
         const relayResult = await session.run(changingGrants(operation.workspace.workspaceId, () =>
           relayShareJsonWithCredentials<unknown>(
@@ -1122,6 +1047,27 @@ export function registerRelaySharesIpcHandlers<
       assertOriginalWorkspace,
       { allowPaused: true },
     );
-  });
+  };
 
+  return {
+    listOwnerLiveDocuments,
+    listOwnerLiveRefusals,
+    retryOwnerLiveShare,
+    createRelayShare,
+    createRelayShareLink,
+    addRelayShareLink,
+    listRelayShareLinks,
+    retuneRelayShareLink,
+    rotateRelayShareLink,
+    revokeRelayShareLink,
+    listRelayShareDiscussion,
+    appendRelayShareDiscussion,
+    deleteRelayShareDiscussionMessage,
+    blockRelayShareDiscussionPrincipal,
+    unblockRelayShareDiscussionPrincipal,
+    pauseRelayShareDiscussion,
+    resumeRelayShareDiscussion,
+    promoteRelayShareGrant,
+    revokeRelayShareGrant,
+  };
 }

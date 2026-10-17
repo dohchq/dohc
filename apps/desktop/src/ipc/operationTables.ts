@@ -1,4 +1,4 @@
-import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations } from "./shareOperations";
+import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations, relayShareOperations } from "./shareOperations";
 import { chatOperations } from "./chatOperations";
 import {
   workspaceSyncOperations,
@@ -39,6 +39,7 @@ export const OPERATION_TABLES = [
   shareMountOperations,
   shareProposalOperations,
   sharedChannelOperations,
+  relayShareOperations,
   shareCopyOperations,
   workspaceSyncOperations,
   systemMotionOperations,
