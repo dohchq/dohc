@@ -1,4 +1,5 @@
-import { expect, test } from "@playwright/test";
+import { holdSystemClipboard } from "./helpers/systemClipboard";
+import { test, expect } from "@playwright/test";
 import { access, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
@@ -132,10 +133,12 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
         await desktop.page.getByTestId("notice-center-toggle").click();
         await expect(desktop.page.getByTestId("notice-center").getByText(AUTHOR_REFUSED_MESSAGE,{exact:true})).toHaveCount(1);
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
-        await desktop.page.getByTestId("notice-center").getByRole("button",{name:"Copy your typing",exact:true}).click();
-        await expect.poll(()=>desktop!.app.evaluate(({clipboard})=>clipboard.readText())).toContain(sentinels[2]!);
-        expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
-        await desktop.app.evaluate(({clipboard})=>clipboard.writeText("OTHER_CLIPBOARD_TEXT"));
+        await holdSystemClipboard(test.info(), async (remainingMs) => {
+          await desktop!.page.getByTestId("notice-center").getByRole("button",{name:"Copy your typing",exact:true}).click({ timeout: remainingMs() });
+          await expect.poll(()=>desktop!.app.evaluate(({clipboard})=>clipboard.readText()), { timeout: remainingMs() }).toContain(sentinels[2]!);
+          expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
+          await desktop!.app.evaluate(({clipboard})=>clipboard.writeText("OTHER_CLIPBOARD_TEXT"));
+        });
         expect(await checkpointText(temp.homeDir)).toContain(sentinels[2]!);
         await expect(desktop.page.getByTestId("notice-center")).toHaveCount(0);
         const openedEditor=desktop.page.getByTestId("markdown-editor");
@@ -175,8 +178,10 @@ for (const mode of ["quit", "last-window", "crash", "crash-reopen-before-import"
         await expect(desktop.page.getByTestId("engine-history-list").getByText("Typing kept",{exact:true})).toHaveCount(1);
         await desktop.page.locator(`[data-testid="engine-moment-open"][data-moment-id="${momentId}"]`).click();
         await expect(desktop.page.getByTestId("engine-diff-lines")).toContainText(sentinels[2]!);
-        await desktop.page.getByTestId("engine-diff-copy-typing").click();
-        await expect.poll(() => desktop!.app.evaluate(({clipboard}) => clipboard.readText())).toContain(sentinels[2]!);
+        await holdSystemClipboard(test.info(), async (remainingMs) => {
+          await desktop!.page.getByTestId("engine-diff-copy-typing").click({ timeout: remainingMs() });
+          await expect.poll(() => desktop!.app.evaluate(({clipboard}) => clipboard.readText()), { timeout: remainingMs() }).toContain(sentinels[2]!);
+        });
         await desktop.page.getByTestId("engine-diff-restore-file").click();
         await desktop.page.getByTestId("engine-diff-confirm-restore").click();
         await expect(desktop.page.getByTestId("engine-diff-restore-status")).toContainText("Restored the earlier state");

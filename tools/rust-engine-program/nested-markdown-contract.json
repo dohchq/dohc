@@ -1,0 +1,1873 @@
+{
+  "cases": [
+    { "name": "empty-task-root", "source": "- [X]\n- [ ]\n",
+      "canonical": "- [x] \n- [ ]",
+      "rustBase64": "AQiTuv+C69buCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAk7r/guvW7goBAwh0YXNrSXRlbSgAk7r/guvW7goCB2NoZWNrZWQBeAcAk7r/guvW7goCAwlwYXJhZ3JhcGiHk7r/guvW7goCAwh0YXNrSXRlbSgAk7r/guvW7goFB2NoZWNrZWQBeQcAk7r/guvW7goFAwlwYXJhZ3JhcGgA"
+    },
+    { "name": "empty-task-nested", "source": "- [x] parent\n  - [X]\n",
+      "canonical": "- [x] parent\n  - [x]",
+      "rustBase64": "AQv44PTv5JnHAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA+OD07+SZxwEBAwh0YXNrSXRlbSgA+OD07+SZxwECB2NoZWNrZWQBeAcA+OD07+SZxwECAwlwYXJhZ3JhcGgHAPjg9O/kmccBBAYEAPjg9O/kmccBBQZwYXJlbnSH+OD07+SZxwEEAwh0YXNrTGlzdAcA+OD07+SZxwEMAwh0YXNrSXRlbSgA+OD07+SZxwENB2NoZWNrZWQBeAcA+OD07+SZxwENAwlwYXJhZ3JhcGgA"
+    },
+    { "name": "ordered-fence-first-in-item", "source": "1. ```js\n   x()\n   ```\n",
+      "canonical": "1. \n   ```js\n   x()\n   ```",
+      "rustBase64": "AQn0xIG2yLaXAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA9MSBtsi2lwEBBXN0YXJ0AX0BBwD0xIG2yLaXAQEDCGxpc3RJdGVtBwD0xIG2yLaXAQMDCXBhcmFncmFwaIf0xIG2yLaXAQQDCWNvZGVCbG9jaygA9MSBtsi2lwEFCGxhbmd1YWdlAXcCanMHAPTEgbbItpcBBQYEAPTEgbbItpcBBwN4KCkA"
+    },
+    { "name": "flat", "source": "- a\n- b\n",
+      "canonical": "- a\n- b",
+      "rustBase64": "AQq/kuK/vKacBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC/kuK/vKacBQEDCGxpc3RJdGVtBwC/kuK/vKacBQIDCXBhcmFncmFwaAcAv5Liv7ymnAUDBgQAv5Liv7ymnAUEAWGHv5Liv7ymnAUCAwhsaXN0SXRlbQcAv5Liv7ymnAUGAwlwYXJhZ3JhcGgHAL+S4r+8ppwFBwYEAL+S4r+8ppwFCAFiAA=="
+    },
+    { "name": "bullet-two", "source": "+ a\n  * b\n",
+      "canonical": "- a\n  - b",
+      "rustBase64": "AQv516zzoIScAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD516zzoIScAwEDCGxpc3RJdGVtBwD516zzoIScAwIDCXBhcmFncmFwaAcA+des86CEnAMDBgQA+des86CEnAMEAWGH+des86CEnAMDAwpidWxsZXRMaXN0BwD516zzoIScAwYDCGxpc3RJdGVtBwD516zzoIScAwcDCXBhcmFncmFwaAcA+des86CEnAMIBgQA+des86CEnAMJAWIA"
+    },
+    { "name": "bullet-four", "source": "* a\n    + b",
+      "canonical": "- a\n  - b",
+      "rustBase64": "AQuO4JWv4b7XCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCO4JWv4b7XCQEDCGxpc3RJdGVtBwCO4JWv4b7XCQIDCXBhcmFncmFwaAcAjuCVr+G+1wkDBgQAjuCVr+G+1wkEAWGHjuCVr+G+1wkDAwpidWxsZXRMaXN0BwCO4JWv4b7XCQYDCGxpc3RJdGVtBwCO4JWv4b7XCQcDCXBhcmFncmFwaAcAjuCVr+G+1wkIBgQAjuCVr+G+1wkJAWIA"
+    },
+    { "name": "ordered-three", "source": "1. a\n   - b\n",
+      "canonical": "1. a\n   - b",
+      "rustBase64": "AQz9jrbklN6lAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA/Y625JTepQMBBXN0YXJ0AX0BBwD9jrbklN6lAwEDCGxpc3RJdGVtBwD9jrbklN6lAwMDCXBhcmFncmFwaAcA/Y625JTepQMEBgQA/Y625JTepQMFAWGH/Y625JTepQMEAwpidWxsZXRMaXN0BwD9jrbklN6lAwcDCGxpc3RJdGVtBwD9jrbklN6lAwgDCXBhcmFncmFwaAcA/Y625JTepQMJBgQA/Y625JTepQMKAWIA"
+    },
+    { "name": "ordered-four", "source": "3) a\n    1) b\n    7) c\n9) d",
+      "canonical": "3. a\n   1. b\n   2. c\n4. d",
+      "rustBase64": "ARWCwZ6i3YmKBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAgsGeot2JigYBBXN0YXJ0AX0DBwCCwZ6i3YmKBgEDCGxpc3RJdGVtBwCCwZ6i3YmKBgMDCXBhcmFncmFwaAcAgsGeot2JigYEBgQAgsGeot2JigYFAWGHgsGeot2JigYEAwtvcmRlcmVkTGlzdCgAgsGeot2JigYHBXN0YXJ0AX0BBwCCwZ6i3YmKBgcDCGxpc3RJdGVtBwCCwZ6i3YmKBgkDCXBhcmFncmFwaAcAgsGeot2JigYKBgQAgsGeot2JigYLAWKHgsGeot2JigYJAwhsaXN0SXRlbQcAgsGeot2JigYNAwlwYXJhZ3JhcGgHAILBnqLdiYoGDgYEAILBnqLdiYoGDwFjh4LBnqLdiYoGAwMIbGlzdEl0ZW0HAILBnqLdiYoGEQMJcGFyYWdyYXBoBwCCwZ6i3YmKBhIGBACCwZ6i3YmKBhMBZAA="
+    },
+    { "name": "wide-ordered", "source": "10. a\n    - b",
+      "canonical": "10. a\n    - b",
+      "rustBase64": "AQykzNf/uu6gAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgApMzX/7ruoAIBBXN0YXJ0AX0KBwCkzNf/uu6gAgEDCGxpc3RJdGVtBwCkzNf/uu6gAgMDCXBhcmFncmFwaAcApMzX/7ruoAIEBgQApMzX/7ruoAIFAWGHpMzX/7ruoAIEAwpidWxsZXRMaXN0BwCkzNf/uu6gAgcDCGxpc3RJdGVtBwCkzNf/uu6gAggDCXBhcmFncmFwaAcApMzX/7ruoAIJBgQApMzX/7ruoAIKAWIA"
+    },
+    { "name": "task-casing", "source": "- [X] a\n  - [x] b\n  - [ ] c",
+      "canonical": "- [x] a\n  - [x] b\n  - [ ] c",
+      "rustBase64": "ARKTof3ftp2OBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAk6H937adjgUBAwh0YXNrSXRlbSgAk6H937adjgUCB2NoZWNrZWQBeAcAk6H937adjgUCAwlwYXJhZ3JhcGgHAJOh/d+2nY4FBAYEAJOh/d+2nY4FBQFhh5Oh/d+2nY4FBAMIdGFza0xpc3QHAJOh/d+2nY4FBwMIdGFza0l0ZW0oAJOh/d+2nY4FCAdjaGVja2VkAXgHAJOh/d+2nY4FCAMJcGFyYWdyYXBoBwCTof3ftp2OBQoGBACTof3ftp2OBQsBYoeTof3ftp2OBQgDCHRhc2tJdGVtKACTof3ftp2OBQ0HY2hlY2tlZAF5BwCTof3ftp2OBQ0DCXBhcmFncmFwaAcAk6H937adjgUPBgQAk6H937adjgUQAWMA"
+    },
+    { "name": "mixed", "source": "- a\n  1) b\n     + [X] c\n       * d\n",
+      "canonical": "- a\n  1. b\n     - [x] c\n       - d",
+      "rustBase64": "ARfGkZyfybOPBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDGkZyfybOPBQEDCGxpc3RJdGVtBwDGkZyfybOPBQIDCXBhcmFncmFwaAcAxpGcn8mzjwUDBgQAxpGcn8mzjwUEAWGHxpGcn8mzjwUDAwtvcmRlcmVkTGlzdCgAxpGcn8mzjwUGBXN0YXJ0AX0BBwDGkZyfybOPBQYDCGxpc3RJdGVtBwDGkZyfybOPBQgDCXBhcmFncmFwaAcAxpGcn8mzjwUJBgQAxpGcn8mzjwUKAWKHxpGcn8mzjwUJAwh0YXNrTGlzdAcAxpGcn8mzjwUMAwh0YXNrSXRlbSgAxpGcn8mzjwUNB2NoZWNrZWQBeAcAxpGcn8mzjwUNAwlwYXJhZ3JhcGgHAMaRnJ/Js48FDwYEAMaRnJ/Js48FEAFjh8aRnJ/Js48FDwMKYnVsbGV0TGlzdAcAxpGcn8mzjwUSAwhsaXN0SXRlbQcAxpGcn8mzjwUTAwlwYXJhZ3JhcGgHAMaRnJ/Js48FFAYEAMaRnJ/Js48FFQFkAA=="
+    },
+    { "name": "loose-space-blank", "source": "- a\n   \n  - b\n \n- c\n",
+      "canonical": "- a\n  - b\n- c",
+      "rustBase64": "AQ+GxLmho6C7DAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCGxLmho6C7DAEDCGxpc3RJdGVtBwCGxLmho6C7DAIDCXBhcmFncmFwaAcAhsS5oaOguwwDBgQAhsS5oaOguwwEAWGHhsS5oaOguwwDAwpidWxsZXRMaXN0BwCGxLmho6C7DAYDCGxpc3RJdGVtBwCGxLmho6C7DAcDCXBhcmFncmFwaAcAhsS5oaOguwwIBgQAhsS5oaOguwwJAWKHhsS5oaOguwwCAwhsaXN0SXRlbQcAhsS5oaOguwwLAwlwYXJhZ3JhcGgHAIbEuaGjoLsMDAYEAIbEuaGjoLsMDQFjAA=="
+    },
+    { "name": "lazy-continuation", "source": "- a\ncontinued\n- b",
+      "canonical": "- a\n  continued\n- b",
+      "rustBase64": "AQr6jNzH27DLCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD6jNzH27DLCQEDCGxpc3RJdGVtBwD6jNzH27DLCQIDCXBhcmFncmFwaAcA+ozcx9uwywkDBgQA+ozcx9uwywkEC2EKY29udGludWVkh/qM3MfbsMsJAgMIbGlzdEl0ZW0HAPqM3MfbsMsJEAMJcGFyYWdyYXBoBwD6jNzH27DLCREGBAD6jNzH27DLCRIBYgA="
+    },
+    { "name": "ordered-continuation", "source": "1. a\n \n   next paragraph\n2. b",
+      "canonical": "1. a\n\n   next paragraph\n2. b",
+      "rustBase64": "AQ7Z07ydrrGBCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA2dO8na6xgQsBBXN0YXJ0AX0BBwDZ07ydrrGBCwEDCGxpc3RJdGVtBwDZ07ydrrGBCwMDCXBhcmFncmFwaAcA2dO8na6xgQsEBgQA2dO8na6xgQsFAWGH2dO8na6xgQsEAwlwYXJhZ3JhcGgHANnTvJ2usYELBwYEANnTvJ2usYELCA5uZXh0IHBhcmFncmFwaIfZ07ydrrGBCwMDCGxpc3RJdGVtBwDZ07ydrrGBCxcDCXBhcmFncmFwaAcA2dO8na6xgQsYBgQA2dO8na6xgQsZAWIA"
+    },
+    { "name": "fence-in-item", "source": "1. a\n   ```ts\n   x()\n   ```\n",
+      "canonical": "1. a\n   ```ts\n   x()\n   ```",
+      "rustBase64": "AQugm76nk6GCAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAoJu+p5OhggEBBXN0YXJ0AX0BBwCgm76nk6GCAQEDCGxpc3RJdGVtBwCgm76nk6GCAQMDCXBhcmFncmFwaAcAoJu+p5OhggEEBgQAoJu+p5OhggEFAWGHoJu+p5OhggEEAwljb2RlQmxvY2soAKCbvqeToYIBBwhsYW5ndWFnZQF3AnRzBwCgm76nk6GCAQcGBACgm76nk6GCAQkDeCgpAA=="
+    },
+    { "name": "quote-in-item", "source": "- a\n  > quoted\n  > - b\n",
+      "canonical": "- a\n  > quoted\n  >\n  > - b",
+      "rustBase64": "AQ+lrb/i2avlAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwClrb/i2avlAwEDCGxpc3RJdGVtBwClrb/i2avlAwIDCXBhcmFncmFwaAcApa2/4tmr5QMDBgQApa2/4tmr5QMEAWGHpa2/4tmr5QMDAwpibG9ja3F1b3RlBwClrb/i2avlAwYDCXBhcmFncmFwaAcApa2/4tmr5QMHBgQApa2/4tmr5QMIBnF1b3RlZIelrb/i2avlAwcDCmJ1bGxldExpc3QHAKWtv+LZq+UDDwMIbGlzdEl0ZW0HAKWtv+LZq+UDEAMJcGFyYWdyYXBoBwClrb/i2avlAxEGBAClrb/i2avlAxIBYgA="
+    },
+    { "name": "table-in-item", "source": "- a\n\n  | x | y |\n  |---|---|\n  | b | c |\n",
+      "canonical": "- a\n  \n  | x   | y   |\n  | --- | --- |\n  | b   | c   |",
+      "rustBase64": "ASHMxtjkipD3BgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDMxtjkipD3BgEDCGxpc3RJdGVtBwDMxtjkipD3BgIDCXBhcmFncmFwaAcAzMbY5IqQ9wYDBgQAzMbY5IqQ9wYEAWGHzMbY5IqQ9wYDAwV0YWJsZQcAzMbY5IqQ9wYGAwh0YWJsZVJvdwcAzMbY5IqQ9wYHAwt0YWJsZUhlYWRlcigAzMbY5IqQ9wYIB2NvbHNwYW4BfQEoAMzG2OSKkPcGCAdyb3dzcGFuAX0BBwDMxtjkipD3BggDCXBhcmFncmFwaAcAzMbY5IqQ9wYLBgQAzMbY5IqQ9wYMAXiHzMbY5IqQ9wYIAwt0YWJsZUhlYWRlcigAzMbY5IqQ9wYOB2NvbHNwYW4BfQEoAMzG2OSKkPcGDgdyb3dzcGFuAX0BBwDMxtjkipD3Bg4DCXBhcmFncmFwaAcAzMbY5IqQ9wYRBgQAzMbY5IqQ9wYSAXmHzMbY5IqQ9wYHAwh0YWJsZVJvdwcAzMbY5IqQ9wYUAwl0YWJsZUNlbGwoAMzG2OSKkPcGFQdjb2xzcGFuAX0BKADMxtjkipD3BhUHcm93c3BhbgF9AQcAzMbY5IqQ9wYVAwlwYXJhZ3JhcGgHAMzG2OSKkPcGGAYEAMzG2OSKkPcGGQFih8zG2OSKkPcGFQMJdGFibGVDZWxsKADMxtjkipD3BhsHY29sc3BhbgF9ASgAzMbY5IqQ9wYbB3Jvd3NwYW4BfQEHAMzG2OSKkPcGGwMJcGFyYWdyYXBoBwDMxtjkipD3Bh4GBADMxtjkipD3Bh8BYwA="
+    },
+    { "name": "crlf", "source": "1. a\r\n   - b\r\n",
+      "canonical": "1. a\r\n   - b",
+      "rustBase64": "AQ3TsZSnqcGpDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQRtZXRhEGRvaGNNYXJrZG93bkNybGYBeAcBBGJvZHkDC29yZGVyZWRMaXN0KADTsZSnqcGpDgIFc3RhcnQBfQEHANOxlKepwakOAgMIbGlzdEl0ZW0HANOxlKepwakOBAMJcGFyYWdyYXBoBwDTsZSnqcGpDgUGBADTsZSnqcGpDgYBYYfTsZSnqcGpDgUDCmJ1bGxldExpc3QHANOxlKepwakOCAMIbGlzdEl0ZW0HANOxlKepwakOCQMJcGFyYWdyYXBoBwDTsZSnqcGpDgoGBADTsZSnqcGpDgsBYgA="
+    },
+    { "name": "ordered-one-space", "source": "1. a\n - b",
+      "refuse": true
+    },
+    { "name": "ordered-two-spaces", "source": "1. a\n  - b",
+      "refuse": true
+    },
+    {
+      "name": "ordered-blank-under-indent",
+      "source": "1. a\n\n  next paragraph",
+      "canonical": "1. a\n\n&#32; next paragraph",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQq6tNfm7MPWBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAurTX5uzD1gQBBXN0YXJ0AX0BBwC6tNfm7MPWBAEDCGxpc3RJdGVtBwC6tNfm7MPWBAMDCXBhcmFncmFwaAcAurTX5uzD1gQEBgQAurTX5uzD1gQFAWGHurTX5uzD1gQBAwlwYXJhZ3JhcGgHALq01+bsw9YEBwYEALq01+bsw9YECBAgIG5leHQgcGFyYWdyYXBoAA=="
+    },
+    { "name": "letter-item", "source": "1. a\n   a. b",
+      "canonical": "1. a\n   a. b",
+      "rustBase64": "AQfzv8/Qxvi2AgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA87/P0Mb4tgIBBXN0YXJ0AX0BBwDzv8/Qxvi2AgEDCGxpc3RJdGVtBwDzv8/Qxvi2AgMDCXBhcmFncmFwaAcA87/P0Mb4tgIEBgQA87/P0Mb4tgIFBmEKYS4gYgA="
+    },
+    { "name": "roman-item", "source": "1. a\n   iv) b",
+      "canonical": "1. a\n   iv) b",
+      "rustBase64": "AQe70Kzxl9+tAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAu9Cs8ZffrQIBBXN0YXJ0AX0BBwC70Kzxl9+tAgEDCGxpc3RJdGVtBwC70Kzxl9+tAgMDCXBhcmFncmFwaAcAu9Cs8ZffrQIEBgQAu9Cs8ZffrQIFB2EKaXYpIGIA"
+    },
+    {
+      "name": "tab-item",
+      "source": "- a\n\t- b",
+      "canonical": "- a\n  - b",
+      "exactSource": true,
+      "foldRefuse": true,
+      "rustBase64": "AQv4nqGd65TtBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD4nqGd65TtBQEDCGxpc3RJdGVtBwD4nqGd65TtBQIDCXBhcmFncmFwaAcA+J6hneuU7QUDBgQA+J6hneuU7QUEAWGH+J6hneuU7QUDAwpidWxsZXRMaXN0BwD4nqGd65TtBQYDCGxpc3RJdGVtBwD4nqGd65TtBQcDCXBhcmFncmFwaAcA+J6hneuU7QUIBgQA+J6hneuU7QUJAWIA"
+    },
+    { "name": "tilde-fence", "source": "- a\n  ~~~\n  b\n  ~~~",
+      "canonical": "- a\n  ```\n  b\n  ```",
+      "rustBase64": "AQmlpua234SDAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwClpua234SDAwEDCGxpc3RJdGVtBwClpua234SDAwIDCXBhcmFncmFwaAcApabmtt+EgwMDBgQApabmtt+EgwMEAWGHpabmtt+EgwMDAwljb2RlQmxvY2sHAKWm5rbfhIMDBgYEAKWm5rbfhIMDBwFiAA=="
+    },
+    { "name": "star-rule", "source": "- a\n\n  ***",
+      "refuse": true
+    },
+    { "name": "underscore-rule", "source": "- a\n\n  ___",
+      "refuse": true
+    },
+    { "name": "root-letter-marker", "source": "a. child",
+      "canonical": "a. child",
+      "rustBase64": "AQTXzb+0o8DKBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHANfNv7SjwMoEAQYEANfNv7SjwMoEAghhLiBjaGlsZAA="
+    },
+    { "name": "root-roman-marker", "source": "iv) child",
+      "canonical": "iv) child",
+      "rustBase64": "AQTOjZj0uIi4AwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAM6NmPS4iLgDAQYEAM6NmPS4iLgDAglpdikgY2hpbGQA"
+    },
+    { "name": "quote-after-lists", "source": "- item\n  - item\n    - item\n      - item\n        - item\n          - item\n            - item\n              - item\n                - item\n                  - item\n                    - item\n                      - item\n                        - item\n                          - item\n                            - item\n                              - item\n                                - item\n                                  - item\n                                    - item\n                                      - item\n                                        - item\n                                          - item\n                                            - item\n                                              - item\n                                                - item\n                                                  - item\n                                                    - item\n                                                      - item\n                                                        - item\n                                                          - item\n                                                            - item\n                                                              - item\n                                                                - item\n                                                                  - item\n                                                                    - item\n                                                                      - item\n                                                                        - item\n                                                                          - item\n                                                                            - item\n                                                                              - item\n                                                                                - item\n                                                                                  - item\n                                                                                    - item\n                                                                                      - item\n                                                                                        - item\n                                                                                          - item\n                                                                                            - item\n                                                                                              - item\n                                                                                                - item\n                                                                                                  - item\n                                                                                                    - item\n                                                                                                      - item\n                                                                                                        - item\n                                                                                                          - item\n                                                                                                            - item\n                                                                                                              - item\n                                                                                                                - item\n                                                                                                                  - item\n                                                                                                                    - item\n                                                                                                                      - item\n                                                                                                                        > quoted\n",
+      "canonical": "- item\n  - item\n    - item\n      - item\n        - item\n          - item\n            - item\n              - item\n                - item\n                  - item\n                    - item\n                      - item\n                        - item\n                          - item\n                            - item\n                              - item\n                                - item\n                                  - item\n                                    - item\n                                      - item\n                                        - item\n                                          - item\n                                            - item\n                                              - item\n                                                - item\n                                                  - item\n                                                    - item\n                                                      - item\n                                                        - item\n                                                          - item\n                                                            - item\n                                                              - item\n                                                                - item\n                                                                  - item\n                                                                    - item\n                                                                      - item\n                                                                        - item\n                                                                          - item\n                                                                            - item\n                                                                              - item\n                                                                                - item\n                                                                                  - item\n                                                                                    - item\n                                                                                      - item\n                                                                                        - item\n                                                                                          - item\n                                                                                            - item\n                                                                                              - item\n                                                                                                - item\n                                                                                                  - item\n                                                                                                    - item\n                                                                                                      - item\n                                                                                                        - item\n                                                                                                          - item\n                                                                                                            - item\n                                                                                                              - item\n                                                                                                                - item\n                                                                                                                  - item\n                                                                                                                    - item\n                                                                                                                      - item\n                                                                                                                        > quoted",
+      "rustBase64": "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"
+    },
+    { "name": "ordered-zero", "source": "0) a\n   - b\n",
+      "canonical": "0. a\n   - b",
+      "rustBase64": "AQzyyo3aieSqAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA8sqN2onkqgMBBXN0YXJ0AX0ABwDyyo3aieSqAwEDCGxpc3RJdGVtBwDyyo3aieSqAwMDCXBhcmFncmFwaAcA8sqN2onkqgMEBgQA8sqN2onkqgMFAWGH8sqN2onkqgMEAwpidWxsZXRMaXN0BwDyyo3aieSqAwcDCGxpc3RJdGVtBwDyyo3aieSqAwgDCXBhcmFncmFwaAcA8sqN2onkqgMJBgQA8sqN2onkqgMKAWIA"
+    },
+    { "name": "task-marker-changes", "source": "- [x] a\n* [ ] b\n+ [X] c\n",
+      "canonical": "- [x] a\n\n- [ ] b\n\n- [x] c",
+      "rustBase64": "ARPT77KXiP62AwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA0++yl4j+tgMBAwh0YXNrSXRlbSgA0++yl4j+tgMCB2NoZWNrZWQBeAcA0++yl4j+tgMCAwlwYXJhZ3JhcGgHANPvspeI/rYDBAYEANPvspeI/rYDBQFhh9PvspeI/rYDAQMIdGFza0xpc3QHANPvspeI/rYDBwMIdGFza0l0ZW0oANPvspeI/rYDCAdjaGVja2VkAXkHANPvspeI/rYDCAMJcGFyYWdyYXBoBwDT77KXiP62AwoGBADT77KXiP62AwsBYofT77KXiP62AwcDCHRhc2tMaXN0BwDT77KXiP62Aw0DCHRhc2tJdGVtKADT77KXiP62Aw4HY2hlY2tlZAF4BwDT77KXiP62Aw4DCXBhcmFncmFwaAcA0++yl4j+tgMQBgQA0++yl4j+tgMRAWMA"
+    },
+    { "name": "ordered-delimiter-change", "source": "1. a\n2) b\n",
+      "canonical": "1. a\n\n2. b",
+      "rustBase64": "AQ2P9rHtzsCGBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAj/ax7c7AhgYBBXN0YXJ0AX0BBwCP9rHtzsCGBgEDCGxpc3RJdGVtBwCP9rHtzsCGBgMDCXBhcmFncmFwaAcAj/ax7c7AhgYEBgQAj/ax7c7AhgYFAWGHj/ax7c7AhgYBAwtvcmRlcmVkTGlzdCgAj/ax7c7AhgYHBXN0YXJ0AX0CBwCP9rHtzsCGBgcDCGxpc3RJdGVtBwCP9rHtzsCGBgkDCXBhcmFncmFwaAcAj/ax7c7AhgYKBgQAj/ax7c7AhgYLAWIA"
+    },
+    {
+      "name": "tab-after-marker",
+      "source": "-\titem\n",
+      "canonical": "- item",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQbT0Z6SjsEeACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHANPRnpKOwR4BAwhsaXN0SXRlbQcA09Geko7BHgIDCXBhcmFncmFwaAcA09Geko7BHgMGBADT0Z6SjsEeBARpdGVtAA=="
+    },
+    {
+      "name": "tab-item-padding",
+      "source": "- a\n-  \tb\n",
+      "canonical": "- a\n- b",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQrI8d7foff4AgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDI8d7foff4AgEDCGxpc3RJdGVtBwDI8d7foff4AgIDCXBhcmFncmFwaAcAyPHe36H3+AIDBgQAyPHe36H3+AIEAWGHyPHe36H3+AICAwhsaXN0SXRlbQcAyPHe36H3+AIGAwlwYXJhZ3JhcGgHAMjx3t+h9/gCBwYEAMjx3t+h9/gCCAFiAA=="
+    },
+    { "name": "fence-first-in-item", "source": "- ```js\n  i. not a list\n  ```\n",
+      "canonical": "- \n  ```js\n  i. not a list\n  ```",
+      "rustBase64": "AQimh+6/45vfDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCmh+6/45vfDgEDCGxpc3RJdGVtBwCmh+6/45vfDgIDCXBhcmFncmFwaIemh+6/45vfDgMDCWNvZGVCbG9jaygApofuv+Ob3w4ECGxhbmd1YWdlAXcCanMHAKaH7r/jm98OBAYEAKaH7r/jm98OBg1pLiBub3QgYSBsaXN0AA=="
+    },
+    { "name": "tilde-in-item", "source": "- ~~~\n  hidden\n",
+      "refuse": true
+    },
+    { "name": "quotes-in-deep-item", "source": "- item\n  - item\n    - item\n      - item\n        - item\n          - item\n            - item\n              - item\n                - item\n                  - item\n                    - item\n                      - item\n                        - item\n                          - item\n                            - item\n                              - item\n                                - item\n                                  - item\n                                    - item\n                                      - item\n                                        - item\n                                          - item\n                                            - item\n                                              - item\n                                                - item\n                                                  - item\n                                                    - item\n                                                      - item\n                                                        - item\n                                                          - item\n                                                            - item\n                                                              - item\n                                                                - item\n                                                                  - item\n                                                                    - item\n                                                                      - item\n                                                                        - item\n                                                                          - item\n                                                                            - item\n                                                                              - item\n                                                                                - item\n                                                                                  - item\n                                                                                    - item\n                                                                                      - item\n                                                                                        - item\n                                                                                          - item\n                                                                                            - item\n                                                                                              - item\n                                                                                                - item\n                                                                                                  - item\n                                                                                                    - item\n                                                                                                      - item\n                                                                                                        - item\n                                                                                                          - item\n                                                                                                            - item\n                                                                                                              - item\n                                                                                                                - item\n                                                                                                                  - item\n                                                                                                                    - item\n                                                                                                                      - item\n                                                                                                                        - item\n                                                                                                                          - item\n                                                                                                                            - > > > > quoted\n",
+      "refuse": true
+    },
+    { "name": "quote-overflow", "source": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > > item\n",
+      "refuse": true
+    },
+    {
+      "name": "ordered-checkbox",
+      "source": "1. [x] task\n",
+      "canonical": "1. \\[x] task",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQfT07DO5aTrCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA09OwzuWk6woBBXN0YXJ0AX0BBwDT07DO5aTrCgEDCGxpc3RJdGVtBwDT07DO5aTrCgMDCXBhcmFncmFwaAcA09OwzuWk6woEBgQA09OwzuWk6woFCFt4XSB0YXNrAA=="
+    },
+    {
+      "name": "ordered-checkbox-sibling",
+      "source": "1. plain\n2. [X] task\n",
+      "canonical": "1. plain\n2. \\[X] task",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQujmfyZzM2HBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAo5n8mczNhwUBBXN0YXJ0AX0BBwCjmfyZzM2HBQEDCGxpc3RJdGVtBwCjmfyZzM2HBQMDCXBhcmFncmFwaAcAo5n8mczNhwUEBgQAo5n8mczNhwUFBXBsYWluh6OZ/JnMzYcFAwMIbGlzdEl0ZW0HAKOZ/JnMzYcFCwMJcGFyYWdyYXBoBwCjmfyZzM2HBQwGBACjmfyZzM2HBQ0IW1hdIHRhc2sA"
+    },
+    { "name": "collection-record", "source": "---\nid: nested-record\n---\n\n+ parent\n  - child\n",
+      "canonical": "---\nid: nested-record\n---\n\n- parent\n  - child",
+      "rustBase64": "AQzLq+j99JT1DQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQtmcm9udG1hdHRlcgJpZAF3DW5lc3RlZC1yZWNvcmQHAQRib2R5AwpidWxsZXRMaXN0BwDLq+j99JT1DQIDCGxpc3RJdGVtBwDLq+j99JT1DQMDCXBhcmFncmFwaAcAy6vo/fSU9Q0EBgQAy6vo/fSU9Q0FBnBhcmVudIfLq+j99JT1DQQDCmJ1bGxldExpc3QHAMur6P30lPUNDAMIbGlzdEl0ZW0HAMur6P30lPUNDQMJcGFyYWdyYXBoBwDLq+j99JT1DQ4GBADLq+j99JT1DQ8FY2hpbGQA"
+    },
+    {
+      "name": "task-checkbox-tab",
+      "source": "- normal\n- [X]\ttask\n",
+      "canonical": "- normal\n\n- [x] task",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQzy8PCSyKPABAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDy8PCSyKPABAEDCGxpc3RJdGVtBwDy8PCSyKPABAIDCXBhcmFncmFwaAcA8vDwksijwAQDBgQA8vDwksijwAQEBm5vcm1hbIfy8PCSyKPABAEDCHRhc2tMaXN0BwDy8PCSyKPABAsDCHRhc2tJdGVtKADy8PCSyKPABAwHY2hlY2tlZAF4BwDy8PCSyKPABAwDCXBhcmFncmFwaAcA8vDwksijwAQOBgQA8vDwksijwAQPBHRhc2sA"
+    },
+    { "name": "ordered-first-in-bullet", "source": "- 1. child\n- sibling\n",
+      "canonical": "- \n  1. child\n- sibling",
+      "rustBase64": "AQ717aG0jtOCBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD17aG0jtOCBwEDCGxpc3RJdGVtBwD17aG0jtOCBwIDCXBhcmFncmFwaIf17aG0jtOCBwMDC29yZGVyZWRMaXN0KAD17aG0jtOCBwQFc3RhcnQBfQEHAPXtobSO04IHBAMIbGlzdEl0ZW0HAPXtobSO04IHBgMJcGFyYWdyYXBoBwD17aG0jtOCBwcGBAD17aG0jtOCBwgFY2hpbGSH9e2htI7TggcCAwhsaXN0SXRlbQcA9e2htI7TggcOAwlwYXJhZ3JhcGgHAPXtobSO04IHDwYEAPXtobSO04IHEAdzaWJsaW5nAA=="
+    },
+    { "name": "letter-first-in-bullet", "source": "- a. child\n- sibling\n",
+      "canonical": "- a. child\n- sibling",
+      "rustBase64": "AQr0gIP+vJO6AwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD0gIP+vJO6AwEDCGxpc3RJdGVtBwD0gIP+vJO6AwIDCXBhcmFncmFwaAcA9ICD/ryTugMDBgQA9ICD/ryTugMECGEuIGNoaWxkh/SAg/68k7oDAgMIbGlzdEl0ZW0HAPSAg/68k7oDDQMJcGFyYWdyYXBoBwD0gIP+vJO6Aw4GBAD0gIP+vJO6Aw8Hc2libGluZwA="
+    },
+    { "name": "underscore-rule-first-in-bullet", "source": "- ___\n- sibling\n",
+      "refuse": true
+    },
+    {
+      "name": "ordered-checkbox-first-in-bullet",
+      "source": "- 1. [x] task\n- sibling\n",
+      "canonical": "- \n  1. \\[x] task\n- sibling",
+      "exactSource": true,
+      "foldRefuse": true,
+      "rustBase64": "AQ6j1I799cfWAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCj1I799cfWAQEDCGxpc3RJdGVtBwCj1I799cfWAQIDCXBhcmFncmFwaIej1I799cfWAQMDC29yZGVyZWRMaXN0KACj1I799cfWAQQFc3RhcnQBfQEHAKPUjv31x9YBBAMIbGlzdEl0ZW0HAKPUjv31x9YBBgMJcGFyYWdyYXBoBwCj1I799cfWAQcGBACj1I799cfWAQgIW3hdIHRhc2uHo9SO/fXH1gECAwhsaXN0SXRlbQcAo9SO/fXH1gERAwlwYXJhZ3JhcGgHAKPUjv31x9YBEgYEAKPUjv31x9YBEwdzaWJsaW5nAA=="
+    },
+    { "name": "ordinary-abbreviations", "source": "Mr. Smith arrived.\nDr. Jones\nSt. Louis\nI. Overview",
+      "canonical": "Mr. Smith arrived.\nDr. Jones\nSt. Louis\nI. Overview",
+      "rustBase64": "AQSi74i0yo+VDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAKLviLTKj5UPAQYEAKLviLTKj5UPAjJNci4gU21pdGggYXJyaXZlZC4KRHIuIEpvbmVzClN0LiBMb3VpcwpJLiBPdmVydmlldwA="
+    },
+    { "name": "tilde-language", "source": "~~~lang`tick\ncode\n~~~",
+      "canonical": "~~~lang`tick\ncode\n~~~",
+      "projected": true,
+      "rustBase64": "AQWw/7mkpO/hCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2soALD/uaSk7+ELAQhsYW5ndWFnZQF3CWxhbmdgdGljawcAsP+5pKTv4QsBBgQAsP+5pKTv4QsDBGNvZGUA"
+    },
+    { "name": "long-fence", "source": "````js\nbefore\n```\nafter\n````",
+      "canonical": "````js\nbefore\n```\nafter\n````",
+      "projected": true,
+      "rustBase64": "AQWtscSitsO4CQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2soAK2xxKK2w7gJAQhsYW5ndWFnZQF3AmpzBwCtscSitsO4CQEGBACtscSitsO4CQMQYmVmb3JlCmBgYAphZnRlcgA="
+    },
+    { "name": "ordered-marker-limit", "source": "999999999. a\n999999999. b",
+      "canonical": "999999999. a\n999999999. b",
+      "rustBase64": "AQvikPH//ujjDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA4pDx//7o4w4BBXN0YXJ0AX2/p9a5BwcA4pDx//7o4w4BAwhsaXN0SXRlbQcA4pDx//7o4w4DAwlwYXJhZ3JhcGgHAOKQ8f/+6OMOBAYEAOKQ8f/+6OMOBQFhh+KQ8f/+6OMOAwMIbGlzdEl0ZW0HAOKQ8f/+6OMOBwMJcGFyYWdyYXBoBwDikPH//ujjDggGBADikPH//ujjDgkBYgA="
+    },
+    { "name": "rule---5-text", "source": "- - -\nfollowing",
+      "canonical": "***\n\nfollowing",
+      "fileFold": true,
+      "rustBase64": "AQWZ4/Kd+PTuCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeZ4/Kd+PTuCwEDCXBhcmFncmFwaAcAmePynfj07gsCBgQAmePynfj07gsDCWZvbGxvd2luZwA="
+    },
+    { "name": "rule---5-blank", "source": "- - -\n\nfollowing",
+      "canonical": "***\n\nfollowing",
+      "fileFold": true,
+      "rustBase64": "AQXnyJmz1/SQBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfnyJmz1/SQBgEDCXBhcmFncmFwaAcA58iZs9f0kAYCBgQA58iZs9f0kAYDCWZvbGxvd2luZwA="
+    },
+    { "name": "rule---5-eof", "source": "- - -",
+      "canonical": "***",
+      "fileFold": true,
+      "rustBase64": "AQLw+tKx/eLeAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA="
+    },
+    { "name": "rule-*-5-text", "source": "* * *\nfollowing",
+      "canonical": "***\n\nfollowing",
+      "fileFold": true,
+      "rustBase64": "AQWzsJfg0/rqDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYezsJfg0/rqDwEDCXBhcmFncmFwaAcAs7CX4NP66g8CBgQAs7CX4NP66g8DCWZvbGxvd2luZwA="
+    },
+    { "name": "rule-*-5-blank", "source": "* * *\n\nfollowing",
+      "canonical": "***\n\nfollowing",
+      "fileFold": true,
+      "rustBase64": "AQXDkcv3wYy3CwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfDkcv3wYy3CwEDCXBhcmFncmFwaAcAw5HL98GMtwsCBgQAw5HL98GMtwsDCWZvbGxvd2luZwA="
+    },
+    { "name": "rule-*-5-eof", "source": "* * *",
+      "canonical": "***",
+      "fileFold": true,
+      "rustBase64": "AQLAqIva+abkDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA="
+    },
+    { "name": "rule-_-5-text", "source": "_ _ _\nfollowing",
+      "canonical": "***\n\nfollowing",
+      "fileFold": true,
+      "rustBase64": "AQWupsSHob2oBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeupsSHob2oBQEDCXBhcmFncmFwaAcArqbEh6G9qAUCBgQArqbEh6G9qAUDCWZvbGxvd2luZwA="
+    },
+    { "name": "rule-_-5-blank", "source": "_ _ _\n\nfollowing",
+      "canonical": "***\n\nfollowing",
+      "fileFold": true,
+      "rustBase64": "AQWqxeLt+bHoCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeqxeLt+bHoCwEDCXBhcmFncmFwaAcAqsXi7fmx6AsCBgQAqsXi7fmx6AsDCWZvbGxvd2luZwA="
+    },
+    { "name": "rule-_-5-eof", "source": "_ _ _",
+      "canonical": "***",
+      "fileFold": true,
+      "rustBase64": "AQLGi63PtdiBAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA="
+    },
+    { "name": "rule-*-3-text", "source": "***\nfollowing",
+      "canonical": "***\n\nfollowing",
+      "fileFold": true,
+      "rustBase64": "AQXi2IaS8Yf0BQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfi2IaS8Yf0BQEDCXBhcmFncmFwaAcA4tiGkvGH9AUCBgQA4tiGkvGH9AUDCWZvbGxvd2luZwA="
+    },
+    { "name": "rule-*-3-blank", "source": "***\n\nfollowing",
+      "canonical": "***\n\nfollowing",
+      "fileFold": true,
+      "rustBase64": "AQWihvTQrpKMCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeihvTQrpKMCgEDCXBhcmFncmFwaAcAoob00K6SjAoCBgQAoob00K6SjAoDCWZvbGxvd2luZwA="
+    },
+    { "name": "rule-*-3-eof", "source": "***",
+      "canonical": "***",
+      "fileFold": true,
+      "rustBase64": "AQKzu4iG383QCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA="
+    },
+    { "name": "doctor", "source": "- Dr. Jones called",
+      "canonical": "- Dr. Jones called",
+      "fileFold": true,
+      "rustBase64": "AQai3P3YtIkpACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAKLc/di0iSkBAwhsaXN0SXRlbQcAotz92LSJKQIDCXBhcmFncmFwaAcAotz92LSJKQMGBACi3P3YtIkpBBBEci4gSm9uZXMgY2FsbGVkAA=="
+    },
+    { "name": "saint", "source": "- St. Louis",
+      "canonical": "- St. Louis",
+      "fileFold": true,
+      "rustBase64": "AQbIzery4e6TBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDIzery4e6TBAEDCGxpc3RJdGVtBwDIzery4e6TBAIDCXBhcmFncmFwaAcAyM3q8uHukwQDBgQAyM3q8uHukwQECVN0LiBMb3VpcwA="
+    },
+    { "name": "letter-prose", "source": "- a. first",
+      "canonical": "- a. first",
+      "fileFold": true,
+      "rustBase64": "AQar5r+jld/0CwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCr5r+jld/0CwEDCGxpc3RJdGVtBwCr5r+jld/0CwIDCXBhcmFncmFwaAcAq+a/o5Xf9AsDBgQAq+a/o5Xf9AsECGEuIGZpcnN0AA=="
+    },
+    { "name": "roman-continuation", "source": "- item\n  ii. note",
+      "canonical": "- item\n  ii. note",
+      "fileFold": true,
+      "rustBase64": "AQbP3Y+Q0q7nDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDP3Y+Q0q7nDQEDCGxpc3RJdGVtBwDP3Y+Q0q7nDQIDCXBhcmFncmFwaAcAz92PkNKu5w0DBgQAz92PkNKu5w0EDWl0ZW0KaWkuIG5vdGUA"
+    },
+    { "name": "roman-overview", "source": "1. I. Overview",
+      "canonical": "1. I. Overview",
+      "fileFold": true,
+      "rustBase64": "AQfNr96j3cfWDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAza/eo93H1g4BBXN0YXJ0AX0BBwDNr96j3cfWDgEDCGxpc3RJdGVtBwDNr96j3cfWDgMDCXBhcmFncmFwaAcAza/eo93H1g4EBgQAza/eo93H1g4FC0kuIE92ZXJ2aWV3AA=="
+    },
+    { "name": "dash-rule-tab-code", "source": "- - -\n\tcode",
+      "canonical": "***\n\n&#9;code",
+      "foldRefuse": true,
+      "nativeSourceRefuse": true,
+      "rustBase64": "AQXLi6CB+ajZBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfLi6CB+ajZBwEDCXBhcmFncmFwaAcAy4uggfmo2QcCBgQAy4uggfmo2QcDBQljb2RlAA==",
+      "sourceCanonical": "***\n\n```\ncode\n```"
+    },
+    { "name": "dash-rule-ends-list-code", "source": "- a\n---\n\tcode",
+      "canonical": "- a\n\n---\n\n&#9;code",
+      "foldRefuse": true,
+      "nativeSourceRefuse": true,
+      "rustBase64": "AQqk7+3azv9EACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAKTv7drO/0QBAwhsaXN0SXRlbQcApO/t2s7/RAIDCXBhcmFncmFwaAcApO/t2s7/RAMGBACk7+3azv9EBAFhh6Tv7drO/0QBAw5ob3Jpem9udGFsUnVsZYek7+3azv9EBgMJcGFyYWdyYXBoBwCk7+3azv9EBwYEAKTv7drO/0QIBQljb2RlAA==",
+      "sourceCanonical": "- a\n\n---\n\n```\ncode\n```"
+    },
+    { "name": "dash-rule-ends-list-item", "source": "- a\n---\n - b",
+      "canonical": "- a\n\n---\n\n- b",
+      "fileFold": true,
+      "rustBase64": "AQzFm+Tv4rqSBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDFm+Tv4rqSBQEDCGxpc3RJdGVtBwDFm+Tv4rqSBQIDCXBhcmFncmFwaAcAxZvk7+K6kgUDBgQAxZvk7+K6kgUEAWGHxZvk7+K6kgUBAw5ob3Jpem9udGFsUnVsZYfFm+Tv4rqSBQYDCmJ1bGxldExpc3QHAMWb5O/iupIFBwMIbGlzdEl0ZW0HAMWb5O/iupIFCAMJcGFyYWdyYXBoBwDFm+Tv4rqSBQkGBADFm+Tv4rqSBQoBYgA="
+    },
+    { "name": "dash-rule-blank-prose", "source": "- - -\n\n x",
+      "canonical": "***\n\n&#32;x",
+      "fileFold": true,
+      "rustBase64": "AQWAw/PcnNbLDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeAw/PcnNbLDQEDCXBhcmFncmFwaAcAgMPz3JzWyw0CBgQAgMPz3JzWyw0DAiB4AA=="
+    },
+    { "name": "dash-rule-before-star-rule", "source": "- - -\n  ***",
+      "canonical": "***\n\n---",
+      "fileFold": true,
+      "rustBase64": "AQP42NyLiazdBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYf42NyLiazdBQEDDmhvcml6b250YWxSdWxlAA=="
+    },
+    { "name": "dash-rule-short-spacing", "source": "- --",
+      "canonical": "***",
+      "fileFold": true,
+      "rustBase64": "AQKyiIbsgcnODgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA="
+    },
+    { "name": "dash-rule-leading-space", "source": " - - -",
+      "canonical": "***",
+      "fileFold": true,
+      "rustBase64": "AQKgvrHVyp6CDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA="
+    },
+    { "name": "star-rule-tab-separated", "source": "*\t*\t*",
+      "canonical": "***",
+      "fileFold": true,
+      "rustBase64": "AQLLq4jBpJdUACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDDmhvcml6b250YWxSdWxlAA=="
+    },
+    { "name": "dash-rule-tab-separated", "source": "-\t-\t-",
+      "canonical": "***",
+      "fileFold": true,
+      "rustBase64": "AQKh2p2Um9LCDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA="
+    },
+    { "name": "dash-rule-mixed-spacing", "source": "- \t- -",
+      "canonical": "***",
+      "fileFold": true,
+      "rustBase64": "AQKm6/PXx4ZLACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDDmhvcml6b250YWxSdWxlAA=="
+    },
+    { "name": "star-rule-mixed-spacing", "source": "* \t* *",
+      "canonical": "***",
+      "fileFold": true,
+      "rustBase64": "AQLN0eO4uJb4DgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZQA="
+    },
+    { "name": "item-setext-rule-disagreement", "source": "- a\n  ---",
+      "canonical": "- a\n\n  ---",
+      "foldRefuse": true,
+      "note": "CommonMark and TypeScript read an item heading; Rust reads a paragraph and rule. File folding refuses before mutation.",
+      "rustBase64": "AQeV4dnbuK8rACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAJXh2du4rysBAwhsaXN0SXRlbQcAleHZ27ivKwIDCXBhcmFncmFwaAcAleHZ27ivKwMGBACV4dnbuK8rBAFhh5Xh2du4rysDAw5ob3Jpem9udGFsUnVsZQA=",
+      "sourceCanonical": "- \n  ## a"
+    },
+    { "name": "item-rule-blank", "source": "- a\n\n  ---",
+      "canonical": "- a\n\n  ---",
+      "foldRefuse": true,
+      "rustBase64": "AQfdqIDB66XLCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDdqIDB66XLCQEDCGxpc3RJdGVtBwDdqIDB66XLCQIDCXBhcmFncmFwaAcA3aiAweulywkDBgQA3aiAweulywkEAWGH3aiAweulywkDAw5ob3Jpem9udGFsUnVsZQA="
+    },
+    { "name": "ordered-item-rule-blank", "source": "1. a\n\n   ---",
+      "canonical": "1. a\n\n   ---",
+      "foldRefuse": true,
+      "rustBase64": "AQjVyN6i1LX1CQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA1cjeotS19QkBBXN0YXJ0AX0BBwDVyN6i1LX1CQEDCGxpc3RJdGVtBwDVyN6i1LX1CQMDCXBhcmFncmFwaAcA1cjeotS19QkEBgQA1cjeotS19QkFAWGH1cjeotS19QkEAw5ob3Jpem9udGFsUnVsZQA="
+    },
+    { "name": "item-spaced-rule-blank", "source": "- a\n\n  - - -",
+      "canonical": "- a\n\n  ---",
+      "foldRefuse": true,
+      "rustBase64": "AQet8/3xn7WzAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCt8/3xn7WzAQEDCGxpc3RJdGVtBwCt8/3xn7WzAQIDCXBhcmFncmFwaAcArfP98Z+1swEDBgQArfP98Z+1swEEAWGHrfP98Z+1swEDAw5ob3Jpem9udGFsUnVsZQA="
+    },
+    { "name": "item-spaced-rule-tight", "source": "- a\n  - - -",
+      "canonical": "- a\n\n  ---",
+      "foldRefuse": true,
+      "rustBase64": "AQf2zLWnyKElACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAPbMtafIoSUBAwhsaXN0SXRlbQcA9sy1p8ihJQIDCXBhcmFncmFwaAcA9sy1p8ihJQMGBAD2zLWnyKElBAFhh/bMtafIoSUDAw5ob3Jpem9udGFsUnVsZQA="
+    },
+    { "name": "rule-first-chapter", "source": "* * *\n\n# Chapter One\n\n* * *\n\nIt was dark.",
+      "canonical": "***\n\n# Chapter One\n\n---\n\nIt was dark.",
+      "fileFold": true,
+      "rustBase64": "AQqwwtSt54rqAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYewwtSt54rqAwEDB2hlYWRpbmcoALDC1K3niuoDAgVsZXZlbAF9AQcAsMLUreeK6gMCBgQAsMLUreeK6gMEC0NoYXB0ZXIgT25lh7DC1K3niuoDAgMOaG9yaXpvbnRhbFJ1bGWHsMLUreeK6gMQAwlwYXJhZ3JhcGgHALDC1K3niuoDEQYEALDC1K3niuoDEgxJdCB3YXMgZGFyay4A"
+    },
+    { "name": "rule-first-author", "source": "* * *\n\nAuthor: Jane\n\n* * *\n\nIt was dark.",
+      "canonical": "***\n\nAuthor: Jane\n\n---\n\nIt was dark.",
+      "fileFold": true,
+      "rustBase64": "AQne6LrY5+K6DQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYfe6LrY5+K6DQEDCXBhcmFncmFwaAcA3ui62Ofiug0CBgQA3ui62Ofiug0DDEF1dGhvcjogSmFuZYfe6LrY5+K6DQIDDmhvcml6b250YWxSdWxlh97outjn4roNEAMJcGFyYWdyYXBoBwDe6LrY5+K6DREGBADe6LrY5+K6DRIMSXQgd2FzIGRhcmsuAA=="
+    },
+    { "name": "item-ordered-non-one", "source": "- a\n\n  2. child",
+      "canonical": "- a\n\n  2. child",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 reads the blank-separated source and projection as an ordered child starting at 2.",
+      "rustBase64": "AQz4juDA98eIDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD4juDA98eIDQEDCGxpc3RJdGVtBwD4juDA98eIDQIDCXBhcmFncmFwaAcA+I7gwPfHiA0DBgQA+I7gwPfHiA0EAWGH+I7gwPfHiA0DAwtvcmRlcmVkTGlzdCgA+I7gwPfHiA0GBXN0YXJ0AX0CBwD4juDA98eIDQYDCGxpc3RJdGVtBwD4juDA98eIDQgDCXBhcmFncmFwaAcA+I7gwPfHiA0JBgQA+I7gwPfHiA0KBWNoaWxkAA=="
+    },
+    { "name": "item-empty-bullet", "source": "- a\n\n  - ",
+      "canonical": "- a\n\n  -",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 reads the blank-separated source and projection as an empty bullet child.",
+      "rustBase64": "AQmp9LuessFSACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAKn0u56ywVIBAwhsaXN0SXRlbQcAqfS7nrLBUgIDCXBhcmFncmFwaAcAqfS7nrLBUgMGBACp9LuessFSBAFhh6n0u56ywVIDAwpidWxsZXRMaXN0BwCp9LuessFSBgMIbGlzdEl0ZW0HAKn0u56ywVIHAwlwYXJhZ3JhcGgA"
+    },
+    { "name": "item-empty-ordered", "source": "- a\n\n  1. ",
+      "canonical": "- a\n\n  1.",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 reads the blank-separated source and projection as an empty ordered child.",
+      "rustBase64": "AQrXpKL56sutAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDXpKL56sutAgEDCGxpc3RJdGVtBwDXpKL56sutAgIDCXBhcmFncmFwaAcA16Si+erLrQIDBgQA16Si+erLrQIEAWGH16Si+erLrQIDAwtvcmRlcmVkTGlzdCgA16Si+erLrQIGBXN0YXJ0AX0BBwDXpKL56sutAgYDCGxpc3RJdGVtBwDXpKL56sutAggDCXBhcmFncmFwaAA="
+    },
+    { "name": "item-ordered-non-one-tight", "source": "- a\n  2. child",
+      "canonical": "- a\n  2&#46; child",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2 and both readers keep the non-one ordered continuation as paragraph text.",
+      "rustBase64": "AQaK9MGRmo7dCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCK9MGRmo7dCwEDCGxpc3RJdGVtBwCK9MGRmo7dCwIDCXBhcmFncmFwaAcAivTBkZqO3QsDBgQAivTBkZqO3QsECmEKMi4gY2hpbGQA"
+    },
+    { "name": "item-empty-bullet-tight", "source": "- a\n  - ",
+      "canonical": "- \n  ## a",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 and both readers read the dash as an item setext underline.",
+      "rustBase64": "AQj427a8qMWmDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD427a8qMWmDQEDCGxpc3RJdGVtBwD427a8qMWmDQIDCXBhcmFncmFwaIf427a8qMWmDQMDB2hlYWRpbmcoAPjbtryoxaYNBAVsZXZlbAF9AgcA+Nu2vKjFpg0EBgQA+Nu2vKjFpg0GAWEA"
+    },
+    { "name": "item-empty-ordered-tight", "source": "- a\n  1. ",
+      "canonical": "- a\n  1&#46;",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2 and both readers keep the empty ordered continuation as paragraph text.",
+      "rustBase64": "AQaToanOxMPMBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCToanOxMPMBgEDCGxpc3RJdGVtBwCToanOxMPMBgIDCXBhcmFncmFwaAcAk6GpzsTDzAYDBgQAk6GpzsTDzAYEBGEKMS4A"
+    },
+    { "name": "item-empty-whitespace-markers", "source": "- a\n\n  -  \n  2.  ",
+      "canonical": "- a\n\n  - \n  2.",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 reads whitespace-only bullet and ordered markers as empty child lists when separated from the preceding paragraph.",
+      "rustBase64": "AQ2Yo5a+vPbdDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCYo5a+vPbdDAEDCGxpc3RJdGVtBwCYo5a+vPbdDAIDCXBhcmFncmFwaAcAmKOWvrz23QwDBgQAmKOWvrz23QwEAWGHmKOWvrz23QwDAwpidWxsZXRMaXN0BwCYo5a+vPbdDAYDCGxpc3RJdGVtBwCYo5a+vPbdDAcDCXBhcmFncmFwaIeYo5a+vPbdDAYDC29yZGVyZWRMaXN0KACYo5a+vPbdDAkFc3RhcnQBfQIHAJijlr689t0MCQMIbGlzdEl0ZW0HAJijlr689t0MCwMJcGFyYWdyYXBoAA=="
+    },
+    { "name": "item-math-table-before-ordered", "source": "- a\n\n  $$x$$\n\n  2. child\n\n  | cell |\n  | ---- |\n  | cell |\n\n  2. child",
+      "canonical": "- a\n\n  \\$\\$x$$\n\n  2. child\n  \n  | cell |\n  | ---- |\n  | cell |\n\n  2. child",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 reads math and GFM table syntax as separate paragraphs. Ordered children remain separate after each. Rust keeps math as literal text; TypeScript reads a math block.",
+      "rustBase64": "ASSbrZf2pK1VACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAJutl/akrVUBAwhsaXN0SXRlbQcAm62X9qStVQIDCXBhcmFncmFwaAcAm62X9qStVQMGBACbrZf2pK1VBAFhh5utl/akrVUDAwlwYXJhZ3JhcGgHAJutl/akrVUGBgQAm62X9qStVQcFJCR4JCSHm62X9qStVQYDC29yZGVyZWRMaXN0KACbrZf2pK1VDQVzdGFydAF9AgcAm62X9qStVQ0DCGxpc3RJdGVtBwCbrZf2pK1VDwMJcGFyYWdyYXBoBwCbrZf2pK1VEAYEAJutl/akrVURBWNoaWxkh5utl/akrVUNAwV0YWJsZQcAm62X9qStVRcDCHRhYmxlUm93BwCbrZf2pK1VGAMLdGFibGVIZWFkZXIoAJutl/akrVUZB2NvbHNwYW4BfQEoAJutl/akrVUZB3Jvd3NwYW4BfQEHAJutl/akrVUZAwlwYXJhZ3JhcGgHAJutl/akrVUcBgQAm62X9qStVR0EY2VsbIebrZf2pK1VGAMIdGFibGVSb3cHAJutl/akrVUiAwl0YWJsZUNlbGwoAJutl/akrVUjB2NvbHNwYW4BfQEoAJutl/akrVUjB3Jvd3NwYW4BfQEHAJutl/akrVUjAwlwYXJhZ3JhcGgHAJutl/akrVUmBgQAm62X9qStVScEY2VsbIebrZf2pK1VFwMLb3JkZXJlZExpc3QoAJutl/akrVUsBXN0YXJ0AX0CBwCbrZf2pK1VLAMIbGlzdEl0ZW0HAJutl/akrVUuAwlwYXJhZ3JhcGgHAJutl/akrVUvBgQAm62X9qStVTAFY2hpbGQA",
+      "sourceCanonical": "- a\n\n  $$x$$\n\n  2. child\n  \n  | cell |\n  | ---- |\n  | cell |\n\n  2. child"
+    },
+    { "name": "empty-parent-rule", "source": "- \n  ---",
+      "canonical": "- \n  ---",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 keeps the child in its item.",
+      "rustBase64": "AQXvte2c98JmACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAO+17Zz3wmYBAwhsaXN0SXRlbQcA77XtnPfCZgIDCXBhcmFncmFwaIfvte2c98JmAwMOaG9yaXpvbnRhbFJ1bGUA"
+    },
+    { "name": "empty-parent-math", "source": "- \n  $$x$$",
+      "canonical": "- \n  \\$\\$x$$",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 keeps the child in its item.",
+      "rustBase64": "AQeW5d6dtLGeAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCW5d6dtLGeAwEDCGxpc3RJdGVtBwCW5d6dtLGeAwIDCXBhcmFncmFwaIeW5d6dtLGeAwMDCXBhcmFncmFwaAcAluXenbSxngMEBgQAluXenbSxngMFBSQkeCQkAA==",
+      "sourceCanonical": "- \n  $$x$$"
+    },
+    { "name": "empty-parent-bullet", "source": "- \n  -",
+      "canonical": "- \n  -",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 keeps the child in its item.",
+      "rustBase64": "AQeNu7bxjPK5BAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCNu7bxjPK5BAEDCGxpc3RJdGVtBwCNu7bxjPK5BAIDCXBhcmFncmFwaIeNu7bxjPK5BAMDCmJ1bGxldExpc3QHAI27tvGM8rkEBAMIbGlzdEl0ZW0HAI27tvGM8rkEBQMJcGFyYWdyYXBoAA=="
+    },
+    { "name": "empty-parent-ordered", "source": "1. \n   2. x",
+      "canonical": "1. \n   2. x",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 keeps the child in its item.",
+      "rustBase64": "AQuLqI6Z48P0BgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAi6iOmePD9AYBBXN0YXJ0AX0BBwCLqI6Z48P0BgEDCGxpc3RJdGVtBwCLqI6Z48P0BgMDCXBhcmFncmFwaIeLqI6Z48P0BgQDC29yZGVyZWRMaXN0KACLqI6Z48P0BgUFc3RhcnQBfQIHAIuojpnjw/QGBQMIbGlzdEl0ZW0HAIuojpnjw/QGBwMJcGFyYWdyYXBoBwCLqI6Z48P0BggGBACLqI6Z48P0BgkBeAA="
+    },
+    { "name": "quote-before-child-lists", "source": "- a\n  > q\n\n  3. x\n  > q\n\n  -\n  > q\n\n  1.",
+      "canonical": "- a\n  > q\n\n  3. x\n  > q\n\n  - \n  > q\n\n  1.",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2 keeps the list outside the quote.",
+      "rustBase64": "AR+ajL2Stph2ACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAJqMvZK2mHYBAwhsaXN0SXRlbQcAmoy9kraYdgIDCXBhcmFncmFwaAcAmoy9kraYdgMGBACajL2Stph2BAFhh5qMvZK2mHYDAwpibG9ja3F1b3RlBwCajL2Stph2BgMJcGFyYWdyYXBoBwCajL2Stph2BwYEAJqMvZK2mHYIAXGHmoy9kraYdgYDC29yZGVyZWRMaXN0KACajL2Stph2CgVzdGFydAF9AwcAmoy9kraYdgoDCGxpc3RJdGVtBwCajL2Stph2DAMJcGFyYWdyYXBoBwCajL2Stph2DQYEAJqMvZK2mHYOAXiHmoy9kraYdgoDCmJsb2NrcXVvdGUHAJqMvZK2mHYQAwlwYXJhZ3JhcGgHAJqMvZK2mHYRBgQAmoy9kraYdhIBcYeajL2Stph2EAMKYnVsbGV0TGlzdAcAmoy9kraYdhQDCGxpc3RJdGVtBwCajL2Stph2FQMJcGFyYWdyYXBoh5qMvZK2mHYUAwpibG9ja3F1b3RlBwCajL2Stph2FwMJcGFyYWdyYXBoBwCajL2Stph2GAYEAJqMvZK2mHYZAXGHmoy9kraYdhcDC29yZGVyZWRMaXN0KACajL2Stph2GwVzdGFydAF9AQcAmoy9kraYdhsDCGxpc3RJdGVtBwCajL2Stph2HQMJcGFyYWdyYXBoAA=="
+    },
+    { "name": "fold-bare-bullet", "source": "Total\n*",
+      "canonical": "Total\n&#42;",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2 keeps the bare marker in the paragraph.",
+      "rustBase64": "AQSy/MWj6aXnAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHALL8xaPppecBAQYEALL8xaPppecBAgdUb3RhbAoqAA=="
+    },
+    { "name": "fold-bare-ordered", "source": "Total\n1.",
+      "canonical": "Total\n1&#46;",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2 keeps the bare marker in the paragraph.",
+      "rustBase64": "AQSihPf8x99BACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCXBhcmFncmFwaAcAooT3/MffQQEGBACihPf8x99BAghUb3RhbAoxLgA="
+    },
+    { "name": "fold-quote-bare-bullet", "source": "> Note\n> *",
+      "canonical": "> Note\n> &#42;",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2 keeps the bare marker in the paragraph.",
+      "rustBase64": "AQWOg5WBz+m8BgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwCOg5WBz+m8BgEDCXBhcmFncmFwaAcAjoOVgc/pvAYCBgQAjoOVgc/pvAYDBk5vdGUKKgA="
+    },
+    { "name": "code-span-ordinal-entity", "source": "`x\n2&#46; y`",
+      "canonical": "`x 2&#46; y`",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2 reads the soft break as a code space and keeps the entity literal.",
+      "rustBase64": "AQbui9jsxKUxACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCXBhcmFncmFwaAcA7ovY7MSlMQEGBgDui9jsxKUxAgRjb2RlAnt9hO6L2OzEpTEDCnggMiYjNDY7IHmG7ovY7MSlMQ0EY29kZQRudWxsAA=="
+    },
+    { "name": "literal-backtick-ordinal", "source": "`literal\n2. y",
+      "canonical": "`literal\n2&#46; y",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2 keeps the unmatched backtick and non-one ordinal in one paragraph.",
+      "rustBase64": "AQS1otOhrLuQBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHALWi06Gsu5AHAQYEALWi06Gsu5AHAg1gbGl0ZXJhbAoyLiB5AA=="
+    },
+    { "name": "literal-link-root", "source": "x [](u \"a\n2. b\") y\n2. not",
+      "canonical": "x [](u \"a\n2. b\") y\n2&#46; not",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2 keeps the empty link inline in one paragraph, within the item or quote where present. Its title contains a soft break; task checkboxes remain text.",
+      "rustBase64": "AQSYoNiw2rPzDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAJig2LDas/MOAQYEAJig2LDas/MOAhl4IFtdKHUgImEKMi4gYiIpIHkKMi4gbm90AA=="
+    },
+    { "name": "literal-link-quote", "source": "> [](u \"a\n> [x] b\")",
+      "canonical": "> [](u \"a\n> [x] b\")",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2 keeps the empty link inline in one paragraph, within the item or quote where present. Its title contains a soft break; task checkboxes remain text.",
+      "rustBase64": "AQXCy6Dl3o2TBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwDCy6Dl3o2TBQEDCXBhcmFncmFwaAcAwsug5d6NkwUCBgQAwsug5d6NkwUDD1tdKHUgImEKW3hdIGIiKQA="
+    },
+    { "name": "literal-link-bullet", "source": "- x [](u \"a\n  2. b\")",
+      "canonical": "- x [](u \"a\n  2. b\")",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2 keeps the empty link inline in one paragraph, within the item or quote where present. Its title contains a soft break; task checkboxes remain text.",
+      "rustBase64": "AQbqhqyf+4+5AwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDqhqyf+4+5AwEDCGxpc3RJdGVtBwDqhqyf+4+5AwIDCXBhcmFncmFwaAcA6oasn/uPuQMDBgQA6oasn/uPuQMEEHggW10odSAiYQoyLiBiIikA"
+    },
+    { "name": "literal-link-ordered", "source": "3. x [](u \"a\n   2. b\")",
+      "canonical": "3. x [](u \"a\n   2. b\")",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2 keeps the empty link inline in one paragraph, within the item or quote where present. Its title contains a soft break; task checkboxes remain text.",
+      "rustBase64": "AQewmY3X2O/aAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAsJmN19jv2gIBBXN0YXJ0AX0DBwCwmY3X2O/aAgEDCGxpc3RJdGVtBwCwmY3X2O/aAgMDCXBhcmFncmFwaAcAsJmN19jv2gIEBgQAsJmN19jv2gIFEHggW10odSAiYQoyLiBiIikA"
+    },
+    { "name": "literal-link-task", "source": "- [ ] x [](u \"a\n  2. b\")",
+      "canonical": "- [ ] x [](u \"a\n  2. b\")",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2 keeps the empty link inline in one paragraph, within the item or quote where present. Its title contains a soft break; task checkboxes remain text.",
+      "rustBase64": "AQe6r6aDgcmCDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAuq+mg4HJgg8BAwh0YXNrSXRlbSgAuq+mg4HJgg8CB2NoZWNrZWQBeQcAuq+mg4HJgg8CAwlwYXJhZ3JhcGgHALqvpoOByYIPBAYEALqvpoOByYIPBRB4IFtdKHUgImEKMi4gYiIpAA=="
+    },
+    { "name": "task-first-continuation", "source": "- [ ]\n  foo",
+      "canonical": "- [ ] foo",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2: <ul> <li>[ ] foo</li> </ul>",
+      "rustBase64": "AQfW8svM/pfBBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA1vLLzP6XwQQBAwh0YXNrSXRlbSgA1vLLzP6XwQQCB2NoZWNrZWQBeQcA1vLLzP6XwQQCAwlwYXJhZ3JhcGgHANbyy8z+l8EEBAYEANbyy8z+l8EEBQNmb28A"
+    },
+    { "name": "task-blank-continuation", "source": "- [ ]\n\n  foo",
+      "canonical": "- [ ] \n\n  foo",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ul> <li> <p>[ ]</p> <p>foo</p> </li> </ul>",
+      "rustBase64": "AQjvpMCsyZzLCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA76TArMmcywoBAwh0YXNrSXRlbSgA76TArMmcywoCB2NoZWNrZWQBeQcA76TArMmcywoCAwlwYXJhZ3JhcGiH76TArMmcywoEAwlwYXJhZ3JhcGgHAO+kwKzJnMsKBQYEAO+kwKzJnMsKBgNmb28A"
+    },
+    { "name": "task-lazy-continuation", "source": "- [ ] \nCall Bob",
+      "canonical": "- [ ] Call Bob",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2: <ul> <li>[ ] Call Bob</li> </ul>",
+      "rustBase64": "AQfwm+Hprb/9BQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA8Jvh6a2//QUBAwh0YXNrSXRlbSgA8Jvh6a2//QUCB2NoZWNrZWQBeQcA8Jvh6a2//QUCAwlwYXJhZ3JhcGgHAPCb4emtv/0FBAYEAPCb4emtv/0FBQhDYWxsIEJvYgA="
+    },
+    { "name": "empty-bullet-root-text", "source": "- \nSome text",
+      "canonical": "- \n\nSome text",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2: <ul> <li></li> </ul> <p>Some text</p>",
+      "rustBase64": "AQf4lofI3ZK+CAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD4lofI3ZK+CAEDCGxpc3RJdGVtBwD4lofI3ZK+CAIDCXBhcmFncmFwaIf4lofI3ZK+CAEDCXBhcmFncmFwaAcA+JaHyN2SvggEBgQA+JaHyN2SvggFCVNvbWUgdGV4dAA="
+    },
+    { "name": "empty-ordered-root-text", "source": "1.\nx",
+      "canonical": "1. \n\nx",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2: <ol> <li></li> </ol> <p>x</p>",
+      "projected": true,
+      "rustBase64": "AQiJiuCenKujBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAiYrgnpyrowYBBXN0YXJ0AX0BBwCJiuCenKujBgEDCGxpc3RJdGVtBwCJiuCenKujBgMDCXBhcmFncmFwaIeJiuCenKujBgEDCXBhcmFncmFwaAcAiYrgnpyrowYFBgQAiYrgnpyrowYGAXgA"
+    },
+    { "name": "empty-bullet-blank-root-text", "source": "- \n\n  x",
+      "canonical": "- \n\n&#32; x",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2: <ul> <li></li> </ul> <p>x</p>",
+      "rustBase64": "AQeAvoTq3bigDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCAvoTq3bigDgEDCGxpc3RJdGVtBwCAvoTq3bigDgIDCXBhcmFncmFwaIeAvoTq3bigDgEDCXBhcmFncmFwaAcAgL6E6t24oA4EBgQAgL6E6t24oA4FAyAgeAA="
+    },
+    { "name": "bare-bullet-indented-text", "source": "-\n  foo",
+      "canonical": "- \n  foo",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ul> <li>foo</li> </ul>",
+      "projected": true,
+      "rustBase64": "AQfmtriZxvDJDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDmtriZxvDJDQEDCGxpc3RJdGVtBwDmtriZxvDJDQIDCXBhcmFncmFwaIfmtriZxvDJDQMDCXBhcmFncmFwaAcA5ra4mcbwyQ0EBgQA5ra4mcbwyQ0FA2ZvbwA="
+    },
+    { "name": "bare-ordered-indented-text", "source": "1.\n   foo",
+      "canonical": "1. \n   foo",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ol> <li>foo</li> </ol>",
+      "projected": true,
+      "rustBase64": "AQiTgPyLhc2ABgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAk4D8i4XNgAYBBXN0YXJ0AX0BBwCTgPyLhc2ABgEDCGxpc3RJdGVtBwCTgPyLhc2ABgMDCXBhcmFncmFwaIeTgPyLhc2ABgQDCXBhcmFncmFwaAcAk4D8i4XNgAYFBgQAk4D8i4XNgAYGA2ZvbwA="
+    },
+    { "name": "source-loose-bullet-child-siblings", "source": "- a\n  - b\n\n  - c",
+      "canonical": "- a\n  - b\n  - c",
+      "exactSource": true,
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ul> <li>a <ul> <li> <p>b</p> </li> <li> <p>c</p> </li> </ul> </li> </ul>",
+      "rustBase64": "AQ+fxIXZtIagDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCfxIXZtIagDQEDCGxpc3RJdGVtBwCfxIXZtIagDQIDCXBhcmFncmFwaAcAn8SF2bSGoA0DBgQAn8SF2bSGoA0EAWGHn8SF2bSGoA0DAwpidWxsZXRMaXN0BwCfxIXZtIagDQYDCGxpc3RJdGVtBwCfxIXZtIagDQcDCXBhcmFncmFwaAcAn8SF2bSGoA0IBgQAn8SF2bSGoA0JAWKHn8SF2bSGoA0HAwhsaXN0SXRlbQcAn8SF2bSGoA0LAwlwYXJhZ3JhcGgHAJ/Ehdm0hqANDAYEAJ/Ehdm0hqANDQFjAA=="
+    },
+    { "name": "source-loose-ordered-parent-child-siblings", "source": "1. Step one\n\n   - detail a\n\n   - detail b\n\n2. Step two",
+      "canonical": "1. Step one\n   - detail a\n   - detail b\n2. Step two",
+      "exactSource": true,
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ol> <li> <p>Step one</p> <ul> <li> <p>detail a</p> </li> <li> <p>detail b</p> </li> </ul> </li> <li> <p>Step two</p> </li> </ol>",
+      "rustBase64": "ARTcj/nQ6viICQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA3I/50Or4iAkBBXN0YXJ0AX0BBwDcj/nQ6viICQEDCGxpc3RJdGVtBwDcj/nQ6viICQMDCXBhcmFncmFwaAcA3I/50Or4iAkEBgQA3I/50Or4iAkFCFN0ZXAgb25lh9yP+dDq+IgJBAMKYnVsbGV0TGlzdAcA3I/50Or4iAkOAwhsaXN0SXRlbQcA3I/50Or4iAkPAwlwYXJhZ3JhcGgHANyP+dDq+IgJEAYEANyP+dDq+IgJEQhkZXRhaWwgYYfcj/nQ6viICQ8DCGxpc3RJdGVtBwDcj/nQ6viICRoDCXBhcmFncmFwaAcA3I/50Or4iAkbBgQA3I/50Or4iAkcCGRldGFpbCBih9yP+dDq+IgJAwMIbGlzdEl0ZW0HANyP+dDq+IgJJQMJcGFyYWdyYXBoBwDcj/nQ6viICSYGBADcj/nQ6viICScIU3RlcCB0d28A"
+    },
+    {
+      "name": "empty-bullet-tab-continuation",
+      "source": "- \n\tfoo",
+      "canonical": "- \n    foo",
+      "exactSource": true,
+      "foldRefuse": true,
+      "rustBase64": "AQfG99mPtJWyBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDG99mPtJWyBQEDCGxpc3RJdGVtBwDG99mPtJWyBQIDCXBhcmFncmFwaIfG99mPtJWyBQMDCXBhcmFncmFwaAcAxvfZj7SVsgUEBgQAxvfZj7SVsgUFBSAgZm9vAA=="
+    },
+    {
+      "name": "empty-bullet-space-tab-continuation",
+      "source": "- \n \tfoo",
+      "canonical": "- \n     foo",
+      "exactSource": true,
+      "foldRefuse": true,
+      "rustBase64": "AQf8lZyh1/m5DQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD8lZyh1/m5DQEDCGxpc3RJdGVtBwD8lZyh1/m5DQIDCXBhcmFncmFwaIf8lZyh1/m5DQMDCXBhcmFncmFwaAcA/JWcodf5uQ0EBgQA/JWcodf5uQ0FBiAgIGZvbwA="
+    },
+    { "name": "empty-bullet-underindent-after-blank", "source": "- \n\n x",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ul> <li></li> </ul> <p>x</p>",
+      "refuse": true
+    },
+    { "name": "empty-ordered-underindent-after-blank", "source": "1.\n\n  x",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ol> <li></li> </ol> <p>x</p>",
+      "projected": true,
+      "refuse": true
+    },
+    { "name": "empty-marker-root-lazy-tab", "source": "Shopping\n\n-\nMilk\n\t2 litres",
+      "canonical": "Shopping\n\n- \n\nMilk\n&#9;2 litres",
+      "exactSource": true,
+      "fileFold": true,
+      "note": "CommonMark 0.31.2: <p>Shopping</p> <ul> <li></li> </ul> <p>Milk 2 litres</p>",
+      "projected": true,
+      "rustBase64": "AgOBioWL/fiTDwAoAQRtZXRhEmRvaGNNYXJrZG93blNvdXJjZQF3GlNob3BwaW5nCgotCk1pbGsKCTIgbGl0cmVzKAEEbWV0YRhkb2hjTWFya2Rvd25Tb3VyY2VTaGEyNTYBd0BiMjBhZDc3MWY5MTYxNzYxYzUxYmJkOWFmNWI1NzZlZDU4ZjY2NTY4Y2UwN2YxYWNhNmI1NGM5OTEwNTViNTU1KAEEbWV0YSJkb2hjTWFya2Rvd25Tb3VyY2VQcm9qZWN0aW9uU2hhMjU2AXdAMDM1MGIyYjE3NDI0Mzc5ZjUwYjkwMDRmMTQwYzI5MzUwZWQyMjhiMjM3NDE1OTRmMjIxOTQwZTQ2ZmE1ZjBjOQq28ZSbqLaIAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHALbxlJuotogBAQYEALbxlJuotogBAghTaG9wcGluZ4e28ZSbqLaIAQEDCmJ1bGxldExpc3QHALbxlJuotogBCwMIbGlzdEl0ZW0HALbxlJuotogBDAMJcGFyYWdyYXBoh7bxlJuotogBCwMJcGFyYWdyYXBoBwC28ZSbqLaIAQ4GBAC28ZSbqLaIAQ8OTWlsawoJMiBsaXRyZXMA",
+      "witnessSeed": true
+    },
+    { "name": "empty-spaced-marker-root-lazy-tab", "source": "Shopping\n\n- \nMilk\n\t2 litres",
+      "canonical": "Shopping\n\n- \n\nMilk\n&#9;2 litres",
+      "exactSource": true,
+      "fileFold": true,
+      "note": "CommonMark 0.31.2: <p>Shopping</p> <ul> <li></li> </ul> <p>Milk 2 litres</p>",
+      "rustBase64": "Agq16bjOy+nGDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHALXpuM7L6cYNAQYEALXpuM7L6cYNAghTaG9wcGluZ4e16bjOy+nGDQEDCmJ1bGxldExpc3QHALXpuM7L6cYNCwMIbGlzdEl0ZW0HALXpuM7L6cYNDAMJcGFyYWdyYXBoh7XpuM7L6cYNCwMJcGFyYWdyYXBoBwC16bjOy+nGDQ4GBAC16bjOy+nGDQ8OTWlsawoJMiBsaXRyZXMDj8CHi/u30AIAKAEEbWV0YRJkb2hjTWFya2Rvd25Tb3VyY2UBdxtTaG9wcGluZwoKLSAKTWlsawoJMiBsaXRyZXMoAQRtZXRhGGRvaGNNYXJrZG93blNvdXJjZVNoYTI1NgF3QDEzYWRmNjA1NDAzY2JlNGU2ZDM5OGU1NGI5MzVmMGRmOGM4YTIwYWZlZDExMDMyMWY5YjQzZjdiYzQxM2M1ZjAoAQRtZXRhImRvaGNNYXJrZG93blNvdXJjZVByb2plY3Rpb25TaGEyNTYBd0AwMzUwYjJiMTc0MjQzNzlmNTBiOTAwNGYxNDBjMjkzNTBlZDIyOGIyMzc0MTU5NGYyMjE5NDBlNDZmYTVmMGM5AA==",
+      "witnessSeed": true
+    },
+    { "name": "empty-marker-root-star-rule", "source": "-\n ***",
+      "canonical": "- \n\n---",
+      "exactSource": true,
+      "fileFold": true,
+      "note": "CommonMark 0.31.2: <ul> <li></li> </ul> <hr />",
+      "projected": true,
+      "rustBase64": "AgOSus2/4Pz1DAAoAQRtZXRhEmRvaGNNYXJrZG93blNvdXJjZQF3Bi0KICoqKigBBG1ldGEYZG9oY01hcmtkb3duU291cmNlU2hhMjU2AXdANTk1NWVmMWRlZTIzODg3YzQ2MDdkOWUxZGE1ZmI0MjdmMTNiYTA0ZjczZTMzODEwM2ZhNTJjNWIwMmIxNmE2YSgBBG1ldGEiZG9oY01hcmtkb3duU291cmNlUHJvamVjdGlvblNoYTI1NgF3QDJjMmMyNmJhYTE1MjFiZGFhNzdlNTdiOTM5ZTg1ZTc2NDgyMTUyY2FkNTlhYThlYTU4NmQzY2ZhZGY4MWI4YjgF/PiOnYX76wcAKAEEbWV0YQ1zY2hlbWFWZXJzaW9uAX0BBwEEYm9keQMKYnVsbGV0TGlzdAcA/PiOnYX76wcBAwhsaXN0SXRlbQcA/PiOnYX76wcCAwlwYXJhZ3JhcGiH/PiOnYX76wcBAw5ob3Jpem9udGFsUnVsZQA=",
+      "witnessSeed": true
+    },
+    { "name": "empty-spaced-marker-root-star-rule", "source": "- \n ***",
+      "canonical": "- \n\n---",
+      "exactSource": true,
+      "fileFold": true,
+      "note": "CommonMark 0.31.2: <ul> <li></li> </ul> <hr />",
+      "rustBase64": "AgOP96C8g5W0BgAoAQRtZXRhEmRvaGNNYXJrZG93blNvdXJjZQF3By0gCiAqKiooAQRtZXRhGGRvaGNNYXJrZG93blNvdXJjZVNoYTI1NgF3QDdhNzgzYzVkZWY1MjI3MGNiNzY1MGM2YmVhZjg2ZjU3ZGQ0NWVhZjQ0MzU5OWQ1NGRlMzdmYTMxNDVmMDkxZWEoAQRtZXRhImRvaGNNYXJrZG93blNvdXJjZVByb2plY3Rpb25TaGEyNTYBd0AyYzJjMjZiYWExNTIxYmRhYTc3ZTU3YjkzOWU4NWU3NjQ4MjE1MmNhZDU5YWE4ZWE1ODZkM2NmYWRmODFiOGI4Bbvjs8PNn6kCACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHALvjs8PNn6kCAQMIbGlzdEl0ZW0HALvjs8PNn6kCAgMJcGFyYWdyYXBoh7vjs8PNn6kCAQMOaG9yaXpvbnRhbFJ1bGUA",
+      "witnessSeed": true
+    },
+    { "name": "empty-child-marker-underindent", "source": "- a\n\n  -\n\n x",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ul> <li> <p>a</p> <ul> <li></li> </ul> </li> </ul> <p>x</p>",
+      "refuse": true
+    },
+    { "name": "empty-spaced-child-marker-underindent", "source": "- a\n\n  - \n\n x",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ul> <li> <p>a</p> <ul> <li></li> </ul> </li> </ul> <p>x</p>",
+      "refuse": true
+    },
+    { "name": "empty-link-tab-entity", "source": "[](u \"x\n&#9;y\")",
+      "canonical": "[](u \"x\n&#9;y\")",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2: <p><a href=\"u\" title=\"x y\"></a></p>",
+      "rustBase64": "AQSm/Mess5CmCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAKb8x6yzkKYLAQYEAKb8x6yzkKYLAg9bXSh1ICJ4CiYjOTt5IikA"
+    },
+    { "name": "item-empty-link-tab-entity", "source": "- [](u \"x\n  &#9;y\")",
+      "canonical": "- [](u \"x\n  &#9;y\")",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2: <ul> <li><a href=\"u\" title=\"x y\"></a></li> </ul>",
+      "rustBase64": "AQapjbmz/urTCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCpjbmz/urTCQEDCGxpc3RJdGVtBwCpjbmz/urTCQIDCXBhcmFncmFwaAcAqY25s/7q0wkDBgQAqY25s/7q0wkED1tdKHUgIngKJiM5O3kiKQA="
+    },
+    { "name": "raw-tag-tab-entity", "source": "<span title=\"a\n&#9;b\">x</span>",
+      "canonical": "&lt;span title&#61;&#34;a\n&amp;&#35;9&#59;b&#34;&gt;x&lt;/span&gt;",
+      "note": "CommonMark 0.31.2: <p><span title=\"a &#9;b\">x</span></p>",
+      "rustBase64": "AQTT6u3u5pLuBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHANPq7e7mku4GAQYEANPq7e7mku4GAh48c3BhbiB0aXRsZT0iYQomIzk7YiI+eDwvc3Bhbj4A",
+      "witnessRefuse": true,
+      "productionFoldRefuse": true,
+      "nativeRereadCanonical": "&amp;lt;span title&amp;#61;&amp;#34;a\n&amp;amp;&amp;#35;9&amp;#59;b&amp;#34;&amp;gt;x&amp;lt;/span&amp;gt;"
+    },
+    { "name": "interior-leading-space-closure", "source": "Milk\n    2 litres",
+      "canonical": "Milk\n&#32;   2 litres",
+      "fileFold": true,
+      "note": "CommonMark 0.31.2: <p>Milk 2 litres</p>",
+      "rustBase64": "AQTGk66FmNg7ACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCXBhcmFncmFwaAcAxpOuhZjYOwEGBADGk66FmNg7AhFNaWxrCiAgICAyIGxpdHJlcwA="
+    },
+    { "name": "empty-bullet-blank-child-marker",
+      "nativeSourceRefuse": true, "source": "- \n\n  - b\n - c",
+      "canonical": "- \n\n- b\n\n- c",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ul> <li></li> <li> <p>b</p> </li> <li> <p>c</p> </li> </ul>",
+      "rustBase64": "AQ60t56U8azbBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC0t56U8azbBgEDCGxpc3RJdGVtBwC0t56U8azbBgIDCXBhcmFncmFwaIe0t56U8azbBgEDCmJ1bGxldExpc3QHALS3npTxrNsGBAMIbGlzdEl0ZW0HALS3npTxrNsGBQMJcGFyYWdyYXBoBwC0t56U8azbBgYGBAC0t56U8azbBgcBYoe0t56U8azbBgQDCmJ1bGxldExpc3QHALS3npTxrNsGCQMIbGlzdEl0ZW0HALS3npTxrNsGCgMJcGFyYWdyYXBoBwC0t56U8azbBgsGBAC0t56U8azbBgwBYwA=",
+      "sourceCanonical": "- \n- b\n- c",
+      "productionFoldRefuse": true
+    },
+    {
+      "name": "empty-ordered-blank-child-marker",
+      "source": "1.\n\n   - b\n  - c",
+      "canonical": "1. \n\n- b\n- c",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ol> <li></li> </ol> <ul> <li>b</li> <li>c</li> </ul>",
+      "projected": true,
+      "productionFoldRefuse": true,
+      "rustBase64": "AQ7G1uK787akBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAxtbiu/O2pAQBBXN0YXJ0AX0BBwDG1uK787akBAEDCGxpc3RJdGVtBwDG1uK787akBAMDCXBhcmFncmFwaIfG1uK787akBAEDCmJ1bGxldExpc3QHAMbW4rvztqQEBQMIbGlzdEl0ZW0HAMbW4rvztqQEBgMJcGFyYWdyYXBoBwDG1uK787akBAcGBADG1uK787akBAgBYofG1uK787akBAYDCGxpc3RJdGVtBwDG1uK787akBAoDCXBhcmFncmFwaAcAxtbiu/O2pAQLBgQAxtbiu/O2pAQMAWMA"
+    },
+    { "name": "inline-empty-bullet-underindent", "source": "- - \n\n   x",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ul> <li> <ul> <li></li> </ul> <p>x</p> </li> </ul>",
+      "refuse": true
+    },
+    { "name": "inline-empty-ordered-underindent", "source": "- 1. \n\n    x",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ul> <li> <ol> <li></li> </ol> <p>x</p> </li> </ul>",
+      "refuse": true
+    },
+    { "name": "root-indented-bare-marker", "source": "a\n\n    -\n\tfoo",
+      "canonical": "a\n\n&#32;   -\n&#9;foo",
+      "foldRefuse": true,
+      "nativeSourceRefuse": true,
+      "note": "CommonMark 0.31.2: <p>a</p> <pre><code>- foo </code></pre> ",
+      "rustBase64": "AQfttqqIhq3dAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAO22qoiGrd0BAQYEAO22qoiGrd0BAgFhh+22qoiGrd0BAQMJcGFyYWdyYXBoBwDttqqIhq3dAQQGBADttqqIhq3dAQUKICAgIC0KCWZvbwA=",
+      "sourceCanonical": "a\n\n```\n-\nfoo\n```"
+    },
+    { "name": "root-indented-install", "source": "Install:\n\n    npm i foo",
+      "canonical": "Install:\n\n&#32;   npm i foo",
+      "foldRefuse": true,
+      "nativeSourceRefuse": true,
+      "note": "CommonMark 0.31.2: <p>Install:</p> <pre><code>npm i foo </code></pre> ",
+      "rustBase64": "AQeL5eK77saGBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAIvl4rvuxoYHAQYEAIvl4rvuxoYHAghJbnN0YWxsOoeL5eK77saGBwEDCXBhcmFncmFwaAcAi+Xiu+7GhgcLBgQAi+Xiu+7GhgcMDSAgICBucG0gaSBmb28A",
+      "sourceCanonical": "Install:\n\n```\nnpm i foo\n```"
+    },
+    { "name": "root-tab-code", "source": "a\n\n\tcode",
+      "canonical": "a\n\n&#9;code",
+      "foldRefuse": true,
+      "nativeSourceRefuse": true,
+      "note": "CommonMark 0.31.2: <p>a</p> <pre><code>code </code></pre> ",
+      "rustBase64": "AQeD5tWU8cXoCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAIPm1ZTxxegIAQYEAIPm1ZTxxegIAgFhh4Pm1ZTxxegIAQMJcGFyYWdyYXBoBwCD5tWU8cXoCAQGBACD5tWU8cXoCAUFCWNvZGUA",
+      "sourceCanonical": "a\n\n```\ncode\n```"
+    },
+    { "name": "root-indented-ordered-marker", "source": "P\n\n    1. a\n\n      b",
+      "canonical": "P\n\n&#32;   1. a\n\n&#32;     b",
+      "foldRefuse": true,
+      "nativeSourceRefuse": true,
+      "note": "CommonMark 0.31.2: <p>P</p> <pre><code>1. a    b </code></pre> ",
+      "rustBase64": "AQqK1ImUsr25CwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAIrUiZSyvbkLAQYEAIrUiZSyvbkLAgFQh4rUiZSyvbkLAQMJcGFyYWdyYXBoBwCK1ImUsr25CwQGBACK1ImUsr25CwUIICAgIDEuIGGHitSJlLK9uQsEAwlwYXJhZ3JhcGgHAIrUiZSyvbkLDgYEAIrUiZSyvbkLDwcgICAgICBiAA==",
+      "sourceCanonical": "P\n\n```\n1. a\n\n  b\n```"
+    },
+    { "name": "decoded-tag-tab-entity", "source": "&lt;b&gt;x\n&amp;&#35;9&#59;y&lt;/b&gt;",
+      "canonical": "&lt;b&gt;x\n&amp;&#35;9&#59;y&lt;/b&gt;",
+      "nativeSeedSource": "<b>x\n&#9;y</b>",
+      "note": "CommonMark 0.31.2: <p>&lt;b&gt;x &amp;#9;y&lt;/b&gt;</p> ",
+      "projected": true,
+      "rustBase64": "AQT1jafSmOm0BQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAPWNp9KY6bQFAQYEAPWNp9KY6bQFAg48Yj54CiYjOTt5PC9iPgA=",
+      "productionFoldRefuse": true,
+      "nativeRereadCanonical": "&amp;lt;b&amp;gt;x\n&amp;amp;&amp;#35;9&amp;#59;y&amp;lt;/b&amp;gt;"
+    },
+    { "name": "raw-foo-tab-entity", "source": "<foo>a\n&#9;b</foo>",
+      "canonical": "&lt;foo&gt;a\n&amp;&#35;9&#59;b&lt;/foo&gt;",
+      "note": "CommonMark 0.31.2: <p><foo>a\n\tb</foo></p>\n",
+      "rustBase64": "AQTcyMzRl+PgBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHANzIzNGX4+AEAQYEANzIzNGX4+AEAhI8Zm9vPmEKJiM5O2I8L2Zvbz4A",
+      "productionFoldRefuse": true,
+      "nativeRereadCanonical": "&amp;lt;foo&amp;gt;a\n&amp;amp;&amp;#35;9&amp;#59;b&amp;lt;/foo&amp;gt;"
+    },
+    { "name": "raw-span-body-tab-entity", "source": "<span class=\"n\">a\n&#9;b</span>",
+      "canonical": "&lt;span class&#61;&#34;n&#34;&gt;a\n&amp;&#35;9&#59;b&lt;/span&gt;",
+      "note": "CommonMark 0.31.2: <p><span class=\"n\">a\n\tb</span></p>\n",
+      "rustBase64": "AQT1nuPZnZGYBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAPWe49mdkZgHAQYEAPWe49mdkZgHAh48c3BhbiBjbGFzcz0ibiI+YQomIzk7Yjwvc3Bhbj4A",
+      "productionFoldRefuse": true,
+      "nativeRereadCanonical": "&amp;lt;span class&amp;#61;&amp;#34;n&amp;#34;&amp;gt;a\n&amp;amp;&amp;#35;9&amp;#59;b&amp;lt;/span&amp;gt;"
+    },
+    { "name": "quoted-empty-child", "source": "- > - \n\n  >    x",
+      "canonical": "- \n  > - \n\n  >    x",
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ul>\n<li>\n<blockquote>\n<ul>\n<li></li>\n</ul>\n</blockquote>\n<blockquote>\n<p>x</p>\n</blockquote>\n</li>\n</ul>\n",
+      "rustBase64": "AQz2qqzPq8zlDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD2qqzPq8zlDQEDCGxpc3RJdGVtBwD2qqzPq8zlDQIDCXBhcmFncmFwaIf2qqzPq8zlDQMDCmJsb2NrcXVvdGUHAPaqrM+rzOUNBAMKYnVsbGV0TGlzdAcA9qqsz6vM5Q0FAwhsaXN0SXRlbQcA9qqsz6vM5Q0GAwlwYXJhZ3JhcGiH9qqsz6vM5Q0EAwpibG9ja3F1b3RlBwD2qqzPq8zlDQgDCXBhcmFncmFwaAcA9qqsz6vM5Q0JBgQA9qqsz6vM5Q0KBCAgIHgA",
+      "sourceCanonical": "- \n  > \\- \n\n  >    x"
+    },
+    { "name": "padded-round12-indented-marker", "source": "-   a\n        - child",
+      "canonical": "- a\n  &#32;   - child",
+      "fileFold": true,
+      "exactSource": true,
+      "witnessSeed": true,
+      "note": "CommonMark 0.31.2: <ul>\n<li>a\n- child</li>\n</ul>\n",
+      "rustBase64": "AgP8xqrr1JG7AQAoAQRtZXRhEmRvaGNNYXJrZG93blNvdXJjZQF3FS0gICBhCiAgICAgICAgLSBjaGlsZCgBBG1ldGEYZG9oY01hcmtkb3duU291cmNlU2hhMjU2AXdAODk1OTkwMzZlODk4YWZlNTc3ZjhkOTk5YjBmNWFiMTFiMjYxNDczNDFiYmIzZGRlNzY0MmFmNzE1M2NkOGZmMCgBBG1ldGEiZG9oY01hcmtkb3duU291cmNlUHJvamVjdGlvblNoYTI1NgF3QGExMDlmNzYwOWNkNzZhZTI2M2I5M2EzN2ZjMmZkMGFjNDU4YTAyZjQ1MzY2M2ZlZDRmNTA0MTUxNDU5ZmExODUG6JOe/r2wsgEAKAEEbWV0YQ1zY2hlbWFWZXJzaW9uAX0BBwEEYm9keQMKYnVsbGV0TGlzdAcA6JOe/r2wsgEBAwhsaXN0SXRlbQcA6JOe/r2wsgECAwlwYXJhZ3JhcGgHAOiTnv69sLIBAwYEAOiTnv69sLIBBA1hCiAgICAtIGNoaWxkAA=="
+    },
+    { "name": "padded-round12-bullet-depth", "source": "-   a\n      - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - x",
+      "refuse": true,
+      "foldRefuse": true,
+      "productionFoldRefuse": true,
+      "note": "CommonMark 0.31.2: 5001 nested list levels; exceeds dohc's XML depth budget."
+    },
+    { "name": "padded-round12-ordered-depth", "source": "1.   a\n       - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - x",
+      "refuse": true,
+      "foldRefuse": true,
+      "productionFoldRefuse": true,
+      "note": "CommonMark 0.31.2: 5001 nested list levels; exceeds dohc's XML depth budget."
+    },
+    { "name": "padded-round12-real-child", "source": "-   a\n    - child",
+      "canonical": "- a\n  - child",
+      "foldRefuse": true,
+      "exactSource": true,
+      "witnessSeed": true,
+      "note": "CommonMark 0.31.2: <ul>\n<li>a\n<ul>\n<li>child</li>\n</ul>\n</li>\n</ul>\n",
+      "rustBase64": "AguglPqVx5WWCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCglPqVx5WWCgEDCGxpc3RJdGVtBwCglPqVx5WWCgIDCXBhcmFncmFwaAcAoJT6lceVlgoDBgQAoJT6lceVlgoEAWGHoJT6lceVlgoDAwpidWxsZXRMaXN0BwCglPqVx5WWCgYDCGxpc3RJdGVtBwCglPqVx5WWCgcDCXBhcmFncmFwaAcAoJT6lceVlgoIBgQAoJT6lceVlgoJBWNoaWxkA97swo3b1/IIACgBBG1ldGESZG9oY01hcmtkb3duU291cmNlAXcRLSAgIGEKICAgIC0gY2hpbGQoAQRtZXRhGGRvaGNNYXJrZG93blNvdXJjZVNoYTI1NgF3QDc5NjQwYzg3YzExNDBmNDBlNzE5MjZmZTMwMDc2N2ZkZTNhZTA0NGYxZjU5ZTZmNjc3YTM1OGU0NmU3MGQyMzMoAQRtZXRhImRvaGNNYXJrZG93blNvdXJjZVByb2plY3Rpb25TaGEyNTYBd0A2MjlhMDI1ZmRiYTA5ZGVkNjBhNDcxMjkwOGY4MjIzNDc2YjdiMTc0M2Q0ZGYxMTBhZDBkYjI5NzJiODdlNjFmAA=="
+    },
+    { "name": "padded-round12-five-space-code", "source": "-     a\n\n      - b",
+      "canonical": "- \n  ```\n  a\n  \n  - b\n  ```",
+      "nativeSourceRefuse": true,
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: <ul>\n<li>\n<pre><code>a\n\n- b\n</code></pre>\n</li>\n</ul>\n",
+      "rustBase64": "AQebrPjVi8eLCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCbrPjVi8eLCQEDCGxpc3RJdGVtBwCbrPjVi8eLCQIDCXBhcmFncmFwaIebrPjVi8eLCQMDCWNvZGVCbG9jawcAm6z41YvHiwkEBgQAm6z41YvHiwkFBmEKCi0gYgA="
+    },
+    { "name": "round13-empty-ordered-before-bullet-child", "source": "1.\n\n- b\n  - c",
+      "canonical": "1. \n\n- b\n  - c",
+      "projected": true,
+      "foldRefuse": true,
+      "note": "CommonMark 0.31.2: empty ordered list, then a bullet list with a child.",
+      "rustBase64": "AQ/s5qX5iMzcAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA7Oal+YjM3AIBBXN0YXJ0AX0BBwDs5qX5iMzcAgEDCGxpc3RJdGVtBwDs5qX5iMzcAgMDCXBhcmFncmFwaIfs5qX5iMzcAgEDCmJ1bGxldExpc3QHAOzmpfmIzNwCBQMIbGlzdEl0ZW0HAOzmpfmIzNwCBgMJcGFyYWdyYXBoBwDs5qX5iMzcAgcGBADs5qX5iMzcAggBYofs5qX5iMzcAgcDCmJ1bGxldExpc3QHAOzmpfmIzNwCCgMIbGlzdEl0ZW0HAOzmpfmIzNwCCwMJcGFyYWdyYXBoBwDs5qX5iMzcAgwGBADs5qX5iMzcAg0BYwA="
+    },
+    {
+      "name": "tab-fence-continuation",
+      "source": "- Item one\n- x\n\t```ts\n\tconst target = true;\n\t```\n- Item three",
+      "canonical": "- Item one\n- x\n  ```ts\n  const target = true;\n  ```\n- Item three",
+      "exactSource": true,
+      "foldRefuse": true,
+      "rustBase64": "ARKytc6q7q20AgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCytc6q7q20AgEDCGxpc3RJdGVtBwCytc6q7q20AgIDCXBhcmFncmFwaAcAsrXOqu6ttAIDBgQAsrXOqu6ttAIECEl0ZW0gb25lh7K1zqrurbQCAgMIbGlzdEl0ZW0HALK1zqrurbQCDQMJcGFyYWdyYXBoBwCytc6q7q20Ag4GBACytc6q7q20Ag8BeIeytc6q7q20Ag4DCWNvZGVCbG9jaygAsrXOqu6ttAIRCGxhbmd1YWdlAXcCdHMHALK1zqrurbQCEQYEALK1zqrurbQCExRjb25zdCB0YXJnZXQgPSB0cnVlO4eytc6q7q20Ag0DCGxpc3RJdGVtBwCytc6q7q20AigDCXBhcmFncmFwaAcAsrXOqu6ttAIpBgQAsrXOqu6ttAIqCkl0ZW0gdGhyZWUA"
+    },
+    {
+      "name": "paren-underindented-continuation",
+      "source": "1) item\n\n  para\n\nAfter",
+      "canonical": "1. item\n\n&#32; para\n\nAfter",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQ2xzc2IjcijDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAsc3NiI3Iow0BBXN0YXJ0AX0BBwCxzc2IjcijDQEDCGxpc3RJdGVtBwCxzc2IjcijDQMDCXBhcmFncmFwaAcAsc3NiI3Iow0EBgQAsc3NiI3Iow0FBGl0ZW2Hsc3NiI3Iow0BAwlwYXJhZ3JhcGgHALHNzYiNyKMNCgYEALHNzYiNyKMNCwYgIHBhcmGHsc3NiI3Iow0KAwlwYXJhZ3JhcGgHALHNzYiNyKMNEgYEALHNzYiNyKMNEwVBZnRlcgA="
+    },
+    {
+      "name": "tab-inline-child",
+      "source": "- -\tchild",
+      "canonical": "- \n  - child",
+      "exactSource": true,
+      "foldRefuse": true,
+      "rustBase64": "AQnxlMz8tJWADAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDxlMz8tJWADAEDCGxpc3RJdGVtBwDxlMz8tJWADAIDCXBhcmFncmFwaIfxlMz8tJWADAMDCmJ1bGxldExpc3QHAPGUzPy0lYAMBAMIbGlzdEl0ZW0HAPGUzPy0lYAMBQMJcGFyYWdyYXBoBwDxlMz8tJWADAYGBADxlMz8tJWADAcFY2hpbGQA"
+    },
+    {
+      "name": "tab-item-text",
+      "source": "- a\tb",
+      "canonical": "- a\tb",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQbovdumjaPgCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDovdumjaPgCwEDCGxpc3RJdGVtBwDovdumjaPgCwIDCXBhcmFncmFwaAcA6L3bpo2j4AsDBgQA6L3bpo2j4AsEA2EJYgA="
+    },
+    {
+      "name": "tab-continuation-text",
+      "source": "- a\n  b\tc",
+      "canonical": "- a\n  b\tc",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQap2eWcg8TlCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCp2eWcg8TlCgEDCGxpc3RJdGVtBwCp2eWcg8TlCgIDCXBhcmFncmFwaAcAqdnlnIPE5QoDBgQAqdnlnIPE5QoEBWEKYgljAA=="
+    },
+    {
+      "name": "tab-root-fence-opaque",
+      "source": "```\n-\tcode\n```",
+      "canonical": "```\n-\tcode\n```",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQTl6/7s8qriAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2sHAOXr/uzyquICAQYEAOXr/uzyquICAgYtCWNvZGUA"
+    },
+    {
+      "name": "tab-root-fence-quote-text",
+      "source": "```\n> literal\n-\tcode\n```",
+      "canonical": "```\n> literal\n-\tcode\n```",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQTz9d3KsZWhCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2sHAPP13cqxlaEJAQYEAPP13cqxlaEJAhA+IGxpdGVyYWwKLQljb2RlAA=="
+    },
+    {
+      "name": "tab-nested-fence-text",
+      "source": "- a\n  ```\n  -\tcode\n  ```",
+      "canonical": "- a\n  ```\n  -\tcode\n  ```",
+      "exactSource": true,
+      "foldRefuse": true,
+      "rustBase64": "AQmnuZqhi471DwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCnuZqhi471DwEDCGxpc3RJdGVtBwCnuZqhi471DwIDCXBhcmFncmFwaAcAp7maoYuO9Q8DBgQAp7maoYuO9Q8EAWGHp7maoYuO9Q8DAwljb2RlQmxvY2sHAKe5mqGLjvUPBgYEAKe5mqGLjvUPBwYtCWNvZGUA"
+    },
+    {
+      "name": "tab-quoted-marker",
+      "source": "> -\titem",
+      "canonical": "> - item",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQe8tc6PntDzDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwC8tc6PntDzDQEDCmJ1bGxldExpc3QHALy1zo+e0PMNAgMIbGlzdEl0ZW0HALy1zo+e0PMNAwMJcGFyYWdyYXBoBwC8tc6PntDzDQQGBAC8tc6PntDzDQUEaXRlbQA="
+    },
+    {
+      "name": "lazy-bullet-interior-tab",
+      "source": "- a\nlazy\ttext",
+      "canonical": "- a\n  lazy\ttext",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQbvq/bUhufjCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDvq/bUhufjCwEDCGxpc3RJdGVtBwDvq/bUhufjCwIDCXBhcmFncmFwaAcA76v21Ibn4wsDBgQA76v21Ibn4wsEC2EKbGF6eQl0ZXh0AA=="
+    },
+    {
+      "name": "lazy-underindented-interior-tab",
+      "source": "- a\n b\tc",
+      "canonical": "- a\n   b\tc",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQavgcTs1PLxDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCvgcTs1PLxDAEDCGxpc3RJdGVtBwCvgcTs1PLxDAIDCXBhcmFncmFwaAcAr4HE7NTy8QwDBgQAr4HE7NTy8QwEBmEKIGIJYwA="
+    },
+    {
+      "name": "lazy-ordered-interior-tab",
+      "source": "1. a\nlazy\ttext",
+      "canonical": "1. a\n   lazy\ttext",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQeukbn4v7LNDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgArpG5+L+yzQ0BBXN0YXJ0AX0BBwCukbn4v7LNDQEDCGxpc3RJdGVtBwCukbn4v7LNDQMDCXBhcmFncmFwaAcArpG5+L+yzQ0EBgQArpG5+L+yzQ0FC2EKbGF6eQl0ZXh0AA=="
+    },
+    {
+      "name": "projected-item-header-literal-tab",
+      "source": "- a\tb",
+      "canonical": "- a\tb",
+      "projected": true,
+      "rustBase64": "AQbv4+ioqcT5AwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDv4+ioqcT5AwEDCGxpc3RJdGVtBwDv4+ioqcT5AwIDCXBhcmFncmFwaAcA7+PoqKnE+QMDBgQA7+PoqKnE+QMEA2EJYgA="
+    },
+    {
+      "name": "projected-item-continuation-literal-tab",
+      "source": "- a\n  b\tc",
+      "canonical": "- a\n  b\tc",
+      "projected": true,
+      "rustBase64": "AQas+tiOruXIAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCs+tiOruXIAwEDCGxpc3RJdGVtBwCs+tiOruXIAwIDCXBhcmFncmFwaAcArPrYjq7lyAMDBgQArPrYjq7lyAMEBWEKYgljAA=="
+    },
+    {
+      "name": "projected-item-code-literal-tab",
+      "source": "- a\n  ```\n  literal\ttext\n  ```",
+      "canonical": "- a\n  ```\n  literal\ttext\n  ```",
+      "projected": true,
+      "foldRefuse": true,
+      "rustBase64": "AQmA0vjFyeyJBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCA0vjFyeyJBAEDCGxpc3RJdGVtBwCA0vjFyeyJBAIDCXBhcmFncmFwaAcAgNL4xcnsiQQDBgQAgNL4xcnsiQQEAWGHgNL4xcnsiQQDAwljb2RlQmxvY2sHAIDS+MXJ7IkEBgYEAIDS+MXJ7IkEBwxsaXRlcmFsCXRleHQA"
+    },
+    {
+      "name": "r22-spaces-0",
+      "source": "1. A  \n2. B",
+      "canonical": "1. A  \n2. B",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQvIsoW8hcz1DQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAyLKFvIXM9Q0BBXN0YXJ0AX0BBwDIsoW8hcz1DQEDCGxpc3RJdGVtBwDIsoW8hcz1DQMDCXBhcmFncmFwaAcAyLKFvIXM9Q0EBgQAyLKFvIXM9Q0FA0EgIIfIsoW8hcz1DQMDCGxpc3RJdGVtBwDIsoW8hcz1DQkDCXBhcmFncmFwaAcAyLKFvIXM9Q0KBgQAyLKFvIXM9Q0LAUIA"
+    },
+    {
+      "name": "r22-last-spaces-0",
+      "source": "1. A\n2. B  ",
+      "canonical": "1. A\n2. B",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQupgq7+543YCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAqYKu/ueN2AkBBXN0YXJ0AX0BBwCpgq7+543YCQEDCGxpc3RJdGVtBwCpgq7+543YCQMDCXBhcmFncmFwaAcAqYKu/ueN2AkEBgQAqYKu/ueN2AkFAUGHqYKu/ueN2AkDAwhsaXN0SXRlbQcAqYKu/ueN2AkHAwlwYXJhZ3JhcGgHAKmCrv7njdgJCAYEAKmCrv7njdgJCQFCAA=="
+    },
+    {
+      "name": "r22-separator-first-0-0",
+      "source": "1. A b\n2. C",
+      "canonical": "1. A b\n2. C",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQuY1emomM/GAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAmNXpqJjPxgEBBXN0YXJ0AX0BBwCY1emomM/GAQEDCGxpc3RJdGVtBwCY1emomM/GAQMDCXBhcmFncmFwaAcAmNXpqJjPxgEEBgQAmNXpqJjPxgEFBUHigKhih5jV6aiYz8YBAwMIbGlzdEl0ZW0HAJjV6aiYz8YBCQMJcGFyYWdyYXBoBwCY1emomM/GAQoGBACY1emomM/GAQsBQwA="
+    },
+    {
+      "name": "r22-separator-next-0-0",
+      "source": "1. A\n2. C d",
+      "canonical": "1. A\n2. C d",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQu6t6Ski9OmCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAurekpIvTpggBBXN0YXJ0AX0BBwC6t6Ski9OmCAEDCGxpc3RJdGVtBwC6t6Ski9OmCAMDCXBhcmFncmFwaAcAurekpIvTpggEBgQAurekpIvTpggFAUGHurekpIvTpggDAwhsaXN0SXRlbQcAurekpIvTpggHAwlwYXJhZ3JhcGgHALq3pKSL06YICAYEALq3pKSL06YICQVD4oCoZAA="
+    },
+    {
+      "name": "r22-separator-first-0-1",
+      "source": "1. A b\n2. C",
+      "canonical": "1. A b\n2. C",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQv3797Ulb2zAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA9+/e1JW9swIBBXN0YXJ0AX0BBwD3797Ulb2zAgEDCGxpc3RJdGVtBwD3797Ulb2zAgMDCXBhcmFncmFwaAcA9+/e1JW9swIEBgQA9+/e1JW9swIFBUHigKlih/fv3tSVvbMCAwMIbGlzdEl0ZW0HAPfv3tSVvbMCCQMJcGFyYWdyYXBoBwD3797Ulb2zAgoGBAD3797Ulb2zAgsBQwA="
+    },
+    {
+      "name": "r22-separator-next-0-1",
+      "source": "1. A\n2. C d",
+      "canonical": "1. A\n2. C d",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQvprKCurcrxCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA6aygrq3K8QgBBXN0YXJ0AX0BBwDprKCurcrxCAEDCGxpc3RJdGVtBwDprKCurcrxCAMDCXBhcmFncmFwaAcA6aygrq3K8QgEBgQA6aygrq3K8QgFAUGH6aygrq3K8QgDAwhsaXN0SXRlbQcA6aygrq3K8QgHAwlwYXJhZ3JhcGgHAOmsoK6tyvEICAYEAOmsoK6tyvEICQVD4oCpZAA="
+    },
+    {
+      "name": "r22-spaces-1",
+      "source": "- A  \n- B",
+      "canonical": "- A  \n- B",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQrkgLmR2ZmtBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDkgLmR2ZmtBgEDCGxpc3RJdGVtBwDkgLmR2ZmtBgIDCXBhcmFncmFwaAcA5IC5kdmZrQYDBgQA5IC5kdmZrQYEA0EgIIfkgLmR2ZmtBgIDCGxpc3RJdGVtBwDkgLmR2ZmtBggDCXBhcmFncmFwaAcA5IC5kdmZrQYJBgQA5IC5kdmZrQYKAUIA"
+    },
+    {
+      "name": "r22-last-spaces-1",
+      "source": "- A\n- B  ",
+      "canonical": "- A\n- B",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQrWlOCx7Yr0DAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDWlOCx7Yr0DAEDCGxpc3RJdGVtBwDWlOCx7Yr0DAIDCXBhcmFncmFwaAcA1pTgse2K9AwDBgQA1pTgse2K9AwEAUGH1pTgse2K9AwCAwhsaXN0SXRlbQcA1pTgse2K9AwGAwlwYXJhZ3JhcGgHANaU4LHtivQMBwYEANaU4LHtivQMCAFCAA=="
+    },
+    {
+      "name": "r22-separator-first-1-0",
+      "source": "- A b\n- C",
+      "canonical": "- A b\n- C",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQrpo/yWr+C+CwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDpo/yWr+C+CwEDCGxpc3RJdGVtBwDpo/yWr+C+CwIDCXBhcmFncmFwaAcA6aP8lq/gvgsDBgQA6aP8lq/gvgsEBUHigKhih+mj/Jav4L4LAgMIbGlzdEl0ZW0HAOmj/Jav4L4LCAMJcGFyYWdyYXBoBwDpo/yWr+C+CwkGBADpo/yWr+C+CwoBQwA="
+    },
+    {
+      "name": "r22-separator-next-1-0",
+      "source": "- A\n- C d",
+      "canonical": "- A\n- C d",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQrX/ufy7Oi8AQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDX/ufy7Oi8AQEDCGxpc3RJdGVtBwDX/ufy7Oi8AQIDCXBhcmFncmFwaAcA1/7n8uzovAEDBgQA1/7n8uzovAEEAUGH1/7n8uzovAECAwhsaXN0SXRlbQcA1/7n8uzovAEGAwlwYXJhZ3JhcGgHANf+5/Ls6LwBBwYEANf+5/Ls6LwBCAVD4oCoZAA="
+    },
+    {
+      "name": "r22-separator-first-1-1",
+      "source": "- A b\n- C",
+      "canonical": "- A b\n- C",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQq+6uibmYtgACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAL7q6JuZi2ABAwhsaXN0SXRlbQcAvurom5mLYAIDCXBhcmFncmFwaAcAvurom5mLYAMGBAC+6uibmYtgBAVB4oCpYoe+6uibmYtgAgMIbGlzdEl0ZW0HAL7q6JuZi2AIAwlwYXJhZ3JhcGgHAL7q6JuZi2AJBgQAvurom5mLYAoBQwA="
+    },
+    {
+      "name": "r22-separator-next-1-1",
+      "source": "- A\n- C d",
+      "canonical": "- A\n- C d",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQrjtsrUwK+3DwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDjtsrUwK+3DwEDCGxpc3RJdGVtBwDjtsrUwK+3DwIDCXBhcmFncmFwaAcA47bK1MCvtw8DBgQA47bK1MCvtw8EAUGH47bK1MCvtw8CAwhsaXN0SXRlbQcA47bK1MCvtw8GAwlwYXJhZ3JhcGgHAOO2ytTAr7cPBwYEAOO2ytTAr7cPCAVD4oCpZAA="
+    },
+    {
+      "name": "r22-spaces-2",
+      "source": "- [ ] A  \n- [ ] B",
+      "canonical": "- [ ] A  \n- [ ] B",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQzRrNWKk6PtDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA0azVipOj7Q0BAwh0YXNrSXRlbSgA0azVipOj7Q0CB2NoZWNrZWQBeQcA0azVipOj7Q0CAwlwYXJhZ3JhcGgHANGs1YqTo+0NBAYEANGs1YqTo+0NBQNBICCH0azVipOj7Q0CAwh0YXNrSXRlbSgA0azVipOj7Q0JB2NoZWNrZWQBeQcA0azVipOj7Q0JAwlwYXJhZ3JhcGgHANGs1YqTo+0NCwYEANGs1YqTo+0NDAFCAA=="
+    },
+    {
+      "name": "r22-last-spaces-2",
+      "source": "- [ ] A\n- [ ] B  ",
+      "canonical": "- [ ] A\n- [ ] B",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQydldzAxL/7BwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAnZXcwMS/+wcBAwh0YXNrSXRlbSgAnZXcwMS/+wcCB2NoZWNrZWQBeQcAnZXcwMS/+wcCAwlwYXJhZ3JhcGgHAJ2V3MDEv/sHBAYEAJ2V3MDEv/sHBQFBh52V3MDEv/sHAgMIdGFza0l0ZW0oAJ2V3MDEv/sHBwdjaGVja2VkAXkHAJ2V3MDEv/sHBwMJcGFyYWdyYXBoBwCdldzAxL/7BwkGBACdldzAxL/7BwoBQgA="
+    },
+    {
+      "name": "r22-separator-first-2-0",
+      "source": "- [ ] A b\n- [ ] C",
+      "canonical": "- [ ] A b\n- [ ] C",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQyOvZLz2JyNAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAjr2S89icjQMBAwh0YXNrSXRlbSgAjr2S89icjQMCB2NoZWNrZWQBeQcAjr2S89icjQMCAwlwYXJhZ3JhcGgHAI69kvPYnI0DBAYEAI69kvPYnI0DBQVB4oCoYoeOvZLz2JyNAwIDCHRhc2tJdGVtKACOvZLz2JyNAwkHY2hlY2tlZAF5BwCOvZLz2JyNAwkDCXBhcmFncmFwaAcAjr2S89icjQMLBgQAjr2S89icjQMMAUMA"
+    },
+    {
+      "name": "r22-separator-next-2-0",
+      "source": "- [ ] A\n- [ ] C d",
+      "canonical": "- [ ] A\n- [ ] C d",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQz13vT25OzFBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA9d709uTsxQcBAwh0YXNrSXRlbSgA9d709uTsxQcCB2NoZWNrZWQBeQcA9d709uTsxQcCAwlwYXJhZ3JhcGgHAPXe9Pbk7MUHBAYEAPXe9Pbk7MUHBQFBh/Xe9Pbk7MUHAgMIdGFza0l0ZW0oAPXe9Pbk7MUHBwdjaGVja2VkAXkHAPXe9Pbk7MUHBwMJcGFyYWdyYXBoBwD13vT25OzFBwkGBAD13vT25OzFBwoFQ+KAqGQA"
+    },
+    {
+      "name": "r22-separator-first-2-1",
+      "source": "- [ ] A b\n- [ ] C",
+      "canonical": "- [ ] A b\n- [ ] C",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQzP98mvx/0VACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCHRhc2tMaXN0BwDP98mvx/0VAQMIdGFza0l0ZW0oAM/3ya/H/RUCB2NoZWNrZWQBeQcAz/fJr8f9FQIDCXBhcmFncmFwaAcAz/fJr8f9FQQGBADP98mvx/0VBQVB4oCpYofP98mvx/0VAgMIdGFza0l0ZW0oAM/3ya/H/RUJB2NoZWNrZWQBeQcAz/fJr8f9FQkDCXBhcmFncmFwaAcAz/fJr8f9FQsGBADP98mvx/0VDAFDAA=="
+    },
+    {
+      "name": "r22-separator-next-2-1",
+      "source": "- [ ] A\n- [ ] C d",
+      "canonical": "- [ ] A\n- [ ] C d",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQyBzeWbofuKCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAgc3lm6H7igsBAwh0YXNrSXRlbSgAgc3lm6H7igsCB2NoZWNrZWQBeQcAgc3lm6H7igsCAwlwYXJhZ3JhcGgHAIHN5Zuh+4oLBAYEAIHN5Zuh+4oLBQFBh4HN5Zuh+4oLAgMIdGFza0l0ZW0oAIHN5Zuh+4oLBwdjaGVja2VkAXkHAIHN5Zuh+4oLBwMJcGFyYWdyYXBoBwCBzeWbofuKCwkGBACBzeWbofuKCwoFQ+KAqWQA"
+    },
+    {
+      "name": "r22-tab-exit-0",
+      "source": "- a\n\n b\n\tc",
+      "canonical": "- a\n\n&#32;b\n&#9;c",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQm6oZvg5LilAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC6oZvg5LilAgEDCGxpc3RJdGVtBwC6oZvg5LilAgIDCXBhcmFncmFwaAcAuqGb4OS4pQIDBgQAuqGb4OS4pQIEAWGHuqGb4OS4pQIBAwlwYXJhZ3JhcGgHALqhm+DkuKUCBgYEALqhm+DkuKUCBwUgYgoJYwA="
+    },
+    {
+      "name": "r22-tab-exit-1",
+      "source": "-\n b\n\tc",
+      "canonical": "- \n\n&#32;b\n&#9;c",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQeHte2rj9qMCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCHte2rj9qMCgEDCGxpc3RJdGVtBwCHte2rj9qMCgIDCXBhcmFncmFwaIeHte2rj9qMCgEDCXBhcmFncmFwaAcAh7Xtq4/ajAoEBgQAh7Xtq4/ajAoFBSBiCgljAA=="
+    },
+    {
+      "name": "r22-tab-exit-2",
+      "source": "1. a\n\n  b\n\tc",
+      "canonical": "1. a\n\n&#32; b\n&#9;c",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQr8yPK+wYinBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA/MjyvsGIpwYBBXN0YXJ0AX0BBwD8yPK+wYinBgEDCGxpc3RJdGVtBwD8yPK+wYinBgMDCXBhcmFncmFwaAcA/MjyvsGIpwYEBgQA/MjyvsGIpwYFAWGH/MjyvsGIpwYBAwlwYXJhZ3JhcGgHAPzI8r7BiKcGBwYEAPzI8r7BiKcGCAYgIGIKCWMA"
+    },
+    {
+      "name": "r22-tab-exit-3",
+      "source": "- a\n # h\n\tx\ty",
+      "canonical": "- a\n\n# h\n\n```\nx\ty\n```",
+      "nativeSourceRefuse": true,
+      "foldRefuse": true,
+      "rustBase64": "AQ20nKff0LGuAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC0nKff0LGuAgEDCGxpc3RJdGVtBwC0nKff0LGuAgIDCXBhcmFncmFwaAcAtJyn39CxrgIDBgQAtJyn39CxrgIEAWGHtJyn39CxrgIBAwdoZWFkaW5nKAC0nKff0LGuAgYFbGV2ZWwBfQEHALScp9/Qsa4CBgYEALScp9/Qsa4CCAFoh7Scp9/Qsa4CBgMJY29kZUJsb2NrBwC0nKff0LGuAgoGBAC0nKff0LGuAgsDeAl5AA=="
+    },
+    {
+      "name": "r22-tab-exit-4",
+      "source": "- a\n\nroot\n\ttext",
+      "canonical": "- a\n\nroot\n&#9;text",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQm0oOvWivDvBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC0oOvWivDvBwEDCGxpc3RJdGVtBwC0oOvWivDvBwIDCXBhcmFncmFwaAcAtKDr1orw7wcDBgQAtKDr1orw7wcEAWGHtKDr1orw7wcBAwlwYXJhZ3JhcGgHALSg69aK8O8HBgYEALSg69aK8O8HBwpyb290Cgl0ZXh0AA=="
+    },
+    {
+      "name": "r22-empty-0",
+      "source": "- - \n\n x",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r22-empty-1",
+      "source": "1. - \n\n  x",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r22-empty-2",
+      "source": "- a\n\n  - [ ]\n\n x",
+      "canonical": "- a\n  - [ ] \n\n&#32;x",
+      "foldRefuse": true,
+      "rustBase64": "AQ2TquvTrrTkBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCTquvTrrTkBgEDCGxpc3RJdGVtBwCTquvTrrTkBgIDCXBhcmFncmFwaAcAk6rr06605AYDBgQAk6rr06605AYEAWGHk6rr06605AYDAwh0YXNrTGlzdAcAk6rr06605AYGAwh0YXNrSXRlbSgAk6rr06605AYHB2NoZWNrZWQBeQcAk6rr06605AYHAwlwYXJhZ3JhcGiHk6rr06605AYBAwlwYXJhZ3JhcGgHAJOq69OutOQGCgYEAJOq69OutOQGCwIgeAA="
+    },
+    {
+      "name": "r22-empty-3",
+      "source": "- a\n  - b\n\n    -\n\n x",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r22-empty-4",
+      "source": "- a\n  - b\n\n   c\n\n  -\n\n x",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r22-content-tab-0",
+      "source": "1. Name\tValue",
+      "canonical": "1. Name\tValue",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQeii6Hx7NbACAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAoouh8ezWwAgBBXN0YXJ0AX0BBwCii6Hx7NbACAEDCGxpc3RJdGVtBwCii6Hx7NbACAMDCXBhcmFncmFwaAcAoouh8ezWwAgEBgQAoouh8ezWwAgFCk5hbWUJVmFsdWUA"
+    },
+    {
+      "name": "r22-content-tab-1",
+      "source": "- Name\tValue",
+      "canonical": "- Name\tValue",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQaQufXIlc//DAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCQufXIlc//DAEDCGxpc3RJdGVtBwCQufXIlc//DAIDCXBhcmFncmFwaAcAkLn1yJXP/wwDBgQAkLn1yJXP/wwECk5hbWUJVmFsdWUA"
+    },
+    {
+      "name": "r22-content-tab-2",
+      "source": "1) a\tb",
+      "canonical": "1. a\tb",
+      "exactSource": true,
+      "fileFold": true,
+      "witnessSeed": true,
+      "foldSeed": true,
+      "rustBase64": "AgfB1/jtxNPzDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAwdf47cTT8w0BBXN0YXJ0AX0BBwDB1/jtxNPzDQEDCGxpc3RJdGVtBwDB1/jtxNPzDQMDCXBhcmFncmFwaAcAwdf47cTT8w0EBgQAwdf47cTT8w0FA2EJYgOZ6evT0NsEACgBBG1ldGESZG9oY01hcmtkb3duU291cmNlAXcGMSkgYQliKAEEbWV0YRhkb2hjTWFya2Rvd25Tb3VyY2VTaGEyNTYBd0A2ZTkyN2MwMTJlZTI5MWZmMjBjMGE2ODYzZTA3NGZmMDk1MDFjNDRiMzBhYTYzZGQ3YTA5ZTRmOGNjY2FhODAwKAEEbWV0YSJkb2hjTWFya2Rvd25Tb3VyY2VQcm9qZWN0aW9uU2hhMjU2AXdAZTkwY2I3Mzk1MTQxNGU2ZTI5MTFiNzQ5YTNlMjllOWZlN2QxMGVkNTExMGE5Y2MzNmRhYmViZDNhZmU4MWNmZAA="
+    },
+    {
+      "name": "r22-content-tab-3",
+      "source": "- a\n  b\tc",
+      "canonical": "- a\n  b\tc",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQbDvLiXtZ7vAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDDvLiXtZ7vAwEDCGxpc3RJdGVtBwDDvLiXtZ7vAwIDCXBhcmFncmFwaAcAw7y4l7We7wMDBgQAw7y4l7We7wMEBWEKYgljAA=="
+    },
+    {
+      "name": "r22-content-tab-4",
+      "source": "- a\n\n \t-\n\n     x",
+      "canonical": "- a\n\n  - \n\n     x",
+      "foldRefuse": true,
+      "rustBase64": "AQz3juqRuP7MBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD3juqRuP7MBQEDCGxpc3RJdGVtBwD3juqRuP7MBQIDCXBhcmFncmFwaAcA947qkbj+zAUDBgQA947qkbj+zAUEAWGH947qkbj+zAUDAwpidWxsZXRMaXN0BwD3juqRuP7MBQYDCGxpc3RJdGVtBwD3juqRuP7MBQcDCXBhcmFncmFwaIf3juqRuP7MBQYDCXBhcmFncmFwaAcA947qkbj+zAUJBgQA947qkbj+zAUKBCAgIHgA"
+    },
+    {
+      "name": "r22-indented-heading-exits-list",
+      "source": "- a\n # h\ntext",
+      "canonical": "- a\n\n# h\n\ntext",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQ2HqZHZ1cDFDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCHqZHZ1cDFDQEDCGxpc3RJdGVtBwCHqZHZ1cDFDQIDCXBhcmFncmFwaAcAh6mR2dXAxQ0DBgQAh6mR2dXAxQ0EAWGHh6mR2dXAxQ0BAwdoZWFkaW5nKACHqZHZ1cDFDQYFbGV2ZWwBfQEHAIepkdnVwMUNBgYEAIepkdnVwMUNCAFoh4epkdnVwMUNBgMJcGFyYWdyYXBoBwCHqZHZ1cDFDQoGBACHqZHZ1cDFDQsEdGV4dAA="
+    },
+    {
+      "name": "r22-ordered-checkbox-tab-0",
+      "source": "1. [ ]\tName\tValue",
+      "canonical": "1. \\[ ]\tName\tValue",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQevpfXrrozcDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAr6X1666M3A8BBXN0YXJ0AX0BBwCvpfXrrozcDwEDCGxpc3RJdGVtBwCvpfXrrozcDwMDCXBhcmFncmFwaAcAr6X1666M3A8EBgQAr6X1666M3A8FDlsgXQlOYW1lCVZhbHVlAA=="
+    },
+    {
+      "name": "r22-ordered-checkbox-tab-1",
+      "source": "1) [ ]\tName\tValue",
+      "canonical": "1. \\[ ]\tName\tValue",
+      "exactSource": true,
+      "fileFold": true,
+      "rustBase64": "AQfim/ay5KQGACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDC29yZGVyZWRMaXN0KADim/ay5KQGAQVzdGFydAF9AQcA4pv2suSkBgEDCGxpc3RJdGVtBwDim/ay5KQGAwMJcGFyYWdyYXBoBwDim/ay5KQGBAYEAOKb9rLkpAYFDlsgXQlOYW1lCVZhbHVlAA=="
+    },
+    {
+      "name": "r23-reference-flat-0",
+      "source": "- See [docs]\n- Next\n\nMore text.\n\n[docs]: https://example.com",
+      "canonical": "- See [docs]\n- Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "- See [docs](https://example.com)\n- Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "ARDz4+7d17jqBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDz4+7d17jqBgEDCGxpc3RJdGVtBwDz4+7d17jqBgIDCXBhcmFncmFwaAcA8+Pu3de46gYDBgQA8+Pu3de46gYEClNlZSBbZG9jc12H8+Pu3de46gYCAwhsaXN0SXRlbQcA8+Pu3de46gYPAwlwYXJhZ3JhcGgHAPPj7t3XuOoGEAYEAPPj7t3XuOoGEQROZXh0h/Pj7t3XuOoGAQMJcGFyYWdyYXBoBwDz4+7d17jqBhYGBADz4+7d17jqBhcKTW9yZSB0ZXh0Lofz4+7d17jqBhYDCXBhcmFncmFwaAcA8+Pu3de46gYiBgQA8+Pu3de46gYjG1tkb2NzXTogaHR0cHM6Ly9leGFtcGxlLmNvbQA=",
+      "nativeRereadCanonical": "- See [docs]\n- Next\n\nMore text.\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com",
+      "fileFold": true,
+      "witnessRefuse": true
+    },
+    {
+      "name": "r23-reference-nested-0",
+      "source": "- a\n  - See [docs]\n\n[docs]: https://example.com",
+      "canonical": "- a\n  - See [docs]\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "- a\n  - See [docs](https://example.com)\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "AQ7yjqryqK6zBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDyjqryqK6zBQEDCGxpc3RJdGVtBwDyjqryqK6zBQIDCXBhcmFncmFwaAcA8o6q8qiuswUDBgQA8o6q8qiuswUEAWGH8o6q8qiuswUDAwpidWxsZXRMaXN0BwDyjqryqK6zBQYDCGxpc3RJdGVtBwDyjqryqK6zBQcDCXBhcmFncmFwaAcA8o6q8qiuswUIBgQA8o6q8qiuswUJClNlZSBbZG9jc12H8o6q8qiuswUBAwlwYXJhZ3JhcGgHAPKOqvKorrMFFAYEAPKOqvKorrMFFRtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
+      "nativeRereadCanonical": "- a\n  - See [docs]\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+    },
+    {
+      "name": "r23-reference-quote-0",
+      "source": "> - See [docs]\n> - Next\n\n[docs]: https://example.com",
+      "canonical": "> - See [docs]\n> - Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "> - See [docs](https://example.com)\n> - Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "AQ7xxbbAwa+vCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwDxxbbAwa+vCQEDCmJ1bGxldExpc3QHAPHFtsDBr68JAgMIbGlzdEl0ZW0HAPHFtsDBr68JAwMJcGFyYWdyYXBoBwDxxbbAwa+vCQQGBADxxbbAwa+vCQUKU2VlIFtkb2NzXYfxxbbAwa+vCQMDCGxpc3RJdGVtBwDxxbbAwa+vCRADCXBhcmFncmFwaAcA8cW2wMGvrwkRBgQA8cW2wMGvrwkSBE5leHSH8cW2wMGvrwkBAwlwYXJhZ3JhcGgHAPHFtsDBr68JFwYEAPHFtsDBr68JGBtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
+      "nativeRereadCanonical": "> - See [docs]\n> - Next\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com",
+      "fileFold": true,
+      "witnessRefuse": true
+    },
+    {
+      "name": "r23-reference-flat-1",
+      "source": "1. See [docs]\n1. Next\n\nMore text.\n\n[docs]: https://example.com",
+      "canonical": "1. See [docs]\n2. Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "1. See [docs](https://example.com)\n2. Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "ARGj3YHl4cToCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAo92B5eHE6AsBBXN0YXJ0AX0BBwCj3YHl4cToCwEDCGxpc3RJdGVtBwCj3YHl4cToCwMDCXBhcmFncmFwaAcAo92B5eHE6AsEBgQAo92B5eHE6AsFClNlZSBbZG9jc12Ho92B5eHE6AsDAwhsaXN0SXRlbQcAo92B5eHE6AsQAwlwYXJhZ3JhcGgHAKPdgeXhxOgLEQYEAKPdgeXhxOgLEgROZXh0h6PdgeXhxOgLAQMJcGFyYWdyYXBoBwCj3YHl4cToCxcGBACj3YHl4cToCxgKTW9yZSB0ZXh0Loej3YHl4cToCxcDCXBhcmFncmFwaAcAo92B5eHE6AsjBgQAo92B5eHE6AskG1tkb2NzXTogaHR0cHM6Ly9leGFtcGxlLmNvbQA=",
+      "nativeRereadCanonical": "1. See [docs]\n2. Next\n\nMore text.\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com",
+      "fileFold": true,
+      "witnessRefuse": true
+    },
+    {
+      "name": "r23-reference-nested-1",
+      "source": "- a\n  1. See [docs]\n\n[docs]: https://example.com",
+      "canonical": "- a\n  1. See [docs]\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "- a\n  1. See [docs](https://example.com)\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "AQ/i+La8sbW2AQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDi+La8sbW2AQEDCGxpc3RJdGVtBwDi+La8sbW2AQIDCXBhcmFncmFwaAcA4vi2vLG1tgEDBgQA4vi2vLG1tgEEAWGH4vi2vLG1tgEDAwtvcmRlcmVkTGlzdCgA4vi2vLG1tgEGBXN0YXJ0AX0BBwDi+La8sbW2AQYDCGxpc3RJdGVtBwDi+La8sbW2AQgDCXBhcmFncmFwaAcA4vi2vLG1tgEJBgQA4vi2vLG1tgEKClNlZSBbZG9jc12H4vi2vLG1tgEBAwlwYXJhZ3JhcGgHAOL4tryxtbYBFQYEAOL4tryxtbYBFhtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
+      "nativeRereadCanonical": "- a\n  1. See [docs]\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+    },
+    {
+      "name": "r23-reference-quote-1",
+      "source": "> 1. See [docs]\n> 1. Next\n\n[docs]: https://example.com",
+      "canonical": "> 1. See [docs]\n> 2. Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "> 1. See [docs](https://example.com)\n> 2. Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "AQ+ciJ7erZOzCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwCciJ7erZOzCQEDC29yZGVyZWRMaXN0KACciJ7erZOzCQIFc3RhcnQBfQEHAJyInt6tk7MJAgMIbGlzdEl0ZW0HAJyInt6tk7MJBAMJcGFyYWdyYXBoBwCciJ7erZOzCQUGBACciJ7erZOzCQYKU2VlIFtkb2NzXYeciJ7erZOzCQQDCGxpc3RJdGVtBwCciJ7erZOzCREDCXBhcmFncmFwaAcAnIie3q2TswkSBgQAnIie3q2TswkTBE5leHSHnIie3q2TswkBAwlwYXJhZ3JhcGgHAJyInt6tk7MJGAYEAJyInt6tk7MJGRtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
+      "nativeRereadCanonical": "> 1. See [docs]\n> 2. Next\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com",
+      "fileFold": true,
+      "witnessRefuse": true
+    },
+    {
+      "name": "r23-reference-flat-2",
+      "source": "- [ ] See [docs]\n- [ ] Next\n\nMore text.\n\n[docs]: https://example.com",
+      "canonical": "- [ ] See [docs]\n- [ ] Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "- [ ] See [docs](https://example.com)\n- [ ] Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "ARLYn4S0/PifAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA2J+EtPz4nwIBAwh0YXNrSXRlbSgA2J+EtPz4nwICB2NoZWNrZWQBeQcA2J+EtPz4nwICAwlwYXJhZ3JhcGgHANifhLT8+J8CBAYEANifhLT8+J8CBQpTZWUgW2RvY3Ndh9ifhLT8+J8CAgMIdGFza0l0ZW0oANifhLT8+J8CEAdjaGVja2VkAXkHANifhLT8+J8CEAMJcGFyYWdyYXBoBwDYn4S0/PifAhIGBADYn4S0/PifAhMETmV4dIfYn4S0/PifAgEDCXBhcmFncmFwaAcA2J+EtPz4nwIYBgQA2J+EtPz4nwIZCk1vcmUgdGV4dC6H2J+EtPz4nwIYAwlwYXJhZ3JhcGgHANifhLT8+J8CJAYEANifhLT8+J8CJRtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
+      "nativeRereadCanonical": "- [ ] See [docs]\n- [ ] Next\n\nMore text.\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com",
+      "fileFold": true,
+      "witnessRefuse": true
+    },
+    {
+      "name": "r23-reference-nested-2",
+      "source": "- a\n  - [ ] See [docs]\n\n[docs]: https://example.com",
+      "canonical": "- a\n  - [ ] See [docs]\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "- a\n  - [ ] See [docs](https://example.com)\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "AQ+lisjjprXzAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwClisjjprXzAwEDCGxpc3RJdGVtBwClisjjprXzAwIDCXBhcmFncmFwaAcApYrI46a18wMDBgQApYrI46a18wMEAWGHpYrI46a18wMDAwh0YXNrTGlzdAcApYrI46a18wMGAwh0YXNrSXRlbSgApYrI46a18wMHB2NoZWNrZWQBeQcApYrI46a18wMHAwlwYXJhZ3JhcGgHAKWKyOOmtfMDCQYEAKWKyOOmtfMDCgpTZWUgW2RvY3Ndh6WKyOOmtfMDAQMJcGFyYWdyYXBoBwClisjjprXzAxUGBAClisjjprXzAxYbW2RvY3NdOiBodHRwczovL2V4YW1wbGUuY29tAA==",
+      "nativeRereadCanonical": "- a\n  - [ ] See [docs]\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+    },
+    {
+      "name": "r23-reference-quote-2",
+      "source": "> - [ ] See [docs]\n> - [ ] Next\n\n[docs]: https://example.com",
+      "canonical": "> - [ ] See [docs]\n> - [ ] Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "> - [ ] See [docs](https://example.com)\n> - [ ] Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "ARCX++G/wJuCCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwCX++G/wJuCCgEDCHRhc2tMaXN0BwCX++G/wJuCCgIDCHRhc2tJdGVtKACX++G/wJuCCgMHY2hlY2tlZAF5BwCX++G/wJuCCgMDCXBhcmFncmFwaAcAl/vhv8CbggoFBgQAl/vhv8CbggoGClNlZSBbZG9jc12Hl/vhv8CbggoDAwh0YXNrSXRlbSgAl/vhv8CbggoRB2NoZWNrZWQBeQcAl/vhv8CbggoRAwlwYXJhZ3JhcGgHAJf74b/Am4IKEwYEAJf74b/Am4IKFAROZXh0h5f74b/Am4IKAQMJcGFyYWdyYXBoBwCX++G/wJuCChkGBACX++G/wJuCChobW2RvY3NdOiBodHRwczovL2V4YW1wbGUuY29tAA==",
+      "nativeRereadCanonical": "> - [ ] See [docs]\n> - [ ] Next\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com",
+      "fileFold": true,
+      "witnessRefuse": true
+    },
+    {
+      "name": "r23-outer-0",
+      "source": "- a\n  - b\n\n  c\td",
+      "canonical": "- a\n  - b\n\n  c\td",
+      "exactSource": true,
+      "rustBase64": "AQ6o/t23hoWBCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCo/t23hoWBCgEDCGxpc3RJdGVtBwCo/t23hoWBCgIDCXBhcmFncmFwaAcAqP7dt4aFgQoDBgQAqP7dt4aFgQoEAWGHqP7dt4aFgQoDAwpidWxsZXRMaXN0BwCo/t23hoWBCgYDCGxpc3RJdGVtBwCo/t23hoWBCgcDCXBhcmFncmFwaAcAqP7dt4aFgQoIBgQAqP7dt4aFgQoJAWKHqP7dt4aFgQoGAwlwYXJhZ3JhcGgHAKj+3beGhYEKCwYEAKj+3beGhYEKDANjCWQA",
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-outer-1",
+      "source": "- a\n  - b\n  ```\n  x\ty\n  ```",
+      "canonical": "- a\n  - b\n  ```\n  x\ty\n  ```",
+      "exactSource": true,
+      "rustBase64": "AQ65j8HHvf2XCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC5j8HHvf2XCQEDCGxpc3RJdGVtBwC5j8HHvf2XCQIDCXBhcmFncmFwaAcAuY/Bx739lwkDBgQAuY/Bx739lwkEAWGHuY/Bx739lwkDAwpidWxsZXRMaXN0BwC5j8HHvf2XCQYDCGxpc3RJdGVtBwC5j8HHvf2XCQcDCXBhcmFncmFwaAcAuY/Bx739lwkIBgQAuY/Bx739lwkJAWKHuY/Bx739lwkGAwljb2RlQmxvY2sHALmPwce9/ZcJCwYEALmPwce9/ZcJDAN4CXkA",
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-outer-2",
+      "source": "- a\n  - b\n\n  c\n - d",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-outer-3",
+      "source": "- a\n # h\n - b",
+      "canonical": "- a\n\n# h\n\n- b",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQ+LuN/8peahBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCLuN/8peahBwEDCGxpc3RJdGVtBwCLuN/8peahBwIDCXBhcmFncmFwaAcAi7jf/KXmoQcDBgQAi7jf/KXmoQcEAWGHi7jf/KXmoQcBAwdoZWFkaW5nKACLuN/8peahBwYFbGV2ZWwBfQEHAIu43/yl5qEHBgYEAIu43/yl5qEHCAFoh4u43/yl5qEHBgMKYnVsbGV0TGlzdAcAi7jf/KXmoQcKAwhsaXN0SXRlbQcAi7jf/KXmoQcLAwlwYXJhZ3JhcGgHAIu43/yl5qEHDAYEAIu43/yl5qEHDQFiAA=="
+    },
+    {
+      "name": "r23-bare-0",
+      "source": "- -\n\n x",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-bare-1",
+      "source": "1. -\n\n  x",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-bare-2",
+      "source": "- -\n\n   x",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-bare-3",
+      "source": "- a\n  - -\n\n x",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-continuation-column",
+      "source": "- a\n    - b\n \t- c",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-slow-spaces-heading-0",
+      "source": "- A\n- B  \n\n# H",
+      "canonical": "- A\n- B\n\n# H",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQ6Pn4W1mJPRDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCPn4W1mJPRDgEDCGxpc3RJdGVtBwCPn4W1mJPRDgIDCXBhcmFncmFwaAcAj5+FtZiT0Q4DBgQAj5+FtZiT0Q4EAUGHj5+FtZiT0Q4CAwhsaXN0SXRlbQcAj5+FtZiT0Q4GAwlwYXJhZ3JhcGgHAI+fhbWYk9EOBwYEAI+fhbWYk9EOCAFCh4+fhbWYk9EOAQMHaGVhZGluZygAj5+FtZiT0Q4KBWxldmVsAX0BBwCPn4W1mJPRDgoGBACPn4W1mJPRDgwBSAA="
+    },
+    {
+      "name": "r23-slow-spaces-inline-0",
+      "source": "- *A*\n- B  \n\nAfter",
+      "canonical": "- *A*\n- B\n\nAfter",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQ3iu9CYpsWLDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDiu9CYpsWLDAEDCGxpc3RJdGVtBwDiu9CYpsWLDAIDCXBhcmFncmFwaAcA4rvQmKbFiwwDBgQA4rvQmKbFiwwEAypBKofiu9CYpsWLDAIDCGxpc3RJdGVtBwDiu9CYpsWLDAgDCXBhcmFncmFwaAcA4rvQmKbFiwwJBgQA4rvQmKbFiwwKAUKH4rvQmKbFiwwBAwlwYXJhZ3JhcGgHAOK70JimxYsMDAYEAOK70JimxYsMDQVBZnRlcgA="
+    },
+    {
+      "name": "r23-slow-spaces-nested-0",
+      "source": "- a\n  - B  \n\nAfter",
+      "canonical": "- a\n  - B\n\nAfter",
+      "exactSource": true,
+      "rustBase64": "AQ6X3aDgzZi2AgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCX3aDgzZi2AgEDCGxpc3RJdGVtBwCX3aDgzZi2AgIDCXBhcmFncmFwaAcAl92g4M2YtgIDBgQAl92g4M2YtgIEAWGHl92g4M2YtgIDAwpidWxsZXRMaXN0BwCX3aDgzZi2AgYDCGxpc3RJdGVtBwCX3aDgzZi2AgcDCXBhcmFncmFwaAcAl92g4M2YtgIIBgQAl92g4M2YtgIJAUKHl92g4M2YtgIBAwlwYXJhZ3JhcGgHAJfdoODNmLYCCwYEAJfdoODNmLYCDAVBZnRlcgA=",
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-slow-spaces-heading-1",
+      "source": "1. A\n1. B  \n\n# H",
+      "canonical": "1. A\n2. B\n\n# H",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQ/mvP6Pnuz3BgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA5rz+j57s9wYBBXN0YXJ0AX0BBwDmvP6Pnuz3BgEDCGxpc3RJdGVtBwDmvP6Pnuz3BgMDCXBhcmFncmFwaAcA5rz+j57s9wYEBgQA5rz+j57s9wYFAUGH5rz+j57s9wYDAwhsaXN0SXRlbQcA5rz+j57s9wYHAwlwYXJhZ3JhcGgHAOa8/o+e7PcGCAYEAOa8/o+e7PcGCQFCh+a8/o+e7PcGAQMHaGVhZGluZygA5rz+j57s9wYLBWxldmVsAX0BBwDmvP6Pnuz3BgsGBADmvP6Pnuz3Bg0BSAA="
+    },
+    {
+      "name": "r23-slow-spaces-inline-1",
+      "source": "1. *A*\n1. B  \n\nAfter",
+      "canonical": "1. *A*\n2. B\n\nAfter",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQ6oho+3nO/ZCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAqIaPt5zv2QgBBXN0YXJ0AX0BBwCoho+3nO/ZCAEDCGxpc3RJdGVtBwCoho+3nO/ZCAMDCXBhcmFncmFwaAcAqIaPt5zv2QgEBgQAqIaPt5zv2QgFAypBKoeoho+3nO/ZCAMDCGxpc3RJdGVtBwCoho+3nO/ZCAkDCXBhcmFncmFwaAcAqIaPt5zv2QgKBgQAqIaPt5zv2QgLAUKHqIaPt5zv2QgBAwlwYXJhZ3JhcGgHAKiGj7ec79kIDQYEAKiGj7ec79kIDgVBZnRlcgA="
+    },
+    {
+      "name": "r23-slow-spaces-nested-1",
+      "source": "- a\n  1. B  \n\nAfter",
+      "canonical": "- a\n  1. B\n\nAfter",
+      "exactSource": true,
+      "rustBase64": "AQ/B4IP4uPihDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDB4IP4uPihDQEDCGxpc3RJdGVtBwDB4IP4uPihDQIDCXBhcmFncmFwaAcAweCD+Lj4oQ0DBgQAweCD+Lj4oQ0EAWGHweCD+Lj4oQ0DAwtvcmRlcmVkTGlzdCgAweCD+Lj4oQ0GBXN0YXJ0AX0BBwDB4IP4uPihDQYDCGxpc3RJdGVtBwDB4IP4uPihDQgDCXBhcmFncmFwaAcAweCD+Lj4oQ0JBgQAweCD+Lj4oQ0KAUKHweCD+Lj4oQ0BAwlwYXJhZ3JhcGgHAMHgg/i4+KENDAYEAMHgg/i4+KENDQVBZnRlcgA=",
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-slow-spaces-heading-2",
+      "source": "- [ ] A\n- [ ] B  \n\n# H",
+      "canonical": "- [ ] A\n- [ ] B\n\n# H",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "ARCruuHgs4nMAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAq7rh4LOJzAIBAwh0YXNrSXRlbSgAq7rh4LOJzAICB2NoZWNrZWQBeQcAq7rh4LOJzAICAwlwYXJhZ3JhcGgHAKu64eCzicwCBAYEAKu64eCzicwCBQFBh6u64eCzicwCAgMIdGFza0l0ZW0oAKu64eCzicwCBwdjaGVja2VkAXkHAKu64eCzicwCBwMJcGFyYWdyYXBoBwCruuHgs4nMAgkGBACruuHgs4nMAgoBQoeruuHgs4nMAgEDB2hlYWRpbmcoAKu64eCzicwCDAVsZXZlbAF9AQcAq7rh4LOJzAIMBgQAq7rh4LOJzAIOAUgA"
+    },
+    {
+      "name": "r23-slow-spaces-inline-2",
+      "source": "- [ ] *A*\n- [ ] B  \n\nAfter",
+      "canonical": "- [ ] *A*\n- [ ] B\n\nAfter",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQ+Vr7qw+KaeDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAla+6sPimng8BAwh0YXNrSXRlbSgAla+6sPimng8CB2NoZWNrZWQBeQcAla+6sPimng8CAwlwYXJhZ3JhcGgHAJWvurD4pp4PBAYEAJWvurD4pp4PBQMqQSqHla+6sPimng8CAwh0YXNrSXRlbSgAla+6sPimng8JB2NoZWNrZWQBeQcAla+6sPimng8JAwlwYXJhZ3JhcGgHAJWvurD4pp4PCwYEAJWvurD4pp4PDAFCh5WvurD4pp4PAQMJcGFyYWdyYXBoBwCVr7qw+KaeDw4GBACVr7qw+KaeDw8FQWZ0ZXIA"
+    },
+    {
+      "name": "r23-slow-spaces-nested-2",
+      "source": "- a\n  - [ ] B  \n\nAfter",
+      "canonical": "- a\n  - [ ] B\n\nAfter",
+      "exactSource": true,
+      "rustBase64": "AQ+N3JeboN/pBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCN3JeboN/pBQEDCGxpc3RJdGVtBwCN3JeboN/pBQIDCXBhcmFncmFwaAcAjdyXm6Df6QUDBgQAjdyXm6Df6QUEAWGHjdyXm6Df6QUDAwh0YXNrTGlzdAcAjdyXm6Df6QUGAwh0YXNrSXRlbSgAjdyXm6Df6QUHB2NoZWNrZWQBeQcAjdyXm6Df6QUHAwlwYXJhZ3JhcGgHAI3cl5ug3+kFCQYEAI3cl5ug3+kFCgFCh43cl5ug3+kFAQMJcGFyYWdyYXBoBwCN3JeboN/pBQwGBACN3JeboN/pBQ0FQWZ0ZXIA",
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-content-0",
+      "source": "- a *b\t* c",
+      "canonical": "- a *b\t* c",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQailJLPl9S2CQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCilJLPl9S2CQEDCGxpc3RJdGVtBwCilJLPl9S2CQIDCXBhcmFncmFwaAcAopSSz5fUtgkDBgQAopSSz5fUtgkECGEgKmIJKiBjAA=="
+    },
+    {
+      "name": "r23-content-1",
+      "source": "- a\t_b_ c",
+      "canonical": "- a\t*b* c",
+      "nativeSeedSource": "- a\t*b* c",
+      "rustBase64": "AQa6gKz1mcrQBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC6gKz1mcrQBAEDCGxpc3RJdGVtBwC6gKz1mcrQBAIDCXBhcmFncmFwaAcAuoCs9ZnK0AQDBgQAuoCs9ZnK0AQEB2EJKmIqIGMA"
+    },
+    {
+      "name": "r23-content-2",
+      "source": "- a\n  2024.\tyear",
+      "canonical": "- a\n  2024&#46;    year",
+      "rustBase64": "AQaMtpbQgbLRAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCMtpbQgbLRAwEDCGxpc3RJdGVtBwCMtpbQgbLRAwIDCXBhcmFncmFwaAcAjLaW0IGy0QMDBgQAjLaW0IGy0QMED2EKMjAyNC4gICAgeWVhcgA="
+    },
+    {
+      "name": "r24-bullet-task-spaces",
+      "source": "- A  \n- [ ] B",
+      "canonical": "- A  \n\n- [ ] B",
+      "fileFold": true,
+      "projectedCanonical": "- A  \n\n- [ ] B",
+      "rustBase64": "AQzprpr7jLXYCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDprpr7jLXYCwEDCGxpc3RJdGVtBwDprpr7jLXYCwIDCXBhcmFncmFwaAcA6a6a+4y12AsDBgQA6a6a+4y12AsEA0EgIIfprpr7jLXYCwEDCHRhc2tMaXN0BwDprpr7jLXYCwgDCHRhc2tJdGVtKADprpr7jLXYCwkHY2hlY2tlZAF5BwDprpr7jLXYCwkDCXBhcmFncmFwaAcA6a6a+4y12AsLBgQA6a6a+4y12AsMAUIA"
+    },
+    {
+      "name": "r24-task-bullet-spaces",
+      "source": "- [ ] A  \n- B",
+      "canonical": "- [ ] A  \n\n- B",
+      "fileFold": true,
+      "projectedCanonical": "- [ ] A  \n\n- B",
+      "rustBase64": "AQyhzYSgvr+qCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAoc2EoL6/qgoBAwh0YXNrSXRlbSgAoc2EoL6/qgoCB2NoZWNrZWQBeQcAoc2EoL6/qgoCAwlwYXJhZ3JhcGgHAKHNhKC+v6oKBAYEAKHNhKC+v6oKBQNBICCHoc2EoL6/qgoBAwpidWxsZXRMaXN0BwChzYSgvr+qCgkDCGxpc3RJdGVtBwChzYSgvr+qCgoDCXBhcmFncmFwaAcAoc2EoL6/qgoLBgQAoc2EoL6/qgoMAUIA"
+    },
+    {
+      "name": "r24-bare-text",
+      "source": "- a\n  -\n\n x",
+      "canonical": "- \n  ## a\n\n&#32;x",
+      "projectedCanonical": "- \n  ## a\n\n&#32;x",
+      "rustBase64": "AQuA2svG6KuDBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCA2svG6KuDBwEDCGxpc3RJdGVtBwCA2svG6KuDBwIDCXBhcmFncmFwaIeA2svG6KuDBwMDB2hlYWRpbmcoAIDay8boq4MHBAVsZXZlbAF9AgcAgNrLxuirgwcEBgQAgNrLxuirgwcGAWGHgNrLxuirgwcBAwlwYXJhZ3JhcGgHAIDay8boq4MHCAYEAIDay8boq4MHCQIgeAA="
+    },
+    {
+      "name": "r24-bare-star",
+      "source": "- a\n  *\n\n x",
+      "canonical": "- a\n  &#42;\n\n&#32;x",
+      "projectedCanonical": "- a\n  &#42;\n\n&#32;x",
+      "rustBase64": "AQm1z4m5k4r9DwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC1z4m5k4r9DwEDCGxpc3RJdGVtBwC1z4m5k4r9DwIDCXBhcmFncmFwaAcAtc+JuZOK/Q8DBgQAtc+JuZOK/Q8EA2EKKoe1z4m5k4r9DwEDCXBhcmFncmFwaAcAtc+JuZOK/Q8IBgQAtc+JuZOK/Q8JAiB4AA=="
+    },
+    {
+      "name": "r24-bare-structural",
+      "source": "- a\n  - b\n  -\n\n x",
+      "canonical": "- a\n  - b\n\n  - \n\n&#32;x",
+      "projectedCanonical": "- a\n  - b\n  - \n\n&#32;x",
+      "sourceCanonical": "- a\n  - b\n  - \n\n&#32;x",
+      "rustBase64": "ARGrmN2QhODVBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCrmN2QhODVBgEDCGxpc3RJdGVtBwCrmN2QhODVBgIDCXBhcmFncmFwaAcAq5jdkITg1QYDBgQAq5jdkITg1QYEAWGHq5jdkITg1QYDAwpidWxsZXRMaXN0BwCrmN2QhODVBgYDCGxpc3RJdGVtBwCrmN2QhODVBgcDCXBhcmFncmFwaAcAq5jdkITg1QYIBgQAq5jdkITg1QYJAWKHq5jdkITg1QYGAwpidWxsZXRMaXN0BwCrmN2QhODVBgsDCGxpc3RJdGVtBwCrmN2QhODVBgwDCXBhcmFncmFwaIermN2QhODVBgEDCXBhcmFncmFwaAcAq5jdkITg1QYOBgQAq5jdkITg1QYPAiB4AA==",
+      "foldRefuse": true
+    },
+    {
+      "name": "r24-parent-spaces",
+      "source": "- Parent  \n  - child\n- Next",
+      "canonical": "- Parent  \n  - child\n- Next",
+      "projectedCanonical": "- Parent  \n  - child\n- Next",
+      "foldRefuse": true,
+      "rustBase64": "AQ+jmsSMsLTcDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCjmsSMsLTcDQEDCGxpc3RJdGVtBwCjmsSMsLTcDQIDCXBhcmFncmFwaAcAo5rEjLC03A0DBgQAo5rEjLC03A0ECFBhcmVudCAgh6OaxIywtNwNAwMKYnVsbGV0TGlzdAcAo5rEjLC03A0NAwhsaXN0SXRlbQcAo5rEjLC03A0OAwlwYXJhZ3JhcGgHAKOaxIywtNwNDwYEAKOaxIywtNwNEAVjaGlsZIejmsSMsLTcDQIDCGxpc3RJdGVtBwCjmsSMsLTcDRYDCXBhcmFncmFwaAcAo5rEjLC03A0XBgQAo5rEjLC03A0YBE5leHQA"
+    },
+    {
+      "name": "r24-continued-tab",
+      "source": "- A\n- a\n  b\t\n\nAfter",
+      "canonical": "- A\n- a\n  b\t\n\nAfter",
+      "fileFold": true,
+      "projectedCanonical": "- A\n- a\n  b\t\n\nAfter",
+      "rustBase64": "AQ3C+Jrt9ox6ACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAML4mu32jHoBAwhsaXN0SXRlbQcAwvia7faMegIDCXBhcmFncmFwaAcAwvia7faMegMGBADC+Jrt9ox6BAFBh8L4mu32jHoCAwhsaXN0SXRlbQcAwvia7faMegYDCXBhcmFncmFwaAcAwvia7faMegcGBADC+Jrt9ox6CARhCmIJh8L4mu32jHoBAwlwYXJhZ3JhcGgHAML4mu32jHoNBgQAwvia7faMeg4FQWZ0ZXIA"
+    },
+    {
+      "name": "r24-lazy-tab",
+      "source": "- A\n- a\nb\t\n\nAfter",
+      "canonical": "- A\n- a\n  b\t\n\nAfter",
+      "fileFold": true,
+      "projectedCanonical": "- A\n- a\n  b\t\n\nAfter",
+      "rustBase64": "AQ3Cwqq9yLznDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDCwqq9yLznDQEDCGxpc3RJdGVtBwDCwqq9yLznDQIDCXBhcmFncmFwaAcAwsKqvci85w0DBgQAwsKqvci85w0EAUGHwsKqvci85w0CAwhsaXN0SXRlbQcAwsKqvci85w0GAwlwYXJhZ3JhcGgHAMLCqr3IvOcNBwYEAMLCqr3IvOcNCARhCmIJh8LCqr3IvOcNAQMJcGFyYWdyYXBoBwDCwqq9yLznDQ0GBADCwqq9yLznDQ4FQWZ0ZXIA"
+    },
+    {
+      "name": "r24-final-nbsp",
+      "source": "- A\n- B\n\n  C ",
+      "canonical": "- A\n- B\n\n  C",
+      "projectedCanonical": "- A\n- B\n\n  C",
+      "rustBase64": "AQ3djsig6YOwAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDdjsig6YOwAgEDCGxpc3RJdGVtBwDdjsig6YOwAgIDCXBhcmFncmFwaAcA3Y7IoOmDsAIDBgQA3Y7IoOmDsAIEAUGH3Y7IoOmDsAICAwhsaXN0SXRlbQcA3Y7IoOmDsAIGAwlwYXJhZ3JhcGgHAN2OyKDpg7ACBwYEAN2OyKDpg7ACCAFCh92OyKDpg7ACBwMJcGFyYWdyYXBoBwDdjsig6YOwAgoGBADdjsig6YOwAgsBQwA="
+    },
+    {
+      "name": "r24-final-block-spaces",
+      "source": "- a\n- b\n\n  c  \n\nAfter",
+      "canonical": "- a\n- b\n\n  c\n\nAfter",
+      "projectedCanonical": "- a\n- b\n\n  c\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "ARDut6moo/NiACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHAO63qaij82IBAwhsaXN0SXRlbQcA7repqKPzYgIDCXBhcmFncmFwaAcA7repqKPzYgMGBADut6moo/NiBAFhh+63qaij82ICAwhsaXN0SXRlbQcA7repqKPzYgYDCXBhcmFncmFwaAcA7repqKPzYgcGBADut6moo/NiCAFih+63qaij82IHAwlwYXJhZ3JhcGgHAO63qaij82IKBgQA7repqKPzYgsBY4fut6moo/NiAQMJcGFyYWdyYXBoBwDut6moo/NiDQYEAO63qaij82IOBUFmdGVyAA=="
+    },
+    {
+      "name": "r24-deep-lazy",
+      "source": "- a\n      b\n lazy\n\nAfter",
+      "canonical": "- a\n  &#32;   b\n\n&#32;lazy\n\nAfter",
+      "projectedCanonical": "- a\n  &#32;   b\n\n&#32;lazy\n\nAfter",
+      "rustBase64": "AQy84bzrxfsFACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHALzhvOvF+wUBAwhsaXN0SXRlbQcAvOG868X7BQIDCXBhcmFncmFwaAcAvOG868X7BQMGBAC84bzrxfsFBAdhCiAgICBih7zhvOvF+wUBAwlwYXJhZ3JhcGgHALzhvOvF+wUMBgQAvOG868X7BQ0FIGxhenmHvOG868X7BQwDCXBhcmFncmFwaAcAvOG868X7BRMGBAC84bzrxfsFFAVBZnRlcgA="
+    },
+    {
+      "name": "r24-nested-deep-lazy",
+      "source": "- a\n  - b\n      c\n lazy\n\nAfter",
+      "canonical": "- a\n  - b\n      c\n\n&#32;lazy\n\nAfter",
+      "projectedCanonical": "- a\n  - b\n      c\n\n&#32;lazy\n\nAfter",
+      "rustBase64": "ARHgyYOcwru1DAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDgyYOcwru1DAEDCGxpc3RJdGVtBwDgyYOcwru1DAIDCXBhcmFncmFwaAcA4MmDnMK7tQwDBgQA4MmDnMK7tQwEAWGH4MmDnMK7tQwDAwpidWxsZXRMaXN0BwDgyYOcwru1DAYDCGxpc3RJdGVtBwDgyYOcwru1DAcDCXBhcmFncmFwaAcA4MmDnMK7tQwIBgQA4MmDnMK7tQwJBWIKICBjh+DJg5zCu7UMAQMJcGFyYWdyYXBoBwDgyYOcwru1DA8GBADgyYOcwru1DBAFIGxhenmH4MmDnMK7tQwPAwlwYXJhZ3JhcGgHAODJg5zCu7UMFgYEAODJg5zCu7UMFwVBZnRlcgA="
+    },
+    {
+      "name": "r24-autolink-tab",
+      "source": "- See https://x.com\tmore",
+      "canonical": "- See [https://x.com](https://x.com)\tmore",
+      "projectedCanonical": "- See [https://x.com](https://x.com)\tmore",
+      "nativeSeedSource": "- See [https://x.com](https://x.com)\tmore",
+      "nativeReadingCanonical": "- See https://x.com\tmore",
+      "rustBase64": "AQagwZDp99L0BgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCgwZDp99L0BgEDCGxpc3RJdGVtBwCgwZDp99L0BgIDCXBhcmFncmFwaAcAoMGQ6ffS9AYDBgQAoMGQ6ffS9AYEJ1NlZSBbaHR0cHM6Ly94LmNvbV0oaHR0cHM6Ly94LmNvbSkJbW9yZQA="
+    },
+    {
+      "name": "r24-blank-bullet-spaces",
+      "source": "- A  \n\n- B",
+      "canonical": "- A  \n- B",
+      "projectedCanonical": "- A  \n\n- B",
+      "rustBase64": "AQqfu4j/hsGACQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCfu4j/hsGACQEDCGxpc3RJdGVtBwCfu4j/hsGACQIDCXBhcmFncmFwaAcAn7uI/4bBgAkDBgQAn7uI/4bBgAkEA0EgIIefu4j/hsGACQIDCGxpc3RJdGVtBwCfu4j/hsGACQgDCXBhcmFncmFwaAcAn7uI/4bBgAkJBgQAn7uI/4bBgAkKAUIA"
+    },
+    {
+      "name": "r24-blank-ordered-spaces",
+      "source": "1. A  \n\n2. B",
+      "canonical": "1. A  \n2. B",
+      "projectedCanonical": "1. A  \n\n2. B",
+      "rustBase64": "AQuL95Gdjb8+ACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDC29yZGVyZWRMaXN0KACL95Gdjb8+AQVzdGFydAF9AQcAi/eRnY2/PgEDCGxpc3RJdGVtBwCL95Gdjb8+AwMJcGFyYWdyYXBoBwCL95Gdjb8+BAYEAIv3kZ2Nvz4FA0EgIIeL95Gdjb8+AwMIbGlzdEl0ZW0HAIv3kZ2Nvz4JAwlwYXJhZ3JhcGgHAIv3kZ2Nvz4KBgQAi/eRnY2/PgsBQgA="
+    },
+    {
+      "name": "r24-blank-task-spaces",
+      "source": "- A  \n\n- [ ] B",
+      "canonical": "- A  \n\n- [ ] B",
+      "projectedCanonical": "- A  \n\n- [ ] B",
+      "rustBase64": "AQz5tquT7ciKAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD5tquT7ciKAgEDCGxpc3RJdGVtBwD5tquT7ciKAgIDCXBhcmFncmFwaAcA+bark+3IigIDBgQA+bark+3IigIEA0EgIIf5tquT7ciKAgEDCHRhc2tMaXN0BwD5tquT7ciKAggDCHRhc2tJdGVtKAD5tquT7ciKAgkHY2hlY2tlZAF5BwD5tquT7ciKAgkDCXBhcmFncmFwaAcA+bark+3IigILBgQA+bark+3IigIMAUIA"
+    },
+    {
+      "name": "r24-end-continued-tab",
+      "source": "- A\n- a\n  b\t",
+      "canonical": "- A\n- a\n  b",
+      "projectedCanonical": "- A\n- a\n  b",
+      "rustBase64": "AQr/qYX6xdPDDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD/qYX6xdPDDwEDCGxpc3RJdGVtBwD/qYX6xdPDDwIDCXBhcmFncmFwaAcA/6mF+sXTww8DBgQA/6mF+sXTww8EAUGH/6mF+sXTww8CAwhsaXN0SXRlbQcA/6mF+sXTww8GAwlwYXJhZ3JhcGgHAP+phfrF08MPBwYEAP+phfrF08MPCARhCmIJAA=="
+    },
+    {
+      "name": "r24-end-lazy-tab",
+      "source": "- A\n- a\nb\t",
+      "canonical": "- A\n- a\n  b",
+      "projectedCanonical": "- A\n- a\n  b",
+      "rustBase64": "AQqrgZbVhu/7CAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCrgZbVhu/7CAEDCGxpc3RJdGVtBwCrgZbVhu/7CAIDCXBhcmFncmFwaAcAq4GW1Ybv+wgDBgQAq4GW1Ybv+wgEAUGHq4GW1Ybv+wgCAwhsaXN0SXRlbQcAq4GW1Ybv+wgGAwlwYXJhZ3JhcGgHAKuBltWG7/sIBwYEAKuBltWG7/sICARhCmIJAA=="
+    },
+    {
+      "name": "r25-quote-bullet",
+      "source": "- a\n  > q  \n\nAfter",
+      "canonical": "- a\n  > q\n\nAfter",
+      "projectedCanonical": "- a\n  > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ3a89CxkrQlACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCmJ1bGxldExpc3QHANrz0LGStCUBAwhsaXN0SXRlbQcA2vPQsZK0JQIDCXBhcmFncmFwaAcA2vPQsZK0JQMGBADa89CxkrQlBAFhh9rz0LGStCUDAwpibG9ja3F1b3RlBwDa89CxkrQlBgMJcGFyYWdyYXBoBwDa89CxkrQlBwYEANrz0LGStCUIAXGH2vPQsZK0JQEDCXBhcmFncmFwaAcA2vPQsZK0JQoGBADa89CxkrQlCwVBZnRlcgA="
+    },
+    {
+      "name": "r25-quote-ordered",
+      "source": "1. a\n   > q  \n\nAfter",
+      "canonical": "1. a\n   > q\n\nAfter",
+      "projectedCanonical": "1. a\n   > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ7j0/uNtf2BAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA49P7jbX9gQIBBXN0YXJ0AX0BBwDj0/uNtf2BAgEDCGxpc3RJdGVtBwDj0/uNtf2BAgMDCXBhcmFncmFwaAcA49P7jbX9gQIEBgQA49P7jbX9gQIFAWGH49P7jbX9gQIEAwpibG9ja3F1b3RlBwDj0/uNtf2BAgcDCXBhcmFncmFwaAcA49P7jbX9gQIIBgQA49P7jbX9gQIJAXGH49P7jbX9gQIBAwlwYXJhZ3JhcGgHAOPT+421/YECCwYEAOPT+421/YECDAVBZnRlcgA="
+    },
+    {
+      "name": "r25-quote-task",
+      "source": "- [ ] a\n  > q  \n\nAfter",
+      "canonical": "- [ ] a\n  > q\n\nAfter",
+      "projectedCanonical": "- [ ] a\n  > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ6Wz9OW+LHmCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAls/Tlvix5goBAwh0YXNrSXRlbSgAls/Tlvix5goCB2NoZWNrZWQBeQcAls/Tlvix5goCAwlwYXJhZ3JhcGgHAJbP05b4seYKBAYEAJbP05b4seYKBQFhh5bP05b4seYKBAMKYmxvY2txdW90ZQcAls/Tlvix5goHAwlwYXJhZ3JhcGgHAJbP05b4seYKCAYEAJbP05b4seYKCQFxh5bP05b4seYKAQMJcGFyYWdyYXBoBwCWz9OW+LHmCgsGBACWz9OW+LHmCgwFQWZ0ZXIA"
+    },
+    {
+      "name": "r25-quote-nested",
+      "source": "- a\n  - b\n    > q  \n\nAfter",
+      "canonical": "- a\n  - b\n    > q\n\nAfter",
+      "projectedCanonical": "- a\n  - b\n    > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "ARLCjqaI8Z6+AwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDCjqaI8Z6+AwEDCGxpc3RJdGVtBwDCjqaI8Z6+AwIDCXBhcmFncmFwaAcAwo6miPGevgMDBgQAwo6miPGevgMEAWGHwo6miPGevgMDAwpidWxsZXRMaXN0BwDCjqaI8Z6+AwYDCGxpc3RJdGVtBwDCjqaI8Z6+AwcDCXBhcmFncmFwaAcAwo6miPGevgMIBgQAwo6miPGevgMJAWKHwo6miPGevgMIAwpibG9ja3F1b3RlBwDCjqaI8Z6+AwsDCXBhcmFncmFwaAcAwo6miPGevgMMBgQAwo6miPGevgMNAXGHwo6miPGevgMBAwlwYXJhZ3JhcGgHAMKOpojxnr4DDwYEAMKOpojxnr4DEAVBZnRlcgA="
+    },
+    {
+      "name": "r25-quote-recursive",
+      "source": "- a\n  > > q  \n\nAfter",
+      "canonical": "- a\n  > > q\n\nAfter",
+      "projectedCanonical": "- a\n  > > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ67vIiaxoiVCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC7vIiaxoiVCgEDCGxpc3RJdGVtBwC7vIiaxoiVCgIDCXBhcmFncmFwaAcAu7yImsaIlQoDBgQAu7yImsaIlQoEAWGHu7yImsaIlQoDAwpibG9ja3F1b3RlBwC7vIiaxoiVCgYDCmJsb2NrcXVvdGUHALu8iJrGiJUKBwMJcGFyYWdyYXBoBwC7vIiaxoiVCggGBAC7vIiaxoiVCgkBcYe7vIiaxoiVCgEDCXBhcmFncmFwaAcAu7yImsaIlQoLBgQAu7yImsaIlQoMBUFmdGVyAA=="
+    },
+    {
+      "name": "r25-quote-nonfinal",
+      "source": "- a\n  > q  \n- b",
+      "canonical": "- a\n  > q  \n- b",
+      "projectedCanonical": "- a\n  > q  \n- b",
+      "foldRefuse": true,
+      "rustBase64": "AQ6Wi5mPu/rrAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCWi5mPu/rrAgEDCGxpc3RJdGVtBwCWi5mPu/rrAgIDCXBhcmFncmFwaAcAlouZj7v66wIDBgQAlouZj7v66wIEAWGHlouZj7v66wIDAwpibG9ja3F1b3RlBwCWi5mPu/rrAgYDCXBhcmFncmFwaAcAlouZj7v66wIHBgQAlouZj7v66wIIA3EgIIeWi5mPu/rrAgIDCGxpc3RJdGVtBwCWi5mPu/rrAgwDCXBhcmFncmFwaAcAlouZj7v66wINBgQAlouZj7v66wIOAWIA"
+    },
+    {
+      "name": "r25-dedent-bullet",
+      "source": " - A  \n- B",
+      "canonical": "- A  \n- B",
+      "projectedCanonical": "- A  \n- B",
+      "rustBase64": "AQqL2Puqp4+KDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCL2Puqp4+KDwEDCGxpc3RJdGVtBwCL2Puqp4+KDwIDCXBhcmFncmFwaAcAi9j7qqePig8DBgQAi9j7qqePig8EA0EgIIeL2Puqp4+KDwIDCGxpc3RJdGVtBwCL2Puqp4+KDwgDCXBhcmFncmFwaAcAi9j7qqePig8JBgQAi9j7qqePig8KAUIA"
+    },
+    {
+      "name": "r25-dedent-ordered",
+      "source": "  1. A\n1. B",
+      "canonical": "1. A\n2. B",
+      "projectedCanonical": "1. A\n2. B",
+      "rustBase64": "AQvghfHz+PiZCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA4IXx8/j4mQgBBXN0YXJ0AX0BBwDghfHz+PiZCAEDCGxpc3RJdGVtBwDghfHz+PiZCAMDCXBhcmFncmFwaAcA4IXx8/j4mQgEBgQA4IXx8/j4mQgFAUGH4IXx8/j4mQgDAwhsaXN0SXRlbQcA4IXx8/j4mQgHAwlwYXJhZ3JhcGgHAOCF8fP4+JkICAYEAOCF8fP4+JkICQFCAA=="
+    },
+    {
+      "name": "r25-dedent-nested",
+      "source": "- a\n   - b  \n  - c",
+      "canonical": "- a\n  - b  \n  - c",
+      "projectedCanonical": "- a\n  - b  \n  - c",
+      "foldRefuse": true,
+      "rustBase64": "AQ+Rjbnw36niCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCRjbnw36niCwEDCGxpc3RJdGVtBwCRjbnw36niCwIDCXBhcmFncmFwaAcAkY258N+p4gsDBgQAkY258N+p4gsEAWGHkY258N+p4gsDAwpidWxsZXRMaXN0BwCRjbnw36niCwYDCGxpc3RJdGVtBwCRjbnw36niCwcDCXBhcmFncmFwaAcAkY258N+p4gsIBgQAkY258N+p4gsJA2IgIIeRjbnw36niCwcDCGxpc3RJdGVtBwCRjbnw36niCw0DCXBhcmFncmFwaAcAkY258N+p4gsOBgQAkY258N+p4gsPAWMA"
+    },
+    {
+      "name": "r25-dedent-task",
+      "source": " - A  \n- [ ] B",
+      "canonical": "- A  \n\n- [ ] B",
+      "projectedCanonical": "- A  \n\n- [ ] B",
+      "rustBase64": "AQzEw8PHwcvVCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDEw8PHwcvVCAEDCGxpc3RJdGVtBwDEw8PHwcvVCAIDCXBhcmFncmFwaAcAxMPDx8HL1QgDBgQAxMPDx8HL1QgEA0EgIIfEw8PHwcvVCAEDCHRhc2tMaXN0BwDEw8PHwcvVCAgDCHRhc2tJdGVtKADEw8PHwcvVCAkHY2hlY2tlZAF5BwDEw8PHwcvVCAkDCXBhcmFncmFwaAcAxMPDx8HL1QgLBgQAxMPDx8HL1QgMAUIA"
+    },
+    {
+      "name": "r25-indent-blank-task",
+      "source": "- A  \n\n - [ ] B",
+      "refuse": true
+    },
+    {
+      "name": "r25-deep-marker-bullet",
+      "source": "-    a\nlazy\n\nAfter",
+      "canonical": "- a\n\nlazy\n\nAfter",
+      "projectedCanonical": "- a\n\nlazy\n\nAfter",
+      "rustBase64": "AQzwo6G5ppy2BQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDwo6G5ppy2BQEDCGxpc3RJdGVtBwDwo6G5ppy2BQIDCXBhcmFncmFwaAcA8KOhuaactgUDBgQA8KOhuaactgUEAWGH8KOhuaactgUBAwlwYXJhZ3JhcGgHAPCjobmmnLYFBgYEAPCjobmmnLYFBwRsYXp5h/CjobmmnLYFBgMJcGFyYWdyYXBoBwDwo6G5ppy2BQwGBADwo6G5ppy2BQ0FQWZ0ZXIA"
+    },
+    {
+      "name": "r25-deep-marker-ordered",
+      "source": "1.    a\nlazy\n\nAfter",
+      "canonical": "1. a\n\nlazy\n\nAfter",
+      "projectedCanonical": "1. a\n\nlazy\n\nAfter",
+      "rustBase64": "AQ2JnMy+2MWaCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAiZzMvtjFmgsBBXN0YXJ0AX0BBwCJnMy+2MWaCwEDCGxpc3RJdGVtBwCJnMy+2MWaCwMDCXBhcmFncmFwaAcAiZzMvtjFmgsEBgQAiZzMvtjFmgsFAWGHiZzMvtjFmgsBAwlwYXJhZ3JhcGgHAImczL7YxZoLBwYEAImczL7YxZoLCARsYXp5h4mczL7YxZoLBwMJcGFyYWdyYXBoBwCJnMy+2MWaCw0GBACJnMy+2MWaCw4FQWZ0ZXIA"
+    },
+    {
+      "name": "r25-heading-marker",
+      "source": "- # h\nlazy\n\nAfter",
+      "canonical": "- \n  # h\n\nlazy\n\nAfter",
+      "projectedCanonical": "- \n  # h\n\nlazy\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ7bkrrSlca8DgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDbkrrSlca8DgEDCGxpc3RJdGVtBwDbkrrSlca8DgIDCXBhcmFncmFwaIfbkrrSlca8DgMDB2hlYWRpbmcoANuSutKVxrwOBAVsZXZlbAF9AQcA25K60pXGvA4EBgQA25K60pXGvA4GAWiH25K60pXGvA4BAwlwYXJhZ3JhcGgHANuSutKVxrwOCAYEANuSutKVxrwOCQRsYXp5h9uSutKVxrwOCAMJcGFyYWdyYXBoBwDbkrrSlca8Dg4GBADbkrrSlca8Dg8FQWZ0ZXIA"
+    },
+    {
+      "name": "r25-heading-continuation",
+      "source": "- a\n  # h\nlazy\n\nAfter",
+      "canonical": "- a\n  # h\n\nlazy\n\nAfter",
+      "projectedCanonical": "- a\n  # h\n\nlazy\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "ARC3oJ6q6K/kAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC3oJ6q6K/kAgEDCGxpc3RJdGVtBwC3oJ6q6K/kAgIDCXBhcmFncmFwaAcAt6Cequiv5AIDBgQAt6Cequiv5AIEAWGHt6Cequiv5AIDAwdoZWFkaW5nKAC3oJ6q6K/kAgYFbGV2ZWwBfQEHALegnqror+QCBgYEALegnqror+QCCAFoh7egnqror+QCAQMJcGFyYWdyYXBoBwC3oJ6q6K/kAgoGBAC3oJ6q6K/kAgsEbGF6eYe3oJ6q6K/kAgoDCXBhcmFncmFwaAcAt6Cequiv5AIQBgQAt6Cequiv5AIRBUFmdGVyAA=="
+    },
+    {
+      "name": "r25-fence-marker",
+      "source": "- ```\n  x\n  ```\nlazy\n\nAfter",
+      "canonical": "- \n  ```\n  x\n  ```\n\nlazy\n\nAfter",
+      "projectedCanonical": "- \n  ```\n  x\n  ```\n\nlazy\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ3f993o/tLdCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDf993o/tLdCQEDCGxpc3RJdGVtBwDf993o/tLdCQIDCXBhcmFncmFwaIff993o/tLdCQMDCWNvZGVCbG9jawcA3/fd6P7S3QkEBgQA3/fd6P7S3QkFAXiH3/fd6P7S3QkBAwlwYXJhZ3JhcGgHAN/33ej+0t0JBwYEAN/33ej+0t0JCARsYXp5h9/33ej+0t0JBwMJcGFyYWdyYXBoBwDf993o/tLdCQ0GBADf993o/tLdCQ4FQWZ0ZXIA"
+    },
+    {
+      "name": "r25-fence-continuation",
+      "source": "- a\n  ```\n  x\n  ```\nlazy\n\nAfter",
+      "canonical": "- a\n  ```\n  x\n  ```\n\nlazy\n\nAfter",
+      "projectedCanonical": "- a\n  ```\n  x\n  ```\n\nlazy\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ/Rnum5uZ2hBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDRnum5uZ2hBgEDCGxpc3RJdGVtBwDRnum5uZ2hBgIDCXBhcmFncmFwaAcA0Z7pubmdoQYDBgQA0Z7pubmdoQYEAWGH0Z7pubmdoQYDAwljb2RlQmxvY2sHANGe6bm5naEGBgYEANGe6bm5naEGBwF4h9Ge6bm5naEGAQMJcGFyYWdyYXBoBwDRnum5uZ2hBgkGBADRnum5uZ2hBgoEbGF6eYfRnum5uZ2hBgkDCXBhcmFncmFwaAcA0Z7pubmdoQYPBgQA0Z7pubmdoQYQBUFmdGVyAA=="
+    },
+    {
+      "name": "r25-rule-marker",
+      "source": "- ---\nlazy\n\nAfter",
+      "canonical": "***\n\nlazy\n\nAfter",
+      "projectedCanonical": "***\n\nlazy\n\nAfter",
+      "rustBase64": "AQih/76djcLtBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Aw5ob3Jpem9udGFsUnVsZYeh/76djcLtBgEDCXBhcmFncmFwaAcAof++nY3C7QYCBgQAof++nY3C7QYDBGxhenmHof++nY3C7QYCAwlwYXJhZ3JhcGgHAKH/vp2Nwu0GCAYEAKH/vp2Nwu0GCQVBZnRlcgA="
+    },
+    {
+      "name": "r25-rule-continuation",
+      "source": "- a\n  - - -\nlazy\n\nAfter",
+      "canonical": "- a\n\n  ---\n\nlazy\n\nAfter",
+      "projectedCanonical": "- a\n\n  ---\n\nlazy\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ2Tw+zG24HfCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCTw+zG24HfCgEDCGxpc3RJdGVtBwCTw+zG24HfCgIDCXBhcmFncmFwaAcAk8PsxtuB3woDBgQAk8PsxtuB3woEAWGHk8PsxtuB3woDAw5ob3Jpem9udGFsUnVsZYeTw+zG24HfCgEDCXBhcmFncmFwaAcAk8PsxtuB3woHBgQAk8PsxtuB3woIBGxhenmHk8PsxtuB3woHAwlwYXJhZ3JhcGgHAJPD7Mbbgd8KDQYEAJPD7Mbbgd8KDgVBZnRlcgA="
+    },
+    {
+      "name": "r25-bare-reread",
+      "source": "- a\n  b\n  -\n\n x",
+      "canonical": "- \n  ## a\n  b\n\n&#32;x",
+      "projectedCanonical": "- \n  ## a\n  b\n\n&#32;x",
+      "rereadCanonical": "- \n  ## a\n\n  b\n\n&#32;x",
+      "nativeRereadCanonical": "- \n  ## a\n\n  b\n\n&#32;x",
+      "foldRefuse": true,
+      "rustBase64": "AQuvhLvZw9zmDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCvhLvZw9zmDwEDCGxpc3RJdGVtBwCvhLvZw9zmDwIDCXBhcmFncmFwaIevhLvZw9zmDwMDB2hlYWRpbmcoAK+Eu9nD3OYPBAVsZXZlbAF9AgcAr4S72cPc5g8EBgQAr4S72cPc5g8GA2EKYoevhLvZw9zmDwEDCXBhcmFncmFwaAcAr4S72cPc5g8KBgQAr4S72cPc5g8LAiB4AA=="
+    },
+    {
+      "name": "r25-bare-empty-parent",
+      "source": "-\n  -\n\n x",
+      "canonical": "- \n  - \n\n&#32;x",
+      "projectedCanonical": "- \n  - \n\n&#32;x",
+      "foldRefuse": true,
+      "rustBase64": "AQq8iOvfocSZBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC8iOvfocSZBwEDCGxpc3RJdGVtBwC8iOvfocSZBwIDCXBhcmFncmFwaIe8iOvfocSZBwMDCmJ1bGxldExpc3QHALyI69+hxJkHBAMIbGlzdEl0ZW0HALyI69+hxJkHBQMJcGFyYWdyYXBoh7yI69+hxJkHAQMJcGFyYWdyYXBoBwC8iOvfocSZBwcGBAC8iOvfocSZBwgCIHgA"
+    },
+    {
+      "name": "r26-hashtag-next",
+      "source": "- a\n#tag",
+      "canonical": "- a\n\n#tag",
+      "projectedCanonical": "- a\n\n#tag",
+      "rustBase64": "AQnM3OXNi8/JAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDM3OXNi8/JAgEDCGxpc3RJdGVtBwDM3OXNi8/JAgIDCXBhcmFncmFwaAcAzNzlzYvPyQIDBgQAzNzlzYvPyQIEAWGHzNzlzYvPyQIBAwlwYXJhZ3JhcGgHAMzc5c2Lz8kCBgYEAMzc5c2Lz8kCBwQjdGFnAA=="
+    },
+    {
+      "name": "r26-hashtag-marker",
+      "source": "- #tag\nlazy",
+      "canonical": "- #tag\n\nlazy",
+      "projectedCanonical": "- #tag\n\nlazy",
+      "rustBase64": "AQnm7/T/n6T2DQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDm7/T/n6T2DQEDCGxpc3RJdGVtBwDm7/T/n6T2DQIDCXBhcmFncmFwaAcA5u/0/5+k9g0DBgQA5u/0/5+k9g0EBCN0YWeH5u/0/5+k9g0BAwlwYXJhZ3JhcGgHAObv9P+fpPYNCQYEAObv9P+fpPYNCgRsYXp5AA=="
+    },
+    {
+      "name": "r26-hashtag-continuation",
+      "source": "- a\n  #tag\nlazy",
+      "canonical": "- a\n  #tag\n\nlazy",
+      "projectedCanonical": "- a\n  #tag\n\nlazy",
+      "rustBase64": "AQnVhZ6q27ToAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDVhZ6q27ToAwEDCGxpc3RJdGVtBwDVhZ6q27ToAwIDCXBhcmFncmFwaAcA1YWeqtu06AMDBgQA1YWeqtu06AMEBmEKI3RhZ4fVhZ6q27ToAwEDCXBhcmFncmFwaAcA1YWeqtu06AMLBgQA1YWeqtu06AMMBGxhenkA"
+    },
+    {
+      "name": "r26-hashtag-number",
+      "source": "- #1 priority\nnext",
+      "canonical": "- #1 priority\n\nnext",
+      "projectedCanonical": "- #1 priority\n\nnext",
+      "rustBase64": "AQmdhKq1/sn2CgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCdhKq1/sn2CgEDCGxpc3RJdGVtBwCdhKq1/sn2CgIDCXBhcmFncmFwaAcAnYSqtf7J9goDBgQAnYSqtf7J9goECyMxIHByaW9yaXR5h52EqrX+yfYKAQMJcGFyYWdyYXBoBwCdhKq1/sn2ChAGBACdhKq1/sn2ChEEbmV4dAA="
+    },
+    {
+      "name": "r26-html-next",
+      "source": "- a\n<!-- note -->",
+      "canonical": "- a\n\n&lt;!&#45;&#45; note &#45;&#45;&gt;",
+      "projectedCanonical": "- a\n\n&lt;!&#45;&#45; note &#45;&#45;&gt;",
+      "nativeRereadCanonical": "- a\n\n&amp;lt;!&amp;#45;&amp;#45; note &amp;#45;&amp;#45;&amp;gt;",
+      "rustBase64": "AQnxkcvdzbPNDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDxkcvdzbPNDgEDCGxpc3RJdGVtBwDxkcvdzbPNDgIDCXBhcmFncmFwaAcA8ZHL3c2zzQ4DBgQA8ZHL3c2zzQ4EAWGH8ZHL3c2zzQ4BAwlwYXJhZ3JhcGgHAPGRy93Ns80OBgYEAPGRy93Ns80OBw08IS0tIG5vdGUgLS0+AA=="
+    },
+    {
+      "name": "r26-quote-bare",
+      "source": "- a\n  > q  \n  >\n\nAfter",
+      "canonical": "- a\n  > q  \n\nAfter",
+      "projectedCanonical": "- a\n  > q  \n\nAfter",
+      "rereadCanonical": "- a\n  > q\n\nAfter",
+      "nativeRereadCanonical": "- a\n  > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ2W7YjdxqCLDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCW7YjdxqCLDwEDCGxpc3RJdGVtBwCW7YjdxqCLDwIDCXBhcmFncmFwaAcAlu2I3cagiw8DBgQAlu2I3cagiw8EAWGHlu2I3cagiw8DAwpibG9ja3F1b3RlBwCW7YjdxqCLDwYDCXBhcmFncmFwaAcAlu2I3cagiw8HBgQAlu2I3cagiw8IA3EgIIeW7YjdxqCLDwEDCXBhcmFncmFwaAcAlu2I3cagiw8MBgQAlu2I3cagiw8NBUFmdGVyAA=="
+    },
+    {
+      "name": "r26-quote-bare-recursive",
+      "source": "- a\n  > > q  \n  >\n\nAfter",
+      "canonical": "- a\n  > > q  \n\nAfter",
+      "projectedCanonical": "- a\n  > > q  \n\nAfter",
+      "rereadCanonical": "- a\n  > > q\n\nAfter",
+      "nativeRereadCanonical": "- a\n  > > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ6wurvu0+rOCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCwurvu0+rOCQEDCGxpc3RJdGVtBwCwurvu0+rOCQIDCXBhcmFncmFwaAcAsLq77tPqzgkDBgQAsLq77tPqzgkEAWGHsLq77tPqzgkDAwpibG9ja3F1b3RlBwCwurvu0+rOCQYDCmJsb2NrcXVvdGUHALC6u+7T6s4JBwMJcGFyYWdyYXBoBwCwurvu0+rOCQgGBACwurvu0+rOCQkDcSAgh7C6u+7T6s4JAQMJcGFyYWdyYXBoBwCwurvu0+rOCQ0GBACwurvu0+rOCQ4FQWZ0ZXIA"
+    },
+    {
+      "name": "r26-quote-bare-spaces",
+      "source": "- a\n  > q  \n  >  \n\nAfter",
+      "canonical": "- a\n  > q  \n\nAfter",
+      "projectedCanonical": "- a\n  > q  \n\nAfter",
+      "rereadCanonical": "- a\n  > q\n\nAfter",
+      "nativeRereadCanonical": "- a\n  > q\n\nAfter",
+      "foldRefuse": true,
+      "rustBase64": "AQ2o2NGIgqC4BwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCo2NGIgqC4BwEDCGxpc3RJdGVtBwCo2NGIgqC4BwIDCXBhcmFncmFwaAcAqNjRiIKguAcDBgQAqNjRiIKguAcEAWGHqNjRiIKguAcDAwpibG9ja3F1b3RlBwCo2NGIgqC4BwYDCXBhcmFncmFwaAcAqNjRiIKguAcHBgQAqNjRiIKguAcIA3EgIIeo2NGIgqC4BwEDCXBhcmFncmFwaAcAqNjRiIKguAcMBgQAqNjRiIKguAcNBUFmdGVyAA=="
+    },
+    {
+      "name": "r26-deep-heading",
+      "source": "- a\n    # h\nlazy",
+      "canonical": "- a\n  # h\n\n  lazy",
+      "projectedCanonical": "- a\n  # h\n\n  lazy",
+      "foldRefuse": true,
+      "rustBase64": "AQ2om9HmwtbMDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCom9HmwtbMDwEDCGxpc3RJdGVtBwCom9HmwtbMDwIDCXBhcmFncmFwaAcAqJvR5sLWzA8DBgQAqJvR5sLWzA8EAWGHqJvR5sLWzA8DAwdoZWFkaW5nKACom9HmwtbMDwYFbGV2ZWwBfQEHAKib0ebC1swPBgYEAKib0ebC1swPCAFoh6ib0ebC1swPBgMJcGFyYWdyYXBoBwCom9HmwtbMDwoGBACom9HmwtbMDwsEbGF6eQA="
+    },
+    {
+      "name": "r26-deep-fence",
+      "source": "- a\n    ```\n    x\n    ```\nlazy",
+      "canonical": "- a\n  ```\n  x\n  ```\n\n  lazy",
+      "projectedCanonical": "- a\n  ```\n  x\n  ```\n\n  lazy",
+      "foldRefuse": true,
+      "rustBase64": "AQz1tc3d3vHIDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwD1tc3d3vHIDAEDCGxpc3RJdGVtBwD1tc3d3vHIDAIDCXBhcmFncmFwaAcA9bXN3d7xyAwDBgQA9bXN3d7xyAwEAWGH9bXN3d7xyAwDAwljb2RlQmxvY2sHAPW1zd3e8cgMBgYEAPW1zd3e8cgMBwF4h/W1zd3e8cgMBgMJcGFyYWdyYXBoBwD1tc3d3vHIDAkGBAD1tc3d3vHIDAoEbGF6eQA="
+    },
+    {
+      "name": "r26-deep-ordered-heading",
+      "source": "1. a\n      # h\nlazy",
+      "canonical": "1. a\n   # h\n\n   lazy",
+      "projectedCanonical": "1. a\n   # h\n\n   lazy",
+      "foldRefuse": true,
+      "rustBase64": "AQ7t/O2956CBCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA7fztveeggQsBBXN0YXJ0AX0BBwDt/O2956CBCwEDCGxpc3RJdGVtBwDt/O2956CBCwMDCXBhcmFncmFwaAcA7fztveeggQsEBgQA7fztveeggQsFAWGH7fztveeggQsEAwdoZWFkaW5nKADt/O2956CBCwcFbGV2ZWwBfQEHAO387b3noIELBwYEAO387b3noIELCQFoh+387b3noIELBwMJcGFyYWdyYXBoBwDt/O2956CBCwsGBADt/O2956CBCwwEbGF6eQA="
+    }
+  ],
+  "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."
+}

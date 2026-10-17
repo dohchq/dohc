@@ -1,16 +1,18 @@
+import { LiveConnectionLimitError } from "@dohc/live-session-contract/live-connection";
 import type { StorageContext } from "./storage/context.js";
 import { parseAutomationDeclaration, parseLiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
+import { setTimeout as delay } from "node:timers/promises";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { EngineClient, NativeAppliedPosition } from "@dohc/workspace-engine-client/daemon";
 import { limitLiveDeclaredAgents, liveAuthorCheckpointAnticipated } from "./storage/liveAuthorWindow";
 import { parseRedeemedLiveTicket, type RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
-import { parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseServerDerivedLiveUpdateAuthority, type ServerDerivedLiveUpdateAuthority, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import { parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseServerDerivedLiveUpdateAuthority, type ServerDerivedLiveUpdateAuthority, type LiveDocumentKey, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { CurrentLiveBindingRequest, LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.js";
-import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
+import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import type { NamedFrameAppliedUpdate, NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { NamedFrameChanges } from "./liveHostChanges.js";
 import { deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
@@ -38,6 +40,14 @@ export interface NamedFrameHostBounds {
   readonly maxAdmissionBytes: number;
 }
 
+export interface NamedFrameValidationBudget {
+  reserve(): (() => void) | null;
+  /** A check larger than this can never be reserved, so it is refused instead of retried. */
+  readonly maxBytes: number;
+  reserveBytes(size: number): () => void;
+}
+class ValidationExceedsBudget extends Error {}
+
 /** Wraps an established authenticated native registration. It never owns host retirement. */
 export function captureNamedLiveFrameHost(options: {
   ticket: RedeemedLiveTicket;
@@ -46,7 +56,9 @@ export function captureNamedLiveFrameHost(options: {
   storage: SyncRelayStorage;
   native: NamedFrameNativeHost;
   bounds: NamedFrameHostBounds;
-  validate: OwnerOutboxAdmission["validate"];
+  validate: CapacityLiveAdmissionValidator;
+  reserveBytes?: (size: number) => () => void;
+  validationBudget?: NamedFrameValidationBudget;
 }): NamedFrameHostSession & {readonly ticket: RedeemedLiveTicket} {
   const ticket = parseRedeemedLiveTicket(options.ticket);
   Object.freeze(ticket.binding.selectorPaths);
@@ -65,7 +77,9 @@ export function captureOwnerLiveFrameHost(options: {
   storage: SyncRelayStorage;
   native: NamedFrameNativeHost;
   bounds: NamedFrameHostBounds;
-  validate: OwnerOutboxAdmission["validate"];
+  validate: CapacityLiveAdmissionValidator;
+  reserveBytes?: (size: number) => () => void;
+  validationBudget?: NamedFrameValidationBudget;
 }): NamedFrameHostSession {
   const binding = parseLiveObjectBinding(options.native.binding);
   const document = {workspaceId: binding.workspaceId, mainVersionId: binding.mainVersionId,
@@ -87,7 +101,9 @@ function captureLiveFrameHost(options: {
   storage: SyncRelayStorage;
   native: NamedFrameNativeHost;
   bounds: NamedFrameHostBounds;
-  validate: OwnerOutboxAdmission["validate"];
+  validate: CapacityLiveAdmissionValidator;
+  reserveBytes?: (size: number) => () => void;
+  validationBudget?: NamedFrameValidationBudget;
 }): NamedFrameHostSession {
   const binding = parseLiveObjectBinding(options.binding);
   Object.freeze(binding.selectorPaths); Object.freeze(binding);
@@ -189,13 +205,17 @@ function captureLiveFrameHost(options: {
                 const next = await native.client.readNextLiveApplied(request(), position, bounds.maxAppliedUpdateBytes, signal);
                 check(signal);
                 if (next) {
-                  if (next.position.eventCount !== position.eventCount + 1 || next.position.journalCursor <= position.journalCursor ||
-                    next.ack.journalCursor !== next.position.journalCursor) throw new Error("Native applied cursor changed.");
-                  position = { ...next.position };
-                  held = true;
-                  let released = false;
-                  return { value: { journalCursor: next.position.journalCursor, updateBytes: next.updateBytes },
-                    release() { if (!released) { released = true; held = false; } } };
+                  let releaseBytes = options.reserveBytes?.(next.updateBytes.byteLength);
+                  try {
+                    if (next.position.eventCount !== position.eventCount + 1 || next.position.journalCursor <= position.journalCursor ||
+                      next.ack.journalCursor !== next.position.journalCursor) throw new Error("Native applied cursor changed.");
+                    position = { ...next.position };
+                    held = true;
+                    let released = false;
+                    const releaseOutput = releaseBytes; releaseBytes = undefined;
+                    return { value: { journalCursor: next.position.journalCursor, updateBytes: next.updateBytes },
+                      release() { if (!released) { released = true; held = false; releaseOutput?.(); } } };
+                  } finally { releaseBytes?.(); }
                 }
                 await changed.promise; check(signal);
               } finally { changed.dispose(); }
@@ -207,6 +227,8 @@ function captureLiveFrameHost(options: {
     async submit(input, caller) {
       check(caller);
       if (submitting) throw new Error("A named submission already owns admission.");
+      let releaseBytes: (() => void) | undefined, releaseValidation: (() => void) | undefined;
+      const releaseValidationBytes = () => { releaseBytes?.(); releaseBytes = undefined; };
       submitting = true;
       const signal = signalFor(caller);
       try {
@@ -224,37 +246,80 @@ function captureLiveFrameHost(options: {
         const authorContext = input.authorContext === undefined ? undefined : parseLiveAuthorContext(input.authorContext);
         if (updateBytes.length < 1 || updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "invalid-update" };
         if (createHash("sha256").update(updateBytes).digest("hex") !== updateDigest) return { result: "refused", reason: "invalid-update" };
-        const read = storage.readLiveUpdateJournalCut({ document });
-        if (read.kind !== "cut") return { result: "refused", reason: read.reason };
-        const cut = read.cut;
-        if (cut.checkpoint.bytes.length + cut.suffix.reduce((sum, row) => sum + row.bytes.length, updateBytes.length) > bounds.maxAdmissionBytes) {
-          return { result: "refused", reason: "capacity-refused" };
+        if (options.validationBudget) {
+          releaseValidation = options.validationBudget.reserve() ?? undefined;
+          if (!releaseValidation) return {result: "retry", reason: "admission-unavailable"};
         }
-        const validation = await validate({ document, currentPath: binding.currentPath, checkpoint: cut.checkpoint.bytes,
-          suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes,
-          retainStateUpdate: (actor.kind === "owner" && liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata), [])) || liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata),
-            limitLiveDeclaredAgents(cut.suffix.map(row => row.metadata), authority,
-              trustedAutomation ? [{kind: "automation", ...trustedAutomation}] : deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount))) }, signal);
-        check(signal);
-        if (validation.kind === "retry") return {result: "retry", reason: validation.reason};
-        const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
-          ...(trustedAccount ? {trustedAccount} : {}),
-          ...(trustedAutomation ? {trustedAutomation} : {}),
-          ...(trustedAutomationPress ? {trustedAutomationPress} : {}),
-          ...(trustedAutomationGrant ? {trustedAutomationGrant} : {}),
-          metadata: { deliveryId, updateDigest, binding, ...(authorContext ? {authorContext} : {}) }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
-        if (committed.result.kind === "refused") return { result: "refused", reason: committed.result.reason };
-        if (committed.result.kind === "retry") return { result: "retry", reason: committed.result.reason };
+        const deadline = new AbortController();
+        const timer = setTimeout(() => deadline.abort(new Error("Named admission deadline exceeded.")), Math.min(native.deadlineMs, 2_147_483_647));
+        const admissionSignal = AbortSignal.any([signal, deadline.signal]);
+        let receipt: LiveUpdateReceipt;
+        try {
+          let retryDelayMs = 10;
+          let waitForCapacity = validate.waitForCapacity?.bind(validate);
+          for (;;) {
+            releaseValidationBytes();
+            await waitForCapacity?.(admissionSignal);
+            check(admissionSignal);
+            if (validate.hasCapacity?.() === false) continue;
+            const read = storage.readLiveUpdateJournalCut({ document }, options.validationBudget ? size => {
+              const charge = size + 3 * updateBytes.length;
+              if (charge > options.validationBudget!.maxBytes) throw new ValidationExceedsBudget();
+              releaseBytes = options.validationBudget!.reserveBytes(charge);
+            } : undefined);
+            if (read.kind !== "cut") return { result: "refused", reason: read.reason };
+            const cut = read.cut;
+            if (cut.checkpoint.bytes.length + cut.suffix.reduce((sum, row) => sum + row.bytes.length, updateBytes.length) > bounds.maxAdmissionBytes) {
+              return { result: "refused", reason: "capacity-refused" };
+            }
+            const validation = await validate({ document, currentPath: binding.currentPath, checkpoint: cut.checkpoint.bytes,
+              suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes,
+              retainStateUpdate: (actor.kind === "owner" && liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata), [])) || liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata),
+                limitLiveDeclaredAgents(cut.suffix.map(row => row.metadata), authority,
+                  trustedAutomation ? [{kind: "automation", ...trustedAutomation}] : deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount))) }, admissionSignal);
+            check(admissionSignal);
+            if (validation.kind === "retry") {
+              waitForCapacity = validation.waitForCapacity.bind(validation);
+              continue;
+            }
+            const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
+              ...(trustedAccount ? {trustedAccount} : {}),
+              ...(trustedAutomation ? {trustedAutomation} : {}),
+              ...(trustedAutomationPress ? {trustedAutomationPress} : {}),
+              ...(trustedAutomationGrant ? {trustedAutomationGrant} : {}),
+              metadata: { deliveryId, updateDigest, binding, ...(authorContext ? {authorContext} : {}) }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
+            if (committed.result.kind === "refused") return { result: "refused", reason: committed.result.reason };
+            if (committed.result.kind === "retry") {
+              releaseValidationBytes();
+              await delay(retryDelayMs, undefined, { signal: admissionSignal });
+              check(admissionSignal);
+              retryDelayMs = Math.min(100, retryDelayMs * 2);
+              continue;
+            }
+            receipt = committed.result.receipt;
+            break;
+          }
+        } catch (error) {
+          if (deadline.signal.aborted) {
+            check(signal);
+            return { result: "retry", reason: "admission-unavailable" };
+          }
+          throw error;
+        } finally { clearTimeout(timer); }
         // An ambiguous drain can still have committed the application. Read the exact durable ACK.
         try { await native.drain(document, signal); } catch { check(signal); }
         check(signal);
         const ack = await native.client.readLiveApplicationAck(request(), { deliveryId, updateDigest }, signal);
         check(signal);
         if (!ack) return { result: "retry", reason: "application-pending" };
-        if (ack.deliveryId !== deliveryId || ack.updateDigest !== updateDigest || ack.journalCursor !== committed.result.receipt.journalCursor ||
-          ack.acceptingHostEpoch !== committed.result.receipt.acceptingHostEpoch) throw new Error("Native application ACK identity changed.");
+        if (ack.deliveryId !== deliveryId || ack.updateDigest !== updateDigest || ack.journalCursor !== receipt.journalCursor ||
+          ack.acceptingHostEpoch !== receipt.acceptingHostEpoch) throw new Error("Native application ACK identity changed.");
         return { result: "success", ack };
-      } finally { submitting = false; }
+      } catch (error) {
+        if (error instanceof ValidationExceedsBudget) return {result: "refused", reason: "capacity-refused"};
+        if (error instanceof LiveConnectionLimitError) return {result: "retry", reason: "admission-unavailable"};
+        throw error;
+      } finally { submitting = false; releaseValidationBytes(); releaseValidation?.(); }
     },
   };
 }

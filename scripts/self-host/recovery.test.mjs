@@ -86,6 +86,49 @@ test("restore and failed maintenance remain stopped", async t => {
     assert.equal(mock.calls.some(args => args.includes("start")), false);
   }
 });
+test("snapshot runs online and never stops, restarts or deletes anything", async t => {
+  const root = await fixture(t), mock = runner(), envFile = join(root, "env");
+  await writeFile(envFile, "DOHC_SNAPSHOT_KEY=key-from-env\n");
+  await runRecovery(parseRecoveryArguments(["snapshot", join(root, "offsite"), "--env-file", envFile]), mock.run, () => {}, ["compose"]);
+  assert.equal(mock.calls.some(args => args.includes("stop") || args.includes("start") || args.includes("rm") || args.includes("down")), false);
+  const run = mock.calls.find(args => args.includes("run"));
+  assert.deepEqual(run.slice(run.indexOf("relay-snapshot")), ["relay-snapshot", "snapshot", "--database", "/data/sync-relay.sqlite",
+    "--state-directory", "/snapshots", "--directory", "/backup/offsite"]);
+  assert.ok(run.includes(`${root}:/backup`));
+});
+
+test("verify mounts no deployment volume and passes only the snapshot key", async t => {
+  const root = await fixture(t), envFile = join(root, "env");
+  await writeFile(envFile, "DOHC_SNAPSHOT_KEY=key-from-env\nPOSTGRES_PASSWORD=not-passed\n");
+  const snapshot = join(root, "taken.dohc-snapshot");
+  await writeFile(snapshot, "sealed");
+  const calls = [];
+  const run = (args, env) => { calls.push({ args, env }); return args.includes("config") ? JSON.stringify(config) : "verified"; };
+  await runRecovery(parseRecoveryArguments(["verify", join(root, "checked"), "--snapshot", snapshot, "--env-file", envFile]), run, () => {}, ["compose"]);
+  const verify = calls.at(-1);
+  assert.deepEqual(verify.env, { DOHC_SNAPSHOT_KEY: "key-from-env" });
+  assert.equal(verify.args.filter(value => value.startsWith("type=volume")).length, 0);
+  assert.deepEqual(verify.args.slice(verify.args.indexOf("--network"), verify.args.indexOf("--network") + 2), ["--network", "none"]);
+  assert.ok(verify.args.includes(`type=bind,source=${root},target=/source,readonly`));
+  assert.equal(calls.some(({ args }) => args.includes("stop") || args[0] === "volume"), false);
+  await mkdir(join(root, "existing"));
+  await assert.rejects(runRecovery(parseRecoveryArguments(["verify", join(root, "existing"), "--snapshot", snapshot, "--env-file", envFile]), run, () => {}, ["compose"]), /new directory/);
+  assert.throws(() => parseRecoveryArguments(["verify", join(root, "checked")]));
+  assert.throws(() => parseRecoveryArguments(["backup", join(root, "b"), "--snapshot", snapshot]));
+});
+
+test("snapshot and verify refuse to run without a snapshot key", async t => {
+  const root = await fixture(t), envFile = join(root, "env"), snapshot = join(root, "taken.dohc-snapshot");
+  await writeFile(envFile, "DOHC_SNAPSHOT_KEY=\n");
+  await writeFile(snapshot, "sealed");
+  for (const args of [["snapshot", join(root, "offsite")], ["verify", join(root, "checked"), "--snapshot", snapshot]]) {
+    const mock = runner();
+    await assert.rejects(runRecovery(parseRecoveryArguments([...args, "--env-file", envFile]), mock.run, () => {}, ["compose"]),
+      /Set DOHC_SNAPSHOT_KEY in .* to the snapshot key/);
+    assert.deepEqual(mock.calls, []);
+  }
+});
+
 test("invalid settings are refused before Docker runs", async t => {
   const root = await fixture(t), mock = runner(), envFile = join(root, "deployment.env");
   await writeFile(envFile, "DOHC_POSTGRES_HOST=db.provider.invalid:5432/dohc?sslmode=disable&unused=\n");
@@ -120,6 +163,16 @@ test("another project writing the disk folder, or a folder inside or above it, i
       JSON.stringify(options.mounts));
     assert.equal(mock.calls.some(args => args.includes("stop")), false);
   }
+});
+test("another project writing the data disk's snapshot folder is refused before stop", async t => {
+  const root = await fixture(t);
+  const disk = { ...config, volumes: { ...config.volumes, snapshots: { name: "recovery_snapshots", driver: "local", driver_opts: bound("/mnt/disk/dohc/snapshots").Options } } };
+  const mock = runner({ foreign: true, mounts: [{ Type: "bind", Source: "/mnt/disk/dohc/snapshots/staging", RW: true }],
+    volumes: { recovery_snapshots: bound("/mnt/disk/dohc/snapshots") } });
+  const run = args => args.includes("config") ? JSON.stringify(disk) : mock.run(args);
+  await assert.rejects(runRecovery(parseRecoveryArguments(["backup", join(root, "snapshot")]), run, () => {}, ["compose"]),
+    { message: "Running containers outside recovery-test can write its storage. Stop them before recovery: portainer_agent (/mnt/disk/dohc/snapshots/staging)." });
+  assert.equal(mock.calls.some(args => args.includes("stop")), false);
 });
 test("read-only mounts and other folders do not block recovery", async t => {
   const root = await fixture(t);
