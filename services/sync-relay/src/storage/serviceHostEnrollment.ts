@@ -441,15 +441,18 @@ export function setServiceHostEnrollmentEnabled(storage: StorageContext, input: 
 }
 
 function coveredByEditGrant(storage: StorageContext, enrollment: Pick<ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean {
-  return storage.db.prepare(`SELECT s.* FROM sync_relay_shares s INDEXED BY ${CANDIDATE_INDEX}
+  // Admission runs this on every check, so it stops at the first covering share instead of reading them all.
+  const shares = storage.db.prepare(`SELECT s.share_id,s.workspace_id,s.granter_user_id,s.selector_json,s.created_at_ms FROM sync_relay_shares s INDEXED BY ${CANDIDATE_INDEX}
     WHERE s.workspace_id=? AND s.granter_user_id=?
       AND EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active' AND g.access='edit')`)
-    .all(enrollment.workspaceId, enrollment.ownerUserId).some(value => {
-      const share: SyncRelayShareRow = {shareId: String(value.share_id), workspaceId: String(value.workspace_id), granterUserId: String(value.granter_user_id),
-        selectorJson: String(value.selector_json), createdAtMs: Number(value.created_at_ms)};
-      const parsed = parseStoredAnyShareSelectorJson(share.selectorJson), selector = parsed && effectiveShareSelector(parsed, "edit");
-      return !!selector && isLiveEditShareSelector(selector) && canonicalLiveSelector(share, selector) && visibleSharePath(selector, enrollment.path) === enrollment.path;
-    });
+    .iterate(enrollment.workspaceId, enrollment.ownerUserId);
+  for (const value of shares) {
+    const share: SyncRelayShareRow = {shareId: String(value.share_id), workspaceId: String(value.workspace_id), granterUserId: String(value.granter_user_id),
+      selectorJson: String(value.selector_json), createdAtMs: Number(value.created_at_ms)};
+    const parsed = parseStoredAnyShareSelectorJson(share.selectorJson), selector = parsed && effectiveShareSelector(parsed, "edit");
+    if (selector && isLiveEditShareSelector(selector) && canonicalLiveSelector(share, selector) && visibleSharePath(selector, enrollment.path) === enrollment.path) return true;
+  }
+  return false;
 }
 /** Whether an active Edit grant on any of the owner's shares still covers the enrolled document. */
 export function serviceHostEnrollmentHasEditGrant(storage: StorageContext, enrollment: Pick<ServiceHostEnrollment, "workspaceId" | "ownerUserId" | "path">): boolean {
