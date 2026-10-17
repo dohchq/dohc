@@ -2,6 +2,7 @@ import './document-size.test.mjs';
 import './go-to-index-fixture.test.mjs';
 import './go-to-packaged-fixture.test.mjs';
 import test from 'node:test';
+import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
@@ -1682,4 +1683,46 @@ test('heap snapshots soak captures a later due minute crossed during the first p
   f.chunk('{"second":true}'); f.captures[1].resolve(); await soak;
   assert.deepEqual(f.controller.records.map(r => r.cycle), [1, 1]);
   assert.equal(f.controller.records[0].pauseMs, 3000000);
+});
+
+// Run the actual signal setup and cleanup paths without launching Electron.
+for (const [name, scenario, abort, expectedCode] of [
+  ['document deadline', 'document-size', 'deadline', undefined],
+  ['presence admission loss', 'presence', 'slot', 1],
+  ['presence interrupt', 'presence', 'interrupt', 130],
+]) test(`benchmark cancellation preserves exit status for ${name} through cleanup errors`, async () => {
+  const source = await readFile(new URL('./packaged-benchmark.mjs', import.meta.url), 'utf8');
+  const setup = source.slice(source.indexOf('const cancellation = benchmarkCancellation();'), source.indexOf("await json(join(output, 'result.json'), receipt);"));
+  const teardown = source.slice(source.lastIndexOf('} catch (error) {'));
+  const interrupt = new AbortController(), slot = new AbortController();
+  const process = { env: {} }, receipt = {}, cleanup = [];
+  await vm.runInNewContext(`(async () => {
+    const root = '.', output = '.', feedRequests = [], json = async () => {}, join = (...parts) => parts.join('/');
+    const dirname = () => '.', writeFile = async () => {}, console = { error() {} };
+    let profilingSlot, feed, presenceFixture, goToFixture, helperStartup;
+    const workload = Promise.resolve();
+    const active = { logPath: 'run.log', logs: () => '' };
+    const closeOwnedPackage = async () => { cleanup.push('package'); throw Error('package cleanup'); };
+    const windowController = { close: async () => { cleanup.push('helper'); throw Error('helper cleanup'); } };
+    ${setup}
+    abort(documentDeadline);
+    benchmarkSignal.throwIfAborted();
+    ${teardown}
+  })()`, {
+    AbortController, AbortSignal, scenario, process, receipt, cleanup,
+    benchmarkCancellation: () => ({ signal: interrupt.signal, dispose() { cleanup.push('dispose'); } }),
+    acquireProfilingSlot: () => ({ signal: slot.signal, evidence: {}, release() { cleanup.push('release'); } }),
+    abort(deadline) {
+      const reason = Error(name);
+      if (abort === 'deadline') deadline.abort(reason);
+      else if (abort === 'slot') slot.abort(reason);
+      else { process.exitCode = 130; interrupt.abort(reason); }
+    },
+  });
+  assert.equal(process.exitCode, expectedCode);
+  assert.equal(receipt.status, 'failed');
+  assert.match(receipt.error, new RegExp(name));
+  assert.match(receipt.shutdownError, /package cleanup/);
+  assert.match(receipt.helperCleanupError, /helper cleanup/);
+  assert.deepEqual(cleanup, ['package', 'helper', ...(scenario === 'presence' ? ['release'] : []), 'dispose']);
 });

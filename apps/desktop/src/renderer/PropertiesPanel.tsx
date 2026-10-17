@@ -26,6 +26,8 @@ const FRONTMATTER_FIELD = "frontmatter";
 // their text, so a pill is as wide as what it says.
 const PILL =
   "group/pill relative inline-flex h-6 max-w-full min-w-0 items-center gap-1.5 rounded-full border border-line px-[9px] text-[12px] transition-colors duration-100 hover:bg-hover focus-within:border-muted";
+const ADD =
+  "grid size-6 shrink-0 place-items-center rounded-full border border-dashed border-line text-subtle";
 const PILL_FIELD =
   "h-5 min-w-[2ch] max-w-64 text-ellipsis border-0 bg-transparent p-0 leading-5 field-sizing-content placeholder:text-subtle";
 
@@ -43,6 +45,9 @@ export type PropertiesPanelProps = (
 ) & {
   // For a Collection record: the automations that set each field, by name.
   fieldMarks?: ReadonlyMap<string, readonly string[]>;
+  // A document still opening shows its properties where they will be and
+  // refuses edits until it opens: no write, no ×, and the + holds its box.
+  opening?: boolean;
 };
 
 function isReserved(key: string): boolean {
@@ -237,9 +242,11 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   // An unsplittable block cannot change one property without
   // rewriting the others, so the panel refuses edits before any write.
   const locked = ydoc ? frontmatterEditsRefused(ydoc) : markdownFrontmatterEditsRefused(body);
+  const opening = props.opening ?? false;
+  const refused = locked || opening;
 
   function commit(next: FrontmatterEntry[]) {
-    if (locked) return;
+    if (refused) return;
     const previous = editableEntries(sourceEntries);
     setEntries(next);
     if (hasDuplicateKeys(next)) return;
@@ -326,7 +333,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 value={entry.key}
                 placeholder="Property"
                 spellCheck={false}
-                readOnly={locked}
+                readOnly={refused}
                 onChange={(event) => setKey(index, event.target.value)}
                 onBlur={() => commit(entries)}
                 className={`${PILL_FIELD} ${reserved || duplicate ? "text-danger" : "text-subtle"}`}
@@ -354,14 +361,14 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   title={entry.value || undefined}
                   placeholder="Empty"
                   spellCheck={false}
-                  readOnly={locked}
+                  readOnly={refused}
                   onChange={(event) => setValue(index, event.target.value)}
                   className={`${PILL_FIELD} text-ink`}
                 />
               )}
               {/* On the pill's corner, so showing it moves nothing. A locked
                   block cannot lose one property, so it offers no ×. */}
-              {locked ? null : (
+              {refused ? null : (
                 <button
                   type="button"
                   data-testid="property-remove"
@@ -379,14 +386,18 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
         {/* Alone on a page with no properties, it shows while the pointer is
             over the title and properties, like "Add icon". A locked block
             cannot gain a property, so it offers no +. */}
-        {locked ? null : (
+        {locked ? null : opening ? (
+          <button type="button" disabled tabIndex={-1} aria-hidden className={`${ADD} invisible`}>
+            <Plus size={12} aria-hidden />
+          </button>
+        ) : (
           <button
             type="button"
             data-testid="property-add"
             aria-label="Add a property"
             title="Add a property"
             onClick={add}
-            className={`grid size-6 shrink-0 place-items-center rounded-full border border-dashed border-line text-subtle transition duration-100 hover:bg-hover hover:text-muted${
+            className={`${ADD} transition duration-100 hover:bg-hover hover:text-muted${
               isEmpty ? " opacity-0 group-hover/topmatter:opacity-100 focus-visible:opacity-100" : ""
             }`}
           >

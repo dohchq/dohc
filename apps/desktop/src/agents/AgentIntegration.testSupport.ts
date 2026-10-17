@@ -7,9 +7,10 @@ import {
 
 type InMemoryAgentIntegrationOptions = Omit<
   AgentIntegrationOptions,
-  "acquire" | "workspaceIds" | "localPersonId"
+  "acquire" | "workspaceIds" | "localPersonId" | "installId"
 > & {
   localPersonId?: () => string;
+  installId?: () => string;
   rootFor(workspaceId: string): string | null;
   setAgentRun(
     workspaceId: string,
@@ -24,6 +25,7 @@ export function createInMemoryAgentIntegration(
   const states = new Map<string, AgentIntegrationState>();
   return createAgentIntegration({
     localPersonId: () => "person-local",
+    installId: () => "install-local",
     ...options,
     workspaceIds: () => [...states.keys()],
     acquire: (workspaceId) => {

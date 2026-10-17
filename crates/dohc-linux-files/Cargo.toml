@@ -1,0 +1,18 @@
+[package]
+name = "dohc-linux-files"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Safe Linux read-lease probe for retained materialization originals."
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+signal-hook-registry = "1.4"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

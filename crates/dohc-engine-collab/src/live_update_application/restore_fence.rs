@@ -298,7 +298,9 @@ impl ApplicationOwner {
                 params![held.namespace,input.operation_id], |r| r.get(0),
             ).map_err(read_sql)?;
             if collision { return Err(ApplicationError::Conflict); }
-            require_registration(tx,&DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?,&held.namespace,b)?;
+            let key = DocKey::new(&b.workspace_id,&b.main_version_id,&b.object_id)?;
+            require_hosted_ready(tx, &key)?;
+            require_registration(tx,&key,&held.namespace,b)?;
             let previous=restore_resume::generation(tx,&held)?.map(|receipt|receipt.operation_id);
             if !read_binding(tx, &held)?.is_some_and(|(binding, coordinate, available)| {
                 binding == *b && available && (coordinate == held.coordinate

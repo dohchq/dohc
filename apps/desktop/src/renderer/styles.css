@@ -16,6 +16,9 @@
  * static block exists so first paint never waits on JS — edit values in BOTH
  * files or the sync test fails. */
 :root {
+  /* Native controls (checkboxes, selects, pickers) draw in the app's theme,
+   * not the OS theme that index.html's `light dark` follows. */
+  color-scheme: light;
   --font-sans: "Inter Variable", system-ui, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 
@@ -56,6 +59,7 @@
 }
 
 [data-theme='dark'] {
+  color-scheme: dark;
   --dohc-bg: #131211;
   --dohc-panel: #181715;
   --dohc-panel-2: #201f1c;
@@ -148,6 +152,11 @@ body {
   :focus-visible {
     outline: 2px solid var(--dohc-accent);
     outline-offset: 1px;
+  }
+
+  /* A checked checkbox or radio fills with the accent, not Chromium's blue. */
+  input {
+    accent-color: var(--dohc-accent);
   }
 }
 
@@ -407,19 +416,26 @@ body {
  * enough for daily work. --dohc-editor-measure is shared by the title, body
  * blocks, rendered slash-command components, and absolutely-positioned code
  * toolbar so every editable surface begins on the same left edge. */
-.dohc-tiptap-editor {
+.dohc-tiptap-editor,
+.dohc-readable-text {
   --dohc-editor-measure: 720px;
   /* How far framed blocks (code, tables, callouts, mermaid previews) extend
    * past the text column on each side. Their inner horizontal padding equals
    * this inset (minus their border), which lands the text inside them back on
    * the column's left content edge — see the alignment comment below. */
   --dohc-editor-block-inset: 16px;
+}
+
+.dohc-tiptap-editor {
   position: relative;
   height: 100%;
   min-height: 100%;
   background: var(--dohc-bg);
 }
 
+/* A document read without the editor (MarkdownView's read body, with
+ * .dohc-readable-text) wears this class too, so every rule below draws its
+ * blocks where the editor draws them. */
 .dohc-notion-editor {
   position: relative;
   box-sizing: border-box;
@@ -447,14 +463,9 @@ body {
   margin-right: auto;
 }
 
-/* The document opens flush to the editor's top padding and ends flush to its
- * bottom, regardless of which block leads/trails — a heading's space-before
- * (e.g. h2's 30px) must not compound with the 40px pad into a lopsided gap.
- * Zeroing the first block's top margin also keeps the title→body rhythm set by
- * the padding above rather than a stacked opening h1/h2 margin. */
-.dohc-notion-editor > :first-child {
-  margin-top: 0;
-}
+/* The document ends flush to its bottom padding, whichever block trails. Its
+ * first block keeps its space-before: in the editor, the block controls'
+ * widget comes before it (blockControls.tsx). */
 .dohc-notion-editor > :last-child {
   margin-bottom: 0;
 }

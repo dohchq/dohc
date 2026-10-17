@@ -82,6 +82,8 @@ node tools/self-host/bootstrap.mjs init --origin https://your-server.your-tailne
 The command creates `.env.self-host` and generates the deployment secrets.
 It refuses to replace an existing configuration.
 Restrict access to this file; it contains credentials.
+Copy `DOHC_SNAPSHOT_KEY` to storage that does not depend on this server.
+Without that key, nobody can open the server's relay snapshots.
 
 Edit these SMTP settings and your approved email in `.env.self-host`:
 
@@ -203,6 +205,8 @@ Both services must use the same `BETTER_AUTH_SECRET`.
 To keep server data on an attached disk, set it up before the first start.
 You can then [move the server to a new host](self-host-recovery.md#move-to-a-new-host) by moving the disk.
 The disk holds the relay database with its files, the continuity record, and the server's session host and automation copies.
+It also holds the working space for [hourly snapshots](self-host-recovery.md#take-hourly-off-site-snapshots).
+A snapshot runs only while the disk has free space for two copies of the relay database, plus headroom for the relay's own writes.
 Caddy's certificates stay in a Docker volume on the host.
 Accounts stay in a Docker volume on the host too, unless you [keep them in an external Postgres](#keep-accounts-in-an-external-postgres).
 Docker names the accounts volume `<DOHC_DEPLOYMENT_NAME>_dohc_self_host_postgres`, which is `dohc-self-host_dohc_self_host_postgres` by default.
@@ -212,8 +216,11 @@ Create a deployment folder on the mounted disk with one folder for each kind of 
 The services run as UID 1000 and need to own these folders:
 
 ```sh
-sudo install -d -m 0700 -o 1000 -g 1000 /mnt/dohc-data/dohc/sync-relay /mnt/dohc-data/dohc/continuity /mnt/dohc-data/dohc/host-data
+sudo install -d -m 0700 -o 1000 -g 1000 /mnt/dohc-data/dohc/sync-relay /mnt/dohc-data/dohc/continuity /mnt/dohc-data/dohc/host-data \
+  /mnt/dohc-data/dohc/snapshots
 ```
+
+Create the `snapshots` folder even if you do not turn on snapshots.
 
 Set the deployment folder in `.env.self-host`:
 
@@ -342,7 +349,7 @@ After that, every start and upgrade refuses to run in these cases:
 
 The accounts check accepts any database that holds dohc accounts, including another deployment's, so check that `POSTGRES_DB` names this deployment's database.
 
-A first start refuses unless all three disk folders are empty, and names each folder that holds data.
+A first start refuses unless all four disk folders are empty, and names each folder that holds data.
 With `DOHC_POSTGRES_HOST` set and no data disk, a first start refuses if the relay's Docker volumes already hold relay data.
 Without a data disk, the relay deployment stays in the Docker volumes on its original host, so start it there.
 Add `--first-start` only to create a new relay deployment that holds none of the existing workspaces.
@@ -351,6 +358,47 @@ A start also refuses when Docker cannot complete these checks.
 The deployment initializes fresh storage, applies authentication migrations, and starts the services.
 Keep the deployment secrets and volumes across restarts.
 Do not rerun fresh initialization against an existing deployment.
+
+## Live editing limits
+
+The live editing profile allows 128 connections in the relay and 96 per workspace.
+The relay keeps 16 of each for workspace owners, so other people share 112 in total and 80 per workspace.
+Each grant allows 80 connections, each principal 12, and each editing session 6.
+Everyone using one share link counts against its link grant.
+One browser holding that link has its own link principal.
+Named accounts count across their grants and devices.
+The browser gateway applies the same limits to its named and link routes.
+
+A refused connection closes with the code of the limit it hit:
+
+| Code | Limit |
+| --- | --- |
+| `live_total_limit` | Connections in the relay or gateway |
+| `live_workspace_limit` | Connections in one workspace |
+| `live_grant_limit` | Connections on one grant |
+| `live_person_limit` | Connections for one principal |
+| `live_session_limit` | Connections in one editing session |
+| `live_buffer_limit` | Live frame buffers |
+
+The relay holds at most 128 MiB of live frame buffers across its owner, desktop, named, and link routes.
+Within that budget, one principal holds at most 12 MiB.
+People other than the owner hold at most 80 MiB per share and 80 MiB per workspace, which leaves room for owners and other workspaces.
+The browser gateway has a separate 128 MiB frame budget with the same portions, shared by its named and link routes.
+Each relay socket can queue at most 256 KiB of outgoing data.
+Each gateway socket can queue at most 4 MiB.
+
+Checking an edit uses a separate 128 MiB pool in the relay, so it never takes room from live frames.
+Each check reserves five times the document's stored state on the relay, plus three times the edit.
+Each person runs one check at a time.
+A check that must wait for room gets a retry.
+The relay refuses an edit whose check needs more than 128 MiB, or whose document state and new edit total more than 16 MiB.
+Two validation workers run the checks, each with its own heap of up to 512 MiB.
+These budgets exclude the validation workers' heaps, the session host's document state, and OS socket buffers.
+
+These limits fit 20 people with three documents open each, with capacity left for owners and other devices.
+They remain provisional until the launch server is measured.
+The numbers come from [the live editing profile](../../services/sync-relay/src/selfHostLiveProfile.ts).
+Custom deployments must supply the same buffer budget to all live routes.
 
 ## Run automations on the server
 
@@ -459,6 +507,7 @@ Run the takedown command again after restoring such a backup.
 ## Back up and maintain the deployment
 
 Follow the [backup and recovery procedure](self-host-recovery.md) before changing your deployment.
+To upload an encrypted relay snapshot every hour, follow [Take hourly off-site snapshots](self-host-recovery.md#take-hourly-off-site-snapshots).
 Recovery must preserve revoked access; replacing current databases with an older snapshot is not a supported rollback.
 
 Stop the services without removing data:

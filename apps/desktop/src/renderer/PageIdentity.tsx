@@ -152,6 +152,10 @@ export type PageIdentityProps = (
   // Read-only surfaces (truncated / shared views) show the identity but never
   // edit it.
   readOnly?: boolean;
+  // An editable page whose document is still opening refuses edits, and
+  // holds the box of every control it will show, so nothing moves when it
+  // becomes editable.
+  opening?: boolean;
   // Enter, or ArrowDown on the title's last line, moves focus into the body
   // editor's start.
   onEnterBody?: () => void;
@@ -210,7 +214,8 @@ function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
 export function PageIdentity(props: PageIdentityProps) {
   const ydoc = props.ydoc ?? null;
   const body = props.body ?? "";
-  const readOnly = props.readOnly ?? false;
+  const opening = (props.opening ?? false) && !props.readOnly;
+  const readOnly = (props.readOnly ?? false) || opening;
   const [ydocRevision, setYdocRevision] = useState(0);
 
   useEffect(() => {
@@ -406,6 +411,11 @@ export function PageIdentity(props: PageIdentityProps) {
               onClick={() => setPickerOpen((open) => !open)}
               className={ADD_ICON}
             >
+              <Smile size={15} aria-hidden />
+              Add icon
+            </button>
+          ) : opening ? (
+            <button type="button" disabled tabIndex={-1} aria-hidden className={`${ADD_ICON} invisible`}>
               <Smile size={15} aria-hidden />
               Add icon
             </button>

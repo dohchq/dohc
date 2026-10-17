@@ -136,6 +136,9 @@ const REQUIRED_TABLES: &[&str] = &[
     "binary_blobs",
     "materialization_jobs",
     "materialization_displacements",
+    "materialization_retained",
+    "materialization_displacement_reads",
+    "materialization_staging_locations",
     // R08 secret-backed-file tables.
     "secret_files",
     "secret_fork_bases",
@@ -205,6 +208,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "hosted_withheld_befores",
     "hosted_deferred_ops",
     "hosted_retired_files",
+    "hosted_parked_snapshots",
+    "hosted_parked_path_aliases",
     // #646 PR3a proposal scan position.
     "share_proposal_push_state",
     // Item 12: the direct lane's position and per-file decisions.

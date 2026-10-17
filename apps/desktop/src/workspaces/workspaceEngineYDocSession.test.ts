@@ -706,7 +706,7 @@ it("settles an open record before a person's delete and credits the person in Hi
         trashedText = await readFile(target, "utf8");
         await rm(target);
       } },
-  )).resolves.toEqual({ trashed: true });
+  )).resolves.toMatchObject({ trashed: true, operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
   // The system trash takes it from its own place, so its Restore returns it there.
   expect(trashed.map(entry => entry.target)).toEqual([join(root, PATH)]);
   const methods = requests.map(request => request.method);
