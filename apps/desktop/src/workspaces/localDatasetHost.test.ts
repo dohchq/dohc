@@ -680,11 +680,11 @@ describe("local dataset owner adapter", () => {
 
 it("returns transfer metadata even when the page prunes every local head", async () => {
   const { host, workspaceRoot } = await open(); await activate(host);
-  expect(host.historyHeads({ positions: [], sourceIds: [id(1)] })).toMatchObject({ transferred: [], pages: [] });
+  expect(await host.historyHeads({ positions: [], sourceIds: [id(1)] })).toMatchObject({ transferred: [], pages: [] });
   const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
   try { db.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,?,?,?,?)").run("w", id(1), "transfer", "https://relay.example", "{}", "imported", digest("manifest"), null, null); }
   finally { db.close(); }
-  expect(host.historyHeads({ positions: [], sourceIds: [id(1)] })).toMatchObject({ transferred: [id(1)], pages: [] });
+  expect(await host.historyHeads({ positions: [], sourceIds: [id(1)] })).toMatchObject({ transferred: [id(1)], pages: [] });
 });
 
 it("selects local and transferred sources together by retained journal activity", async () => {
@@ -701,8 +701,57 @@ it("selects local and transferred sources together by retained journal activity"
     for (let n = 1; n <= 134; n++) db.prepare("UPDATE dohc_dataset_checkpoint_times SET recorded_at_ms=? WHERE dataset_id=?").run(n, id(n));
     db.prepare("INSERT INTO local_dataset_transfers VALUES(?,?,?,?,?,?,?,?,?)").run("w", id(134), "transfer", "https://relay.example", "{}", "imported", digest("manifest"), null, null);
   } finally { db.close(); }
-  const heads = host.historyHeads({ limit: 1 });
+  const heads = await host.historyHeads({ limit: 1 });
   expect(heads.sourceCount).toBe(134); expect(heads.sourceIds).toHaveLength(129);
   expect(heads.sourceIds[0]).toBe(id(134)); expect(heads.sourceIds).not.toContain(id(1));
   expect(heads.transferred).toEqual([id(134)]); expect(heads.pages).toHaveLength(128);
+});
+
+it("reads History heads without running SQLite on the calling thread", async () => {
+  const { host } = await open(), approved = await activate(host);
+  await host.invoke(call(approved, id(6), "history-write", { name: "First" }));
+  const prepare = vi.spyOn(DatabaseSync.prototype, "prepare").mockImplementation(() => {
+    throw new Error("History SQLite read ran on the calling thread");
+  });
+  try {
+    const pending = host.historyHeads({ limit: 1 });
+    expect(pending).toBeInstanceOf(Promise);
+    await expect(pending).resolves.toMatchObject({ sourceCount: 1, sourceIds: [id(1)], pages: [{ datasetId: id(1), headRevision: 1, entries: [{ revision: 1, operation: "add" }] }] });
+    expect(prepare).not.toHaveBeenCalled();
+  } finally { prepare.mockRestore(); }
+});
+
+it("rejects History heads when the workspace changes during a worker read", async () => {
+  let current = true;
+  const { host } = await open({ assertCurrent() { if (!current) throw new Error("Workspace changed"); } });
+  await activate(host);
+  const pending = host.historyHeads();
+  current = false;
+  try { await expect(pending).rejects.toThrow("Workspace changed"); }
+  finally { current = true; }
+});
+
+it("closes an in-flight History read before releasing Collection storage", async () => {
+  const { host } = await open(); await activate(host);
+  const pending = host.historyHeads();
+  const rejected = expect(pending).rejects.toThrow(/session ended/);
+  await Promise.all([host.close(), rejected]);
+  await expect(host.historyHeads()).rejects.toThrow(/session ended/);
+});
+
+it("keeps History read errors and recovers the read transaction", async () => {
+  const { host } = await open(); await activate(host);
+  await expect(host.historyHeads({ limit: 0 })).rejects.toMatchObject({ code: "invalid", message: "Invalid Collection history page." });
+  await expect(host.historyHeads({ limit: 1 })).resolves.toMatchObject({ sourceCount: 1 });
+});
+
+it("reports a worker startup failure for one page and succeeds on the next request", async () => {
+  const { host, workspaceRoot } = await open(); await activate(host);
+  const db = new DatabaseSync(join(workspaceRoot, ".dohc", "datasets", "state.sqlite"));
+  try {
+    db.prepare("UPDATE local_dataset_identity SET workspace_id=? WHERE singleton=1").run("another-workspace");
+    await expect(host.historyHeads()).rejects.toThrow("This Collection store belongs to another workspace.");
+    db.prepare("UPDATE local_dataset_identity SET workspace_id=? WHERE singleton=1").run("w");
+    await expect(host.historyHeads()).resolves.toMatchObject({ sourceCount: 1, pages: [{ datasetId: id(1) }] });
+  } finally { db.close(); }
 });

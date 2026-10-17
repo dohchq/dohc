@@ -709,3 +709,145 @@ impl EngineStore {
             .map_err(StorageError::corrupt)
     }
 }
+
+impl EngineStore {
+    fn require_materialization_owner(&self) -> Result<(), StorageError> {
+        if self.is_passive() {
+            return Err(StorageError::InvalidInput {
+                reason: "passive store cannot materialize",
+            });
+        }
+        Ok(())
+    }
+
+    /// Read at most 128 retained originals after the stable cursor.
+    pub fn retained_displacements_after(
+        &self,
+        after: i64,
+    ) -> Result<Vec<crate::RetainedDisplacement>, StorageError> {
+        materialize::retained_rows(&self.conn, after)
+    }
+    pub fn retain_displacement(
+        &self,
+        row: &crate::RetainedDisplacement,
+    ) -> Result<i64, StorageError> {
+        self.require_materialization_owner()?;
+        materialize::retain(&self.conn, row)
+    }
+    /// FULL-commit exact changed bytes and their new quiet-period baseline together.
+    pub fn record_retained_read(
+        &self,
+        old: &crate::RetainedDisplacement,
+        new: &crate::RetainedDisplacement,
+        bytes: &[u8],
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        materialize::record_retained_read(&self.conn, old, new, bytes, now_ms)
+    }
+    pub fn release_retained(&self, id: i64) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        self.conn
+            .execute(
+                "DELETE FROM materialization_retained WHERE displacement_id=?1",
+                [id],
+            )
+            .map_err(StorageError::persist)?;
+        Ok(())
+    }
+    /// FULL precedes a rename outside the default staging tree. Without this
+    /// location recovery cannot find the surviving source after a power loss.
+    pub fn remember_staging(&self, job_id: &str, directory: &str) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        materialize::with_full_commit(&self.conn, |tx| {
+            tx.execute("INSERT INTO materialization_staging_locations(job_id,directory) VALUES(?1,?2) ON CONFLICT(job_id) DO UPDATE SET directory=excluded.directory",rusqlite::params![job_id,directory]).map_err(StorageError::persist)?;
+            Ok(())
+        })
+    }
+    pub fn staging_location(&self, job_id: &str) -> Result<Option<String>, StorageError> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT directory FROM materialization_staging_locations WHERE job_id=?1",
+                [job_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt)
+    }
+    pub fn staging_locations(&self) -> Result<Vec<String>, StorageError> {
+        let mut q = self
+            .conn
+            .prepare("SELECT DISTINCT directory FROM materialization_staging_locations ORDER BY directory")
+            .map_err(StorageError::corrupt)?;
+        q.query_map([], |r| r.get(0))
+            .map_err(StorageError::corrupt)?
+            .collect::<Result<_, _>>()
+            .map_err(StorageError::corrupt)
+    }
+}
+
+impl EngineStore {
+    pub fn is_retained_source(&self, path: &str) -> Result<bool, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM materialization_retained WHERE source_path=?1)",
+                [path],
+                |r| r.get(0),
+            )
+            .map_err(StorageError::corrupt)
+    }
+    pub fn retained_names_for_job(&self, job_id: &str) -> Result<Vec<String>, StorageError> {
+        let mut q = self
+            .conn
+            .prepare_cached("SELECT source_path FROM materialization_retained WHERE job_id=?1")
+            .map_err(StorageError::corrupt)?;
+        let paths = q
+            .query_map([job_id], |r| r.get::<_, String>(0))
+            .map_err(StorageError::corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::corrupt)?;
+        Ok(paths
+            .into_iter()
+            .filter_map(|p| p.rsplit('/').next().map(str::to_owned))
+            .collect())
+    }
+}
+
+impl EngineStore {
+    /// Promote an oversized retained source to the existing kept-copy path.
+    /// FULL preserves its unreadable-source record before ending retention.
+    pub fn keep_oversized_retained(
+        &self,
+        row: &crate::RetainedDisplacement,
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        let name = row
+            .source_path
+            .rsplit('/')
+            .next()
+            .ok_or(StorageError::InvalidInput {
+                reason: "retained source has no name",
+            })?;
+        materialize::with_full_commit(&self.conn, |tx| {
+            tx.execute("INSERT INTO materialization_displacements (job_id,workspace_id,target_path,displaced_name,expected_sha256,content_sha256,state,displaced_sha256,created_at_ms,resolved_at_ms) SELECT ?1,?2,?3,?4,'',NULL,'kept',NULL,?5,?5 WHERE EXISTS(SELECT 1 FROM materialization_retained WHERE displacement_id=?6)",rusqlite::params![row.job_id,row.workspace_id,row.target_path,name,now_ms,row.displacement_id]).map_err(StorageError::persist)?;
+            tx.execute(
+                "DELETE FROM materialization_retained WHERE displacement_id=?1",
+                [row.displacement_id],
+            )
+            .map_err(StorageError::persist)?;
+            Ok(())
+        })
+    }
+    pub fn forget_staging_directory(&self, directory: &str) -> Result<(), StorageError> {
+        self.require_materialization_owner()?;
+        self.conn
+            .execute(
+                "DELETE FROM materialization_staging_locations WHERE directory=?1",
+                [directory],
+            )
+            .map_err(StorageError::persist)?;
+        Ok(())
+    }
+}

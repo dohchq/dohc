@@ -1,3 +1,4 @@
+import {createLiveBufferBudget} from "@dohc/live-session-contract/live-connection";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -89,9 +90,11 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
     fatal("FATAL: Invalid device control configuration. Check DOHC_DEVICE_CONTROL_LIMITS, DOHC_SHARE_WEB_DEVICE_CONTROL_ADMISSION, and relay settings.");
   }
 }
+const gatewayBufferMaximum = config.namedLiveGatewayLimits?.maxBufferedBytes ?? config.linkLive?.gateway.maxBufferedBytes;
+const gatewayBuffers = gatewayBufferMaximum === undefined ? undefined : createLiveBufferBudget(gatewayBufferMaximum);
 let namedGateway: ReturnType<typeof createLiveGateway> | undefined;
 if (config.namedLiveGatewayLimits) {
-  namedGateway = createLiveGateway({publicHosts: config.publicHosts, publicOrigin: config.accountAuth!.publicOrigin,
+  namedGateway = createLiveGateway({bufferBudget: gatewayBuffers, publicHosts: config.publicHosts, publicOrigin: config.accountAuth!.publicOrigin,
     limits: config.namedLiveGatewayLimits,
     resolveSession(request, discriminator, signal) {
       const authenticated = namedLiveGatewayRequest(request, config.accountAuth!.publicOrigin, signal);
@@ -104,7 +107,7 @@ if (config.namedLiveGatewayLimits) {
   process.once("SIGTERM", namedGateway.close);
   server.once("close", namedGateway.close);
 }
-const linkGateway = config.linkLive && application.linkLive ? createLiveGateway({publicHosts: config.publicHosts, publicOrigin: config.linkLive.publicOrigin,
+const linkGateway = config.linkLive && application.linkLive ? createLiveGateway({bufferBudget: gatewayBuffers, publicHosts: config.publicHosts, publicOrigin: config.linkLive.publicOrigin,
   path: "/api/live/link", limits: config.linkLive.gateway, resolveSession: application.linkLive.resolveSession, openHostRoute: application.linkLive.openHostRoute}) : undefined;
 if (linkGateway) {
   process.once("SIGINT", linkGateway.close); process.once("SIGTERM", linkGateway.close); server.once("close", linkGateway.close);

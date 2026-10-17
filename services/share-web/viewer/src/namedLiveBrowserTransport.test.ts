@@ -1,3 +1,4 @@
+import {LIVE_CONNECTION_LIMIT_CLOSE_CODE, LIVE_CONNECTION_LIMIT_MESSAGES} from "@dohc/live-session-contract/live-connection";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import * as Y from "yjs";
@@ -106,7 +107,7 @@ function host(socket: Socket, value: Session, epoch = 1, policy = limits().provi
       for (let offset = 0; offset < bytes.length; offset += 900) send({ kind: "chunk", transferId: id, offset, bytes: bytes.subarray(offset, offset + 900) });
       await waitState(value, state => ["live", "quarantined"].includes(state.status));
     },
-    async submitted() { await until(() => submissions().length > 0); return submissions()[0]!; },
+    async submitted(count = 1) { await until(() => submissions().length >= count); return submissions()[count - 1]!; },
     ack(item: Transfer, acceptingHostEpoch = epoch) {
       if (item.begin.purpose !== "submit-update") throw new Error("Expected submission.");
       send({ kind: "result", result: "success", ack: { deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest,
@@ -273,8 +274,116 @@ describe("named browser transport", () => {
     await vi.advanceTimersByTimeAsync(limits().sendTimeoutMs);
     expect(f.value.state()).toMatchObject({ status: "disconnected", reason: "send-timeout" });
     expect(socket.readyState).toBe(3); expect(socket.frames).toHaveLength(0); expect(socket.listenerCount).toBe(0);
-    expect(vi.getTimerCount()).toBe(0);
+    f.value.disconnect(); expect(vi.getTimerCount()).toBe(0);
   });
+});
+
+it.each(Object.keys(LIVE_CONNECTION_LIMIT_MESSAGES))("retains %s from a refused socket before initial sync", async reason => {
+  const f = fixture(), connecting = f.value.reconnect(), socket = await f.socketAt(0);
+  socket.open(); await connecting;
+  const event = new Event("close"); Object.assign(event, {code: LIVE_CONNECTION_LIMIT_CLOSE_CODE, reason});
+  socket.dispatchEvent(event);
+  expect(f.value.state()).toMatchObject({status: "disconnected", reason});
+  expect(socket.listenerCount).toBe(0);
+});
+
+it("keeps retryable admission editable and resubmits the same update on its socket", async () => {
+  const f = await live(); vi.useFakeTimers();
+  edit(f.value, " draft"); const first = await f.peer.submitted();
+  if (first.begin.purpose !== "submit-update") throw new Error("Expected submit");
+  f.peer.send({kind: "result", result: "retry", deliveryId: first.begin.deliveryId, updateDigest: first.begin.digest, reason: "admission-unavailable"});
+  await waitState(f.value, state => state.reason === "admission-unavailable");
+  expect(edit(f.value, " more")).toBe(true);
+  expect(f.sockets).toHaveLength(1); expect(f.socket.closed).toBe(0);
+  await vi.advanceTimersByTimeAsync(250);
+  const retry = await f.peer.submitted(2);
+  expect(retry.bytes).toEqual(first.bytes); expect(retry.begin).toMatchObject({deliveryId: first.begin.deliveryId, digest: first.begin.digest});
+  f.peer.ack(retry);
+  await f.peer.submitted(3);
+  expect(f.value.state().status).toBe("live");
+});
+it("reconnects automatically with a fresh ticket and preserves the pending delivery", async () => {
+  const f = await live(); vi.useFakeTimers();
+  edit(f.value, " draft"); const first = await f.peer.submitted();
+  Y.applyUpdate(f.doc, first.bytes); f.socket.close();
+  expect(f.value.state().status).toBe("disconnected");
+  await vi.advanceTimersByTimeAsync(249); expect(f.sockets).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(1);
+  const socket = await f.socketAt(1), peer = host(socket, f.value, 2);
+  socket.open(); await peer.greet(); await peer.initial(f.doc, binding, 1);
+  const retry = await peer.submitted();
+  expect(retry.bytes).toEqual(first.bytes); expect(retry.begin).toMatchObject(first.begin);
+  expect(f.protocols[1]).not.toEqual(f.protocols[0]);
+  peer.ack(retry, 1); await waitState(f.value, state => state.pendingUpdates === 0);
+  expect(f.value.state().status).toBe("live");
+});
+it("backs off repeated connection failures and cancels recovery when paused or replaced", async () => {
+  const f = await live(); vi.useFakeTimers(); f.socket.close();
+  await vi.advanceTimersByTimeAsync(250);
+  const socket = await f.socketAt(1); socket.close();
+  await vi.advanceTimersByTimeAsync(499); expect(f.sockets).toHaveLength(2);
+  await vi.advanceTimersByTimeAsync(1); await f.socketAt(2);
+  f.value.disconnect();
+  await vi.advanceTimersByTimeAsync(20_000); expect(f.sockets).toHaveLength(3);
+  const pending = f.value.reconnect(); const next = await f.socketAt(3); next.close(); await pending;
+  f.manager.select({...selection, objectId: "another-document"});
+  await vi.advanceTimersByTimeAsync(20_000); expect(f.sockets).toHaveLength(4);
+});
+it("stops editing and automatic recovery after terminal admission refusal", async () => {
+  const f = await live(); vi.useFakeTimers();
+  edit(f.value, " draft"); const item = await f.peer.submitted();
+  if (item.begin.purpose !== "submit-update") throw new Error("Expected submit");
+  f.peer.send({kind: "result", result: "refused", deliveryId: item.begin.deliveryId, updateDigest: item.begin.digest, reason: "authority-refused"});
+  await waitState(f.value, state => state.status === "quarantined");
+  expect(edit(f.value, " blocked")).toBe(false);
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(20_000); expect(f.sockets).toHaveLength(1);
+  expect(f.socket.listenerCount).toBe(0);
+});
+
+it("pauses a live socket without leaving an automatic reconnect timer", async () => {
+  const f = await live(); vi.useFakeTimers();
+  f.value.disconnect();
+  expect(f.value.state()).toMatchObject({status: "disconnected", reason: "paused"});
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(20_000); expect(f.sockets).toHaveLength(1);
+});
+it("caps automatic reconnect backoff at ten seconds", async () => {
+  const f = await live(); vi.useFakeTimers(); f.socket.close();
+  let index = 1;
+  for (const delay of [250, 500, 1_000, 2_000, 4_000, 8_000, 10_000, 10_000]) {
+    await vi.advanceTimersByTimeAsync(delay - 1); expect(f.sockets).toHaveLength(index);
+    await vi.advanceTimersByTimeAsync(1); const socket = await f.socketAt(index++);
+    socket.close();
+  }
+  f.value.disconnect(); expect(vi.getTimerCount()).toBe(0);
+});
+
+it("does not retry a ticket authority refusal over twenty seconds", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  f.intercept(path => path === "/api/live/named-ticket" ? new Response(null, {status: 404}) : undefined);
+  await f.value.reconnect();
+  expect(f.value.state()).toMatchObject({status: "disconnected", reason: "authority-unavailable"});
+  expect(f.requests).toHaveLength(3);
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(f.requests).toHaveLength(3);
+  expect(f.sockets).toHaveLength(0);
+  expect(vi.getTimerCount()).toBe(0);
+});
+it("reconnects a live route once without tearing down the replacement", async () => {
+  const f = await live();
+  vi.useFakeTimers();
+  const reconnecting = f.value.reconnect();
+  const socket = await f.socketAt(1), peer = host(socket, f.value);
+  socket.open(); await reconnecting; await peer.greet(); await peer.initial(f.doc);
+  expect(f.value.state().status).toBe("live");
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(f.sockets).toHaveLength(2);
+  expect(f.requests).toHaveLength(6);
+  expect(socket.closed).toBe(0);
+  expect(f.value.state().status).toBe("live");
 });
 
 it("refuses an initial frame bound to another named grant before applying content", async () => {

@@ -4,7 +4,7 @@ import { constants } from "node:fs";
 import { copyFile, link, lstat, mkdir, readdir, realpath, rename, rmdir, unlink } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
 import type { CliResultByVerb } from "@dohc/cli/protocol";
-import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
+import type { HistoryOperationsStore, MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
@@ -13,6 +13,7 @@ import type { AuthoredPathChanges, WorkspaceEngineCapture } from "./workspaceEng
 import { historyExcludesSubtree, historyPathAdmission, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
 import { deletePath, moveIntoWorkspaceTrash, prepareWorkspaceDelete, removeEmptyWorkspaceFolder } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
+import { finishDeleteRecovery, stageDeleteRecovery, undoDeleteRecovery, type DeleteRecovery, type DeleteRecoveryPlan, type DeleteUndoResult } from "./workspaceDeleteRecovery";
 
 type PathChangeWorkspace = { rootPath: string; readOnly?: boolean; shareView?: unknown };
 
@@ -214,7 +215,7 @@ const stayed = (left: readonly string[], file: string) =>
 // From the workspace trash to the system trash. The entry never returns to
 // its place first, where another program may have written since. When the
 // system refuses, it stays in the workspace trash.
-async function toSystemTrash(options: PathChangeOptions, staged: string): Promise<boolean> {
+async function toSystemTrash(options: Pick<PathChangeOptions, "trashItem">, staged: string): Promise<boolean> {
   try {
     await options.trashItem(staged);
     return true;
@@ -470,17 +471,18 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
   path: string,
   author: MomentWriteAuthor,
   options: PathChangeOptions,
-): Promise<() => Promise<CliResultByVerb["fileDelete"]>> {
+): Promise<() => Promise<CliResultByVerb["fileDelete"] & Partial<DeleteRecovery>>> {
   const rootPath = operation.workspace.rootPath;
   const failed = `dohc could not delete ${path}.`;
+  const operationId = `${OPERATION_ID_PREFIX}${randomUUID()}`;
   try {
     assertWritable(operation);
     const changed = await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
       let gone: string[] = [];
       // The capture settles, closes and checks this endpoint before the hold.
       const endpoint = (await admitPath(rootPath, path)).physical;
-      return await options.capture.changePathsAs<Changed<{ path: string; withoutHistory: string[] }, DeleteFailure>>([endpoint],
-        { operation: "delete", author, operationId: `${OPERATION_ID_PREFIX}${randomUUID()}` },
+      return await options.capture.changePathsAs<Changed<{ path: string; withoutHistory: string[]; recovery: DeleteRecoveryPlan }, DeleteFailure>>([endpoint],
+        { operation: "delete", author, operationId },
         async engine => {
           // Admission runs here, with capture held, right before the disk changes.
           assertWritable(operation);
@@ -496,6 +498,7 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
           // records each file's delete.
           const staged = await moveIntoWorkspaceTrash(rootPath, original);
           markChanged();
+          const recovery = await stageDeleteRecovery(operationId, staged, target.relative, [...recorded]);
           const deleted: string[] = [];
           let at = 0;
           try {
@@ -528,15 +531,16 @@ export async function prepareDeleteWorkspacePathAs<Workspace extends PathChangeW
           }
           gone = [target.relative];
           options.markDeleted(target.relative);
-          return { done: { path: target.path, withoutHistory }, trash: staged };
+          return { done: { path: target.path, withoutHistory, recovery }, trash: staged };
         },
         () => gone);
     });
     if ("failed" in changed) return async () => changed.failed;
     return async () => {
       const trashed = changed.trash !== undefined && await toSystemTrash(options, changed.trash);
-      const { withoutHistory, ...done } = changed.done;
-      return { ok: true, ...done, trashed,
+      const { withoutHistory, recovery: plan, ...done } = changed.done;
+      const recovery = await finishDeleteRecovery(rootPath, plan, trashed, changed.trash);
+      return { ok: true, ...done, trashed, ...recovery,
         ...(trashed || changed.trash === undefined ? {} : { trashPath: workspaceTrashPath(changed.trash) }),
         ...(withoutHistory.length ? { withoutHistory } : {}) };
     };
@@ -575,10 +579,11 @@ export async function deleteWorkspacePathByHand(
   path: string,
   person: Extract<MomentWriteAuthor, { kind: "human" }>,
   options: Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null; emptyFolderOnly?: boolean },
-): Promise<{ trashed: boolean }> {
+): Promise<{ trashed: boolean } & Partial<DeleteRecovery>> {
   const rootPath = operation.workspace.rootPath;
   assertWritable(operation);
   const { capture } = options;
+  const operationId = `${OPERATION_ID_PREFIX}${randomUUID()}`;
   const outcome = await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
     if (options.emptyFolderOnly) {
       assertWritable(operation);
@@ -586,16 +591,21 @@ export async function deleteWorkspacePathByHand(
       return { trashed: false, refused: undefined };
     }
     const endpoint = await prepareWorkspaceDelete(rootPath, path);
-    const trash = async () => {
-      const trashed = await deletePath(rootPath, endpoint, options.trashItem);
+    const trash = async (recorded: readonly string[]) => {
+      const plan = await stageDeleteRecovery(operationId, join(rootPath, endpoint), endpoint, recorded);
+      let staged: string | undefined;
+      const trashed = await deletePath(rootPath, endpoint, options.trashItem, path => { staged = path; });
       markChanged();
       options.markDeleted(endpoint);
-      return trashed;
+      const collected = staged === undefined ? plan : await stageDeleteRecovery(operationId, staged, endpoint, recorded);
+      return { ...trashed, recovery: await finishDeleteRecovery(rootPath, collected, trashed.trashed, staged) };
     };
     // History holds nothing the engine cannot address, and nothing is open there.
-    if (capture === null || !engineAddresses(endpoint)) return { ...await trash(), refused: undefined };
+    if (capture === null || !engineAddresses(endpoint)) {
+      return { ...await trash([]), refused: undefined };
+    }
     let gone: string[] = [];
-    return await capture.changePathsAs([endpoint], { operation: "delete", author: person, operationId: `${OPERATION_ID_PREFIX}${randomUUID()}` },
+    return await capture.changePathsAs([endpoint], { operation: "delete", author: person, operationId },
       async engine => {
         // Checked again here, with capture held, right before the disk changes.
         assertWritable(operation);
@@ -606,7 +616,7 @@ export async function deleteWorkspacePathByHand(
           folder => historyExcludesSubtree(engine.policy, folder));
         // Edits capture has not seen yet land as their own rows first.
         const recorded = await engine.recordDisk(endpoint, files);
-        const trashed = await trash();
+        const trashed = await trash(recorded);
         gone = [endpoint];
         for (const file of recorded) {
           try {
@@ -623,5 +633,25 @@ export async function deleteWorkspacePathByHand(
     const where = outcome.trashed ? "the trash" : "the workspace trash, .dohc/trash";
     throw new Error(`${path} is in ${where}. ${outcome.refused}`);
   }
-  return { trashed: outcome.trashed };
+  return { trashed: outcome.trashed, ...("recovery" in outcome ? outcome.recovery : {}) };
+}
+
+// Main-only seam. PR 3 supplies each door's path floor and share authority.
+export async function undoWorkspaceDelete(
+  operation: PathChangeOperation,
+  input: { operationId: string; requestId: string },
+  author: MomentWriteAuthor,
+  options: { workspaceId: string; history: Pick<HistoryOperationsStore, "undoHistoryOperation"> },
+): Promise<DeleteUndoResult> {
+  const root = operation.workspace.rootPath;
+  try {
+    assertWritable(operation);
+    return await withExclusiveWorkspaceOperation(root, async markChanged => {
+      assertWritable(operation);
+      return await undoDeleteRecovery(root, input, author, options.history, options.workspaceId,
+        () => assertWritable(operation), markChanged);
+    });
+  } catch (error) {
+    return { ok: false, reason: reason(error, "dohc could not undo the delete.") };
+  }
 }
