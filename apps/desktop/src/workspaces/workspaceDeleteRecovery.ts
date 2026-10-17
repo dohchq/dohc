@@ -240,7 +240,7 @@ export async function undoDeleteRecovery(root: string, input: { operationId: str
       if (occupant && !(record.emptyFolders.includes(path) && occupant.isDirectory())) return { ok: false, reason: `Cannot undo the delete. ${path} now occupies the old path. Move it first.` };
       if (record.paths.includes(path)) {
         const source = await sourcePath(root, record, path).catch(error => { if (code(error) === "ENOENT") return undefined; throw error; });
-        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in the workspace trash. Restore it from the trash.` };
+        if (!source || !await info(source)) return { ok: false, reason: `Cannot undo the delete. ${path} is no longer in the workspace trash, and History has no copy of it.` };
       }
     }
     assertCurrent();

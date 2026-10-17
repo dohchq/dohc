@@ -575,7 +575,7 @@ describe("delete recovery placement and receipts", () => {
     const trash = join(f.root, ".dohc/trash");
     const staged = (await readdir(trash)).find(name => name.endsWith("-folder"))!;
     await rm(whole ? join(trash, staged) : join(trash, staged, "rowless.txt"), { recursive: true });
-    expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining("no longer in the workspace trash") });
+    expect(await f.undo(id)).toMatchObject({ ok: false, reason: expect.stringContaining("is no longer in the workspace trash, and History has no copy of it.") });
     expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   });
   it("expires metadata without deleting fallback bytes", async () => {
