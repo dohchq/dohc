@@ -17,6 +17,7 @@ import type {
   HistoryPolicyUnreadableResult,
   SitePackageInfo,
   SyncStatusResult,
+  TimelineEntry,
   UsageRecordResult,
   UsageRecordRow,
   WorkspaceFileEntry,
@@ -72,7 +73,7 @@ import { EditorGroupFrame } from "../workbench/tabRowActions";
 import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords } from "../workbench/HistoryPolicyStates";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
-import { MomentRow } from "../workbench/EngineHistory";
+import { EngineHistoryView, MomentRow } from "../workbench/EngineHistory";
 import { DiffCounts, UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "../workbench/unifiedDiff";
 import {
   AboutAccessView,
@@ -591,6 +592,48 @@ const RECOVERY_MOMENT: EngineMomentRecord = {
   origin: "capture-recovery",
   momentOrder: 7,
 };
+
+// One History timeline across two days: a file change, a version starting,
+// a labelled record change by an automation, a rules change an agent
+// approved that main could not date, the workspace starting, and an
+// unlabelled record change with no date or place. Only a rules change can
+// carry its approving agent. Local times, as above.
+const TIMELINE_BUDGET = "00000000-0000-4000-8000-0000000000b1";
+const TIMELINE_GUESTS = "00000000-0000-4000-8000-0000000000b2";
+const TIMELINE_FILE: TimelineEntry = { kind: "file", moment: {
+  id: "moment-timeline-plan", versionId: "main", path: "trip/plan.md", recordedAtMs: new Date(2026, 6, 8, 10, 12).getTime(),
+  operation: "write", origin: "local-file", momentOrder: 9, summary: "Added the ferry times",
+} };
+function timelineVersion(id: string, kind: "main" | "named", name: string, createdAtMs: number): TimelineEntry {
+  return { kind: "version", version: { id, workspaceId: "states", kind, name, createdAtMs } };
+}
+function timelineChange(datasetId: string, name: string, revision: number, recordedAtMs: number | null, sortAtMs: number | null,
+  by?: { automation?: string; rulesApprovedBy?: string }): TimelineEntry {
+  const rules = by?.rulesApprovedBy;
+  return { kind: "collection", datasetId, name, sortAtMs, change: {
+    revision, operation: rules ? "Fields and rules" : "addGuest", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64),
+    changesetBytes: rules ? 0 : 120, attachmentCount: 0,
+    ...(by?.automation ? { automation: { automationId: `automations.yaml#${by.automation}`, depth: 1, name: by.automation } } : {}),
+    ...(rules ? {
+      approvalAgent: { kind: "agent" as const, label: rules, labelSource: "agent-declared" as const },
+      schema: { previousRevisionHash: "b".repeat(64), revisionHash: "a".repeat(64) },
+    } : {}),
+  } };
+}
+const TIMELINE_DATED = timelineChange(TIMELINE_BUDGET, "Budget", 12, new Date(2026, 6, 8, 9, 44).getTime(), new Date(2026, 6, 8, 9, 44).getTime(), { automation: "Stamp the date" });
+const TIMELINE_MIXED: TimelineEntry[] = [
+  TIMELINE_FILE,
+  timelineVersion("version-draft", "named", "Draft itinerary", new Date(2026, 6, 8, 9, 58).getTime()),
+  TIMELINE_DATED,
+  timelineChange(TIMELINE_GUESTS, "Guests", 3, null, new Date(2026, 6, 8, 9, 30).getTime(), { rulesApprovedBy: "trip-agent" }),
+  timelineVersion("main", "main", "Main", new Date(2026, 6, 7, 18, 0).getTime()),
+  timelineChange(TIMELINE_GUESTS, "Guests", 1, null, null),
+];
+// Budget's definition labels its operation; Guests' is not loaded here.
+const TIMELINE_COLLECTIONS = new Map([
+  [TIMELINE_BUDGET, { name: "Budget", operationLabels: new Map([["addGuest", "Add guest"]]), open: noop }],
+  [TIMELINE_GUESTS, { name: "Guests" }],
+]);
 
 // The About tab on the drawing's document: who wrote what, who has it.
 const ABOUT_PATH = "notes/product-plan.md";
@@ -1665,6 +1708,38 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="restore refused">
           <div className={SHADOW_ROOM}>
             <WorkspaceErrorToast error={REFUSED_RESTORE_TOAST} onRetry={noop} onHide={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="history-timeline" title="History timeline">
+        <Specimen label="files, versions and Collections, with day headings">
+          <div className="flex h-[500px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={TIMELINE_MIXED} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="partial: a Collection did not load">
+          <div className="flex h-[260px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[TIMELINE_FILE, TIMELINE_DATED]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              unavailableSources={[{ datasetId: TIMELINE_GUESTS }]} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="Collections left out by the limit">
+          <div className="flex h-[240px] w-[300px] flex-col overflow-hidden rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[TIMELINE_FILE]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              omittedSources={14} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="one Collection, unavailable">
+          <div className="flex h-48 w-[300px] flex-col rounded-lg border border-line bg-panel">
+            <EngineHistoryView entries={[]} hasMore={false} loadingMore={false} onLoadMore={noop} onOpenMoment={noop}
+              unavailableSources={[{ datasetId: TIMELINE_GUESTS }]} collections={TIMELINE_COLLECTIONS} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="loading">
+          <div className="flex h-48 w-[300px] flex-col rounded-lg border border-line bg-panel">
+            <SkeletonRows layout="panel" label="Loading history..." />
           </div>
         </Specimen>
       </Section>
