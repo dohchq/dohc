@@ -352,6 +352,47 @@ The deployment initializes fresh storage, applies authentication migrations, and
 Keep the deployment secrets and volumes across restarts.
 Do not rerun fresh initialization against an existing deployment.
 
+## Live editing limits
+
+The live editing profile allows 128 connections in the relay and 96 per workspace.
+The relay keeps 16 of each for workspace owners, so other people share 112 in total and 80 per workspace.
+Each grant allows 80 connections, each principal 12, and each editing session 6.
+Everyone using one share link counts against its link grant.
+One browser holding that link has its own link principal.
+Named accounts count across their grants and devices.
+The browser gateway applies the same limits to its named and link routes.
+
+A refused connection closes with the code of the limit it hit:
+
+| Code | Limit |
+| --- | --- |
+| `live_total_limit` | Connections in the relay or gateway |
+| `live_workspace_limit` | Connections in one workspace |
+| `live_grant_limit` | Connections on one grant |
+| `live_person_limit` | Connections for one principal |
+| `live_session_limit` | Connections in one editing session |
+| `live_buffer_limit` | Live frame buffers |
+
+The relay holds at most 128 MiB of live frame buffers across its owner, desktop, named, and link routes.
+Within that budget, one principal holds at most 12 MiB.
+People other than the owner hold at most 80 MiB per share and 80 MiB per workspace, which leaves room for owners and other workspaces.
+The browser gateway has a separate 128 MiB frame budget with the same portions, shared by its named and link routes.
+Each relay socket can queue at most 256 KiB of outgoing data.
+Each gateway socket can queue at most 4 MiB.
+
+Checking an edit uses a separate 128 MiB pool in the relay, so it never takes room from live frames.
+Each check reserves five times the document's stored state on the relay, plus three times the edit.
+Each person runs one check at a time.
+A check that must wait for room gets a retry.
+The relay refuses an edit whose check needs more than 128 MiB, or whose document state and new edit total more than 16 MiB.
+Two validation workers run the checks, each with its own heap of up to 512 MiB.
+These budgets exclude the validation workers' heaps, the session host's document state, and OS socket buffers.
+
+These limits fit 20 people with three documents open each, with capacity left for owners and other devices.
+They remain provisional until the launch server is measured.
+The numbers come from [the live editing profile](../../services/sync-relay/src/selfHostLiveProfile.ts).
+Custom deployments must supply the same buffer budget to all live routes.
+
 ## Run automations on the server
 
 The self-host bundle enables server automations with `DOHC_RELAY_AUTOMATIONS=1`.

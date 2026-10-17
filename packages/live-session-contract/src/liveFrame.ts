@@ -492,7 +492,7 @@ interface Direction {
   greeted: boolean;
   receivePolicy?: LiveFrameReceivePolicy;
   nextTransferId: number;
-  active?: { begin: LiveFrameBegin; offset: number; bytes?: Uint8Array };
+  active?: { begin: LiveFrameBegin; offset: number; bytes?: Uint8Array; releaseBytes?: () => void };
   grantedBytes: number;
   grantedFrames: number;
   chargedBytes: number;
@@ -512,7 +512,7 @@ function opposite(side: Side): Side { return side === "client" ? "server" : "cli
  * Queue accounting covers one owned frame; assembly accounting covers its copied chunks.
  * Callers own hashing and durable effects. A decoded RESULT proves neither.
  */
-export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy) {
+export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy, reserveBytes?: (size: number) => () => void) {
   requireFrame(role === "client" || role === "server");
   const raw = record(input, ["receive", "maxQueuedBytes", "maxQueuedFrames", "maxControlBytes", "maxControlFrames", "maxAssemblyBytes"]);
   const limits: LiveFrameSessionPolicy = {
@@ -535,6 +535,7 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
     terminal = true;
     for (const state of Object.values(sides)) {
       if (state.active?.bytes) assemblyBytes -= state.active.begin.totalBytes;
+      state.active?.releaseBytes?.();
       state.active = undefined;
       state.grantedBytes = state.chargedBytes; state.grantedFrames = state.chargedFrames;
     }
@@ -592,7 +593,7 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       const identity = frame.result === "success" ? frame.ack : frame;
       requireFrame(sender === "server" && live && pending?.complete && pending.deliveryId === identity.deliveryId && pending.updateDigest === identity.updateDigest, "state");
       pending = undefined;
-      if (frame.result !== "success") close();
+      if (frame.result === "refused") close();
       return;
     }
     if (frame.kind === "begin") {
@@ -604,13 +605,14 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       else {
         requireFrame(live && (frame.purpose === "submit-update" ? sender === "client" && !pending : sender === "server"), "state");
       }
-      let bytes: Uint8Array | undefined;
+      let bytes: Uint8Array | undefined, releaseBytes: (() => void) | undefined;
       if (sender !== role) {
         requireFrame(frame.totalBytes <= limits.maxAssemblyBytes - assemblyBytes, "limit");
-        bytes = new Uint8Array(frame.totalBytes);
+        releaseBytes = reserveBytes?.(frame.totalBytes);
+        try { bytes = new Uint8Array(frame.totalBytes); } catch (error) { releaseBytes?.(); throw error; }
         assemblyBytes += frame.totalBytes;
       }
-      state.active = { begin: frame, offset: 0, bytes };
+      state.active = { begin: frame, offset: 0, bytes, releaseBytes };
       state.nextTransferId = frame.transferId === Number.MAX_SAFE_INTEGER ? 0 : frame.transferId + 1;
       if (frame.purpose === "submit-update") pending = { deliveryId: frame.deliveryId, updateDigest: frame.digest, complete: false };
     } else {
@@ -623,7 +625,7 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
         if (active.begin.purpose === "initial-sync") { syncDone = true; syncCursor = active.begin.appliedThroughJournalCursor; }
         if (active.begin.purpose === "submit-update") pending!.complete = true;
         state.chargedBytes += size; state.chargedFrames += 1;
-        if (active.bytes) return lease({ begin: active.begin, bytes: active.bytes }, () => { assemblyBytes -= active.begin.totalBytes; });
+        if (active.bytes) return lease({ begin: active.begin, bytes: active.bytes }, () => { assemblyBytes -= active.begin.totalBytes; active.releaseBytes?.(); });
         return;
       }
     }
@@ -634,8 +636,9 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
     const bytesField = data ? "queuedBytes" : "controlBytes", framesField = data ? "queuedFrames" : "controlFrames";
     requireFrame(size <= (data ? limits.maxQueuedBytes : limits.maxControlBytes) - state[bytesField] &&
       state[framesField] < (data ? limits.maxQueuedFrames : limits.maxControlFrames), "limit");
+    const releaseBytes = reserveBytes?.(size);
     state[bytesField] += size; state[framesField] += 1;
-    return () => { state[bytesField] -= size; state[framesField] -= 1; };
+    return () => { state[bytesField] -= size; state[framesField] -= 1; releaseBytes?.(); };
   }
   return {
     send(value: LiveFrame): LiveFrameLease<Uint8Array> {

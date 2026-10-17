@@ -1,3 +1,4 @@
+import {liveConnectionLimitMessage} from "@dohc/live-session-contract/live-connection";
 import {useEffect, useRef, useState} from "react";
 import {mountLiveBodyEditor} from "@dohc/ydoc-projection/browser-editor";
 import type {createNamedLiveBrowserTransport, NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
@@ -8,6 +9,8 @@ export type NamedDocumentSession = ReturnType<ReturnType<typeof createNamedLiveB
 function statusText(state: NamedLiveBrowserState, link: boolean): string {
   if (state.status === "live") return state.pendingUpdates ? "Saving changes…" : state.lastApplied ? "Changes saved" : "Ready to edit";
   if (["authorizing", "connecting", "syncing"].includes(state.status)) return "Opening the file…";
+  const limit = liveConnectionLimitMessage(state.reason);
+  if (limit) return limit;
   if (state.status === "quarantined") return "Editing stopped. Review your draft before opening the current file.";
   if (state.status === "refused") return link ? "This link cannot open the file. Ask the owner for access." : "This account cannot open the file. Sign in with the invited account.";
   if (state.status === "closed") return "Editing stopped. Copy any unsynced changes you want to keep.";
@@ -31,7 +34,7 @@ export function NamedDocumentEditor({session, path, onState, link = false}: {ses
     <h1>{path}</h1>
     <p className="named-document-status" role="status">{statusText(state, link)}</p>
     {state.status === "disconnected" && <button className="handoff-button secondary" onClick={() => void session.reconnect()}>
-      {state.reason === "authority-unavailable" ? "Try again" : "Retry connection"}</button>}
+      {state.reason === "authority-unavailable" || liveConnectionLimitMessage(state.reason) ? "Try again" : "Retry connection"}</button>}
     <PropertiesAsWritten block={frontmatter}/>
     <div className="named-body-editor" ref={element} />
   </section>;
