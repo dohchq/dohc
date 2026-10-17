@@ -3,7 +3,7 @@ import { writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CHANNELS } from "./channels";
 import { registerDirectMessagesIpcHandlers, peekReceivedGrantKindForShare } from "./directMessagesIpc";
-import { registerSharedChannelsIpcHandlers } from "./sharedChannelsIpc";
+import { createSharedChannelsIpc } from "./sharedChannelsIpc";
 import { createChatScopeCapability } from "./chatScope";
 import { createWorkspaceAuthorityOwner, type PhysicalWorkspace } from "../workspaces/workspaceAuthorityOwner";
 import { createRendererWorkspaceOperationRunner, type ExactRendererWorkspaceOperation } from "../window/rendererWorkspaceOperation";
@@ -135,8 +135,7 @@ async function harness() {
     const refusal = workspaceWriteRefusal(value.shareView);
     if (refusal) throw new Error(refusal);
   };
-  const sharedCommands = registerSharedChannelsIpcHandlers<string, Event, Workspace, Operation>({
-    registerHandler: () => undefined, assertTrustedSender, withRendererWorkspaceOperation,
+  const sharedCommands = createSharedChannelsIpc<Workspace, Operation>({
     requireEngineCapture, assertWritableWorkspace, linkedChatStoreFor,
     remoteForWorkspace: remote, currentCredentialGeneration: () => generation, currentCredentials: () => current,
     warmCredentialCache: warm, mountShareFolder: async () => undefined, unmountShareFolder: async () => ({}),

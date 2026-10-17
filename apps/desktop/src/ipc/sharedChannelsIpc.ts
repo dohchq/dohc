@@ -1,13 +1,14 @@
-import { CHANNELS } from "./channels";
+import type { sharedChannelOperations } from "./shareOperations";
+import type { OperationHandlers } from "./operationTable";
 import {
-  ShareChatChannelPayload, ShareChatChannelResult,
-  ListChatChannelSharesPayload, ListChatChannelSharesResult,
-  JoinSharedChannelPayload, JoinSharedChannelResult,
-  LeaveSharedChannelPayload, DismissShareSkipsPayload,
+  ShareChatChannelResult,
+  ListChatChannelSharesResult,
+  JoinSharedChannelResult,
+  ListJoinedSharedChannelsResult,
 } from "./bridgeContract";
 import {
   awaitCredentialGeneration, chatShareSessionKey,
-  createListJoinedSharedChannelsIpcHandler, readRelayChatShareLanes, RelaySessionError,
+  readRelayChatShareLanes, RelaySessionError,
 } from "../mainChatIpcHandlers";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { ShareUnavailableError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
@@ -34,9 +35,7 @@ import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLan
 import { shareMountRecordsForId } from "../workspaces/shareMounts";
 import { storedShareMounts } from "../workspaces/shareViewFilesTarget";
 
-export function registerSharedChannelsIpcHandlers<
-  Sender,
-  Event extends { sender: Sender },
+export function createSharedChannelsIpc<
   Workspace extends RegistryEntry & { readonly attachmentId: symbol },
   Operation extends {
     readonly workspace: Workspace;
@@ -44,12 +43,6 @@ export function registerSharedChannelsIpcHandlers<
     assertCurrent(): void;
   },
 >(dependencies: {
-  registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
-  assertTrustedSender(event: Event): void;
-  withRendererWorkspaceOperation<Result>(
-    sender: Sender, workspaceId: string, message: string,
-    work: (operation: Operation) => Result | Promise<Result>,
-  ): Promise<Result>;
   requireEngineCapture(workspace: Workspace, feature: "Chats"): Promise<{ workspace: RegistryEntry }>;
   assertWritableWorkspace(workspace: RegistryEntry): void;
   linkedChatStoreFor(workspace: RegistryEntry): Pick<DesktopLinkedChatStore, "listChannels" | "getChannelWireId">;
@@ -92,8 +85,8 @@ export function registerSharedChannelsIpcHandlers<
   // shares so a share the owner restored resumes.
   reconcileReceivedShares(listing: unknown): Promise<void>;
 }) {
+  type Handlers = OperationHandlers<typeof sharedChannelOperations, unknown, Operation>;
   const {
-    registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
     requireEngineCapture, assertWritableWorkspace, linkedChatStoreFor, remoteForWorkspace,
     currentCredentialGeneration, currentCredentials, warmCredentialCache,
     relayShareJsonWithCredentials, listWorkspaces, updateWorkspaceSharedChannels,
@@ -108,107 +101,98 @@ export function registerSharedChannelsIpcHandlers<
   // security decision (membership, authorship, channel scoping, revocation);
   // these handlers only address grants and move the member-side sync.
 
-  registerHandler(CHANNELS.shareChatChannel, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ShareChatChannelPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Sharing stopped because this window changed workspaces.",
-      async (operation) => {
-        const { workspace } = await requireEngineCapture(
-          operation.workspace,
-          "Chats",
-        );
-        operation.assertCurrent();
-        assertWritableWorkspace(workspace);
-        const store = linkedChatStoreFor(workspace);
-        const channel = await requireShareableChatChannel({
-          workspaceId: workspace.workspaceId,
-          channelId: input.channelId,
-          store,
-        });
-        operation.assertCurrent();
-        const wireId = await store.getChannelWireId({
-          workspaceId: workspace.workspaceId,
-          channelId: input.channelId,
-        });
-        operation.assertCurrent();
-        if (!wireId) throw new Error("This group can't be shared yet.");
-        // "general" is every workspace's personal default channel — the same wire
-        // id everywhere by design, so sharing it would merge strangers' personal
-        // chats. Refuse with a way forward.
-        if (wireId === GENERAL_CHANNEL_WIRE_ID) {
-          throw new Error(
-            "The general group is personal to each workspace. Create a group to share.",
-          );
-        }
-        if (
-          workspace.sharedChannels?.some(
-            (channel) => channel.channelWireId === wireId,
-          )
-        ) {
-          throw new Error(
-            "This group was shared with you. Ask the person who shared it to add more people.",
-          );
-        }
-        const { credentials, credentialGeneration } =
-          await remoteForWorkspace(workspace);
-        operation.assertCurrent();
-        // A group is a grant on a channel the relay already knows. The
-        // channel's create op may still be waiting for the next sync pass,
-        // so push it now rather than let the relay refuse a channel it has
-        // not seen.
-        // The push and the share belong to one session: a sign-out during
-        // the push must not let the old credentials mint the grant.
-        const { assertCurrent: assertCurrentShareSession } = credentialScopedOperation({
-          assertCurrent: operation.assertCurrent,
-          capturedGeneration: credentialGeneration,
-          currentGeneration: () => currentCredentialGeneration(),
-        });
-        // Credentials can rotate between the lookup resolving and this
-        // handler resuming; nothing runs on a session that is already gone.
-        assertCurrentShareSession();
-        if (channel.folderPath && credentials.relayUrl) {
-          await pushWithIdentity(relayClientForWorkspace({
-            workspaceId: workspace.workspaceId,
-            accountId: credentials.userId,
-            rootPath: workspace.rootPath,
-            attachmentId: operation.workspace.attachmentId,
-            relay: { baseUrl: credentials.relayUrl, token: credentials.token },
-          }));
-          assertCurrentShareSession();
-        }
-        const created = await awaitCredentialGeneration({
-          capturedGeneration: credentialGeneration,
-          currentGeneration: () => currentCredentialGeneration(),
-          run: async () => {
-            operation.assertCurrent();
-            const share = await relayShareJsonWithCredentials<{ shareId: string }>(
-              credentials,
-              `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
-              {
-                method: "POST",
-                // A channel with a folder is a group: one grant covers
-                // the channel and the folder together.
-                body: JSON.stringify({
-                  recipientEmail: input.recipientEmail,
-                  channelWireId: wireId,
-                  ...(channel.folderPath ? { paths: [channel.folderPath] } : {}),
-                  ...(input.access ? { access: input.access } : {}),
-                }),
-              },
-            );
-            // The share exists even if this window has moved on.
-            sharesChanged(workspace.workspaceId);
-            return share;
-          },
-        });
-        operation.assertCurrent();
-        return ShareChatChannelResult.parse({ shareId: created.shareId });
-      },
+  const shareChatChannelHandler: Handlers["shareChatChannel"] = async (input, { operation }) => {
+    const { workspace } = await requireEngineCapture(
+      operation.workspace,
+      "Chats",
     );
-  });
+    operation.assertCurrent();
+    assertWritableWorkspace(workspace);
+    const store = linkedChatStoreFor(workspace);
+    const channel = await requireShareableChatChannel({
+      workspaceId: workspace.workspaceId,
+      channelId: input.channelId,
+      store,
+    });
+    operation.assertCurrent();
+    const wireId = await store.getChannelWireId({
+      workspaceId: workspace.workspaceId,
+      channelId: input.channelId,
+    });
+    operation.assertCurrent();
+    if (!wireId) throw new Error("This group can't be shared yet.");
+    // "general" is every workspace's personal default channel — the same wire
+    // id everywhere by design, so sharing it would merge strangers' personal
+    // chats. Refuse with a way forward.
+    if (wireId === GENERAL_CHANNEL_WIRE_ID) {
+      throw new Error(
+        "The general group is personal to each workspace. Create a group to share.",
+      );
+    }
+    if (
+      workspace.sharedChannels?.some(
+        (channel) => channel.channelWireId === wireId,
+      )
+    ) {
+      throw new Error(
+        "This group was shared with you. Ask the person who shared it to add more people.",
+      );
+    }
+    const { credentials, credentialGeneration } =
+      await remoteForWorkspace(workspace);
+    operation.assertCurrent();
+    // A group is a grant on a channel the relay already knows. The
+    // channel's create op may still be waiting for the next sync pass,
+    // so push it now rather than let the relay refuse a channel it has
+    // not seen.
+    // The push and the share belong to one session: a sign-out during
+    // the push must not let the old credentials mint the grant.
+    const { assertCurrent: assertCurrentShareSession } = credentialScopedOperation({
+      assertCurrent: operation.assertCurrent,
+      capturedGeneration: credentialGeneration,
+      currentGeneration: () => currentCredentialGeneration(),
+    });
+    // Credentials can rotate between the lookup resolving and this
+    // handler resuming; nothing runs on a session that is already gone.
+    assertCurrentShareSession();
+    if (channel.folderPath && credentials.relayUrl) {
+      await pushWithIdentity(relayClientForWorkspace({
+        workspaceId: workspace.workspaceId,
+        accountId: credentials.userId,
+        rootPath: workspace.rootPath,
+        attachmentId: operation.workspace.attachmentId,
+        relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+      }));
+      assertCurrentShareSession();
+    }
+    const created = await awaitCredentialGeneration({
+      capturedGeneration: credentialGeneration,
+      currentGeneration: () => currentCredentialGeneration(),
+      run: async () => {
+        operation.assertCurrent();
+        const share = await relayShareJsonWithCredentials<{ shareId: string }>(
+          credentials,
+          `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
+          {
+            method: "POST",
+            // A channel with a folder is a group: one grant covers
+            // the channel and the folder together.
+            body: JSON.stringify({
+              recipientEmail: input.recipientEmail,
+              channelWireId: wireId,
+              ...(channel.folderPath ? { paths: [channel.folderPath] } : {}),
+              ...(input.access ? { access: input.access } : {}),
+            }),
+          },
+        );
+        // The share exists even if this window has moved on.
+        sharesChanged(workspace.workspaceId);
+        return share;
+      },
+    });
+    operation.assertCurrent();
+    return ShareChatChannelResult.parse({ shareId: created.shareId });
+  };
 
   // What this machine joined, for the channels the caller named. The grant
   // side lives on the relay; this side does not, so asking it costs no network
@@ -227,20 +211,10 @@ export function registerSharedChannelsIpcHandlers<
     return scopeJoinedChannels(workspace.sharedChannels ?? [], channelWireIds);
   }
 
-  registerHandler(
-    CHANNELS.listJoinedSharedChannels,
-    createListJoinedSharedChannelsIpcHandler({
-      assertTrustedSender,
-      withWorkspaceOperation: (event, workspaceId, work) =>
-        withRendererWorkspaceOperation(
-          event.sender,
-          workspaceId,
-          "Sharing stopped because this window changed workspaces.",
-          work,
-        ),
-      answerJoinedChannels: joinedChannelAnswers,
-    }),
-  );
+  const listJoinedSharedChannelsHandler: Handlers["listJoinedSharedChannels"] = (input, { operation }) =>
+    ListJoinedSharedChannelsResult.parse({
+      joined: joinedChannelAnswers(operation.workspace, input.channelWireIds),
+    });
 
   function shareIdsClaimedByOtherWorkspaces(workspaceId: string): Set<string> {
     const claimed = new Set<string>();
@@ -371,124 +345,115 @@ export function registerSharedChannelsIpcHandlers<
     });
   }
 
-  registerHandler(CHANNELS.listChatChannelShares, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListChatChannelSharesPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Sharing stopped because this window changed workspaces.",
-      async (operation) => {
-        const workspace = operation.workspace;
-        // Relay-side listings need a signed-in session; without one the local
-        // joined set still answers (their local copies keep working offline), and
-        // the relay side reports signed-out or unreachable instead of posing as
-        // an empty listing.
-        //
-        // One credentials snapshot serves both the fetch and the session key, so
-        // the key always names the session the request actually used — a login
-        // or switch landing mid-flight cannot drift them apart.
-        await warmCredentialCache();
-        operation.assertCurrent();
-        const credentials = currentCredentials();
-        const shareCredentialGeneration = currentCredentialGeneration();
-        const { assertCurrent: assertCurrentShareSession } = credentialScopedOperation({
-          assertCurrent: operation.assertCurrent,
-          capturedGeneration: shareCredentialGeneration,
-          currentGeneration: () => currentCredentialGeneration(),
-        });
-        const shareIdsClaimedElsewhere = shareIdsClaimedByOtherWorkspaces(
-          workspace.workspaceId,
-        );
-        const relay = await readRelayChatShareLanes({
-          fetchListing: async () => {
-            if (!credentials) {
-              throw new RelaySessionError("Sign in to your server first.");
-            }
+  const listChatChannelSharesHandler: Handlers["listChatChannelShares"] = async (input, { operation }) => {
+    const workspace = operation.workspace;
+    // Relay-side listings need a signed-in session; without one the local
+    // joined set still answers (their local copies keep working offline), and
+    // the relay side reports signed-out or unreachable instead of posing as
+    // an empty listing.
+    //
+    // One credentials snapshot serves both the fetch and the session key, so
+    // the key always names the session the request actually used — a login
+    // or switch landing mid-flight cannot drift them apart.
+    await warmCredentialCache();
+    operation.assertCurrent();
+    const credentials = currentCredentials();
+    const shareCredentialGeneration = currentCredentialGeneration();
+    const { assertCurrent: assertCurrentShareSession } = credentialScopedOperation({
+      assertCurrent: operation.assertCurrent,
+      capturedGeneration: shareCredentialGeneration,
+      currentGeneration: () => currentCredentialGeneration(),
+    });
+    const shareIdsClaimedElsewhere = shareIdsClaimedByOtherWorkspaces(
+      workspace.workspaceId,
+    );
+    const relay = await readRelayChatShareLanes({
+      fetchListing: async () => {
+        if (!credentials) {
+          throw new RelaySessionError("Sign in to your server first.");
+        }
+        assertCurrentShareSession();
+        const listing = await relayShareJsonWithCredentials<{
+          granted?: Array<Record<string, unknown>>;
+          received?: Array<Record<string, unknown>>;
+          removed?: unknown;
+        }>(credentials, "/sync/shares");
+        assertCurrentShareSession();
+        // Before the joined answers below are read, so a row this listing
+        // resumes answers as live.
+        await reconcileReceivedShares(listing);
+        assertCurrentShareSession();
+        const receivedShareIds = Array.isArray(listing.received)
+          ? listing.received.flatMap((row) => {
+              const selector = row.selector as
+                | { kind?: unknown }
+                | undefined;
+              return selector?.kind === "chat" &&
+                typeof row.shareId === "string"
+                ? [row.shareId]
+                : [];
+            })
+          : [];
+        // This adds bounded relay reads only for uncached grants. The one-time
+        // cost closes the request-gate window before the first syncDms poll.
+        await resolveDmKinds({
+          shareIds: receivedShareIds,
+          cache: peekedReceivedGrantKinds,
+          peekKind: async (shareId) => {
             assertCurrentShareSession();
-            const listing = await relayShareJsonWithCredentials<{
-              granted?: Array<Record<string, unknown>>;
-              received?: Array<Record<string, unknown>>;
-              removed?: unknown;
-            }>(credentials, "/sync/shares");
-            assertCurrentShareSession();
-            // Before the joined answers below are read, so a row this listing
-            // resumes answers as live.
-            await reconcileReceivedShares(listing);
-            assertCurrentShareSession();
-            const receivedShareIds = Array.isArray(listing.received)
-              ? listing.received.flatMap((row) => {
-                  const selector = row.selector as
-                    | { kind?: unknown }
-                    | undefined;
-                  return selector?.kind === "chat" &&
-                    typeof row.shareId === "string"
-                    ? [row.shareId]
-                    : [];
-                })
-              : [];
-            // This adds bounded relay reads only for uncached grants. The one-time
-            // cost closes the request-gate window before the first syncDms poll.
-            await resolveDmKinds({
-              shareIds: receivedShareIds,
-              cache: peekedReceivedGrantKinds,
-              peekKind: async (shareId) => {
-                assertCurrentShareSession();
-                const kind = await peekReceivedGrantKindForShare(
-                  {
-                    baseUrl: normalizeServerUrl(credentials.relayUrl!),
-                    token: credentials.token,
-                    fetch: relayFetchWithTimeout(
-                      RELAY_FETCH_TIMEOUT_MS,
-                    ),
-                  },
-                  shareId,
-                );
-                assertCurrentShareSession();
-                return kind;
+            const kind = await peekReceivedGrantKindForShare(
+              {
+                baseUrl: normalizeServerUrl(credentials.relayUrl!),
+                token: credentials.token,
+                fetch: relayFetchWithTimeout(
+                  RELAY_FETCH_TIMEOUT_MS,
+                ),
               },
-            });
+              shareId,
+            );
             assertCurrentShareSession();
-            for (const shareId of shareIdsToWithholdFromOrdinaryInvites({
-              shareIds: receivedShareIds,
-              cache: peekedReceivedGrantKinds,
-            })) {
-              shareIdsClaimedElsewhere.add(shareId);
-            }
-            return listing;
+            return kind;
           },
-          workspaceId: workspace.remote ? workspace.workspaceId : null,
-          shareIdsClaimedElsewhere,
         });
         assertCurrentShareSession();
-        // The caller's channels plus the invitations this answer is about to hand
-        // it. The sharing surface shows both, and for each invitation it decides
-        // whether this workspace has already joined that channel — a question it
-        // cannot ask in advance, because this call is what tells it the invitation
-        // exists. Read after the relay await, so a sync pass that ended a row
-        // during it is reflected rather than missed.
-        const shownWireIds = [
-          ...input.channelWireIds,
-          ...(relay.state === "answered"
-            ? relay.received.map((row) => row.channelWireId)
-            : []),
-        ];
-        // The registry as it stands, not the operation's snapshot: the listing
-        // above may have resumed a row.
-        const registered =
-          listWorkspaces().find((entry) => entry.workspaceId === workspace.workspaceId) ??
-          operation.workspace;
-        return ListChatChannelSharesResult.parse({
-          joined: joinedChannelAnswers(registered, shownWireIds),
-          sessionKey:
-            relay.state === "signed-out"
-              ? null
-              : chatShareSessionKey(credentials),
-          relay,
-        });
+        for (const shareId of shareIdsToWithholdFromOrdinaryInvites({
+          shareIds: receivedShareIds,
+          cache: peekedReceivedGrantKinds,
+        })) {
+          shareIdsClaimedElsewhere.add(shareId);
+        }
+        return listing;
       },
-    );
-  });
+      workspaceId: workspace.remote ? workspace.workspaceId : null,
+      shareIdsClaimedElsewhere,
+    });
+    assertCurrentShareSession();
+    // The caller's channels plus the invitations this answer is about to hand
+    // it. The sharing surface shows both, and for each invitation it decides
+    // whether this workspace has already joined that channel — a question it
+    // cannot ask in advance, because this call is what tells it the invitation
+    // exists. Read after the relay await, so a sync pass that ended a row
+    // during it is reflected rather than missed.
+    const shownWireIds = [
+      ...input.channelWireIds,
+      ...(relay.state === "answered"
+        ? relay.received.map((row) => row.channelWireId)
+        : []),
+    ];
+    // The registry as it stands, not the operation's snapshot: the listing
+    // above may have resumed a row.
+    const registered =
+      listWorkspaces().find((entry) => entry.workspaceId === workspace.workspaceId) ??
+      operation.workspace;
+    return ListChatChannelSharesResult.parse({
+      joined: joinedChannelAnswers(registered, shownWireIds),
+      sessionKey:
+        relay.state === "signed-out"
+          ? null
+          : chatShareSessionKey(credentials),
+      relay,
+    });
+  };
 
   // The joined channel's name, for the folder's label. A replicated channel
   // keeps the originating store's channel id, which is its wire id. The
@@ -499,110 +464,101 @@ export function registerSharedChannelsIpcHandlers<
     return channels.find((channel) => channel.id === channelWireId)?.name ?? "";
   }
 
-  registerHandler(CHANNELS.joinSharedChannel, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = JoinSharedChannelPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Joining stopped because this window changed workspaces.",
-      async (operation) => {
-        const { workspace } = await requireEngineCapture(
-          operation.workspace,
-          "Chats",
-        );
-        operation.assertCurrent();
-        if (shareViewIsPresent(workspace.shareView)) {
-          throw new Error(
-            "Shared views are read-only. Join groups from a workspace you own.",
-          );
-        }
-        await warmCredentialCache();
-        operation.assertCurrent();
-        const joinCredentials = requireCredentials(currentCredentials());
-        const joinCredentialGeneration = currentCredentialGeneration();
-        if (!joinCredentials.relayUrl) {
-          throw new Error(
-            "Reconnect your server to refresh its connection settings, then try again.",
-          );
-        }
-        // Capture the credentials before the awaits below (CodeRabbit Data
-        // Integrity): currentCredentials() can change during fetch/pull (logout,
-        // relay switch) — re-reading it afterwards can crash on null or pin the
-        // joined channel to the wrong relay. The join is atomic against the
-        // credentials it started with.
-        const joinedRelayUrl = joinCredentials.relayUrl;
-        const joinedRecipientUserId = joinCredentials.userId;
-        const { assertCurrent: assertCurrentJoinSession } = credentialScopedOperation({
-          assertCurrent: operation.assertCurrent,
-          capturedGeneration: joinCredentialGeneration,
-          currentGeneration: () => currentCredentialGeneration(),
-        });
-        const relay = {
-          baseUrl: normalizeServerUrl(joinedRelayUrl),
-          token: joinCredentials.token,
-          // Same timeout wrapper runSharedChannelSyncPass uses (:973): an
-          // unresponsive relay must abort the join's fetch/pull instead of leaving
-          // the renderer's "Joining…" button stuck forever.
-          fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
-        };
-        let joined: JoinedSharedChannel;
-        // Filled by preWrite. Held in an object so the closure's assignment
-        // survives TypeScript's narrowing of a plain `let`.
-        const grant: { info: SharedChannelInfo | null } = { info: null };
-        try {
-          joined = await reserveAndPullSharedChannelForWorkspace({
-            operation,
-            assertCurrent: assertCurrentJoinSession,
-            relay,
-            shareId: input.shareId,
-            recipientUserId: joinedRecipientUserId,
-            relayUrl: joinedRelayUrl,
-            serverUrl: joinCredentials.serverUrl,
-            preWrite: (info) => {
-              grant.info = info;
-            },
-          });
-          assertCurrentJoinSession();
-        } catch (error) {
-          assertCurrentJoinSession();
-          if (error instanceof ShareUnavailableError) {
-            throw new Error("That shared group isn't available anymore.");
-          }
-          throw error;
-        }
-        // A group's folder follows its channel. The channel is joined and
-        // its row written, so a folder that cannot be added leaves the chat
-        // usable and says what is missing. The mount re-reads and adopts the
-        // session itself, which advances the credential generation, so after
-        // it only workspace liveness is checked here.
-        if (
-          grant.info?.kind === "group" &&
-          shareMountRecordsForId(storedShareMounts(operation.workspace), input.shareId).length === 0
-        ) {
-          const labelHint = await groupFolderName(operation.workspace, joined.channelWireId);
-          assertCurrentJoinSession();
-          try {
-            await mountShareFolder({
-              workspace: operation.workspace,
-              shareId: input.shareId,
-              relayUrl: joinedRelayUrl,
-              labelHint,
-              assertCurrent: operation.assertCurrent,
-            });
-          } catch (error) {
-            operation.assertCurrent();
-            const reason = error instanceof Error ? error.message : String(error);
-            throw new Error(`Joined the group's chat, but its folder could not be added. ${reason}`);
-          }
-          operation.assertCurrent();
-        }
-        return JoinSharedChannelResult.parse({
-          joined: { ...joined, ended: false },
-        });
-      },
+  const joinSharedChannelHandler: Handlers["joinSharedChannel"] = async (input, { operation }) => {
+    const { workspace } = await requireEngineCapture(
+      operation.workspace,
+      "Chats",
     );
-  });
+    operation.assertCurrent();
+    if (shareViewIsPresent(workspace.shareView)) {
+      throw new Error(
+        "Shared views are read-only. Join groups from a workspace you own.",
+      );
+    }
+    await warmCredentialCache();
+    operation.assertCurrent();
+    const joinCredentials = requireCredentials(currentCredentials());
+    const joinCredentialGeneration = currentCredentialGeneration();
+    if (!joinCredentials.relayUrl) {
+      throw new Error(
+        "Reconnect your server to refresh its connection settings, then try again.",
+      );
+    }
+    // Capture the credentials before the awaits below (CodeRabbit Data
+    // Integrity): currentCredentials() can change during fetch/pull (logout,
+    // relay switch) — re-reading it afterwards can crash on null or pin the
+    // joined channel to the wrong relay. The join is atomic against the
+    // credentials it started with.
+    const joinedRelayUrl = joinCredentials.relayUrl;
+    const joinedRecipientUserId = joinCredentials.userId;
+    const { assertCurrent: assertCurrentJoinSession } = credentialScopedOperation({
+      assertCurrent: operation.assertCurrent,
+      capturedGeneration: joinCredentialGeneration,
+      currentGeneration: () => currentCredentialGeneration(),
+    });
+    const relay = {
+      baseUrl: normalizeServerUrl(joinedRelayUrl),
+      token: joinCredentials.token,
+      // Same timeout wrapper runSharedChannelSyncPass uses (:973): an
+      // unresponsive relay must abort the join's fetch/pull instead of leaving
+      // the renderer's "Joining…" button stuck forever.
+      fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
+    };
+    let joined: JoinedSharedChannel;
+    // Filled by preWrite. Held in an object so the closure's assignment
+    // survives TypeScript's narrowing of a plain `let`.
+    const grant: { info: SharedChannelInfo | null } = { info: null };
+    try {
+      joined = await reserveAndPullSharedChannelForWorkspace({
+        operation,
+        assertCurrent: assertCurrentJoinSession,
+        relay,
+        shareId: input.shareId,
+        recipientUserId: joinedRecipientUserId,
+        relayUrl: joinedRelayUrl,
+        serverUrl: joinCredentials.serverUrl,
+        preWrite: (info) => {
+          grant.info = info;
+        },
+      });
+      assertCurrentJoinSession();
+    } catch (error) {
+      assertCurrentJoinSession();
+      if (error instanceof ShareUnavailableError) {
+        throw new Error("That shared group isn't available anymore.");
+      }
+      throw error;
+    }
+    // A group's folder follows its channel. The channel is joined and
+    // its row written, so a folder that cannot be added leaves the chat
+    // usable and says what is missing. The mount re-reads and adopts the
+    // session itself, which advances the credential generation, so after
+    // it only workspace liveness is checked here.
+    if (
+      grant.info?.kind === "group" &&
+      shareMountRecordsForId(storedShareMounts(operation.workspace), input.shareId).length === 0
+    ) {
+      const labelHint = await groupFolderName(operation.workspace, joined.channelWireId);
+      assertCurrentJoinSession();
+      try {
+        await mountShareFolder({
+          workspace: operation.workspace,
+          shareId: input.shareId,
+          relayUrl: joinedRelayUrl,
+          labelHint,
+          assertCurrent: operation.assertCurrent,
+        });
+      } catch (error) {
+        operation.assertCurrent();
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`Joined the group's chat, but its folder could not be added. ${reason}`);
+      }
+      operation.assertCurrent();
+    }
+    return JoinSharedChannelResult.parse({
+      joined: { ...joined, ended: false },
+    });
+  };
 
   // Member-initiated leave: purely local — the channel stops syncing and its
   // rows stay readable. Keep an ended tombstone so participant provenance and
@@ -622,37 +578,28 @@ export function registerSharedChannelsIpcHandlers<
     operation.assertCurrent();
   }
 
-  registerHandler(CHANNELS.leaveSharedChannel, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = LeaveSharedChannelPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Leaving stopped because this window changed workspaces.",
-      async (operation) => {
-        await endWorkspaceJoinedChannel(operation, input.shareId);
-        if (shareMountRecordsForId(storedShareMounts(operation.workspace), input.shareId).length > 0) {
-          let folderLeft = false;
-          try {
-            folderLeft = (await unmountShareFolder({
-              workspace: operation.workspace, shareId: input.shareId, assertCurrent: operation.assertCurrent,
-            })).folderLeft === true;
-          } catch (error) {
-            const reason = error instanceof Error ? error.message : String(error);
-            throw new Error(`Left the group, but its folder could not be removed. ${reason}`);
-          }
-          if (folderLeft) {
-            // The mount record is gone, so Settings offers nothing for it;
-            // the folder itself is what remains.
-            throw new Error(
-              "Left the group. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.",
-            );
-          }
-        }
-        return undefined;
-      },
-    );
-  });
+  const leaveSharedChannelHandler: Handlers["leaveSharedChannel"] = async (input, { operation }) => {
+    await endWorkspaceJoinedChannel(operation, input.shareId);
+    if (shareMountRecordsForId(storedShareMounts(operation.workspace), input.shareId).length > 0) {
+      let folderLeft = false;
+      try {
+        folderLeft = (await unmountShareFolder({
+          workspace: operation.workspace, shareId: input.shareId, assertCurrent: operation.assertCurrent,
+        })).folderLeft === true;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`Left the group, but its folder could not be removed. ${reason}`);
+      }
+      if (folderLeft) {
+        // The mount record is gone, so Settings offers nothing for it;
+        // the folder itself is what remains.
+        throw new Error(
+          "Left the group. Its folder is still in shared-with-me/ — delete it yourself if you don't want it.",
+        );
+      }
+    }
+    return undefined;
+  };
 
   // Record that the user has seen a share's skipped ops.
   //
@@ -662,43 +609,42 @@ export function registerSharedChannelsIpcHandlers<
   // with no reverse path and no warning. Acknowledging hides the warning,
   // keeps the coordinates for diagnosis, and lets a later refusal (a higher
   // generation) raise it again on its own.
-  registerHandler(CHANNELS.dismissShareSkips, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = DismissShareSkipsPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Share warning update stopped because this window changed workspaces.",
-      (operation) => {
-        const workspace = operation.workspace;
-        if (
-          input.shareId === undefined &&
-          !shareViewIsPresent(workspace.shareView)
-        ) {
-          throw new Error("This workspace is not a shared view.");
-        }
-        if (
-          input.shareId !== undefined &&
-          shareMountRecordsForId(
-            storedShareMounts(workspace),
-            input.shareId,
-          ).length === 0
-        ) {
-          throw new Error("That share is not mounted in this workspace.");
-        }
-        operation.assertCurrent();
-        acknowledgeWorkspaceShareSkips(
-          workspace.workspaceId,
-          input.shareId,
-          input.generation,
-        );
-        operation.assertCurrent();
-        notifyRenderer({ workspaceId: workspace.workspaceId });
-      },
+  const dismissShareSkipsHandler: Handlers["dismissShareSkips"] = async (input, { operation }) => {
+    const workspace = operation.workspace;
+    if (
+      input.shareId === undefined &&
+      !shareViewIsPresent(workspace.shareView)
+    ) {
+      throw new Error("This workspace is not a shared view.");
+    }
+    if (
+      input.shareId !== undefined &&
+      shareMountRecordsForId(
+        storedShareMounts(workspace),
+        input.shareId,
+      ).length === 0
+    ) {
+      throw new Error("That share is not mounted in this workspace.");
+    }
+    operation.assertCurrent();
+    acknowledgeWorkspaceShareSkips(
+      workspace.workspaceId,
+      input.shareId,
+      input.generation,
     );
-  });
+    operation.assertCurrent();
+    notifyRenderer({ workspaceId: workspace.workspaceId });
+  };
 
   return {
+    handlers: {
+      shareChatChannel: shareChatChannelHandler,
+      listJoinedSharedChannels: listJoinedSharedChannelsHandler,
+      listChatChannelShares: listChatChannelSharesHandler,
+      joinSharedChannel: joinSharedChannelHandler,
+      leaveSharedChannel: leaveSharedChannelHandler,
+      dismissShareSkips: dismissShareSkipsHandler,
+    },
     assertShareNotHeldElsewhere,
     reserveAndPullSharedChannelForWorkspace,
     endWorkspaceJoinedChannel,

@@ -1,4 +1,4 @@
-import { shareHandoffOperations, shareMountOperations } from "./ipc/shareOperations";
+import { shareHandoffOperations, shareMountOperations, shareProposalOperations, sharedChannelOperations } from "./ipc/shareOperations";
 import { chatOperations } from "./ipc/chatOperations";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
@@ -126,6 +126,8 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(chatOperations, invoke),
   ...operationBridge(shareHandoffOperations, invoke),
   ...operationBridge(shareMountOperations, invoke),
+  ...operationBridge(shareProposalOperations, invoke),
+  ...operationBridge(sharedChannelOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
   ...operationBridge(historyOperations, invoke),
@@ -301,16 +303,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.promoteRelayShareGrant, payload),
   revokeRelayShareGrant: (payload) =>
     ipcRenderer.invoke(CHANNELS.revokeRelayShareGrant, payload),
-  shareChatChannel: (payload) => ipcRenderer.invoke(CHANNELS.shareChatChannel, payload),
-  listChatChannelShares: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatChannelShares, payload),
-  listJoinedSharedChannels: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listJoinedSharedChannels, payload),
-  joinSharedChannel: (payload) => ipcRenderer.invoke(CHANNELS.joinSharedChannel, payload),
-  leaveSharedChannel: (payload) =>
-    ipcRenderer.invoke(CHANNELS.leaveSharedChannel, payload),
   ...operationBridge(sharedViewAccessOperations, invoke),
-  dismissShareSkips: (payload) => ipcRenderer.invoke(CHANNELS.dismissShareSkips, payload),
   listCollectionAutomations: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),
   switchCollectionAutomation: (payload) => ipcRenderer.invoke(CHANNELS.switchCollectionAutomation, payload),
@@ -443,18 +436,6 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.on(CHANNELS.automationRunWaiting, handler);
     return () => ipcRenderer.removeListener(CHANNELS.automationRunWaiting, handler);
   },
-  listShareProposals: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listShareProposals, payload),
-  readShareProposalChanges: (payload) =>
-    ipcRenderer.invoke(CHANNELS.readShareProposalChanges, payload),
-  readShareProposalFileContent: (payload) =>
-    ipcRenderer.invoke(CHANNELS.readShareProposalFileContent, payload),
-  settleShareProposal: (payload) =>
-    ipcRenderer.invoke(CHANNELS.settleShareProposal, payload),
-  submitShareChanges: (payload) =>
-    ipcRenderer.invoke(CHANNELS.submitShareChanges, payload),
-  pushShareDirectWrites: (payload) =>
-    ipcRenderer.invoke(CHANNELS.pushShareDirectWrites, payload),
   onShareDirectWritesPushed: (listener, workspaceId) => {
     const subscriptionId = crypto.randomUUID();
     const identity = { workspaceId, rendererDocumentId, subscriptionId };
@@ -472,10 +453,6 @@ const bridge: DohcDesktopBridge = {
     update(true);
     return () => { unsubscribe(); update(false); };
   },
-  listMyShareChanges: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listMyShareChanges, payload),
-  withdrawShareChanges: (payload) =>
-    ipcRenderer.invoke(CHANNELS.withdrawShareChanges, payload),
   openWorkspace: (payload) =>
     ipcRenderer.invoke(CHANNELS.openWorkspace, {
       ...payload,
