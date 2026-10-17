@@ -18,7 +18,7 @@ vi.mock("node:fs/promises", async original => {
 const person = { kind: "human", humanId: "local:owner" } as const;
 const agent = { kind: "agent", agentId: "test-agent", onBehalfOf: "local:owner" } as const;
 const otherId = "dohc-operation:11111111-1111-4111-8111-111111111111";
-const unsupported = "Cannot undo this change yet. Only a delete can be undone.";
+const missingMove = "Cannot undo the rename. Its recovery record is missing or expired. Rename it back yourself.";
 async function fixture(trackedPaths = ["folder/tracked.txt"]) {
   const rootPath = await createTestScratch("history-operation-floor-");
   const write = async (path: string, body = "bytes") => { await mkdir(join(rootPath, path, ".."), { recursive: true }); await writeFile(join(rootPath, path), body); };
@@ -95,7 +95,7 @@ it("checks beforePath on later History pages before Undo", async () => {
 it("refuses moves, unknown ids and invalid ids without an engine Undo or record creation", async () => {
   const f = await fixture();
   f.history.readHistoryPage.mockResolvedValue({ moments: [], nextCursor: null } as never);
-  expect(await f.undo(otherId)).toEqual({ ok: false, reason: unsupported });
+  expect(await f.undo(otherId)).toEqual({ ok: false, reason: "This operation is not in History." });
   expect(await f.undo("11111111-1111-4111-8111-111111111111")).toMatchObject({ ok: false });
   expect(f.history.readHistoryPage).toHaveBeenCalledOnce(); expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
   expect(await readdir(join(f.rootPath, ".dohc"))).toEqual([]);
@@ -178,7 +178,7 @@ it("reports missing recovery for a delete and unsupported for another operation"
   const f = await fixture();
   expect(await f.undo(otherId)).toEqual({ ok: false, reason: "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." });
   f.history.readHistoryPage.mockResolvedValue({ moments: [{ operation: "rename", path: "folder/a.txt", beforePath: "folder/b.txt" }], nextCursor: null } as never);
-  expect(await f.undo(otherId)).toEqual({ ok: false, reason: unsupported });
+  expect(await f.undo(otherId)).toEqual({ ok: false, reason: missingMove });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 it.runIf(process.env.DOHC_OPERATION_TIMING === "1").each(["mixed", "tracked"])("times agent read, Undo and replay for 5,000 files (%s)", async mode => {
@@ -265,7 +265,7 @@ it.each(["delete", "rename"])("uses the settled person refusal without checking 
   await symlink(outside, join(f.rootPath, "folder"), process.platform === "win32" ? "junction" : "dir");
   f.history.readHistoryPage.mockResolvedValue({ moments: [{ operation: kind, path: "folder/tracked.txt" }], nextCursor: null } as never);
   expect(await f.undo(otherId)).toEqual({ ok: false, reason: kind === "delete"
-    ? "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." : unsupported });
+    ? "Cannot undo the delete. Its recovery record is missing or expired. Restore files from History or the trash." : missingMove });
   expect(f.history.undoHistoryOperation).not.toHaveBeenCalled();
 });
 

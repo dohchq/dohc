@@ -1,3 +1,5 @@
+import { caseOnlyMoveReason, missingMoveRecoveryReason, moveWord, moveEntryTarget, readMoveRecovery, undoMoveRecovery, type MoveRecoveryRecord } from "./workspaceMoveRecovery";
+import { placeBack } from "./workspaceFileMoves";
 import { lstat, readdir } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { posix, join } from "node:path";
@@ -24,8 +26,8 @@ export function createOperationHistory(withAdapter: <T>(work: (adapter: Operatio
     undoHistoryOperation: async input => requireResult(await withAdapter(adapter => adapter.undoHistoryOperation(input))),
   };
 }
+
 type Floor = (path: string, entry?: Stats, root?: boolean) => Promise<void>;
-const unsupported = "Cannot undo this change yet. Only a delete can be undone.";
 function writable(operation: Operation): void {
   operation.assertCurrent();
   if (operation.workspace.readOnly || operation.workspace.shareView !== undefined) throw new Error("History operations require the owning workspace. Open it to continue.");
@@ -81,15 +83,15 @@ async function agentFloor(rootPath: string, walkLiveDirectories = true): Promise
   };
   return floor;
 }
-function personFloor(rootPath: string): Floor {
+function personFloor(rootPath: string, word = "delete"): Floor {
   return async (path, _entry, root = false) => {
     const checked = root ? validateUserWritePath(path) : validateUserMaterializePath(path, { platform: process.platform, allowIgnoredSegments: true });
-    if (!checked.ok || checked.normalized !== path) throw new Error("Cannot undo the delete. Its recovery paths are invalid.");
+    if (!checked.ok || checked.normalized !== path) throw new Error(`Cannot undo the ${word}. Its recovery paths are invalid.`);
     if (root) await assertResolvedWorkspacePath({ rootPath, absolutePath: join(rootPath, path), spelled: path, label: "Undo path", access: "entry" });
     else {
       const target = await realRelativeInRoot(rootPath, join(rootPath, path), true);
       if (!target.ok || target.relative !== path || !validateUserMaterializePath(target.relative, { platform: process.platform, allowIgnoredSegments: true }).ok) {
-        throw new Error("Cannot undo the delete. " + path + " now leads somewhere else.");
+        throw new Error(`Cannot undo the ${word}. ` + path + " now leads somewhere else.");
       }
     }
   };
@@ -105,6 +107,16 @@ async function recoveryFloor(record: Readonly<RecoveryRecord>, staged: string | 
     if (entry.isDirectory() && !entry.isSymbolicLink()) for (const name of await readdir(source)) await walk(join(source, name), `${path}/${name}`);
   };
   await walk(staged, record.base);
+}
+async function moveRecoveryFloor(record: MoveRecoveryRecord, floor: Floor): Promise<void> {
+  const invalid = () => new Error(`Cannot undo the ${moveWord(record.from, record.to)}. Its recovery paths are invalid.`);
+  if (record.from === record.to || record.from.startsWith(record.to + "/") || record.to.startsWith(record.from + "/")) throw invalid();
+  const paths = [...record.entries, ...(record.pending ?? []), ...[record.progress, record.result].flatMap(result =>
+    [...(result?.restored ?? []), ...(result?.remaining.map(item => item.path) ?? [])])];
+  for (const path of paths) if (path !== record.from && !path.startsWith(record.from + "/")) throw invalid();
+  await floor(record.from, undefined, true);
+  await floor(record.to, undefined, true);
+  for (const path of paths) { await floor(path); await floor(moveEntryTarget(record, path)); }
 }
 function decodeCursor(cursor: string, workspaceId: string, operationId: string): HistoryCursor {
   let parsed: HistoryCursor;
@@ -126,15 +138,17 @@ export async function readWorkspaceHistoryOperation(operation: Operation, input:
     return await withSharedWorkspaceOperation(rootPath, async () => {
       writable(operation);
       const record = cursor ? undefined : await readDeleteRecovery(rootPath, input.operationId, "read");
+      const move = cursor ? undefined : await readMoveRecovery(rootPath, input.operationId);
       const floor = await agentFloor(rootPath, !record?.result);
+      if (move) await moveRecoveryFloor(move, floor);
       if (record) await recoveryFloor(record, record.staged ? join(rootPath, ".dohc", "trash", record.staged) : undefined, floor);
       const result = await history.readHistoryPage({ workspaceId, operationId: input.operationId, limit: 50, ...(cursor ? { cursor } : {}) });
       for (const member of result.moments) { await floor(member.path); if (member.beforePath) await floor(member.beforePath); }
-      if (!record && !result.moments.length && !input.cursor) throw new Error("This operation is not in History.");
+      if (!record && !move && !result.moments.length && !input.cursor) throw new Error("This operation is not in History.");
       operation.assertCurrent();
       return { ok: true as const, operationId: input.operationId,
         members: result.moments.map(member => ({ momentId: member.momentId, operation: member.operation, path: member.path, ...(member.beforePath ? { beforePath: member.beforePath } : {}) })),
-        ...(record ? { withoutHistory: record.paths } : {}), nextCursor: result.nextCursor ? Buffer.from(JSON.stringify(result.nextCursor)).toString("base64url") : null };
+        ...(record ? { withoutHistory: record.paths } : move ? { withoutHistory: move.entries.map(path => moveEntryTarget(move, path)) } : {}), nextCursor: result.nextCursor ? Buffer.from(JSON.stringify(result.nextCursor)).toString("base64url") : null };
     });
   } catch (error) { return failure(error, "read"); }
 }
@@ -149,19 +163,30 @@ export async function undoWorkspaceHistoryOperation(operation: Operation & { sig
     return await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
       writable(operation);
       const record = await readDeleteRecovery(rootPath, input.operationId);
-      const floor = options.agent ? await agentFloor(rootPath, !record?.result) : record ? personFloor(rootPath) : undefined;
+      const move = record ? undefined : await readMoveRecovery(rootPath, input.operationId);
+      if (move && move.from !== move.to && move.from.toLowerCase() === move.to.toLowerCase()) throw new Error(caseOnlyMoveReason);
+      const floor = options.agent ? await agentFloor(rootPath, move ? true : !record?.result)
+        : record ? personFloor(rootPath) : move ? personFloor(rootPath, moveWord(move.from, move.to)) : undefined;
+      if (move && floor) await moveRecoveryFloor(move, floor);
       if (record && floor) await recoveryFloor(record, record.staged ? join(rootPath, ".dohc", "trash", record.staged) : undefined, floor);
       let cursor: HistoryCursor | undefined, deleted = false;
-      if (!record || record.tracked) do {
+      const members: { path: string; beforePath?: string | null; operation: string }[] = [];
+      if ((!record && !move) || record?.tracked || move?.tracked) do {
         const result = await options.history.readHistoryPage({ workspaceId, operationId: input.operationId, limit: 50, ...(cursor ? { cursor } : {}) });
         for (const member of result.moments) {
           if (floor) { await floor(member.path); if (member.beforePath) await floor(member.beforePath); }
+          members.push(member);
           deleted ||= member.operation === "delete";
           if (!floor && deleted) break;
         }
         cursor = result.nextCursor ?? undefined;
       } while (cursor && (floor || !deleted));
-      if (!record) throw new Error(deleted ? missingDeleteRecoveryReason : unsupported);
+      if (move) return undoMoveRecovery(rootPath, move, members, author, options.history, workspaceId, () => writable(operation), markChanged, (root, from, to) => placeBack(root, from, to, "", true));
+      if (!record) {
+        const rename = members.find(member => member.operation === "rename");
+        throw new Error(deleted ? missingDeleteRecoveryReason : rename
+          ? missingMoveRecoveryReason(moveWord(rename.beforePath ?? rename.path, rename.path)) : "This operation is not in History.");
+      }
       return undoDeleteRecovery(rootPath, record, author, options.history, workspaceId, () => writable(operation), markChanged);
     });
   } catch (error) {

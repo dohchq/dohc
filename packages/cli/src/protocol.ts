@@ -14,7 +14,7 @@ import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPubl
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "./account";
 
-import { DeleteRecovery, HistoryOperationId, HistoryOperationReadResult, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
+import { OperationRecovery, HistoryOperationId, HistoryOperationReadResult, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 
 export const CLI_PROTOCOL_VERSION = 5;
@@ -1321,7 +1321,7 @@ const replacedPathSchema = z.object({
 
 const fileMoveResultSchema = z.discriminatedUnion("ok", [
   z.object({
-    ok: z.literal(true), operationId: HistoryOperationId, fromPath: z.string(), toPath: z.string(), withoutHistory: z.array(z.string()).optional(),
+    ok: z.literal(true), ...OperationRecovery.shape, fromPath: z.string(), toPath: z.string(), withoutHistory: z.array(z.string()).optional(),
     replaced: replacedPathSchema.optional(),
   }).strict(),
   z.object({
@@ -1337,7 +1337,7 @@ const fileMoveResultSchema = z.discriminatedUnion("ok", [
 // deleted.
 const fileDeleteResultSchema = z.discriminatedUnion("ok", [
   z.object({
-    ok: z.literal(true), ...DeleteRecovery.shape, path: z.string(), trashed: z.boolean(), trashPath: z.string().optional(),
+    ok: z.literal(true), ...OperationRecovery.shape, path: z.string(), trashed: z.boolean(), trashPath: z.string().optional(),
     withoutHistory: z.array(z.string()).optional(),
   }).strict(),
   z.object({

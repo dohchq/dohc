@@ -103,7 +103,7 @@ Returns `{ ok: false, reason } | { ok: true, operationId, members: { momentId, o
 
 ### `dohc_undo_operation`
 
-Undo a delete by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry a pending copy. Other operations cannot be undone yet.
+Undo a delete, move, or rename by its operation id. Requires dohc open and the owning workspace. Returns History restoration state, restored paths, and remaining paths with reasons and retry flags. Undo again to retry each remaining path marked retry.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -243,7 +243,7 @@ Returns `{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the 
 
 ### `dohc_move_path`
 
-Move or rename a visible workspace file or folder. Returns its operationId for reading the operation. Move Undo is not available yet. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.
+Move or rename a visible workspace file or folder. Returns operationId and undo availability. Use dohc_undo_operation when available. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.
 
 Changes the workspace, so a shared view does not offer it.
 
@@ -1434,7 +1434,7 @@ Returns `{ action: "undo", items: { acceptanceId, status, momentId? }[], nextCur
 
 ### `dohc history`
 
-Read History changes and undo deletes.
+Read History changes and undo deletes, moves, and renames.
 
 Changes come from the active version of the workspace.
 
@@ -1456,7 +1456,7 @@ With `--json`, prints `{ schemaVersion, ok: true, operationId, members: { moment
 dohc history undo <operation> [options]
 ```
 
-Undo a delete recorded in History.
+Undo a delete, move, or rename recorded in History.
 
 With `--json`, prints `{ schemaVersion, ok: true, tracked: { state, momentCount }, restored, remaining: { path, reason, retry }[] }`.
 

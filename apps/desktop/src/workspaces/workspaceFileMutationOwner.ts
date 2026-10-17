@@ -9,6 +9,7 @@ import {
   DeleteWorkspacePathResult,
   UndoHistoryOperationPayload,
   MoveWorkspacePathPayload,
+  MoveWorkspacePathResult,
   WriteWorkspaceAssetPayload,
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
@@ -41,13 +42,11 @@ import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { LocalPersonAuthor } from "./desktopRecordEdits";
 import { undoWorkspaceHistoryOperation, type OperationHistory } from "./workspaceHistoryOperations";
 import type { DeleteUndoResult } from "./workspaceDeleteRecovery";
-import { deleteWorkspacePathByHand } from "./workspaceFileMoves";
+import { deleteWorkspacePathByHand, moveWorkspacePathByHand } from "./workspaceFileMoves";
 import {
   createFile,
   createFolder,
-  movePath,
   normalizeWorkspaceMovePaths,
-  prepareWorkspaceMove,
 } from "./workspaceFiles";
 
 type WorkspaceFileMutationIpcHandler<Event, Result = void> = (
@@ -64,7 +63,7 @@ export interface WorkspaceFileMutationOwner<Event> {
     Event,
     CreateWorkspaceFileResult
   >;
-  movePath: WorkspaceFileMutationIpcHandler<Event, CreateWorkspaceFileResult>;
+  movePath: WorkspaceFileMutationIpcHandler<Event, MoveWorkspacePathResult>;
   deletePath: WorkspaceFileMutationIpcHandler<
     Event,
     DeleteWorkspacePathResult
@@ -104,7 +103,7 @@ export interface WorkspaceFileMutationAuthority<
   assertCurrent(): void;
 }
 
-type MutationCapture = Pick<WorkspaceEngineCapture, "beginFileRename" | "changePathsAs">;
+type MutationCapture = Pick<WorkspaceEngineCapture, "changePathsAs">;
 
 function assertWritableWorkspace(
   workspace: WorkspaceFileMutationWorkspace,
@@ -302,98 +301,29 @@ export function createWorkspaceFileMutationOwner<
     },
 
     movePath: async (event, payload) => {
-      return await runMutation(
-        event,
-        payload,
-        MoveWorkspacePathPayload.parse,
-        async ({ input, workspace, receivedShare, capture }) => {
-          if (!receivedShare) assertWritableWorkspace(workspace);
-      return withExclusiveWorkspaceOperation(
-        workspace.rootPath,
-        async (markWorkspaceChanged, lease) => {
-          if (!receivedShare) {
-            await refuseMoveAcrossShareMount(
-              workspace.rootPath,
-              input.fromPath,
-              input.toPath,
-              storedShareMounts(workspace),
-              shareMountRegistryIsPresent(workspace),
-            );
-          }
-          const requestedPaths = normalizeWorkspaceMovePaths(
-            input.fromPath,
-            input.toPath,
-          );
-          const preparedMove = receivedShare
-            ? null
-            : await prepareWorkspaceMove(
-                workspace.rootPath,
-                input.fromPath,
-                input.toPath,
-              );
-          const fromPath =
-            preparedMove?.physicalFromPath ?? requestedPaths.fromPath;
-          const toPath = preparedMove?.physicalToPath ?? requestedPaths.toPath;
-          const visibleResultPath =
-            preparedMove?.visibleResultPath ?? requestedPaths.toPath;
-          const fromKind = liveDocumentKindForPath(fromPath);
-          const toKind = liveDocumentKindForPath(toPath);
-          if (
-            (capture !== null || receivedShare) &&
-            fromKind !== null &&
-            fromKind !== toKind
-          ) {
-            // Starting the engine rename before this refusal can strand its
-            // stable object at a path whose live-document kind cannot open it.
-            throw new Error(
-              `A rename cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`,
-            );
-          }
-
-          const finishRename = capture
-            ? await capture.beginFileRename(fromPath, toPath)
-            : null;
-          try {
-            let path: ShareViewFileChangeValue;
-            if (receivedShare) {
-              const outcome = await dependencies.shareViewFiles.change(
-                lease,
-                shareTarget(workspace),
-                {
-                  kind: "move",
-                  fromPath,
-                  toPath,
-                },
-              );
-              path = structuralShareViewChangeValue(
-                workspace.workspaceId,
-                outcome,
-                markWorkspaceChanged,
-              );
-            } else {
-              await movePath(
-                workspace.rootPath,
-                fromPath,
-                toPath,
-              );
-              path = visibleResultPath;
-            }
-            if (typeof path !== "string") {
-              throw new Error("Shared file move returned an invalid result.");
-            }
-            // The path move has landed. Bump the generation before the engine
-            // finisher so its failure cannot release queued stale writes.
-            if (!receivedShare) markWorkspaceChanged();
-            await finishRename?.(true);
-            return CreateWorkspaceFileResult.parse({ path });
-          } catch (error) {
-            await finishRename?.(false);
-            throw error;
-          }
-        },
-      );
-    },
-      );
+      const request = admitMutation(event, payload, MoveWorkspacePathPayload.parse);
+      const person = await dependencies.localPerson();
+      return runAdmittedMutation(event, request, async ({ input, workspace, receivedShare, capture, authorityId, yDocSessions, assertCurrent }) => {
+        if (!receivedShare) {
+          assertWritableWorkspace(workspace);
+          return MoveWorkspacePathResult.parse(await moveWorkspacePathByHand({ workspace, assertCurrent }, input, person, {
+            capture, requestId: randomUUID(), trashItem: dependencies.trashItem,
+            markDeleted: path => yDocSessions.markDeletedUnderPath(authorityId, path),
+            admit: () => refuseMoveAcrossShareMount(workspace.rootPath, input.fromPath, input.toPath,
+              storedShareMounts(workspace), shareMountRegistryIsPresent(workspace)),
+          }));
+        }
+        return withExclusiveWorkspaceOperation(workspace.rootPath, async (markChanged, lease) => {
+          const { fromPath, toPath } = normalizeWorkspaceMovePaths(input.fromPath, input.toPath);
+          const fromKind = liveDocumentKindForPath(fromPath), toKind = liveDocumentKindForPath(toPath);
+          if (fromKind !== null && fromKind !== toKind) throw new Error(
+            `A rename cannot change a live document's kind from ${fromKind} to ${toKind ?? "a plain file"}. Create a new file and copy the content instead.`);
+          const path = structuralShareViewChangeValue(workspace.workspaceId,
+            await dependencies.shareViewFiles.change(lease, shareTarget(workspace), { kind: "move", fromPath, toPath }), markChanged);
+          if (typeof path !== "string") throw new Error("Shared file move returned an invalid result.");
+          return MoveWorkspacePathResult.parse({ path });
+        });
+      });
     },
 
     undoHistoryOperation: async (event, payload) => {

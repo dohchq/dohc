@@ -14,9 +14,9 @@ it("sends an agent Undo and prints each remaining path with its retry", async ()
   expect(result.stdout.split("\n")).toEqual(["History: restoring", "a.txt now occupies the old path. Move it first. Undo again to retry.", "b.txt may be incomplete. Undo again to retry, or restore it from the trash.", ""]);
   expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "historyUndo", args: expect.objectContaining({ actor: "agent", operationId }) }));
 });
-it("refuses unsupported Undo and rejects an id without its namespace before transport", async () => {
-  const request = vi.fn(async () => ({ ok: false, reason: "Cannot undo this change yet. Only a delete can be undone." }));
-  expect(await executeCli({ argv: ["history", "undo", operationId], request })).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: Cannot undo this change yet. Only a delete can be undone.\n" });
+it("prints a successful move Undo and rejects an id without its namespace before transport", async () => {
+  const request = vi.fn(async () => ({ ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [] }));
+  expect(await executeCli({ argv: ["history", "undo", operationId], request })).toEqual({ exitCode: 0, stdout: "History: restored\n", stderr: "" });
   request.mockClear();
   for (const verb of ["undo", "operation"]) {
     expect((await executeCli({ argv: ["history", verb, operationId.slice(15)], request })).exitCode).toBe(1);

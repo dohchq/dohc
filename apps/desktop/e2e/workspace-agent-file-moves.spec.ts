@@ -22,9 +22,8 @@ test("an MCP move and delete each show one History row under the agent", async (
     }
 
     const move = await moveWorkspacePath(ctx, { fromPath: "plans", toPath: "archive/plans" }, "Mover agent");
-    expect(move).toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:/), fromPath: "plans", toPath: "archive/plans" });
+    expect(move).toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:/), fromPath: "plans", toPath: "archive/plans", undo: { available: true } });
     if (!move.ok) throw new Error(move.reason);
-    await expect(undoOperation(ctx, { operationId: move.operationId })).resolves.toEqual({ ok: false, reason: "Cannot undo this change yet. Only a delete can be undone." });
     expect(await readFile(join(temp.rootPath, "archive/plans/notes.txt"), "utf8")).toBe("plans/notes.txt body");
     await waitForWorkspaceFile(page, workspace.workspaceId, "archive/plans/notes.txt");
     const removed = await deleteWorkspacePath(ctx, { path: "old.txt" });
@@ -59,6 +58,8 @@ test("an MCP move and delete each show one History row under the agent", async (
     }
     await moved.click();
     await expect(page.getByTestId("engine-diff-source")).toHaveText("Mover agent");
+    expect(await undoOperation(ctx, { operationId: move.operationId })).toMatchObject({ ok: true, tracked: { state: expect.stringMatching(/^restor(?:ing|ed)$/u), momentCount: 1 }, remaining: [] });
+    await expect.poll(() => readFile(join(temp.rootPath, "plans/notes.txt"), "utf8")).toBe("plans/notes.txt body");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

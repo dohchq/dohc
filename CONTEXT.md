@@ -181,4 +181,4 @@ Settlement cuts remain a separate concept. Recipient access and pinned History a
 
 ## History operation
 
-A History operation groups the file changes made by one admitted action under a main-minted `dohc-operation:` id. Reading it returns paths and change references. Delete Undo also uses its recovery record.
+A History operation groups the file changes made by one admitted action under a main-minted `dohc-operation:` id. Reading it returns paths and change references. Delete and move Undo also use the operation's recovery record.

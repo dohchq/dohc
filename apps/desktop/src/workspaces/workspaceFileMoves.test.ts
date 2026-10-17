@@ -117,7 +117,7 @@ async function fixture(options: {
   const added = async (seen: ReadonlySet<string>) => (await rows()).filter(row => !seen.has(row.id))
     .map(row => ({ operation: row.operation, path: row.path, agentId: row.authors?.find(author => author.kind === "agent")?.agentId }))
     .sort((a, b) => a.path.localeCompare(b.path) || a.operation.localeCompare(b.operation));
-  const workspaceTrash = async () => existsSync(join(rootPath, ".dohc/trash")) ? (await readdir(join(rootPath, ".dohc/trash"))).filter(name => !/^delete-[a-f0-9]{64}\.json$/.test(name)) : [];
+  const workspaceTrash = async () => existsSync(join(rootPath, ".dohc/trash")) ? (await readdir(join(rootPath, ".dohc/trash"))).filter(name => !/^(?:delete|move)-[a-f0-9]{64}\.json$/.test(name)) : [];
   // The system trash keeps the workspace trash's entry name, which ends with the file's own name.
   const systemTrashed = async (name: string) => {
     const entry = (await readdir(systemTrash)).find(entry => entry.endsWith(`-${name}`));
@@ -155,7 +155,7 @@ describe("agent moves and deletes", () => {
       await write(f.rootPath, "source.txt", "new save");
     };
     try {
-      expect(await f.move("source.txt", "target.txt")).toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "source.txt", toPath: "target.txt" });
+      expect(await f.move("source.txt", "target.txt")).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "source.txt", toPath: "target.txt" });
       expect(requests).toContain("capture.moveFile");
       expect(links).toHaveLength(1);
       expect(await readFile(join(f.rootPath, "target.txt"), "utf8")).toBe("original");
@@ -185,8 +185,8 @@ describe("agent moves and deletes", () => {
     expect(outside.every(row => row.authors === undefined)).toBe(true);
     for (const row of outside) seen.add(row.id);
 
-    expect(await f.move("person.txt", "agent.txt")).toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "person.txt", toPath: "agent.txt" });
-    expect(await f.move("notes", "archive/notes", unnamed)).toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "notes", toPath: "archive/notes" });
+    expect(await f.move("person.txt", "agent.txt")).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "person.txt", toPath: "agent.txt" });
+    expect(await f.move("notes", "archive/notes", unnamed)).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "notes", toPath: "archive/notes" });
     expect(await f.remove("photo.bin")).toMatchObject({ ok: true, path: "photo.bin", trashed: true });
     await f.settle();
 
@@ -347,7 +347,7 @@ describe("agent moves and deletes", () => {
     } });
     await write(f.rootPath, "a.txt", "mine");
     const seen = await f.start();
-    expect(await f.move("a.txt", "b.txt")).toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "a.txt", toPath: "b.txt" });
+    expect(await f.move("a.txt", "b.txt")).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "a.txt", toPath: "b.txt" });
     expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("mine");
     expect(await readFile(join(f.rootPath, "a.txt"), "utf8")).toBe("theirs");
     // Their file reaches History through the watcher, without an author.
@@ -470,7 +470,7 @@ describe("agent moves and deletes", () => {
     await write(f.rootPath, "b.txt", "old");
     const seen = await f.start();
     expect(await f.move("a.txt", "b.txt")).toMatchObject({ ok: false, reason: expect.stringContaining("already exists") });
-    expect(await f.move("a.txt", "b.txt", named, true)).toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "a.txt", toPath: "b.txt",
+    expect(await f.move("a.txt", "b.txt", named, true)).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "a.txt", toPath: "b.txt",
       replaced: { path: "b.txt", trashed: true, withoutHistory: [] } });
     expect(await readFile(join(f.rootPath, "b.txt"), "utf8")).toBe("new");
     expect(await readFile(await f.systemTrashed("b.txt"), "utf8")).toBe("old");
@@ -512,7 +512,7 @@ describe("agent moves and deletes", () => {
     expect(await f.remove("Notes.txt")).toMatchObject({ ok: true });
     expect(await f.move("Draft.txt", "moved.txt")).toMatchObject({ ok: true });
     // A rename of case alone still renames.
-    expect(await f.move("keep.txt", "Keep.txt")).toEqual({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "keep.txt", toPath: "Keep.txt" });
+    expect(await f.move("keep.txt", "Keep.txt")).toMatchObject({ ok: true, operationId: expect.stringMatching(/^dohc-operation:[0-9a-f-]{36}$/), fromPath: "keep.txt", toPath: "Keep.txt" });
     // The destination names the folder that holds the source.
     expect(await f.move("a/b.txt", "A", named, true)).toMatchObject({ ok: false, reason: expect.stringContaining("one holds the other") });
     await f.settle();
