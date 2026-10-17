@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { Menu } from "./ui/Menu";
+import { StepperControl } from "./settings/SettingRow";
 import { StrictMode, useLayoutEffect, useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Overlay } from "./Overlay";
@@ -56,6 +59,64 @@ describe("Overlay", () => {
     fireEvent.keyDown(document, { key: "Escape" });
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes an open menu on the first Escape and the overlay on the second", async () => {
+    const user = userEvent.setup();
+    function Dialog() {
+      const [open, setOpen] = useState(true);
+      const [menuOpen, setMenuOpen] = useState(false);
+      return open ? (
+        <Overlay onClose={() => setOpen(false)} panelProps={{ role: "dialog", "aria-label": "Actions" }}>
+          <Menu label="Row actions" open={menuOpen} onOpenChange={setMenuOpen}
+            items={[{ id: "rename", label: "Rename", onSelect: vi.fn() }]} />
+        </Overlay>
+      ) : null;
+    }
+    render(<Dialog />);
+    const dialog = screen.getByRole("dialog", { name: "Actions" });
+    const trigger = screen.getByRole("button", { name: "Row actions" });
+    await user.click(trigger);
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Rename" }));
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Actions" })).toBe(dialog);
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("closes an open tooltip on the first Escape and the overlay on the second", async () => {
+    const user = userEvent.setup();
+    function Dialog() {
+      const [open, setOpen] = useState(true);
+      return open ? (
+        <Overlay onClose={() => setOpen(false)} panelProps={{ role: "dialog", "aria-label": "Zoom" }}>
+          <StepperControl setting="zoom" value="100%"
+            decrease={{ label: "Zoom out", onClick: vi.fn() }}
+            reset={{ label: "Reset zoom", to: "100%", onClick: vi.fn() }}
+            increase={{ label: "Zoom in", onClick: vi.fn() }} />
+        </Overlay>
+      ) : null;
+    }
+    render(<Dialog />);
+    const dialog = screen.getByRole("dialog", { name: "Zoom" });
+    await user.tab();
+    const trigger = screen.getByRole("button", { name: "Zoom out" });
+    expect(document.activeElement).toBe(trigger);
+    // jsdom does not track keyboard :focus-visible, so open the real tooltip by hover.
+    await user.hover(trigger);
+    expect(screen.getByRole("tooltip").textContent).toBe("Zoom out");
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.getByRole("dialog", { name: "Zoom" })).toBe(dialog);
+    expect(document.activeElement).toBe(trigger);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("closes only the topmost of two nested overlays on Escape", () => {
