@@ -2446,7 +2446,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
         now_ms: i64,
-    ) -> Result<TxnOutcome<Vec<crate::SharingDeclined>>, RelayError> {
+    ) -> Result<TxnOutcome<crate::CursorCommit>, RelayError> {
         commit_relay_cursor(store, workspace_id, cursor, faults, leases, now_ms).map_err(local)
     }
 

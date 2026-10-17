@@ -202,33 +202,21 @@ export function createShareReadQueries(
       audience === "accountless" && fileSelector
         ? createAccountlessPathProjection(fileSelector)
         : null;
-    const ops: Array<Record<string, unknown>> = [];
-    let nextCursor = since;
-    let rawRowsConsumed = 0;
-
-    for (;;) {
-      const rawLimit =
-        audience === "accountless"
-          ? Math.min(
-              MAX_LOG_PAGE_SIZE,
-              MAX_RAW_ROWS_PER_LINK_PAGE - rawRowsConsumed,
-            )
-          : limit;
-      const page = storage.fetchLogPage({
+    const page = scanFilteredLog(
+      storage,
+      {
         workspaceId,
-        sinceRelaySeq: nextCursor,
-        limit: rawLimit,
-      });
-
-      for (const [index, row] of page.rows.entries()) {
-        rawRowsConsumed += 1;
-        nextCursor = row.relaySeq;
-        if (row.settlementAdmission?.status === "refused") continue;
+        since,
+        limit,
+        maxRawRows: audience === "accountless" ? MAX_RAW_ROWS_PER_LINK_PAGE : limit,
+      },
+      (row) => {
+        if (row.settlementAdmission?.status === "refused") return null;
         if (
           audience === "accountless" &&
           !ACCOUNTLESS_FILE_REPLAY_OP_KINDS.has(row.opKind)
         ) {
-          continue;
+          return null;
         }
         const decision = filterOpForShare(
           selector,
@@ -249,7 +237,7 @@ export function createShareReadQueries(
                 chatResolver,
               )
             : null;
-        if (payload === null) continue;
+        if (payload === null) return null;
         if (recipient) tokenizeReceivedPayload({ identity, recipient, workspaceId, selector, chat: chatResolver,
           opKind: row.opKind, original: JSON.parse(row.payloadJson), served: payload as Record<string, unknown>,
           ...(accountlessProjection ? { projectPath: accountlessProjection.projectPath } : {}) });
@@ -269,7 +257,7 @@ export function createShareReadQueries(
         }
         const collectionOriginPrefix = row.originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX) ? COLLECTION_FILE_ORIGIN_PREFIX
           : row.originId.startsWith(COLLECTION_CREATE_ORIGIN_PREFIX) ? COLLECTION_CREATE_ORIGIN_PREFIX : undefined;
-        ops.push({
+        return {
           relaySeq: row.relaySeq,
           ...(audience === "authenticated" ? { originId: collectionOriginPrefix !== undefined
             ? `${collectionOriginPrefix}${createHmac("sha256", shareId).update(row.originId).digest("hex")}`
@@ -278,27 +266,10 @@ export function createShareReadQueries(
           opKind: row.opKind,
           payload,
           recordedAtMs: row.recordedAtMs,
-        });
-        if (ops.length === limit) {
-          return {
-            ops,
-            nextCursor,
-            hasMore:
-              (audience === "accountless" &&
-                rawRowsConsumed === MAX_RAW_ROWS_PER_LINK_PAGE) ||
-              index < page.rows.length - 1 ||
-              page.hasMore,
-          };
-        }
-      }
-
-      if (audience === "authenticated" || !page.hasMore) {
-        return { ops, nextCursor, hasMore: page.hasMore };
-      }
-      if (rawRowsConsumed === MAX_RAW_ROWS_PER_LINK_PAGE) {
-        return { ops, nextCursor, hasMore: true };
-      }
-    }
+        };
+      },
+    );
+    return { ops: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
   };
 
   const newestFilteredOpFreshness = (
@@ -467,6 +438,41 @@ export function createShareReadQueries(
     historicalSharedBlob,
     linkRevisionByteLength,
   };
+}
+
+/**
+ * Serves the rows `admit` maps, reading at most `maxRawRows` raw log rows.
+ * The cursor passes every row read, served or not, so a run of rows the
+ * reader may not see never stalls it.
+ */
+export function scanFilteredLog<T>(
+  storage: Pick<SyncRelayStorage, "fetchLogPage">,
+  input: { workspaceId: string; since: number; limit: number; maxRawRows: number },
+  admit: (row: SyncRelayLogRow) => T | null,
+): { items: T[]; nextCursor: number; hasMore: boolean } {
+  const items: T[] = [];
+  let nextCursor = input.since;
+  let consumed = 0;
+  for (;;) {
+    const page = storage.fetchLogPage({
+      workspaceId: input.workspaceId,
+      sinceRelaySeq: nextCursor,
+      limit: Math.min(MAX_LOG_PAGE_SIZE, input.maxRawRows - consumed),
+    });
+    for (const [index, row] of page.rows.entries()) {
+      consumed += 1;
+      nextCursor = row.relaySeq;
+      const item = admit(row);
+      if (item === null) continue;
+      items.push(item);
+      if (items.length === input.limit) {
+        return { items, nextCursor, hasMore: index < page.rows.length - 1 || page.hasMore };
+      }
+    }
+    if (!page.hasMore || consumed >= input.maxRawRows) {
+      return { items, nextCursor, hasMore: page.hasMore };
+    }
+  }
 }
 
 /** Only relay-minted snapshots can name people or bind an agent to them. */

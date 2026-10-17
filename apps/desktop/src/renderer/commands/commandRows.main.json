@@ -1,8 +1,7 @@
 {
   "base": "96e8d87ba",
   "context": {
-    "isShareView": false,
-    "shareViewWritable": false,
+    "shareView": null,
     "activeDocumentKind": "markdown",
     "pinnedApps": [
       {
