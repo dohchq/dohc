@@ -451,7 +451,7 @@ export async function openEngineYdocProviderSession(
 
     applyLocalUpdate(update, applyOptions) {
       if (closed) {
-        if (closeComplete) return Promise.resolve();
+        if (closeComplete) return Promise.reject(new Error(`Y.Doc provider session for ${options.path} is closed.`));
         return Promise.reject(
           localEditError ??
             closeError ??

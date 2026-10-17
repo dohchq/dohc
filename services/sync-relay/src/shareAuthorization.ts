@@ -71,6 +71,7 @@ type ShareGrantAuthorizationInput = {
   grantId: string;
   action: ShareAction;
   principal: CurrentShareGrantPrincipal;
+  generation?: number;
 };
 
 export type NamedLiveEditShareGrantResult =

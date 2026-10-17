@@ -1,3 +1,4 @@
+import {createLiveBufferBudget, LiveConnectionLimitError} from "@dohc/live-session-contract/live-connection";
 import {afterEach, expect, it} from "vitest";
 import {cleanupLiveDeliveryFixtures, registered} from "../../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
 
@@ -98,3 +99,17 @@ it.each([{coverage: []}, {coverage: [{author: {kind: "human", humanId: "owner", 
       expect(f.storage.readLiveUpdateJournalCut({document})).toEqual(original);
     } finally {f.close();}
   });
+
+it("charges journal bytes before materializing the cut", () => {
+  const f = registered({deployment: true});
+  try {
+    const document = f.input.evidence.document;
+    const budget = createLiveBufferBudget(1);
+    expect(() => f.storage.readLiveUpdateJournalCut({document}, budget.reserve)).toThrowError(LiveConnectionLimitError);
+    expect(budget.usage()).toBe(0);
+    let charge = 0;
+    const read = f.storage.readLiveUpdateJournalCut({document}, size => {charge = size;});
+    expect(read.kind).toBe("cut");
+    expect(charge).toBeGreaterThan(1);
+  } finally {f.close();}
+});

@@ -1,15 +1,31 @@
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { classifyEngineFilePath } from "./enginePathFloor";
 
+const preparedPaths = new WeakSet<PreparedSharePath>();
+class PreparedSharePath {
+  private constructor(readonly path: string) { Object.freeze(this); }
+  static prepare(path: string): PreparedSharePath | null {
+    const validated = validateUserWritePath(path);
+    if (!validated.ok) return null;
+    if (classifyEngineFilePath(validated.normalized).kind !== "tracked") return null;
+    const prepared = new PreparedSharePath(validated.normalized);
+    preparedPaths.add(prepared);
+    return prepared;
+  }
+}
+
+/** Validate immutable inventory paths once. This carries no selector decision. */
+export const prepareSharePath = (path: string) => PreparedSharePath.prepare(path);
+
 /** The normalized tracked path selected by a file scope, or null. Versions are checked by the caller. */
-export function visibleSharePath(selector: { paths: readonly string[]; versionId: string | null }, path: string): string | null {
-  const validated = validateUserWritePath(path);
-  if (!validated.ok) return null;
-  if (classifyEngineFilePath(validated.normalized).kind !== "tracked") return null;
+export function visibleSharePath(selector: { paths: readonly string[]; versionId: string | null }, path: string | PreparedSharePath): string | null {
+  const prepared = typeof path === "string" ? prepareSharePath(path) : preparedPaths.has(path) ? path : null;
+  if (!prepared) return null;
+  const normalized = prepared.path;
   const selected = selector.paths.length === 0
     ? selector.versionId !== null
-    : selector.paths.some(granted => validated.normalized === granted || validated.normalized.startsWith(`${granted}/`));
-  return selected ? validated.normalized : null;
+    : selector.paths.some(granted => normalized === granted || normalized.startsWith(`${granted}/`));
+  return selected ? normalized : null;
 }
 
 // The share selector's VERSION and ACCESS dimensions, as one rule in one

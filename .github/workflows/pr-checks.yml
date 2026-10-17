@@ -195,6 +195,10 @@ jobs:
               - 'apps/desktop/tsconfig.json'
               - 'packages/security-contract/tsconfig.json'
               - 'packages/workspace-contracts/tsconfig.json'
+              # system-clipboard.test.mjs and its fixtures import the e2e clipboard
+              # lock and the helper the specs hold it through.
+              - 'apps/desktop/e2e/helpers/systemClipboardLock.mjs'
+              - 'apps/desktop/e2e/helpers/systemClipboard.ts'
 
   javascript:
     name: typecheck + tests

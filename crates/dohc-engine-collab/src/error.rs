@@ -24,7 +24,9 @@ pub enum CollabError {
     #[error("Y.Doc author capacity reached")]
     AuthorCapacity,
 
-    #[error("This edit's author details exceed the supported size. Shorten the author details and try again.")]
+    #[error(
+        "This edit's author details exceed the supported size. Shorten the author details and try again."
+    )]
     AuthorEntryTooLarge,
 
     /// The update is valid Yjs v1 data, but one of its structural edit
@@ -79,6 +81,9 @@ pub enum CollabError {
     /// The fold parser kept an over-budget quote as escaped paragraph text.
     #[error("Markdown quote nesting exceeds the fold's recursion budget")]
     MarkdownQuoteDepthExceeded,
+
+    #[error("Markdown is not representable by the live document contract")]
+    MarkdownNotRepresentable,
 
     /// A replicated lineage already has its single base; a second base is
     /// rejected (base-once). The caller must resume the existing lineage.
@@ -231,6 +236,7 @@ impl CollabError {
             CollabError::ContentKindMismatch => "content-kind-mismatch",
             CollabError::UnsupportedContentKind { .. } => "unsupported-content-kind",
             CollabError::MarkdownRewriteUnsupported { .. } => "markdown-rewrite-unsupported",
+            CollabError::MarkdownNotRepresentable => "markdown-not-representable",
             CollabError::MarkdownQuoteDepthExceeded => "markdown-quote-depth-exceeded",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
             CollabError::BaseStateDiverged => "base-state-diverged",
