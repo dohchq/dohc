@@ -92,7 +92,7 @@ export function modalFocusableElements(container: HTMLElement): HTMLElement[] {
   });
 }
 
-const BLOCKING_MODAL_SELECTOR = "[role='dialog'], [data-dohc-modal='true']";
+const BLOCKING_MODAL_SELECTOR = "[aria-modal='true'], [data-dohc-modal='true']";
 
 export function hasBlockingModal() {
   return document.querySelector(BLOCKING_MODAL_SELECTOR) !== null;

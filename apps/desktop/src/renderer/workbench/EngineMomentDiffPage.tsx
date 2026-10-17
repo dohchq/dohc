@@ -18,7 +18,6 @@ import {
 } from "./unifiedDiff";
 import { EngineMomentSource, engineMomentSummary } from "./EngineHistory";
 import { parseTab } from "./workbenchState";
-import { hasBlockingModal } from "../modalFocus";
 import { SkeletonRows } from "../ui/SkeletonRows";
 
 function isEditableShortcutTarget(target: EventTarget | null) {
@@ -342,7 +341,7 @@ export function EngineMomentDiffPage({
         ) {
           return false;
         }
-        return !hasBlockingModal();
+        return true;
       },
     });
     return () => registerActiveUndo(null);

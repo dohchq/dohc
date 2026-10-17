@@ -7,7 +7,7 @@ import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
-import { matchShellShortcut } from "../shortcuts/shortcutRegistry";
+import { matchShellShortcut, matchShellShortcutChord } from "../shortcuts/shortcutRegistry";
 import { hasBlockingModal } from "./modalFocus";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
@@ -58,7 +58,6 @@ import {
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
 } from "../workspaces/workspaceEngineCaptureLimits";
-import { DohcMark } from "@dohc/brand";
 import {
   hasUnacknowledgedShareSkips,
   shareSkipNoticeLines,
@@ -183,6 +182,7 @@ import { ActivityBar } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupFrame } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
+import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import {
@@ -3896,13 +3896,21 @@ export function DesktopWorkspaceShell(props: {
     function onKeyDown(event: KeyboardEvent) {
       // A stopped workspace answers no workspace shortcut.
       if (storeUpdateRequiredRef.current) return;
-      const command = matchShellShortcut(event);
+      const blockingModal = hasBlockingModal();
+      const command = blockingModal ? matchShellShortcutChord(event) : matchShellShortcut(event);
       if (!command) return;
+      // A modal owns the keyboard while it is visible. Native/main-owned
+      // shortcuts such as Close Window and zoom never reach this listener,
+      // so they continue to work over a modal.
+      if (blockingModal) {
+        // Consume Command chords before macOS can route them through the menu.
+        // Text inputs keep Control-key editing and native undo.
+        if (command !== "history-restore-undo" && event.metaKey) event.preventDefault();
+        return;
+      }
       if (command === "settings") {
-        if (!hasBlockingModal()) {
-          event.preventDefault();
-          openSettings();
-        }
+        event.preventDefault();
+        openSettings();
         return;
       }
       if (command === "history-restore-undo") {
@@ -3933,6 +3941,7 @@ export function DesktopWorkspaceShell(props: {
 
   useEffect(() => {
     return bridge().onMenuCommand((command) => {
+      // App-menu commands originate outside the modal; only keydown is guarded.
       if (command === "command-palette") setPaletteOpen(true);
       else if (isCommandAvailable(command, commandContext)) commandHandlers[command]();
     });
@@ -5662,38 +5671,12 @@ export function DesktopWorkspaceShell(props: {
                   : { onSharePath })}
               />
             ) : (
-              <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
-                <DohcMark size={30} className="text-line" />
-                <span className="text-sm text-muted">
-                  Select a file, or create one
-                </span>
-                {/* Known exceptions to the shortcut registry, pinned in
-                    DesktopWorkspaceShell.shortcuts.test.tsx until macOS
-                    shows its own keys here. */}
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setNewFileOpen(true)}
-                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
-                  >
-                    Ctrl N · new file
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPaletteOpen(true)}
-                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
-                  >
-                    Ctrl K · commands
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setQuickOpenOpen(true)}
-                    className="rounded-md border border-line px-2.5 py-1 font-mono text-[11px] text-subtle transition-colors hover:bg-hover hover:text-ink"
-                  >
-                    Ctrl P · go to
-                  </button>
-                </div>
-              </div>
+              <EmptyEditorGroup
+                platform={bridge().platform}
+                onNewFile={() => setNewFileOpen(true)}
+                onOpenPalette={() => setPaletteOpen(true)}
+                onOpenQuickOpen={() => setQuickOpenOpen(true)}
+              />
             );
               }
               const unhandled: never = groupTab;
