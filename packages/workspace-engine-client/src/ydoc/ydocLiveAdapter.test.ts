@@ -3220,10 +3220,8 @@ describe("YdocLiveAdapter", () => {
     expect(engine.activeSessionIds()).toHaveLength(0);
   });
 
-  it("ignores a local update that arrives after the session released", async () => {
-    // The session and its lease are gone, so there is nothing to journal and
-    // nothing to retry: a late keystroke from a torn-down editor must not
-    // reject into a caller that has no session left to act on.
+  it("rejects a local update that arrives after the session released", async () => {
+    // A released session cannot save a late edit. Report that to its caller.
     const engine = seedPlaintextEngine();
     const provider = await openEngineYdocProviderSession({
       transport: engine,
@@ -3242,7 +3240,7 @@ describe("YdocLiveAdapter", () => {
           text.insert(0, "typed after teardown");
         }),
       ),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow("closed");
 
     expect(engine.recordedUpdates).toHaveLength(0);
     expect(engine.requests.map((request) => request.method)).toEqual([
@@ -5285,6 +5283,7 @@ describe("the ydoc.open deadline", () => {
     methods.length = 0;
 
     await provider.evict();
+    await expect(provider.applyLocalUpdate(new Uint8Array())).rejects.toThrow("closed");
 
     expect(methods, "route `evict` through the close ladder -> ydoc.settle and ydoc.close appear here, and the refusal the evict escapes comes back.").toEqual([YDOC_METHOD.evict]);
     // The lease is gone, so the path binds again.

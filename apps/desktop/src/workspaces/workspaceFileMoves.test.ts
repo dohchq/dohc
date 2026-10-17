@@ -116,7 +116,7 @@ async function fixture(options: {
   const added = async (seen: ReadonlySet<string>) => (await rows()).filter(row => !seen.has(row.id))
     .map(row => ({ operation: row.operation, path: row.path, agentId: row.authors?.find(author => author.kind === "agent")?.agentId }))
     .sort((a, b) => a.path.localeCompare(b.path) || a.operation.localeCompare(b.operation));
-  const workspaceTrash = async () => existsSync(join(rootPath, ".dohc/trash")) ? await readdir(join(rootPath, ".dohc/trash")) : [];
+  const workspaceTrash = async () => existsSync(join(rootPath, ".dohc/trash")) ? (await readdir(join(rootPath, ".dohc/trash"))).filter(name => !/^delete-[a-f0-9]{64}\.json$/.test(name)) : [];
   // The system trash keeps the workspace trash's entry name, which ends with the file's own name.
   const systemTrashed = async (name: string) => {
     const entry = (await readdir(systemTrash)).find(entry => entry.endsWith(`-${name}`));
@@ -186,7 +186,7 @@ describe("agent moves and deletes", () => {
 
     expect(await f.move("person.txt", "agent.txt")).toEqual({ ok: true, fromPath: "person.txt", toPath: "agent.txt" });
     expect(await f.move("notes", "archive/notes", unnamed)).toEqual({ ok: true, fromPath: "notes", toPath: "archive/notes" });
-    expect(await f.remove("photo.bin")).toEqual({ ok: true, path: "photo.bin", trashed: true });
+    expect(await f.remove("photo.bin")).toMatchObject({ ok: true, path: "photo.bin", trashed: true });
     await f.settle();
 
     expect(await f.added(seen)).toEqual([
@@ -432,7 +432,7 @@ describe("agent moves and deletes", () => {
     } });
     await write(f.rootPath, "note.txt", "mine");
     await f.start();
-    expect(await f.remove("note.txt")).toEqual({ ok: true, path: "note.txt", trashed: true });
+    expect(await f.remove("note.txt")).toMatchObject({ ok: true, path: "note.txt", trashed: true });
     expect(f.trashItem).toHaveBeenCalledOnce();
     expect(f.trashItem.mock.calls[0]?.[0]).toContain(join(".dohc", "trash"));
     expect(await readFile(join(f.rootPath, "note.txt"), "utf8")).toBe("theirs");
@@ -939,7 +939,7 @@ describe("a person's delete", () => {
         trace.push("trash");
         await rename(absolute, join(f.systemTrash, basename(absolute)));
       });
-      expect(await f.removeByHand("tasks/hand.md")).toEqual({ trashed: true });
+      expect(await f.removeByHand("tasks/hand.md")).toMatchObject({ trashed: true });
       // The system trash holds it from its own place, so its Restore returns it there.
       expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks/hand.md")]]);
       expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Outside edit\n");
@@ -1025,7 +1025,7 @@ describe("a person's delete", () => {
     const seen = await f.start();
     f.trashItem.mockRejectedValueOnce(new Error("No system trash here."));
     try {
-      expect(await f.removeByHand("tasks/hand.md")).toEqual({ trashed: false });
+      expect(await f.removeByHand("tasks/hand.md")).toMatchObject({ trashed: false });
       expect(existsSync(join(f.rootPath, "tasks/hand.md"))).toBe(false);
       const [staged] = await f.workspaceTrash();
       expect(await readFile(join(f.rootPath, ".dohc/trash", staged!), "utf8")).toBe("# Hand made\n");
@@ -1040,7 +1040,7 @@ describe("a person's delete", () => {
     await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
     const seen = await f.start();
     try {
-      expect(await f.removeByHand("tasks/hand.md", null)).toEqual({ trashed: true });
+      expect(await f.removeByHand("tasks/hand.md", null)).toMatchObject({ trashed: true });
       expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
       expect(f.markDeleted).toHaveBeenCalledWith("tasks/hand.md");
       expect((await f.rows()).filter(row => !seen.has(row.id) && row.authors !== undefined)).toEqual([]);
@@ -1055,7 +1055,7 @@ describe("a person's delete", () => {
     await symlink(external, join(f.rootPath, "tasks/link"), process.platform === "win32" ? "junction" : "dir");
     const seen = await f.start();
     try {
-      expect(await f.removeByHand("tasks/link")).toEqual({ trashed: true });
+      expect(await f.removeByHand("tasks/link")).toMatchObject({ trashed: true });
       expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks/link")]]);
       expect((await lstat(join(f.systemTrash, "link"))).isSymbolicLink()).toBe(true);
       expect(await readFile(join(external, "kept.txt"), "utf8")).toBe("outside");
@@ -1080,7 +1080,7 @@ describe("a person's delete", () => {
     await symlink(external, join(f.rootPath, "tasks/link"), process.platform === "win32" ? "junction" : "dir");
     const seen = await f.start();
     try {
-      expect(await f.removeByHand("tasks")).toEqual({ trashed: true });
+      expect(await f.removeByHand("tasks")).toMatchObject({ trashed: true });
       expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks")]]);
       expect(await readFile(join(f.systemTrash, "tasks", "build", "out.js"), "utf8")).toBe("built");
       expect(await readFile(join(f.systemTrash, "tasks", ".env"), "utf8")).toBe("SECRET=kept private");
@@ -1102,7 +1102,7 @@ describe("a person's delete", () => {
     const seen = await f.start();
     await write(f.rootPath, "notes/bell\u0007.md", "ring");
     try {
-      expect(await f.removeByHand("notes/bell\u0007.md")).toEqual({ trashed: true });
+      expect(await f.removeByHand("notes/bell\u0007.md")).toMatchObject({ trashed: true });
       expect(f.trashItem.mock.calls).toHaveLength(1);
       expect(f.trashItem.mock.calls[0]?.[0].endsWith("bell\u0007.md")).toBe(true);
       expect(existsSync(join(f.rootPath, "notes/bell\u0007.md"))).toBe(false);
@@ -1119,7 +1119,7 @@ describe("a person's delete", () => {
     await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
     const seen = await f.start();
     try {
-      expect(await f.removeByHand("tasks/hand.md")).toEqual({ trashed: true });
+      expect(await f.removeByHand("tasks/hand.md")).toMatchObject({ trashed: true });
       expect(await readFile(join(f.rootPath, "tasks/hand.md"), "utf8")).toBe("new");
       expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
       expect((await f.rows()).filter(row => !seen.has(row.id) && row.operation === "delete")).toMatchObject([

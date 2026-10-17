@@ -70,6 +70,7 @@ it("bounds concurrent work, cancels active jobs, and closes without dangling req
   const first = Promise.resolve(validate(input, abort.signal));
   const rejected = expect(first).rejects.toThrow("cancelled");
   const second = Promise.resolve(validate(input));
+  expect(validate.hasCapacity?.()).toBe(false);
   const busy = await validate(input);
   expect(busy).toMatchObject({kind: "retry", reason: "admission-unavailable"});
   if (busy.kind !== "retry") throw Error("Expected busy pool");
@@ -81,6 +82,7 @@ it("bounds concurrent work, cancels active jobs, and closes without dangling req
   expect(ready).toBe(false);
   abort.abort(new Error("cancelled")); await rejected;
   await available;
+  expect(validate.hasCapacity?.()).toBe(true);
   expect((await second).kind).toBe("accepted");
   const active = Promise.resolve(validate(input)); const closing = expect(active).rejects.toThrow("exited");
   await pool.close(); await closing;

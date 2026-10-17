@@ -1,5 +1,6 @@
+import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { activityPin, settingsNavPin, editorTabTestId } from "../src/testPins";
-import { expect, test, type Page, type Locator } from "@playwright/test";
+import { test, expect, type Page, type Locator } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
@@ -103,8 +104,10 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await expect(share.getByTestId("share-link-url")).toBeVisible();
     const linkUrl = (await share.getByTestId("share-link-url").textContent())!;
     expect(new URL(linkUrl).origin).toBe(sharedDatasetViewerOrigin);
-    await share.getByRole("button", { name: "Copy", exact: true }).click();
-    await expect(share.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    await holdSystemClipboard(test.info(), async (remainingMs) => {
+      await share.getByRole("button", { name: "Copy", exact: true }).click({ timeout: remainingMs() });
+      await expect(share.getByRole("button", { name: "Copied", exact: true })).toBeVisible({ timeout: remainingMs() });
+    });
     await share.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByTestId("site-preview-page").getByRole("button", { name: "Open in browser", exact: true })).toBeVisible();
     await page.getByTestId("site-preview-publish").click();
