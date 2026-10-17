@@ -1,3 +1,4 @@
+import { shareHandoffOperations, shareMountOperations } from "./ipc/shareOperations";
 import { createOperationHistory } from "./workspaces/workspaceHistoryOperations";
 import { createReceivedFileReferenceScopes } from "./workspaces/workspaceFileReferenceScopes";
 import { mountRootFor } from "./workspaces/shareMounts";
@@ -87,7 +88,7 @@ import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
 import { createWorkspaceSyncStop } from "./workspaces/stopWorkspaceSync";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
 import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
-import { registerShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
+import { createShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
 import { createDesktopSharedChannelSync } from "./workspaces/desktopSharedChannelSync";
 import { createWorkspaceFilesIpc } from "./ipc/workspaceFilesIpc";
 import { settingsOperations } from "./ipc/settingsOperations";
@@ -168,7 +169,7 @@ import {
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
-import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
+import { createShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
@@ -5245,6 +5246,7 @@ const workspaceFileMutations = createWorkspaceFileMutationOwner({
         return await work({
           authorityId: workspace.attachmentId,
           workspace,
+          signal: operation.signal,
           capture: activity.engineCaptureFor(workspaceId, workspace.rootPath),
           yDocSessions: engineYDocSessionIpc.fileMutationPort(),
           assertCurrent: () => operation.assertCurrent(),
@@ -6076,11 +6078,9 @@ function registerIpcHandlers(): void {
 
   windowIpc.registerExternalUrl();
 
-  registerShareHandoffIpcHandlers<IpcMainInvokeEvent>({
-    registerHandler: handleIpc,
-    assertTrustedSender,
+  registerOperations(operationBoundary, shareHandoffOperations, createShareHandoffIpcHandlers({
     shareHandoffRedemption,
-  });
+  }));
 
   registerCloudIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: handleIpc,
@@ -6709,19 +6709,10 @@ function registerIpcHandlers(): void {
   // the effective-policy floor — mounted content cannot leak into the
   // host's history or its synced copy.
 
-  registerShareMountIpcHandlers({
-    registerHandler: handleIpc,
-    assertTrustedSender,
-    withWorkspaceOperation: (event, workspaceId, work) =>
-      withRendererWorkspaceOperation(
-        event.sender,
-        workspaceId,
-        "Share update stopped because this window changed workspaces.",
-        work,
-      ),
+  registerOperations(operationBoundary, shareMountOperations, createShareMountIpcHandlers({
     assertWritableWorkspace,
     commands: shareMountCommands,
-  });
+  }));
 
   registerDesktopDatabaseIpcHandlers<
     WebContents,

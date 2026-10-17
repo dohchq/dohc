@@ -204,18 +204,26 @@ export function createDesktopCliServer<State>(
     // A move or delete holds the workspace operation fileWrite holds.
     const withPathChange = async <Result>(requestId: string, work: (
       operation: WorkspaceAuthorityOperation<RegistryEntry, State>, options: PathChangeOptions) => Promise<() => Promise<Result>>) => {
-      const finish = await withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
-        operation.assertCurrent();
-        if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
-        if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Write in the owning workspace.");
-        const current = activity.engineCaptureFor(workspace.workspaceId);
-        if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
-        return work(operation, {
-          capture: current, requestId, trashItem: dependencies.trashItem,
-          markDeleted: path => dependencies.markDeletedUnderPath(operation.workspace.attachmentId, path),
+      let finish: (() => Promise<Result>) | undefined;
+      try {
+        await withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
+          operation.assertCurrent();
+          if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");
+          if (sharedViewOf(workspace.workspaceId)) throw new Error("This workspace is read-only. Write in the owning workspace.");
+          const current = activity.engineCaptureFor(workspace.workspaceId);
+          if (!current) throw new Error("dohc could not start the engine for this workspace. Restart dohc to try again.");
+          const attachmentId = operation.workspace.attachmentId;
+          finish = await work(operation, {
+            capture: current, requestId, trashItem: dependencies.trashItem,
+            markDeleted: path => dependencies.markDeletedUnderPath(attachmentId, path),
+          });
         });
-      });
-      return finish();
+      } catch (error) {
+        // Preparation already changed disk and History, even if the lease retired.
+        await finish?.().catch(() => undefined);
+        throw error;
+      }
+      return finish!();
     };
     const operationHistory = createOperationHistory(work => withEngineAdapter(workspace, work));
     const withHistoryOperation = <T>(work: (operation: WorkspaceAuthorityOperation<RegistryEntry, State>) => Promise<T>) =>

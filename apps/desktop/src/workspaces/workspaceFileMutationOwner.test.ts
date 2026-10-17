@@ -28,6 +28,7 @@ import {
 } from "./workspaceFileMutationOwner";
 import { deferred } from "../testing/deferred";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
+import { beginPendingDeleteRecovery } from "./workspaceDeleteRecovery";
 
 interface TestEvent {
   trusted: boolean;
@@ -179,12 +180,14 @@ async function harness(options: {
       (async (path: string) => rm(path, { recursive: true, force: true })),
   );
   const rendererOperationCalls = vi.fn();
+  const retirement = new AbortController();
   const withRendererWorkspaceOperation = async <Result>(
     event: TestEvent,
     workspaceId: string,
     work: (authority: {
       authorityId: symbol;
       workspace: Readonly<TestWorkspace>;
+      signal: AbortSignal;
       capture: MutationCapture | null;
       yDocSessions: WorkspaceFileMutationYDocPort;
       assertCurrent(): void;
@@ -201,9 +204,10 @@ async function harness(options: {
     return await work({
       authorityId,
       workspace: requireWorkspace(workspaceId),
+      signal: retirement.signal,
       capture,
       yDocSessions,
-      assertCurrent: () => { if (event.authorityId !== undefined && event.authorityId !== authorityId) throw new Error("File change stopped because this window changed workspaces."); },
+      assertCurrent: () => { if (retirement.signal.aborted || event.authorityId !== undefined && event.authorityId !== authorityId) throw new Error("File change stopped because this window changed workspaces."); },
     });
   };
   let account = "account-alice";
@@ -228,6 +232,7 @@ async function harness(options: {
     change,
     assertTrustedSender,
     rendererOperationCalls,
+    retirement,
     requireWorkspace,
     notifyRenderer,
     shareViewEdited,
@@ -289,6 +294,23 @@ async function openYDoc(
 }
 
 describe("WorkspaceFileMutationOwner", () => {
+  it("stops an Undo waiting on system trash when its workspace retires", async () => {
+    const test = await harness();
+    const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
+    const release = beginPendingDeleteRecovery(operationId);
+    let result: unknown;
+    const undo = test.owner.undoHistoryOperation(trustedEvent, { workspaceId: test.workspace.workspaceId, operationId })
+      .then(value => { result = value; }, error => { result = { ok: false, reason: error.message }; });
+    try {
+      await vi.waitFor(() => expect(test.rendererOperationCalls).toHaveBeenCalledOnce());
+      expect(result).toBeUndefined();
+      test.retirement.abort();
+      await vi.waitFor(() => expect(result).toEqual({ ok: false, reason: "This workspace was closed. Open it again." }));
+      expect(test.history.readHistoryPage).not.toHaveBeenCalled();
+      expect(test.history.undoHistoryOperation).not.toHaveBeenCalled();
+    } finally { release(); await undo; }
+  });
+
   it("checks sender trust and payload shape before resolving a workspace", async () => {
     const test = await harness();
 

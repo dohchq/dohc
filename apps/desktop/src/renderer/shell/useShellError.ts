@@ -81,7 +81,8 @@ export interface ShellError {
   // Facts for a report, one "label: value" line each, such as the error as
   // it arrived. They go into Copy details, not the text a person reads.
   details?: ReadonlyArray<ErrorDetailField>;
-  retry: (() => void) | null;
+  // Answers false when it could not run, so the row stays.
+  retry: (() => void | false) | null;
   // A step offered beside Try again: one that fixes the cause, such as
   // opening the file it names, or a success notice's Undo. A step that
   // `ends` the notice removes its row when it runs.
@@ -307,7 +308,7 @@ export function useShellError(workspaceId: string) {
       message: string;
       cause?: unknown;
       details?: ReadonlyArray<ErrorDetailField>;
-      retry?: (() => void) | null;
+      retry?: ShellError["retry"];
       onDismiss?: () => void;
       action?: ShellError["action"];
       kind?: ShellErrorKind;
@@ -647,13 +648,15 @@ export function useShellError(workspaceId: string) {
 
   const retryShellError = useCallback((id: string) => {
     const target = shellErrorsRef.current.find((error) => error.id === id);
-    // Clearing first is what shows the control took: the read is on its
-    // way, and a failure that is being retried is no longer the newest
-    // thing this surface knows. The retry runs once, outside the updater.
+    // A retry that could not run leaves every row where it stands.
+    if (target?.retry?.() === false) return;
+    // Clearing is what shows the control took: the read is on its way, and
+    // a failure that is being retried is no longer the newest thing this
+    // surface knows. The retry runs once, outside the updater. Only the row
+    // retried goes, so a failure the retry has already reported again stays.
     setShellErrors(current => target?.kind === "sync-refusal" || target?.kind === "capture-held"
       ? current
-      : current.filter(error => error.id !== id));
-    target?.retry?.();
+      : current.filter(error => error !== target));
   }, []);
 
   return {
