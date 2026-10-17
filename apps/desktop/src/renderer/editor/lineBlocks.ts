@@ -296,15 +296,17 @@ export function leadingColumns(text: string): number {
 }
 
 /** The column a continuation line must reach to stay inside this list item. */
-function continuationIndent(text: string): number {
+function continuationIndent(text: string): { indent: number; lazy: boolean } {
   const match = LIST_MARKER_RE.exec(text);
-  if (!match) return 1;
+  if (!match) return { indent: 1, lazy: false };
   const spaces = /^[ \t]*/.exec(text.slice(match[0].length))?.[0] ?? "";
   const marker = columnAt(text, match[0].length);
   const content = columnAt(text, match[0].length + spaces.length);
-  return content - marker > 4 || !text.slice(match[0].length).trim()
+  const body = text.slice(match[0].length).trim();
+  const indent = content - marker > 4 || !body
     ? marker + 1
     : content;
+  return { indent, lazy: !!body && content - marker < 4 };
 }
 
 function blockKind(text: string): BlockKind {
@@ -387,6 +389,7 @@ export function blockForLine(body: string, line: number): LineBlock {
   let openMarker = "";
   let openIndent = 1;
   let lazyAllowed = false;
+  let previousDeep = false;
   let quoteOpen = false;
   let quoteCallout = false;
   let quoteFence: Fence | null = null;
@@ -536,7 +539,7 @@ export function blockForLine(body: string, line: number): LineBlock {
           (kind === "ordered" &&
             (quoteCallout || INTERRUPTING_ORDERED_RE.test(text))))) ||
       // Ordinary item paragraphs accept underindented lazy continuation.
-      (open && listOpen && !lazyAllowed && indent > 0 && indent < openIndent);
+      (open && listOpen && (!lazyAllowed || previousDeep) && indent > 0 && indent < openIndent);
     // A heading opens a block wherever one can open — but indented into a
     // list item it is that item's own heading, which is what `resumes` says.
     const opens = (kind === "heading" || interrupts || !open) && !resumes;
@@ -569,12 +572,11 @@ export function blockForLine(body: string, line: number): LineBlock {
           marker === openMarker &&
           indent < openIndent))
     ) {
-      openIndent = continuationIndent(text);
-      const markerEnd = LIST_MARKER_RE.exec(text)![0].length;
-      const body = text.slice(markerEnd);
-      const padding = /^[ \t]*/.exec(body)![0].length;
-      lazyAllowed = !!body.trim() && columnAt(text, markerEnd + padding) - columnAt(text, markerEnd) < 4;
+      const continuation = continuationIndent(text);
+      openIndent = continuation.indent;
+      lazyAllowed = continuation.lazy;
     }
+    previousDeep = listOpen && indent >= openIndent + 4;
     // An ATX heading and a thematic break are one line each. The next line
     // opens its own block, blank line or not — `# Plan\nBody` is two nodes.
     open = kind !== "heading" && kind !== "break";

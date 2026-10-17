@@ -3641,9 +3641,9 @@ fn plain_bullet_prefix<'src>(
     (items, end)
 }
 
-fn empty_list_child(mut text: &str, reading: MarkdownReading) -> bool {
+fn empty_list_child(mut text: &str) -> bool {
     for _ in 0..MARKDOWN_XML_MAX_DEPTH {
-        let Some(child) = list_marker(text, reading) else {
+        let Some(child) = list_marker(text, MarkdownReading::ProjectedSource) else {
             break;
         };
         if matches!(child.kind, ListKind::Task(_)) {
@@ -3655,6 +3655,10 @@ fn empty_list_child(mut text: &str, reading: MarkdownReading) -> bool {
         text = child.text;
     }
     false
+}
+
+fn trim_list_item_end(text: &str) -> &str {
+    text.trim_end_matches(|character| character != '\t' && is_js_whitespace(character))
 }
 
 fn parse_list<'src>(
@@ -3680,6 +3684,9 @@ fn parse_list<'src>(
                 && list_marker(lines[at], reading).is_none_or(|next| next.kind != first.kind)
         });
     if prefix_end == lines.len() || ends_before_block {
+        if let Some(last) = plain_items.last_mut() {
+            *last = trim_list_item_end(last);
+        }
         return Some((
             MdBlock::BulletList(MdBulletItems::Plain(plain_items)),
             prefix_end,
@@ -3766,17 +3773,8 @@ fn parse_list<'src>(
                             .iter()
                             .rposition(|line| !blank_line(line))
                             .map_or_else(
-                                || empty_list_child(marker.text, reading),
-                                |at| {
-                                    empty_list_child(
-                                        continued[at],
-                                        if at > 0 && blank_line(continued[at - 1]) {
-                                            MarkdownReading::ProjectedSource
-                                        } else {
-                                            reading
-                                        },
-                                    )
-                                },
+                                || empty_list_child(marker.text),
+                                |at| empty_list_child(continued[at]),
                             );
                 }
                 break;
@@ -3833,6 +3831,12 @@ fn parse_list<'src>(
         }
         if next_marker.is_none() {
             next_marker = lines.get(at).and_then(|line| list_marker(line, reading));
+        }
+    }
+    if let Some(last) = items.last_mut().filter(|item| item.blocks.is_none()) {
+        let trimmed = trim_list_item_end(&last.paragraph);
+        if trimmed.len() != last.paragraph.len() {
+            last.paragraph = trimmed.into();
         }
     }
     let block = match first.kind {

@@ -997,9 +997,10 @@ function markdownLists(projected = false) {
     if (!' -+*0123456789'.includes(src[0]) || !/^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|\n|$)/u.test(src)) return undefined
     // Ordinary tight items need only inline lexing. A following root paragraph
     // cannot continue the list across a blank; indented bodies stay on Marked.
-    const flatTasks = /^([-+*]) \[[ xX]\] [A-Za-z][^\n\t]*(?:\n\1 \[[ xX]\] [A-Za-z][^\n\t]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
-    const flat = flatTasks ?? /^([-+*]) [A-Za-z][^\n\t]*(?:\n\1 [A-Za-z][^\n\t]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
-      ?? /^[0-9]{1,9}([.)]) [A-Za-z][^\n\t]*(?:\n[0-9]{1,9}\1 [A-Za-z][^\n\t]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
+    // Reference labels wait for later definitions through block lexing.
+    const flatTasks = /^([-+*]) \[[ xX]\] [A-Za-z][^\n\t\[]*(?:\n\1 \[[ xX]\] [A-Za-z][^\n\t\[]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
+    const flat = flatTasks ?? /^([-+*]) [A-Za-z][^\n\t\[]*(?:\n\1 [A-Za-z][^\n\t\[]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
+      ?? /^[0-9]{1,9}([.)]) [A-Za-z][^\n\t\[]*(?:\n[0-9]{1,9}\1 [A-Za-z][^\n\t\[]*)*(?=\n\n[A-Za-z]|\n?$)/u.exec(src)
     if (flat) {
       const raw = flat[0]
       const ordered = /^[0-9]/u.test(raw)
@@ -1007,7 +1008,8 @@ function markdownLists(projected = false) {
       return {
         type: 'list', raw, ordered, start: ordered ? Number.parseInt(raw, 10) : '', loose: false,
         items: lines.map((line, at) => {
-          const text = line.slice(flatTasks ? 6 : ordered ? line.indexOf(' ') + 1 : 2)
+          const body = line.slice(flatTasks ? 6 : ordered ? line.indexOf(' ') + 1 : 2)
+          const text = at === lines.length - 1 ? body.trimEnd() : body
           return {
             type: 'list_item', raw: line + (at < lines.length - 1 ? '\n' : ''),
             task: !!flatTasks, ...(flatTasks ? { checked: line[3].toLowerCase() === 'x' } : {}),
@@ -1017,7 +1019,7 @@ function markdownLists(projected = false) {
         }),
       }
     }
-    if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?![ \t]*(?:\n|$)|\[[ xX]\](?:[ \t]|\n|$))[^\n]+(?:\n|$))+(?:\n|$)(?![ \t\n0-9*+-])/u.test(src)) return undefined
+    if (/^(?:(?:[-+*]|[0-9]{1,9}[.)]) (?![ \t]*(?:\n|$))[^\n\[]+(?:\n|$))+(?:\n|$)(?![ \t\n0-9*+-])/u.test(src)) return undefined
     // Marked otherwise strips a checkbox from ordered item text as GFM tasks.
     tokenizer.options.gfm = !/^ {0,3}[0-9]/u.test(src)
     const list = tokenizer.list(src)

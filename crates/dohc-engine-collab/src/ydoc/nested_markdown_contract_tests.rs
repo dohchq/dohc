@@ -1,5 +1,75 @@
 use super::*;
 
+#[test]
+fn nested_contract_r23_bare_empty_chains_refuse_in_all_readings() {
+    for reading in [
+        MarkdownReading::Source,
+        MarkdownReading::Projection,
+        MarkdownReading::ProjectedSource,
+        MarkdownReading::Successor,
+    ] {
+        for source in [
+            "- -\n\n x",
+            "1. -\n\n  x",
+            "- -\n\n   x",
+            "- a\n  - -\n\n x",
+        ] {
+            let doc = Ydoc::wire();
+            assert!(
+                doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                    .is_err(),
+                "{source:?}, {reading:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_contract_r23_last_item_spaces_follow_the_same_rule() {
+    for reading in [
+        MarkdownReading::Source,
+        MarkdownReading::Projection,
+        MarkdownReading::ProjectedSource,
+        MarkdownReading::Successor,
+    ] {
+        for marker in ["-", "1.", "- [ ]"] {
+            for suffix in ["\n\nAfter", "\n\n# H"] {
+                let source = format!("{marker} A\n{marker} B  {suffix}");
+                let doc = Ydoc::wire();
+                doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, &source, reading)
+                    .unwrap();
+                assert!(
+                    !doc.project_richdoc().unwrap().contains("B  "),
+                    "{source:?}, {reading:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_contract_r23_content_tabs_keep_inline_spelling() {
+    for reading in [
+        MarkdownReading::Source,
+        MarkdownReading::Projection,
+        MarkdownReading::ProjectedSource,
+        MarkdownReading::Successor,
+    ] {
+        for source in [
+            "- a *b\t* c",
+            "- a\t_b_ c",
+            "- a\t\n\nAfter",
+            "1. a\t\n\nAfter",
+            "- [ ] a\t\n\nAfter",
+        ] {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, reading)
+                .unwrap();
+            assert_eq!(doc.project_richdoc().unwrap(), source, "{reading:?}");
+        }
+    }
+}
+
 fn nested_contract_case(case: &Value) {
     let name = case["name"].as_str().unwrap();
     let doc = Ydoc::wire();

@@ -60,6 +60,7 @@ const PARSE_REFERENCE_RE = new RegExp(
 // until its tag spans are read, so only the serializer's `&lt;` and `&gt;`
 // open and close one.
 let parseReferences: ReadonlyMap<string, string> = new Map()
+let parseTabs: ReadonlyMap<string, string> = new Map()
 let rawHtmlMarkup = { lt: '<', gt: '>', used: false }
 
 // Raw HTML stays the text the file holds, references and all. Tiptap keeps it
@@ -428,6 +429,14 @@ const markdownParser = new Marked({
   },
 })
 
+// Block lexing must protect content tabs from list indentation expansion, but
+// inline lexing must see whitespace when it decides emphasis boundaries.
+class ContentTabLexer<ParserOutput = string, RendererOutput = string> extends Lexer<ParserOutput, RendererOutput> {
+  inlineTokens(src: string, tokens: Token[] = []): Token[] {
+    return super.inlineTokens(parseTabs.size ? restoreParseSentinels(src, parseTabs) : src, tokens)
+  }
+}
+
 const markdownManager = new MarkdownManager({
   marked: markdownParser as unknown as typeof marked,
   extensions,
@@ -498,7 +507,7 @@ function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (te
     let line = lines[at].replace(/\r$/u, '')
     if (line.includes('\t')) line = line.replace(/^[ \t]*(?:(?:[-+*]|[0-9]{1,9}[.)])[ \t]+)?/u, prefix => {
       let column = 0
-      const continuation = parents.length > 0 && Array.from(prefix.match(/^[ \t]*/u)![0], character => character === '\t' ? 4 : 1).reduce((sum, width) => sum + width, 0) >= parents.at(-1)!.column
+      const continuation = parents.length > 0 && Array.from(prefix.match(/^[ \t]*/u)![0], character => character === '\t' ? 4 : 1).reduce((sum, width) => sum + width, 0) >= parents[0].column
       return Array.from(prefix, character => {
         const width = character === '\t' ? continuation ? 4 : 4 - column % 4 : 1
         column += width
@@ -537,8 +546,9 @@ function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (te
     open = undefined
     if (marker) {
       while (parents.length && indent <= parents.at(-1)!.indent) parents.pop()
-    } else if (parents.length && indent <= parents.at(-1)!.indent
-      && (blank || run || quotes || rule || /^#{1,6} /u.test(rest))) parents.length = 0
+    } else if (blank || run || quotes || rule || /^#{1,6} /u.test(rest)) {
+      while (parents.length && indent < parents.at(-1)!.column) parents.pop()
+    }
     const inList = parents.length > 0
     if (quotes > 120) refuse()
     if (run) { fence = run; fenceInList = inList; blank = false; continue }
@@ -555,10 +565,10 @@ function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (te
       while (true) {
         if (depth > 128) refuse()
         if (body.startsWith('> ')) { body = body.slice(2); depth += 1; quoted = true; continue }
-        const child = /^(?:[-+*]|[0-9]{1,9}[.)])[ \t]+/u.exec(body)
+        const child = /^(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)/u.exec(body)
         if (!child) break
         body = body.slice(child[0].length); depth += 2
-        if (!quoted && !body.trim()) emptyChild = { indent: indent + rest.length - body.length - child[0].length, column: indent + rest.length - body.length }
+        if (!quoted && !body.trim()) emptyChild = { indent: indent + rest.length - body.length - child[0].length, column: indent + rest.length - body.length + (/\s$/u.test(child[0]) ? 0 : 1) }
       }
       if (/^(?:\*(?:[ \t]*\*){2,}|_(?:[ \t]*_){2,})[ \t]*$/u.test(body)) refuse()
       const itemFence = /^(?:`{3,}|~{3,})/u.exec(body)?.[0] ?? ''
@@ -569,12 +579,6 @@ function assertSupportedListMarkdown(markdown: string, preserveContentTabs?: (te
       if (itemBody.trim() === '') open = parents.at(-1)
       if (emptyChild) { parents.push(emptyChild); open = emptyChild }
       if (itemBody === '') { lines[at] = lines[at].trimEnd(); changed = true }
-    } else if (parents.length) {
-      const parent = parents.at(-1)!
-      if (indent > parent.indent && blank && indent < parent.column) {
-        if (emptyEnded) refuse()
-        while (parents.length && indent < parents.at(-1)!.column) parents.pop()
-      }
     }
     if (parents.length) protectTabs(at)
     blank = false
@@ -653,6 +657,8 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
     ] as const),
   )
   parseReferences = entitySentinels
+  parseTabs = projectionTabs
+  markdownParser.Lexer = projectionTabs.size ? ContentTabLexer : Lexer
   rawHtmlMarkup = markup
   writtenLinks = {
     openers: writtenOpeners(prepared, entitySentinels),
@@ -665,6 +671,8 @@ export function parseRichdocMarkdown(markdown: string, reading: 'source' | 'proj
     parsed = (reading === 'projection' ? projectedMarkdownManager() : markdownManager).parse(prepared)
   } finally {
     parseReferences = new Map()
+    parseTabs = new Map()
+    markdownParser.Lexer = Lexer
     rawHtmlMarkup = { lt: '<', gt: '>', used: false }
     writtenLinks = { openers: new Set(), runs: new Map(), length: -1, sentinels: new WeakMap() }
   }

@@ -976,8 +976,8 @@
       "source": "1. A\n2. B  ",
       "canonical": "1. A\n2. B",
       "fileFold": true,
-      "witnessRefuse": true,
-      "rustBase64": "AQvbgKG3+ZnABQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA24Cht/mZwAUBBXN0YXJ0AX0BBwDbgKG3+ZnABQEDCGxpc3RJdGVtBwDbgKG3+ZnABQMDCXBhcmFncmFwaAcA24Cht/mZwAUEBgQA24Cht/mZwAUFAUGH24Cht/mZwAUDAwhsaXN0SXRlbQcA24Cht/mZwAUHAwlwYXJhZ3JhcGgHANuAobf5mcAFCAYEANuAobf5mcAFCQNCICAA"
+      "exactSource": true,
+      "rustBase64": "AQupgq7+543YCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAqYKu/ueN2AkBBXN0YXJ0AX0BBwCpgq7+543YCQEDCGxpc3RJdGVtBwCpgq7+543YCQMDCXBhcmFncmFwaAcAqYKu/ueN2AkEBgQAqYKu/ueN2AkFAUGHqYKu/ueN2AkDAwhsaXN0SXRlbQcAqYKu/ueN2AkHAwlwYXJhZ3JhcGgHAKmCrv7njdgJCAYEAKmCrv7njdgJCQFCAA=="
     },
     {
       "name": "r22-separator-first-0-0",
@@ -1024,8 +1024,8 @@
       "source": "- A\n- B  ",
       "canonical": "- A\n- B",
       "fileFold": true,
-      "witnessRefuse": true,
-      "rustBase64": "AQrjgZSapJmCAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDjgZSapJmCAwEDCGxpc3RJdGVtBwDjgZSapJmCAwIDCXBhcmFncmFwaAcA44GUmqSZggMDBgQA44GUmqSZggMEAUGH44GUmqSZggMCAwhsaXN0SXRlbQcA44GUmqSZggMGAwlwYXJhZ3JhcGgHAOOBlJqkmYIDBwYEAOOBlJqkmYIDCANCICAA"
+      "exactSource": true,
+      "rustBase64": "AQrWlOCx7Yr0DAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDWlOCx7Yr0DAEDCGxpc3RJdGVtBwDWlOCx7Yr0DAIDCXBhcmFncmFwaAcA1pTgse2K9AwDBgQA1pTgse2K9AwEAUGH1pTgse2K9AwCAwhsaXN0SXRlbQcA1pTgse2K9AwGAwlwYXJhZ3JhcGgHANaU4LHtivQMBwYEANaU4LHtivQMCAFCAA=="
     },
     {
       "name": "r22-separator-first-1-0",
@@ -1072,8 +1072,8 @@
       "source": "- [ ] A\n- [ ] B  ",
       "canonical": "- [ ] A\n- [ ] B",
       "fileFold": true,
-      "witnessRefuse": true,
-      "rustBase64": "AQzFqaXS38kCACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCHRhc2tMaXN0BwDFqaXS38kCAQMIdGFza0l0ZW0oAMWppdLfyQICB2NoZWNrZWQBeQcAxaml0t/JAgIDCXBhcmFncmFwaAcAxaml0t/JAgQGBADFqaXS38kCBQFBh8WppdLfyQICAwh0YXNrSXRlbSgAxaml0t/JAgcHY2hlY2tlZAF5BwDFqaXS38kCBwMJcGFyYWdyYXBoBwDFqaXS38kCCQYEAMWppdLfyQIKA0IgIAA="
+      "exactSource": true,
+      "rustBase64": "AQydldzAxL/7BwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAnZXcwMS/+wcBAwh0YXNrSXRlbSgAnZXcwMS/+wcCB2NoZWNrZWQBeQcAnZXcwMS/+wcCAwlwYXJhZ3JhcGgHAJ2V3MDEv/sHBAYEAJ2V3MDEv/sHBQFBh52V3MDEv/sHAgMIdGFza0l0ZW0oAJ2V3MDEv/sHBwdjaGVja2VkAXkHAJ2V3MDEv/sHBwMJcGFyYWdyYXBoBwCdldzAxL/7BwkGBACdldzAxL/7BwoBQgA="
     },
     {
       "name": "r22-separator-first-2-0",
@@ -1242,6 +1242,231 @@
       "exactSource": true,
       "fileFold": true,
       "rustBase64": "AQfim/ay5KQGACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDC29yZGVyZWRMaXN0KADim/ay5KQGAQVzdGFydAF9AQcA4pv2suSkBgEDCGxpc3RJdGVtBwDim/ay5KQGAwMJcGFyYWdyYXBoBwDim/ay5KQGBAYEAOKb9rLkpAYFDlsgXQlOYW1lCVZhbHVlAA=="
+    },
+    {
+      "name": "r23-reference-flat-0",
+      "source": "- See [docs]\n- Next\n\nMore text.\n\n[docs]: https://example.com",
+      "canonical": "- See [docs]\n- Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "- See [docs](https://example.com)\n- Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "ARDz4+7d17jqBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDz4+7d17jqBgEDCGxpc3RJdGVtBwDz4+7d17jqBgIDCXBhcmFncmFwaAcA8+Pu3de46gYDBgQA8+Pu3de46gYEClNlZSBbZG9jc12H8+Pu3de46gYCAwhsaXN0SXRlbQcA8+Pu3de46gYPAwlwYXJhZ3JhcGgHAPPj7t3XuOoGEAYEAPPj7t3XuOoGEQROZXh0h/Pj7t3XuOoGAQMJcGFyYWdyYXBoBwDz4+7d17jqBhYGBADz4+7d17jqBhcKTW9yZSB0ZXh0Lofz4+7d17jqBhYDCXBhcmFncmFwaAcA8+Pu3de46gYiBgQA8+Pu3de46gYjG1tkb2NzXTogaHR0cHM6Ly9leGFtcGxlLmNvbQA=",
+      "nativeRereadCanonical": "- See [docs]\n- Next\n\nMore text.\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+    },
+    {
+      "name": "r23-reference-nested-0",
+      "source": "- a\n  - See [docs]\n\n[docs]: https://example.com",
+      "canonical": "- a\n  - See [docs]\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "- a\n  - See [docs](https://example.com)\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "AQ7yjqryqK6zBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDyjqryqK6zBQEDCGxpc3RJdGVtBwDyjqryqK6zBQIDCXBhcmFncmFwaAcA8o6q8qiuswUDBgQA8o6q8qiuswUEAWGH8o6q8qiuswUDAwpidWxsZXRMaXN0BwDyjqryqK6zBQYDCGxpc3RJdGVtBwDyjqryqK6zBQcDCXBhcmFncmFwaAcA8o6q8qiuswUIBgQA8o6q8qiuswUJClNlZSBbZG9jc12H8o6q8qiuswUBAwlwYXJhZ3JhcGgHAPKOqvKorrMFFAYEAPKOqvKorrMFFRtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
+      "nativeRereadCanonical": "- a\n  - See [docs]\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+    },
+    {
+      "name": "r23-reference-quote-0",
+      "source": "> - See [docs]\n> - Next\n\n[docs]: https://example.com",
+      "canonical": "> - See [docs]\n> - Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "> - See [docs](https://example.com)\n> - Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "AQ7xxbbAwa+vCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwDxxbbAwa+vCQEDCmJ1bGxldExpc3QHAPHFtsDBr68JAgMIbGlzdEl0ZW0HAPHFtsDBr68JAwMJcGFyYWdyYXBoBwDxxbbAwa+vCQQGBADxxbbAwa+vCQUKU2VlIFtkb2NzXYfxxbbAwa+vCQMDCGxpc3RJdGVtBwDxxbbAwa+vCRADCXBhcmFncmFwaAcA8cW2wMGvrwkRBgQA8cW2wMGvrwkSBE5leHSH8cW2wMGvrwkBAwlwYXJhZ3JhcGgHAPHFtsDBr68JFwYEAPHFtsDBr68JGBtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
+      "nativeRereadCanonical": "> - See [docs]\n> - Next\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+    },
+    {
+      "name": "r23-reference-flat-1",
+      "source": "1. See [docs]\n1. Next\n\nMore text.\n\n[docs]: https://example.com",
+      "canonical": "1. See [docs]\n2. Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "1. See [docs](https://example.com)\n2. Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "ARGj3YHl4cToCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAo92B5eHE6AsBBXN0YXJ0AX0BBwCj3YHl4cToCwEDCGxpc3RJdGVtBwCj3YHl4cToCwMDCXBhcmFncmFwaAcAo92B5eHE6AsEBgQAo92B5eHE6AsFClNlZSBbZG9jc12Ho92B5eHE6AsDAwhsaXN0SXRlbQcAo92B5eHE6AsQAwlwYXJhZ3JhcGgHAKPdgeXhxOgLEQYEAKPdgeXhxOgLEgROZXh0h6PdgeXhxOgLAQMJcGFyYWdyYXBoBwCj3YHl4cToCxcGBACj3YHl4cToCxgKTW9yZSB0ZXh0Loej3YHl4cToCxcDCXBhcmFncmFwaAcAo92B5eHE6AsjBgQAo92B5eHE6AskG1tkb2NzXTogaHR0cHM6Ly9leGFtcGxlLmNvbQA=",
+      "nativeRereadCanonical": "1. See [docs]\n2. Next\n\nMore text.\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+    },
+    {
+      "name": "r23-reference-nested-1",
+      "source": "- a\n  1. See [docs]\n\n[docs]: https://example.com",
+      "canonical": "- a\n  1. See [docs]\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "- a\n  1. See [docs](https://example.com)\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "AQ/i+La8sbW2AQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDi+La8sbW2AQEDCGxpc3RJdGVtBwDi+La8sbW2AQIDCXBhcmFncmFwaAcA4vi2vLG1tgEDBgQA4vi2vLG1tgEEAWGH4vi2vLG1tgEDAwtvcmRlcmVkTGlzdCgA4vi2vLG1tgEGBXN0YXJ0AX0BBwDi+La8sbW2AQYDCGxpc3RJdGVtBwDi+La8sbW2AQgDCXBhcmFncmFwaAcA4vi2vLG1tgEJBgQA4vi2vLG1tgEKClNlZSBbZG9jc12H4vi2vLG1tgEBAwlwYXJhZ3JhcGgHAOL4tryxtbYBFQYEAOL4tryxtbYBFhtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
+      "nativeRereadCanonical": "- a\n  1. See [docs]\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+    },
+    {
+      "name": "r23-reference-quote-1",
+      "source": "> 1. See [docs]\n> 1. Next\n\n[docs]: https://example.com",
+      "canonical": "> 1. See [docs]\n> 2. Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "> 1. See [docs](https://example.com)\n> 2. Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "AQ+ciJ7erZOzCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwCciJ7erZOzCQEDC29yZGVyZWRMaXN0KACciJ7erZOzCQIFc3RhcnQBfQEHAJyInt6tk7MJAgMIbGlzdEl0ZW0HAJyInt6tk7MJBAMJcGFyYWdyYXBoBwCciJ7erZOzCQUGBACciJ7erZOzCQYKU2VlIFtkb2NzXYeciJ7erZOzCQQDCGxpc3RJdGVtBwCciJ7erZOzCREDCXBhcmFncmFwaAcAnIie3q2TswkSBgQAnIie3q2TswkTBE5leHSHnIie3q2TswkBAwlwYXJhZ3JhcGgHAJyInt6tk7MJGAYEAJyInt6tk7MJGRtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
+      "nativeRereadCanonical": "> 1. See [docs]\n> 2. Next\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+    },
+    {
+      "name": "r23-reference-flat-2",
+      "source": "- [ ] See [docs]\n- [ ] Next\n\nMore text.\n\n[docs]: https://example.com",
+      "canonical": "- [ ] See [docs]\n- [ ] Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "- [ ] See [docs](https://example.com)\n- [ ] Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "ARLYn4S0/PifAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA2J+EtPz4nwIBAwh0YXNrSXRlbSgA2J+EtPz4nwICB2NoZWNrZWQBeQcA2J+EtPz4nwICAwlwYXJhZ3JhcGgHANifhLT8+J8CBAYEANifhLT8+J8CBQpTZWUgW2RvY3Ndh9ifhLT8+J8CAgMIdGFza0l0ZW0oANifhLT8+J8CEAdjaGVja2VkAXkHANifhLT8+J8CEAMJcGFyYWdyYXBoBwDYn4S0/PifAhIGBADYn4S0/PifAhMETmV4dIfYn4S0/PifAgEDCXBhcmFncmFwaAcA2J+EtPz4nwIYBgQA2J+EtPz4nwIZCk1vcmUgdGV4dC6H2J+EtPz4nwIYAwlwYXJhZ3JhcGgHANifhLT8+J8CJAYEANifhLT8+J8CJRtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
+      "nativeRereadCanonical": "- [ ] See [docs]\n- [ ] Next\n\nMore text.\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+    },
+    {
+      "name": "r23-reference-nested-2",
+      "source": "- a\n  - [ ] See [docs]\n\n[docs]: https://example.com",
+      "canonical": "- a\n  - [ ] See [docs]\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "- a\n  - [ ] See [docs](https://example.com)\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "AQ+lisjjprXzAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwClisjjprXzAwEDCGxpc3RJdGVtBwClisjjprXzAwIDCXBhcmFncmFwaAcApYrI46a18wMDBgQApYrI46a18wMEAWGHpYrI46a18wMDAwh0YXNrTGlzdAcApYrI46a18wMGAwh0YXNrSXRlbSgApYrI46a18wMHB2NoZWNrZWQBeQcApYrI46a18wMHAwlwYXJhZ3JhcGgHAKWKyOOmtfMDCQYEAKWKyOOmtfMDCgpTZWUgW2RvY3Ndh6WKyOOmtfMDAQMJcGFyYWdyYXBoBwClisjjprXzAxUGBAClisjjprXzAxYbW2RvY3NdOiBodHRwczovL2V4YW1wbGUuY29tAA==",
+      "nativeRereadCanonical": "- a\n  - [ ] See [docs]\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+    },
+    {
+      "name": "r23-reference-quote-2",
+      "source": "> - [ ] See [docs]\n> - [ ] Next\n\n[docs]: https://example.com",
+      "canonical": "> - [ ] See [docs]\n> - [ ] Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "sourceCanonical": "> - [ ] See [docs](https://example.com)\n> - [ ] Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com",
+      "rustBase64": "ARCX++G/wJuCCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwCX++G/wJuCCgEDCHRhc2tMaXN0BwCX++G/wJuCCgIDCHRhc2tJdGVtKACX++G/wJuCCgMHY2hlY2tlZAF5BwCX++G/wJuCCgMDCXBhcmFncmFwaAcAl/vhv8CbggoFBgQAl/vhv8CbggoGClNlZSBbZG9jc12Hl/vhv8CbggoDAwh0YXNrSXRlbSgAl/vhv8CbggoRB2NoZWNrZWQBeQcAl/vhv8CbggoRAwlwYXJhZ3JhcGgHAJf74b/Am4IKEwYEAJf74b/Am4IKFAROZXh0h5f74b/Am4IKAQMJcGFyYWdyYXBoBwCX++G/wJuCChkGBACX++G/wJuCChobW2RvY3NdOiBodHRwczovL2V4YW1wbGUuY29tAA==",
+      "nativeRereadCanonical": "> - [ ] See [docs]\n> - [ ] Next\n\n&amp;#91;docs&amp;#93;&amp;#58; https&amp;#58;//example&amp;#46;com"
+    },
+    {
+      "name": "r23-outer-0",
+      "source": "- a\n  - b\n\n  c\td",
+      "canonical": "- a\n  - b\n\n  c\td",
+      "exactSource": true,
+      "rustBase64": "AQ6o/t23hoWBCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCo/t23hoWBCgEDCGxpc3RJdGVtBwCo/t23hoWBCgIDCXBhcmFncmFwaAcAqP7dt4aFgQoDBgQAqP7dt4aFgQoEAWGHqP7dt4aFgQoDAwpidWxsZXRMaXN0BwCo/t23hoWBCgYDCGxpc3RJdGVtBwCo/t23hoWBCgcDCXBhcmFncmFwaAcAqP7dt4aFgQoIBgQAqP7dt4aFgQoJAWKHqP7dt4aFgQoGAwlwYXJhZ3JhcGgHAKj+3beGhYEKCwYEAKj+3beGhYEKDANjCWQA",
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-outer-1",
+      "source": "- a\n  - b\n  ```\n  x\ty\n  ```",
+      "canonical": "- a\n  - b\n  ```\n  x\ty\n  ```",
+      "exactSource": true,
+      "rustBase64": "AQ65j8HHvf2XCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC5j8HHvf2XCQEDCGxpc3RJdGVtBwC5j8HHvf2XCQIDCXBhcmFncmFwaAcAuY/Bx739lwkDBgQAuY/Bx739lwkEAWGHuY/Bx739lwkDAwpidWxsZXRMaXN0BwC5j8HHvf2XCQYDCGxpc3RJdGVtBwC5j8HHvf2XCQcDCXBhcmFncmFwaAcAuY/Bx739lwkIBgQAuY/Bx739lwkJAWKHuY/Bx739lwkGAwljb2RlQmxvY2sHALmPwce9/ZcJCwYEALmPwce9/ZcJDAN4CXkA",
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-outer-2",
+      "source": "- a\n  - b\n\n  c\n - d",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-outer-3",
+      "source": "- a\n # h\n - b",
+      "canonical": "- a\n\n# h\n\n- b",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQ+LuN/8peahBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCLuN/8peahBwEDCGxpc3RJdGVtBwCLuN/8peahBwIDCXBhcmFncmFwaAcAi7jf/KXmoQcDBgQAi7jf/KXmoQcEAWGHi7jf/KXmoQcBAwdoZWFkaW5nKACLuN/8peahBwYFbGV2ZWwBfQEHAIu43/yl5qEHBgYEAIu43/yl5qEHCAFoh4u43/yl5qEHBgMKYnVsbGV0TGlzdAcAi7jf/KXmoQcKAwhsaXN0SXRlbQcAi7jf/KXmoQcLAwlwYXJhZ3JhcGgHAIu43/yl5qEHDAYEAIu43/yl5qEHDQFiAA=="
+    },
+    {
+      "name": "r23-bare-0",
+      "source": "- -\n\n x",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-bare-1",
+      "source": "1. -\n\n  x",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-bare-2",
+      "source": "- -\n\n   x",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-bare-3",
+      "source": "- a\n  - -\n\n x",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-continuation-column",
+      "source": "- a\n    - b\n \t- c",
+      "refuse": true,
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-slow-spaces-heading-0",
+      "source": "- A\n- B  \n\n# H",
+      "canonical": "- A\n- B\n\n# H",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQ6Pn4W1mJPRDgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCPn4W1mJPRDgEDCGxpc3RJdGVtBwCPn4W1mJPRDgIDCXBhcmFncmFwaAcAj5+FtZiT0Q4DBgQAj5+FtZiT0Q4EAUGHj5+FtZiT0Q4CAwhsaXN0SXRlbQcAj5+FtZiT0Q4GAwlwYXJhZ3JhcGgHAI+fhbWYk9EOBwYEAI+fhbWYk9EOCAFCh4+fhbWYk9EOAQMHaGVhZGluZygAj5+FtZiT0Q4KBWxldmVsAX0BBwCPn4W1mJPRDgoGBACPn4W1mJPRDgwBSAA="
+    },
+    {
+      "name": "r23-slow-spaces-inline-0",
+      "source": "- *A*\n- B  \n\nAfter",
+      "canonical": "- *A*\n- B\n\nAfter",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQ3iu9CYpsWLDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDiu9CYpsWLDAEDCGxpc3RJdGVtBwDiu9CYpsWLDAIDCXBhcmFncmFwaAcA4rvQmKbFiwwDBgQA4rvQmKbFiwwEAypBKofiu9CYpsWLDAIDCGxpc3RJdGVtBwDiu9CYpsWLDAgDCXBhcmFncmFwaAcA4rvQmKbFiwwJBgQA4rvQmKbFiwwKAUKH4rvQmKbFiwwBAwlwYXJhZ3JhcGgHAOK70JimxYsMDAYEAOK70JimxYsMDQVBZnRlcgA="
+    },
+    {
+      "name": "r23-slow-spaces-nested-0",
+      "source": "- a\n  - B  \n\nAfter",
+      "canonical": "- a\n  - B\n\nAfter",
+      "exactSource": true,
+      "rustBase64": "AQ6X3aDgzZi2AgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCX3aDgzZi2AgEDCGxpc3RJdGVtBwCX3aDgzZi2AgIDCXBhcmFncmFwaAcAl92g4M2YtgIDBgQAl92g4M2YtgIEAWGHl92g4M2YtgIDAwpidWxsZXRMaXN0BwCX3aDgzZi2AgYDCGxpc3RJdGVtBwCX3aDgzZi2AgcDCXBhcmFncmFwaAcAl92g4M2YtgIIBgQAl92g4M2YtgIJAUKHl92g4M2YtgIBAwlwYXJhZ3JhcGgHAJfdoODNmLYCCwYEAJfdoODNmLYCDAVBZnRlcgA=",
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-slow-spaces-heading-1",
+      "source": "1. A\n1. B  \n\n# H",
+      "canonical": "1. A\n2. B\n\n# H",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQ/mvP6Pnuz3BgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA5rz+j57s9wYBBXN0YXJ0AX0BBwDmvP6Pnuz3BgEDCGxpc3RJdGVtBwDmvP6Pnuz3BgMDCXBhcmFncmFwaAcA5rz+j57s9wYEBgQA5rz+j57s9wYFAUGH5rz+j57s9wYDAwhsaXN0SXRlbQcA5rz+j57s9wYHAwlwYXJhZ3JhcGgHAOa8/o+e7PcGCAYEAOa8/o+e7PcGCQFCh+a8/o+e7PcGAQMHaGVhZGluZygA5rz+j57s9wYLBWxldmVsAX0BBwDmvP6Pnuz3BgsGBADmvP6Pnuz3Bg0BSAA="
+    },
+    {
+      "name": "r23-slow-spaces-inline-1",
+      "source": "1. *A*\n1. B  \n\nAfter",
+      "canonical": "1. *A*\n2. B\n\nAfter",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQ6oho+3nO/ZCAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAqIaPt5zv2QgBBXN0YXJ0AX0BBwCoho+3nO/ZCAEDCGxpc3RJdGVtBwCoho+3nO/ZCAMDCXBhcmFncmFwaAcAqIaPt5zv2QgEBgQAqIaPt5zv2QgFAypBKoeoho+3nO/ZCAMDCGxpc3RJdGVtBwCoho+3nO/ZCAkDCXBhcmFncmFwaAcAqIaPt5zv2QgKBgQAqIaPt5zv2QgLAUKHqIaPt5zv2QgBAwlwYXJhZ3JhcGgHAKiGj7ec79kIDQYEAKiGj7ec79kIDgVBZnRlcgA="
+    },
+    {
+      "name": "r23-slow-spaces-nested-1",
+      "source": "- a\n  1. B  \n\nAfter",
+      "canonical": "- a\n  1. B\n\nAfter",
+      "exactSource": true,
+      "rustBase64": "AQ/B4IP4uPihDQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDB4IP4uPihDQEDCGxpc3RJdGVtBwDB4IP4uPihDQIDCXBhcmFncmFwaAcAweCD+Lj4oQ0DBgQAweCD+Lj4oQ0EAWGHweCD+Lj4oQ0DAwtvcmRlcmVkTGlzdCgAweCD+Lj4oQ0GBXN0YXJ0AX0BBwDB4IP4uPihDQYDCGxpc3RJdGVtBwDB4IP4uPihDQgDCXBhcmFncmFwaAcAweCD+Lj4oQ0JBgQAweCD+Lj4oQ0KAUKHweCD+Lj4oQ0BAwlwYXJhZ3JhcGgHAMHgg/i4+KENDAYEAMHgg/i4+KENDQVBZnRlcgA=",
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-slow-spaces-heading-2",
+      "source": "- [ ] A\n- [ ] B  \n\n# H",
+      "canonical": "- [ ] A\n- [ ] B\n\n# H",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "ARCruuHgs4nMAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAq7rh4LOJzAIBAwh0YXNrSXRlbSgAq7rh4LOJzAICB2NoZWNrZWQBeQcAq7rh4LOJzAICAwlwYXJhZ3JhcGgHAKu64eCzicwCBAYEAKu64eCzicwCBQFBh6u64eCzicwCAgMIdGFza0l0ZW0oAKu64eCzicwCBwdjaGVja2VkAXkHAKu64eCzicwCBwMJcGFyYWdyYXBoBwCruuHgs4nMAgkGBACruuHgs4nMAgoBQoeruuHgs4nMAgEDB2hlYWRpbmcoAKu64eCzicwCDAVsZXZlbAF9AQcAq7rh4LOJzAIMBgQAq7rh4LOJzAIOAUgA"
+    },
+    {
+      "name": "r23-slow-spaces-inline-2",
+      "source": "- [ ] *A*\n- [ ] B  \n\nAfter",
+      "canonical": "- [ ] *A*\n- [ ] B\n\nAfter",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQ+Vr7qw+KaeDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAla+6sPimng8BAwh0YXNrSXRlbSgAla+6sPimng8CB2NoZWNrZWQBeQcAla+6sPimng8CAwlwYXJhZ3JhcGgHAJWvurD4pp4PBAYEAJWvurD4pp4PBQMqQSqHla+6sPimng8CAwh0YXNrSXRlbSgAla+6sPimng8JB2NoZWNrZWQBeQcAla+6sPimng8JAwlwYXJhZ3JhcGgHAJWvurD4pp4PCwYEAJWvurD4pp4PDAFCh5WvurD4pp4PAQMJcGFyYWdyYXBoBwCVr7qw+KaeDw4GBACVr7qw+KaeDw8FQWZ0ZXIA"
+    },
+    {
+      "name": "r23-slow-spaces-nested-2",
+      "source": "- a\n  - [ ] B  \n\nAfter",
+      "canonical": "- a\n  - [ ] B\n\nAfter",
+      "exactSource": true,
+      "rustBase64": "AQ+N3JeboN/pBQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCN3JeboN/pBQEDCGxpc3RJdGVtBwCN3JeboN/pBQIDCXBhcmFncmFwaAcAjdyXm6Df6QUDBgQAjdyXm6Df6QUEAWGHjdyXm6Df6QUDAwh0YXNrTGlzdAcAjdyXm6Df6QUGAwh0YXNrSXRlbSgAjdyXm6Df6QUHB2NoZWNrZWQBeQcAjdyXm6Df6QUHAwlwYXJhZ3JhcGgHAI3cl5ug3+kFCQYEAI3cl5ug3+kFCgFCh43cl5ug3+kFAQMJcGFyYWdyYXBoBwCN3JeboN/pBQwGBACN3JeboN/pBQ0FQWZ0ZXIA",
+      "foldRefuse": true
+    },
+    {
+      "name": "r23-content-0",
+      "source": "- a *b\t* c",
+      "canonical": "- a *b\t* c",
+      "fileFold": true,
+      "exactSource": true,
+      "rustBase64": "AQailJLPl9S2CQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCilJLPl9S2CQEDCGxpc3RJdGVtBwCilJLPl9S2CQIDCXBhcmFncmFwaAcAopSSz5fUtgkDBgQAopSSz5fUtgkECGEgKmIJKiBjAA=="
+    },
+    {
+      "name": "r23-content-1",
+      "source": "- a\t_b_ c",
+      "canonical": "- a\t*b* c",
+      "nativeSeedSource": "- a\t*b* c",
+      "rustBase64": "AQa6gKz1mcrQBAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwC6gKz1mcrQBAEDCGxpc3RJdGVtBwC6gKz1mcrQBAIDCXBhcmFncmFwaAcAuoCs9ZnK0AQDBgQAuoCs9ZnK0AQEB2EJKmIqIGMA"
+    },
+    {
+      "name": "r23-content-2",
+      "source": "- a\n  2024.\tyear",
+      "canonical": "- a\n  2024&#46;    year",
+      "rustBase64": "AQaMtpbQgbLRAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCMtpbQgbLRAwEDCGxpc3RJdGVtBwCMtpbQgbLRAwIDCXBhcmFncmFwaAcAjLaW0IGy0QMDBgQAjLaW0IGy0QMED2EKMjAyNC4gICAgeWVhcgA="
     }
   ],
   "rules": "Blank lines contain only spaces or tabs. Same-kind siblings across blanks form one loose list. An indented line after a blank starts another item paragraph; a nonblank unindented line can lazily continue the current paragraph. Children must reach their parent's marker content column. Task checkboxes are content after a two-column bullet marker. Refusals for ambiguous lines apply inside list bodies; root prose, rules and code remain accepted. Each projector output must be accepted unchanged by its projected reader. Ordered output is capped at nine digits. Letter and Roman prefixes are prose. Thematic breaks take precedence over list markers."

@@ -1172,6 +1172,8 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
       ["1. item\n  lazy\n\nAfter", 2, 4],
       ["10. item\n   lazy\n\nAfter", 2, 4],
       ["- item\n lazy\n\nAfter", 2, 4],
+      ["- a\n      b\n lazy\n\nAfter", 3, 5],
+      ["- a\n  - b\n      c\n lazy\n\nAfter", 4, 6],
     ].map(([body, lazy, after]) => ({
       name: `an underindented lazy line stays in its item: ${body}`,
       body: body as string,
