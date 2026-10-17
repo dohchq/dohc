@@ -110,6 +110,7 @@ import {
   WORKBENCH_MENU_COMMANDS,
 } from "./channels";
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
+import type { settingsOperations } from "./settingsOperations";
 import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
@@ -6915,6 +6916,7 @@ export const serverAccountOperations = {
 
 export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceFileOperations>,
+    OperationBridge<typeof settingsOperations>,
     OperationBridge<typeof chatOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof systemMotionOperations>,
@@ -7275,27 +7277,6 @@ export interface DohcDesktopBridge
   ): Promise<ChatDispatchStateForThreadResult>;
   runnerSelfTest(payload: RunnerSelfTestPayload): Promise<RunnerSelfTestResult>;
   detectAgentTools(payload: AgentRunPayload): Promise<AgentToolsResult>;
-  getUserSettings(): Promise<DesktopUserSettingsResult>;
-  setUserSettings(payload: SetUserSettingsPayload): Promise<DesktopUserSettingsResult>;
-  resetUserSettings(): Promise<DesktopUserSettingsResult>;
-  // Reads the settings file again, applies it, and answers what is in effect.
-  reloadUserSettings(): Promise<DesktopUserSettingsResult>;
-  setAppPinned(payload: SetAppPinnedPayload): Promise<DesktopUserSettingsResult>;
-  getUserSettingsFilePath(): Promise<string>;
-  // Opens the settings file in the system's editor, creating it first when
-  // there is none.
-  openUserSettingsFile(): Promise<void>;
-  // Opens this workspace's .dohc/settings.local.json in the system's editor.
-  openWorkspaceSettingsFile(payload: WorkspaceSettingsPayload): Promise<void>;
-  getWorkspaceSettings(
-    payload: WorkspaceSettingsPayload,
-  ): Promise<WorkspaceSettingsResult>;
-  setWorkspaceSettings(
-    payload: SetWorkspaceSettingsPayload,
-  ): Promise<WorkspaceSettingsResult>;
-  resetWorkspaceSettings(
-    payload: WorkspaceSettingsPayload,
-  ): Promise<WorkspaceSettingsResult>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   onUserSettingsChanged(
     listener: (result: DesktopUserSettingsResult) => void,
@@ -7303,11 +7284,6 @@ export interface DohcDesktopBridge
   stepWindowZoom(
     payload: StepWindowZoomPayload,
   ): Promise<DesktopUserSettingsResult>;
-  // Per-workspace workbench UI state (.dohc/ui-state.json), main-owned.
-  getWorkspaceUiState(
-    payload: WorkspaceIdPayload,
-  ): Promise<GetWorkspaceUiStateResult>;
-  setWorkspaceUiState(payload: SetWorkspaceUiStatePayload): Promise<void>;
   // Cached History names changed. Subscribers re-read with workspace/request guards.
   onHistoryNamesChanged(listener: (event: WorkspaceIdPayload) => void): () => void;
   // Live push: main signals the renderer when the active workspace's files
