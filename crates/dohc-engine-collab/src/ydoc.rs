@@ -271,9 +271,11 @@ pub fn fresh_successor_base(
             observed: observed_result,
         });
     }
-    if identity.content_kind == ContentKind::Richdoc && !outside_markdown_is_allowlisted(artifact) {
-        return Err(CollabError::MarkdownNotRepresentable);
-    }
+    let item_blocks = if identity.content_kind == ContentKind::Richdoc {
+        outside_markdown_allowlist(artifact).ok_or(CollabError::MarkdownNotRepresentable)?
+    } else {
+        false
+    };
     let doc = Ydoc::with_client_id(identity.client_id);
     let meta = doc.doc.get_or_insert_map(ROOT_META);
     {
@@ -311,9 +313,13 @@ pub fn fresh_successor_base(
             // Write with the deterministic client, not a staged edit's random
             // client. Installation makes this artifact the settled body.
             doc.record_validated_markdown_source_reference(artifact)?;
-            doc.settled_markdown_source(&projection, || {
-                Ok::<_, CollabError>(Some(artifact.to_owned()))
-            })?
+            if item_blocks {
+                doc.preserved_markdown_source(&projection)
+            } else {
+                doc.settled_markdown_source(&projection, || {
+                    Ok::<_, CollabError>(Some(artifact.to_owned()))
+                })?
+            }
             .unwrap_or(projection)
         } else {
             projection
@@ -1278,25 +1284,57 @@ impl Ydoc {
             return Err(CollabError::MarkdownNotRepresentable);
         }
         let (frontmatter, _, _) = split_markdown_frontmatter(markdown);
-        self.stage_source_preserving_edit(markdown, |staged| {
+        self.stage_source_preserving_edit_bounded(markdown, None, false, |staged| {
             let map = staged.doc.get_or_insert_map(ROOT_FRONTMATTER);
             let meta = staged.doc.get_or_insert_map(ROOT_META);
-            let _ = staged.with_delta(|txn| {
-                let keys: Vec<String> = map.keys(txn).map(str::to_owned).collect();
-                for key in keys {
-                    map.remove(txn, &key);
+            let mut transaction = staged.doc.transact_mut();
+            let txn = &mut transaction;
+            match meta.get(txn, "schemaVersion") {
+                None => {
+                    meta.insert(txn, "schemaVersion", Any::Number(1.0));
                 }
-                for (key, value) in &frontmatter {
-                    map.insert(txn, key.as_str(), json_to_any(value));
+                Some(Out::Any(Any::Number(1.0))) => {}
+                _ => {
+                    return Err(CollabError::MalformedUpdate {
+                        reason: "unsupported rich-document schema version".into(),
+                    })
                 }
-                if markdown.contains("\r\n") {
-                    meta.insert(txn, MARKDOWN_CRLF_META_KEY, true);
-                } else {
-                    meta.remove(txn, MARKDOWN_CRLF_META_KEY);
-                }
-            });
+            }
+            let keys: Vec<String> = map.keys(txn).map(str::to_owned).collect();
+            for key in keys {
+                map.remove(txn, &key);
+            }
+            for (key, value) in &frontmatter {
+                map.insert(txn, key.as_str(), json_to_any(value));
+            }
+            if markdown.contains("\r\n") {
+                meta.insert(txn, MARKDOWN_CRLF_META_KEY, true);
+            } else {
+                meta.remove(txn, MARKDOWN_CRLF_META_KEY);
+            }
             Ok(())
         })
+    }
+
+    /// Seed a never-opened Collection relation referrer through the outside
+    /// grammar and exact-source proof before it can enter a lineage.
+    pub fn seed_collection_relation_markdown(&self, markdown: &str) -> Result<(), CollabError> {
+        if !outside_markdown_is_allowlisted(markdown) {
+            return Err(CollabError::MarkdownNotRepresentable);
+        }
+        self.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)?;
+        let canonical = self.project_richdoc()?;
+        if canonical != markdown {
+            if markdown.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES {
+                return Err(CollabError::MarkdownNotRepresentable);
+            }
+            self.preserve_folded_markdown_source(markdown)
+                .map_err(|_| CollabError::MarkdownNotRepresentable)?;
+            if self.preserved_markdown_source(&canonical).as_deref() != Some(markdown) {
+                return Err(CollabError::MarkdownNotRepresentable);
+            }
+        }
+        Ok(())
     }
 
     fn rewrite_content_to_markdown_checked<const WIRE_SEED: bool>(
@@ -1562,7 +1600,7 @@ impl Ydoc {
         point: &Ydoc,
         max_bytes: usize,
     ) -> Result<Vec<u8>, CollabError> {
-        self.stage_source_preserving_edit_bounded(markdown, Some(max_bytes), |staged| {
+        self.stage_source_preserving_edit_bounded(markdown, Some(max_bytes), true, |staged| {
             restore_copy::copy(point, staged, max_bytes)
         })
     }
@@ -1690,13 +1728,14 @@ impl Ydoc {
         markdown: &str,
         edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
     ) -> Result<Vec<u8>, CollabError> {
-        self.stage_source_preserving_edit_bounded(markdown, None, edit)
+        self.stage_source_preserving_edit_bounded(markdown, None, true, edit)
     }
 
     fn stage_source_preserving_edit_bounded(
         &self,
         markdown: &str,
         budget: Option<usize>,
+        retain_matching_source: bool,
         edit: impl FnOnce(&Ydoc) -> Result<(), CollabError>,
     ) -> Result<Vec<u8>, CollabError> {
         if markdown.len() > dohc_engine_domain::MAX_TEXT_BYTES {
@@ -1734,7 +1773,20 @@ impl Ydoc {
         drop(full);
         edit(&staged)?;
         staged.keep_frontmatter_source_of(markdown)?;
-        staged.record_validated_markdown_source_reference(markdown)?;
+        let projection = staged.project_richdoc()?;
+        if !retain_matching_source && projection == markdown {
+            let meta = staged.doc.get_or_insert_map(ROOT_META);
+            let mut txn = staged.doc.transact_mut();
+            for key in [
+                MARKDOWN_SOURCE_META_KEY,
+                MARKDOWN_SOURCE_SHA_META_KEY,
+                MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+            ] {
+                meta.remove(&mut txn, key);
+            }
+        } else {
+            staged.record_markdown_source_reference(markdown, &projection);
+        }
         let update = if bounded {
             let mut encoder = bounded_encoder::BoundedEncoder::new(
                 max_bytes.min(crate::limits::MAX_YDOC_UPDATE_BYTES),
@@ -1797,7 +1849,12 @@ impl Ydoc {
         &self,
         markdown: &str,
     ) -> Result<(), CollabError> {
-        let projection_sha256 = crate::hex_sha256(self.project_richdoc()?.as_bytes());
+        self.record_markdown_source_reference(markdown, &self.project_richdoc()?);
+        Ok(())
+    }
+
+    fn record_markdown_source_reference(&self, markdown: &str, projection: &str) {
+        let projection_sha256 = crate::hex_sha256(projection.as_bytes());
         let source_sha256 = crate::hex_sha256(markdown.as_bytes());
         let meta = self.doc.get_or_insert_map(ROOT_META);
         let mut txn = self.doc.transact_mut();
@@ -1812,7 +1869,6 @@ impl Ydoc {
             MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
             projection_sha256.as_str(),
         );
-        Ok(())
     }
 }
 
@@ -2820,19 +2876,49 @@ enum FileFold {
 /// Whether outside Markdown's additional item blocks belong to the proved
 /// subset. This does not enable strict-fold admission or authorize a witness.
 pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
+    outside_markdown_allowlist(markdown).is_some()
+}
+
+// Some(true) denotes an agreed item-block body; flat successors keep their
+// existing permissive proof, except for the desktop's quote depth limit.
+fn outside_markdown_allowlist(markdown: &str) -> Option<bool> {
+    fn inline(text: &str) -> bool {
+        // Ordered checkboxes remain ordinary text. Other brackets can start
+        // links or references the native reader keeps as escaped text.
+        let text = ["[ ] ", "[x] ", "[X] "]
+            .into_iter()
+            .find_map(|prefix| text.strip_prefix(prefix))
+            .unwrap_or(text);
+        !text.contains('[')
+            && !text.split('&').skip(1).any(|part| {
+                part.split_once(';')
+                    .is_some_and(|(name, _)| decoded_reference(name).is_some())
+            })
+    }
     fn tree(blocks: &[MdBlock<'_>], in_item: bool) -> bool {
         blocks.iter().all(|block| match block {
-            MdBlock::Paragraph(_) | MdBlock::CodeBlock { .. } => true,
-            MdBlock::BulletList(items) => items
-                .iter()
-                .all(|(text, blocks)| !text.trim().is_empty() && tree(blocks, true)),
-            MdBlock::OrderedList { items, .. } => items
-                .iter()
-                .all(|item| !item.paragraph.trim().is_empty() && tree(item.blocks(), true)),
-            MdBlock::TaskList(items) => items
-                .iter()
-                .all(|(_, item)| !item.paragraph.trim().is_empty() && tree(item.blocks(), true)),
-            MdBlock::Quote(children) => !in_item && !refused_fold_item_bodies(children),
+            MdBlock::Paragraph(text) => inline(text),
+            MdBlock::Heading { text, .. } => !in_item && inline(text),
+            MdBlock::CodeBlock { .. } => true,
+            MdBlock::BulletList(items) => items.iter().all(|(text, blocks)| {
+                !text.trim().is_empty() && inline(text) && tree(blocks, true)
+            }),
+            MdBlock::OrderedList { items, .. } => items.iter().all(|item| {
+                !item.paragraph.trim().is_empty()
+                    && inline(&item.paragraph)
+                    && tree(item.blocks(), true)
+            }),
+            MdBlock::TaskList(items) => items.iter().all(|(_, item)| {
+                !item.paragraph.trim().is_empty()
+                    && inline(&item.paragraph)
+                    && tree(item.blocks(), true)
+            }),
+            MdBlock::Quote(children) => {
+                !in_item && !refused_fold_item_bodies(children) && tree(children, false)
+            }
+            MdBlock::Table { rows, .. } => {
+                !in_item && rows.iter().flatten().all(|cell| inline(cell))
+            }
             _ => !in_item,
         })
     }
@@ -2855,16 +2941,19 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
         let named_block = TABLE_ENDING_HTML
             .split_ascii_whitespace()
             .any(|block| name.eq_ignore_ascii_case(block));
-        if named_block && (tail.starts_with([' ', '>']) || tail.starts_with("/>")) {
+        if named_block
+            && (tail.is_empty() || tail.starts_with([' ', '>']) || tail.starts_with("/>"))
+        {
             return true;
         }
         for raw in ["script", "pre", "style", "textarea"] {
             if !line.starts_with("</")
                 && name.eq_ignore_ascii_case(raw)
-                && tail
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c == '>' || is_js_whitespace(c))
+                && (tail.is_empty()
+                    || tail
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c == '>' || is_js_whitespace(c)))
             {
                 return true;
             }
@@ -2899,8 +2988,8 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
                 })
     }
 
-    // The source parser retains some constructs as text. Line shapes close
-    // those gaps without adding restrictions on ordinary inline spelling.
+    // The source parser retains some blocks as text. Line shapes close
+    // those block-start gaps after the tree and inline checks.
     fn list_lines(lines: &[&str]) -> bool {
         let mut stack: Vec<(usize, usize)> = Vec::new();
         let mut fence: Option<usize> = None;
@@ -2919,7 +3008,12 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
                     return false;
                 }
                 let text = &line[column..];
-                if text.trim_end_matches(' ') == "```" {
+                if markdown_fence(text, false)
+                    .is_some_and(|(delimiter, _, rest)| delimiter == b'`' && rest.trim().is_empty())
+                {
+                    if text != "```" {
+                        return false;
+                    }
                     fence = None;
                 }
                 continue;
@@ -2948,6 +3042,7 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
                     || marker.text.trim_start_matches(' ').starts_with('\t')
                     || marker.text.trim().is_empty()
                     || html_block(marker.text)
+                    || marker.text.trim_start_matches(' ').starts_with("$$")
                 {
                     return false;
                 }
@@ -2973,7 +3068,7 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
             } else if html_block(text.trim_start_matches(' '))
                 || matches!(
                     block_start(text, true, true),
-                    Some("code" | "fence" | "heading" | "quote" | "rule" | "setext")
+                    Some("code" | "fence" | "heading" | "quote" | "rule" | "math")
                 )
             {
                 return false;
@@ -2987,20 +3082,28 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
     let normalized = normalize_list_tabs(&body, MarkdownReading::Source);
     let (blocks, refused) = parse_markdown_blocks_checked(&normalized, MarkdownReading::Source);
     if !refused_fold_item_bodies(&blocks) {
-        return !refused;
+        return (!quote_fold_overflows(&blocks, 0)).then_some(false);
     }
     if refused || markdown.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES || !tree(&blocks, false)
     {
-        return false;
+        return None;
+    }
+    for reading in [MarkdownReading::Projection, MarkdownReading::Successor] {
+        let normalized = normalize_list_tabs(&body, reading);
+        let (other, refused) = parse_markdown_blocks_checked(&normalized, reading);
+        if refused || other != blocks {
+            return None;
+        }
     }
     let lines: Vec<_> = body.lines().collect();
     let mut at = 0;
     while at < lines.len() {
         // A top-level fence may contain marker-looking text.
         if let Some((_, _, info)) = markdown_fence(lines[at], true) {
-            let close = lines[at + 1..]
-                .iter()
-                .position(|line| *line == "```" && !info.contains('`'));
+            if info.contains('`') {
+                return None;
+            }
+            let close = lines[at + 1..].iter().position(|line| *line == "```");
             if let Some(close) = close {
                 at += close + 2;
                 continue;
@@ -3016,7 +3119,7 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
                     .strip_prefix(['.', ')'])
                     .is_some_and(|rest| rest.starts_with('\t')))
         {
-            return false;
+            return None;
         }
         if let Some(marker) = list_marker(lines[at], MarkdownReading::Source) {
             let mut refused = false;
@@ -3030,16 +3133,16 @@ pub fn outside_markdown_is_allowlisted(markdown: &str) -> bool {
                 &mut refused,
             ) {
                 if refused || !list_lines(&lines[at..end]) {
-                    return false;
+                    return None;
                 }
                 at = end;
                 continue;
             }
-            return false;
+            return None;
         }
         at += 1;
     }
-    true
+    Some(true)
 }
 
 fn refused_fold_item_bodies(blocks: &[MdBlock<'_>]) -> bool {

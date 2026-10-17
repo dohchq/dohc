@@ -1967,27 +1967,12 @@ fn cleanup_collection_relation_on_store(
             .ok_or(DomainError::StateCorrupt {
                 reason: "collection relation cleanup has no Markdown artifact seed",
             })?;
-        if !dohc_engine_collab::ydoc::outside_markdown_is_allowlisted(seed) {
-            return Ok(CollectionRelationCleanupExecution::Skipped);
-        }
-        match doc.rewrite_content_to_markdown(ContentKind::Richdoc, seed) {
+        match doc.seed_collection_relation_markdown(seed) {
             Err(CollabError::MarkdownNotRepresentable) => {
                 return Ok(CollectionRelationCleanupExecution::Skipped);
             }
             result => {
                 result?;
-            }
-        }
-        let canonical = doc.project(ContentKind::Richdoc)?.content;
-        if canonical != seed {
-            if seed.len() > dohc_engine_collab::limits::MAX_PUBLIC_MARKDOWN_BYTES {
-                return Ok(CollectionRelationCleanupExecution::Skipped);
-            }
-            if doc.preserve_folded_markdown_source(seed).is_err() {
-                return Ok(CollectionRelationCleanupExecution::Skipped);
-            }
-            if doc.preserved_markdown_source(&canonical).as_deref() != Some(seed) {
-                return Ok(CollectionRelationCleanupExecution::Skipped);
             }
         }
         let seed_update = doc.encode_full_state();

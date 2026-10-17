@@ -7647,15 +7647,23 @@ mod tests {
                 }
             ));
         }
-        for (source, expected) in [
-            ("- Run:\n\n      npm i foo", "- Run:\n\n  &#32;   npm i foo"),
-            ("Install:\n\n    npm i foo", "Install:\n\n&#32;   npm i foo"),
-            ("- \n\n  - b\n - c", "- \n\n- b\n- c"),
-            ("1.\n\n   - b\n  - c", "1. \n\n- b\n- c"),
+        for (source, expected, held) in [
+            (
+                "- Run:\n\n      npm i foo",
+                "- Run:\n\n  &#32;   npm i foo",
+                true,
+            ),
+            (
+                "Install:\n\n    npm i foo",
+                "Install:\n\n&#32;   npm i foo",
+                false,
+            ),
+            ("- \n\n  - b\n - c", "- \n\n- b\n- c", false),
+            ("1.\n\n   - b\n  - c", "1. \n\n- b\n- c", false),
         ] {
             let (_scratch, mut store, key) =
                 content_conflict_store("Other settled body", source, None, ContentKind::Richdoc);
-            if !dohc_engine_collab::ydoc::outside_markdown_is_allowlisted(source) {
+            if held {
                 assert!(matches!(
                     try_resolve_content_conflict(
                         &mut store,
