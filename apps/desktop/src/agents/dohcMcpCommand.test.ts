@@ -89,6 +89,9 @@ describe("resolveDohcMcpCommand", () => {
     }
     const installed = "/Applications/dohc.app/Contents/Resources";
     expect(isTemporaryMacAppPath(installed)).toBe(false);
+    // An app installed in a volume's own Applications folder stays put.
+    expect(isTemporaryMacAppPath("/Volumes/External/Applications/dohc.app/Contents/Resources")).toBe(false);
+    expect(isTemporaryMacAppPath("/Users/sam/Applications/dohc.app/Contents/Resources")).toBe(false);
     expect(resolveDohcMcpCommand({ isPackaged: true, resourcesPath: installed, platform: "darwin", env: {} }))
       .toBe(join(installed, "cli-bin", "dohc-mcp"));
   });

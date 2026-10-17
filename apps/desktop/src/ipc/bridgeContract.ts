@@ -6561,6 +6561,14 @@ export const WorkspacePathOpenFailure = z.union([
     count: z.number().int().positive(),
     workspaceId: z.string().min(1).nullable(),
   }),
+  // The move to Applications the person asked for at launch failed. Its
+  // Try again runs the move again.
+  z.object({
+    attemptId: OPAQUE_ID,
+    moveToApplications: z.literal(true),
+    cause: z.string(),
+    workspaceId: z.string().min(1).nullable(),
+  }),
 ]);
 export type WorkspacePathOpenFailure = z.infer<typeof WorkspacePathOpenFailure>;
 // Main holds each failure for its window until the renderer takes it. This

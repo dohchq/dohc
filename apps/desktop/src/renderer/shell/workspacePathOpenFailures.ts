@@ -93,12 +93,30 @@ export function useWorkspacePathOpenFailures(workspaceId: string | null, report:
         identity: `workspace-path-open:${failure.path}`,
       });
     };
+    type MoveFailure = Extract<WorkspacePathOpenFailure, { moveToApplications: true }>;
+    const reportMoveFailure = (failure: MoveFailure, cause: unknown, canRetry: boolean) => {
+      const said = withErrorWords("dohc could not move itself to Applications.", cause);
+      report({
+        message: `${/[.!?]$/u.test(said) ? said : `${said}.`} To move it yourself, drag dohc into Applications in Finder.`,
+        cause,
+        retry: canRetry ? () => {
+          void bridge().retryWorkspacePathOpen({ attemptId: failure.attemptId }).catch((error: unknown) => {
+            if (live.current) reportMoveFailure(failure, error, false);
+          });
+        } : null,
+        identity: "move-to-applications",
+      });
+    };
     for (const failure of failures) {
       // Main names the workspace the window showed when it sent this. A
       // workspace that has gone since takes its failure with it.
       if (failure.workspaceId !== null && failure.workspaceId !== workspaceId) continue;
       if ("path" in failure) {
         reportFailure(failure, failure.cause, true);
+        continue;
+      }
+      if ("moveToApplications" in failure) {
+        reportMoveFailure(failure, failure.cause, true);
         continue;
       }
       // Folders past the ones main keeps apart: one row, every listed

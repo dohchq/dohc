@@ -1243,6 +1243,19 @@ describe("notices sent to you", () => {
     await screen.findByTestId("tab-b.md");
   });
 
+  it("hears a file main sends while it answers this workspace's open, before the reply", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    // Main's open handler sends the file, then replies. A listener that the
+    // shell installed only after the reply would miss it.
+    bridge.openWorkspace.mockImplementation(async () => {
+      bridge.emitWorkspaceActivated(WORKSPACE, "b.md");
+      return SYNC_STATUS;
+    });
+    renderWithNotices(bridge, {});
+    await screen.findByTestId("tab-b.md");
+    expect(bridge.openWorkspace).toHaveBeenCalledTimes(1);
+  });
+
   it("opens no runs for a notice whose Open was cancelled while main looked the automation up", async () => {
     const user = userEvent.setup();
     const bridge = withRuns(makeBridge(Promise.resolve(null)));

@@ -105,7 +105,7 @@ import { createAppLifecycle } from "./appLifecycle";
 import { captureOpenPathFailureTarget } from "./window/openPathFailureTarget";
 import { createOpenPathFailures } from "./window/openPathFailures";
 import { createWorkspaceFileOpens } from "./window/workspaceFileOpens";
-import { confirmOpenPathWorkspace, resolveOpenPathTarget } from "./workspaces/openPathTarget";
+import { confirmOpenPathWorkspace, createOpenPathOpener } from "./workspaces/openPathTarget";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { randomUUID } from "node:crypto";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster } from "./access/accessOwner";
@@ -142,7 +142,8 @@ import {
   type IpcMainEvent,
   type WebContents,
 } from "electron";
-import { watch, existsSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { watch, existsSync, lstatSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { hostname, release as osRelease, type as osType } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -550,11 +551,10 @@ makeProcessDiagnosticsNonFatal();
 
 // Finder and the Dock start a packaged dohc with launchd's PATH, where the
 // dohc CLI's node, npm-installed agents, and Homebrew tools are missing. The
-// login shell's PATH is read once, in parallel with startup. Agent runs and
-// agent detection wait for it, at most for its timeout.
-const loginShellPathRead = process.platform === "darwin" && app.isPackaged
-  ? adoptLoginShellPath(process.env)
-  : Promise.resolve();
+// login shell's PATH is read once, in parallel with startup, once this
+// instance holds the single-instance lock. Agent runs and agent detection
+// wait for it, at most for its timeout.
+let loginShellPathRead: Promise<void> = Promise.resolve();
 
 let usageStore: ReturnType<typeof createUsageStore> | undefined;
 let usageLoad: ReturnType<typeof setImmediate> | undefined;
@@ -5436,34 +5436,53 @@ if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged) {
 // first window, whether to move there. A decline is remembered in this file.
 const MOVE_DECLINED_FILE = "move-to-applications-declined";
 
+// Electron quits dohc and opens the moved copy once the move succeeds.
+async function moveDohcToApplications(): Promise<void> {
+  try {
+    app.moveToApplicationsFolder();
+  } catch (error) {
+    console.error("[desktop] move to Applications:", error);
+    throw error;
+  }
+}
+
 function offerMoveToApplicationsOn(window: BrowserWindow | undefined): void {
   if (process.platform !== "darwin" || !app.isPackaged || !window) return;
   const bundlePath = resolve(process.execPath, "..", "..", "..");
+  const declinedFile = () => join(stateDir(), MOVE_DECLINED_FILE);
   const offer = () => void offerMoveToApplications({
     bundlePath,
+    runningVersion: app.getVersion(),
     isInApplicationsFolder: () => app.isInApplicationsFolder(),
-    declined: () => existsSync(join(stateDir(), MOVE_DECLINED_FILE)),
+    // Any entry there means declined; it is never followed.
+    declined: () => lstatSync(declinedFile(), { throwIfNoEntry: false }) !== undefined,
     recordDecline: () => {
       try {
-        writeFileSync(join(stateDir(), MOVE_DECLINED_FILE), "");
+        writeFileSync(declinedFile(), "", { flag: "wx" });
       } catch (error) {
-        console.warn("[desktop] could not remember the declined move to Applications:", error);
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+          console.warn("[desktop] could not remember the declined move to Applications:", error);
+        }
       }
     },
-    replacesCopy: () => existsSync(join("/Applications", basename(bundlePath))),
+    installedVersion: () => {
+      const installed = join("/Applications", basename(bundlePath));
+      if (!existsSync(installed)) return null;
+      try {
+        return execFileSync("/usr/bin/plutil", [
+          "-extract", "CFBundleShortVersionString", "raw", "-o", "-", join(installed, "Contents", "Info.plist"),
+        ], { encoding: "utf8", timeout: 2_000 }).trim();
+      } catch {
+        return "";
+      }
+    },
     showMessageBox: (options) =>
       window.isDestroyed() ? dialog.showMessageBox(options) : dialog.showMessageBox(window, options),
-    move: () => { app.moveToApplicationsFolder(); },
-    reportMoveFailure: async (error) => {
-      console.error("[desktop] move to Applications:", error);
-      await dialog.showMessageBox({
-        type: "warning",
-        message: "dohc could not move itself to Applications.",
-        detail: [
-          ...(error instanceof Error && error.message ? [error.message] : []),
-          "Drag dohc into Applications in Finder, then open it from there.",
-        ].join(" "),
-      });
+    move: moveDohcToApplications,
+    // A toast and a Notices row in the window, with Try again.
+    reportMoveFailure: (error) => {
+      const target = window.isDestroyed() ? liveWorkspaceWindow() : window;
+      if (target) openPathFailures.reportMove(error, target.webContents);
     },
   }).catch((error: unknown) => console.error("[desktop] move to Applications:", error));
   if (window.isVisible()) offer();
@@ -5680,41 +5699,48 @@ const workspaceFileOpens = createWorkspaceFileOpens<WebContents, WorkspaceSummar
 });
 
 // Opens a file or folder the OS or a launch handed dohc: its workspace, and
-// the file in a tab. A folder that is not yet a workspace becomes one only
-// when the person agrees; null means nothing opened.
-async function openWorkspacePath(
-  path: string,
-  window?: BrowserWindow,
-): Promise<WorkspaceSummary | null> {
-  const target = resolveOpenPathTarget(path, {
-    workspaces: workspaceSummaries(),
-    home: effectiveHome(),
-    platform: process.platform,
-    fs: {
-      kindOf: (candidate) => {
-        const stats = statSync(candidate, { throwIfNoEntry: false });
-        return stats?.isFile() ? "file" : stats?.isDirectory() ? "folder" : null;
-      },
-      hasManifest: (folder) => existsSync(join(folder, ".dohc", "manifest.json")),
+// the file in a tab. A folder that is not yet a registered workspace becomes
+// one only when the person agrees.
+const openPathOpener = createOpenPathOpener<WorkspaceSummary, BrowserWindow>({
+  workspaces: workspaceSummaries,
+  home: effectiveHome,
+  platform: process.platform,
+  fs: {
+    realPath: (path) => {
+      try {
+        return realpathSync.native(path);
+      } catch {
+        return null;
+      }
     },
-  });
-  if (!target) return null;
-  let workspace: WorkspaceSummary;
-  if (target.kind === "workspace") {
-    workspace = target.workspace;
-  } else {
+    kindOf: (path) => {
+      const stats = statSync(path, { throwIfNoEntry: false });
+      return stats?.isFile() ? "file" : stats?.isDirectory() ? "folder" : null;
+    },
+    hasManifest: (folder) => existsSync(join(folder, ".dohc", "manifest.json")),
+  },
+  confirm: (folder, window) => {
     const parent = window ?? liveWorkspaceWindow();
-    if (!target.hasManifest && !(await confirmOpenPathWorkspace({
+    return confirmOpenPathWorkspace({
       showMessageBox: (options) => parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options),
-    }, target))) return null;
-    const created = await createWorkspaceFolder({ rootPath: target.rootPath, kind: "personal" });
-    workspace = WorkspaceSummary.parse(created);
+    }, folder);
+  },
+  register: async (rootPath) => {
+    const created = await createWorkspaceFolder({ rootPath, kind: "personal" });
+    const workspace = WorkspaceSummary.parse(created);
     registerPhysicalWorkspace(created);
-  }
-  const shown = await sendWorkspaceActivated(window, workspace);
-  if (target.file !== null) workspaceFileOpens.request(shown.webContents, workspace, target.file);
-  refreshNativeWorkspaceSurfaces();
-  return workspace;
+    return workspace;
+  },
+  activate: async (workspace, file, window) => {
+    const shown = await sendWorkspaceActivated(window, workspace);
+    if (file !== null) workspaceFileOpens.request(shown.webContents, workspace, file);
+    refreshNativeWorkspaceSurfaces();
+  },
+});
+
+// Null means nothing opened.
+function openWorkspacePath(path: string, window?: BrowserWindow): Promise<WorkspaceSummary | null> {
+  return openPathOpener(path, window);
 }
 
 function recordOpenPathFailure(path: string, error: unknown): void {
@@ -5725,6 +5751,7 @@ function recordOpenPathFailure(path: string, error: unknown): void {
 const openPathFailures = createOpenPathFailures<WebContents>({
   workspaceIdOf: (contents) => rendererWorkspaceSessions.current(contents)?.workspaceId ?? null,
   notify: (contents) => contents.send(CHANNELS.workspacePathOpenFailed),
+  moveAgain: moveDohcToApplications,
   reopen: async (path, contents) => {
     if (await openWorkspacePath(path, BrowserWindow.fromWebContents(contents) ?? undefined)) return;
     // The person chose Cancel, or nothing opens there now. Stat's own error
@@ -7027,3 +7054,7 @@ if (process.platform === "win32") app.setAppUserModelId("app.dohc.desktop");
 if (process.platform === "linux") app.setDesktopName("dohc.desktop");
 
 void appLifecycle.start();
+// start() takes the lock first. A second instance quits without running the profile.
+if (process.platform === "darwin" && app.isPackaged && app.hasSingleInstanceLock()) {
+  loginShellPathRead = adoptLoginShellPath(process.env);
+}
