@@ -113,5 +113,13 @@
   "desktop:list-history": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:preview-server-account-deletion": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:delete-server-account": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
-  "desktop:retry-server-account-disconnect": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null }
+  "desktop:retry-server-account-disconnect": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:get-share-handoff-status": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:accept-share-handoff": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:retry-share-handoff": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:dismiss-share-handoff": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:mount-share": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:refresh-share-mounts": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:unmount-share": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:open-shared-view": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null }
 }

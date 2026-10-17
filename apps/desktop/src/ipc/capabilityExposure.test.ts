@@ -100,6 +100,24 @@ describe("main inventories", () => {
       });
     }
   });
+  it("records the eight small share operations with their existing admission", () => {
+    const deviceChannels = [
+      "get-share-handoff-status", "accept-share-handoff", "retry-share-handoff",
+      "dismiss-share-handoff", "open-shared-view",
+    ].map(name => `desktop:${name}`);
+    const mountChannels = ["mount-share", "refresh-share-mounts", "unmount-share"]
+      .map(name => `desktop:${name}`);
+    const channels = [...deviceChannels, ...mountChannels];
+    const shareRows = rows.filter(row => channels.includes(row.channel));
+    expect(shareRows.map(row => row.channel).sort()).toEqual(channels.sort());
+    for (const row of shareRows) {
+      expect(row, row.channel).toMatchObject(mountChannels.includes(row.channel) ? {
+        guard: "active-workspace", scope: "workspace",
+        inactiveMessage: "Share update stopped because this window changed workspaces.",
+      } : { guard: "trusted-sender", scope: "device" });
+      expect(row).not.toHaveProperty("handlerCheck");
+    }
+  });
   it("preserves socket verbs, public verbs, and all public help", () => {
     expect(socketVerbs).toEqual(mainCli.socketVerbs);
     expect(Object.keys(CLI_COMMANDS)).toEqual(mainCli.publicGroups);

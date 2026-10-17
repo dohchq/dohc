@@ -1,3 +1,4 @@
+import { shareHandoffOperations, shareMountOperations } from "./ipc/shareOperations";
 import { chatOperations } from "./ipc/chatOperations";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
@@ -123,6 +124,8 @@ const bridge: DohcDesktopBridge = {
   ...operationBridge(workspaceFileOperations, invoke),
   ...operationBridge(settingsOperations, invoke),
   ...operationBridge(chatOperations, invoke),
+  ...operationBridge(shareHandoffOperations, invoke),
+  ...operationBridge(shareMountOperations, invoke),
   ...operationBridge(systemMotionOperations, invoke),
   ...operationBridge(serverAccountOperations, invoke),
   ...operationBridge(historyOperations, invoke),
@@ -230,13 +233,6 @@ const bridge: DohcDesktopBridge = {
   cloudLoginPoll: () => ipcRenderer.invoke(CHANNELS.cloudLoginPoll),
   cloudStatus: (payload) => ipcRenderer.invoke(CHANNELS.cloudStatus, payload),
   cloudLogout: () => ipcRenderer.invoke(CHANNELS.cloudLogout),
-  getShareHandoffStatus: () =>
-    invokeParsed(CHANNELS.getShareHandoffStatus, ShareHandoffStatus),
-  acceptShareHandoff: (payload) =>
-    ipcRenderer.invoke(CHANNELS.acceptShareHandoff, payload),
-  retryShareHandoff: () => ipcRenderer.invoke(CHANNELS.retryShareHandoff),
-  dismissShareHandoff: (payload) =>
-    ipcRenderer.invoke(CHANNELS.dismissShareHandoff, payload),
   onShareHandoffStatus: (listener) =>
     onEvent(CHANNELS.shareHandoffStatus, ShareHandoffStatus, listener),
   ...operationBridge(workspaceSyncOperations, invoke),
@@ -313,7 +309,6 @@ const bridge: DohcDesktopBridge = {
   joinSharedChannel: (payload) => ipcRenderer.invoke(CHANNELS.joinSharedChannel, payload),
   leaveSharedChannel: (payload) =>
     ipcRenderer.invoke(CHANNELS.leaveSharedChannel, payload),
-  openSharedView: (payload) => ipcRenderer.invoke(CHANNELS.openSharedView, payload),
   ...operationBridge(sharedViewAccessOperations, invoke),
   dismissShareSkips: (payload) => ipcRenderer.invoke(CHANNELS.dismissShareSkips, payload),
   listCollectionAutomations: (payload) =>
@@ -481,9 +476,6 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.listMyShareChanges, payload),
   withdrawShareChanges: (payload) =>
     ipcRenderer.invoke(CHANNELS.withdrawShareChanges, payload),
-  mountShare: (payload) => ipcRenderer.invoke(CHANNELS.mountShare, payload),
-  refreshShareMounts: (payload) => ipcRenderer.invoke(CHANNELS.refreshShareMounts, payload),
-  unmountShare: (payload) => ipcRenderer.invoke(CHANNELS.unmountShare, payload),
   openWorkspace: (payload) =>
     ipcRenderer.invoke(CHANNELS.openWorkspace, {
       ...payload,

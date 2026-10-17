@@ -189,5 +189,13 @@
   "group.create",
   "chat.thread.read.mark",
   "chat.reactions.list",
-  "chat.reaction.set"
+  "chat.reaction.set",
+  "share.handoff.status.read",
+  "share.handoff.accept",
+  "share.handoff.retry",
+  "share.handoff.dismiss",
+  "share.mount.add",
+  "share.mounts.refresh",
+  "share.mount.remove",
+  "share.view.open"
 ]
