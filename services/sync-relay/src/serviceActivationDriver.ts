@@ -9,6 +9,8 @@ import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidat
 import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
 import {configRecord} from "./deviceLiveHostConfig";
 import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
+import {settlementResult,type CommittedSettlement} from "./liveSettlement";
+import {authorityInteger} from "./storage/liveDocumentAuthority";
 import {liveValidation} from "./liveValidation.js";
 import {serviceOwnerTransport} from "./serviceOwnerTransport";
 import {ServiceActivationStaleCut,type ServiceActivationStore} from "./storage/serviceActivation";
@@ -53,6 +55,8 @@ export type ServiceActivationBlock="refused"|"without-lineage";
 type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;
   binding:LiveObjectBinding;target:string;actor:{ownerUserId:string;shareId:string}};
 const fenced={kind:"pending" as const,reason:"Service binding is fenced or unavailable."};
+/** How a departed document's settlement ended. The engine refuses an `unready` document's registration, as once it parked. */
+export type DepartedSettlement={kind:"settled";settlement:CommittedSettlement}|{kind:"pending";reason:string}|{kind:"unready"};
 /** A workspace's hosted replica, as activation uses it. */
 export interface ServiceActivationReplica {
   pull(signal:AbortSignal):Promise<{hasMore:boolean}>;
@@ -61,6 +65,7 @@ export interface ServiceActivationReplica {
 
 export class ServiceActivationDriver {
   readonly #store;
+  readonly #delivery;
   #targets:readonly ServiceActivationTarget[];
   readonly #completedTargets=new Set<string>();
   readonly #staleLeases=new Map<string,{activationId:string;sessionId:string}>();
@@ -81,6 +86,7 @@ export class ServiceActivationDriver {
     assertCurrent():void;registered():void;
     runDocument<T>(document:LiveDocumentKey,signal:AbortSignal,operation:()=>Promise<T>):Promise<T>;}){
     this.#store=options.storage.createServiceActivationStore(options.history);
+    this.#delivery=options.storage.createLiveCommittedDeliveryStore(options.history);
     this.#targets=options.config.targets;
   }
   /** The documents activation passes visit, in pass order. */
@@ -212,10 +218,72 @@ export class ServiceActivationDriver {
     if(!owner?.completed || this.#invalidated(owner,document))throw new Error("Service document activation is incomplete.");
     return owner;
   }
-  /** Settles what the host already applied of an owned document, as once Stop fenced it. Null when nothing was adopted to settle. */
-  settleApplied(value:LiveDocumentKey,signal:AbortSignal){
-    const document=parseLiveDocumentKey(value),owner=this.#owners.get(JSON.stringify(document));
-    return owner?owner.consumer.settleApplied(document,signal):Promise.resolve(null);
+  /**
+   * The document of the activation the relay retains at the target's path,
+   * once this connection has standing for it, whatever its owner's authority.
+   * Undefined when it retains none.
+   */
+  departing(target:ServiceActivationTarget,signal:AbortSignal){
+    const o=this.options,saved=this.#store.read(target.workspaceId,target.path,o.config.maxCaptureBytes);
+    if(!saved)return undefined;
+    if(saved.shareId!==target.shareId)throw new Error("Service activation share changed.");
+    const document=parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,
+      objectId:saved.source.objectId,lineageClaimId:saved.source.lineageClaimId});
+    const check=()=>{signal.throwIfAborted();o.assertCurrent();};
+    this.#store.departing({document,activationId:saved.activationId,host:o.host,registeredAtMs:Date.now(),guard:check});
+    o.registered();check();
+    return document;
+  }
+  /**
+   * Settles what the host applied of a document whose owner lost live
+   * authority, as after Stop or the loss of its last Edit grant, from durable
+   * state alone: the relay's journal and owner tip, and the engine's record of
+   * what it applied. It registers through the engine client itself, so it
+   * captures no session, and it sends no application, so it accepts nothing.
+   * Runs in the work of the document `departing` returned. Null when nothing
+   * was adopted here.
+   */
+  async settleDeparted(target:ServiceActivationTarget,value:LiveDocumentKey,signal:AbortSignal):Promise<DepartedSettlement|null>{
+    const o=this.options,workspace=o.workspaces.get(target.workspaceId);
+    if(!workspace)throw new Error("Service activation workspace is not attached.");
+    const check=()=>{signal.throwIfAborted();o.assertCurrent();};
+    const request=()=>({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs});
+    const document=parseLiveDocumentKey(value),saved=this.#store.read(target.workspaceId,target.path,o.config.maxCaptureBytes);
+    if(!saved || saved.shareId!==target.shareId || saved.source.objectId!==document.objectId || saved.source.lineageClaimId!==document.lineageClaimId) {
+      throw new Error("Retained service activation changed.");
+    }
+    check();
+    const input={host:o.host,document,adoptionId:saved.activationId};
+    let delivery=this.#delivery.departedOwnerDelivery(input);
+    if(!delivery)return null;
+    // Registering retires the engine registration a cached owner holds. That owner
+    // registers again, and the document is ready again, only if it returns.
+    const owner=this.#owners.get(JSON.stringify(document));
+    if(owner){owner.consumer.release(document);owner.completed=false;}
+    this.#completedTargets.delete(targetKey(target));
+    let registered;
+    try{
+      registered=await o.client.sendRequest({...request(),method:"liveApplication.register",
+        params:{binding:{...delivery.binding,selectorPaths:[...delivery.binding.selectorPaths]}}},signal);
+    }catch(error){
+      // A parked document, or one its replica's scope still holds but not ready.
+      if(isHostedDocumentUnready(error))return {kind:"unready"};
+      throw error;
+    }
+    check();
+    const registrationId=authorityInteger(configRecord(registered.result,["registrationId"]).registrationId,1);
+    // Record each accepted row the engine applied. One it did not apply stays unapplied, and so do those after it.
+    for(let read=0;delivery.next;read++){
+      if(read===o.adoption.maxEvents)return {kind:"pending",reason:"Departed document reconciliation reached its work budget."};
+      const ack=await o.client.readLiveApplicationAck({...request(),registrationId},delivery.next,signal);
+      check();
+      if(!ack)break;
+      delivery=this.#delivery.recordDepartedApplication({...input,binding:delivery.binding},ack);
+    }
+    const response=await o.client.sendRequest({...request(),method:"liveApplication.settle",
+      params:{registrationId,terminalReceipt:delivery.tip?{...delivery.tip}:null}},signal);
+    check();
+    return {kind:"settled",settlement:settlementResult(response.result,delivery.tip)};
   }
   /**
    * Activates the target and drains it. A target with no owner here first pulls

@@ -175,6 +175,8 @@ export async function startServiceLiveHost(options: {
   const leaving = new Set<string>();
   // Leaving documents an earlier daemon may have left unsettled. Each resumes its retained activation before it unloads.
   const recovering = new Set<string>();
+  // Leaving documents the engine refused as not ready, with the number of the pull that must succeed before they are known parked.
+  const parking = new Map<string, number>();
   // Whether an update completed on this daemon.
   let updated = false;
   // The stores of workspaces whose replica diverged. None attaches again on this daemon, and each store stays where it is.
@@ -394,7 +396,7 @@ export async function startServiceLiveHost(options: {
       changes?.notifyHost([workspaceId]);
     };
     const forget = (key: string) => {
-      activation!.removeTarget(hosted.get(key)!.target); hosted.delete(key); leaving.delete(key); recovering.delete(key); idle.delete(key); unloading.delete(key);
+      activation!.removeTarget(hosted.get(key)!.target); hosted.delete(key); leaving.delete(key); recovering.delete(key); parking.delete(key); idle.delete(key); unloading.delete(key);
     };
     // The engine's reason while it holds unfinished work for the document, or undefined once nothing of it is loaded.
     const requestUnload = async (document: {target: ServiceActivationTarget; objectId: string}, joined: AbortSignal) => {
@@ -412,29 +414,76 @@ export async function startServiceLiveHost(options: {
     };
     const settleTarget: Parameters<ServiceActivationDriver["activate"]>[2] = config.settlement
       ? (consumer, document, joined) => consumer.settle(document, joined) : undefined;
+    // Whether a hosted document's owner lost live authority over it: Stop
+    // fenced it, or no Edit grant of its owner covers it any more.
+    const authorityLost = ({target, objectId}: {target: ServiceActivationTarget; objectId: string}) => {
+      const share = storage.getShare(target.shareId);
+      return !storage.serviceHostDocumentEnabled({workspaceId: target.workspaceId, objectId}) || !share || share.workspaceId !== target.workspaceId ||
+        !storage.serviceHostEnrollmentHasEditGrant({workspaceId: target.workspaceId, ownerUserId: share.granterUserId, path: target.path});
+    };
+    const PARKING = "Waiting for its hosted replica to confirm the document parked.";
+    // The engine refused the document as not ready, as once it parked. Only a pull that starts after
+    // this can tell: a parked document is no longer departed, and one its scope still held becomes so.
+    // Meanwhile it leaves activation passes, which would keep its workspace from pulling.
+    const awaitParking = (key: string, row: {target: ServiceActivationTarget}) => {
+      parking.set(key, attachments.get(row.target.workspaceId)!.pulls + 1);
+      activation!.removeTarget(row.target);
+      return PARKING;
+    };
     // Unloads a document that left the hosted set once it settled and its
     // output reached the relay; its workspace stays attached, so its hosted
     // replica can retire it. Resolves to why it stays loaded, or undefined
-    // once it is gone. Until then it stays in activation passes, which settle it.
-    // Stop fences a document: nothing new is accepted, but what the host already
-    // applied still settles into the file. Its work is pushed while it is loaded,
-    // where the engine can prove it, so the relay refuses it at its coordinates.
-    // It stays while the engine answers its unload as pending, since its replica
-    // cannot park it until then.
+    // once it is gone. It stays while the engine answers its unload as
+    // pending, since its replica cannot park it until then.
+    // Once its owner lost live authority nothing new is accepted, but what the
+    // host already applied still settles into the file. That settlement uses
+    // only durable state, so it holds after a restart and whether or not this
+    // daemon loaded the document. Its work is pushed before the unload, where
+    // the engine can prove it, so the relay refuses it at its coordinates.
     const depart = async (key: string, joined: AbortSignal) => {
       await resolveUnload(key, joined);
       const row = hosted.get(key);
       if (!row) return undefined;
-      const fenced = !storage.serviceHostDocumentEnabled({workspaceId: row.target.workspaceId, objectId: row.objectId});
+      const attached = attachments.get(row.target.workspaceId)!, required = parking.get(key);
+      if (required !== undefined) {
+        if (attached.confirmed < required) return PARKING;
+        parking.delete(key);
+        if (attached.hosted.departed?.has(row.objectId) === false) {forget(key); return undefined;}
+      }
+      const publish = async (operation: AbortSignal) => (await attached.hosted.publish(operation)).hasMore ? "Hosted publication has more pages." : undefined;
+      if (authorityLost(row)) {
+        recovering.delete(key);
+        const document = activation!.departing(row.target, joined);
+        if (document) {
+          // Settle, publish, then unload, under the departure's registration.
+          const waiting = await runDocument(document, joined, async operation => {
+            if (settleTarget) {
+              const settled = await activation!.settleDeparted(row.target, document, operation);
+              if (settled?.kind === "unready") return awaitParking(key, row);
+              if (settled?.kind === "pending") return settled.reason;
+              if (settled && !settled.settlement.materialized) return "Settlement has not reached the file.";
+              if (settled) {
+                const more = await publish(operation);
+                if (more) return more;
+              }
+            }
+            return requestUnload(row, operation);
+          });
+          if (waiting !== undefined) return waiting;
+        } else if (activation!.loaded(row.target) && !activation!.dormant(row.target)) {
+          const waiting = await requestUnload(row, joined);
+          if (waiting !== undefined) return waiting;
+        }
+        forget(key);
+        return undefined;
+      }
       // Resuming loads what an earlier daemon left, and delivers and settles it, as for a document that left this one.
-      // One the engine no longer has ready, as once it parked, has nothing here to resume or unload.
-      if (recovering.has(key) && !fenced && activation!.retained(row.target)) {
+      if (recovering.has(key) && activation!.retained(row.target)) {
         let outcome;
         try {outcome = await activation!.activate(row.target, joined, settleTarget, false);}
         catch (error) {
           if (!isHostedDocumentUnready(error)) throw error;
-          forget(key);
-          return undefined;
+          return awaitParking(key, row);
         }
         if (outcome.kind !== "done") return outcome.reason;
       }
@@ -444,14 +493,11 @@ export async function startServiceLiveHost(options: {
         // A document with no owner has nothing delivered here to settle; the engine reports any work it still holds.
         const leave = async (operation: AbortSignal) => {
           if (document) {
-            if (fenced) {
-              if (settleTarget && (await activation!.settleApplied(document, operation))?.materialized === false) return "Settlement has not reached the file.";
-            } else {
-              if (!activation!.completed(row.target)) return "Service document activation is incomplete.";
-              const {consumer} = activation!.consumer(document);
-              if (settleTarget && !(await consumer.settle(document, operation)).materialized) return "Settlement has not reached the file.";
-            }
-            if ((await attachments.get(row.target.workspaceId)!.hosted.publish(operation)).hasMore) return "Hosted publication has more pages.";
+            if (!activation!.completed(row.target)) return "Service document activation is incomplete.";
+            const {consumer} = activation!.consumer(document);
+            if (settleTarget && !(await consumer.settle(document, operation)).materialized) return "Settlement has not reached the file.";
+            const more = await publish(operation);
+            if (more) return more;
           }
           return requestUnload(row, operation);
         };
@@ -571,9 +617,11 @@ export async function startServiceLiveHost(options: {
         ? !isDeepStrictEqual(desired.get(workspaceId), member.workspace) : obsolete(workspaceId, member.workspace))
         .map(([workspaceId]) => workspaceId);
       // A document that left stays in passes, which settle, publish and unload it.
+      // One that returns before it is gone activates again; a recovered or parking one was never in activation passes.
       for (const [key, document] of hosted) {
-        if (isDeepStrictEqual(wanted.get(key), document)) leaving.delete(key);
-        else if (!changed.includes(document.target.workspaceId)) leaving.add(key);
+        if (isDeepStrictEqual(wanted.get(key), document)) {
+          if (leaving.delete(key)) {recovering.delete(key); parking.delete(key); activation.addTarget(document.target, document.objectId);}
+        } else if (!changed.includes(document.target.workspaceId)) leaving.add(key);
       }
       // A workspace stays wanted while anything of it may remain in its replica, so one that is not has nothing left to drain.
       for (const workspaceId of [...members.keys()]) if (!desired.has(workspaceId) || changed.includes(workspaceId)) await detach(workspaceId, joined);
@@ -582,12 +630,12 @@ export async function startServiceLiveHost(options: {
         if (!hosted.has(key) && members.has(document.target.workspaceId)) {activation.addTarget(document.target, document.objectId); hosted.set(key, document); touch(key);}
       }
       // A fresh daemon has nothing loaded, but an earlier one may have left a
-      // departing document's work unsettled in its store. Passes resume each
-      // one still enabled at its enrolled path, then settle, publish and unload it.
+      // departing document's work unsettled in its store. Passes settle each
+      // one still at its enrolled path, then publish and unload it.
       if (!updated) {
         for (const document of departing.values()) {
           const {workspaceId, path} = document.target, key = JSON.stringify([workspaceId, path]);
-          if (hosted.has(key) || !members.has(workspaceId) || !storage.serviceHostDocumentEnabled({workspaceId, objectId: document.objectId}) ||
+          if (hosted.has(key) || !members.has(workspaceId) ||
             storage.objectIdAtPathInVersion({workspaceId, versionId: "main", path}) !== document.objectId) continue;
           hosted.set(key, document); leaving.add(key); recovering.add(key);
         }
@@ -621,10 +669,7 @@ export async function startServiceLiveHost(options: {
       registerRetained();
       let index=0,lastError:string|undefined,lastIdleError:string|undefined;
       const pass=async()=>{
-        // A dormant document stays out of memory until someone opens it. One whose
-        // unload is unanswered may hold an ended registration until the unload is sent again.
-        const bounds=config.activation!,targets=activation!.targets.filter(target=>!activation!.dormant(target) &&
-          !unloading.has(JSON.stringify([target.workspaceId,target.path])));
+        const bounds=config.activation!;
         const passSignal=AbortSignal.any([signal,AbortSignal.timeout(bounds.passDeadlineMs)]);
         let failed=false;
         // One failed step does not hold back the others.
@@ -643,6 +688,13 @@ export async function startServiceLiveHost(options: {
         for(const key of [...leaving])await step(async()=>{
           const waiting=await depart(key,passSignal);
           if(waiting!==undefined)throw new Error(`Departing live document is waiting: ${waiting}`);
+        });
+        // A dormant document stays out of memory until someone opens it. One whose
+        // unload is unanswered may hold an ended registration until the unload is sent again.
+        // A departing one whose owner lost live authority only settles what the host applied.
+        const targets=activation!.targets.filter(target=>{
+          const key=JSON.stringify([target.workspaceId,target.path]),row=hosted.get(key);
+          return !activation!.dormant(target) && !unloading.has(key) && !(row && leaving.has(key) && authorityLost(row));
         });
         await step(async()=>{
           for(let visited=0;visited<Math.min(bounds.maxDocumentsPerPass,targets.length);visited++){
