@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -1024,4 +1025,54 @@ describe("computeBacklinks", () => {
     });
     expect(sources.map((source) => source.sourcePath)).toEqual(["allowed.md"]);
   });
+});
+
+// Rust uses the same fixtures to check extraction and candidate-key coverage.
+const linkParity = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../../crates/dohc-engine-runtime/src/links/parity.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+) as {
+  extract: {
+    name: string;
+    text: string;
+    links: ["wikilink" | "markdown", string][];
+  }[];
+  resolve: {
+    source: string;
+    literal: string;
+    kind: "wikilink" | "markdown";
+    target: string;
+  }[];
+};
+
+describe("persisted links parser parity", () => {
+  for (const fixture of linkParity.extract) {
+    it(fixture.name, () => {
+      expect(
+        extractMarkdownGraphLinks(fixture.text)
+          .map(({ kind, target }) => [kind, target])
+          .sort(),
+      ).toEqual([...fixture.links].sort());
+    });
+  }
+  for (const fixture of linkParity.resolve) {
+    it(`resolves ${fixture.literal} to ${fixture.target}`, () => {
+      const text =
+        fixture.kind === "wikilink"
+          ? `[[${fixture.literal}]]`
+          : `[go](${fixture.literal})`;
+      const graph = buildMarkdownGraph([
+        { path: fixture.source, text },
+        { path: fixture.target, text: "" },
+      ]);
+      expect(graph.edges).toEqual([
+        { source: fixture.source, target: fixture.target, kind: fixture.kind },
+      ]);
+    });
+  }
 });

@@ -13,6 +13,8 @@ enum Script {
     /// The reconcile is cancelled mid-scan (teardown racing the tick).
     CancelledTick,
     HealthyButDirtyApply,
+    FileFailureWithCollectionPending,
+    CollectionBusyExhausted,
     /// A healthy tick during which the watcher records one more
     /// disruption (backend error / root-identity blip that re-attached).
     Disrupted,
@@ -142,6 +144,16 @@ impl DriverEnv for FakeEnv {
         match script {
             Script::ActorLost => TickIo::ActorLost,
             Script::ReconcileFails => TickIo::Failed,
+            Script::FileFailureWithCollectionPending => {
+                self.status.request_collection_reconcile();
+                self.status.mark_degraded();
+                TickIo::Applied { clean: false }
+            }
+            Script::CollectionBusyExhausted => {
+                self.status.request_collection_reconcile();
+                self.status.mark_degraded();
+                TickIo::CollectionBusyExhausted
+            }
             Script::HealthyButDirtyApply => {
                 self.status.mark_degraded();
                 TickIo::Applied { clean: false }
@@ -769,4 +781,59 @@ async fn a_flush_that_never_converges_is_bounded() {
         waited < std::time::Duration::from_secs(1),
         "the cycle bound answers without further sleeps, waited {waited:?}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_flush_retries_file_failure_with_a_collection_reconcile_pending() {
+    let (handle, cancel, journal, status, flush_tx) = spawn_loop(vec![
+        Script::Idle,
+        Script::FileFailureWithCollectionPending,
+        Script::Healthy,
+        Script::Idle,
+    ]);
+    // Wait for the initial tick, then queue flush before the next drive tick.
+    while journal.lock().unwrap().ticks.is_empty() {
+        tokio::task::yield_now().await;
+    }
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    flush_tx.send(reply).await.unwrap();
+    let outcome = answer.await.unwrap();
+    assert!(status.collection_reconcile_pending());
+    assert!(
+        outcome.settled,
+        "ordinary apply failures still drive to quiescence"
+    );
+    assert!(outcome.degraded, "the failed apply remains visible");
+    assert_eq!(
+        journal.lock().unwrap().ticks.len(),
+        4,
+        "flush retries the failed file in the same request"
+    );
+    cancel.cancel();
+    handle.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_flush_stops_after_the_collection_busy_budget_expires() {
+    let (handle, cancel, journal, status, flush_tx) = spawn_loop(vec![
+        Script::Idle,
+        Script::CollectionBusyExhausted,
+        Script::Healthy,
+        Script::Idle,
+    ]);
+    while journal.lock().unwrap().ticks.is_empty() {
+        tokio::task::yield_now().await;
+    }
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    flush_tx.send(reply).await.unwrap();
+    let outcome = answer.await.unwrap();
+    assert!(!outcome.settled && outcome.degraded);
+    assert!(status.collection_reconcile_pending());
+    assert_eq!(
+        journal.lock().unwrap().ticks.len(),
+        2,
+        "only exhaustion stops this flush early"
+    );
+    cancel.cancel();
+    handle.await.unwrap();
 }

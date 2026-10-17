@@ -131,6 +131,7 @@ export function DemoSidebar(props: {
     [props.documents, props.folders],
   );
   const moments = useMemo(() => demoMoments(props.documents), [props.documents]);
+  const historyEntries = useMemo(() => moments.map((moment) => ({ kind: "file" as const, moment })), [moments]);
   const refreshKey = props.documents.map((document) => document.path).join("|");
 
   function open(path: string) {
@@ -282,7 +283,7 @@ export function DemoSidebar(props: {
         />
       ) : props.activePanel === "history" ? (
         <EngineHistoryView
-          moments={moments}
+          entries={historyEntries}
           hasMore={false}
           loadingMore={false}
           onLoadMore={() => undefined}

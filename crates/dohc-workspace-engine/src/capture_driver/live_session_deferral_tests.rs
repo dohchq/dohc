@@ -93,7 +93,8 @@ async fn capture_with_a_live_session_on_a_new_file(files_on_disk: &[&str]) {
         run,
         &CancellationToken::new(),
     )
-    .await;
+    .await
+    .clean;
     assert!(
         clean,
         "a path the live session holds is not a failed capture"
@@ -127,13 +128,15 @@ async fn capture_with_a_live_session_on_a_new_file(files_on_disk: &[&str]) {
             .acquire(&elsewhere)
             .expect("another workspace's session"),
     );
-    offer_deferred_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle()).await;
+    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
+        .await;
     assert!(!files.handle().stats().await.expect("stats").dirty);
 
     // The session closes without an edit. Nothing on disk changes, and the
     // release alone brings the file back to capture.
     drop(lease);
-    offer_deferred_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle()).await;
+    offer_unrecorded_after_release(&leases, WORKSPACE_ID, &mut releases_seen, &files.handle())
+        .await;
     let run = reconcile_if_dirty_bound(&root, &files.handle(), CancellationToken::new())
         .await
         .expect("reconcile after release");
@@ -147,7 +150,8 @@ async fn capture_with_a_live_session_on_a_new_file(files_on_disk: &[&str]) {
         run,
         &CancellationToken::new(),
     )
-    .await;
+    .await
+    .clean;
     assert!(clean);
     assert_eq!(files.handle().stats().await.expect("stats").deferred, 0);
     assert_eq!(
@@ -663,7 +667,9 @@ impl Harness {
             &self.self_writes,
         );
         context.author_json = self.author_json.clone();
-        apply_bound_run_with_handle(context, files, run, &CancellationToken::new()).await
+        apply_bound_run_with_handle(context, files, run, &CancellationToken::new())
+            .await
+            .clean
     }
 
     fn close(self) {
@@ -1479,6 +1485,7 @@ async fn capture_file_hold_capture_and_idle_cost() {
                     &CancellationToken::new()
                 )
                 .await
+                .clean
             );
             let apply_ms = apply_start.elapsed().as_secs_f64() * 1000.0;
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
@@ -1868,4 +1875,44 @@ async fn fix1_no_hold_placement_replay_cost() {
         (samples[14] + samples[15]) / 2.0,
         samples[28]
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lease_release_reoffers_quarantined_outside_writes() {
+    let harness = Harness::new();
+    std::fs::write(harness.root.join(NEW_FILE), "Written outside the editor.\n").unwrap();
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
+    let lease = harness.leases.acquire(&harness.key(&object_id)).unwrap();
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .unwrap();
+    let files = FilesActorCloseGuard::new(files);
+    for _ in 0..dohc_engine_files::DEGRADED_RESCAN_BACKOFF {
+        assert!(!harness.capture(&files.handle()).await);
+    }
+    let parked = files.handle().stats().await.unwrap();
+    assert!(!parked.dirty);
+    assert_eq!((parked.deferred, parked.quarantined), (0, 1));
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+    drop(lease);
+    offer_unrecorded_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    let offered = files.handle().stats().await.unwrap().dirty;
+    let clean = harness.capture(&files.handle()).await;
+    let captured = head_count(&harness.db, NEW_FILE);
+    let recovered = files.handle().stats().await.unwrap();
+    files.close().await;
+    harness.close();
+    assert!(
+        offered,
+        "releasing the lease must wake its quarantined write"
+    );
+    assert!(clean);
+    assert_eq!(captured, 1);
+    assert_eq!((recovered.deferred, recovered.quarantined), (0, 0));
 }

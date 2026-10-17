@@ -29,15 +29,15 @@ async fn open(
         .as_object_mut()
         .expect("open params")
         .extend(params.as_object().expect("extra open params").clone());
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, "workspace.open", None, open_params),
-        )
-        .await
-        .map(|response| {
-            serde_json::from_value(response.result["workspace"].clone()).expect("workspace handle")
-        })
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(id, "workspace.open", None, open_params),
+    )
+    .await
+    .map(|response| {
+        serde_json::from_value(response.result["workspace"].clone()).expect("workspace handle")
+    })
 }
 
 async fn call(
@@ -46,14 +46,14 @@ async fn call(
     id: u64,
     method: &str,
 ) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), json!({})),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
-        .result
+    call_with_busy_retry(
+        transport,
+        RequestContext::unbounded(),
+        request(id, method, Some(handle.clone()), json!({})),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
+    .result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

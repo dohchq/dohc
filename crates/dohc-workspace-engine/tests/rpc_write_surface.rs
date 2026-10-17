@@ -29,21 +29,21 @@ async fn fixture(
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": format!("ws-rpcd-{name}"),
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": format!("ws-rpcd-{name}"),
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     (scratch, transport, handle)
 }
@@ -60,21 +60,21 @@ async fn fixture_with_service(
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
-    let opened = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                1,
-                "workspace.open",
-                None,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": format!("ws-rpcd-{name}"),
-                }),
-            ),
-        )
-        .await
-        .expect("open");
+    let opened = call_with_busy_retry(
+        &transport,
+        RequestContext::unbounded(),
+        request(
+            1,
+            "workspace.open",
+            None,
+            json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": format!("ws-rpcd-{name}"),
+            }),
+        ),
+    )
+    .await
+    .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     (scratch, service, transport, handle)
 }

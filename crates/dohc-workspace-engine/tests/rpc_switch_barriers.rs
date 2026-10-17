@@ -67,7 +67,8 @@ async fn fixture(
     let transport = Arc::new(InProcessTransport::new(Arc::new(service)));
     let opened = bounded(
         "workspace.open",
-        transport.call(
+        call_with_busy_retry(
+            &transport,
             RequestContext::unbounded(),
             request(
                 1,
@@ -96,7 +97,8 @@ async fn open_additional_workspace(
     std::fs::write(scratch.path().join("notes.md"), "other base").expect("seed disk");
     let opened = bounded(
         "additional workspace.open",
-        transport.call(
+        call_with_busy_retry(
+            transport,
             RequestContext::unbounded(),
             request(
                 id,
@@ -126,7 +128,8 @@ async fn call(
 ) -> Value {
     bounded(
         method,
-        transport.call(
+        call_with_busy_retry(
+            transport,
             RequestContext::unbounded(),
             request(id, method, Some(handle.clone()), params),
         ),
@@ -145,7 +148,8 @@ async fn call_error(
 ) -> dohc_engine_protocol::error::WireError {
     bounded(
         method,
-        transport.call(
+        call_with_busy_retry(
+            transport,
             RequestContext::unbounded(),
             request(id, method, Some(handle.clone()), params),
         ),
@@ -164,9 +168,12 @@ async fn call_with_idempotency(
 ) -> Result<Value, dohc_engine_protocol::error::WireError> {
     let mut request = request(id, method, Some(handle.clone()), params);
     request.idempotency_key = Some(idempotency_key.to_owned());
-    bounded(method, transport.call(RequestContext::unbounded(), request))
-        .await
-        .map(|response| response.result)
+    bounded(
+        method,
+        call_with_busy_retry(transport, RequestContext::unbounded(), request),
+    )
+    .await
+    .map(|response| response.result)
 }
 
 async fn create_feature(
@@ -201,7 +208,8 @@ async fn switch_to(
 ) -> Result<Value, dohc_engine_protocol::error::WireError> {
     bounded(
         "versions.setActive",
-        transport.call(
+        call_with_busy_retry(
+            transport,
             RequestContext::unbounded(),
             request(
                 id,

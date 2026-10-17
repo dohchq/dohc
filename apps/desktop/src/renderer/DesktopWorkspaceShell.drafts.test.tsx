@@ -80,7 +80,7 @@ describe("workspace switch admission", () => {
     );
     await screen.findByTestId("tab-b.md");
     await screen.findByTestId("titlebar-about-sidebar");
-    await waitFor(() => expect(bridge.listEngineMoments).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalled());
     await act(async () => {});
 
     expect(rejectedReads).toEqual([`ui-state:${OTHER_WORKSPACE.workspaceId}`]);

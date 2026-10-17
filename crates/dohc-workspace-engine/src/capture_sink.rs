@@ -67,6 +67,9 @@ const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
 /// serialized database writer.
 const MAX_ADDED_TEXT_PREPARE_WORKERS: usize = 8;
 
+mod busy_retry;
+use busy_retry::CaptureBatchRetry;
+
 /// Per-run moment provenance, mirroring the TS capture metadata: a reconcile
 /// pass stamps one summary + correlation id across every moment it records
 /// ("Reconciled offline edits"); a live watcher batch leaves both unset and
@@ -280,6 +283,7 @@ impl CapturedRoot {
 /// active version and capture-time provenance; `.dohc/files.toml` is read once at construction, matching
 /// the one-policy-snapshot-per-task rule in the TS capture path.
 pub struct StoreCaptureSink {
+    batch_retry: CaptureBatchRetry,
     actor: ActorHandle,
     leases: LeaseRegistry,
     workspace_id: String,
@@ -312,6 +316,7 @@ pub struct StoreCaptureSink {
 
 pub(crate) struct StoreCaptureSinkParams {
     pub(crate) actor: ActorHandle,
+    pub(crate) cancel: dohc_engine_files::CancellationToken,
     pub(crate) workspace_id: String,
     pub(crate) version_id: String,
     pub(crate) shadow_root: PathBuf,
@@ -335,6 +340,7 @@ pub(crate) fn bound_sink_params(
     let shadow_root = shadow_root.into();
     let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
     StoreCaptureSinkParams {
+        cancel: dohc_engine_files::CancellationToken::new(),
         actor,
         workspace_id: workspace_id.to_owned(),
         version_id: version_id.to_owned(),
@@ -368,6 +374,7 @@ pub(crate) enum PolicyState {
 impl StoreCaptureSink {
     pub(crate) fn new(params: StoreCaptureSinkParams) -> Self {
         let StoreCaptureSinkParams {
+            cancel,
             actor,
             workspace_id,
             version_id,
@@ -389,6 +396,7 @@ impl StoreCaptureSink {
             PolicyState::Known(snapshot.files_policy.clone())
         };
         StoreCaptureSink {
+            batch_retry: CaptureBatchRetry::new(cancel),
             actor,
             leases,
             workspace_id,
@@ -406,6 +414,14 @@ impl StoreCaptureSink {
             self_writes,
             provenance,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_batch_wait_for_test(
+        &mut self,
+        wait: impl Fn(std::time::Duration) + Send + 'static,
+    ) {
+        self.batch_retry.wait = Some(Box::new(wait));
     }
 
     fn captured_root(&self) -> Result<&CapturedRoot, CaptureError> {
@@ -501,12 +517,15 @@ impl StoreCaptureSink {
     /// Refresh collection detection and record bindings after a clean capture
     /// pass. Adoption uses the runtime's ordinary Y.Doc update + settle path,
     /// including durable replication journaling and self-write suppression.
-    pub(crate) fn reconcile_collections(&self) -> Result<CollectionReconciliation, RuntimeError> {
+    pub(crate) fn reconcile_collections_observed(
+        &self,
+        committed: Option<dohc_engine_runtime::actor::CollectionCommitListener>,
+    ) -> Result<CollectionReconciliation, RuntimeError> {
         let root_guard = self.root_guard().map_err(|_| RuntimeError::Identity {
             reason: "workspace root changed during capture",
             source: None,
         })?;
-        let mut reconciliation = self.actor.reconcile_collections_blocking_guarded(
+        self.actor.reconcile_collections_blocking_guarded(
             self.workspace_id.clone(),
             self.version_id.clone(),
             self.shadow_root.clone(),
@@ -515,11 +534,8 @@ impl StoreCaptureSink {
             self.now_ms,
             Arc::new(NoFaults),
             root_guard,
-        )?;
-        self.automation_claims
-            .borrow_mut()
-            .extend(std::mem::take(&mut reconciliation.automation_claims));
-        Ok(reconciliation)
+            committed,
+        )
     }
 
     /// Check only the changed collection records offered by this capture
@@ -596,7 +612,7 @@ impl StoreCaptureSink {
         text: String,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
-        match self.actor.capture_ingest_with_search_policy_blocking(
+        let result = self.actor.capture_ingest_with_search_policy_blocking(
             CaptureIngest {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -613,7 +629,8 @@ impl StoreCaptureSink {
             Arc::clone(&self.search_policy),
             self.leases.clone(),
             Arc::new(NoFaults),
-        ) {
+        );
+        match self.batch_retry.observe(result) {
             Ok(result) => {
                 if result.pending_placement {
                     self.pending_placement_paths
@@ -662,7 +679,7 @@ impl StoreCaptureSink {
         bytes: Vec<u8>,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
-        match self.actor.capture_ingest_binary_blocking(
+        let result = self.actor.capture_ingest_binary_blocking(
             CaptureIngestBinary {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -678,7 +695,8 @@ impl StoreCaptureSink {
             },
             self.leases.clone(),
             Arc::new(NoFaults),
-        ) {
+        );
+        match self.batch_retry.observe(result) {
             Ok(result) => {
                 if result.pending_placement {
                     self.pending_placement_paths
@@ -749,7 +767,7 @@ impl StoreCaptureSink {
                 self.ensure_secret_key()?;
                 let key = self.secret_key.clone().expect("key ensured just above");
                 self.require_captured_root()?;
-                match self.actor.capture_secret_blocking(
+                let result = self.actor.capture_secret_blocking(
                     CaptureSecret {
                         workspace_id: self.workspace_id.clone(),
                         version_id: self.version_id.clone(),
@@ -762,7 +780,8 @@ impl StoreCaptureSink {
                     },
                     key,
                     Arc::new(NoFaults),
-                ) {
+                );
+                match self.batch_retry.observe(result) {
                     Ok(_) => Ok(IngestOutcome::Captured { size, sha256 }),
                     Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                         Ok(IngestOutcome::NotOwned)
@@ -845,7 +864,7 @@ impl StoreCaptureSink {
 
     fn retire_secret(&self, path: &str) -> Result<(), CaptureError> {
         let root_guard = self.root_guard()?;
-        match self.actor.capture_secret_retire_blocking_guarded(
+        let result = self.actor.capture_secret_retire_blocking_guarded(
             CaptureSecretRetire {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -858,7 +877,8 @@ impl StoreCaptureSink {
             self.shadow_root.clone(),
             Arc::new(NoFaults),
             root_guard,
-        ) {
+        );
+        match self.batch_retry.observe(result) {
             Ok(_) => Ok(()),
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
             Err(_) => Err(SECRET_RETIRE_FAILED),
@@ -897,7 +917,7 @@ impl StoreCaptureSink {
         confirm_absent: bool,
     ) -> Result<(), CaptureError> {
         let root_guard = self.root_guard()?;
-        match self.actor.capture_retire_materialized_blocking_guarded(
+        let result = self.actor.capture_retire_materialized_blocking_guarded(
             CaptureRetire {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -916,7 +936,8 @@ impl StoreCaptureSink {
             self.leases.clone(),
             Arc::new(NoFaults),
             root_guard,
-        ) {
+        );
+        match self.batch_retry.observe(result) {
             Ok(result) => {
                 if result.pending_placement {
                     self.pending_placement_paths
@@ -1192,6 +1213,13 @@ impl StoreCaptureSink {
     }
 
     fn commit_added_text_batch(&self, batch: Vec<PreparedTextCapture>) -> BatchIngestResult {
+        #[cfg(feature = "harness")]
+        let mut phase = dohc_engine_storage::capture_phase::Phase::new(
+            "sink_capture_batch",
+            self.provenance.correlation_id.as_deref(),
+            batch.len(),
+            true,
+        );
         let root_guard = match self.root_guard() {
             Ok(root_guard) => root_guard,
             Err(_) => {
@@ -1206,14 +1234,25 @@ impl StoreCaptureSink {
             inputs.push(prepared.input);
             identities.push((prepared.size, prepared.sha256));
         }
-        let results = self.actor.capture_ingest_batch_blocking(
-            inputs,
-            Arc::clone(&self.search_policy),
-            self.leases.clone(),
-            Arc::new(NoFaults),
-            self.shadow_root.clone(),
-            root_guard,
-        );
+        // Each attempt rechecks live leases and preserves uncovered Y.Doc recovery.
+        // The receipt records these bytes' hash, so the watcher or next scan
+        // captures a newer disk edit even when it arrives during the wait.
+        let inputs: Arc<[CaptureIngest]> = inputs.into();
+        #[cfg(feature = "harness")]
+        let roundtrip_phase =
+            dohc_engine_storage::capture_phase::Measure::new("actor_roundtrip_including_retry");
+        let results = self.batch_retry.run(|| {
+            self.actor.capture_ingest_batch_blocking(
+                Arc::clone(&inputs),
+                Arc::clone(&self.search_policy),
+                self.leases.clone(),
+                Arc::new(NoFaults),
+                self.shadow_root.clone(),
+                Arc::clone(&root_guard),
+            )
+        });
+        #[cfg(feature = "harness")]
+        drop(roundtrip_phase);
         match results {
             Ok(results) if results.len() == identities.len() => {
                 let mut outcomes = Vec::with_capacity(results.len());
@@ -1255,11 +1294,26 @@ impl StoreCaptureSink {
                         Err(_) => Err(INGEST_FAILED),
                     });
                 }
+                #[cfg(feature = "harness")]
+                {
+                    phase.field(
+                        "failed_receipts",
+                        outcomes.iter().filter(|r| r.is_err()).count() as u64,
+                    );
+                    phase.finish("receipts");
+                }
                 BatchIngestResult::Committed(outcomes)
             }
-            Ok(_) | Err(_) => BatchIngestResult::Uncertain {
-                attempted: identities.len(),
-            },
+            Ok(_) | Err(_) => {
+                #[cfg(feature = "harness")]
+                {
+                    phase.field("failed_receipts", identities.len() as u64);
+                    phase.finish("uncertain");
+                }
+                BatchIngestResult::Uncertain {
+                    attempted: identities.len(),
+                }
+            }
         }
     }
 
@@ -1324,8 +1378,20 @@ impl CaptureSink for StoreCaptureSink {
             Ok(root) => root,
             Err(_) => return Some(self.ingest_single_added_op(&ops[0])),
         };
+        #[cfg(feature = "harness")]
+        let mut prepare_phase = dohc_engine_storage::capture_phase::Phase::new(
+            "parallel_prepare",
+            self.provenance.correlation_id.as_deref(),
+            candidates.len(),
+            false,
+        );
         let prepared =
             prepare_added_text_prefix_parallel(&self.shadow_root, captured_root, &candidates);
+        #[cfg(feature = "harness")]
+        {
+            prepare_phase.finish("completed");
+            drop(prepare_phase);
+        }
         let prepared = match prepared {
             PreparedTextPrefix::Ready(prepared) => prepared,
             PreparedTextPrefix::FallbackFirst => {

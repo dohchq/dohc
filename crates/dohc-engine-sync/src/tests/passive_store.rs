@@ -83,6 +83,20 @@ fn head(store: &EngineStore, object: &str) -> String {
                     })
                     .unwrap();
                 assert_eq!((local, jobs), (0, 0));
+                for table in [
+                    "link_pending",
+                    "link_aliases",
+                    "link_index_state",
+                    "link_sources",
+                    "links",
+                ] {
+                    let count: i64 = conn
+                        .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                            row.get(0)
+                        })
+                        .unwrap();
+                    assert_eq!(count, 0, "passive replication originated {table}");
+                }
                 Ok(())
             })
             .unwrap();
