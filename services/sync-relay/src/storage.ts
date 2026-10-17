@@ -1,3 +1,4 @@
+import {accountIsFenced} from "./storage/accountDeletion";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import {prepareLiveApplications} from "./storage/liveApplicationAuthorship";
 import {prepareHostedSettlements} from "./storage/hostedSettlement";
@@ -8,6 +9,8 @@ import type {ShareLabels} from "@dohc/security-contract/share-labels";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { ServiceActivationStore } from "./storage/serviceActivation";
 import * as serviceHostEnrollmentStorage from "./storage/serviceHostEnrollment";
+import * as serviceHostFeedStorage from "./storage/serviceHostFeed";
+import * as serviceHostUploadStorage from "./storage/serviceHostUploads";
 import { LiveCommittedDeliveryStore } from "./storage/liveCommittedDelivery";
 import * as liveRestoreOperationStorage from "./storage/liveRestoreOperation";
 import * as ownerRestoreOptionsStorage from "./storage/ownerRestoreOptions";
@@ -358,6 +361,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     this.newDiscussionId = options.newDiscussionId;
   }
 
+  invalidate(): void {this.owner.invalidate();}
+
   close(): void {
     this.owner.close();
   }
@@ -388,7 +393,20 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
   }
   currentServiceHostWorkspace(workspaceId: string) {
-    return serviceHostEnrollmentStorage.currentServiceHostWorkspace(this, workspaceId);
+    const row = serviceHostEnrollmentStorage.currentServiceHostWorkspace(this, workspaceId);
+    return row && !accountIsFenced(this, row.ownerUserId) ? row : null;
+  }
+  readServiceHostFeedScope(workspaceId: string) {
+    return serviceHostFeedStorage.readServiceHostFeedScope(this, workspaceId);
+  }
+  listServiceHostDocumentRows(input: Parameters<typeof serviceHostFeedStorage.listServiceHostDocumentRows>[1]) {
+    return serviceHostFeedStorage.listServiceHostDocumentRows(this, input);
+  }
+  putServiceHostBlob(input: Parameters<typeof serviceHostUploadStorage.putServiceHostBlob>[1]) {
+    return serviceHostUploadStorage.putServiceHostBlob(this, input);
+  }
+  serviceHostUploaded(workspaceId: string, sha256: string) {
+    return serviceHostUploadStorage.serviceHostUploaded(this, workspaceId, sha256);
   }
   scanServiceHostCandidateShares(after?: serviceHostEnrollmentStorage.ServiceHostCandidateCursor, workspaceId?: string) {
     return serviceHostEnrollmentStorage.scanServiceHostCandidateShares(this, after, workspaceId);
@@ -582,7 +600,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
-    return workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
+    return !accountIsFenced(this, ownerUserId) && workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
   }
 
   discardReplicaCurrentView(lease: Parameters<typeof replicaCurrentViews.discardReplicaCurrentView>[1]) { return replicaCurrentViews.discardReplicaCurrentView(this,lease); }
@@ -681,6 +699,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return automationWorkspaceStorage.joinAutomationWorkspace(this, input);
   }
 
+  replaceLostAutomationReplica(input: { workspaceId: string; incarnation: number; nowMs: number }) {
+    return automationWorkspaceStorage.replaceLostAutomationReplica(this, input);
+  }
+
   unwantAutomationWorkspace(input: { workspaceId: string; nowMs: number }) {
     return automationWorkspaceStorage.unwantAutomationWorkspace(this, input);
   }
@@ -698,7 +720,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   currentAutomationWorkspace(workspaceId: string) {
-    return automationWorkspaceStorage.currentAutomationWorkspace(this, workspaceId);
+    const row = automationWorkspaceStorage.currentAutomationWorkspace(this, workspaceId);
+    return row && !accountIsFenced(this, row.ownerUserId) ? row : null;
   }
 
   liveClaimLogSeq(input: { workspaceId: string; liveCursor: number }) {

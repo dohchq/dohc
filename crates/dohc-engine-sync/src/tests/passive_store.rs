@@ -473,6 +473,41 @@ fn passive_store_restarts_mid_history_across_a_secret_page() {
     assert!(!scratch.path().join(".env").exists());
 }
 
+/// A passive store is never hosted, and each relay row it applies or
+/// recognizes as redelivered moves its log frontier.
+#[test]
+fn passive_apply_advances_the_log_frontier_and_never_hosts() {
+    let (_scratch, _path, mut store) = open_passive_store();
+    replica(&mut store);
+    let frontier = |store: &EngineStore| {
+        store
+            .read_with(|conn| dohc_engine_storage::replica::read_frontiers(conn, "ws"))
+            .unwrap()
+    };
+    let mut init = envelope("owner", 0, "workspace.init", json!({}));
+    for (relay_seq, disposition) in [(5, "applied"), (8, "redelivered")] {
+        init.relay_seq = Some(relay_seq);
+        let result = apply_replication_envelope(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &init,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        match disposition {
+            "applied" => assert!(matches!(result.primary, ApplyDisposition::Applied(_))),
+            _ => assert!(matches!(result.primary, ApplyDisposition::Skipped)),
+        }
+        assert_eq!(frontier(&store).log_cursor, relay_seq, "{disposition}");
+    }
+    assert!(matches!(
+        create_hosted_replica(&mut store, "ws", "service-host:a", "epoch-1", "stream-1", 1, &NoFaults),
+        Err(SyncError::InvalidInput { reason }) if reason == PASSIVE_STORE_CANNOT_HOST
+    ));
+    assert!(!is_hosted_replica(&store, "ws").unwrap());
+}
+
 #[test]
 fn passive_store_refuses_claim_and_push_before_transport() {
     let (_scratch, _path, mut store) = open_passive_store();

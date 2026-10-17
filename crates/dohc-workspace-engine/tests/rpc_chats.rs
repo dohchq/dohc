@@ -4724,6 +4724,26 @@ async fn polls_and_lanes_cross_the_rpc_boundary() {
     .await;
     assert_eq!(wrong.message, "invalid-poll-choice");
 
+    let repeated_choice = call_error_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        "send-repeated-choice",
+        json!({
+            "threadId": "poll-thread",
+            "messageId": "repeated-choice",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Which day?",
+            "options": ["Friday", " Friday "],
+            "nowMs": 30,
+        }),
+    )
+    .await;
+    assert_eq!(repeated_choice.code, ErrorCode::InvalidParams);
+    assert_eq!(repeated_choice.message, "Each choice appears once.");
+
     call_with_idempotency(
         &transport,
         &handle,

@@ -21,6 +21,8 @@ fn is_safe_identifier(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+type CompletionBatch = Arc<std::sync::Mutex<Option<std::collections::HashMap<String, i64>>>>;
+
 /// A single owned writable connection. Not `Sync`, not cloneable: the workspace
 /// actor owns exactly one and never lets it cross threads
 /// (one writer per actor). Dropping it closes the connection deterministically.
@@ -34,6 +36,7 @@ pub struct EngineStore {
     freshly_created: bool,
     database_path: PathBuf,
     passive: bool,
+    completed_batch: CompletionBatch,
 }
 
 /// The outcome of a transactional unit run through
@@ -101,6 +104,7 @@ impl EngineStore {
             freshly_created: opened.freshly_created,
             database_path: path.to_path_buf(),
             passive: true,
+            completed_batch: Arc::default(),
         })
     }
 
@@ -134,6 +138,7 @@ impl EngineStore {
             passive: false,
             #[cfg(feature = "fault-injection")]
             harness_commits: 0,
+            completed_batch: Arc::default(),
         })
     }
 
@@ -155,6 +160,7 @@ impl EngineStore {
             #[cfg(feature = "fault-injection")]
             harness_commits: 0,
             passive: false,
+            completed_batch: Arc::default(),
         })
     }
 
@@ -178,6 +184,7 @@ impl EngineStore {
             #[cfg(feature = "fault-injection")]
             harness_commits: 0,
             passive: false,
+            completed_batch: Arc::default(),
         })
     }
 
@@ -204,6 +211,7 @@ impl EngineStore {
             #[cfg(feature = "fault-injection")]
             harness_commits: 0,
             passive,
+            completed_batch: Arc::default(),
         })
     }
 
@@ -598,7 +606,69 @@ impl EngineStore {
         &self,
         job_id: &str,
     ) -> Result<Option<MaterializationJob>, StorageError> {
-        materialize::load_job(&self.conn, job_id)
+        let mut job = materialize::load_job(&self.conn, job_id)?;
+        if self
+            .completed_batch
+            .lock()
+            .expect("status batch mutex")
+            .as_ref()
+            .is_some_and(|batch| batch.contains_key(job_id))
+            && let Some(job) = job.as_mut()
+        {
+            job.status = JobStatus::Complete;
+        }
+        Ok(job)
+    }
+
+    /// Finish file IO before publishing its completion statuses in one durable commit.
+    /// A crash before publication leaves replayable pending jobs.
+    pub fn with_materialization_status_batch<T, E>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<StorageError>,
+    {
+        struct Reset(CompletionBatch);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                *self.0.lock().expect("status batch mutex") = None;
+            }
+        }
+        let nested = self
+            .completed_batch
+            .lock()
+            .expect("status batch mutex")
+            .is_some();
+        if nested {
+            return body(self);
+        }
+        *self.completed_batch.lock().expect("status batch mutex") =
+            Some(std::collections::HashMap::new());
+        let reset = Reset(Arc::clone(&self.completed_batch));
+        let result = body(self)?;
+        let completed = self
+            .completed_batch
+            .lock()
+            .expect("status batch mutex")
+            .take()
+            .unwrap_or_default();
+        drop(reset);
+        if !completed.is_empty() {
+            let outcome = self.write_with(&crate::NoFaults, |tx| {
+                for (id, now) in completed {
+                    materialize::mark_complete(tx, &id, now)?;
+                }
+                Ok::<_, StorageError>(())
+            })?;
+            if !matches!(outcome, TxnOutcome::Committed(())) {
+                return Err(StorageError::persist_public(std::io::Error::other(
+                    "status batch commit interrupted",
+                ))
+                .into());
+            }
+        }
+        Ok(result)
     }
 
     /// Mark a job complete (content durably on disk).
@@ -607,6 +677,15 @@ impl EngineStore {
         job_id: &str,
         now_ms: i64,
     ) -> Result<(), StorageError> {
+        if let Some(batch) = self
+            .completed_batch
+            .lock()
+            .expect("status batch mutex")
+            .as_mut()
+        {
+            batch.insert(job_id.to_owned(), now_ms);
+            return Ok(());
+        }
         materialize::mark_complete(&self.conn, job_id, now_ms)
     }
 

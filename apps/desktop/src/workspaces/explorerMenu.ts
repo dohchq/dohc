@@ -1,5 +1,5 @@
 import type { ExplorerMenuCommand } from "../ipc/bridgeContract";
-import { shareViewTakesLocalWrites, type ShareViewWriteScope } from "./shareWriteGate";
+import { workspaceCreateOffers, type ShareViewWriteScope } from "./shareWriteGate";
 
 // WHAT THE EXPLORER'S CONTEXT MENU OFFERS — one decision, in one place.
 //
@@ -40,20 +40,14 @@ const separator: ExplorerMenuEntry = { kind: "separator" };
 
 export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry[] {
   const isSharedView = scope.shareView !== null;
-  // The four routed operations — create, rename, delete, import —
-  // offered exactly where their handlers accept them: everywhere in an
-  // ordinary workspace, and in a share view only at the level
-  // `shareViewTakesLocalWrites` names. One rule, asked once, by the menu and
-  // by the handlers both.
-  const canWrite = scope.shareView === null || shareViewTakesLocalWrites(scope.shareView);
-  // New folder is offered nowhere in a share view, at any level: the engine
-  // has no folder object, so an empty folder is nothing the recipient could
-  // send. `ShareViewFiles` therefore exposes no empty-folder operation.
-  const canCreateFolder = canWrite && !isSharedView;
-  // A document Collection is a folder with a schema file. A share view that
-  // takes writes can make one: the schema file is the Collection's first
-  // file, and the folder comes with it (ADR 0013).
-  const canCreateCollection = canWrite;
+  // The four routed operations — create, rename, delete, import — offered
+  // exactly where their handlers accept them. One rule, asked once, by the
+  // menu, the command rows and the handlers.
+  const {
+    write: canWrite,
+    folder: canCreateFolder,
+    collection: canCreateCollection,
+  } = workspaceCreateOffers(scope.shareView);
 
   if (scope.isMountPath) {
     return [

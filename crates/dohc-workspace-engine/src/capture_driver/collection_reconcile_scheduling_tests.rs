@@ -264,7 +264,7 @@ async fn held_collection_idle_ticks(pending_sibling: bool) {
     let key = DocKey::new(WORKSPACE_ID, "main", &object_id).expect("record key");
     let lease = leases.acquire(&key).expect("hold record lease");
 
-    let seed = manifest_seed(scratch.path(), &actor, WORKSPACE_ID)
+    let seed = manifest_seed(scratch.path(), &actor, WORKSPACE_ID, None)
         .await
         .unwrap()
         .into_scan_seed();

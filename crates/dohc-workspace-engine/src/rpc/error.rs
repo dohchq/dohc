@@ -100,6 +100,9 @@ pub(crate) fn store_busy(error: &RuntimeError) -> bool {
 }
 
 pub(super) fn map_runtime(error: RuntimeError) -> WireError {
+    if let RuntimeError::Domain(DomainError::UndoRefused { .. }) = &error {
+        return WireError::new(ErrorCode::Conflict, error.to_string());
+    }
     if let RuntimeError::CaptureFileHeld { path } = &error {
         return WireError::new(ErrorCode::Conflict, format!("capture-file-held: {path}"));
     }
@@ -230,6 +233,10 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Relay(RelayError::ShareReadOnly) => {
             return WireError::new(ErrorCode::InvalidParams, "share-read-only");
         }
+        // The caller matches the code prefix and shows the reason.
+        RuntimeError::Relay(RelayError::HostedRefusal(reason)) => {
+            return WireError::new(ErrorCode::InvalidParams, format!("invalid-input: {reason}"));
+        }
         RuntimeError::Relay(RelayError::ClaimRefused(reason)) => {
             let mut wire = map_runtime(RuntimeError::Relay((**reason).clone()));
             wire.message = "relay-claim-refused".to_owned();
@@ -244,6 +251,10 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
         }
         RuntimeError::Relay(RelayError::Partitioned) => {
             return WireError::new(ErrorCode::WorkspaceUnavailable, "relay-unreachable");
+        }
+        // Only the session host's service reads it, and it must find the file.
+        RuntimeError::HostedFileUnexpected { .. } => {
+            return WireError::new(ErrorCode::Internal, error.to_string());
         }
         RuntimeError::SceneAssetDeletePending => {
             return WireError::new(
@@ -384,7 +395,7 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         | RelayError::UnknownServerCode(_)
         | RelayError::HttpStatus(_)
         | RelayError::Local(_) => ErrorCode::Internal,
-        RelayError::BadRequest => ErrorCode::InvalidParams,
+        RelayError::BadRequest | RelayError::HostedRefusal(_) => ErrorCode::InvalidParams,
     }
 }
 
@@ -421,6 +432,12 @@ fn map_domain(error: DomainError) -> WireError {
         DomainError::InvalidText { .. } => (InvalidParams, "invalid-text"),
         DomainError::NotSecretPath => (InvalidParams, "not-secret-path"),
         DomainError::SecretMomentNotFound => (InvalidParams, "moment-not-found"),
+        // The caller matches the code prefix and shows the reason.
+        DomainError::InvalidInput {
+            reason: reason @ dohc_engine_domain::HOSTED_REPLICA_WRITE_REFUSED,
+        } => {
+            return WireError::new(InvalidParams, format!("invalid-input: {reason}"));
+        }
         DomainError::InvalidInput { .. } => (InvalidParams, "invalid-input"),
         DomainError::StateCorrupt { .. } => (Internal, "state-corrupt"),
         DomainError::Storage(_) => (Internal, "persist-failed"),
@@ -428,6 +445,10 @@ fn map_domain(error: DomainError) -> WireError {
             code: "state-corrupt",
             ..
         } => (Internal, "state-corrupt"),
+        DomainError::Chat {
+            code: "invalid-poll-options",
+            reason,
+        } => (InvalidParams, reason),
         DomainError::Chat { code, .. } => (InvalidParams, code),
         DomainError::Crypto(error) => {
             let code = match error {
@@ -814,6 +835,7 @@ mod tests {
             reason: "test invalid input",
         }));
         assert_eq!(invalid.code, ErrorCode::InvalidParams);
+        assert_eq!(invalid.message, "invalid-input");
 
         // S1 (BINHEAD): a text read of a binary head is a normal user error, not
         // an internal server fault — it must map to InvalidParams, never fall
@@ -875,6 +897,155 @@ mod tests {
                 (code, message, Retryability::No)
             );
         }
+    }
+
+    /// A session host's hosted replica refuses a named version. The write
+    /// rolls back and the caller hears why, as its own input error rather than
+    /// an internal storage failure.
+    #[tokio::test]
+    async fn a_hosted_replica_refusal_reaches_the_caller_with_its_reason() {
+        use dohc_engine_runtime::{CancellationToken, NoFaults};
+        use dohc_engine_storage::EngineStore;
+        use std::sync::Arc;
+
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        {
+            let mut store = EngineStore::open(&db, 1).unwrap();
+            dohc_engine_sync::create_hosted_replica(
+                &mut store,
+                "ws",
+                "service-host:host",
+                "epoch",
+                "stream",
+                1,
+                &NoFaults,
+            )
+            .unwrap();
+            dohc_engine_domain::VersionedTextStore::new(&mut store)
+                .ensure_main_version("ws", "main", 1, &NoFaults)
+                .unwrap();
+        }
+        let supervisor = dohc_engine_runtime::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).unwrap().actor;
+        let refused = actor
+            .create_named_version(
+                dohc_engine_domain::CreateNamedVersion {
+                    workspace_id: "ws".into(),
+                    new_version_id: "draft".into(),
+                    name: "Draft".into(),
+                    from_version_id: "main".into(),
+                    now_ms: 2,
+                    request_id: None,
+                },
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        let surfaced = map_runtime(refused);
+        assert_eq!(
+            (surfaced.code, surfaced.message.as_str()),
+            (
+                ErrorCode::InvalidParams,
+                "invalid-input: a hosted replica writes only its hosted documents"
+            )
+        );
+        let versions = actor.list_versions("ws".into()).await.unwrap();
+        assert_eq!(versions.len(), 1, "the refused version rolled back");
+        supervisor.close(&db).unwrap();
+    }
+
+    /// Relay operations a store cannot take as a hosted replica keep their
+    /// reason: creating one on a passive store, and adopting an ordinary
+    /// identity on one that exists.
+    #[tokio::test]
+    async fn hosted_relay_refusals_reach_the_caller_with_their_reason() {
+        use dohc_engine_runtime::{
+            ActorHandle, CancellationToken, NoFaults, RelayConfiguration, RelayOperation,
+        };
+        use dohc_engine_storage::EngineStore;
+
+        let relay = |actor: ActorHandle, operation: RelayOperation| async move {
+            let refused = actor
+                .relay(
+                    RelayConfiguration {
+                        base_url: "https://relay.invalid".to_owned(),
+                        bearer_token: "token".to_owned(),
+                        #[cfg(debug_assertions)]
+                        allow_insecure_loopback_for_tests: false,
+                    },
+                    operation,
+                    dohc_engine_collab::LeaseRegistry::default(),
+                    CancellationToken::new(),
+                    None,
+                )
+                .await
+                .unwrap_err();
+            let surfaced = map_runtime(refused);
+            (surfaced.code, surfaced.message)
+        };
+        let supervisor = dohc_engine_runtime::WorkspaceSupervisor::new();
+
+        let passive_scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let passive = dohc_engine_testkit::engine_db_path(&passive_scratch).unwrap();
+        let actor = supervisor
+            .open_passive_root_bound(&passive, 1, "root-token", None)
+            .unwrap()
+            .actor;
+        assert_eq!(
+            relay(
+                actor,
+                RelayOperation::CreateHostedReplica {
+                    workspace_id: "ws".into(),
+                    new_origin_id: "service-host:host".into(),
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    created_at_ms: 2,
+                }
+            )
+            .await,
+            (
+                ErrorCode::InvalidParams,
+                "invalid-input: a passive store cannot host documents".to_owned()
+            )
+        );
+        supervisor.close(&passive).unwrap();
+
+        let hosted_scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let hosted = dohc_engine_testkit::engine_db_path(&hosted_scratch).unwrap();
+        {
+            let mut store = EngineStore::open(&hosted, 1).unwrap();
+            dohc_engine_sync::create_hosted_replica(
+                &mut store,
+                "ws",
+                "service-host:host",
+                "epoch",
+                "stream",
+                1,
+                &NoFaults,
+            )
+            .unwrap();
+        }
+        let actor = supervisor.open(&hosted, 1).unwrap().actor;
+        assert_eq!(
+            relay(
+                actor,
+                RelayOperation::AdoptJoinIdentity {
+                    workspace_id: "ws".into(),
+                    new_origin_id: "origin".into(),
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    created_at_ms: 2,
+                }
+            )
+            .await,
+            (
+                ErrorCode::InvalidParams,
+                "invalid-input: a hosted replica uses only its hosted feed".to_owned()
+            )
+        );
+        supervisor.close(&hosted).unwrap();
     }
 
     #[test]

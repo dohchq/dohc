@@ -5,7 +5,8 @@ use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use dohc_engine_sync::{
     BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobHaveRequest,
     BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse, DirectWritePushOutcome,
-    EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
+    EpochRequest, EpochResponse, HostedCursor, HostedPassOutcome, HostedPullRequest,
+    HostedPullResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
     KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse,
     MAX_BASE_REPAIR_LOOKUPS, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
     PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse, RelayCursor,
@@ -14,11 +15,17 @@ use dohc_engine_sync::{
     ShareProposalSubmitOutcome, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
     ShareViewPullOutcome, ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome,
     SharedChannelPushOutcome, SharedChannelRequest, SharedChannelResponse, SyncError,
-    SyncPassOutcome, adopt_join_identity, create_claim_identity, read_sync_identity,
+    SyncPassOutcome, adopt_join_identity, create_claim_identity, create_hosted_replica,
+    is_hosted_replica, read_sync_identity,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
+
+#[cfg(not(test))]
+use dohc_engine_storage::NoFaults as CursorFaults;
+#[cfg(test)]
+use relay_push_tests::cache_tests::CursorFaults;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RelayConfiguration {
@@ -142,6 +149,89 @@ pub enum RelayOperation {
         workspace_id: String,
         cursor: ShareCursor,
     },
+    /// Make a pristine workspace the session host's hosted replica under the
+    /// relay's coordinate, before any other write gives it an ordinary one.
+    CreateHostedReplica {
+        workspace_id: String,
+        new_origin_id: String,
+        replication_epoch: String,
+        stream_identity: String,
+        created_at_ms: i64,
+    },
+    /// One pass of the hosted feed. Its cursor commits with
+    /// `CommitHostedCursor` once its changed paths are materialized. A pass
+    /// that adopts a new scope, and every commit, then retire the documents
+    /// that left the scope, as `root` holds them.
+    PullHosted {
+        workspace_id: String,
+        root: std::path::PathBuf,
+        now_ms: i64,
+    },
+    CommitHostedCursor {
+        workspace_id: String,
+        cursor: HostedCursor,
+        root: std::path::PathBuf,
+        now_ms: i64,
+    },
+}
+
+impl RelayOperation {
+    fn workspace_id(&self) -> &str {
+        match self {
+            Self::Push { workspace_id, .. }
+            | Self::Pull { workspace_id, .. }
+            | Self::CommitCursor { workspace_id, .. }
+            | Self::Probe { workspace_id }
+            | Self::Claim { workspace_id, .. }
+            | Self::AdoptJoinIdentity { workspace_id, .. }
+            | Self::RecoverOrigin { workspace_id, .. }
+            | Self::UploadKeyEnvelope { workspace_id, .. }
+            | Self::DownloadKeyEnvelope { workspace_id }
+            | Self::PullSharedChannel { workspace_id, .. }
+            | Self::PushSharedChannel { workspace_id, .. }
+            | Self::PullShareView { workspace_id, .. }
+            | Self::RecordShareViewIdentity { workspace_id, .. }
+            | Self::SubmitShareProposal { workspace_id, .. }
+            | Self::PushDirectWrites { workspace_id, .. }
+            | Self::CommitShareViewCursor { workspace_id, .. }
+            | Self::CreateHostedReplica { workspace_id, .. }
+            | Self::PullHosted { workspace_id, .. }
+            | Self::CommitHostedCursor { workspace_id, .. } => workspace_id,
+        }
+    }
+
+    /// The replicas this operation runs on. A push goes to whichever log
+    /// its replica writes.
+    fn replicas(&self) -> Replicas {
+        match self {
+            Self::Push { .. } => Replicas::Both,
+            Self::CreateHostedReplica { .. }
+            | Self::PullHosted { .. }
+            | Self::CommitHostedCursor { .. } => Replicas::Hosted,
+            Self::Pull { .. }
+            | Self::CommitCursor { .. }
+            | Self::Probe { .. }
+            | Self::Claim { .. }
+            | Self::AdoptJoinIdentity { .. }
+            | Self::RecoverOrigin { .. }
+            | Self::UploadKeyEnvelope { .. }
+            | Self::DownloadKeyEnvelope { .. }
+            | Self::PullSharedChannel { .. }
+            | Self::PushSharedChannel { .. }
+            | Self::PullShareView { .. }
+            | Self::RecordShareViewIdentity { .. }
+            | Self::SubmitShareProposal { .. }
+            | Self::PushDirectWrites { .. }
+            | Self::CommitShareViewCursor { .. } => Replicas::Ordinary,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Replicas {
+    Ordinary,
+    Hosted,
+    Both,
 }
 
 const RELAY_IO_PENDING: &str = "relay-io-pending";
@@ -154,6 +244,8 @@ const RELAY_IO_ABORTED: &str = "relay-io-aborted";
 enum RelayIoRequest {
     Push(PushRequest),
     Pull(PullRequest),
+    PushHosted(PushRequest),
+    PullHosted(HostedPullRequest),
     LookupCoordinates(Vec<LogCoordinateRequest>),
     Probe(ProbeRequest),
     Claim(ClaimRequest),
@@ -174,8 +266,10 @@ enum RelayIoRequest {
 
 #[derive(Debug, Clone)]
 enum RelayIoResponse {
+    /// Answers both log pushes.
     Push(PushResponse),
     Pull(PullResponse),
+    PullHosted(HostedPullResponse),
     LookupCoordinates(Vec<LogCoordinateResponse>),
     Probe(ProbeResponse),
     Claim(ClaimResponse),
@@ -229,6 +323,7 @@ impl DeferredRelayTransport {
                 && matches!(
                     state.completed[index].0,
                     RelayIoRequest::Push(_)
+                        | RelayIoRequest::PushHosted(_)
                         | RelayIoRequest::ShareLogPush(_)
                         | RelayIoRequest::UploadBlob(_)
                         | RelayIoRequest::DownloadBlobs(_)
@@ -292,7 +387,7 @@ impl DeferredRelayTransport {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Ok(RelayIoResponse::Push(response)) = &result
-            && let RelayIoRequest::Push(request) = &request
+            && let RelayIoRequest::Push(request) | RelayIoRequest::PushHosted(request) = &request
             && !request.ops.is_empty()
         {
             state.workspace_pushed = state.workspace_pushed.saturating_add(response.inserted);
@@ -374,6 +469,14 @@ impl RelayTransport for DeferredRelayTransport {
 
     relay_transport_method!(push, PushRequest, Push, PushResponse, Push);
     relay_transport_method!(pull, PullRequest, Pull, PullResponse, Pull);
+    relay_transport_method!(push_hosted, PushRequest, PushHosted, PushResponse, Push);
+    relay_transport_method!(
+        pull_hosted,
+        HostedPullRequest,
+        PullHosted,
+        HostedPullResponse,
+        PullHosted
+    );
     fn lookup_log_coordinate(
         &self,
         request: LogCoordinateRequest,
@@ -1580,6 +1683,7 @@ pub enum RelayOperationOutcome {
     Sync(SyncPassOutcome),
     CursorCommitted {
         sharing_declined: Vec<dohc_engine_sync::SharingDeclined>,
+        writer_cache_changed: bool,
     },
     Probe(bool),
     Claimed,
@@ -1598,6 +1702,17 @@ pub enum RelayOperationOutcome {
     ShareViewIdentity(ShareViewIdentityRecord),
     ShareProposalSubmitted(ShareProposalSubmitOutcome),
     DirectWritesPushed(DirectWritePushOutcome),
+    HostedReplicaCreated,
+    HostedPass(HostedPassOutcome),
+    HostedCursorCommitted {
+        /// `false` when the scope moved since the pass fetched; nothing
+        /// committed.
+        committed: bool,
+        /// Retirement after the commit: `Ok(true)` when a document that left
+        /// the scope retired, so work that waited for its path can apply and
+        /// the caller pulls again. Its failure leaves the commit standing.
+        retirement: Result<bool, RuntimeError>,
+    },
 }
 
 /// What a share view's identity call settled on, including the answer the
@@ -1732,7 +1847,17 @@ impl ActorHandle {
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
-        let http_transport = Arc::new(build_http_transport(configuration)?);
+        let http_transport = build_http_transport(configuration)?;
+        // A hosted replica reads and writes only the session host's scoped feed.
+        let workspace_id = operation.workspace_id().to_owned();
+        let hosted = self
+            .run(move |store, _cache| Ok(is_hosted_replica(store, &workspace_id)?))
+            .await?;
+        let http_transport = Arc::new(if hosted {
+            http_transport.hosted()
+        } else {
+            http_transport
+        });
         // Keep the deferred I/O state out of callers' inline RPC futures.
         Box::pin(self.relay_with_io(
             http_transport.publishes_native_settlements(),
@@ -1776,6 +1901,7 @@ impl ActorHandle {
                 .run(move |store, cache| {
                     let _reservation = queued_reservation;
                     let is_push = matches!(&queued_operation, RelayOperation::Push { .. });
+                    let is_pull = matches!(&queued_operation, RelayOperation::Pull { .. });
                     let outcome = if queued_token.is_cancelled() {
                         Err(RuntimeError::Cancelled)
                     } else {
@@ -1788,9 +1914,37 @@ impl ActorHandle {
                             &queued_claims,
                         )
                     };
-                    // Push handles enrollment resets below. Every other
-                    // operation clears by default.
-                    if !is_push {
+                    // Push handles enrollment resets below. A pull that only
+                    // redelivers durable echoes leaves the writer cache valid;
+                    // applied or materialized work still invalidates it.
+                    let pull_changed = match &outcome {
+                        Ok(RelayOperationOutcome::Sync(
+                            SyncPassOutcome::Complete {
+                                applied,
+                                changed_paths,
+                                ..
+                            }
+                            | SyncPassOutcome::CrashedAfterApply {
+                                applied,
+                                changed_paths,
+                                ..
+                            },
+                        )) => *applied > 0 || !changed_paths.is_empty(),
+                        Err(RuntimeError::Relay(RelayError::Local(reason)))
+                            if reason == RELAY_IO_PENDING =>
+                        {
+                            false
+                        }
+                        _ => true,
+                    };
+                    let unchanged_commit = matches!(
+                        &outcome,
+                        Ok(RelayOperationOutcome::CursorCommitted {
+                            writer_cache_changed: false,
+                            ..
+                        })
+                    );
+                    if !is_push && !unchanged_commit && (!is_pull || pull_changed) {
                         cache.clear();
                     }
                     outcome
@@ -2071,6 +2225,12 @@ fn execute_blocking_http_request(
     match request {
         RelayIoRequest::Push(request) => transport.push(request).map(RelayIoResponse::Push),
         RelayIoRequest::Pull(request) => transport.pull(request).map(RelayIoResponse::Pull),
+        RelayIoRequest::PushHosted(request) => {
+            transport.push_hosted(request).map(RelayIoResponse::Push)
+        }
+        RelayIoRequest::PullHosted(request) => transport
+            .pull_hosted(request)
+            .map(RelayIoResponse::PullHosted),
         RelayIoRequest::LookupCoordinates(_) => Err(RelayError::InvalidResponse),
         RelayIoRequest::Probe(request) => transport.probe(request).map(RelayIoResponse::Probe),
         RelayIoRequest::Claim(request) => transport
@@ -2140,6 +2300,7 @@ fn run_relay_operation(
     operation: RelayOperation,
     leases: &LeaseRegistry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
+    let replicas = operation.replicas();
     if store.is_passive()
         && !matches!(
             &operation,
@@ -2148,9 +2309,19 @@ fn run_relay_operation(
                 | RelayOperation::AdoptJoinIdentity { .. }
         )
     {
+        if replicas == Replicas::Hosted {
+            return Err(RuntimeError::Relay(RelayError::HostedRefusal(
+                dohc_engine_sync::PASSIVE_STORE_CANNOT_HOST,
+            )));
+        }
         return Err(RuntimeError::Sync(SyncError::InvalidInput {
             reason: "passive store cannot execute this relay operation",
         }));
+    }
+    // Before any state change or relay request: a hosted replica reaches only
+    // its hosted feed.
+    if replicas == Replicas::Ordinary && is_hosted_replica(store, operation.workspace_id())? {
+        return Err(RuntimeError::Relay(dohc_engine_sync::hosted_feed_only()));
     }
     match operation {
         RelayOperation::Push {
@@ -2195,13 +2366,14 @@ fn run_relay_operation(
             store,
             &workspace_id,
             &cursor,
-            &NoFaults,
+            &CursorFaults,
             leases,
             now_ms,
         )? {
-            TxnOutcome::Committed(sharing_declined) => {
-                Ok(RelayOperationOutcome::CursorCommitted { sharing_declined })
-            }
+            TxnOutcome::Committed(commit) => Ok(RelayOperationOutcome::CursorCommitted {
+                sharing_declined: commit.sharing_declined,
+                writer_cache_changed: commit.writer_cache_changed,
+            }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
         RelayOperation::Probe { workspace_id } => {
@@ -2421,10 +2593,185 @@ fn run_relay_operation(
         } => match client.commit_share_view_cursor(store, &workspace_id, &cursor, &NoFaults)? {
             TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted {
                 sharing_declined: Vec::new(),
+                writer_cache_changed: true,
+            }),
+            TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+        },
+        RelayOperation::CreateHostedReplica {
+            workspace_id,
+            new_origin_id,
+            replication_epoch,
+            stream_identity,
+            created_at_ms,
+        } => match create_hosted_replica(
+            store,
+            &workspace_id,
+            &new_origin_id,
+            &replication_epoch,
+            &stream_identity,
+            created_at_ms,
+            &NoFaults,
+        )
+        .map_err(|error| match error {
+            SyncError::InvalidInput { reason } => {
+                RuntimeError::Relay(RelayError::HostedRefusal(reason))
+            }
+            error => RuntimeError::Sync(error),
+        })? {
+            TxnOutcome::Committed(_) => Ok(RelayOperationOutcome::HostedReplicaCreated),
+            TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+        },
+        RelayOperation::PullHosted {
+            workspace_id,
+            root,
+            now_ms,
+        } => {
+            let pass =
+                client.pull_hosted_workspace(store, doc_cache, &workspace_id, &NoFaults, leases)?;
+            // A pass without a cursor adopted a new scope.
+            if pass.pending_cursor.is_none() {
+                retire_departed_hosted(store, doc_cache, leases, &workspace_id, &root, now_ms)?;
+            }
+            Ok(RelayOperationOutcome::HostedPass(pass))
+        }
+        RelayOperation::CommitHostedCursor {
+            workspace_id,
+            cursor,
+            root,
+            now_ms,
+        } => match client.commit_hosted_cursor(store, &workspace_id, &cursor, &NoFaults)? {
+            TxnOutcome::Committed(committed) => Ok(RelayOperationOutcome::HostedCursorCommitted {
+                committed,
+                retirement: retire_departed_hosted(
+                    store,
+                    doc_cache,
+                    leases,
+                    &workspace_id,
+                    &root,
+                    now_ms,
+                ),
             }),
             TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
         },
     }
+}
+
+/// Retire each hosted document that left the scope once nothing of it is
+/// left to settle, deliver or push: no live session holds it, the unload
+/// checks pass, and its file holds its head or nothing. Each retires in its
+/// own transaction, which records its file as retired; the file goes after,
+/// and a file an earlier pass could not remove goes first. A file holding
+/// anything else is a bug in a service root nothing else writes to, so
+/// retirement stops and names it. Answers whether any document retired or
+/// any path came free.
+fn retire_departed_hosted(
+    store: &mut EngineStore,
+    doc_cache: &mut WriterDocCache,
+    leases: &LeaseRegistry,
+    workspace_id: &str,
+    root: &std::path::Path,
+    now_ms: i64,
+) -> Result<bool, RuntimeError> {
+    let active = dohc_engine_domain::VersionedTextStore::new(store)
+        .get_active_version(workspace_id)?
+        .version_id;
+    let mut retired = remove_retired_files(store, workspace_id, root)?;
+    'departed: for document in dohc_engine_sync::departed_hosted_documents(store, workspace_id)? {
+        let versions = document
+            .heads
+            .iter()
+            .map(|head| &head.version_id)
+            .chain(&document.ydoc_versions)
+            .collect::<std::collections::BTreeSet<_>>();
+        let keys = versions
+            .into_iter()
+            .map(|version_id| {
+                dohc_engine_collab::DocKey::new(workspace_id, version_id, &document.object_id)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if keys.iter().any(|key| leases.is_held(key))
+            || !dohc_engine_sync::hosted_document_retirable(
+                store,
+                workspace_id,
+                &document.object_id,
+            )?
+        {
+            continue;
+        }
+        for key in &keys {
+            if super::ydoc::ydoc_unload_pending(store, key, root, now_ms)?.is_some() {
+                continue 'departed;
+            }
+        }
+        let files = document
+            .heads
+            .iter()
+            .filter(|head| head.version_id == active)
+            .collect::<Vec<_>>();
+        for head in &files {
+            use dohc_engine_files::ProjectionTargetState as File;
+            match dohc_engine_files::probe_projection_target(
+                root,
+                &head.path,
+                dohc_engine_files::ProjectionTargetKind::Plaintext,
+            ) {
+                File::Absent => {}
+                File::Text { sha256 } | File::Binary { sha256 } if sha256 == head.sha256 => {}
+                _ => {
+                    return Err(RuntimeError::HostedFileUnexpected {
+                        path: head.path.clone(),
+                    });
+                }
+            }
+        }
+        match dohc_engine_sync::retire_hosted_document(
+            store,
+            workspace_id,
+            &document.object_id,
+            &active,
+            &NoFaults,
+        )? {
+            TxnOutcome::Committed(true) => {}
+            TxnOutcome::Committed(false) => continue,
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+        retired = true;
+        for key in &keys {
+            doc_cache.remove(key);
+            doc_cache.unpin(key);
+        }
+        remove_retired_files(store, workspace_id, root)?;
+    }
+    Ok(retired)
+}
+
+/// Remove each retired file that still holds its document's head, and free
+/// its path. One that holds anything else stays on disk, its path is freed,
+/// and it is named. A removal that fails keeps the path held for the next
+/// pass. Answers whether any path came free.
+fn remove_retired_files(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    root: &std::path::Path,
+) -> Result<bool, RuntimeError> {
+    let files = dohc_engine_sync::retired_hosted_files(store, workspace_id)?;
+    let freed = !files.is_empty();
+    for file in files {
+        let removed = dohc_engine_files::remove_file_holding(root, &file.path, &file.sha256)?;
+        match dohc_engine_sync::forget_retired_hosted_file(
+            store,
+            workspace_id,
+            &file.path,
+            &NoFaults,
+        )? {
+            TxnOutcome::Committed(()) => {}
+            TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+        }
+        if !removed {
+            return Err(RuntimeError::HostedFileUnexpected { path: file.path });
+        }
+    }
+    Ok(freed)
 }
 
 /// The level gate on share-view enrolment, read at the one place
@@ -2656,6 +3003,172 @@ mod share_view_identity_tests {
             ShareViewIdentityRecord::AlreadyRecorded,
             "every refresh calls this; a second row would split the log",
         );
+    }
+}
+
+#[cfg(test)]
+mod hosted_refusal_tests {
+    use super::*;
+    use dohc_engine_sync::{CursorKind, ShareAccess, ShareGrant};
+    use dohc_engine_testkit::ScratchDir;
+
+    /// Every row of every table, to show a refusal changed nothing.
+    fn everything(store: &EngineStore) -> Vec<String> {
+        store
+            .read_with(|conn| {
+                let tables = conn
+                    .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")?
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut rows = Vec::new();
+                for table in tables {
+                    let mut statement = conn.prepare(&format!("SELECT * FROM \"{table}\""))?;
+                    let columns = statement.column_count();
+                    let mut query = statement.query([])?;
+                    while let Some(row) = query.next()? {
+                        let values = (0..columns)
+                            .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        rows.push(format!("{table}: {values:?}"));
+                    }
+                }
+                Ok::<_, rusqlite::Error>(rows)
+            })
+            .unwrap()
+    }
+
+    /// Sol's slice-4 review: ordinary operations reached ordinary relay
+    /// routes from a hosted replica, and a claim left `pending` behind.
+    /// Each is refused with its reason before it writes or sends anything.
+    #[test]
+    fn a_hosted_replica_refuses_every_ordinary_operation_untouched() {
+        let scratch = ScratchDir::new().unwrap();
+        let path = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&path, 1_000).unwrap();
+        create_hosted_replica(
+            &mut store,
+            "ws",
+            "service-host:host",
+            "epoch",
+            "stream",
+            1_000,
+            &NoFaults,
+        )
+        .unwrap();
+        let ws = || "ws".to_owned();
+        let granted = || ShareGrant {
+            paths: Vec::new(),
+            version_id: None,
+            access: ShareAccess::Edit,
+        };
+        let operations = [
+            RelayOperation::Pull {
+                workspace_id: ws(),
+                now_ms: 2_000,
+            },
+            RelayOperation::CommitCursor {
+                workspace_id: ws(),
+                cursor: RelayCursor {
+                    cursor: 1,
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    bootstrap_complete: true,
+                    settlement_report_id: None,
+                },
+                now_ms: 2_000,
+            },
+            RelayOperation::Probe { workspace_id: ws() },
+            RelayOperation::Claim {
+                workspace_id: ws(),
+                account_id: Some("account".into()),
+                new_origin_id: "origin".into(),
+                new_replication_epoch: "epoch-2".into(),
+                new_stream_identity: "stream-2".into(),
+                created_at_ms: 2_000,
+            },
+            RelayOperation::AdoptJoinIdentity {
+                workspace_id: ws(),
+                new_origin_id: "origin".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                created_at_ms: 2_000,
+            },
+            RelayOperation::RecoverOrigin {
+                workspace_id: ws(),
+                new_origin_id: "service-host:rebased".into(),
+            },
+            RelayOperation::UploadKeyEnvelope {
+                workspace_id: ws(),
+                envelope_json: "{}".into(),
+                if_match: None,
+            },
+            RelayOperation::DownloadKeyEnvelope { workspace_id: ws() },
+            RelayOperation::PullSharedChannel {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                channel_wire_id: "wire".into(),
+            },
+            RelayOperation::PushSharedChannel {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                channel_wire_id: "wire".into(),
+            },
+            RelayOperation::PullShareView {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                granted: granted(),
+            },
+            RelayOperation::RecordShareViewIdentity {
+                workspace_id: ws(),
+                access: ShareAccess::Edit,
+                origin_id: "origin".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                created_at_ms: 2_000,
+            },
+            RelayOperation::SubmitShareProposal {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                granted: granted(),
+                submit_id: "submit".into(),
+                max_read_bytes: 0,
+            },
+            RelayOperation::PushDirectWrites {
+                workspace_id: ws(),
+                share_id: "share".into(),
+                granted: granted(),
+                max_read_bytes: 0,
+            },
+            RelayOperation::CommitShareViewCursor {
+                workspace_id: ws(),
+                cursor: ShareCursor {
+                    kind: CursorKind::ShareView,
+                    share_id: "share".into(),
+                    cursor: 1,
+                },
+            },
+        ];
+        let before = everything(&store);
+        let mut cache = WriterDocCache::new();
+        for operation in operations {
+            assert_eq!(operation.replicas(), Replicas::Ordinary, "{operation:?}");
+            let transport = DeferredRelayTransport::default();
+            let refused = execute_relay_operation(
+                &mut store,
+                &mut cache,
+                transport.clone(),
+                operation.clone(),
+                &LeaseRegistry::default(),
+                &ClaimAnnouncer::default(),
+            );
+            assert!(
+                matches!(&refused, Err(RuntimeError::Relay(refusal))
+                    if *refusal == dohc_engine_sync::hosted_feed_only()),
+                "{operation:?}: {refused:?}"
+            );
+            assert_eq!(transport.take_pending(), None, "{operation:?} sent nothing");
+            assert_eq!(everything(&store), before, "{operation:?} wrote nothing");
+        }
     }
 }
 

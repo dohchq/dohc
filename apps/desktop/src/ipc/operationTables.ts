@@ -1,6 +1,7 @@
 import {
   chatOperations,
   systemMotionOperations,
+  serverAccountOperations,
   chatDispatchNoticeOperations,
   crashReportOperations,
   engineYDocAdmissionOperations,
@@ -18,18 +19,25 @@ import {
   workspaceSearchOperations,
   folderAppOfferOperations,
   workspaceVersionOperations,
+  historyOperations,
 } from "./bridgeContract";
+import { settingsOperations } from "./settingsOperations";
 import type { OperationTable } from "./operationTable";
 import { shareCopyOperations } from "./shareCopyOperations";
 import { accessOperations } from "./accessOperations";
+import { workspaceFileOperations } from "./workspaceFileOperations";
 
 // Add each migrated table here when B5 replaces its manual registrations.
 export const OPERATION_TABLES = [
+  workspaceFileOperations,
+  settingsOperations,
   chatOperations,
   shareCopyOperations,
   systemMotionOperations,
+  serverAccountOperations,
   accessOperations,
   workspaceVersionOperations,
+  historyOperations,
   workspaceSearchOperations,
   folderAppOfferOperations,
   crashReportOperations,

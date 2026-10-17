@@ -45,7 +45,7 @@ async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
     std::fs::write(&policy_path, policy).expect("narrow all ordinary files");
     let fingerprint = policy_fingerprint(&root);
     assert!(fingerprint.is_some());
-    let (manifest, generation) = manifest_seed(&root, &actor, WORKSPACE_ID)
+    let (manifest, generation) = manifest_seed(&root, &actor, WORKSPACE_ID, None)
         .await
         .expect("captured-state seed")
         .into_scan_seed()
@@ -76,7 +76,7 @@ async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
             std::fs::remove_dir(&policy_path).expect("remove unreadable policy");
             std::fs::write(&policy_path, policy).expect("restore narrowing policy");
             assert_eq!(policy_fingerprint(&root), fingerprint);
-            seed = manifest_seed(&root, &actor, WORKSPACE_ID)
+            seed = manifest_seed(&root, &actor, WORKSPACE_ID, None)
                 .await
                 .expect("recovery seed")
                 .into_scan_seed();

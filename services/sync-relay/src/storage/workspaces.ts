@@ -7,6 +7,7 @@ import {
   type EnforceWorkspaceIdentityResult,
 } from "./types";
 import { type StorageContext } from "./context";
+import { accountIsFenced, workspaceIsDeleted } from "./accountDeletion";
 import { SyncRelayQuotaExceededError } from "./errors";
 
 function workspaceIdentityFromRow(
@@ -26,6 +27,7 @@ export function claimWorkspace(storage: StorageContext, input: {
     ownerUserId: string;
     createdAtMs: number;
   }): "created" | "owned" | "not-owner" {
+    if (accountIsFenced(storage, input.ownerUserId) || workspaceIsDeleted(storage, input.workspaceId)) return "not-owner";
     return storage.tx(() => {
       const existing = storage.db
         .prepare(
@@ -286,6 +288,13 @@ export function rotateWorkspaceIdentity(storage: StorageContext, input: {
       storage.db
         .prepare(
           `DELETE FROM sync_relay_current_files
+           WHERE workspace_id = ?`,
+        )
+        .run(input.workspaceId);
+      // Enrollments belong to the old identity, so the workspace is no longer hosted.
+      storage.db
+        .prepare(
+          `DELETE FROM sync_relay_service_host_uploads
            WHERE workspace_id = ?`,
         )
         .run(input.workspaceId);

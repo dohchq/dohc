@@ -16,6 +16,7 @@ import { OPEN_EDITORS_DEFAULT_HEIGHT, OPEN_EDITORS_MIN_HEIGHT } from "./workbenc
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
 import { deferred } from "../testing/deferred";
+import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, STORED_CHATS_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
 
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
@@ -567,20 +568,71 @@ describe("collection folders", () => {
     expect(await within(palette).findByText("New collection")).toBeTruthy();
   });
 
-  // assertWritableWorkspace refuses createWorkspaceFile on the share's
-  // presence alone, so New collection from a shared view is a dead click —
-  // the palette must not offer what it can never do.
-  it("does not offer New collection from a read-only shared view", async () => {
+  // A View share takes no writes, so every create or import would end in a
+  // refusal. Neither the palette nor the application menu offers one.
+  it("offers no create or import command from a read-only shared view", async () => {
     const bridge = makeBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
-    renderShell(bridge, SHARE_VIEW);
+    const view = renderShell(bridge, SHARE_VIEW);
 
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
-    // The palette renders and lists something, so the miss below is the
+    // The palette renders and lists something, so the misses below are the
     // gate working, not the palette failing to open.
     await within(palette).findByText("New editor group right");
-    expect(within(palette).queryByText("New collection")).toBeNull();
+    for (const label of ["New file", "New drawing", "New folder", "New collection", "Import files"]) {
+      expect(within(palette).queryByText(label)).toBeNull();
+    }
+    await user.keyboard("{Escape}");
+
+    for (const command of ["new-file", "new-folder", "new-collection", "import-files"] as const) {
+      act(() => bridge.emitMenuCommand(command));
+    }
+    await act(async () => {});
+    expect(screen.queryByRole("heading", { name: "New file" })).toBeNull();
+    expect(screen.queryByLabelText("New folder name")).toBeNull();
+    expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
+    expect(bridge.importWorkspaceFiles).not.toHaveBeenCalled();
+    // The Collection dialog stays hidden without Edit, so a New collection the
+    // menu let through would open only once a registry update grants Edit.
+    const editShare: Workspace = { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } };
+    view.rerender(
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell workspace={editShare} workspaces={[editShare]} {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+      </>,
+    );
+    await act(async () => {});
+    expect(screen.queryByTestId("new-collection-dialog")).toBeNull();
+  });
+
+  it.each<[string, NonNullable<Workspace["shareView"]>]>([
+    ["a damaged", { ...SHARE_VIEW.shareView!, access: "edit", damaged: true }],
+    ["an ended", { ...SHARE_VIEW.shareView!, access: "edit", ended: true }],
+  ])("offers no create or import command from %s Edit share view", async (_name, shareView) => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge, { ...SHARE_VIEW, shareView });
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    await within(palette).findByText("New editor group right");
+    for (const label of ["New file", "New drawing", "New folder", "New collection", "Import files"]) {
+      expect(within(palette).queryByText(label)).toBeNull();
+    }
+  });
+
+  it("offers an Edit share view's creates and imports, but not New folder", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge, { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } });
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    for (const label of ["New file", "New drawing", "New collection", "Import files"]) {
+      expect(await within(palette).findByText(label)).toBeTruthy();
+    }
+    expect(within(palette).queryByText("New folder")).toBeNull();
   });
 });
 
@@ -1415,6 +1467,59 @@ describe("native workbench context menus", () => {
 });
 
 describe("settings entry points", () => {
+  it("shows Settings Agents as unavailable after the workspace fails to open", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace.mockRejectedValue(new Error("Workspace unavailable"));
+    renderShell(bridge);
+    await screen.findByTestId("workspace-open-failed");
+    const user = userEvent.setup();
+    await user.keyboard("{Control>},{/Control}");
+    await screen.findByTestId("settings-dialog");
+    await user.click(screen.getByRole("button", { name: "Agents" }));
+    expect(screen.getByText("Couldn’t open this workspace. Close Settings to try again.")).toBeTruthy();
+    expect(screen.queryByText("Loading settings...")).toBeNull();
+    expect(bridge.getMcpConfig).not.toHaveBeenCalled();
+    expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
+  });
+
+  it("holds Settings Agents before admission without a toast or Notice, then loads", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const admitted = deferred<Awaited<ReturnType<typeof bridge.openWorkspace>>>();
+    bridge.openWorkspace.mockReturnValue(admitted.promise);
+    const config = await bridge.getMcpConfig();
+    bridge.getMcpConfig.mockClear();
+    let ready = false;
+    bridge.getMcpConfig.mockImplementation(async () => {
+      if (!ready) throw new Error("This workspace is no longer active.");
+      return config;
+    });
+    bridge.getAgentRunStatus.mockImplementation(async () => {
+      if (!ready) throw new Error("This workspace is no longer active.");
+      return { activeRun: null, lastRun: null };
+    });
+    renderShell(bridge);
+    const user = userEvent.setup();
+    await user.keyboard("{Control>},{/Control}");
+    await screen.findByTestId("settings-dialog");
+    await user.click(screen.getByRole("button", { name: "Agents" }));
+    expect(bridge.getMcpConfig).not.toHaveBeenCalled();
+    expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByText(/no longer active/)).toBeNull();
+    await act(async () => {
+      ready = true;
+      admitted.resolve(await bridge.getSyncStatus());
+    });
+    await screen.findByTestId("settings-section-agents");
+    await waitFor(() => expect(bridge.getMcpConfig).toHaveBeenCalledOnce());
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(screen.queryByText(/no longer active/)).toBeNull();
+    await user.click(screen.getByLabelText("Close settings"));
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(within(notices).queryByText(/agent settings|refresh agent runs|no longer active/)).toBeNull();
+  });
+
   it("opens settings from the activity bar", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();

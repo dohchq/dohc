@@ -19,6 +19,7 @@ import type {
   SyncStatusResult,
   UsageRecordResult,
   UsageRecordRow,
+  WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { CsvPreviewBound, CsvTable, CsvViewActions, csvColumns } from "../CsvView";
@@ -44,7 +45,8 @@ import { UsageRecordCard, UsageRecordClearConfirm, type UsageRecordView } from "
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
-import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
+import { ObjectGlyph, type ObjectKind } from "../ui/KindGlyph";
+import { MENU_FRAME, MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { SkeletonRows } from "../ui/SkeletonRows";
@@ -54,13 +56,15 @@ import { Titlebar } from "../Titlebar";
 import { ActivityBar } from "../workbench/ActivityBar";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AppRows } from "../workbench/AppsView";
-import { siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
+import { chatTabPath, collectionTabPath, HISTORY_TAB_PATH, siteTabPath, VIEW_IDS } from "../workbench/workbenchState";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { neutralPresentation, relayPresentation } from "../workbench/actorPresentation";
 import { ThreadMessages } from "../workbench/ChatPosts";
 import { ChatComposer, type ChatReactionControls } from "../workbench/chatMessages";
-import { MentionComposer } from "../workbench/MentionComposer";
+import { ComposerModeBar } from "../workbench/ChatsControls";
+import { ComposerCatalogOptions, MentionComposer } from "../workbench/MentionComposer";
+import type { AgentAddressedOffer, AgentOfferState } from "../offers/agentAddressed";
 import { PostCard, type PostData } from "../workbench/PostCard";
 import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
@@ -113,48 +117,23 @@ const SAMPLE_SAM: ActorPresentation = { ...relayPresentation(SAM_PALETTE_SLOT), 
 
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
-// A floating part draws a shadow up to 38px below and 28px beside itself,
-// and its whole shadow must stay in its own capture. The toasts get this
-// padding; the menus get the same room from their taller boxes.
+// A floating part draws a shadow up to 41px below and 31px beside itself in
+// the dark theme, and its whole shadow must stay in its own capture, which
+// takes 16px around its part. So a part needs at least 25px of its own room
+// below a floating box and 15px beside it. The toasts get this 40px padding;
+// the shell's menus get the room from their taller boxes, and the editor's
+// menus from EDITOR_MENU_BOX's margin and their boxes' heights.
 const SHADOW_ROOM = "p-10";
-
-// A part's pixels depend on where in a pixel it starts, and Chromium lays
-// out in 1/64 px, so a section whose content ends on a fraction would move
-// every section below it off the pixel grid and change their captures. Each
-// section takes the next whole pixel above its content's height; with whole
-// gaps and padding around them, every part then starts on one. The content
-// is measured, not the section: the section's own height is what is set,
-// so measuring it would never let it shrink and would resize inside its own
-// observer's callback.
-function useWholePixelHeight() {
-  const section = useRef<HTMLElement>(null);
-  const content = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const measured = content.current;
-    const sized = section.current;
-    if (!measured || !sized) return;
-    const observer = new ResizeObserver(([entry]) => {
-      const size = entry?.borderBoxSize[0];
-      if (size) sized.style.height = `${Math.ceil(size.blockSize)}px`;
-    });
-    observer.observe(measured, { box: "border-box" });
-    return () => observer.disconnect();
-  }, []);
-  return { section, content };
-}
 
 // A part whose subject is not a menu but which holds one, such as a header
 // with its document menu, is captured with its menus closed (`menusAtRest`).
 function Section(props: { part: string; title: string; children: ReactNode; menusAtRest?: boolean }) {
-  const { section, content } = useWholePixelHeight();
   return (
-    <section ref={section} data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined}>
-      <div ref={content} className="flex flex-col gap-3">
-        <SectionLabel as="h3" className="m-0">
-          {props.title}
-        </SectionLabel>
-        <div className="flex flex-wrap items-start gap-x-6 gap-y-4">{props.children}</div>
-      </div>
+    <section data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined} className="flex flex-col gap-3">
+      <SectionLabel as="h3" className="m-0">
+        {props.title}
+      </SectionLabel>
+      <div className="flex flex-wrap items-start gap-x-6 gap-y-4">{props.children}</div>
     </section>
   );
 }
@@ -327,6 +306,35 @@ function EditorGroupsSpecimen(props: { activeHasTabs: boolean }) {
   );
 }
 
+// More tabs than a narrow strip holds.
+const OVERFLOW_TABS = ["itinerary.md", "budget.csv", "packing-list.md", "flights.md", "restaurants.md", "notes.md"].map(
+  (path) => ({ path }),
+);
+
+// One group's overflowing strip over a strip of paper. The strip scrolls
+// itself to reveal its active tab when it mounts.
+function OverflowStripSpecimen(props: { groupId: string; groupNumber: number; active: string; testId?: string }) {
+  return (
+    <div data-testid={props.testId}>
+      <EditorTabs
+        groupId={props.groupId}
+        groupNumber={props.groupNumber}
+        tabs={OVERFLOW_TABS}
+        activeTab={props.active}
+        activeTabDirty={false}
+        recoveryPaths={NO_RECOVERY}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />
+      <div className="h-6 bg-bg" />
+    </div>
+  );
+}
+
 function treeRow(name: string, folder = false): VisibleRow {
   return {
     fullPath: name,
@@ -419,7 +427,94 @@ function KindRows(props: { label: string; selected: boolean }) {
   );
 }
 
-const RELAY_ERROR = "dohc could not reach the sync relay. Check your connection.";
+// Every object that is not a file, by the name its tab shows, each glyph in
+// a row the way a list draws it. A `Record` over the kinds, so a new kind is
+// a compile error here until the page shows it.
+const OBJECT_SAMPLES: Record<ObjectKind, string> = {
+  app: "trip-planner",
+  collection: "Registrations",
+  group: "trip",
+  chat: "Home",
+  compare: "Compare with Main",
+  change: "Diff: plan.md",
+  graph: "Graph",
+  history: "History",
+};
+const OBJECTS = Object.keys(OBJECT_SAMPLES) as ObjectKind[];
+// The kind and object name columns share one width, wider than the longest
+// name, so the rows beside each start at the same place on both lines.
+const KIND_NAMES = "m-0 w-36 list-none border border-transparent py-1 font-mono text-[11px] text-subtle";
+
+function ObjectRows(props: { label: string; selected: boolean }) {
+  return (
+    <ul aria-label={props.label} className="m-0 w-52 list-none rounded-lg border border-line bg-panel py-1">
+      {OBJECTS.map((kind) => (
+        <li key={kind} className="px-1">
+          <span
+            className={`flex h-7 items-center gap-1.5 rounded-md pl-7 pr-2 text-[13px] ${
+              props.selected ? "bg-selected text-ink" : "text-muted"
+            }`}
+          >
+            <ObjectGlyph kind={kind} size={15} className={props.selected ? "text-ink" : "text-subtle"} />
+            <span className="min-w-0 flex-1 truncate">{OBJECT_SAMPLES[kind]}</span>
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// Tabs of every kind, as the listing describes their files: a database by
+// its header, whatever its name, and a page with an emoji.
+const STRIP_GROUP = chatTabPath({ kind: "channel", id: "trip" });
+const STRIP_COLLECTION = collectionTabPath("registrations");
+const STRIP_LONG = "notes/offsite-retrospective-and-next-quarter-planning.md";
+const STRIP_FILES: ReadonlyMap<string, WorkspaceFileEntry> = new Map(
+  [
+    { path: "trip/plan.md", kind: "file" as const },
+    { path: "budget.csv", kind: "file" as const },
+    { path: "map.excalidraw", kind: "file" as const },
+    { path: "ledger.db", kind: "database" as const },
+    { path: "launch.md", kind: "file" as const, icon: "🚀" },
+    { path: STRIP_LONG, kind: "file" as const },
+  ].map((entry) => [entry.path, entry]),
+);
+const STRIP_LABELS: ReadonlyMap<string, string> = new Map([[STRIP_GROUP, "trip"]]);
+
+// One group's strip over a strip of paper, its tab list at rest.
+function GlyphStrip(props: { groupId: string; groupNumber: number; tabs: string[]; active: string; dirty?: boolean }) {
+  return (
+    <>
+      <EditorTabs
+        groupId={props.groupId}
+        groupNumber={props.groupNumber}
+        tabs={props.tabs.map((path) => ({ path }))}
+        activeTab={props.active}
+        activeTabDirty={props.dirty ?? false}
+        tabLabels={STRIP_LABELS}
+        files={STRIP_FILES}
+        recoveryPaths={NO_RECOVERY}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />
+      <div className="h-4 bg-bg" />
+    </>
+  );
+}
+
+function GlyphStripBox(props: { tabs: string[]; active: string; dirty?: boolean }) {
+  return (
+    <div className="w-full overflow-hidden rounded-lg border border-line">
+      <GlyphStrip groupId="states" groupNumber={1} {...props} />
+    </div>
+  );
+}
+
+const RELAY_ERROR ="dohc could not reach the sync relay. Check your connection.";
 const FOLDER = "C:\\Users\\ice\\Research";
 
 function toast(tone: "danger" | "success") {
@@ -618,10 +713,11 @@ const CHAT_THREAD_MESSAGES = [
 const CHAT_THREAD_NAV = { level: "thread", channel: CHAT_CHANNEL, thread: CHAT_POSTS[0]!.thread } as const;
 const NO_BOOKMARKS = new Set<string>();
 
-// A thread at the drawing's column, its second comment hovered.
+// A thread at the drawing's column, its second comment hovered. Its
+// toolbar's shadow takes the room below.
 function ChatThreadSpecimen() {
   return (
-    <div className="w-[560px]" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
+    <div className="w-[560px] pb-6" data-force-state="hover" data-force-target='[data-message-id="comment-2"] > [data-testid="chats-comment-bubble"]'>
       <ThreadMessages
         nav={CHAT_THREAD_NAV}
         messages={CHAT_THREAD_MESSAGES}
@@ -647,6 +743,50 @@ function ChatThreadSpecimen() {
 }
 
 const COMPOSER_DRAFT = "Can we cut the last paragraph?";
+
+// The agent picked from the roster, in each state its offer says. The
+// specimen agent takes the default agent colour, not a chosen one.
+const AGENT_OFFER_STATES: readonly AgentOfferState[] = ["runs", "working", "paused", "runner-off", "no-command", "unknown"];
+const AGENT_DRAFT = "@agent can you check funnel.csv against last week?";
+function agentOffer(state: AgentOfferState): AgentAddressedOffer {
+  return {
+    kind: "agent-addressed",
+    agent: { id: "agent:default", kind: "agent", handle: "agent", label: "Nova" },
+    presentation: { group: "states-agent", hue: null, self: false },
+    state,
+    working: state === "working",
+    reach: "C:\\Users\\ada\\trip-planner",
+  };
+}
+
+function AgentOfferComposer(props: {
+  state: AgentOfferState;
+  surface: "post" | "stream";
+  id: string;
+  width?: string;
+  focus?: boolean;
+  replying?: boolean;
+}) {
+  const composer = (
+    <MentionComposer testIdPrefix={props.id} composerId={props.id} value={AGENT_DRAFT} sending={false}
+      surface={props.surface} authorName="Ada" authorPresentation={SAMPLE_ADA}
+      placeholder={props.surface === "post" ? "What's happening in #general?" : "Message #general"}
+      sendLabel={props.surface === "post" ? "Start post" : "Send message"} candidates={[]} onChange={noop} onSend={noop}
+      agentOffer={agentOffer(props.state)} onSetUpAgent={noop}
+      above={props.replying ? (
+        <ComposerModeBar testId={`${props.id}-replying-mode`} cancelTestId={`${props.id}-replying-cancel`}
+          cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+      ) : undefined} />
+  );
+  const focused = props.focus ? (
+    <div data-force-state="focus-visible" data-force-target='[data-testid="composer-agent-offer-setup"]'>{composer}</div>
+  ) : composer;
+  // A stream composer floats its offer above its top edge, into the room the
+  // end of its conversation keeps, so it gets that room here.
+  return props.surface === "post"
+    ? <div id={`${props.id}-specimen`} className={props.width ?? "w-[560px]"}>{focused}</div>
+    : <div id={`${props.id}-specimen`} className={`${props.width ?? "w-[400px]"} rounded-lg border border-line bg-panel pt-9`}>{focused}</div>;
+}
 
 // The About rail at the drawing's 290px, on the chrome.
 function AboutPanelSpecimen(props: { children: ReactNode }) {
@@ -902,8 +1042,9 @@ const dangerMenuItems: MenuEntry[] = [
 
 // The editor's menus draw themselves at fixed places. Laid out inside a box
 // with `contain: layout`, which is the containing block for fixed children,
-// they land in their part. The box leaves room for the shadow.
-const EDITOR_MENU_BOX = "relative [contain:layout]";
+// they land in their part. The box's 24px margin leaves room for the shadow
+// beside; each box's height leaves room below.
+const EDITOR_MENU_BOX = "relative ml-6 [contain:layout]";
 
 const BLOCK_MENU_OPEN = {
   open: true,
@@ -1356,8 +1497,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <DialogSpecimen theme={theme} />
       </Section>
 
-      {/* The shell's menus, one part each, after the dialog so the parts
-          above keep their places. */}
+      {/* The shell's menus, one part each. */}
       <Section part="menu-radio" title="Menu with radio rows">
         <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled">
           <div
@@ -1374,7 +1514,7 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       <Section part="menu-field" title="Menu with a name field">
         <Specimen label="field: focus, hint">
-          <div className="flex h-48 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
+          <div className="flex h-52 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
             <MenuSpecimen label="Versions" items={fieldMenuItems} width={240} testId={`states-menu-field-${theme}`} />
           </div>
         </Specimen>
@@ -1409,8 +1549,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the menus, so the parts above keep their places. The capture
-          opens each part's tab list. */}
+      {/* The capture opens each part's tab list. */}
       <Section part="editor-groups" title="Editor groups">
         <Specimen label="split: the active group with tabs, then an empty one">
           <EditorGroupsSpecimen activeHasTabs />
@@ -1423,10 +1562,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the editor groups, so the parts above keep their places. */}
       <Section part="kind-glyph" title="Kind glyph">
         <Specimen label="kind">
-          <ul className="m-0 list-none border border-transparent py-1 font-mono text-[11px] text-subtle">
+          <ul className={KIND_NAMES}>
             {KINDS.map((kind) => (
               <li key={kind.displayKind} className="flex h-7 items-center">
                 {kind.displayKind} · {kind.name}
@@ -1440,11 +1578,25 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="selected">
           <KindRows label="Kinds, selected" selected />
         </Specimen>
+        <Specimen label="object">
+          <ul className={KIND_NAMES}>
+            {OBJECTS.map((kind) => (
+              <li key={kind} className="flex h-7 items-center">
+                {kind}
+              </li>
+            ))}
+          </ul>
+        </Specimen>
+        <Specimen label="object, rest">
+          <ObjectRows label="Objects" selected={false} />
+        </Specimen>
+        <Specimen label="object, selected">
+          <ObjectRows label="Objects, selected" selected />
+        </Specimen>
       </Section>
 
-      {/* The editor's menus, after the shell's so the parts above keep their
-          places. Their active row is the one Enter acts on, keyboard or
-          pointer, and always draws the outline. */}
+      {/* The editor's menus. Their active row is the one Enter acts on,
+          keyboard or pointer, and always draws the outline. */}
       <Section part="block-menu" title="Block menu">
         <Specimen label="sections; first row active; destructive with Del">
           <div className={`${EDITOR_MENU_BOX} h-[410px] w-[270px]`}>
@@ -1459,7 +1611,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Near the end, so a change here moves only the file header below it. */}
       <Section part="history" title="History held back by its rules">
         <Specimen label="panel: rules can't be read">
           <div className="flex h-64 w-64 flex-col rounded-lg border border-line bg-panel">
@@ -1478,7 +1629,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the history part, so the parts above keep their places. */}
       <Section part="tab-row-actions" title="Document actions in the tab row" menusAtRest>
         {/* One document loading, saved, saving, pending share, held,
             failed, and changed on disk in a narrow pane: Share, the toggle
@@ -1587,22 +1737,20 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The editor's listboxes share these rows, after History so no part
-          above them moves. The editor keeps focus, and the option Enter acts
-          on draws the outline. The page link and emoji pickers are not here:
-          an open picker takes Enter from the whole window, which would take
-          it from this page's other parts. */}
+      {/* The editor's listboxes share these rows. The editor keeps focus,
+          and the option Enter acts on draws the outline. The page link and
+          emoji pickers are not here: an open picker takes Enter from the
+          whole window, which would take it from this page's other parts. */}
       <Section part="slash-menu" title="Slash menu">
         <Specimen label="third option active; the list scrolls">
-          <div className={`${EDITOR_MENU_BOX} h-[272px] w-[330px]`}>
+          <div className={`${EDITOR_MENU_BOX} h-[290px] w-[330px]`}>
             <SlashCommandMenu state={SLASH_MENU_OPEN} onSelect={noop} onHover={noop} />
           </div>
         </Specimen>
       </Section>
 
-      {/* After the file header, so the parts above keep their places. The
-          group a keyboard close leaves empty takes focus, and its ring shows
-          on all four edges above its tab strip. */}
+      {/* The group a keyboard close leaves empty takes focus, and its ring
+          shows on all four edges above its tab strip. */}
       <Section part="editor-group-focus" title="Editor group, focused" menusAtRest>
         <Specimen label="split: the focused active group, empty, then one with tabs">
           <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
@@ -1611,7 +1759,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the parts above, so they keep their places. */}
       <Section part="frontmatter-as-written" title="Frontmatter as written">
         <Specimen label="rename saved">
           <AsWrittenSpecimen name="cost" />
@@ -1621,8 +1768,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After the others, so they keep their places. On the title bar's
-          own fill. */}
+      {/* On the title bar's own fill. */}
       <Section part="title-bar-status" title="Title bar status">
         {/* The saved dot alone while nothing needs the person, and its words
             once something does. */}
@@ -1635,7 +1781,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="capture-recovery" title="Typing kept in History">
         <Specimen label="toast">
           <div className={SHADOW_ROOM}>
@@ -1659,7 +1804,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="about" title="About">
         <Specimen label="a document: chats, history, access checked">
           <AboutPanelSpecimen>
@@ -1726,8 +1870,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After About, so the parts above keep their places. Its rows' menus
-          rest; the menu part draws an open one. */}
+      {/* Its rows' menus rest; the menu part draws an open one. */}
       <Section part="sharing" title="Sharing" menusAtRest>
         <Specimen label="both lists, a conflict, and changes waiting">
           <SharingSpecimen granted={ready(SHARING_GRANTED)} received={ready(SHARING_RECEIVED)} conflictCount={2} />
@@ -1776,7 +1919,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After Sharing, so the parts above keep their places. */}
       <Section part="usage-record" title="Usage record">
         <Specimen label="counts, with a row and a door this version does not count">
           <UsageRecordSpecimen view={USAGE_RECORD} />
@@ -1814,7 +1956,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After Usage record, so the parts above keep their places. */}
       <Section part="word-diff" title="Word diff">
         {WORD_DIFFS.map((specimen) => (
           <Specimen key={specimen.label} label={specimen.label}>
@@ -1829,8 +1970,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         ))}
       </Section>
 
-      {/* After Word diff, so the parts above keep their places. Its empty and loading
-          states are the shared ones above, in Empty ("create") and Loading. */}
+      {/* Its empty and loading states are the shared ones above, in Empty
+          ("create") and Loading. */}
       <Section part="apps-shelf" title="Apps shelf">
         <Specimen label="pinned; selected, with a warning; shared, hovered; low confidence">
           <div className="w-60 rounded-lg border border-line bg-panel" data-force-state="hover" data-force-target="li:nth-child(3)">
@@ -1873,7 +2014,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* After Chat rows, so the parts above keep their places. */}
       <Section part="settings-frame" title="Settings frame">
         <Specimen label="General chosen, Appearance hovered, keyboard focus on Files; a changed row">
           <div
@@ -1949,7 +2089,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="rails" title="Rails">
         <Specimen label="activity bar: Chats beside Files, selected; Search hovered; Graph focused">
           <div className="flex h-[400px] overflow-hidden rounded-lg border border-line">
@@ -1972,8 +2111,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. A send shows only once it
-          has taken a second, so the capture waits for the ring. */}
+      {/* A send shows only once it has taken a second, so the capture waits
+          for the ring. */}
       <Section part="composer-sending" title="Composer sending">
         <Specimen label="at rest">
           <div className="w-[400px] rounded-lg border border-line bg-panel">
@@ -2012,7 +2151,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="about-conversation" title="About a conversation">
         <Specimen label="a Group: who is here, and its access checked">
           <AboutPanelSpecimen>
@@ -2045,9 +2183,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. A CSV and a text file
-          draw their save state, Share and controls in the tab row, as a
-          document does: a calm save state says so only to screen readers. */}
+      {/* A CSV and a text file draw their save state, Share and controls in
+          the tab row, as a document does: a calm save state says so only to
+          screen readers. */}
       <Section part="file-view-actions" title="File view actions" menusAtRest>
         {FILE_VIEW_CSV_STATES.map((specimen) => (
           <Specimen key={specimen.label} label={`CSV ${specimen.label}`} className="w-full">
@@ -2074,9 +2212,9 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. Offers sit in space
-          already there: a folder row's glyph, the tab row's end, and a row
-          floating under a pasted line. */}
+      {/* Offers sit in space already there: a folder row's glyph, the tab
+          row's end, a row floating under a pasted line, the space before a
+          post's Send, and above a message composer's Send. */}
       <Section part="offers" title="Offers" menusAtRest>
         <Specimen label="an app folder in Files: at rest, selected, focused">
           <ul role="tree" aria-label="App folders" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
@@ -2098,10 +2236,34 @@ function Pane(props: { theme: "light" | "dark" }) {
             <UrlOfferSpecimen chosen />
           </div>
         </Specimen>
+        <Specimen label="the agent picked in a new post: runs, working, paused, dispatch off, no runner, unknown">
+          <div className="flex flex-col gap-3">
+            {AGENT_OFFER_STATES.map((state) => (
+              <AgentOfferComposer key={state} state={state} surface="post" id={`states-agent-post-${state}-${theme}`} />
+            ))}
+          </div>
+        </Specimen>
+        <Specimen label="the agent picked in a message or comment: the same states, above Send">
+          <div className="flex flex-col gap-3">
+            {AGENT_OFFER_STATES.map((state) => (
+              <AgentOfferComposer key={state} state={state} surface="stream" id={`states-agent-stream-${state}-${theme}`} />
+            ))}
+          </div>
+        </Specimen>
+        <Specimen label="Set up focused; above a reply bar; then a narrow pane">
+          <div className="flex flex-col gap-3">
+            <AgentOfferComposer state="no-command" surface="post" id={`states-agent-post-focus-${theme}`} focus />
+            <AgentOfferComposer state="runner-off" surface="stream" id={`states-agent-stream-focus-${theme}`} focus />
+            <AgentOfferComposer state="runs" surface="stream" id={`states-agent-stream-replying-${theme}`} replying />
+            <AgentOfferComposer state="runs" surface="post" id={`states-agent-post-narrow-${theme}`} width="w-[300px]" />
+            <AgentOfferComposer state="paused" surface="stream" id={`states-agent-stream-narrow-${theme}`} width="w-[300px]" />
+            <AgentOfferComposer state="no-command" surface="stream" id={`states-agent-stream-narrow-setup-${theme}`} width="w-[300px]" />
+          </div>
+        </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. The body's H1 is the
-          editor's, so the folded specimens show the row above it alone. */}
+      {/* The body's H1 is the editor's, so the folded specimens show the
+          row above it alone. */}
       <Section part="page-identity" title="Page identity">
         <Specimen label="an H1 opens the body: the title folds, at rest">
           <TopmatterSpecimen>
@@ -2198,7 +2360,6 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. */}
       <Section part="settings-sync" title="Settings: Sync and sharing">
         <Specimen label="signed in, syncing, on a private server; keyboard focus on Disconnect">
           <div className="w-[640px]" data-force-state="focus focus-visible" data-force-target='[data-testid="cloud-disconnect"]'>
@@ -2251,11 +2412,10 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so the parts above keep their places. A CSV's rows and
-          columns: numbers at the right in mono, row numbers in the gutter,
-          and each row's and column's actions only on hover or focus. A
-          database table: each column's type as an icon, the active cell,
-          the editing cell, a sort, and the read-only mark. */}
+      {/* A CSV's rows and columns: numbers at the right in mono, row
+          numbers in the gutter, and each row's and column's actions only on
+          hover or focus. A database table: each column's type as an icon,
+          the active cell, the editing cell, a sort, and the read-only mark. */}
       <Section part="data-grid" title="Data grid" menusAtRest>
         <Specimen label="CSV at rest: numbers, Add row and Add column">
           <CsvGridSpecimen />
@@ -2322,7 +2482,135 @@ function Pane(props: { theme: "light" | "dark" }) {
           </TabRowActionsSpecimen>
         </Specimen>
       </Section>
+
+      {/* Last, so the parts above keep their places. A strip too narrow for
+          its tabs fades each edge it can still scroll past, and none it has
+          reached; its active tab sits clear of the fades. */}
+      <Section part="tab-strip-overflow" title="Tab strip, overflowing" menusAtRest>
+        {(
+          [
+            ["start", "at the start: the end fades", "itinerary.md"],
+            ["middle", "scrolled to the middle: both edges fade", "flights.md"],
+            ["end", "at the end: the start fades", "notes.md"],
+          ] as const
+        ).map(([at, label, active]) => (
+          <Specimen key={at} label={label} className="w-full">
+            <div className="w-[360px] overflow-hidden rounded-lg border border-line">
+              <OverflowStripSpecimen
+                groupId={`overflow-${at}`}
+                groupNumber={1}
+                active={active}
+                testId={`states-tab-strip-overflow-${at}-${theme}`}
+              />
+            </div>
+          </Specimen>
+        ))}
+        <Specimen label="split: the active group's line over its fades, then the other group">
+          <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
+            <EditorGroupLayout
+              groups={[
+                { id: "first", size: 1, content: <OverflowStripSpecimen groupId="first" groupNumber={1} active="packing-list.md" /> },
+                { id: "second", size: 1, content: <OverflowStripSpecimen groupId="second" groupNumber={2} active="flights.md" /> },
+              ]}
+              activeGroupId="first"
+              onFocusGroup={noop}
+              onResizeGroups={noop}
+            />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. Each strip holds a tab
+          list, so the part holds them at rest. */}
+      <Section part="tab-glyphs" title="Tab glyphs" menusAtRest>
+        <Specimen label="files: a document, active and unsaved; a CSV; a drawing; a database" className="w-full">
+          <GlyphStripBox tabs={["trip/plan.md", "budget.csv", "map.excalidraw", "ledger.db"]} active="trip/plan.md" dirty />
+        </Specimen>
+        <Specimen label="objects: a group, active; an app; a Collection; History" className="w-full">
+          <GlyphStripBox tabs={[STRIP_GROUP, siteTabPath("trip-planner"), STRIP_COLLECTION, HISTORY_TAB_PATH]} active={STRIP_GROUP} />
+        </Specimen>
+        <Specimen label="a page with an emoji, active; a long name, cut off" className="w-full">
+          <GlyphStripBox tabs={["launch.md", STRIP_LONG]} active="launch.md" />
+        </Specimen>
+        <Specimen label="split: the active group, then one whose active tab recedes" className="w-full">
+          <div className="flex w-full overflow-hidden rounded-lg border border-line">
+            <EditorGroupLayout
+              groups={[
+                { id: "first", size: 1, content: <GlyphStrip groupId="first" groupNumber={1} tabs={["trip/plan.md", "ledger.db"]} active="trip/plan.md" /> },
+                { id: "second", size: 1, content: <GlyphStrip groupId="second" groupNumber={2} tabs={[STRIP_GROUP, siteTabPath("trip-planner")]} active={STRIP_GROUP} /> },
+              ]}
+              activeGroupId="first"
+              onFocusGroup={noop}
+              onResizeGroups={noop}
+            />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* The catalog is a listbox the textarea controls, not a menu, so it
+          is drawn open here under its composer instead of being opened. */}
+      <Section part="composer-poll" title="Composer catalog and poll">
+        <Specimen label="/ in a new post: Poll active">
+          <ComposerCatalogSpecimen theme={theme} surface="post" />
+        </Specimen>
+        <Specimen label="/ in a group's chat">
+          <ComposerCatalogSpecimen theme={theme} surface="stream" />
+        </Specimen>
+        <Specimen label="a new post with a poll; the second choice repeats the first">
+          <div className="w-[560px]">
+            <MentionComposer testIdPrefix={`states-poll-post-${theme}`} composerId={`states-poll-post-${theme}`}
+              value={POLL_QUESTION} sending={false} surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA}
+              placeholder="What's happening in #general?" sendLabel="Start post" candidates={[]} fileCandidates={STATES_FILES}
+              onChange={noop} onSend={noop} poll={{ choices: ["Porto", "Porto ", "Lisbon"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="a narrow new post with a poll: Poll without its label">
+          <div className="w-[400px]">
+            <MentionComposer testIdPrefix={`states-poll-narrow-${theme}`} composerId={`states-poll-narrow-${theme}`}
+              value={POLL_QUESTION} sending={false} surface="post" authorName="Ada" authorPresentation={SAMPLE_ADA}
+              placeholder="What's happening in #general?" sendLabel="Start post" candidates={[]} fileCandidates={STATES_FILES}
+              onChange={noop} onSend={noop} poll={{ choices: ["Lisbon", "Porto"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="a comment asking the agent, with a poll, replying to a message: the offer floats over the stack">
+          {/* A stream composer floats its offer above its top edge, into the
+              room the end of its conversation keeps, so it gets that room. */}
+          <div className="w-[400px] rounded-lg border border-line bg-panel pt-9">
+            <MentionComposer testIdPrefix={`states-poll-stream-${theme}`} composerId={`states-poll-stream-${theme}`}
+              value={`@agent ${POLL_QUESTION.toLowerCase()}`} sending={false} placeholder="Write a comment…  @ to mention"
+              sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES} onChange={noop} onSend={noop}
+              agentOffer={agentOffer("runs")} onSetUpAgent={noop}
+              above={
+                <ComposerModeBar testId={`states-poll-stream-${theme}-replying-mode`} cancelTestId={`states-poll-stream-${theme}-replying-cancel`}
+                  cancelLabel="Cancel reply" onCancel={noop}>Replying to Sam ·</ComposerModeBar>
+              }
+              poll={{ choices: ["Lisbon", "Porto", "Madeira"], open: true }} onPollChange={noop} />
+          </div>
+        </Specimen>
+      </Section>
     </section>
+  );
+}
+
+const POLL_QUESTION = "Where should we hold the offsite?";
+const STATES_FILES = [{ path: "Plans/offsite.md", label: "offsite" }];
+
+function ComposerCatalogSpecimen(props: { theme: "light" | "dark"; surface: "post" | "stream" }) {
+  const id = `states-catalog-${props.surface}-${props.theme}`;
+  const composer = (
+    <MentionComposer testIdPrefix={id} composerId={id} value={`${POLL_QUESTION} /`} sending={false}
+      surface={props.surface} authorName="Ada" authorPresentation={SAMPLE_ADA}
+      placeholder="Message #general" sendLabel="Send message" candidates={[]} fileCandidates={STATES_FILES}
+      onChange={noop} onSend={noop} poll={null} onPollChange={noop} />
+  );
+  return (
+    <div className={`flex flex-col gap-1.5 pb-10 ${props.surface === "post" ? "w-[560px]" : "w-[400px]"}`}>
+      {props.surface === "post" ? composer : <div className="flex flex-col rounded-lg border border-line bg-panel">{composer}</div>}
+      <ul role="listbox" aria-label="Add to message" className={`${MENU_FRAME} w-64`}>
+        <ComposerCatalogOptions listboxId={`${id}-mentions`} testIdPrefix={id} rows={["poll", "mention", "file"]}
+          highlight={0} onPick={noop} onHover={() => noop} />
+      </ul>
+    </div>
   );
 }
 
@@ -2414,7 +2702,7 @@ const CLOUD_SIGNED_IN: CloudStatusResult = {
   workspaceSyncConnected: false,
 };
 const settingsCloud = (status: CloudStatusResult | null): CloudSettings => ({
-  status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop, onAccountError: noop,
+  status, unreadable: false, onChanged: noop, onConnect: noop, onError: noop, onAccountError: noop, onDeleteAccount: noop,
 });
 
 const SETTINGS_WORKSPACE = "C:\\Users\\ada\\Documents\\trip";

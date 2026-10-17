@@ -29,6 +29,7 @@ import {
   ShareReadFailureNotice,
   ChatHeader,
   joinedChannelLabel,
+  ComposerModeBar,
   ComposerNotice,
   type ShareReadFailure,
 } from "./ChatsControls";
@@ -70,6 +71,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -92,6 +94,7 @@ import type {
   JoinedChannelAnswer,
   JoinedSharedChannelRow,
   ListChatChannelSharesResult,
+  SendChatMessageResult,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -103,6 +106,8 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
+import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
+import { AGENT_OFFER_SPACE, NEW_CONVERSATION, reachName, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { extractChatFileReferences } from "./chatFileMentions";
@@ -136,6 +141,8 @@ export interface ChatPresenceCollaboration {
 }
 
 export interface AgentSetupSummary {
+  // The workspace whose agent run was read with these settings.
+  workspaceId: string;
   agentName?: string;
   preferredName?: string;
   runnerConfigured: boolean;
@@ -209,6 +216,20 @@ export interface ChatsDrafts {
   resolveTargetMessageId: string | null;
   // The poll choice taken with the answer, when the poll had choices.
   resolveChosenOption?: string | null;
+  // The polls drafted in the comment and new-post composers, each with the
+  // conversation it belongs to.
+  poll: ThreadPollDraft | null;
+  newThreadPoll: PostPollDraft | null;
+}
+
+// A drafted poll, open or removed, with the conversation it was drafted in:
+// the thread for a comment's poll and the group for a new post's. Opening
+// another drops it, and sending the message drops it.
+export interface ThreadPollDraft extends ComposerPollDraft {
+  threadId: string;
+}
+export interface PostPollDraft extends ComposerPollDraft {
+  channelId: string;
 }
 
 interface ThreadSnapshot {
@@ -275,12 +296,6 @@ interface ChannelSnapshot {
   threads: ChannelThreadRecord[];
   feedPosts: Record<string, PostData>;
 }
-
-const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
-  liveRunId: null,
-  pendingCount: 0,
-  paused: false,
-};
 
 const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
 
@@ -592,17 +607,24 @@ export function ChatsView(props: {
   const [decisions, setDecisions] = useState<ChatDecisionRecord[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachmentRecord[]>([]);
   const [runRecords, setRunRecords] = useState<Record<string, ChatRunRecord>>({});
-  const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult>(
-    IDLE_DISPATCH_STATE,
-  );
+  // The open thread's dispatch, null until read.
+  const [dispatchState, setDispatchState] = useState<ChatDispatchStateForThreadResult | null>(null);
   const [dispatchActionBusy, setDispatchActionBusy] = useState(false);
   const [composer, setComposer] = useState("");
+  const [poll, setPoll] = useState<ThreadPollDraft | null>(null);
   const [replyTarget, setReplyTarget] = useState<ComposerReplyTarget | null>(null);
   const [resolveTargetMessageId, setResolveTargetMessageId] = useState<string | null>(null);
   const [resolveChosenOption, setResolveChosenOption] = useState<string | null>(null);
   const [flashMessageId, setFlashMessageId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [newThreadBody, setNewThreadBody] = useState("");
+  const [newThreadPoll, setNewThreadPoll] = useState<PostPollDraft | null>(null);
+  // Opening another thread or group drops a poll drafted in a different one,
+  // before the next paint.
+  useLayoutEffect(() => {
+    if (nav.level === "thread" && poll && poll.threadId !== nav.thread.id) setPoll(null);
+    if (nav.level === "channel" && newThreadPoll && newThreadPoll.channelId !== nav.channel.id) setNewThreadPoll(null);
+  }, [nav, poll, newThreadPoll]);
   const [startingThread, setStartingThread] = useState(false);
   const [creatingChannel, setCreatingChannel] = useState<string | null>(null);
   const [newGroupType, setNewGroupType] = useState<"posts" | "chat" | "both">("posts");
@@ -715,6 +737,18 @@ export function ChatsView(props: {
   );
   const focusedMessageJump = useRef<string | null>(null);
 
+  // One composer shows at a time. A new post or message starts a new
+  // conversation; this view reads dispatch only for an open thread.
+  const agentOffer = useAgentOffer({
+    workspaceId,
+    scope: `${workspaceId}:${nav.level === "thread" ? `thread:${nav.thread.id}`
+      : nav.level === "channel" ? `channel:${nav.channel.id}`
+        : nav.level === "dm" ? `dm:${nav.dm.channelId}` : nav.level}`,
+    setup: props.agentSetup,
+    dispatch: nav.level === "thread" ? dispatchState : nav.level === "dm" ? null : NEW_CONVERSATION,
+    reach: props.workspacePath,
+  });
+
   const sendContextKey =
     nav.level === "thread"
       ? `${workspaceId}:thread:${nav.thread.id}`
@@ -725,11 +759,13 @@ export function ChatsView(props: {
   activeSendContext.current = sendContextKey;
   const latestComposerState = useRef({
     composer,
+    poll,
     replyMessageId: replyTarget?.messageId,
     resolveTargetMessageId,
   });
   latestComposerState.current = {
     composer,
+    poll,
     replyMessageId: replyTarget?.messageId,
     resolveTargetMessageId,
   };
@@ -1320,14 +1356,16 @@ export function ChatsView(props: {
     setDecisions([]);
     setAttachments([]);
     setRunRecords({});
-    setDispatchState(IDLE_DISPATCH_STATE);
+    setDispatchState(null);
     setDispatchActionBusy(false);
     setComposer("");
+    setPoll(null);
     setReplyTarget(null);
     setResolveTargetMessageId(null);
     setFlashMessageId(null);
     messageNodes.current.clear();
     setNewThreadBody("");
+    setNewThreadPoll(null);
     resetGroupForm();
     setChannelShares(null);
     setShareReadFailure(null);
@@ -1563,7 +1601,7 @@ export function ChatsView(props: {
       setSharePanelOpen(false);
       setChannelThreads([]);
       setFeedPosts({});
-      setDispatchState(IDLE_DISPATCH_STATE);
+      setDispatchState(null);
       setThreadsLoading(true);
       try {
         const snapshot = await loadChannelSnapshot(channel.id);
@@ -1871,7 +1909,7 @@ export function ChatsView(props: {
       setDecisions([]);
       setAttachments([]);
       setRunRecords({});
-      setDispatchState(IDLE_DISPATCH_STATE);
+      setDispatchState(null);
       setDispatchActionBusy(false);
       setReplyTarget(null);
       setResolveTargetMessageId(null);
@@ -2040,6 +2078,9 @@ export function ChatsView(props: {
     if (nav.level !== "channel") return;
     const body = newThreadBody.trim();
     if (body.length === 0 || startingThread || startingThreadRef.current) return;
+    const asked = openPollChoices(newThreadPoll);
+    const options = asked ? pollChoicesToSend(asked) : null;
+    if (asked && !options) return;
     const channel = nav.channel;
     const token = liveToken.current;
     startingThreadRef.current = true;
@@ -2050,6 +2091,7 @@ export function ChatsView(props: {
         workspaceId,
         channelId: channel.id,
         body,
+        ...(options ? { needsDecision: true, options } : {}),
         ...(extractChatFileReferences(body).length > 0
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
@@ -2065,15 +2107,17 @@ export function ChatsView(props: {
       if (token !== liveToken.current) return;
       props.onThreadStarted?.();
       setNewThreadBody("");
+      setNewThreadPoll(null);
       // The completion is the user's command landing: report it through the
       // seam in the same tick as the nav write (see openConversation).
       props.onNavCommand?.({ level: "thread", channel, thread: result.thread });
       setNav({ level: "thread", channel, thread: result.thread });
       setMessages([result.message]);
-      setDecisions([]);
+      // A poll comes with its message, so it shows wherever the message does.
+      setDecisions(result.decision ? [result.decision] : []);
       setAttachments(result.message.attachments ?? []);
       setRunRecords({});
-      setDispatchState(IDLE_DISPATCH_STATE);
+      setDispatchState(NEW_CONVERSATION);
       setDispatchActionBusy(false);
       setReplyTarget(null);
       setResolveTargetMessageId(null);
@@ -2086,7 +2130,7 @@ export function ChatsView(props: {
       startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
+  }, [nav, newThreadBody, newThreadPoll, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
@@ -2108,6 +2152,10 @@ export function ChatsView(props: {
     ) {
       return;
     }
+    // A poll's question is the message's own words, never a fallback.
+    const asked = openPollChoices(poll);
+    const options = asked ? pollChoicesToSend(asked) : null;
+    if (asked && (!options || trimmedBody.length === 0)) return;
     const parentMessageId = replyTarget?.messageId;
     const request = ++sendRequestGeneration.current;
     inFlightSendByContext.current.set(sendContextKey, request);
@@ -2121,6 +2169,10 @@ export function ChatsView(props: {
         next.composer = "";
         setComposer("");
       }
+      if (latest.poll === poll) {
+        next.poll = null;
+        setPoll(null);
+      }
       if (latest.replyMessageId === replyTarget?.messageId) {
         next.replyMessageId = undefined;
         setReplyTarget(null);
@@ -2132,15 +2184,30 @@ export function ChatsView(props: {
       }
       latestComposerState.current = next;
     };
+    // The message's poll lands with it, so it shows wherever the message does.
+    const showSent = (sent: SendChatMessageResult) => {
+      setMessages((current) =>
+        current.some((message) => message.id === sent.message.id)
+          ? current
+          : [...current, sent.message],
+      );
+      const asked = sent.decision;
+      if (asked) {
+        setDecisions((current) =>
+          current.some((decision) => decision.messageId === asked.messageId) ? current : [...current, asked],
+        );
+      }
+    };
     sendingRef.current = true;
     setSending(true);
-    let sentMessage: ChatMessageRecord | null = null;
+    let sentMessage: SendChatMessageResult | null = null;
     try {
       const result = await bridge().sendChatMessage({
         workspaceId,
         threadId: nav.thread.id,
         ...(parentMessageId ? { parentMessageId } : {}),
         body,
+        ...(options ? { needsDecision: true, options } : {}),
         ...(extractChatFileReferences(body).length > 0
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
@@ -2149,7 +2216,7 @@ export function ChatsView(props: {
       // exception is returning to the exact workspace conversation while this
       // request still owns its send slot.
       if (!requestOwnsActiveContext()) return;
-      sentMessage = result.message;
+      sentMessage = result;
       let resolvedDecision: ChatDecisionRecord | null = null;
       if (resolvingMessageId) {
         const resolution = await bridge().resolveChatDecision({
@@ -2162,11 +2229,7 @@ export function ChatsView(props: {
         if (!requestOwnsActiveContext()) return;
         resolvedDecision = resolution.decision;
       }
-      setMessages((current) =>
-        current.some((message) => message.id === result.message.id)
-          ? current
-          : [...current, result.message],
-      );
+      showSent(result);
       if (resolvedDecision) {
         const decisionWasOpen = reconcileResolvedChatDecision(
           latestDecisions.current,
@@ -2200,12 +2263,7 @@ export function ChatsView(props: {
         // The two durable writes are intentionally separate. If the reply
         // landed but resolution failed, show the real posted message and exit
         // the mode so retrying cannot silently duplicate the reply.
-        const posted = sentMessage;
-        setMessages((current) =>
-          current.some((message) => message.id === posted.id)
-            ? current
-            : [...current, posted],
-        );
+        showSent(sentMessage);
         clearMatchingComposer();
         props.onError(
           ipcErrorMessage(error, "Your reply was sent, but the decision is still open."),
@@ -2228,6 +2286,7 @@ export function ChatsView(props: {
   }, [
     composer,
     nav,
+    poll,
     props.onError,
     replyTarget,
     resolveChosenOption,
@@ -2426,13 +2485,17 @@ export function ChatsView(props: {
       replyTarget,
       resolveTargetMessageId,
       resolveChosenOption,
+      poll,
+      newThreadPoll,
     });
   }, [
     composer,
     dmDraft,
     dmRecipients,
     newThreadBody,
+    newThreadPoll,
     onDraftsChange,
+    poll,
     replyTarget,
     resolveChosenOption,
     resolveTargetMessageId,
@@ -2485,6 +2548,8 @@ export function ChatsView(props: {
       setReplyTarget(drafts.replyTarget);
       setResolveTargetMessageId(drafts.resolveTargetMessageId);
       setResolveChosenOption(drafts.resolveChosenOption ?? null);
+      setPoll(drafts.poll);
+      setNewThreadPoll(drafts.newThreadPoll);
     }
   }, [
     openChannel,
@@ -2623,7 +2688,7 @@ export function ChatsView(props: {
       ]);
       // The completion is the user's command landing (see openConversation).
       if (props.editorTabPath && props.onOpenInTab) {
-        onDraftsChange?.({ composer: "", newThreadBody: "", dmRecipients: "", dmDraft: "", replyTarget: null, resolveTargetMessageId: null });
+        onDraftsChange?.({ composer: "", newThreadBody: "", dmRecipients: "", dmDraft: "", replyTarget: null, resolveTargetMessageId: null, poll: null, newThreadPoll: null });
         props.onOpenInTab({ level: "dm", dm: result.dm });
       } else {
         props.onNavCommand?.({ level: "dm", dm: result.dm });
@@ -3099,6 +3164,7 @@ export function ChatsView(props: {
         setMessages([]);
         setMessagesLoading(false);
         setComposer("");
+        setPoll(null);
         void refreshDms("person");
         void refreshShares();
         return;
@@ -3344,6 +3410,7 @@ export function ChatsView(props: {
       setNav({ level: "channels" });
       setMessages([]);
       setComposer("");
+      setPoll(null);
       // Drop the compose draft/recipients so reopening "New message" never
       // shows a stale, unrelated "To:" that could misdirect the next send.
       setDmRecipients("");
@@ -3515,10 +3582,11 @@ export function ChatsView(props: {
     });
   }, []);
 
+  const liveRunId = dispatchState?.liveRunId ?? null;
   const stopThreadRun = useCallback(async () => {
     if (
       nav.level !== "thread" ||
-      dispatchState.liveRunId === null ||
+      liveRunId === null ||
       dispatchActionBusy
     ) {
       return;
@@ -3530,7 +3598,7 @@ export function ChatsView(props: {
     try {
       await bridge().stopAgentRun({
         workspaceId,
-        runId: dispatchState.liveRunId,
+        runId: liveRunId,
       });
       const next = await bridge().chatDispatchStateForThread({
         workspaceId,
@@ -3554,10 +3622,11 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, dispatchState.liveRunId, nav, props.onError, workspaceId]);
+  }, [dispatchActionBusy, liveRunId, nav, props.onError, workspaceId]);
 
+  const dispatchPaused = dispatchState?.paused === true;
   const resumeThreadDispatch = useCallback(async () => {
-    if (nav.level !== "thread" || !dispatchState.paused || dispatchActionBusy) {
+    if (nav.level !== "thread" || !dispatchPaused || dispatchActionBusy) {
       return;
     }
     const token = liveToken.current;
@@ -3588,7 +3657,7 @@ export function ChatsView(props: {
     } finally {
       if (token === liveToken.current) setDispatchActionBusy(false);
     }
-  }, [dispatchActionBusy, dispatchState.paused, nav, props.onError, workspaceId]);
+  }, [dispatchActionBusy, dispatchPaused, nav, props.onError, workspaceId]);
 
   // Escape walks back up one level — but never steals Escape from a composer
   // holding a draft (that Escape reads as "leave my text alone").
@@ -3952,6 +4021,10 @@ export function ChatsView(props: {
             loadFileHeadings={loadFileHeadings}
             onChange={setDmDraft}
             onSend={() => void startDm()}
+            onRosterPick={agentOffer.onRosterPick}
+            rosterScope={agentOffer.scope}
+            agentOffer={agentOffer.offer}
+            onSetUpAgent={props.onSetupAgent}
           />
         </div>
       </div>
@@ -4009,6 +4082,7 @@ export function ChatsView(props: {
               onOpenPath={props.onOpenPath}
               flashMessageId={flashMessageId}
               reactionControls={reactionControls}
+              bottomSpace={AGENT_OFFER_SPACE}
             />
           ) : (
             <div
@@ -4039,6 +4113,10 @@ export function ChatsView(props: {
                 presence.setTyping(false);
                 void sendDmMessage();
               }}
+              onRosterPick={agentOffer.onRosterPick}
+              rosterScope={agentOffer.scope}
+              agentOffer={agentOffer.offer}
+              onSetUpAgent={props.onSetupAgent}
             />
           ) : (
             <ComposerNotice testId="chats-dm-ended">
@@ -4107,7 +4185,7 @@ export function ChatsView(props: {
                 }
                 testId="chats-thread-bookmark"
               />
-              {!threadLocked && dispatchState.liveRunId !== null ? (
+              {!threadLocked && liveRunId !== null ? (
                 <button
                   type="button"
                   data-testid="chats-stop-agent-run"
@@ -4137,7 +4215,7 @@ export function ChatsView(props: {
             </>
           }
         />
-        {dispatchState.paused ? (
+        {dispatchState?.paused ? (
           <div
             data-testid="chats-dispatch-status"
             title={dispatchState.pausedReason}
@@ -4158,13 +4236,13 @@ export function ChatsView(props: {
               <span>read-only</span>
             )}
           </div>
-        ) : dispatchState.liveRunId !== null ||
-          dispatchState.pendingCount > 0 ? (
+        ) : dispatchState && (liveRunId !== null ||
+          dispatchState.pendingCount > 0) ? (
           <div
             data-testid="chats-dispatch-status"
             className="flex h-7 shrink-0 items-center justify-center border-b border-line bg-panel-2/35 px-3 font-mono text-[10px] text-subtle"
           >
-            {dispatchState.liveRunId !== null
+            {liveRunId !== null
               ? `agent working${
                   dispatchState.pendingCount > 0
                     ? ` · ${dispatchState.pendingCount} queued`
@@ -4212,59 +4290,44 @@ export function ChatsView(props: {
                 : "This group is read-only for you."}
             </ComposerNotice>
           ) : (
-            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 sm:px-4">
-              {resolveTargetMessageId ? (
-                <div
-                  data-testid="chats-resolving-mode"
-                  className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
-                >
-                  <span className="min-w-0 flex-1 truncate">
-                    {resolveChosenOption
-                      ? `Answering the poll · ${resolveChosenOption}`
-                      : "Answering the poll"}
-                  </span>
-                  <button
-                    type="button"
-                    data-testid="chats-resolving-cancel"
-                    aria-label="Cancel resolving decision"
-                    onClick={() => {
-                      if (replyTarget?.messageId === resolveTargetMessageId) {
-                        setReplyTarget(null);
-                      }
-                      setResolveTargetMessageId(null);
-                      setResolveChosenOption(null);
-                    }}
-                    className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
-                  >
-                    ×
-                  </button>
-                </div>
-              ) : null}
-              {replyTarget ? (
-                <div
-                  data-testid="chats-replying-mode"
-                  className="flex items-center gap-1 border-x border-t border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[10px] text-muted"
-                >
-                  <span className="min-w-0 flex-1">
-                    Replying to {replyTarget.authorLabel} ·
-                  </span>
-                  <button
-                    type="button"
-                    data-testid="chats-replying-cancel"
-                    aria-label="Cancel reply"
-                    onClick={() => {
-                      if (resolveTargetMessageId === replyTarget.messageId) {
-                        setResolveTargetMessageId(null);
-                      }
-                      setReplyTarget(null);
-                    }}
-                    className="rounded px-1 text-subtle hover:text-ink dohc-focus-visible"
-                  >
-                    ×
-                  </button>
-                </div>
-              ) : null}
+            // The top space holds a picked agent's offer, so it covers no comment.
+            <div ref={threadComposerRef} className="mx-auto w-full max-w-[640px] px-3 pb-4 pt-6 sm:px-4">
               <MentionComposer
+                above={<>
+                  {resolveTargetMessageId ? (
+                    <ComposerModeBar
+                      testId="chats-resolving-mode"
+                      cancelTestId="chats-resolving-cancel"
+                      cancelLabel="Cancel resolving decision"
+                      onCancel={() => {
+                        if (replyTarget?.messageId === resolveTargetMessageId) {
+                          setReplyTarget(null);
+                        }
+                        setResolveTargetMessageId(null);
+                        setResolveChosenOption(null);
+                      }}
+                    >
+                      {resolveChosenOption
+                        ? `Answering the poll · ${resolveChosenOption}`
+                        : "Answering the poll"}
+                    </ComposerModeBar>
+                  ) : null}
+                  {replyTarget ? (
+                    <ComposerModeBar
+                      testId="chats-replying-mode"
+                      cancelTestId="chats-replying-cancel"
+                      cancelLabel="Cancel reply"
+                      onCancel={() => {
+                        if (resolveTargetMessageId === replyTarget.messageId) {
+                          setResolveTargetMessageId(null);
+                        }
+                        setReplyTarget(null);
+                      }}
+                    >
+                      Replying to {replyTarget.authorLabel} ·
+                    </ComposerModeBar>
+                  ) : null}
+                </>}
                 testIdPrefix="chats"
                 composerId="chats-composer"
                 value={composer}
@@ -4279,6 +4342,8 @@ export function ChatsView(props: {
                   setComposer(value);
                   presence.setTyping(value.trim().length > 0);
                 }}
+                poll={poll}
+                onPollChange={(next) => setPoll(next && { ...next, threadId: nav.thread.id })}
                 onEscape={() => {
                   setReplyTarget(null);
                   setResolveTargetMessageId(null);
@@ -4287,6 +4352,10 @@ export function ChatsView(props: {
                   presence.setTyping(false);
                   void sendMessage();
                 }}
+                onRosterPick={agentOffer.onRosterPick}
+                rosterScope={agentOffer.scope}
+                agentOffer={agentOffer.offer}
+                onSetUpAgent={props.onSetupAgent}
               />
             </div>
           )}
@@ -4457,7 +4526,7 @@ export function ChatsView(props: {
                 title={props.workspacePath}
                 className="hidden shrink-0 truncate font-mono text-[10px] text-subtle sm:inline"
               >
-                reaches {props.workspacePath.split(/[\\/]/u).filter(Boolean).at(-1) ?? props.workspacePath}
+                reaches {reachName(props.workspacePath)}
               </span>
             ) : null}
             {props.onSetupAgent ? (
@@ -4595,6 +4664,9 @@ export function ChatsView(props: {
             onError={props.onError}
             onThreadRead={props.onThreadRead}
             revision={props.threadRevision ?? 0}
+            agentSetup={props.agentSetup}
+            onSetupAgent={props.onSetupAgent}
+            workspacePath={props.workspacePath}
           />
         ) : (
         <PostFeedList
@@ -4626,7 +4698,13 @@ export function ChatsView(props: {
                   fileCandidates={fileMentionCandidates}
                   loadFileHeadings={loadFileHeadings}
                   onChange={setNewThreadBody}
+                  poll={newThreadPoll}
+                  onPollChange={(next) => setNewThreadPoll(next && { ...next, channelId: nav.channel.id })}
                   onSend={() => void startThread()}
+                  onRosterPick={agentOffer.onRosterPick}
+                  rosterScope={agentOffer.scope}
+                  agentOffer={agentOffer.offer}
+                  onSetUpAgent={props.onSetupAgent}
                 />
               </div>
             ) : null}

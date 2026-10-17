@@ -1,3 +1,8 @@
+import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
+import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import { createDesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
+import { createTestScratch } from "../workspaces/testTemp";
+import { StartChannelThreadResult, SendChatMessageResult, ListChatMessagesResult, ListChatThreadDecisionsResult } from "./bridgeContract";
 import { chatOperations } from "./bridgeContract";
 import { workspaceFileRef } from "../workspaces/resolveEngineFiles";
 import { describe, expect, it, vi } from "vitest";
@@ -15,12 +20,13 @@ import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { deferred } from "../testing/deferred";
+import { createRendererWorkspaceOperationRunner } from "../window/rendererWorkspaceOperation";
 
 type ScopeKind = "local" | "view" | "comment" | "edit" | "ended" | "damaged";
 type Event = { sender: { trusted: boolean } };
 type Operation = { workspace: RegistryEntry; assertCurrent(): void };
 
-function fixture(kind: ScopeKind = "local") {
+function fixture(kind: ScopeKind = "local", persistedStore?: DesktopLinkedChatStore) {
   const workspace: RegistryEntry = {
     workspaceId: "workspace", rootPath: "/workspace", kind: "personal", mode: "local-first",
   };
@@ -57,13 +63,16 @@ function fixture(kind: ScopeKind = "local") {
     resolveChatDecision: vi.fn<DesktopLinkedChatStore["resolveChatDecision"]>(async input => ({ ...input, state: "resolved", atMs: 4 })),
     setReaction: vi.fn<DesktopLinkedChatStore["setReaction"]>(async input => ({ ...input, reactionId: "reaction", atMs: 4 })),
     listReactions: vi.fn<DesktopLinkedChatStore["listReactions"]>(async () => []),
+    listThreadDecisions: vi.fn<DesktopLinkedChatStore["listThreadDecisions"]>(async () => []),
+    listThreadAttachments: vi.fn<DesktopLinkedChatStore["listThreadAttachments"]>(async () => []),
+    listFollows: vi.fn<DesktopLinkedChatStore["listFollows"]>(async () => []),
+    listChannelThreads: vi.fn<DesktopLinkedChatStore["listChannelThreads"]>(async () => []),
     markThreadRead: vi.fn<DesktopLinkedChatStore["markThreadRead"]>(async input => ({ ...input, lastReadSequence: input.upToSequence, revision: 7, updatedAtMs: 5 })),
     listMessages: vi.fn<DesktopLinkedChatStore["listMessages"]>(async () => [message]),
     listThreads: vi.fn<DesktopLinkedChatStore["listThreads"]>(async () => [thread]),
     listThreadsForFile: vi.fn<DesktopLinkedChatStore["listThreadsForFile"]>(async () => [thread]),
     listFileMentions: vi.fn<DesktopLinkedChatStore["listFileMentions"]>(async () => []),
     getThreadRevision: vi.fn<DesktopLinkedChatStore["getThreadRevision"]>(async () => 7),
-    listChannelThreads: vi.fn<DesktopLinkedChatStore["listChannelThreads"]>(async () => []),
     listChannels: vi.fn<DesktopLinkedChatStore["listChannels"]>(async () => []),
     ensureGeneralChannel: vi.fn<DesktopLinkedChatStore["ensureGeneralChannel"]>(async () => ({ id: "general", workspaceId: "workspace", name: "General", slug: "general", kind: "channel", type: "posts", purpose: "", createdAtMs: 1, updatedAtMs: 1 })),
     findThreadChannelId: vi.fn<DesktopLinkedChatStore["findThreadChannelId"]>(async () => "channel"),
@@ -81,7 +90,7 @@ function fixture(kind: ScopeKind = "local") {
     markPersonalFeedSeen: vi.fn<DesktopLinkedChatStore["markPersonalFeedSeen"]>(async input => ({ ...input, lastSeenCreatedAtMs: 3, lastSeenMessageId: "message", updatedAtMs: 5 })),
   };
   // Unused ports fail if a handler unexpectedly reaches them. Each configured method keeps the production signature.
-  const store = new Proxy(storeMethods, {
+  const store = persistedStore ?? new Proxy(storeMethods, {
     get(target, key) {
       if (key in target) return Reflect.get(target, key);
       throw new Error(`Unexpected chat store method: ${String(key)}`);
@@ -93,7 +102,7 @@ function fixture(kind: ScopeKind = "local") {
   };
   const capture = captureMethods as unknown as WorkspaceEngineCapture;
   const authorities = createWorkspaceAuthorityOwner({
-    findWorkspace: id => id === workspace.workspaceId ? workspace : null,
+    findWorkspace: id => id === workspace.workspaceId ? workspace : id === "other" ? { ...workspace, workspaceId: "other", rootPath: "/other" } : null,
     canonicalizeRoot: root => root,
     createState: () => ({}),
   });
@@ -149,6 +158,14 @@ function fixture(kind: ScopeKind = "local") {
     notifyRenderer: () => undefined,
   });
   const sender = { trusted: true };
+  const held = authorities.acquire(workspace.workspaceId);
+  const session = { workspaceId: workspace.workspaceId, attachmentId: held.binding.attachmentId, generation: 1, isCurrent: () => true };
+  held.release();
+  const withRendererWorkspaceOperation = createRendererWorkspaceOperationRunner({
+    currentSession: (value: Event["sender"]) => value === sender ? session : undefined,
+    withPhysicalOperation: authorities.withOperation.bind(authorities),
+  });
+  const syncWorkspaceSharedChannels = vi.fn(async (_workspaceId: string) => 0);
   const assertTrustedSender = vi.fn((event: Event) => {
     if (!event.sender.trusted) throw new Error("Untrusted sender");
   });
@@ -160,9 +177,13 @@ function fixture(kind: ScopeKind = "local") {
     warmCredentialCache, localUserId: () => "owner",
     localInstallationId: () => "local-owner", currentCredentials: () => null,
     chatRelayIdentityFor,
-    syncWorkspaceSharedChannels: async () => 0, syncSharedChannelsForChatTarget,
-    syncRendererWorkspaceSharedChannels: async () => 0,
-    withRendererWorkspaceOperation: async (_sender, _id, _message, run) => run({ workspace, assertCurrent() {} }),
+    syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
+    syncRendererWorkspaceSharedChannels: async operation => {
+      const rows = await syncWorkspaceSharedChannels(operation.workspace.workspaceId);
+      operation.assertCurrent();
+      return rows;
+    },
+    withRendererWorkspaceOperation,
     resolveEngineFiles, activity, desktopChatBookmarks, notifyRenderer: () => undefined, automationCollectionOf: () => () => null,
     ensureGroupFolder,
   });
@@ -184,6 +205,42 @@ const mutations = [
   { name: "decision", channel: CHANNELS.resolveChatDecision, payload: { workspaceId: "workspace", threadId: "thread", messageId: "message", resolvedByMessageId: "reply" }, method: "resolveChatDecision" },
   { name: "reaction", channel: CHANNELS.setChatReaction, payload: { workspaceId: "workspace", threadId: "thread", messageId: "message", emoji: "👍", state: "added" }, method: "setReaction" },
 ] as const;
+
+describe("chat sender binding", () => {
+  const cases = [
+    ...mutations.map(({ channel, payload }) => ({ channel, payload })),
+    { channel: CHANNELS.listFileChats, payload: { path: "notes/a.md" } },
+    { channel: chatOperations.listChatFileMentions.channel, payload: { path: "notes/a.md" } },
+    { channel: CHANNELS.listChatBookmarks, payload: {} },
+    { channel: CHANNELS.saveChatBookmark, payload: { target: { kind: "thread", threadId: "thread" }, mode: "live" } },
+    { channel: CHANNELS.archiveChatBookmark, payload: { bookmarkId: "bookmark" } },
+    { channel: chatOperations.listChatMessages.channel, payload: { threadId: "thread" } },
+    { channel: CHANNELS.getChatThreadRevision, payload: { threadId: "thread" } },
+    { channel: CHANNELS.listChatThreadDecisions, payload: { threadId: "thread" } },
+    { channel: CHANNELS.listChatThreadAttachments, payload: { threadId: "thread" } },
+    { channel: CHANNELS.listChatFollows, payload: {} },
+    { channel: CHANNELS.setChatFollow, payload: { target: { kind: "thread", threadId: "thread" }, state: "following" } },
+    { channel: chatOperations.listPersonalChatFeed.channel, payload: {} },
+    { channel: CHANNELS.markPersonalChatFeedSeen, payload: { headCursor: "cursor" } },
+    { channel: CHANNELS.createChatChannel, payload: { name: "General" } },
+    { channel: chatOperations.listChannelThreads.channel, payload: { channelId: "channel" } },
+    { channel: chatOperations.startChannelThread.channel, payload: { channelId: "channel", body: "First message" } },
+    { channel: CHANNELS.markChatThreadRead, payload: { threadId: "thread", upToSequence: 3 } },
+    { channel: CHANNELS.listChatReactions, payload: { threadId: "thread" } },
+  ];
+  it.each(cases)("binds $channel before calling chat services", async ({ channel, payload }) => {
+    const h = fixture();
+    await h.invoke(channel, { ...payload, workspaceId: "workspace" });
+    const services = [h.requireEngineCapture, h.linkedChatStoreFor, h.openWorkspaceActivity,
+      h.warmCredentialCache, h.resolveEngineFiles, h.readOwnedWorkspaceText,
+      h.chatRelayIdentityFor, h.ensureGroupFolder, ...Object.values(h.storeMethods),
+      ...Object.values(h.captureMethods), ...Object.values(h.desktopChatBookmarks)];
+    services.forEach(service => service.mockClear());
+    const row = Object.values(chatOperations).find(operation => operation.channel === channel);
+    await expect(h.invoke(channel, { ...payload, workspaceId: "other" })).rejects.toThrow(row?.inactiveMessage ?? "no longer active");
+    services.forEach(service => expect(service).not.toHaveBeenCalled());
+  });
+});
 
 describe("the personal feed names each item's viewer", () => {
   it("falls back only for the thread whose identity lookup rejects", async () => {
@@ -539,4 +596,96 @@ it("keeps two unknown authors distinct in a received share view", async () => {
   expect(tokens[0]).toMatchObject({ hue: null, self: false });
   expect(tokens[1]!.group).not.toBe(tokens[0]!.group);
   expect(tokens[2]!.group).toBe(tokens[0]!.group);
+});
+
+describe("poll IPC writes", () => {
+  const doors = [
+    { name: "send", channel: chatOperations.sendChatMessage.channel, target: { threadId: "thread" }, method: "sendMessage" },
+    { name: "start", channel: chatOperations.startChannelThread.channel, target: { channelId: "channel" }, method: "startChannelThread" },
+  ] as const;
+  it.each(doors)("passes a poll through chatWrites on $name", async ({ channel, target, method }) => {
+    const test = fixture();
+    const poll = { needsDecision: true, options: [" Monday ", "Tuesday"] };
+    await test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", ...poll });
+    expect(test.storeMethods[method]).toHaveBeenCalledWith(expect.objectContaining(poll));
+  });
+  it.each(doors)("passes choices without a decision flag on $name", async ({ channel, target, method }) => {
+    const test = fixture();
+    await test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", options: ["Monday", "Tuesday"] });
+    const input = test.storeMethods[method].mock.calls[0]![0];
+    expect(input).toMatchObject({ options: ["Monday", "Tuesday"] });
+    expect(input).not.toHaveProperty("needsDecision");
+  });
+  it.each([
+    { name: "a decision flag", poll: { needsDecision: true }, count: 1 },
+    { name: "choices alone", poll: { options: ["Monday", "Tuesday"] }, count: 1 },
+    { name: "choices with a false decision flag", poll: { needsDecision: false, options: ["Monday", "Tuesday"] }, count: 1 },
+    { name: "a decision flag with no choices", poll: { needsDecision: true, options: [] }, count: 1 },
+    { name: "a plain message", poll: {}, count: 0 },
+    { name: "no decision and no choices", poll: { needsDecision: false, options: [] }, count: 0 },
+  ])("returns the opening decision count for $name", async ({ poll, count }) => {
+    const test = fixture();
+    const result = StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
+      workspaceId: "workspace", channelId: "channel", body: "When?", ...poll,
+    }));
+    expect(result.thread.openDecisionCount).toBe(count);
+  });
+  it.each(doors)("returns no decision and reads none for a plain message on $name", async ({ channel, target }) => {
+    const test = fixture();
+    const result = await test.invoke(channel, { workspaceId: "workspace", ...target, body: "Hello" }) as { decision?: unknown };
+    expect(result).not.toHaveProperty("decision");
+    expect(test.storeMethods.listThreadDecisions).not.toHaveBeenCalled();
+  });
+  it.each(doors)("still answers a written poll when its decision cannot be read back on $name", async ({ channel, target }) => {
+    const test = fixture();
+    test.storeMethods.listThreadDecisions.mockRejectedValueOnce(new Error("engine busy"));
+    const result = await test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", options: ["Monday", "Tuesday"] }) as { message: unknown; decision?: unknown };
+    expect(result.message).toBeDefined();
+    expect(result).not.toHaveProperty("decision");
+  });
+  it.each(doors)("refuses a poll in a share view on $name before persistence", async ({ channel, target, name }) => {
+    const test = fixture("view");
+    await expect(test.invoke(channel, { workspaceId: "workspace", ...target, body: "When?", needsDecision: true, options: ["Monday", "Tuesday"] }))
+      .rejects.toThrow(name === "send" ? "Chats are read-only in this shared view." : "A shared view has no capture.");
+    for (const method of Object.values(test.storeMethods)) expect(method).not.toHaveBeenCalled();
+    expect(test.activity.queueCloudSync).not.toHaveBeenCalled();
+  });
+});
+
+
+it("reads both IPC polls back with their decisions from the live chat store", async () => {
+  const workspace = { workspaceId: "workspace", rootPath: await createTestScratch("dohc-ipc-poll-") };
+  const engine = new ChatsLoopbackEngine();
+  const client = { close() {}, async sendRequest(request: import("@dohc/workspace-engine-client").Request): Promise<import("@dohc/workspace-engine-client").Response> {
+    if (request.method === "workspace.open") return { id: request.id, result: { workspace: workspace.workspaceId } };
+    if (request.method === "workspace.close") return { id: request.id, result: { closed: true } };
+    return engine.sendRequest(request);
+  } };
+  const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+  const store = createDesktopLinkedChatStore(workspace, { sessions });
+  try {
+    const channel = await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
+    const test = fixture("local", store);
+    const first = StartChannelThreadResult.parse(await test.invoke(chatOperations.startChannelThread.channel, {
+      workspaceId: workspace.workspaceId, channelId: channel.id, body: "Which day?", needsDecision: true, options: [" Monday ", "Tuesday"],
+    }));
+    const second = SendChatMessageResult.parse(await test.invoke(chatOperations.sendChatMessage.channel, {
+      workspaceId: workspace.workspaceId, threadId: first.thread.id, body: "Which time?", options: ["Morning", "Afternoon"],
+    }));
+    // Each write returns its poll as the engine stored it, choices trimmed.
+    expect(first.decision).toMatchObject({ messageId: first.message.id, state: "open", options: ["Monday", "Tuesday"] });
+    expect(second.decision).toMatchObject({ messageId: second.message.id, state: "open", options: ["Morning", "Afternoon"] });
+    const messages = ListChatMessagesResult.parse(await test.invoke(chatOperations.listChatMessages.channel, {
+      workspaceId: workspace.workspaceId, threadId: first.thread.id,
+    }));
+    expect(messages.messages.map(message => message.id)).toEqual([first.message.id, second.message.id]);
+    const decisions = ListChatThreadDecisionsResult.parse(await test.invoke(CHANNELS.listChatThreadDecisions, {
+      workspaceId: workspace.workspaceId, threadId: first.thread.id,
+    }));
+    expect(decisions.decisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ messageId: first.message.id, state: "open", options: ["Monday", "Tuesday"] }),
+      expect.objectContaining({ messageId: second.message.id, state: "open", options: ["Morning", "Afternoon"] }),
+    ]));
+    expect(decisions.decisions).toHaveLength(2);
+  } finally { await sessions.closeWorkspace(workspace); }
 });

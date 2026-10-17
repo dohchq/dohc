@@ -14,7 +14,8 @@ import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHA
 export type WorkspaceReplicationRoute =
   | { route: "bootstrap"; workspaceId: string }
   | { route: "epoch"; workspaceId: string }
-  | { route: "log"; workspaceId: string }
+  // `serviceHost` marks the service host's own feed, the only writer of its reserved origins.
+  | { route: "log"; workspaceId: string; serviceHost?: boolean }
   | { route: "log-coordinate"; workspaceId: string; originId: string; originSeq: number };
 
 const MAX_IDENTITY_BYTES = 512;
@@ -129,7 +130,7 @@ export function createWorkspaceReplicationRoutes(
       // parseLogOp and appendLogBatch, so the relay rejects the full batch
       // before it writes any operation.
       assertChatAuthorship(input.ops, actor.userId);
-      assertClientLogProvenance(originId, input.ops, true);
+      assertClientLogProvenance(originId, input.ops, {deferMomentRefusal: true, serviceHost: route.serviceHost === true});
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
       await storage.prepareLogAppend({workspaceId:route.workspaceId,originId,ops},request.signal);
       const result = storage.appendLogBatch({
@@ -194,17 +195,7 @@ export function createWorkspaceReplicationRoutes(
       });
       const response = jsonResponse({
         ok: true,
-        ops: page.rows.map((row) => ({
-          relaySeq: row.relaySeq,
-          workspaceId: row.workspaceId,
-          originId: row.originId,
-          originSeq: row.originSeq,
-          opKind: row.opKind,
-          payload: JSON.parse(row.payloadJson) as unknown,
-          recordedAtMs: row.recordedAtMs,
-          ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
-          ...(row.settlementAdmission === undefined ? {} : {settlementAdmission:row.settlementAdmission}),
-        })),
+        ops: page.rows.map(servedLogOp),
         // A hidden epoch floor is a read filter, not a served log row. An
         // empty response therefore cannot advance the caller's cursor: the
         // strict page contract requires nextCursor to equal the final
@@ -229,24 +220,8 @@ export function createWorkspaceReplicationRoutes(
         originId: route.originId,
         originSeq: route.originSeq,
       });
-      if (!row) return jsonResponse({ ok: true, status: "absent" });
-      const op = {
-        relaySeq: row.relaySeq,
-        workspaceId: row.workspaceId,
-        originId: row.originId,
-        originSeq: row.originSeq,
-        opKind: row.opKind,
-        payload: JSON.parse(row.payloadJson) as unknown,
-        recordedAtMs: row.recordedAtMs,
-        ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
-          ...(row.settlementAdmission === undefined ? {} : {settlementAdmission:row.settlementAdmission}),
-      };
-      const response = jsonResponse({
-        ok: true,
-        status: row.relaySeq <= epochLogFloor ? "presentBelowEpochFloor" : "present",
-        op,
-      });
-      onLogRead?.(request, route.workspaceId, [row]);
+      const response = jsonResponse(logCoordinateAnswer(row, epochLogFloor));
+      if (row) onLogRead?.(request, route.workspaceId, [row]);
       return response;
     }
 
@@ -317,6 +292,30 @@ export function createWorkspaceReplicationRoutes(
   return { respondToWorkspaceRegistration, respondToWorkspaceReplication };
 }
 
+/** A log row as replication serves it: the stored payload, unchanged. */
+export function servedLogOp(row: SyncRelayLogRow) {
+  return {
+    relaySeq: row.relaySeq,
+    workspaceId: row.workspaceId,
+    originId: row.originId,
+    originSeq: row.originSeq,
+    opKind: row.opKind,
+    payload: JSON.parse(row.payloadJson) as unknown,
+    recordedAtMs: row.recordedAtMs,
+    ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
+    ...(row.settlementAdmission === undefined ? {} : {settlementAdmission: row.settlementAdmission}),
+  };
+}
+
+export function logCoordinateAnswer(row: SyncRelayLogRow | null, epochLogFloor: number) {
+  if (!row) return { ok: true, status: "absent" };
+  return {
+    ok: true,
+    status: row.relaySeq <= epochLogFloor ? "presentBelowEpochFloor" : "present",
+    op: servedLogOp(row),
+  };
+}
+
 function parseLogHold(value: string): number {
   if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
     throw badRequest("hold must be a non-negative integer");
@@ -352,7 +351,7 @@ function parseOptionalWorkspaceIdentity(
   );
 }
 
-function parseOptionalWorkspaceIdentityQuery(
+export function parseOptionalWorkspaceIdentityQuery(
   searchParams: URLSearchParams,
 ): OptionalWorkspaceIdentity | null {
   return parseOptionalWorkspaceIdentityValues(
@@ -385,7 +384,7 @@ function parseOptionalWorkspaceIdentityValues(
   };
 }
 
-function enforceWorkspaceIdentity(
+export function enforceWorkspaceIdentity(
   storage: Pick<SyncRelayStorage, "getWorkspaceIdentity" | "verifyWorkspaceIdentity" | "getEpochLogFloor">,
   workspaceId: string,
   identity: OptionalWorkspaceIdentity | null,

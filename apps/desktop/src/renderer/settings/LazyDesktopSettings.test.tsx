@@ -20,6 +20,7 @@ function RecoveredSettings(_props: DesktopSettingsProps) {
 function settingsProps(): DesktopSettingsProps {
   return {
     workspaceId: "workspace-1",
+    workspaceIsReady: true,
     workspacePath: "C:\\workspace-1",
     onClose: () => undefined,
   };

@@ -17,6 +17,9 @@ import {
 import { Pool } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
+import {ACCOUNT_DELETION_PATH, ACCOUNT_DELETION_KEY_HEADER, accountDeletionKey, accountDeletionFenceKey} from "@dohc/workspace-auth/accountDeletion";
+import {createAccountDeletionRoute, fencePendingAccountDeletions} from "./accountDeletionRoute";
+import type {StorageContext} from "./storage/context";
 import { createSignUpInviteRoute } from "./signUpInviteRoute";
 import { errorBody, errorResponse, notFound } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
@@ -39,7 +42,7 @@ import { startPublicationOperator } from "./appPublicationOperator";
 import { operatorSocketPath } from "./appPublicationOperatorProtocol";
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
-import { startServiceLiveHost } from "./serviceLiveHost";
+import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots } from "./serviceLiveHost";
 import { startEngineProjection } from "./engineProjection";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
@@ -59,7 +62,7 @@ import type {NamedFrameNativeHost} from "./namedLiveFrameHost";
 import {createAutomationRecordHost} from "./automationRecordHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
-import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
+import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots} from "./selfHostedLiveHost";
 import {createServiceHostEnrollmentRoutes} from "./serviceHostEnrollmentRoutes";
 import {createServiceHostReplication} from "./serviceHostReplication";
 import {authorizeServiceHostReplication} from "./serviceHostCredential";
@@ -147,6 +150,7 @@ function validateShareWebOrigin(value: string | undefined): string | undefined {
 }
 
 const shareWebOrigin = validateShareWebOrigin(process.env.DOHC_RELAY_SHARE_WEB_ORIGIN);
+if (shareWebOrigin && !process.env.DOHC_RELAY_SHARE_WEB_URL) fatal("DOHC_RELAY_SHARE_WEB_ORIGIN requires DOHC_RELAY_SHARE_WEB_URL for account deletion.");
 
 // Reject an unparseable SYNC_RELAY_PORT up front: Number("abc") is NaN and
 // server.listen(NaN) fails with an obscure downstream error. Port 0 is
@@ -321,7 +325,7 @@ let automations: Awaited<ReturnType<typeof startAutomationServer>> | undefined;
 const serviceReplication = selfHostedLive && deployment && linkKey
   ? (() => {
       const credential = {key: Buffer.from(linkKey), namespace: deployment.history.namespace};
-      return createServiceHostReplication({storage, prefix: "dohc-service-v1.",
+      return createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true,
         authorize: input => authorizeServiceHostReplication(storage, {...credential, ...input})});
     })() : undefined;
 
@@ -398,6 +402,7 @@ const relayApplication = createSyncRelayHandler({
   noticePostRateLimiter,
   ...(automationServer ? {automationServer} : {}),
 });
+let ownerLive: ReturnType<typeof createOwnerLiveRoutes> | undefined;
 let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let linkLiveHttp: ReturnType<typeof createLinkLiveHttp> | undefined;
@@ -414,8 +419,39 @@ const relayHandler = guardRelayResponses(storage, request => {
   if (isLinkLivePath(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   return relayApplication(request);
 });
+const deletions = createAccountDeletionRoute({storage: storage as StorageContext, key: accountDeletionKey(secret), fenceKey: accountDeletionFenceKey(secret),
+  invalidate(userId, manifest) {
+    const ids = manifest.workspaces.map(row => row.workspaceId);
+    relayApplication.deleteAccount(userId,ids,manifest.shareIds);
+    namedLive?.deleteAccount(userId,ids); linkLive?.deleteAccount(userId,ids); desktopLive?.deleteAccount(userId,ids); ownerLive?.deleteAccount(userId,ids);
+    automations?.deleteAccount(userId);
+  },
+  async deleteRuntime(userId, manifest) {
+    const ids = manifest.workspaces.map(row => row.workspaceId);
+    if (shareWebOrigin) {
+      const origin = process.env.DOHC_RELAY_SHARE_WEB_URL;
+      if (!origin || !relayExchangeKey) throw new Error("Share-web deletion is unavailable.");
+      const batches = Math.max(1, Math.ceil(Math.max(ids.length,manifest.grantIds.length,manifest.publicationIds.length)/8));
+      for (let i=0;i<batches;i++) {
+        const response = await fetch(new URL(ACCOUNT_DELETION_PATH,origin), {method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
+          headers: {"content-type":"application/json", [ACCOUNT_DELETION_KEY_HEADER]: accountDeletionKey(relayExchangeKey)},
+          body: JSON.stringify({userId,workspaceIds:ids.slice(i*8,i*8+8),grantIds:manifest.grantIds.slice(i*8,i*8+8),publicationIds:manifest.publicationIds.slice(i*8,i*8+8)})});
+        const result: unknown = await response.json();
+        if (!response.ok || !result || typeof result !== "object" || !("finished" in result) || result.finished !== true) throw new Error("Share-web deletion is unfinished.");
+      }
+    }
+    await automations?.deleteWorkspaces(ids);
+    if (selfHost) await selfHost.deleteWorkspaces(manifest.workspaces);
+    else if (deployment && process.env.DOHC_RELAY_SERVICE_HOST_ROOT) await deleteSelfHostedWorkspaceRoots(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, deployment.history.namespace, manifest.workspaces);
+    await configuredServiceHost?.deleteWorkspaces(ids);
+    if (serviceHostConfig) await deleteConfiguredServiceWorkspaceRoots(serviceHostConfig, ids);
+    await datasetHost.deleteWorkspaces(manifest.datasets);
+  },
+});
+const pendingDeletions = pool ? await fencePendingAccountDeletions(pool, deletions) : [];
 const signUpInvites = secret.length >= 32 ? createSignUpInviteRoute({storage, key: signUpInviteKey(secret)}) : undefined;
 const fetchHandler = async (request: Request): Promise<Response> => {
+  if (secret.length >= 32 && new URL(request.url).pathname === ACCOUNT_DELETION_PATH) return deletions.handle(request);
   if (signUpInvites && new URL(request.url).pathname === SIGN_UP_INVITE_PATH) return signUpInvites(request);
   if (new URL(request.url).pathname === "/ready") {
     const ready = !storage.unavailable.aborted && (!selfHostedLive || (!!selfHost && !selfHost.unavailable));
@@ -633,29 +669,22 @@ if (namedLiveConfig) {
       sessions: desktopAdmission, tickets, captureNative, membership, admission});
     server.once("close", desktopLive.close); process.once("SIGINT", desktopLive.close); process.once("SIGTERM", desktopLive.close);
   }
-  const ownerLive = createOwnerLiveRoutes({ storage, resolveActor, lookupUserDisplayName, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+  ownerLive = createOwnerLiveRoutes({ storage, resolveActor, lookupUserDisplayName, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
     frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate, captureNative, admission });
   server.once("close", ownerLive.close);
   process.once("SIGINT", ownerLive.close); process.once("SIGTERM", ownerLive.close);
   server.on("upgrade", (request, socket, head) => {
-    if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? "")) void ownerLive.handleUpgrade(request, socket, head);
-    else if (request.url?.startsWith("/sync/live/named?")) void namedLive!.handleUpgrade(request, socket, head);
-    else if (request.url?.startsWith("/sync/live/link?")) {if (linkLive) void linkLive.handleUpgrade(request, socket, head); else socket.destroy();}
-    else if (request.url?.startsWith("/sync/live/desktop?")) {if (desktopLive) void desktopLive.handleUpgrade(request, socket, head); else socket.destroy();}
+    if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? "")) void ownerLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
+    else if (request.url?.startsWith("/sync/live/named?")) void namedLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
+    else if (request.url?.startsWith("/sync/live/link?")) {if (linkLive) void linkLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy()); else socket.destroy();}
+    else if (request.url?.startsWith("/sync/live/desktop?")) {if (desktopLive) void desktopLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy()); else socket.destroy();}
     else if (!deviceControl) socket.destroy();
   });
   server.once("close", namedLive.close);
   process.once("SIGINT", namedLive.close); process.once("SIGTERM", namedLive.close);
 }
 const publicationOperator = await startPublicationOperator(storage, operatorSocketPath());
-server.listen(requestedPort, host, () => {
-  const address = server.address();
-  const actualPort = typeof address === "object" && address ? address.port : requestedPort;
-  console.log(`[sync-relay] listening on ${host}:${actualPort}`);
-  console.log(`SYNC_RELAY_LISTENING host=${host} port=${actualPort}`);
-  if (testAuthSeam) console.log("[sync-relay] SYNC_RELAY_TEST_AUTH seam ENABLED (dev/test only)");
-});
 
 // A server that does not run automations keeps no copies of workspaces.
 const automationRoot = process.env.DOHC_RELAY_SERVICE_HOST_ROOT ? join(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, "automations") : undefined;
@@ -675,6 +704,17 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
     workspaces: () => selfHost.automationWorkspaces(), onEvent: selfHost.onAutomationEvent}} : {}),
   onError: (context, error) => console.error(`[sync-relay] automations: ${context}:`, error),
 }) : undefined;
+
+server.listen(requestedPort, host, () => {
+  void (async () => {
+    for (const job of pendingDeletions.splice(0)) await deletions.purge(job.user_id,job.email).catch(() => console.error("[sync-relay] Account deletion remains pending."));
+  })();
+  const address = server.address();
+  const actualPort = typeof address === "object" && address ? address.port : requestedPort;
+  console.log(`[sync-relay] listening on ${host}:${actualPort}`);
+  console.log(`SYNC_RELAY_LISTENING host=${host} port=${actualPort}`);
+  if (testAuthSeam) console.log("[sync-relay] SYNC_RELAY_TEST_AUTH seam ENABLED (dev/test only)");
+});
 
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
