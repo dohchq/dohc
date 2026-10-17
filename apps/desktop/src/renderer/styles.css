@@ -16,6 +16,9 @@
  * static block exists so first paint never waits on JS — edit values in BOTH
  * files or the sync test fails. */
 :root {
+  /* Native controls (checkboxes, selects, pickers) draw in the app's theme,
+   * not the OS theme that index.html's `light dark` follows. */
+  color-scheme: light;
   --font-sans: "Inter Variable", system-ui, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 
@@ -56,6 +59,7 @@
 }
 
 [data-theme='dark'] {
+  color-scheme: dark;
   --dohc-bg: #131211;
   --dohc-panel: #181715;
   --dohc-panel-2: #201f1c;
@@ -148,6 +152,11 @@ body {
   :focus-visible {
     outline: 2px solid var(--dohc-accent);
     outline-offset: 1px;
+  }
+
+  /* A checked checkbox or radio fills with the accent, not Chromium's blue. */
+  input {
+    accent-color: var(--dohc-accent);
   }
 }
 
