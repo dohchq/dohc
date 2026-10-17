@@ -1,5 +1,5 @@
+import { chatOperations } from "./ipc/chatOperations";
 import { describe, expect, it, vi } from "vitest";
-import { CHANNELS } from "./ipc/channels";
 import {
   ListChatChannelSharesResult,
   MAX_CHAT_CHANNEL_SHARE_ROWS,
@@ -153,7 +153,7 @@ describe("runtime main chat IPC boundaries", () => {
     const cloudSync = vi.fn();
 
     ipc.handle(
-      CHANNELS.createChatChannel,
+      chatOperations.createChatChannel.channel,
       createChatChannelIpcHandler({
         ...deps,
         run: create,
@@ -161,7 +161,7 @@ describe("runtime main chat IPC boundaries", () => {
       }),
     );
 
-    await expect(ipc.invoke(CHANNELS.createChatChannel, { workspaceId })).rejects.toThrow(
+    await expect(ipc.invoke(chatOperations.createChatChannel.channel, { workspaceId })).rejects.toThrow(
       /read-only/u,
     );
     expect(create).not.toHaveBeenCalled();
@@ -178,7 +178,7 @@ describe("runtime main chat IPC boundaries", () => {
     const events: string[] = [];
 
     ipc.handle(
-      CHANNELS.createChatChannel,
+      chatOperations.createChatChannel.channel,
       createChatChannelIpcHandler({
         ...deps,
         run: async () => {
@@ -189,7 +189,7 @@ describe("runtime main chat IPC boundaries", () => {
       }),
     );
 
-    await ipc.invoke(CHANNELS.createChatChannel, { workspaceId });
+    await ipc.invoke(chatOperations.createChatChannel.channel, { workspaceId });
     expect(events).toEqual(["channel-write", `cloud:${workspaceId}`]);
   });
 
@@ -232,7 +232,7 @@ describe("runtime main chat IPC boundaries", () => {
     });
     const requireContext = vi.fn(deps.requireContext);
     ipc.handle(
-      CHANNELS.markChatThreadRead,
+      chatOperations.markChatThreadRead.channel,
       createMarkChatThreadReadIpcHandler({
         parsePayload,
         requireContext,
@@ -241,7 +241,7 @@ describe("runtime main chat IPC boundaries", () => {
     );
 
     await expect(
-      ipc.invoke(CHANNELS.markChatThreadRead, {
+      ipc.invoke(chatOperations.markChatThreadRead.channel, {
         workspaceId,
         threadId: "thread-view",
         upToSequence: 4,
@@ -251,7 +251,7 @@ describe("runtime main chat IPC boundaries", () => {
     const validParseCount = parsePayload.mock.calls.length;
     await expect(
       ipc.invoke(
-        CHANNELS.markChatThreadRead,
+        chatOperations.markChatThreadRead.channel,
         { workspaceId, threadId: "thread-view", upToSequence: 4 },
         { trusted: false },
       ),
@@ -259,11 +259,11 @@ describe("runtime main chat IPC boundaries", () => {
     expect(parsePayload).toHaveBeenCalledTimes(validParseCount);
     expect(requireContext).toHaveBeenCalledTimes(1);
     await expect(
-      ipc.invoke(CHANNELS.markChatThreadRead, { workspaceId }),
+      ipc.invoke(chatOperations.markChatThreadRead.channel, { workspaceId }),
     ).rejects.toThrow("Invalid payload.");
     expect(requireContext).toHaveBeenCalledTimes(1);
     await expect(
-      ipc.invoke(CHANNELS.markChatThreadRead, {
+      ipc.invoke(chatOperations.markChatThreadRead.channel, {
         workspaceId: "missing-workspace",
         threadId: "thread-view",
         upToSequence: 4,
@@ -1237,7 +1237,7 @@ describe("chat read state in a share view", () => {
       const ipc = runtimeHarness();
       const run = vi.fn(async () => ({ ok: true }));
       ipc.handle(
-        CHANNELS.markChatThreadRead,
+        chatOperations.markChatThreadRead.channel,
         createMarkChatThreadReadIpcHandler({
           parsePayload(payload: unknown) {
             const parsed = payload as { workspaceId?: unknown };
@@ -1248,7 +1248,7 @@ describe("chat read state in a share view", () => {
           run,
         }),
       );
-      await expect(ipc.invoke(CHANNELS.markChatThreadRead, { workspaceId })).resolves.toEqual({
+      await expect(ipc.invoke(chatOperations.markChatThreadRead.channel, { workspaceId })).resolves.toEqual({
         ok: true,
       });
       expect(run, label).toHaveBeenCalledTimes(1);

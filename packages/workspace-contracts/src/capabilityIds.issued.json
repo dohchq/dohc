@@ -171,5 +171,20 @@
   "file.external.open",
   "account.delete.preview",
   "account.delete",
-  "agent.run.state.read"
+  "agent.run.state.read",
+  "chat.bookmarks.list",
+  "chat.bookmark.save",
+  "chat.bookmark.archive",
+  "chat.thread.revision.read",
+  "chat.decisions.list",
+  "chat.decision.resolve",
+  "chat.attachments.list",
+  "chat.navigation.list",
+  "chat.follows.list",
+  "chat.follow.set",
+  "chat.inbox.seen.mark",
+  "group.create",
+  "chat.thread.read.mark",
+  "chat.reactions.list",
+  "chat.reaction.set"
 ]

@@ -1,3 +1,4 @@
+import { chatOperations } from "./ipc/chatOperations";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { accessOperations } from "./ipc/accessOperations";
@@ -20,7 +21,6 @@ import type {
 } from "./ipc/bridgeContract";
 import {
   CaptureHoldsEvent,
-  chatOperations,
   systemMotionOperations,
   serverAccountOperations,
   SitePreviewReplacedEvent,
@@ -202,12 +202,6 @@ const bridge: DohcDesktopBridge = {
   getBacklinks: (payload) => ipcRenderer.invoke(CHANNELS.getBacklinks, payload),
   listWorkspaceHeadings: (payload) =>
     ipcRenderer.invoke(CHANNELS.listWorkspaceHeadings, payload),
-  listChatBookmarks: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatBookmarks, payload),
-  saveChatBookmark: (payload) =>
-    ipcRenderer.invoke(CHANNELS.saveChatBookmark, payload),
-  archiveChatBookmark: (payload) =>
-    ipcRenderer.invoke(CHANNELS.archiveChatBookmark, payload),
   readWorkspaceDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceDatabase, payload),
   readWorkspaceDatabasePage: (payload) =>
@@ -500,35 +494,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.readEngineMoment, payload),
   restoreEngineMomentFile: (payload) =>
     ipcRenderer.invoke(CHANNELS.restoreEngineMomentFile, payload),
-  listFileChats: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listFileChats, payload),
-  createFileChat: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createFileChat, payload),
-  getChatThreadRevision: (payload) =>
-    ipcRenderer.invoke(CHANNELS.getChatThreadRevision, payload),
-  listChatThreadDecisions: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatThreadDecisions, payload),
-  resolveChatDecision: (payload) =>
-    ipcRenderer.invoke(CHANNELS.resolveChatDecision, payload),
-  listChatThreadAttachments: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatThreadAttachments, payload),
   chatRunRecordsForThread: (payload) =>
     ipcRenderer.invoke(CHANNELS.chatRunRecordsForThread, payload),
-  listChatChannels: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatChannels, payload),
-  listChatFollows: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatFollows, payload),
-  setChatFollow: (payload) => ipcRenderer.invoke(CHANNELS.setChatFollow, payload),
-  markPersonalChatFeedSeen: (payload) =>
-    ipcRenderer.invoke(CHANNELS.markPersonalChatFeedSeen, payload),
-  createChatChannel: (payload) =>
-    ipcRenderer.invoke(CHANNELS.createChatChannel, payload),
-  markChatThreadRead: (payload) =>
-    ipcRenderer.invoke(CHANNELS.markChatThreadRead, payload),
-  listChatReactions: (payload) =>
-    ipcRenderer.invoke(CHANNELS.listChatReactions, payload),
-  setChatReaction: (payload) =>
-    ipcRenderer.invoke(CHANNELS.setChatReaction, payload),
   syncDms: (payload) => ipcRenderer.invoke(CHANNELS.syncDms, payload),
   acceptDm: (payload) => ipcRenderer.invoke(CHANNELS.acceptDm, payload),
   declineDm: (payload) => ipcRenderer.invoke(CHANNELS.declineDm, payload),

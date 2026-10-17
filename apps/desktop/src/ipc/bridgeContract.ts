@@ -1,3 +1,4 @@
+import type { chatOperations } from "./chatOperations";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
 export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -6886,39 +6887,6 @@ export const systemMotionOperations = {
   },
 } as const satisfies OperationTable;
 
-export const chatOperations = {
-  listChatFileMentions: {
-    capabilityId: "chat.read", scope: "workspace",
-    channel: "desktop:list-chat-file-mentions", payload: ListChatFileMentionsPayload, result: ListChatFileMentionsResult,
-    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
-  },
-  listChatMessages: {
-    capabilityId: "chat.read", scope: "workspace",
-    channel: "desktop:list-chat-messages", payload: ListChatMessagesPayload, result: ListChatMessagesResult,
-    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
-  },
-  sendChatMessage: {
-    capabilityId: "chat.reply", scope: "workspace",
-    channel: "desktop:send-chat-message", payload: SendChatMessagePayload, result: SendChatMessageResult,
-    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
-  },
-  listPersonalChatFeed: {
-    capabilityId: "chat.inbox.read", scope: "workspace",
-    channel: "desktop:list-personal-chat-feed", payload: ListPersonalChatFeedPayload, result: ListPersonalChatFeedResult,
-    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
-  },
-  listChannelThreads: {
-    capabilityId: "chat.threads.list", scope: "workspace",
-    channel: "desktop:list-channel-threads", payload: ListChannelThreadsPayload, result: ListChannelThreadsResult,
-    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
-  },
-  startChannelThread: {
-    capabilityId: "chat.post", scope: "workspace",
-    channel: "desktop:start-channel-thread", payload: StartChannelThreadPayload, result: StartChannelThreadResult,
-    guard: "active-workspace", inactiveMessage: "Chats stopped because this window changed workspaces.",
-  },
-} as const satisfies OperationTable;
-
 // The server account this computer is connected to. Main sends both requests
 // with its own session; the window never sees the session.
 export const serverAccountOperations = {
@@ -7039,11 +7007,6 @@ export interface DohcDesktopBridge
   listWorkspaceHeadings(
     payload: ListWorkspaceHeadingsPayload,
   ): Promise<ListWorkspaceHeadingsResult>;
-  listChatBookmarks(payload: ListChatBookmarksPayload): Promise<ListChatBookmarksResult>;
-  saveChatBookmark(payload: SaveChatBookmarkPayload): Promise<SaveChatBookmarkResult>;
-  archiveChatBookmark(
-    payload: ArchiveChatBookmarkPayload,
-  ): Promise<ArchiveChatBookmarkResult>;
   // Collections: the engine's collection index, read-only.
   // Writes ride the live document's frontmatter map, not a bridge method.
   listCollections(payload: ListCollectionsPayload): Promise<ListCollectionsResult>;
@@ -7242,44 +7205,9 @@ export interface DohcDesktopBridge
   restoreEngineMomentFile(
     payload: RestoreEngineMomentFilePayload,
   ): Promise<RestoreEngineMomentFileResult>;
-  listFileChats(payload: ListFileChatsPayload): Promise<ListFileChatsResponse>;
-  createFileChat(payload: CreateFileChatPayload): Promise<CreateFileChatResult>;
-  getChatThreadRevision(
-    payload: GetChatThreadRevisionPayload,
-  ): Promise<GetChatThreadRevisionResult>;
-  listChatThreadDecisions(
-    payload: ListChatThreadDecisionsPayload,
-  ): Promise<ListChatThreadDecisionsResult>;
-  resolveChatDecision(
-    payload: ResolveChatDecisionPayload,
-  ): Promise<ResolveChatDecisionResult>;
-  listChatThreadAttachments(
-    payload: ListChatThreadAttachmentsPayload,
-  ): Promise<ListChatThreadAttachmentsResult>;
   chatRunRecordsForThread(
     payload: ChatRunRecordsForThreadPayload,
   ): Promise<ChatRunRecordsForThreadResult>;
-  // Chats channels (PR 12/13, WS-E) — same flag gate as the file rail.
-  listChatChannels(
-    payload: ListChatChannelsPayload,
-  ): Promise<ListChatChannelsResult>;
-  listChatFollows(payload: ListChatFollowsPayload): Promise<ListChatFollowsResult>;
-  setChatFollow(payload: SetChatFollowPayload): Promise<SetChatFollowResult>;
-  markPersonalChatFeedSeen(payload: MarkPersonalChatFeedSeenPayload): Promise<void>;
-  createChatChannel(
-    payload: CreateChatChannelPayload,
-  ): Promise<CreateChatChannelResult>;
-  markChatThreadRead(
-    payload: MarkChatThreadReadPayload,
-  ): Promise<MarkChatThreadReadResult>;
-  // Reactions (WS-MU-C2): list active reactions for a thread and add/remove
-  // the viewer's own. Same gate as the rest of chat.
-  listChatReactions(
-    payload: ListChatReactionsPayload,
-  ): Promise<ListChatReactionsResult>;
-  setChatReaction(
-    payload: SetChatReactionPayload,
-  ): Promise<SetChatReactionResult>;
   // Direct messages (WS-MU-C3): reconcile DM state with the relay and list the
   // workspace's DMs; start (or continue) a DM with a recipient set.
   syncDms(payload: SyncDmsPayload): Promise<SyncDmsResult>;

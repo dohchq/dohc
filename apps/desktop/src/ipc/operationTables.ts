@@ -1,5 +1,5 @@
+import { chatOperations } from "./chatOperations";
 import {
-  chatOperations,
   systemMotionOperations,
   serverAccountOperations,
   chatDispatchNoticeOperations,

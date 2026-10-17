@@ -1,55 +1,38 @@
+import { chatOperations } from "./chatOperations";
 import { isReceivedObject } from "@dohc/workspace-contracts/workspace-ref";
 import { workspaceFileRefs } from "../workspaces/workspaceFileReferenceScopes";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { createActorPresentationRequest } from "../workspaces/actorPresentation";
 import type { ActorPresentation, ChatDecisionRecord } from "./bridgeContract";
 import { type EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import {
-  chatOperations,
-  ListFileChatsPayload,
-  CreateFileChatPayload,
   CreateFileChatResult,
   ListChatMessagesResult,
-  GetChatThreadRevisionPayload,
   GetChatThreadRevisionResult,
   SendChatMessageResult,
-  ListChatThreadDecisionsPayload,
   ListChatThreadDecisionsResult,
-  ResolveChatDecisionPayload,
   ResolveChatDecisionResult,
-  ListChatThreadAttachmentsPayload,
   ListChatThreadAttachmentsResult,
-  ListChatChannelsPayload,
   ListChatChannelsResult,
-  ListChatFollowsPayload,
   ListChatFollowsResult,
-  SetChatFollowPayload,
   SetChatFollowResult,
   ListPersonalChatFeedResult,
-  MarkPersonalChatFeedSeenPayload,
   CreateChatChannelPayload,
   CreateChatChannelResult,
   ListChannelThreadsResult,
   StartChannelThreadResult,
   MarkChatThreadReadPayload,
   MarkChatThreadReadResult,
-  ListChatReactionsPayload,
   ListChatReactionsResult,
-  SetChatReactionPayload,
   SetChatReactionResult,
   ChatThreadRecord,
   ChatMessageRecord,
   ListChatFileMentionsResult,
-  ListChatBookmarksPayload,
   ListChatBookmarksResult,
-  SaveChatBookmarkPayload,
   SaveChatBookmarkResult,
-  ArchiveChatBookmarkPayload,
   ArchiveChatBookmarkResult,
 } from "./bridgeContract";
-import { CHANNELS } from "./channels";
 import { registerOperations, type OperationHandlers } from "./operationTable";
 import { listFileChatsForIpc } from "./fileChatsIpc";
 import type { RegistryEntry } from "../workspaces/registryStore";
@@ -226,7 +209,7 @@ export function registerChatsIpcHandlers<
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
   const { materializeChatBookmark } = desktopChatBookmarks;
-  const workspaceHandler = createWorkspaceHandler({ assertTrustedSender, withRendererWorkspaceOperation });
+  type ChatHandler<Name extends keyof typeof chatOperations> = OperationHandlers<typeof chatOperations, Event, Operation>[Name];
 
   async function presentationRequest(workspace: RegistryEntry, store: DesktopLinkedChatStore, assertCurrent: () => void) {
     await warmCredentialCache();
@@ -262,8 +245,7 @@ export function registerChatsIpcHandlers<
     };
   }
 
-  registerHandler(CHANNELS.listFileChats, workspaceHandler(async (event, payload) => {
-    const input = ListFileChatsPayload.parse(payload);
+  const listFileChats: ChatHandler<"listFileChats"> = async (input) => {
     // Reachable from a share view at every level. The file it names
     // is one the share already served, and an out-of-selector thread was
     // never served by the relay nor applied by the engine boundary — there is
@@ -283,7 +265,7 @@ export function registerChatsIpcHandlers<
         threads: threads.map(chatThreadForIpc),
       };
     });
-  }));
+  };
 
   const listChatFileMentions: OperationHandlers<typeof chatOperations, Event, Operation>["listChatFileMentions"] = async (input, { event, operation }) => {
     const { workspace, capture } = await requireEngineCapture(
@@ -367,8 +349,7 @@ export function registerChatsIpcHandlers<
       }))).flat(),
     });
   };
-  registerHandler(CHANNELS.listChatBookmarks, workspaceHandler(async (event, payload) => {
-    const input = ListChatBookmarksPayload.parse(payload);
+  const listChatBookmarks: ChatHandler<"listChatBookmarks"> = async (input) => {
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -381,10 +362,9 @@ export function registerChatsIpcHandlers<
     return ListChatBookmarksResult.parse({
       bookmarks: bookmarks.map(chatBookmarkForIpc),
     });
-  }));
+  };
 
-  registerHandler(CHANNELS.saveChatBookmark, workspaceHandler(async (event, payload) => {
-    const input = SaveChatBookmarkPayload.parse(payload);
+  const saveChatBookmark: ChatHandler<"saveChatBookmark"> = async (input) => {
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -424,10 +404,9 @@ export function registerChatsIpcHandlers<
     return SaveChatBookmarkResult.parse({
       bookmark: chatBookmarkForIpc(bookmark),
     });
-  }));
+  };
 
-  registerHandler(CHANNELS.archiveChatBookmark, workspaceHandler(async (event, payload) => {
-    const input = ArchiveChatBookmarkPayload.parse(payload);
+  const archiveChatBookmark: ChatHandler<"archiveChatBookmark"> = async (input) => {
     const { workspace, capture } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -442,10 +421,9 @@ export function registerChatsIpcHandlers<
     return ArchiveChatBookmarkResult.parse({
       bookmark: chatBookmarkForIpc(projected),
     });
-  }));
+  };
 
-  registerHandler(CHANNELS.createFileChat, workspaceHandler(async (event, payload) => {
-    const input = CreateFileChatPayload.parse(payload);
+  const createFileChat: ChatHandler<"createFileChat"> = async (input) => {
     // Reads are reachable from every received share. This mutation resolves
     // the same scope, then chatWrites refuses it before persistence.
     const scope = await requireChatScope(input.workspaceId);
@@ -462,7 +440,7 @@ export function registerChatsIpcHandlers<
       },
     });
     return CreateFileChatResult.parse({ thread: chatThreadForIpc(thread) });
-  }));
+  };
 
   const listChatMessages: OperationHandlers<typeof chatOperations, Event, Operation>["listChatMessages"] = async (input, { event, operation }) => {
     // Reachable from a share view at every level, for a thread on
@@ -477,15 +455,14 @@ export function registerChatsIpcHandlers<
       messages: await Promise.all(messages.map(async (message) => chatMessageForIpc(message, automationCollectionOf(workspace.workspaceId), await presentation(message, message.threadId)))),
     });
   };
-  registerHandler(CHANNELS.getChatThreadRevision, workspaceHandler(async (event, payload) => {
-    const input = GetChatThreadRevisionPayload.parse(payload);
+  const getChatThreadRevision: ChatHandler<"getChatThreadRevision"> = async (input) => {
     const { workspace, store } = await requireChatScope(input.workspaceId);
     const revision = await store.getThreadRevision({
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
     });
     return GetChatThreadRevisionResult.parse({ revision });
-  }));
+  };
 
   const sendChatMessage: OperationHandlers<typeof chatOperations, Event, Operation>["sendChatMessage"] = async (input, { event, operation }) => {
     // A share view resolves a scope instead of a capture so reads still work.
@@ -511,8 +488,7 @@ export function registerChatsIpcHandlers<
       ...await askedDecision(scope.store, scope.workspace.workspaceId, input, message),
     });
   };
-  registerHandler(CHANNELS.listChatThreadDecisions, workspaceHandler(async (event, payload) => {
-    const input = ListChatThreadDecisionsPayload.parse(payload);
+  const listChatThreadDecisions: ChatHandler<"listChatThreadDecisions"> = async (input) => {
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -522,10 +498,9 @@ export function registerChatsIpcHandlers<
       input.threadId,
     );
     return ListChatThreadDecisionsResult.parse({ decisions: decisions.map(chatDecisionForIpc) });
-  }));
+  };
 
-  registerHandler(CHANNELS.resolveChatDecision, workspaceHandler(async (event, payload) => {
-    const input = ResolveChatDecisionPayload.parse(payload);
+  const resolveChatDecision: ChatHandler<"resolveChatDecision"> = async (input) => {
     // Reads are reachable from a share view; this mutation is not.
     const scope = await requireChatScope(input.workspaceId);
     const decision = await chatWrites.resolveDecision(chatWritePlace(scope), {
@@ -547,10 +522,9 @@ export function registerChatsIpcHandlers<
         atMs: decision.atMs,
       },
     });
-  }));
+  };
 
-  registerHandler(CHANNELS.listChatThreadAttachments, workspaceHandler(async (event, payload) => {
-    const input = ListChatThreadAttachmentsPayload.parse(payload);
+  const listChatThreadAttachments: ChatHandler<"listChatThreadAttachments"> = async (input) => {
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -560,7 +534,7 @@ export function registerChatsIpcHandlers<
       input.threadId,
     );
     return ListChatThreadAttachmentsResult.parse({ attachments });
-  }));
+  };
 
   // --- Chats channels (PR 12/13, WS-E) -------------------------------------
   // Workspace-wide Chats organized in channels, same gate as the file rail.
@@ -620,85 +594,76 @@ export function registerChatsIpcHandlers<
     };
   }
 
-  registerHandler(CHANNELS.listChatChannels, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListChatChannelsPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Chats stopped because this window changed workspaces.",
-      async (operation) => {
-        const { workspace, store, kind } = await requireChatScope(operation.workspace.workspaceId);
-        operation.assertCurrent();
-        // MU-C4: refresh joined shared channels before reading, so opening
-        // Chats shows other members' latest messages. Offline, local rows
-        // still answer.
-        const rowsUncovered =
-          await syncRendererWorkspaceSharedChannels(operation);
-        operation.assertCurrent();
-        // First chat use auto-creates General.
-        if (kind === "workspace") await store.ensureGeneralChannel({
-          workspaceId: workspace.workspaceId,
-        });
-        operation.assertCurrent();
-        const channels = await store.listChannels({
-          workspaceId: workspace.workspaceId,
-        });
-        operation.assertCurrent();
-        // Wire identities let the renderer match channels against share grants.
-        const wireIdEntries = await Promise.all(
-          channels.map(async (channel) => [
-            channel.id,
-            await store
-              .getChannelWireId({
-                workspaceId: workspace.workspaceId,
-                channelId: channel.id,
-              })
-              .catch(() => null),
-          ] as const),
-        );
-        operation.assertCurrent();
-        const wireIds = new Map(wireIdEntries);
-        // The "Files" grouping: file-linked Chats with their current path (the
-        // stable object id resolved through the active version), falling back
-        // to the captured hint when the engine no longer owns the file.
-        const threads = await store.listThreads({
-          workspaceId: workspace.workspaceId,
-        });
-        operation.assertCurrent();
-        const fileThreads = threads.filter((thread) => thread.linkedFile);
-        let pathByObjectId = new Map<string, string>();
-        if (fileThreads.length > 0) {
-          try {
-            const ids = [...new Set(fileThreads.map(thread => thread.linkedFile!.objectId))];
-            const resolved = await resolveEngineFiles(workspace, ids.flatMap(objectId => workspaceFileRefs(workspace, objectId)));
-            pathByObjectId = new Map(resolved.flatMap(file => file.status === "found" ? [[file.objectId, file.path] as const] : []));
-          } catch {
-            // Path resolution is display-only; the hint fallback keeps the
-            // listing honest enough.
-          }
-          operation.assertCurrent();
-        }
-        return ListChatChannelsResult.parse({
-          ...(rowsUncovered > 0
-            ? { sharedChannelRowsUncovered: rowsUncovered }
-            : {}),
-          channels: channels.map((channel) => ({
-            ...chatChannelForIpc(channel),
-            wireId: wireIds.get(channel.id) ?? null,
-          })),
-          fileThreads: fileThreads.map((thread) => ({
-            ...chatThreadForIpc(thread),
-            path:
-              (thread.linkedFile
-                ? (pathByObjectId.get(thread.linkedFile.objectId) ??
-                  (!shareViewIsPresent(workspace.shareView) && !isReceivedObject(thread.linkedFile.objectId) ? thread.linkedFile.pathHint : undefined))
-                : undefined) ?? null,
-          })),
-        });
-      },
+  const listChatChannels: ChatHandler<"listChatChannels"> = async (input, { operation }) => {
+    const { workspace, store, kind } = await requireChatScope(operation.workspace.workspaceId);
+    operation.assertCurrent();
+    // MU-C4: refresh joined shared channels before reading, so opening
+    // Chats shows other members' latest messages. Offline, local rows
+    // still answer.
+    const rowsUncovered =
+      await syncRendererWorkspaceSharedChannels(operation);
+    operation.assertCurrent();
+    // First chat use auto-creates General.
+    if (kind === "workspace") await store.ensureGeneralChannel({
+      workspaceId: workspace.workspaceId,
+    });
+    operation.assertCurrent();
+    const channels = await store.listChannels({
+      workspaceId: workspace.workspaceId,
+    });
+    operation.assertCurrent();
+    // Wire identities let the renderer match channels against share grants.
+    const wireIdEntries = await Promise.all(
+      channels.map(async (channel) => [
+        channel.id,
+        await store
+          .getChannelWireId({
+            workspaceId: workspace.workspaceId,
+            channelId: channel.id,
+          })
+          .catch(() => null),
+      ] as const),
     );
-  });
+    operation.assertCurrent();
+    const wireIds = new Map(wireIdEntries);
+    // The "Files" grouping: file-linked Chats with their current path (the
+    // stable object id resolved through the active version), falling back
+    // to the captured hint when the engine no longer owns the file.
+    const threads = await store.listThreads({
+      workspaceId: workspace.workspaceId,
+    });
+    operation.assertCurrent();
+    const fileThreads = threads.filter((thread) => thread.linkedFile);
+    let pathByObjectId = new Map<string, string>();
+    if (fileThreads.length > 0) {
+      try {
+        const ids = [...new Set(fileThreads.map(thread => thread.linkedFile!.objectId))];
+        const resolved = await resolveEngineFiles(workspace, ids.flatMap(objectId => workspaceFileRefs(workspace, objectId)));
+        pathByObjectId = new Map(resolved.flatMap(file => file.status === "found" ? [[file.objectId, file.path] as const] : []));
+      } catch {
+        // Path resolution is display-only; the hint fallback keeps the
+        // listing honest enough.
+      }
+      operation.assertCurrent();
+    }
+    return ListChatChannelsResult.parse({
+      ...(rowsUncovered > 0
+        ? { sharedChannelRowsUncovered: rowsUncovered }
+        : {}),
+      channels: channels.map((channel) => ({
+        ...chatChannelForIpc(channel),
+        wireId: wireIds.get(channel.id) ?? null,
+      })),
+      fileThreads: fileThreads.map((thread) => ({
+        ...chatThreadForIpc(thread),
+        path:
+          (thread.linkedFile
+            ? (pathByObjectId.get(thread.linkedFile.objectId) ??
+              (!shareViewIsPresent(workspace.shareView) && !isReceivedObject(thread.linkedFile.objectId) ? thread.linkedFile.pathHint : undefined))
+            : undefined) ?? null,
+      })),
+    });
+  };
 
   function chatFollowForIpc(follow: {
     targetKind: "person" | "agent" | "channel" | "thread";
@@ -714,8 +679,7 @@ export function registerChatsIpcHandlers<
     };
   }
 
-  registerHandler(CHANNELS.listChatFollows, workspaceHandler(async (event, payload) => {
-    const input = ListChatFollowsPayload.parse(payload);
+  const listChatFollows: ChatHandler<"listChatFollows"> = async (input) => {
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -732,10 +696,9 @@ export function registerChatsIpcHandlers<
       ownerUserId,
     });
     return ListChatFollowsResult.parse({ follows: follows.map(chatFollowForIpc) });
-  }));
+  };
 
-  registerHandler(CHANNELS.setChatFollow, workspaceHandler(async (event, payload) => {
-    const input = SetChatFollowPayload.parse(payload);
+  const setChatFollow: ChatHandler<"setChatFollow"> = async (input) => {
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -788,7 +751,7 @@ export function registerChatsIpcHandlers<
     if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
     notifyRenderer({ workspaceId: workspace.workspaceId });
     return SetChatFollowResult.parse({ follow: chatFollowForIpc(follow) });
-  }));
+  };
 
   const listPersonalChatFeed: OperationHandlers<typeof chatOperations, Event, Operation>["listPersonalChatFeed"] = async (input, { event, operation }) => {
     const { workspace } = await requireEngineCapture(
@@ -886,8 +849,7 @@ export function registerChatsIpcHandlers<
       ...(page.headCursor ? { headCursor: page.headCursor } : {}),
     });
   };
-  registerHandler(CHANNELS.markPersonalChatFeedSeen, workspaceHandler(async (event, payload) => {
-    const input = MarkPersonalChatFeedSeenPayload.parse(payload);
+  const markPersonalChatFeedSeen: ChatHandler<"markPersonalChatFeedSeen"> = async (input) => {
     const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats",
@@ -905,7 +867,7 @@ export function registerChatsIpcHandlers<
       headCursor: input.headCursor,
     });
     if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
-  }));
+  };
 
   // The engine refuses a taken or malformed name by code. The person typed
   // the name, so the toast names the group and what to change.
@@ -918,43 +880,41 @@ export function registerChatsIpcHandlers<
     return copy === undefined ? error : new Error(copy);
   }
 
-  registerHandler(
-    CHANNELS.createChatChannel,
-    workspaceHandler(createChatChannelIpcHandler({
-      parsePayload: (payload) => CreateChatChannelPayload.parse(payload),
-      requireContext: (workspaceId) =>
-        requireEngineCapture(workspaceId, "Chats"),
-      assertWritable: ({ workspace }) => assertWritableWorkspace(workspace),
-      run: async ({ workspace }, input) => {
-        // A group is a folder: the folder is the group's slug unless the
-        // creator named one. Main creates it so the group's files have a
-        // home before the first post.
-        const folderPath = input.folderPath ?? nameSlug(input.name);
-        if (!folderPath) {
-          throw new Error("Give the group a name with a letter or a number, or name its folder.");
-        }
-        await ensureGroupFolder(workspace, folderPath);
-        const channel = await linkedChatStoreFor(workspace).createChannel({
-          workspaceId: workspace.workspaceId,
-          name: input.name,
-          kind: "channel",
-          ...(input.type ? { type: input.type } : {}),
-          ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
-          ...(folderPath ? { folderPath } : {}),
-        }).catch((error: unknown) => {
-          throw groupCreateRefusal(error);
-        });
-        return CreateChatChannelResult.parse({
-          // A locally created channel's wire identity is its own id.
-          channel: {
-            ...chatChannelForIpc({ ...channel, threadCount: 0, unreadCount: 0 }),
-            wireId: channel.id,
-          },
-        });
-      },
-      queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
-    })),
-  );
+  const createChatChannelHandler = createChatChannelIpcHandler({
+    parsePayload: (payload) => CreateChatChannelPayload.parse(payload),
+    requireContext: (workspaceId) =>
+      requireEngineCapture(workspaceId, "Chats"),
+    assertWritable: ({ workspace }) => assertWritableWorkspace(workspace),
+    run: async ({ workspace }, input) => {
+      // A group is a folder: the folder is the group's slug unless the
+      // creator named one. Main creates it so the group's files have a
+      // home before the first post.
+      const folderPath = input.folderPath ?? nameSlug(input.name);
+      if (!folderPath) {
+        throw new Error("Give the group a name with a letter or a number, or name its folder.");
+      }
+      await ensureGroupFolder(workspace, folderPath);
+      const channel = await linkedChatStoreFor(workspace).createChannel({
+        workspaceId: workspace.workspaceId,
+        name: input.name,
+        kind: "channel",
+        ...(input.type ? { type: input.type } : {}),
+        ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+        ...(folderPath ? { folderPath } : {}),
+      }).catch((error: unknown) => {
+        throw groupCreateRefusal(error);
+      });
+      return CreateChatChannelResult.parse({
+        // A locally created channel's wire identity is its own id.
+        channel: {
+          ...chatChannelForIpc({ ...channel, threadCount: 0, unreadCount: 0 }),
+          wireId: channel.id,
+        },
+      });
+    },
+    queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
+  });
+  const createChatChannel: ChatHandler<"createChatChannel"> = (input, { event }) => createChatChannelHandler(event, input);
 
   const listChannelThreads: OperationHandlers<typeof chatOperations, Event, Operation>["listChannelThreads"] = async (input, { event, operation }) => {
     const { workspace } = await requireEngineCapture(
@@ -1030,25 +990,23 @@ export function registerChatsIpcHandlers<
       ...await askedDecision(linkedChatStoreFor(workspace), workspace.workspaceId, input, started.message),
     });
   };
-  registerHandler(
-    CHANNELS.markChatThreadRead,
-    workspaceHandler(createMarkChatThreadReadIpcHandler({
-      parsePayload: (payload) => MarkChatThreadReadPayload.parse(payload),
-      // Reachable from a share view at every level, view included.
-      requireContext: requireChatScope,
-      run: async ({ workspace, store }, input) => {
-        const state = await store.markThreadRead({
-          workspaceId: workspace.workspaceId,
-          threadId: input.threadId,
-          upToSequence: input.upToSequence,
-        });
-        return MarkChatThreadReadResult.parse({
-          lastReadSequence: state.lastReadSequence,
-          revision: state.revision,
-        });
-      },
-    })),
-  );
+  const markChatThreadReadHandler = createMarkChatThreadReadIpcHandler({
+    parsePayload: (payload) => MarkChatThreadReadPayload.parse(payload),
+    // Reachable from a share view at every level, view included.
+    requireContext: requireChatScope,
+    run: async ({ workspace, store }, input) => {
+      const state = await store.markThreadRead({
+        workspaceId: workspace.workspaceId,
+        threadId: input.threadId,
+        upToSequence: input.upToSequence,
+      });
+      return MarkChatThreadReadResult.parse({
+        lastReadSequence: state.lastReadSequence,
+        revision: state.revision,
+      });
+    },
+  });
+  const markChatThreadRead: ChatHandler<"markChatThreadRead"> = (input, { event }) => markChatThreadReadHandler(event, input);
 
   // --- Reactions (WS-MU-C2) ------------------------------------------------
   // Durable, commutative emoji reactions. Identity is main-derived: the viewer
@@ -1066,8 +1024,7 @@ export function registerChatsIpcHandlers<
     };
   }
 
-  registerHandler(CHANNELS.listChatReactions, workspaceHandler(async (event, payload) => {
-    const input = ListChatReactionsPayload.parse(payload);
+  const listChatReactions: ChatHandler<"listChatReactions"> = async (input) => {
     // Reachable from a share view at every level. The panel loads
     // messages and reactions together, so a capture gate here refuses the
     // whole thread open, not just its reactions.
@@ -1092,10 +1049,9 @@ export function registerChatsIpcHandlers<
       }),
       viewerAuthorId,
     });
-  }));
+  };
 
-  registerHandler(CHANNELS.setChatReaction, workspaceHandler(async (event, payload) => {
-    const input = SetChatReactionPayload.parse(payload);
+  const setChatReaction: ChatHandler<"setChatReaction"> = async (input) => {
     // Reads are reachable from a share view; this mutation is not.
     const scope = await requireChatScope(input.workspaceId);
     const reaction = await chatWrites.setReaction(chatWritePlace(scope), {
@@ -1109,13 +1065,37 @@ export function registerChatsIpcHandlers<
       reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
       viewerAuthorId: reaction.author.authorId,
     });
-  }));
+  };
 
   registerOperations<typeof chatOperations, Event, Operation>({
     handle: registerHandler,
     assertTrustedSender,
     withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
       withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
-  }, chatOperations, { listChatFileMentions, listChatMessages, sendChatMessage, listPersonalChatFeed, listChannelThreads, startChannelThread });
+  }, chatOperations, {
+    listFileChats,
+    listChatBookmarks,
+    saveChatBookmark,
+    archiveChatBookmark,
+    createFileChat,
+    getChatThreadRevision,
+    listChatThreadDecisions,
+    resolveChatDecision,
+    listChatThreadAttachments,
+    listChatChannels,
+    listChatFollows,
+    setChatFollow,
+    markPersonalChatFeedSeen,
+    createChatChannel,
+    markChatThreadRead,
+    listChatReactions,
+    setChatReaction,
+    listChatFileMentions,
+    listChatMessages,
+    sendChatMessage,
+    listPersonalChatFeed,
+    listChannelThreads,
+    startChannelThread,
+  });
 
 }
