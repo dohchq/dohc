@@ -1,4 +1,0 @@
-{
-  "nameAdditions": ["desktop:agent-run-state", "desktop:read-agent-run-state"],
-  "channelKeyAdditions": ["agentRunState"]
-}
