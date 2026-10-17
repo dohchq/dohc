@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
-import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
+import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
 import type { LiveJournalValidation } from "./storage/types.js";
 
 export type SettlementNormalizationInput = {
@@ -43,13 +43,14 @@ export function createLiveValidationExecutor() {
   const slots = new Set<{ worker: Worker; busy: boolean }>();
   const waiters = new Set<() => void>();
   let closed = false;
+  const hasCapacity = () => !closed && (slots.size < 2 || [...slots].some((slot) => !slot.busy));
   const notify = () => {
     for (const wake of [...waiters]) wake();
   };
   function waitForCapacity(signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     if (closed) return Promise.reject(new Error("Live validation closed."));
-    if (slots.size < 2 || [...slots].some((slot) => !slot.busy))
+    if (hasCapacity())
       return Promise.resolve();
     return new Promise<void>((resolve, reject) => {
       const dispose = () => {
@@ -154,13 +155,14 @@ export function createLiveValidationExecutor() {
   }
   function validator(
     policy: OrderedLiveUpdateCutPolicy,
-  ): OwnerOutboxAdmission["validate"] {
+  ): CapacityLiveAdmissionValidator {
     const ownedPolicy = Object.freeze({ ...policy });
-    return (input, signal) =>
+    const validate: OwnerOutboxAdmission["validate"] = (input, signal) =>
       submit<LiveJournalValidation>(
         { kind: "journal", policy: ownedPolicy, input },
         signal,
       );
+    return Object.assign(validate, { waitForCapacity, hasCapacity });
   }
   async function close() {
     closed = true;

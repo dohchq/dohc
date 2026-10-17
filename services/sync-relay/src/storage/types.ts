@@ -698,7 +698,7 @@ export interface SyncRelayStorage {
   captureStanding(): () => void;
   createLiveCommittedDeliveryStore(history: LiveJournalHistoryAuthority, activation?: ServiceActivationAccess): LiveCommittedDeliveryStore;
   createServiceActivationStore(history: LiveJournalHistoryAuthority): ServiceActivationStore;
-  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult;
+  readLiveUpdateJournalCut(input: { document: LiveDocumentKey }, reserveBytes?: (size: number) => void): LiveUpdateJournalCutResult;
   commitLiveUpdateJournal(input: LiveUpdateJournalCommitInput, activation?: ServiceActivationAccess): RelayLiveUpdateJournalResult;
   readCommittedLiveUpdate(input: { host: LiveHostConnectionCoordinate; document: LiveDocumentKey; journalCursor: number }): CommittedLiveUpdateResult;
   readReplicaLiveJournal(input: ReplicaLiveJournalRead): Promise<ReplicaLiveJournalPage>;
@@ -788,6 +788,8 @@ export interface SyncRelayStorage {
   currentViewFilesAtFences(workspaceId: string, files: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"], previous: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"], omitted: import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["omitted"]): import("@dohc/workspace-engine-client/daemon").ReplicaCurrentView["files"];
   readReplicaCurrentViewText(workspaceId: string,sha: string): string | null;
   readReplicaStanding(workspaceId: string, shareGrantBindings?: string): ReturnType<typeof import("./replicaReads").readReplicaStanding>;
+  listReplicaCurrentViewFiles(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaCurrentViewReads").ReplicaCurrentViewList;
+  readReplicaCurrentViewFile(input: import("../replicaCurrentViewReads").ReplicaCurrentViewReadInput & {path: string}, source?: import("../replicaCurrentViewReads").ReplicaCurrentViewSource): import("../replicaCurrentViewReads").ReplicaCurrentViewRead;
   putBlob(input: {
     workspaceId: string;
     sha256: string;
