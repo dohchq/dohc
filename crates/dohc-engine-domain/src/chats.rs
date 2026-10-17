@@ -769,7 +769,7 @@ pub struct AgentRunRecord {
     pub exit_code: Option<i64>,
     pub failure_reason: Option<String>,
     pub log_path: Option<String>,
-    pub failure_note_posted: bool,
+    pub failure_handled: bool,
 }
 
 /// A message-to-run link in the oracle's run-first ordering.

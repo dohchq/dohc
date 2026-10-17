@@ -92,7 +92,7 @@ describe("live agent dispatch store real daemon", () => {
         ).resolves.toMatchObject({
           runId: "run-e2e-complete",
           exitCode: 0,
-          failureNotePosted: false,
+          failureHandled: false,
         });
         await expect(
           store.getRunRecord("run-e2e-complete"),

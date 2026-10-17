@@ -560,7 +560,7 @@ fn open_runs_rejects_unmatched_unended_run() {
     store
         .write_with(&NO_FAULTS, |tx| {
             tx.execute(
-                "INSERT INTO agent_run_records (workspace_id,run_id,thread_id,trigger_message_id,command,started_at_ms,failure_note_posted) VALUES (?1,'orphan','thread','trigger','',20,0)",
+                "INSERT INTO agent_run_records (workspace_id,run_id,thread_id,trigger_message_id,command,started_at_ms,failure_handled) VALUES (?1,'orphan','thread','trigger','',20,0)",
                 params![WS],
             )
             .map_err(StorageError::persist_public)?;
@@ -586,7 +586,7 @@ fn get_run_record_rejects_duplicate_global_run_id() {
                 .map_err(StorageError::persist_public)?;
             for ws in [WS, OTHER_WS] {
                 tx.execute(
-                    "INSERT INTO agent_run_records (workspace_id,run_id,thread_id,trigger_message_id,command,started_at_ms,failure_note_posted) VALUES (?1,'duplicate','thread','trigger','',20,0)",
+                    "INSERT INTO agent_run_records (workspace_id,run_id,thread_id,trigger_message_id,command,started_at_ms,failure_handled) VALUES (?1,'duplicate','thread','trigger','',20,0)",
                     params![ws],
                 )
                 .map_err(StorageError::persist_public)?;
@@ -713,7 +713,7 @@ fn record_run_message_rejects_different_run_collision() {
             .expect("link");
     }
     store.write_with(&NO_FAULTS, |tx| {
-        tx.execute("INSERT INTO agent_run_records (workspace_id,run_id,thread_id,trigger_message_id,command,started_at_ms,failure_note_posted) VALUES (?1,'other-run','thread','other-trigger','',30,0)", params![WS]).map_err(StorageError::persist_public)?;
+        tx.execute("INSERT INTO agent_run_records (workspace_id,run_id,thread_id,trigger_message_id,command,started_at_ms,failure_handled) VALUES (?1,'other-run','thread','other-trigger','',30,0)", params![WS]).map_err(StorageError::persist_public)?;
         Ok::<_, StorageError>(())
     }).expect("other run");
     let error = LinkedChatStore::new(&mut store)
@@ -816,12 +816,12 @@ fn requeue_returns_the_interrupted_runs_covered_triggers_to_the_queue() {
 }
 
 #[test]
-fn app_quit_failure_remains_durably_recoverable_after_note() {
+fn app_quit_failure_remains_durably_recoverable_after_handling() {
     let (_scratch, mut store) = open_store();
     claimed_run(&mut store, "trigger", "thread", "run", 20);
     LinkedChatStore::new(&mut store)
-        .mark_failure_note_posted(WS, "run", &NO_FAULTS)
-        .expect("mark failure note");
+        .mark_failure_handled(WS, "run", &NO_FAULTS)
+        .expect("mark failure handled");
     LinkedChatStore::new(&mut store)
         .fail_dispatch(WS, "run", "app-quit", Some(143), 30, &NO_FAULTS)
         .expect("fail");
@@ -831,7 +831,7 @@ fn app_quit_failure_remains_durably_recoverable_after_note() {
     assert_eq!(
         (rows.len(), rows[0].attempt_count),
         (1, 1),
-        "require an unposted failure note -> a crash after the recovery note but before requeue makes the app-quit row disappear."
+        "A crash after marking the failure handled but before requeue must leave the app-quit run recoverable."
     );
 }
 
@@ -840,8 +840,8 @@ fn restart_failure_remains_durably_recoverable_before_requeue() {
     let (_scratch, mut store) = open_store();
     claimed_run(&mut store, "trigger", "thread", "run", 20);
     LinkedChatStore::new(&mut store)
-        .mark_failure_note_posted(WS, "run", &NO_FAULTS)
-        .expect("mark failure note");
+        .mark_failure_handled(WS, "run", &NO_FAULTS)
+        .expect("mark failure handled");
     LinkedChatStore::new(&mut store)
         .fail_dispatch(WS, "run", "app restart during run", None, 30, &NO_FAULTS)
         .expect("fail");
@@ -852,23 +852,23 @@ fn restart_failure_remains_durably_recoverable_before_requeue() {
         rows.first()
             .map(|row| (row.run.failure_reason.as_deref(), row.attempt_count,)),
         Some((Some("app restart during run"), 1)),
-        "require failure_note_posted = 0 for restart failures -> the normal note-then-fail ordering strands this row if requeue never commits.",
+        "Marking the failure handled before failing the run must leave it recoverable if requeue never commits.",
     );
 }
 
 #[test]
-fn failure_note_mark_is_idempotent_and_requires_one_transition() {
+fn failure_handled_mark_is_idempotent_and_requires_one_transition() {
     let (_scratch, mut store) = open_store();
     claimed_run(&mut store, "trigger", "thread", "run", 20);
     let mut chats = LinkedChatStore::new(&mut store);
     let first = chats
-        .mark_failure_note_posted(WS, "run", &NO_FAULTS)
+        .mark_failure_handled(WS, "run", &NO_FAULTS)
         .expect("first");
     let replay = chats
-        .mark_failure_note_posted(WS, "run", &NO_FAULTS)
+        .mark_failure_handled(WS, "run", &NO_FAULTS)
         .expect("replay");
     assert!(
-        first.failure_note_posted && replay.failure_note_posted,
+        first.failure_handled && replay.failure_handled,
         "require/update more than the one false->true transition -> replay fails or false remains."
     );
 }
