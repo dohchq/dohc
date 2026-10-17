@@ -2,10 +2,14 @@ import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import { RelayUnauthorizedError, RelayWorkspaceUnavailableError, RelayClaimRefusedError } from "@dohc/workspace-contracts/relay";
+import { RelayUnauthorizedError, RelayWorkspaceUnavailableError, RelayClaimRefusedError, RelayKeyEnvelopeMissingError } from "@dohc/workspace-contracts/relay";
 import { CHANNELS } from "./channels";
+import { workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
+import { syncPauseFor } from "../workspaces/syncPauseFor";
+import { createWorkspaceSyncStop } from "../workspaces/stopWorkspaceSync";
+import { enrollWorkspaceKeyEnvelope } from "../workspaces/workspaceKeyEnvelopeEnrollment";
 import { registerCloudIpcHandlers } from "./cloudIpc";
-import { type SyncStatusResult } from "./bridgeContract";
+import { workspaceSyncOperations, type SyncStatusResult } from "./bridgeContract";
 import { createWorkspaceRootApproval } from "./workspaceRegistryIpc";
 import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
@@ -81,12 +85,13 @@ async function harness() {
   const attachmentId = await authorities.withOperation("existing", (operation) => operation.workspace.attachmentId);
   let rendererCurrent = true;
   const session = { workspaceId: "existing", attachmentId, generation: 1, isCurrent: () => rendererCurrent };
+  let rendererSession = session;
   type Event = { sender: string; trusted: boolean };
   type Workspace = PhysicalWorkspace<RegistryEntry>;
   type Operation = ExactRendererWorkspaceOperation<Workspace, object, typeof session>;
   type Dependencies = Parameters<typeof registerCloudIpcHandlers<string, Event, Operation>>[0];
   const withRendererWorkspaceOperation = createRendererWorkspaceOperationRunner<string, Workspace, object, typeof session>({
-    currentSession: () => session,
+    currentSession: () => rendererSession,
     withPhysicalOperation: (id, work) => authorities.withOperation(id, work),
   });
   const cache = new CredentialSessionCache<CloudCredentials>();
@@ -103,7 +108,9 @@ async function harness() {
   const claim = vi.fn(async () => { steps.push("claim"); });
   // These opaque collaborators are used only by the injected I/O functions below.
   const sessions = {} as EngineWorkspaceSessions;
-  const relay = { claim } as unknown as EngineRelayWorkspaceClient;
+  const downloadKeyEnvelope = vi.fn(async () => ({ envelopeJson: "existing-envelope", etag: "a".repeat(64) }));
+  const uploadKeyEnvelope = vi.fn(async () => ({ etag: "b".repeat(64) }));
+  const relay = { claim, downloadKeyEnvelope, uploadKeyEnvelope } as unknown as EngineRelayWorkspaceClient;
   const daemonStartup = vi.fn<() => Promise<void>>(async () => undefined);
   const readSecrets = vi.fn<Dependencies["readWorkspaceSecretState"]>(async () => "none");
   const readDataKey = vi.fn<Dependencies["readWorkspaceDataKeyForEnrollment"]>(async () => null);
@@ -119,6 +126,8 @@ async function harness() {
   const setRemote = vi.fn<Dependencies["setWorkspaceRemote"]>(async (id, remote) => {
     steps.push("remote");
     registry.get(id)!.remote = remote;
+    delete registry.get(id)!.pausedRemote;
+    delete registry.get(id)!.syncPause;
   });
   const enable = vi.fn<Dependencies["activity"]["enableCloud"]>(async () => { steps.push("enable"); });
   const notify = vi.fn(() => { steps.push("notify"); });
@@ -129,18 +138,35 @@ async function harness() {
     return { workspaceId: input.workspaceId!, rootPath: input.rootPath, kind: "personal" as const, mode: "local-first" as const };
   });
   const cleanup = vi.fn(async () => { steps.push("cleanup"); });
+  const removeJoinedWorkspace = vi.fn<Parameters<typeof createJoinedWorkspaceRunner>[0]["remove"]>((binding, finalize) => authorities.retireBinding(binding, {
+    finalize, removeBinding: () => { registry.delete(binding.workspaceId); },
+  }));
   const createJoinedWorkspace = createJoinedWorkspaceRunner({
     reserve: (input) => authorities.reserveBinding(input), createFolder,
     register: (reservation, entry) => authorities.registerReservedBinding(reservation, entry, {
       persist: () => { steps.push("register"); registry.set(entry.workspaceId, entry); },
       rollback: () => { registry.delete(entry.workspaceId); },
     }),
-    remove: (binding, finalize) => authorities.retireBinding(binding, {
-      finalize, removeBinding: () => { registry.delete(binding.workspaceId); },
-    }),
+    remove: removeJoinedWorkspace,
     release: (reservation, finalize) => authorities.releaseReservation(reservation, finalize),
     closeRelay: cleanup, rollbackComplete: notify, logError: vi.fn(),
   });
+  const stopWorkspaceSync = vi.fn<Dependencies["stopWorkspaceSync"]>(async operation => ({
+    workspaceId: operation.workspace.workspaceId, workspaceSynced: false,
+    status,
+  }));
+  const preparePause = vi.fn(async () => () => {});
+  const pauseStatus = (pause: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause) => workspaceSyncPauseStatus(pause, "local");
+  const stopOperation = createWorkspaceSyncStop({
+    person: async () => ({ kind: "person", personId: "local" }),
+    pauseStatus,
+    withOwnerHostPaused: work => work(), prepare: preparePause, resume: enable,
+    pauseRemote: (id, syncPause) => { const entry = registry.get(id)!; entry.pausedRemote = entry.remote; delete entry.remote; entry.syncPause = syncPause; },
+    closeActivity: async () => {}, closeRelay: async () => {}, openActivity: async () => {},
+    status: id => ({ ...status, ...(registry.get(id)?.syncPause ? { syncPause: pauseStatus(registry.get(id)!.syncPause!) } : {}) }), notify: () => {}, cleanupFailed: vi.fn(),
+  });
+  stopWorkspaceSync.mockImplementation(stopOperation);
+  const openActivity = vi.fn<Dependencies["openWorkspaceActivity"]>(async (_entry, options) => { steps.push("open"); await options.afterActivityOpen(); });
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   registerCloudIpcHandlers<string, Event, Operation>({
     registerHandler: (channel, handler) => { expect(handlers.has(channel)).toBe(false); handlers.set(channel, handler); },
@@ -158,6 +184,8 @@ async function harness() {
     },
     closeAllRelayTransportWorkspaces: closeRelay,
     activity: { stopEngines: stop, enableCloud: enable, getStatus: () => status },
+    currentWorkspaceId: () => rendererSession.isCurrent() ? rendererSession.workspaceId : null, stopWorkspaceSync,
+    syncPauseFor: workspace => syncPauseFor(workspace, "local"),
     reconcileCloud: () => { steps.push("reconcile"); },
     notifyCloudSessionChanged: ready, notifyCloudSessionChangedWithKey: changing, notifyRenderer: notify,
     findWorkspace: (id) => registry.get(id) ?? null,
@@ -174,17 +202,21 @@ async function harness() {
     usableRoot: roots.usableRoot, readdir, mkdir, probeRelayWorkspace: probe,
     createJoinedWorkspace, bootstrapJoinedWorkspace: bootstrap,
     refreshNativeWorkspaceSurfaces: () => { steps.push("surfaces"); },
-    openWorkspaceActivity: async (_entry, options) => { steps.push("open"); await options.afterActivityOpen(); },
+    openWorkspaceActivity: openActivity,
     completeWorkspaceJoinBootstrap: (id) => { steps.push("complete"); delete registry.get(id)!.joinBootstrapPending; },
     desktopMarks: { mark: () => { steps.push("mark"); }, measureSince: () => { steps.push("measure"); } },
   });
   const invoke = async (channel: string, payload?: unknown, trusted = true) => handlers.get(channel)!({ sender: "window", trusted }, payload);
   const joinPayload = { rootPath, syncCode: buildSyncCode({ workspaceId: "joined", relayUrl: credentials.relayUrl! }) };
   return {
-    handlers, invoke, joinPayload, roots, workspace, registry, authorities, cache, login,
+    handlers, invoke, removeJoinedWorkspace, stopWorkspaceSync, stopOperation, preparePause, openActivity, downloadKeyEnvelope, uploadKeyEnvelope, joinPayload, roots, workspace, registry, authorities, cache, login,
     stop, closeRelay, claim, readSecrets, readDataKey, enroll, bootstrap, probe, readdir, mkdir,
     bindRelay, setRemote, enable, notify, changing, ready, createFolder, cleanup, steps, daemonStartup, disposed,
     retireRenderer: () => { rendererCurrent = false; },
+    reopenRenderer: () => {
+      rendererCurrent = false;
+      rendererSession = { ...session, generation: 2, isCurrent: () => true };
+    },
   };
 }
 
@@ -202,11 +234,66 @@ describe("registered cloud handlers", () => {
     const h = await harness();
     expect([...h.handlers.keys()]).toEqual([
       CHANNELS.cloudLoginStart, CHANNELS.cloudLoginPoll, CHANNELS.cloudStatus,
-      CHANNELS.cloudLogout, CHANNELS.cloudEnableSync, CHANNELS.cloudJoinWorkspace,
+      CHANNELS.cloudLogout, CHANNELS.cloudEnableSync, workspaceSyncOperations.cloudStopSync.channel, CHANNELS.cloudJoinWorkspace,
     ]);
     for (const channel of h.handlers.keys()) await expect(h.invoke(channel, null, false)).rejects.toThrow("untrusted");
     for (const method of Object.values(h.login)) expect(method).not.toHaveBeenCalled();
     expect(h.steps).toEqual([]);
+  });
+
+  it("derives stop from the current window and refuses renderer-supplied identities", async () => {
+    const h = await harness();
+    await expect(h.invoke(workspaceSyncOperations.cloudStopSync.channel, { workspaceId: "joined" })).rejects.toThrow();
+    expect(h.stopWorkspaceSync).not.toHaveBeenCalled();
+    h.stopWorkspaceSync.mockImplementationOnce(async operation => {
+      expect(operation.workspace).toMatchObject({ workspaceId: "existing", attachmentId: expect.any(Symbol) });
+      return { workspaceId: operation.workspace.workspaceId, workspaceSynced: false, status };
+    });
+    await expect(h.invoke(workspaceSyncOperations.cloudStopSync.channel)).resolves.toMatchObject({
+      workspaceId: "existing", workspaceSynced: false,
+    });
+    expect(h.stopWorkspaceSync).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a late stop answer for a retired renderer workspace", async () => {
+    const h = await harness();
+    const entered = deferred(), held = deferred();
+    h.stopWorkspaceSync.mockImplementationOnce(async operation => {
+      entered.resolve(); await held.promise;
+      return { workspaceId: operation.workspace.workspaceId, workspaceSynced: false, status };
+    });
+    const pending = h.invoke(workspaceSyncOperations.cloudStopSync.channel);
+    await entered.promise;
+    h.retireRenderer(); held.resolve();
+    await expect(pending).rejects.toThrow();
+  });
+
+  it("queues stop behind an in-flight enable of the same workspace", async () => {
+    const h = await harness();
+    const entered = deferred(), held = deferred();
+    h.claim.mockImplementationOnce(() => { entered.resolve(); return held.promise; });
+    const enabling = h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" });
+    await entered.promise;
+    const stopping = h.invoke(workspaceSyncOperations.cloudStopSync.channel);
+    expect(h.preparePause).not.toHaveBeenCalled();
+    held.resolve(); await enabling; await stopping;
+    expect(h.enable).toHaveBeenCalledOnce();
+    expect(h.preparePause).toHaveBeenCalledOnce();
+    expect(h.workspace.remote).toBeUndefined();
+  });
+
+  it("refuses a queued stop from an earlier visit to the same workspace", async () => {
+    const h = await harness();
+    const entered = deferred(), held = deferred();
+    h.claim.mockImplementationOnce(() => { entered.resolve(); return held.promise; });
+    const enabling = h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" });
+    await entered.promise;
+    const stopping = h.invoke(workspaceSyncOperations.cloudStopSync.channel);
+    h.reopenRenderer();
+    const refused = Promise.all([expect(enabling).rejects.toThrow(), expect(stopping).rejects.toThrow()]);
+    held.resolve(); await refused;
+    expect(h.preparePause).not.toHaveBeenCalled();
+    await expect(h.invoke(workspaceSyncOperations.cloudStopSync.channel)).resolves.toMatchObject({ workspaceId: "existing" });
   });
 
   it("parses login inputs and returns only the public result", async () => {
@@ -284,7 +371,7 @@ describe("registered cloud handlers", () => {
       ownPresentation: ownActorPresentation("device", credentials),
       connected: true, email: credentials.email, serverUrl: credentials.serverUrl,
       relayUrl: credentials.relayUrl,
-      workspaceSynced: true, workspaceSyncConnected: true, workspaceSecretState: "none",
+      workspaceSyncOwned: true, workspaceSynced: true, workspaceSyncConnected: true, workspaceSecretState: "none",
     });
     h.cache.set({ ...credentials, userId: "other" });
     await expect(h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).resolves.toMatchObject({ workspaceSyncConnected: false });
@@ -475,4 +562,154 @@ describe("registered cloud handlers", () => {
     expect(h.registry.has("joined")).toBe(false);
     expect(h.enable).not.toHaveBeenCalled();
   });
+});
+
+it("resumes through cloudEnableSync without replacing an intact protected-file envelope", async () => {
+  const h = await harness();
+  h.workspace.remote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
+  await h.invoke(workspaceSyncOperations.cloudStopSync.channel);
+  const pause = h.workspace.syncPause!;
+  expect(await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).toMatchObject({ workspaceSynced: false, syncPause: workspaceSyncPauseStatus(pause, "local") });
+  const key = Buffer.alloc(32, 42);
+  h.readDataKey.mockResolvedValueOnce(key);
+  h.enroll.mockImplementation(enrollWorkspaceKeyEnvelope);
+  await h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" });
+  expect(h.downloadKeyEnvelope).toHaveBeenCalledOnce();
+  expect(h.uploadKeyEnvelope).not.toHaveBeenCalled();
+  expect(h.setRemote).toHaveBeenCalledWith("existing", { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId });
+  expect(h.enable).toHaveBeenCalledOnce();
+  expect(h.workspace.pausedRemote).toBeUndefined();
+  expect(h.workspace.syncPause).toBeUndefined();
+  expect(key.equals(Buffer.alloc(32))).toBe(true);
+});
+
+it("requires enrollment when protected files were added while paused and no envelope exists", async () => {
+  const h = await harness();
+  h.workspace.pausedRemote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
+  h.downloadKeyEnvelope.mockRejectedValue(new RelayKeyEnvelopeMissingError());
+  h.enroll.mockImplementation(enrollWorkspaceKeyEnvelope);
+  h.readDataKey.mockResolvedValue(Buffer.alloc(32, 7));
+  await expect(h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" })).rejects.toThrow("Passphrase required");
+  expect(h.enable).not.toHaveBeenCalled();
+  expect(h.workspace.pausedRemote).toBeDefined();
+  h.readDataKey.mockResolvedValue(Buffer.alloc(32, 7));
+  await h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing", passphrase: "original new passphrase" });
+  expect(h.uploadKeyEnvelope).toHaveBeenCalledOnce();
+});
+
+it("keeps resume pinned to the original paused owner", async () => {
+  const h = await harness();
+  h.workspace.pausedRemote = { serverUrl: credentials.serverUrl, ownerUserId: "someone-else" };
+  await expect(h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" })).rejects.toThrow("account that synced");
+  expect(h.claim).not.toHaveBeenCalled();
+});
+
+it("refuses a stop before join activation instead of reporting a pause", async () => {
+  const h = await harness();
+  const entered = deferred(), held = deferred();
+  h.openActivity.mockImplementationOnce(async (_entry, options) => {
+    entered.resolve(); await held.promise; await options.afterActivityOpen();
+  });
+  const joining = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
+  await entered.promise;
+  expect(h.registry.get("joined")).toMatchObject({ joinBootstrapPending: true });
+  expect(h.registry.get("joined")?.remote).toBeUndefined();
+  await expect(h.authorities.withOperation("joined", h.stopOperation)).rejects.toThrow(
+    "This workspace is still joining. Wait for it to finish, then stop sync.",
+  );
+  expect(h.preparePause).not.toHaveBeenCalled();
+  expect(h.registry.get("joined")?.syncPause).toBeUndefined();
+  held.resolve(); await joining;
+  expect(h.registry.get("joined")?.remote).toBeDefined();
+  expect(h.registry.get("joined")?.joinBootstrapPending).toBeUndefined();
+});
+
+it("queues a stop during join until the joined workspace is enabled", async () => {
+  const h = await harness();
+  const entered = deferred(), held = deferred();
+  h.enable.mockImplementationOnce(async () => { entered.resolve(); await held.promise; });
+  const joining = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
+  await entered.promise;
+  const stopping = h.authorities.withOperation("joined", operation => createWorkspaceSyncStop({
+    person: async () => ({ kind: "person", personId: "local" }),
+    pauseStatus: pause => workspaceSyncPauseStatus(pause, "local"),
+    withOwnerHostPaused: work => work(), prepare: h.preparePause, resume: h.enable,
+    pauseRemote: id => { const entry = h.registry.get(id)!; entry.pausedRemote = entry.remote; delete entry.remote; },
+    closeActivity: async () => {}, closeRelay: async () => {}, openActivity: async () => {},
+    status: () => status, notify: () => {}, cleanupFailed: vi.fn(),
+  })(operation));
+  expect(h.preparePause).not.toHaveBeenCalled();
+  held.resolve(); await joining;
+  await expect(stopping).resolves.toMatchObject({ workspaceSynced: false });
+  expect(h.registry.get("joined")?.remote).toBeUndefined();
+  expect(h.registry.get("joined")?.pausedRemote).toBeDefined();
+});
+
+it("releases the join transition lane before rollback drains a queued stop", async () => {
+  const h = await harness();
+  const entered = deferred(), held = deferred(), stopQueued = deferred(), rollbackEntered = deferred(), allowRetirement = deferred();
+  const remove = h.removeJoinedWorkspace.getMockImplementation()!;
+  h.removeJoinedWorkspace.mockImplementationOnce(async (binding, finalize) => {
+    rollbackEntered.resolve(); await allowRetirement.promise; await remove(binding, finalize);
+  });
+  h.enable.mockImplementationOnce(async () => { entered.resolve(); await held.promise; throw new Error("first pull failed"); });
+  const joining = h.invoke(CHANNELS.cloudJoinWorkspace, h.joinPayload);
+  const joinRefused = expect(joining).rejects.toThrow("could not download");
+  await entered.promise;
+  const stopping = h.authorities.withOperation("joined", operation => {
+    const pending = h.stopOperation(operation);
+    stopQueued.resolve();
+    return pending;
+  });
+  const stopRefused = expect(stopping).rejects.toThrow("This workspace is still joining. Wait for it to finish, then stop sync.");
+  await stopQueued.promise;
+  expect(h.preparePause).not.toHaveBeenCalled();
+  held.resolve();
+  await rollbackEntered.promise;
+  await stopRefused;
+  expect(h.registry.get("joined")?.joinBootstrapPending).toBe(true);
+  expect(h.preparePause).not.toHaveBeenCalled();
+  allowRetirement.resolve();
+  await joinRefused;
+  expect(h.cleanup).toHaveBeenCalledWith("joined");
+  expect(h.registry.has("joined")).toBe(false);
+  expect(() => h.authorities.withOperation("joined", () => {})).toThrow("Unknown workspace");
+});
+
+it("exposes owned sync and pause state while signed out", async () => {
+  const h = await harness();
+  h.workspace.remote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
+  h.login.status.mockResolvedValue({ connected: false });
+  h.login.credentials.mockResolvedValue(null); h.cache.clear();
+  expect(await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).toMatchObject({
+    connected: false, workspaceSyncOwned: true, workspaceSynced: true, workspaceSyncConnected: false,
+  });
+  const stopped = await h.invoke(workspaceSyncOperations.cloudStopSync.channel);
+  expect(stopped).toMatchObject({ syncPause: { author: { kind: "person", personId: "local", self: true } } });
+  expect(h.workspace.syncPause?.author).toEqual({ kind: "person", personId: "local" });
+  expect(await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" })).toMatchObject({
+    connected: false, workspaceSyncOwned: true, workspaceSynced: false,
+    syncPause: { author: { kind: "person", personId: "local", self: true } },
+  });
+  h.workspace.shareView = { shareId: "received", granterEmail: null, genericChatWritable: false,
+    grantedSelector: { paths: ["note.md"], versionId: null, access: "edit" } };
+  const received = await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" });
+  expect(received).toMatchObject({ workspaceSyncOwned: false });
+  expect(received).not.toHaveProperty("syncPause");
+  h.workspace.shareView = null as never;
+  const damaged = await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" });
+  expect(damaged).toMatchObject({ workspaceSyncOwned: false });
+  expect(damaged).not.toHaveProperty("syncPause");
+  await expect(h.invoke(workspaceSyncOperations.cloudStopSync.channel)).rejects.toThrow("received share");
+  expect(h.preparePause).toHaveBeenCalledOnce();
+});
+
+it("omits invalid persisted pause metadata from the Settings status handler", async () => {
+  const h = await harness();
+  h.workspace.pausedRemote = { serverUrl: credentials.serverUrl, ownerUserId: credentials.userId };
+  Object.assign(h.workspace, { syncPause: { atMs: 42, author: { kind: "human", humanId: "local", displayName: "You" } } });
+  const result = await h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" });
+  expect(result).toMatchObject({ workspaceSyncOwned: true, workspaceSynced: false });
+  expect(result).toHaveProperty("syncPause", undefined);
+  expect(h.workspace.pausedRemote).toBeDefined();
 });

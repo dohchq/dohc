@@ -35,6 +35,7 @@
     "desktop:cloud-logout",
     "desktop:cloud-session-changed",
     "desktop:cloud-status",
+    "desktop:cloud-stop-sync",
     "desktop:collection-automations-changed",
     "desktop:compare-workspace-versions",
     "desktop:confirm-collection-automation-step",

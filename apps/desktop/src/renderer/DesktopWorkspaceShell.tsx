@@ -985,6 +985,7 @@ export function DesktopWorkspaceShell(props: {
   );
   // Unguarded by workspace: an installation-wide failure is news here.
   useInstallationNotices(reportConnectionError);
+  const hasReceivedShares = workspaceShareMounts.length > 0;
   const cloudSettings = useMemo<CloudSettings>(() => {
     // The page answers after it closed too. Only this workspace's answers
     // reach its status and its notices.
@@ -1000,13 +1001,24 @@ export function DesktopWorkspaceShell(props: {
         closeSettings();
         setCloudOpen(true);
       },
+      // An enable or a pause. The page holds the switch, signed in or out,
+      // so a retry it can no longer run opens the page again.
       onError: (error) => {
-        if (current()) reportConnectionError(error);
+        if (!current()) return;
+        reportShellFailure({
+          message: error.message,
+          cause: error.cause,
+          retry: () => {
+            if (reviewingAccountDeletion()) return;
+            if (!error.retry?.()) openSettings("cloud");
+          },
+        });
       },
       onAccountError: reportInstallationFailure,
+      hasReceivedShares,
       onDeleteAccount: startAccountDeletion,
     };
-  }, [startAccountDeletion, closeSettings, cloudStatus, cloudStatusUnreadable, refreshCloudStatus, reportConnectionError, workspaceId]);
+  }, [startAccountDeletion, reviewingAccountDeletion, closeSettings, cloudStatus, cloudStatusUnreadable, hasReceivedShares, openSettings, refreshCloudStatus, reportShellFailure, workspaceId]);
   // About's section reads report through this shell's notices, one row per
   // section and file. A repeat keeps an existing row's toast state only for
   // an unchanged message. A changed message, or a missing row, toasts again.

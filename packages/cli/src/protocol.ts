@@ -14,6 +14,8 @@ import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPubl
 import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
 import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "./account";
 
+import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
+
 export const CLI_PROTOCOL_VERSION = 5;
 export const CLI_JSON_SCHEMA_VERSION = 3;
 
@@ -388,6 +390,7 @@ const accountDeletePreviewArgsSchema = z.object(argsBase).strict();
 const accountDeleteArgsSchema = ServerAccountDeleteRequest.extend(argsBase).strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
+  z.object({ ...requestBase, verb: z.literal("stopSync"), args: z.object({ ...argsBase, agent: documentAgentNameSchema.optional() }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("shareCopy"), args: ShareCopyInput.extend(argsBase).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDeletePreview"), args: accountDeletePreviewArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("accountDelete"), args: accountDeleteArgsSchema }).strict(),
@@ -513,6 +516,7 @@ export const APP_RESPONSE_CAPABILITIES = {
 } as const satisfies Record<OwnerAppResponsesRequest["action"], CapabilityId>;
 
 export const CLI_CAPABILITIES = {
+  stopSync: ["workspace.sync.stop"],
   shareCopy: ["share.copy.read"],
   accountDeletePreview: ["account.delete.preview"],
   accountDelete: ["account.delete"],
@@ -1360,6 +1364,11 @@ const automationPressResultSchema = z.union([
 ]);
 
 export const cliResultSchemas = {
+  stopSync: z.union([
+    z.object({ ok: z.literal(true), workspaceId: z.string().min(1), workspaceSynced: z.literal(false),
+      syncPause: WorkspaceSyncPauseStatus.optional() }).strict(),
+    rawFailureSchema,
+  ]),
   shareCopy: ShareCopyResult,
   accountDeletePreview: ServerAccountDeletionPreview,
   accountDelete: ServerAccountDeleteResult,

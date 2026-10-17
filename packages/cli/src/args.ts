@@ -18,6 +18,7 @@ type ExportScope =
   | { kind: "thread"; thread: string };
 
 type CliCommandBody =
+  | { verb: "stopSync"; agent?: string }
   | { verb: "shareCopy"; shareId: string; grantId: string }
   | { verb: "accountDeletePreview" }
   | { verb: "accountDelete"; server: string; previewToken: string }
@@ -1005,6 +1006,24 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
 
 /** Every command and verb the CLI dispatches. Help reads this table too. */
 export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
+  sync: {
+    summary: "Stop syncing this workspace on this computer.",
+    notes: ["Local files, documents, records, and history stay here. Shares and protected-file keys are retained.",
+      "Groups you joined and received-share mounts keep syncing.",
+      "Turn sync on in Settings to resume the same workspace."],
+    verbs: {
+      stop: {
+        capabilityId: "workspace.sync.stop", summary: "Stop this computer's sync after saving live document edits.", operands: "",
+        flags: [{ name: "--agent", value: "name", text: "Record this agent name when --as-agent is set." }],
+        parse: (input) => {
+          noExtraArgs(input.operands, "sync stop");
+          const agent = lastValue(input, "--agent");
+          if (agent !== undefined && !documentAgentNameSchema.safeParse(agent).success) fail("invalid --agent name");
+          return { verb: "stopSync", ...(agent === undefined ? {} : { agent }) };
+        },
+      },
+    },
+  },
   access: {
     summary: "Read observed object grants and Sharing inventories.",
     notes: ["Answers describe observed grants, not authorization. An empty page means no matching grants within its coverage.",

@@ -60,6 +60,7 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 }
 
 interface DesktopCliServerDependencies<State> {
+  stopWorkspaceSync?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, author?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseAuthor): Promise<import("@dohc/cli/protocol").CliResultByVerb["stopSync"]>;
   shareCopy?(operation: WorkspaceAuthorityOperation<RegistryEntry, State>, input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput): Promise<import("@dohc/workspace-contracts/share-copy").ShareCopyResult>;
   access?(workspaceId: string): NonNullable<CliWorkspaceContext["access"]>;
   recordSuccess?: CliServerOptions["recordSuccess"];
@@ -217,6 +218,19 @@ export function createDesktopCliServer<State>(
     };
     return {
       workspaceId: workspace.workspaceId,
+      ...(dependencies.stopWorkspaceSync ? { stopSync: async author => {
+        let saved: import("@dohc/cli/protocol").CliResultByVerb["stopSync"] | undefined;
+        try {
+          return await withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
+            if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("This workspace was closed. Open it again.");
+            saved = await dependencies.stopWorkspaceSync!(operation, author);
+            return saved;
+          });
+        } catch (error) {
+          if (saved?.ok) return saved;
+          throw error;
+        }
+      } } : {}),
       ...(dependencies.shareCopy ? { shareCopy: (input: import("@dohc/workspace-contracts/share-copy").ShareCopyInput) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
           if (operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The workspace attachment changed.");

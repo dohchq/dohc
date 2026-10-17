@@ -83,6 +83,7 @@ import { workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
 import { registerShareProposalsIpcHandlers } from "./ipc/shareProposalsIpc";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
+import { createWorkspaceSyncStop } from "./workspaces/stopWorkspaceSync";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
 import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
 import { registerShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
@@ -240,6 +241,7 @@ import {
   registerWorkspace,
   removeWorkspace as removeRegisteredWorkspace,
   setWorkspaceRemote,
+  pauseWorkspaceRemote,
   acknowledgeWorkspaceShareSkips,
   updateWorkspaceShareMounts,
   markWorkspaceShareRosterPulled,
@@ -256,6 +258,8 @@ import {
   reconcileRecipientSharesAfterLookup,
 } from "./workspaces/recipientShareReconciliation";
 import { createReceivedShareAcquisition, createReceivedShareStore, listReceivedInventory } from "./workspaces/receivedShareStore";
+import { workspaceSyncPauseStatus, type WorkspaceSyncPause } from "@dohc/workspace-contracts/workspace-sync";
+import { syncPauseFor } from "./workspaces/syncPauseFor";
 import { createShareRosters, createHistoryLabels } from "./automations/shareRoster";
 import { listRosterGrants, lookupHistoryAccounts } from "@dohc/automation-executor/roster-listing";
 import {
@@ -339,6 +343,7 @@ import {
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
 import { createChatWrites } from "./workspaces/chatWrites";
+import { localPersonOwnsWorkspace } from "./workspaces/localPersonOwns";
 import { createNoticeStore, type NoticeSession, type NoticeStore } from "./notices/noticeStore";
 import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices";
 import { noticeReachFor } from "./notices/noticeReach";
@@ -749,14 +754,12 @@ async function pressingPerson(): Promise<string> {
   return localUserId();
 }
 
-// Whether this computer's person owns the workspace: a workspace that does
-// not sync is its computer's person's, and a synced one is its owner
+// Whether this computer's person owns the workspace: a workspace that never
+// synced is its computer's person's, and a synced one is its owner
 // account's. A shared view is never this person's.
 async function localPersonOwns(workspaceId: string): Promise<boolean> {
   await warmCredentialCache();
-  const entry = findWorkspace(workspaceId);
-  if (!entry || shareViewIsPresent(entry.shareView)) return false;
-  return !entry.remote || workspaceRemoteMatchesCredentials(entry.remote, cachedCredentials);
+  return localPersonOwnsWorkspace(findWorkspace(workspaceId), cachedCredentials);
 }
 
 // A Collection automation step started or stopped waiting for a current
@@ -1121,10 +1124,10 @@ async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials
 function normalizeServerUrl(url: string): string {
   return url.replace(/\/+$/, "");
 }
-async function remoteForWorkspace(workspace: RegistryEntry) {
+async function remoteForWorkspace(workspace: RegistryEntry, options?: { allowPaused: boolean }) {
   await warmCredentialCache();
   const credentialGeneration = credentialCacheGeneration;
-  const remote = workspace.remote;
+  const remote = workspace.remote ?? (options?.allowPaused ? workspace.pausedRemote : undefined);
   if (!remote) throw new Error("Sync this workspace before sharing.");
   const credentials = requireCredentials(cachedCredentials);
   if (!workspaceRemoteMatchesCredentials(remote, credentials)) {
@@ -1484,7 +1487,7 @@ const shareRosters = createShareRosters({
   listRoster: async (workspace) => {
     let credentials: CloudSessionCredentials;
     try {
-      ({ credentials } = await remoteForWorkspace(workspace));
+      ({ credentials } = await remoteForWorkspace(workspace, { allowPaused: true }));
     } catch (error) {
       // Signed out, or signed in to another account or server: the message
       // says which, and dohc could not ask.
@@ -1525,8 +1528,9 @@ function historyLabelsFor(sender: WebContents): ReturnType<typeof createHistoryL
   const labels = createHistoryLabels({
     snapshot: (workspaceId) => {
       const workspace = findWorkspace(workspaceId);
+      const remote = workspace?.remote ?? workspace?.pausedRemote;
       return { roster: shareRosters.observation(workspaceId).listing, shareView: workspace?.shareView,
-        owner: !sender.isDestroyed() && !!workspace?.remote && !workspace.shareView && workspaceRemoteMatchesCredentials(workspace.remote, cachedCredentials),
+        owner: !sender.isDestroyed() && !!remote && !workspace?.shareView && workspaceRemoteMatchesCredentials(remote, cachedCredentials),
         context: rosterContext(workspaceId), inventory: workspace?.shareRoster?.version };
     },
     ready: workspaceId => {
@@ -2357,9 +2361,11 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
   },
   onAgentRunState: (event) => sendToWorkspaceWindows(CHANNELS.agentRunState, event),
   cloudStateFor: (workspaceId) => {
-    const remote = findWorkspace(workspaceId)?.remote;
+    const workspace = findWorkspace(workspaceId);
+    const remote = workspace?.remote;
     return {
       enabled: !!remote,
+      syncPause: workspace ? syncPauseFor(workspace, localInstallationId()) : undefined,
       // Legacy and different-account bindings stay local-only.
       connected:
         !!remote && workspaceRemoteMatchesCredentials(remote, cachedCredentials),
@@ -2459,7 +2465,7 @@ const activity = {
     ),
   close: (
     workspaceId: string,
-    options?: { preserveStatus?: boolean; notify?: boolean; expectedRootPath?: string },
+    options?: { preserveStatus?: boolean; preserveAgentRun?: boolean; notify?: boolean; expectedRootPath?: string },
   ) => {
     if (!findWorkspace(workspaceId)) return Promise.resolve(false);
     return workspaceAuthorities.withAuthority(workspaceId, (lease) =>
@@ -2480,6 +2486,10 @@ const activity = {
         lease.state.activity,
         options,
       ),
+    ),
+  prepareSyncPause: (workspace: RegistryEntry) =>
+    workspaceAuthorities.withAuthority(workspace.workspaceId, lease =>
+      workspaceActivity.prepareSyncPause(canonicalWorkspaceFor(lease), lease.state.activity),
     ),
   reconcileCloud: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
@@ -4710,6 +4720,10 @@ const { startDesktopCliServer } = createDesktopCliServer({
   findWorkspace,
   listWorkspaces,
   openWorkspaceActivity,
+  stopWorkspaceSync: async (operation, author) => {
+    const { status: _status, ...result } = await stopWorkspaceSync(operation, author);
+    return { ok: true as const, ...result };
+  },
   activity,
   linkedChatStoreFor,
   currentDaemon: () => desktopEngine.daemon,
@@ -5834,6 +5848,25 @@ async function currentDiagnostics(): Promise<string> {
   });
 }
 
+function pauseStatus(pause: WorkspaceSyncPause) {
+  return workspaceSyncPauseStatus(pause, localInstallationId());
+}
+
+const stopWorkspaceSync = createWorkspaceSyncStop({
+  person: async () => ({ kind: "person", personId: localInstallationId() }),
+  pauseStatus,
+  withOwnerHostPaused: work => desktopEngine.withOwnerHostPaused(work),
+  prepare: workspace => activity.prepareSyncPause(workspace),
+  resume: workspace => activity.enableCloud(workspace),
+  pauseRemote: pauseWorkspaceRemote,
+  closeActivity: workspaceId => activity.close(workspaceId, { notify: false, preserveAgentRun: true }),
+  closeRelay: workspace => closeRelayTransportWorkspace(workspace),
+  openActivity: workspace => activity.open(workspace),
+  status: workspaceId => activity.getStatus(workspaceId),
+  notify: workspaceId => notifyRenderer({ workspaceId }),
+  cleanupFailed: (workspaceId, error) => console.error("[desktop] sync pause cleanup:", workspaceId, error),
+});
+
 function registerIpcHandlers(): void {
   registerSystemMotionIpc(operationBoundary, () => systemPreferences.getAnimationSettings());
   registerServerAccountIpc(operationBoundary, serverAccountDeletion);
@@ -6052,6 +6085,8 @@ function registerIpcHandlers(): void {
     assertTrustedSender, cloudLogin, clearCachedCredentials, refreshCredentialCache,
     warmCredentialCache, currentCredentials: () => cachedCredentials, localInstallationId,
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
+    currentWorkspaceId: sender => rendererWorkspaceSessions.current(sender)?.workspaceId ?? null,
+    stopWorkspaceSync, syncPauseFor: workspace => syncPauseFor(workspace, localInstallationId()),
     reconcileCloud: () => activity.reconcileCloud(),
     notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
     notifyRenderer, findWorkspace,

@@ -186,6 +186,8 @@ export const CAPABILITIES = {
   "app.responses.list": capability("List responses link holders sent through a share link.", {}),
   "app.responses.undo": capability("Remove responses link holders sent through a share link.", {}),
   "workspace.list": capability("List registered workspaces.", {mcp: {owner: ["dohc_list_workspaces"], view: ["dohc_list_workspaces"], comment: ["dohc_list_workspaces"], edit: ["dohc_list_workspaces"]}}),
+  "workspace.sync.stop": capability("Stop this device's workspace sync.", { ipc: ["cloudStopSync"], mcp: { owner: ["dohc_stop_workspace_sync"] },
+    mcpReason: "Only the owner can stop sync. Main verifies the stored server and owner binding." }),
   "workspace.status": capability("Read workspace sync status.", {mcp: {owner: ["dohc_workspace_status"], view: ["dohc_workspace_status"], comment: ["dohc_workspace_status"], edit: ["dohc_workspace_status"]}}),
   "file.list": capability("List workspace files.", {ipc: ["listWorkspaceFiles"], mcp: {owner: ["dohc_list_files"], view: ["dohc_list_files"], comment: ["dohc_list_files"], edit: ["dohc_list_files"]}}),
   "file.read": capability("Read settled file content.", {mcp: {owner: ["dohc_read_file"], view: ["dohc_read_file"], comment: ["dohc_read_file"], edit: ["dohc_read_file"]}}),

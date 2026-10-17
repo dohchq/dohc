@@ -153,6 +153,23 @@ function fixture(rootPath = resolve("cli-workspace")) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("desktop CLI workspace context", () => {
+  it("binds sync stop to the registered workspace and fences a retired attachment", async () => {
+    const f = fixture();
+    f.dependencies.stopWorkspaceSync = vi.fn(async (operation, author) => {
+      operation.assertCurrent();
+      expect(operation.workspace.workspaceId).toBe(f.workspace.workspaceId);
+      expect(author).toBeUndefined();
+      return { ok: true as const, workspaceId: operation.workspace.workspaceId, workspaceSynced: false as const };
+    });
+    const server = f.create();
+    const context = await server.openCliWorkspace(f.workspace);
+    await expect(context.stopSync!()).resolves.toMatchObject({ ok: true, workspaceId: "workspace" });
+    const retired = f.authorities.invalidate("workspace");
+    await retired;
+    await expect(context.stopSync!()).rejects.toThrow();
+    expect(f.dependencies.stopWorkspaceSync).toHaveBeenCalledOnce();
+  });
+
   it("keeps owner app actions bound to the CLI's original physical attachment", async () => {
     const f = fixture();
     const publish = vi.fn<NonNullable<Dependencies["ownerAppPublication"]>>(async () => ({ kind: "cancelled" }));
@@ -780,6 +797,19 @@ describe("raw fileMove and fileDelete socket requests", () => {
   });
 });
 
+it("keeps the saved pause result when the physical attachment retires before the socket reply", async () => {
+  const f = fixture();
+  let drained: Promise<void> | undefined;
+  f.dependencies.stopWorkspaceSync = vi.fn<NonNullable<Dependencies["stopWorkspaceSync"]>>(async operation => {
+    const workspaceId = operation.workspace.workspaceId;
+    drained = f.authorities.invalidate(workspaceId);
+    return { ok: true, workspaceId, workspaceSynced: false };
+  });
+  const context = await f.create().openCliWorkspace(f.workspace);
+  const author = { kind: "agent" as const, agentId: "Claude", onBehalfOf: "person-local", depth: 0 };
+  await expect(context.stopSync!(author)).resolves.toMatchObject({ ok: true, workspaceId: "workspace", workspaceSynced: false });
+  await drained;
+});
 
 // Exercise both agent doors through desktop attachment admission and the real relay copy route.
 afterEach(closeTestStorages);

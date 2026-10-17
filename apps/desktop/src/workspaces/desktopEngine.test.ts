@@ -166,7 +166,7 @@ describe("desktop engine construction", () => {
     }
   });
 
-  it("discovers remaining configured owners after another workspace closes", async () => {
+  it.each(["forgotten", "paused"])("discovers remaining configured owners after another workspace is %s", async mode => {
     const f = fixture();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
     for (const workspaceId of ["first","second"]) {
@@ -185,12 +185,27 @@ describe("desktop engine construction", () => {
       expect(await f.engine.start()).toBe(true);
       const discover = ownerHostMock.start.mock.calls.at(-1)![0].bindings;
       expect((await discover()).workspaces).toHaveLength(2);
-      await f.authorities.invalidate("first"); f.rows.delete("first");
-      const remaining = await discover();
+      if (mode === "forgotten") {
+        await f.authorities.invalidate("first"); f.rows.delete("first");
+      } else {
+        await f.engine.withOwnerHostPaused(async () => {
+          f.rows.set("first", { ...f.rows.get("first")!, pausedRemote: { serverUrl: "https://server.test", ownerUserId: "owner" } });
+        });
+      }
+      const remaining = await ownerHostMock.start.mock.calls.at(-1)![0].bindings();
       expect(remaining.workspaces).toEqual([{workspaceId:"second",workspaceHandle:"handle-second"}]);
       expect(() => remaining.assertCurrent()).not.toThrow();
+      if (mode === "paused") {
+        await f.engine.withOwnerHostPaused(async () => {
+          const resumed = { ...f.rows.get("first")! };
+          delete resumed.pausedRemote;
+          f.rows.set("first", resumed);
+        });
+        expect((await ownerHostMock.start.mock.calls.at(-1)![0].bindings()).workspaces).toHaveLength(2);
+        await f.authorities.invalidate("first"); f.rows.delete("first");
+      }
       await f.authorities.invalidate("second"); f.rows.delete("second");
-      await expect(discover()).rejects.toThrow("Owner host has no registered workspaces.");
+      await expect(ownerHostMock.start.mock.calls.at(-1)![0].bindings()).rejects.toThrow("Owner host has no registered workspaces.");
     } finally {await f.close(); ownerHostMock.read.mockReset(); ownerHostMock.start.mockReset();}
   });
 

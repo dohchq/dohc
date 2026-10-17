@@ -61,6 +61,7 @@ import {
   testApp,
   writeWorkspaceFile,
   workspaceStatus,
+  stopWorkspaceSync,
   type ToolContext,
 } from "./tools";
 
@@ -151,6 +152,12 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_workspace_status",
     { description: "Report whether this workspace is local-only or cloud-synced.", inputSchema: {} },
     async () => text(await workspaceStatus(ctx)),
+  );
+
+  register(
+    "dohc_stop_workspace_sync",
+    { description: "Stop this computer's sync for the owning workspace after saving live document edits. Keep local work, shares, history, and protected-file keys. Groups you joined and received-share mounts keep syncing. Record who paused and when. Resume in Settings.", inputSchema: {} },
+    async () => text(await stopWorkspaceSync(ctx, agentName())),
   );
 
   // Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed with the

@@ -91,6 +91,7 @@
   "desktop:typing-recovery": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:get-folder-app": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:get-system-reduced-motion": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
+  "desktop:cloud-stop-sync": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },
   "desktop:list-history": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:preview-server-account-deletion": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:delete-server-account": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
