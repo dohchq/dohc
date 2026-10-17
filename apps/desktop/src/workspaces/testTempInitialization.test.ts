@@ -32,6 +32,10 @@ describe("test scratch initialization", () => {
     expect(await initialization("async")).toEqual({ scans: 1, rootCreates: 1, agedExists: false });
   });
 
+  it("makes the run root again for the next file in the same worker, without a second sweep", async () => {
+    expect(await initialization("next-file")).toEqual({ scans: 1, rootCreates: 2, rootRemoved: true, nextExists: true });
+  });
+
   it.each(["scan-failure", "mkdir-failure"])("preserves a rejected startup after %s", async (mode) => {
     expect(await initialization(mode)).toEqual({
       scans: 1,

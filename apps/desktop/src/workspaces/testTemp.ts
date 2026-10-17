@@ -54,6 +54,7 @@ const suiteScratch = new Set<string>();
 // run-level scratch reporter in this repo runs from the Rust gate — it never
 // sees a JS run at all.
 const unresolvedScratch = new Set<string>();
+let swept: Promise<void> | undefined;
 let startup: Promise<void> | undefined;
 let processRunId: string | undefined;
 
@@ -280,11 +281,14 @@ function safePrefix(prefix: string): string {
   return safe.length > 0 && !isDirection ? safe : "scratch-";
 }
 
+// The sweep runs once per process. The run root is made again after
+// `removeEmptyRunRoot` removes it, because a worker that runs several test
+// files keeps this module from one file to the next.
 export async function prepareTestScratch({ sweep = true } = {}): Promise<void> {
-  startup ??= (async () => {
-    if (sweep) await sweepOldTestScratch();
+  swept ??= sweep ? sweepOldTestScratch() : Promise.resolve();
+  startup ??= swept.then(async () => {
     await mkdir(testScratchRunRoot(), { recursive: true });
-  })();
+  });
   await startup;
 }
 
@@ -330,7 +334,9 @@ async function removeEmptyRunRoot(): Promise<void> {
         `scratch run cleanup failed for ${testScratchRunRoot()}: ${errorMessage(error)}`,
       );
     }
+    return;
   }
+  startup = undefined;
 }
 
 function cleanupAttempts(): number {
