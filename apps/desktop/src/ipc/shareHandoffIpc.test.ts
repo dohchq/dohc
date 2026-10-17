@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ZodError } from "zod";
 import { createShareHandoffIpcHandlers } from "./shareHandoffIpc";
 import { shareHandoffOperations } from "./shareOperations";
 import { registerOperations } from "./operationTable";
@@ -44,12 +45,12 @@ describe("registered share handoff handlers", () => {
   it("rejects malformed or missing payloads before reaching the coordinator", async () => {
     const h = harness();
     for (const channel of [shareHandoffOperations.getShareHandoffStatus.channel, shareHandoffOperations.retryShareHandoff.channel]) {
-      await expect(h.invoke(channel, true, "dohc://open?forged")).rejects.toThrow();
+      await expect(h.invoke(channel, true, "dohc://open?forged")).rejects.toThrow(ZodError);
     }
     for (const channel of [shareHandoffOperations.acceptShareHandoff.channel, shareHandoffOperations.dismissShareHandoff.channel]) {
-      await expect(h.invoke(channel, true)).rejects.toThrow();
-      await expect(h.invoke(channel, true, { url: "dohc://open?forged" })).rejects.toThrow();
-      await expect(h.invoke(channel, true, { statusId: "" })).rejects.toThrow();
+      await expect(h.invoke(channel, true)).rejects.toThrow(ZodError);
+      await expect(h.invoke(channel, true, { url: "dohc://open?forged" })).rejects.toThrow(ZodError);
+      await expect(h.invoke(channel, true, { statusId: "" })).rejects.toThrow(ZodError);
     }
     for (const method of Object.values(h.coordinator)) expect(method).not.toHaveBeenCalled();
   });

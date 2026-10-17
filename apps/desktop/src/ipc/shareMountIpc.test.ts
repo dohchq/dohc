@@ -83,7 +83,7 @@ function harness() {
           event.generation !== admittedGeneration ||
           generation !== admittedGeneration
         ) {
-          throw new Error("This window changed workspaces.");
+          throw new Error(inactiveMessage);
         }
       };
       assertCurrent();
@@ -226,7 +226,7 @@ describe("share mount IPC registration", () => {
     [shareMountOperations.unmountShare.channel, { workspaceId: "workspace-2", shareId }],
   ])("rejects a foreign workspace payload for %s before its command", async (channel, payload) => {
     const test = harness();
-    await expect(test.invoke(channel, payload)).rejects.toThrow("changed workspaces");
+    await expect(test.invoke(channel, payload)).rejects.toThrow("Share update stopped because this window changed workspaces.");
     expect(test.trace).toEqual(["trust", "operation:workspace-2"]);
     for (const command of Object.values(test.commands)) expect(command).not.toHaveBeenCalled();
   });

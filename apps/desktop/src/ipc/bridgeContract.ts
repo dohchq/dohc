@@ -1,4 +1,3 @@
-import { shareHandoffOperations, shareMountOperations } from "./shareOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
@@ -115,6 +114,7 @@ import {
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
 import type { chatOperations } from "./chatOperations";
 import type { settingsOperations } from "./settingsOperations";
+import type { shareHandoffOperations, shareMountOperations } from "./shareOperations";
 import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
 import { isLoopbackHostname } from "../security/loopback";
@@ -5574,7 +5574,6 @@ export const CheckSharedViewAccessResult = z.object({
 });
 export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessResult>;
 
-// Refresh and access checks own their workspace operations so stale checks can reply unverified.
 export const sharedViewAccessOperations = {
   openSharedView: {
     capabilityId: "share.view.open", channel: "desktop:open-shared-view",
